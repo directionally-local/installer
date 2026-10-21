@@ -1,0 +1,59 @@
+import { detectHost, MIN_DISK_GB } from "./detect.js";
+import { AUTOPILOT_PORT, HOTCELL_PORT, PATHS, SERVICES, parseEnvFile } from "./layout.js";
+import { readState } from "./state.js";
+import type { System } from "./system.js";
+
+export interface Check {
+  name: string;
+  ok: boolean;
+  detail: string;
+  /** What to do when it fails. */
+  fix?: string;
+}
+
+/** `directionally-local doctor`: every moving part, with a fix for each failure. */
+export async function doctor(system: System): Promise<Check[]> {
+  const checks: Check[] = [];
+  const add = (check: Check) => checks.push(check);
+  const state = await readState(system);
+  add(state
+    ? { name: "install", ok: true, detail: `${state.release}, ${state.access.mode} at ${state.access.url}` }
+    : { name: "install", ok: false, detail: "not installed", fix: "sudo directionally-local up" });
+
+  const facts = await detectHost(system);
+  add({ name: "disk", ok: facts.diskFreeGb >= MIN_DISK_GB, detail: `${facts.diskFreeGb} GB free under /var`, fix: "free space: docker system prune, or grow the disk" });
+  add(facts.docker
+    ? { name: "docker", ok: true, detail: "running" }
+    : { name: "docker", ok: false, detail: "not running", fix: "systemctl start docker" });
+
+  for (const service of [SERVICES.metadataBlock, SERVICES.hotcell, SERVICES.autopilot]) {
+    const active = (await system.probe("systemctl", ["is-active", service])).stdout.trim();
+    add({ name: service, ok: active === "active", detail: active || "unknown", fix: `journalctl -u ${service} -n 50; systemctl restart ${service}` });
+  }
+
+  const hotcell = await system.probe("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", `http://127.0.0.1:${HOTCELL_PORT}/`]);
+  add({ name: "hotcell api", ok: /^\d{3}$/.test(hotcell.stdout.trim()) && hotcell.stdout.trim() !== "000", detail: `HTTP ${hotcell.stdout.trim() || "none"}`, fix: `systemctl restart ${SERVICES.hotcell}` });
+
+  const keys = await system.probe("runuser", ["-u", "hotcell", "--", "env", `HOTCELL_HOME=${PATHS.hotcellHome}`, "HOTCELL_KEYSTORE=file", "/usr/bin/node", `${PATHS.current}/node_modules/hotcell/dist/index.js`, "keys", "ls"]);
+  const hasModelKey = keys.code === 0 && /^\s*openrouter\b/m.test(keys.stdout);
+  add({ name: "model key", ok: hasModelKey, detail: hasModelKey ? "OpenRouter key in Hotcell" : "no OpenRouter key in Hotcell", fix: "sudo directionally-local up (asks for it)" });
+
+  const github = Boolean(parseEnvFile(await system.readFile(PATHS.githubEnv)).GITHUB_TOKEN);
+  add({ name: "github", ok: github, detail: github ? "token configured" : "no token; runs can't push or open PRs", fix: "sudo directionally-local up (asks for it)" });
+
+  const autopilot = (await system.probe("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", `http://127.0.0.1:${AUTOPILOT_PORT}/api/v1/health`])).stdout.trim();
+  add({ name: "autopilot api", ok: autopilot === "401", detail: autopilot === "401" ? "up (refuses requests without a token)" : `HTTP ${autopilot || "none"}`, fix: `journalctl -u ${SERVICES.autopilot} -n 50` });
+
+  if (state?.access.mode === "tailscale") {
+    const serve = await system.probe("tailscale", ["serve", "status"]);
+    const serving = serve.code === 0 && serve.stdout.includes(`127.0.0.1:${AUTOPILOT_PORT}`);
+    add({ name: "tailscale", ok: serving, detail: serving ? `serving ${state.access.url}` : "not serving Autopilot", fix: `tailscale serve --bg --https=443 http://127.0.0.1:${AUTOPILOT_PORT}` });
+    const remote = await system.probe("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10", `${state.access.url}/api/v1/health`]);
+    add({ name: "reachable", ok: remote.stdout.trim() === "401", detail: `${state.access.url}: HTTP ${remote.stdout.trim() || "none"}`, fix: "turn on HTTPS certificates at https://login.tailscale.com/admin/dns" });
+  }
+  return checks;
+}
+
+export function formatChecks(checks: Check[]): string {
+  return checks.map((check) => `${check.ok ? "✓" : "✗"} ${check.name.padEnd(44)} ${check.detail}${!check.ok && check.fix ? `\n    fix: ${check.fix}` : ""}`).join("\n");
+}
