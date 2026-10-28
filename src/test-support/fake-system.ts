@@ -4,6 +4,8 @@ export interface FakeCommand {
   command: string;
   args: string[];
   input?: string;
+  /** The command was marked as printing a secret (kept out of the install log). */
+  secretOutput?: boolean;
 }
 
 /**
@@ -39,6 +41,8 @@ export class FakeSystem implements System {
   pendingCodes: Array<{ code: string; name: string }> = [];
   approved: string[] = [];
   revoked: string[] = [];
+  /** Credentials made by `aster token create`, newest last; each gets a fresh token. */
+  created: Array<{ name: string; credentialId: string; token: string; workspace: string; days: number }> = [];
   unattendedUpgrades = true;
   nodeFromNodeSource = true;
   serving = false;
@@ -59,7 +63,7 @@ export class FakeSystem implements System {
   }
 
   async run(command: string, args: string[], options: RunOptions = {}): Promise<RunResult> {
-    this.commands.push({ command, args, ...(options.input !== undefined ? { input: options.input } : {}) });
+    this.commands.push({ command, args, ...(options.input !== undefined ? { input: options.input } : {}), ...(options.secretOutput ? { secretOutput: true } : {}) });
     const result = this.respond(command, args, options);
     if (result.code !== 0 && !options.allowFailure) throw new Error(`${command} ${args.join(" ")} failed: ${result.stderr}`);
     return result;
@@ -143,6 +147,13 @@ export class FakeSystem implements System {
         if (args.includes("keys") && args.includes("ls")) return ok([...this.hotcellKeys].map((key) => `  ${key}  file\n`).join(""));
         if (args.includes("owner") && args.includes("link")) return ok(`${args.at(-1)}/api/v1/auth/claim?token=aster_claim_${"x".repeat(43)}\n`);
         if (args.includes("token") && args.includes("list")) return ok(`${JSON.stringify(this.laptops)}\n`);
+        if (args.includes("token") && args.includes("create")) {
+          const flag = (name: string) => args[args.indexOf(name) + 1]!;
+          const credential = { name: flag("--name"), credentialId: `cred-${this.created.length + 1}`, token: `aster_${"t".repeat(40)}${this.created.length + 1}`, workspace: flag("--workspace"), days: Number(flag("--expires-in-days")) };
+          this.created.push(credential);
+          const createdAt = Date.UTC(2026, 9, 28, 8, 0, 0);
+          return ok(`${JSON.stringify({ credentialId: credential.credentialId, workspaceIds: [credential.workspace], scopes: ["conversations:write"], createdAt, expiresAt: createdAt + credential.days * 86_400_000, token: credential.token })}\n`);
+        }
         if (args.includes("token") && args.includes("revoke")) {
           this.revoked.push(args.at(-1)!);
           return ok(`Revoked credential ${args.at(-1)}\n`);

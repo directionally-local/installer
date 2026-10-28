@@ -1,7 +1,7 @@
 import { detectHost, MIN_DISK_GB } from "./detect.js";
 import { nodeAdvisory } from "./node-advisory.js";
 import { AUTOPILOT_PORT, AUTO_UPGRADES, HOTCELL_PORT, NODE_AUTO_UPDATES, PATHS, SERVICES, parseEnvFile } from "./layout.js";
-import { readState } from "./state.js";
+import { describeAccess, readState } from "./state.js";
 import { palette } from "./ui.js";
 import type { System } from "./system.js";
 
@@ -19,7 +19,7 @@ export async function doctor(system: System): Promise<Check[]> {
   const add = (check: Check) => checks.push(check);
   const state = await readState(system);
   add(state
-    ? { name: "installed", ok: true, detail: `${state.release}, ${state.access.mode} at ${state.access.url}` }
+    ? { name: "installed", ok: true, detail: `${state.release}, ${state.access.mode === "ssh" ? describeAccess(state.access) : `${state.access.mode} at ${state.access.url}`}` }
     : { name: "installed", ok: false, detail: "not installed", fix: "sudo dl up" });
 
   const facts = await detectHost(system);
@@ -66,6 +66,7 @@ export async function doctor(system: System): Promise<Check[]> {
   const autopilot = (await system.probe("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", `http://127.0.0.1:${AUTOPILOT_PORT}/api/v1/health`])).stdout.trim();
   add({ name: "agent server API", ok: autopilot === "401", detail: autopilot === "401" ? "up (refuses requests without a token)" : `HTTP ${autopilot || "none"}`, fix: "dl logs autopilot · then dl up" });
 
+  // Loopback and SSH access have nothing published to check: the tunnel is the laptop's.
   if (state?.access.mode === "tailscale") {
     const serve = await system.probe("tailscale", ["serve", "status"]);
     const serving = serve.code === 0 && serve.stdout.includes(`127.0.0.1:${AUTOPILOT_PORT}`);

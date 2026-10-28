@@ -7,7 +7,7 @@ import {
   MOTD_SCRIPT, cellDockerfile, cellImage, githubEnv, hotcellBin, hotcellEnv, hotcellUnit, metadataBlockUnit, motdScript, nodeAutoUpdates, parseEnvFile,
 } from "./layout.js";
 import type { Prompter } from "./prompt.js";
-import { readState, writeState, type AccessMode, type InstallState } from "./state.js";
+import { ACCESS_MODES, readState, writeState, type AccessMode, type InstallState } from "./state.js";
 import type { System } from "./system.js";
 import { PlainUi, type SummaryItem, type Ui } from "./ui.js";
 import { ownerLink } from "./server-api.js";
@@ -21,6 +21,13 @@ export interface UpOptions {
    * DL_ACCESS=loopback skips Tailscale (SSH tunnel access); DL_SKIP_CREDENTIAL_CHECK=1 skips online validation.
    */
   env?: NodeJS.ProcessEnv;
+  /** How the server is reached (`--access`); overrides DL_ACCESS and what an earlier `up` chose. */
+  access?: AccessMode;
+  /**
+   * Answers sent by the laptop (`--answers-stdin`). When given, they replace the DL_* answers
+   * and nothing is asked: a required answer that's missing is a failure.
+   */
+  answers?: ProvidedAnswers;
   autopilotVersion?: string;
   hotcellVersion?: string;
   /** Validates the model key and GitHub token before anything is stored. */
@@ -41,6 +48,16 @@ interface Answers {
   openRouterKey: string | undefined;
   githubToken: string | undefined;
 }
+
+/** What the laptop sends on stdin: `{"openrouterKey"?, "githubToken"?, "tailscaleAuthKey"?}`. */
+export interface ProvidedAnswers {
+  openrouterKey?: string;
+  githubToken?: string;
+  tailscaleAuthKey?: string;
+}
+
+/** An answer `up` can't go on without, as `dl up --needs` names it. */
+export type Need = "tailscale" | "openrouter" | "github";
 
 /** A validation outcome: a problem to show, or a detail to confirm the answer with. */
 export interface Checked { problem?: string; detail?: string }
@@ -67,9 +84,9 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
 
   // Every question comes first, so the long part runs unattended.
   const previous = await readState(system);
-  const access = accessMode(env, previous);
+  const access = accessMode(options.access, env, previous);
   const check = env.DL_SKIP_CREDENTIAL_CHECK === "1" ? undefined : fetchImpl;
-  const answers = await collectAnswers(system, ui, options.prompter, env, check, facts, access);
+  const answers = await collectAnswers(system, ui, options.prompter, given(env, options.answers), check, facts, access);
 
   ui.plan([
     ...(access === "tailscale" ? [{ id: "tailnet", label: "Joining your tailnet" }] : []),
@@ -166,6 +183,10 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
   });
 
   const url = await step("access", async () => {
+    // Moving off Tailscale: stop publishing on the tailnet, so the only way in is the new one.
+    if (access !== "tailscale" && previous?.access.mode === "tailscale") {
+      await system.run("tailscale", ["serve", "--https=443", `http://127.0.0.1:${AUTOPILOT_PORT}`, "off"], { allowFailure: true });
+    }
     const address = access === "tailscale" ? await serveOverTailscale(system) : `http://127.0.0.1:${AUTOPILOT_PORT}`;
     await system.writeFile(PATHS.autopilotEnv, autopilotEnv({ hotcellApiKey, image, bridgeIp, publicUrl: address }), { mode: 0o640, owner: `root:${USERS.autopilot}`, secret: true });
     await system.run("systemctl", ["enable", SERVICES.autopilot]);
@@ -189,8 +210,15 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
   };
   await writeState(system, state);
 
-  const link = await ownerLink(system, url);
   const capacity = agentCapacity(facts, CELL_MEMORY_MB);
+  if (access === "ssh") {
+    // The laptop set this up, pairs itself (`dl pair`), and prints its own summary, so there's
+    // no browser link to make: a one-time owner link would only be a secret in its output.
+    await installLoginStatus(system);
+    ui.ready("Ready", [{ label: "On your laptop, from inside a GitHub repository", value: 'dl run "fix the flaky checkout test"' }]);
+    return { url, ownerLink: undefined, capacity, state };
+  }
+  const link = await ownerLink(system, url);
   await installLoginStatus(system);
   ui.ready("Ready", nextSteps({ url, ownerLink: link, access }), {
     about: [
@@ -221,73 +249,158 @@ async function installLoginStatus(system: System): Promise<void> {
   await system.writeFile(MOTD_SCRIPT, motdScript(), { mode: 0o755 });
 }
 
-function accessMode(env: NodeJS.ProcessEnv, previous: InstallState | undefined): AccessMode {
+/** Checks an access mode named by `--access` or DL_ACCESS. */
+export function parseAccessMode(value: string, source = "--access"): AccessMode {
+  const mode = ACCESS_MODES.find((entry) => entry === value);
+  if (mode) return mode;
+  throw new Error(`${source} must be ${ACCESS_MODES.join(", ").replace(/, ([^,]+)$/, " or $1")} (got "${value}"); an own domain and the instant address are coming.`);
+}
+
+/** The flag wins, then DL_ACCESS, then what the last `up` chose; Tailscale on a fresh machine. */
+function accessMode(flag: AccessMode | undefined, env: NodeJS.ProcessEnv, previous: InstallState | undefined): AccessMode {
+  if (flag) return flag;
   const requested = env.DL_ACCESS?.trim();
   if (requested === undefined || requested === "") return previous?.access.mode ?? "tailscale";
-  if (requested === "tailscale" || requested === "loopback") return requested;
-  throw new Error(`DL_ACCESS must be tailscale or loopback (got "${requested}"); an own domain and the instant address are coming.`);
+  return parseAccessMode(requested, "DL_ACCESS");
+}
+
+/**
+ * `dl up --needs`: the answers a real `up` would require on this machine, without asking for
+ * or changing anything (it only reads files and runs read-only probes). The laptop asks for
+ * exactly these before it starts the install. Answers in DL_* variables don't count: the
+ * laptop's `up` takes its answers from stdin.
+ */
+export async function needs(system: System, options: { access?: AccessMode; env?: NodeJS.ProcessEnv } = {}): Promise<Need[]> {
+  const access = accessMode(options.access, options.env ?? process.env, await readState(system));
+  const missing = await missingAnswers(system, await detectHost(system), access);
+  return (["tailscale", "openrouter", "github"] as const).filter((need) => missing[need]);
+}
+
+/**
+ * Which answers this machine still lacks: the model key unless Hotcell has one, a GitHub
+ * token unless its env file has one, a Tailscale key only for Tailscale access off a tailnet.
+ */
+async function missingAnswers(system: System, facts: HostFacts, access: AccessMode): Promise<Record<Need, boolean>> {
+  const tailscaleRunning = access !== "tailscale" || (facts.tailscale && await tailscaleIsUp(system));
+  return {
+    tailscale: !tailscaleRunning,
+    openrouter: !(await hotcellHasKey(system, "openrouter")),
+    github: !parseEnvFile(await system.readFile(PATHS.githubEnv)).GITHUB_TOKEN,
+  };
+}
+
+/** Answers given up front, and where they came from (shown next to each, never the value). */
+interface Given {
+  tailscaleAuthKey: string | undefined;
+  openRouterKey: string | undefined;
+  githubToken: string | undefined;
+  /** Said next to an accepted answer, e.g. "from the environment". */
+  source: string;
+  /** Nothing may be asked: the answers came from the laptop, and there's no terminal. */
+  final: boolean;
+}
+
+function given(env: NodeJS.ProcessEnv, provided: ProvidedAnswers | undefined): Given {
+  if (provided) {
+    return { tailscaleAuthKey: provided.tailscaleAuthKey, openRouterKey: provided.openrouterKey, githubToken: provided.githubToken, source: "from your laptop", final: true };
+  }
+  return { tailscaleAuthKey: env.DL_TAILSCALE_AUTH_KEY, openRouterKey: env.DL_OPENROUTER_API_KEY, githubToken: env.DL_GITHUB_TOKEN, source: "from the environment", final: false };
+}
+
+/**
+ * The answers from `--answers-stdin`. Parse errors never quote the input: it holds keys.
+ * Unknown fields are ignored, so a newer laptop can send more than this server knows.
+ */
+export function parseProvidedAnswers(text: string): ProvidedAnswers {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("The answers on stdin aren't valid JSON; expected one object like {\"openrouterKey\": \"sk-or-…\"}.");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("The answers on stdin must be one JSON object.");
+  const record = parsed as Record<string, unknown>;
+  const answers: ProvidedAnswers = {};
+  for (const key of ["openrouterKey", "githubToken", "tailscaleAuthKey"] as const) {
+    const value = record[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "string") throw new Error(`The answer "${key}" on stdin must be a string.`);
+    answers[key] = value;
+  }
+  return answers;
 }
 
 async function collectAnswers(
   system: System,
   ui: Ui,
   prompter: Prompter,
-  env: NodeJS.ProcessEnv,
+  provided: Given,
   fetchImpl: typeof fetch | undefined,
   facts: HostFacts,
   access: AccessMode,
 ): Promise<Answers> {
-  const tailscaleRunning = access !== "tailscale" || (facts.tailscale && await tailscaleIsUp(system));
-  const hasModelKey = await hotcellHasKey(system, "openrouter");
-  const hasGitHub = Boolean(parseEnvFile(await system.readFile(PATHS.githubEnv)).GITHUB_TOKEN);
+  const missing = await missingAnswers(system, facts, access);
   if (system.dryRun) {
     return {
-      tailscaleAuthKey: tailscaleRunning ? undefined : "<asked>",
-      openRouterKey: hasModelKey ? undefined : "<asked>",
-      githubToken: hasGitHub ? undefined : "<asked>",
+      tailscaleAuthKey: missing.tailscale ? "<asked>" : undefined,
+      openRouterKey: missing.openrouter ? "<asked>" : undefined,
+      githubToken: missing.github ? "<asked>" : undefined,
     };
   }
-  const typed = [
-    !tailscaleRunning && !env.DL_TAILSCALE_AUTH_KEY,
-    !hasModelKey && !env.DL_OPENROUTER_API_KEY,
-    !hasGitHub && !env.DL_GITHUB_TOKEN,
+  const typed = provided.final ? 0 : [
+    missing.tailscale && !provided.tailscaleAuthKey,
+    missing.openrouter && !provided.openRouterKey,
+    missing.github && !provided.githubToken,
   ].filter(Boolean).length;
   if (typed > 0) ui.questions(`${typed === 1 ? "One key" : `${typed} keys`}, then it runs on its own. Typing is hidden.`);
+  // With final answers there's no one to ask: a missing one fails before anything changes.
+  const asking = (ask: () => Promise<string>) => provided.final ? undefined : ask;
 
-  const tailscaleAuthKey = tailscaleRunning ? undefined : await askValidated(ui,
-    env.DL_TAILSCALE_AUTH_KEY,
+  const tailscaleAuthKey = !missing.tailscale ? undefined : await askValidated(ui,
+    provided.tailscaleAuthKey,
+    provided.source,
     "Tailscale auth key",
-    () => prompter.secret(ui.prompt("Tailscale auth key", "login.tailscale.com/admin/settings/keys")),
+    asking(() => prompter.secret(ui.prompt("Tailscale auth key", "login.tailscale.com/admin/settings/keys"))),
     async (value) => /^tskey-[A-Za-z0-9-]+$/.test(value) ? {} : { problem: "That doesn't look like a Tailscale auth key (tskey-…)." },
   );
-  const openRouterKey = hasModelKey ? undefined : await askValidated(ui,
-    env.DL_OPENROUTER_API_KEY,
+  const openRouterKey = !missing.openrouter ? undefined : await askValidated(ui,
+    provided.openRouterKey,
+    provided.source,
     "OpenRouter API key",
-    () => prompter.secret(ui.prompt("OpenRouter API key", "stays in Hotcell; sandboxes and laptops never see it")),
+    asking(() => prompter.secret(ui.prompt("OpenRouter API key", "stays in Hotcell; sandboxes and laptops never see it"))),
     async (value) => ({ ...await validateOpenRouterKey(value, fetchImpl).then((problem) => problem ? { problem } : { detail: "kept in Hotcell" }) }),
   );
-  const githubToken = hasGitHub ? undefined : await askValidated(ui,
-    env.DL_GITHUB_TOKEN,
+  const githubToken = !missing.github ? undefined : await askValidated(ui,
+    provided.githubToken,
+    provided.source,
     "GitHub token",
-    () => prompter.secret(ui.prompt("GitHub token", "fine-grained · Contents + Pull requests read/write")),
+    asking(() => prompter.secret(ui.prompt("GitHub token", "fine-grained · Contents + Pull requests read/write"))),
     (value) => validateGitHubToken(value, fetchImpl),
   );
   return { tailscaleAuthKey, openRouterKey, githubToken };
 }
 
-/** Takes an env answer as-is (failing fast if invalid) or asks up to three times. */
+/**
+ * Takes a given answer as-is (failing fast if invalid) or asks up to three times. Without a
+ * way to ask (answers from the laptop), a missing answer is a failure.
+ */
 async function askValidated(
   ui: Ui,
   fromEnv: string | undefined,
+  source: string,
   label: string,
-  ask: () => Promise<string>,
+  ask: (() => Promise<string>) | undefined,
   validate: (value: string) => Promise<Checked>,
 ): Promise<string> {
   if (fromEnv) {
     const { problem, detail } = await validate(fromEnv.trim());
     if (problem) throw new Error(problem);
-    ui.line("done", label, detail ? `${detail} · from the environment` : "from the environment");
+    ui.line("done", label, detail ? `${detail} · ${source}` : source);
     return fromEnv.trim();
+  }
+  if (!ask) {
+    ui.line("failed", label, "not given");
+    throw new Error(`This server needs ${/^[AEIOU]/.test(label) ? "an" : "a"} ${label} and none was given ${source.replace(/^from/, "by")}.`);
   }
   for (let attempt = 1; ; attempt++) {
     const value = (await ask()).trim();
