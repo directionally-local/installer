@@ -10,6 +10,19 @@ export interface RemoteServer {
   credentialId: string;
   expiresAt: string;
   addedAt: string;
+  /**
+   * Set when the server is reached over SSH (set up by `dl setup`): `url` is then the
+   * server-side address (http://127.0.0.1:4096) and every command tunnels to it. Optional,
+   * so entries written by `dl connect` or Autopilot's `remote add` stay exactly as they were.
+   */
+  ssh?: SshAccess;
+}
+
+/** How to reach a server over SSH: a destination ssh understands (an alias or user@host). */
+export interface SshAccess {
+  target: string;
+  port?: number;
+  identityFile?: string;
 }
 
 interface RemotesFile {
@@ -100,5 +113,14 @@ async function writeRemotes(remotes: RemoteServer[], path: string): Promise<void
 function isRemote(value: unknown): value is RemoteServer {
   if (!value || typeof value !== "object") return false;
   const entry = value as Record<string, unknown>;
-  return ["name", "url", "token", "credentialId", "expiresAt", "addedAt"].every((key) => typeof entry[key] === "string");
+  if (!["name", "url", "token", "credentialId", "expiresAt", "addedAt"].every((key) => typeof entry[key] === "string")) return false;
+  return entry.ssh === undefined || isSshAccess(entry.ssh);
+}
+
+function isSshAccess(value: unknown): value is SshAccess {
+  if (!value || typeof value !== "object") return false;
+  const ssh = value as Record<string, unknown>;
+  return typeof ssh.target === "string" && ssh.target.length > 0 && !ssh.target.startsWith("-") &&
+    (ssh.port === undefined || (typeof ssh.port === "number" && Number.isInteger(ssh.port) && ssh.port > 0 && ssh.port < 65536)) &&
+    (ssh.identityFile === undefined || typeof ssh.identityFile === "string");
 }

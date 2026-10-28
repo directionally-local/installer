@@ -28,7 +28,7 @@ step() {
   if [ -n "$FANCY" ]; then printf '  \033[36m⠋\033[0m %s' "$1"; else say ".. $1"; fi
 }
 step_done() {
-  if [ -n "$FANCY" ]; then printf '\r\033[2K  \033[32m✓\033[0m %-33s\033[2m%s\033[0m\n' "$1" "${2:-}"; else say "ok $1${2:+: $2}"; fi
+  if [ -n "$FANCY" ]; then printf '\r\033[2K  \033[32m✓\033[0m %-33s\033[2m%s\033[0m\n' "$1" "${2:-}"; else say "ok ${STEP:-$1}${2:+: $2}"; fi
 }
 
 # Quiet steps: output goes to a log that's shown only if the step fails.

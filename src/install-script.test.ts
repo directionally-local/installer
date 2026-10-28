@@ -49,7 +49,7 @@ describe("install.sh", () => {
   it("with DL_INSTALL_ONLY=1 installs the CLI and stops before dl up", { skip: !supportedHost() && "needs Ubuntu or Debian" }, () => {
     const only = install({ DL_INSTALL_ONLY: "1" });
     assert.equal(only.status, 0, only.stderr);
-    assert.equal(only.stdout, "Directionally Local\n.. Getting the installer\nok Got the installer: dl 0.1.2\n", "plain lines without a terminal");
+    assert.equal(only.stdout, "Directionally Local\n.. Getting the installer\nok Getting the installer: dl 0.1.2\n", "plain lines without a terminal");
     assert.match(only.npm ?? "", /^install -g --no-audit --no-fund --loglevel=error directionallylocal@latest$/m);
     assert.equal(only.up, undefined, "dl up didn't run");
 
