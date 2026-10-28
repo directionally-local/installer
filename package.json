@@ -1,6 +1,6 @@
 {
   "name": "directionallylocal",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "One-line server install for Directionally Local: Hotcell sandboxes and Autopilot, ready for autopilot --on",
   "type": "module",
   "bin": {
