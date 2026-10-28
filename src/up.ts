@@ -61,12 +61,19 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
   const answers = await collectAnswers(system, options.prompter, env, check, facts, access);
 
   say("== Docker");
-  if (!facts.docker) {
-    await system.run("sh", ["-c", "curl -fsSL https://get.docker.com | sh"], { inherit: true, describe: "install Docker (get.docker.com)" });
-    await system.run("systemctl", ["enable", "--now", "docker"]);
-    facts = await detectHost(system);
+  if (facts.docker) {
+    say("  already running");
   } else {
-    say("  already installed");
+    // An installed Docker (Ubuntu's docker.io or Docker's docker-ce) is started, never
+    // replaced: get.docker.com swapping packages under a running install is how the socket
+    // and service fall out of step.
+    if (facts.dockerInstalled) {
+      say("  installed but not running; starting it");
+    } else {
+      await system.run("sh", ["-c", "curl -fsSL https://get.docker.com | sh"], { inherit: true, describe: "install Docker (get.docker.com)" });
+    }
+    await startDocker(system, sleep);
+    facts = await detectHost(system);
   }
   const bridgeIp = facts.dockerBridgeIp ?? (system.dryRun ? DRY_RUN_BRIDGE_IP : undefined);
   if (!bridgeIp) throw new Error("Docker is running but its docker0 bridge has no IPv4 address; sandboxes couldn't reach the gateway.");
@@ -281,6 +288,21 @@ async function ensureAutomaticUpdates(system: System): Promise<void> {
   }
 }
 
+/**
+ * Starts Docker so it actually answers. docker.service is socket-activated on Ubuntu: if it
+ * starts while docker.socket is down, dockerd exits ("no sockets found via socket
+ * activation") and systemd soon stops retrying. So: clear that failed state, bring up the
+ * socket first, then the service, and wait for the daemon to respond.
+ */
+async function startDocker(system: System, sleep: (ms: number) => Promise<void>): Promise<void> {
+  await system.run("systemctl", ["reset-failed", "docker.service", "docker.socket"], { allowFailure: true });
+  await system.run("systemctl", ["enable", "--now", "docker.socket"], { allowFailure: true });
+  await system.run("systemctl", ["enable", "docker.service"]);
+  await system.run("systemctl", ["restart", "docker.service"]);
+  await waitUntil(system, sleep, "Docker", async () =>
+    (await system.probe("docker", ["version", "--format", "{{.Server.Version}}"])).stdout.trim() !== "", "docker");
+}
+
 async function ensureUser(system: System, name: string, home: string, groups: string[]): Promise<void> {
   if ((await system.probe("id", ["-u", name])).code !== 0) {
     await system.run("useradd", ["--system", "--user-group", "--home-dir", home, "--shell", "/usr/sbin/nologin", name]);
@@ -394,13 +416,13 @@ async function createOwnerLink(system: System, url: string): Promise<string | un
   return result.code === 0 && link?.startsWith("http") ? link : undefined;
 }
 
-async function waitUntil(system: System, sleep: (ms: number) => Promise<void>, what: string, ready: () => Promise<boolean>): Promise<void> {
+async function waitUntil(system: System, sleep: (ms: number) => Promise<void>, what: string, ready: () => Promise<boolean>, unit = what.toLowerCase()): Promise<void> {
   if (system.dryRun) return;
   for (let attempt = 0; attempt < 60; attempt++) {
     if (await ready()) return;
     await sleep(1_000);
   }
-  throw new Error(`${what} didn't come up; check: journalctl -u ${what.toLowerCase()} -n 50`);
+  throw new Error(`${what} didn't come up; check: journalctl -u ${unit} -n 50`);
 }
 
 function machineName(): string {

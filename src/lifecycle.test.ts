@@ -45,7 +45,7 @@ describe("uninstall", () => {
     const system = await installed();
     system.containers.push("abc123");
     await uninstall(system);
-    assert.equal(system.enabled.size, 0, "no services left enabled");
+    assert.deepEqual([...system.enabled], ["docker.service"], "none of ours left enabled; Docker stays");
     for (const unit of ["hotcell.service", "autopilot.service", "directionally-local-metadata-block.service"]) {
       assert.equal(system.files.has(`${PATHS.units}/${unit}`), false, unit);
     }
