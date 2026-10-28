@@ -23,9 +23,14 @@ It ends with:
 Then, on your laptop:
 
 ```sh
-autopilot remote add https://box.tail1234.ts.net   # approve the code in the browser you opened the link in
-autopilot --on box "fix the flaky checkout test"
+npm install -g directionallylocal
+dl connect https://box.tail1234.ts.net     # approve the code in the browser you opened the link in
+dl run "fix the flaky checkout test"       # from inside a GitHub repository; local changes go along
+dl runs                                    # tasks and their pull requests
+dl pull <id>                               # check one out here
 ```
+
+Typing `dl` on its own explains what it is and what's going on, on the server and on the laptop.
 
 The "fits ~N agents" figure is a conservative estimate from memory and CPUs (1 GB per sandbox). Measured numbers will replace it.
 

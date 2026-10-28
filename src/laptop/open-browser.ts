@@ -1,0 +1,21 @@
+import { spawn } from "node:child_process";
+import { platform } from "node:os";
+
+/**
+ * Opens a URL in the laptop's browser. Returns false when that's turned off
+ * (DL_NO_BROWSER=1 or BROWSER=none) or impossible, so the caller shows the link instead.
+ */
+export function openBrowser(url: string): boolean {
+  if (process.env.DL_NO_BROWSER === "1" || process.env.BROWSER === "none") return false;
+  try {
+    const os = platform();
+    // start is a cmd.exe builtin; the empty string is its window-title argument.
+    const [cmd, args] = os === "darwin" ? ["open", [url]] : os === "win32" ? ["cmd", ["/c", "start", "", url]] : ["xdg-open", [url]];
+    const child = spawn(cmd, args, { detached: true, stdio: "ignore" });
+    child.on("error", () => undefined);
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
