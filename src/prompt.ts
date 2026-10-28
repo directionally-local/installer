@@ -40,15 +40,21 @@ export class TtyPrompter implements Prompter {
     }
     const input = new ReadStream(fd);
     const output = new WriteStream(fd);
+    // A styled prompt is "label line\n› ": print the label line ourselves and give readline
+    // only the last line, so its redraws (and the hidden-input filter) stay on one line.
+    const split = question.lastIndexOf("\n");
+    const head = split >= 0 ? question.slice(0, split + 1) : "";
+    const line = split >= 0 ? question.slice(split + 1) : question;
+    if (head) output.write(head);
     return new Promise((resolve) => {
       const rl = createInterface({ input, output, terminal: true });
       if (hidden) {
         // Echo nothing while the secret is typed.
         (rl as unknown as { _writeToOutput: (text: string) => void })._writeToOutput = (text: string) => {
-          if (text.includes(question)) output.write(text);
+          if (text.includes(line)) output.write(text);
         };
       }
-      rl.question(question, (answer) => {
+      rl.question(line, (answer) => {
         if (hidden) output.write("\n");
         rl.close();
         input.destroy();

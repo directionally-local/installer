@@ -110,5 +110,8 @@ describe("cli", () => {
     assert.equal(await main(["launch"], io), 2);
     assert.match(err, /Unknown command "launch"/);
     assert.equal(await main([], io), 2);
+    out = "";
+    assert.equal(await main(["--version"], io), 0);
+    assert.match(out, /^\d+\.\d+\.\d+\n$/);
   });
 });

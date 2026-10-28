@@ -39,7 +39,7 @@ describe("automatic Node.js security updates", () => {
     system.nodeFromNodeSource = false;
     await install(system);
     assert.equal(system.files.has(NODE_AUTO_UPDATES), false);
-    assert.ok(system.logs.some((line) => line.includes("isn't from NodeSource here; keep it patched yourself")));
+    assert.ok(system.logs.some((line) => line.includes("isn't from NodeSource here, so it won't update itself")));
     assert.equal((await doctor(system)).find((check) => check.name === "security updates")?.detail, "Node.js isn't included");
   });
 

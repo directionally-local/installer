@@ -1,9 +1,12 @@
+import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { doctor, formatChecks } from "./doctor.js";
 import { TtyPrompter } from "./prompt.js";
 import { readState } from "./state.js";
 import { DryRunSystem, RealSystem, type System } from "./system.js";
 import { uninstall } from "./uninstall.js";
+import { PlainUi, TerminalUi, palette, type Ui } from "./ui.js";
 import { up } from "./up.js";
 
 const HELP = `Directionally Local: run background coding agents on this server.
@@ -30,10 +33,14 @@ Advanced:
   DL_SKIP_CREDENTIAL_CHECK=1  don't check the keys with OpenRouter and GitHub (offline installs)
 `;
 
-export async function main(argv: string[], io: { out: (text: string) => void; err: (text: string) => void } = {
-  out: (text) => process.stdout.write(text),
-  err: (text) => process.stderr.write(text),
-}): Promise<number> {
+export async function main(
+  argv: string[],
+  io: { out: (text: string) => void; err: (text: string) => void } = {
+    out: (text) => process.stdout.write(text),
+    err: (text) => process.stderr.write(text),
+  },
+  options: { terminal?: boolean } = {},
+): Promise<number> {
   let parsed;
   try {
     parsed = parseArgs({
@@ -45,6 +52,7 @@ export async function main(argv: string[], io: { out: (text: string) => void; er
         "autopilot-version": { type: "string" },
         "hotcell-version": { type: "string" },
         help: { type: "boolean", short: "h" },
+        version: { type: "boolean", short: "v" },
       },
     });
   } catch (error) {
@@ -53,12 +61,20 @@ export async function main(argv: string[], io: { out: (text: string) => void; er
   }
   const [command] = parsed.positionals;
   const { values } = parsed;
+  if (values.version) {
+    io.out(`${packageVersion()}\n`);
+    return 0;
+  }
   if (values.help || !command || command === "help") {
     io.out(HELP);
     return command || values.help ? 0 : 2;
   }
   const log = (line: string) => io.out(`${line}\n`);
-  const system: System = values["dry-run"] ? new DryRunSystem(log) : new RealSystem(log);
+  // The live checklist needs a terminal; a dry run prints its plan line by line instead.
+  const terminal = options.terminal ?? (process.stdout.isTTY === true);
+  const live = terminal && command === "up" && !values["dry-run"];
+  const ui: Ui = live ? new TerminalUi(io.out) : new PlainUi(io.out);
+  const system: System = values["dry-run"] ? new DryRunSystem(log) : new RealSystem(log, live ? { outputLog: UP_LOG } : {});
 
   try {
     switch (command) {
@@ -66,13 +82,14 @@ export async function main(argv: string[], io: { out: (text: string) => void; er
         if (system.dryRun) log("Dry run: nothing on this machine will change.\n");
         await up(system, {
           prompter: new TtyPrompter(),
+          ui,
           ...(values["autopilot-version"] ? { autopilotVersion: values["autopilot-version"] } : {}),
           ...(values["hotcell-version"] ? { hotcellVersion: values["hotcell-version"] } : {}),
         });
         return 0;
       case "doctor": {
         const checks = await doctor(system);
-        log(formatChecks(checks));
+        log(formatChecks(checks, terminal && !process.env.NO_COLOR));
         return checks.every((check) => check.ok) ? 0 : 1;
       }
       case "status": {
@@ -94,7 +111,25 @@ export async function main(argv: string[], io: { out: (text: string) => void; er
         return 2;
     }
   } catch (error) {
-    io.err(`\n✗ ${(error as Error).message}\n`);
+    ui.finish();
+    const c = palette(live && !process.env.NO_COLOR);
+    io.err(`\n  ${c.red("✗")} ${(error as Error).message.replace(/\n/g, "\n    ")}\n`);
+    if (live) io.err(await logTail(UP_LOG, c));
     return 1;
   }
+}
+
+/** From package.json, which sits one level above both src/ and dist/. */
+function packageVersion(): string {
+  return (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+}
+
+/** Where `dl up` keeps other tools' output; shown only when something fails. */
+export const UP_LOG = "/var/log/directionally-local/up.log";
+
+async function logTail(path: string, c: ReturnType<typeof palette>): Promise<string> {
+  const text = await readFile(path, "utf8").catch(() => "");
+  const lines = text.trimEnd().split("\n").filter((line) => line.trim() && !line.startsWith("#")).slice(-15);
+  if (lines.length === 0) return "";
+  return `\n  ${c.dim(`Last lines of ${path}:`)}\n${lines.map((line) => `    ${c.dim(line.slice(0, 200))}`).join("\n")}\n\n  Fix it and run ${c.bold("dl up")} again; it picks up where it stopped.\n`;
 }

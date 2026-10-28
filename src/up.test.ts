@@ -33,8 +33,9 @@ describe("directionally-local up", () => {
     assert.equal(result.url, "https://box.tail1234.ts.net");
     assert.match(result.ownerLink ?? "", /^https:\/\/box\.tail1234\.ts\.net\/api\/v1\/auth\/claim\?token=aster_claim_/);
     assert.equal(result.capacity, 6, "8 GB minus the host's share, 1 GB per sandbox");
-    assert.ok(system.logs.includes("✓ Ready. Fits ~6 agents at once (estimate)."));
-    assert.ok(system.logs.some((line) => line.includes("autopilot remote add https://box.tail1234.ts.net")));
+    assert.ok(system.logs.includes("Ready · fits ~6 agents at once (estimate)"));
+    assert.ok(system.logs.includes("  On your laptop (signed in to the same tailnet): autopilot remote add https://box.tail1234.ts.net"));
+    assert.ok(system.logs.includes("ok Joining your tailnet: joined as box"));
 
     // Docker, accounts, software, image, services, access.
     assert.ok(system.ran.some((command) => command.includes("get.docker.com")));
@@ -146,8 +147,8 @@ describe("directionally-local up", () => {
     assert.equal(await validateOpenRouterKey(OPENROUTER_KEY, offline), undefined, "offline isn't fatal");
     assert.match(await validateOpenRouterKey("sk-proj-123", fetchOk) ?? "", /doesn't look like/);
     const system = new FakeSystem();
-    assert.match(await validateGitHubToken(GITHUB_TOKEN, rejected, system) ?? "", /rejected/);
-    assert.equal(await validateGitHubToken(GITHUB_TOKEN, fetchOk, system), undefined);
-    assert.ok(system.logs.includes("  GitHub: signed in as octo"));
+    assert.match((await validateGitHubToken(GITHUB_TOKEN, rejected)).problem ?? "", /rejected/);
+    assert.deepEqual(await validateGitHubToken(GITHUB_TOKEN, fetchOk), { detail: "signed in as octo" });
+    assert.ok(system.commands.length === 0);
   });
 });

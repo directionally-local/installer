@@ -2,6 +2,7 @@ import { detectHost, MIN_DISK_GB } from "./detect.js";
 import { nodeAdvisory } from "./node-advisory.js";
 import { AUTOPILOT_PORT, AUTO_UPGRADES, HOTCELL_PORT, NODE_AUTO_UPDATES, PATHS, SERVICES, parseEnvFile } from "./layout.js";
 import { readState } from "./state.js";
+import { palette } from "./ui.js";
 import type { System } from "./system.js";
 
 export interface Check {
@@ -70,6 +71,15 @@ export async function doctor(system: System): Promise<Check[]> {
   return checks;
 }
 
-export function formatChecks(checks: Check[]): string {
-  return checks.map((check) => `${check.ok ? "✓" : "✗"} ${check.name.padEnd(44)} ${check.detail}${!check.ok && check.fix ? `\n    fix: ${check.fix}` : ""}`).join("\n");
+export function formatChecks(checks: Check[], color = false): string {
+  const c = palette(color);
+  const width = Math.max(...checks.map((check) => check.name.length)) + 2;
+  const rows = checks.map((check) => {
+    const glyph = check.ok ? c.green("✓") : c.red("✗");
+    const fix = !check.ok && check.fix ? `\n     ${c.dim(`fix: ${check.fix}`)}` : "";
+    return `  ${glyph} ${check.name.padEnd(width)}${check.ok ? c.dim(check.detail) : c.red(check.detail)}${fix}`;
+  });
+  const failed = checks.filter((check) => !check.ok).length;
+  const verdict = failed === 0 ? `${c.green("✓")} ${c.bold("All good")}` : `${c.red("✗")} ${c.bold(`${failed} to fix`)}`;
+  return `${rows.join("\n")}\n\n  ${verdict}`;
 }
