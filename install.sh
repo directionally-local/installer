@@ -1,10 +1,10 @@
 #!/bin/sh
 # Directionally Local: one-line server install.
 #
-#   curl -fsSL https://directionallylocal.com/install.sh | sh
+#   curl -fsSL https://directionallylocal.run | sh
 #
-# Installs Node.js 22 if needed and the directionally-local CLI, then runs
-# `directionally-local up`, which asks how to reach this server and for the model
+# Installs Node.js 22 if needed and the directionally-local CLI (also `dl`), then runs
+# `dl up`, which asks how to reach this server and for the model
 # key, and sets up Hotcell + Autopilot as services. Safe to run again.
 #
 # Unattended: export DL_TAILSCALE_AUTH_KEY, DL_OPENROUTER_API_KEY and DL_GITHUB_TOKEN first.

@@ -6,13 +6,14 @@ import { DryRunSystem, RealSystem, type System } from "./system.js";
 import { uninstall } from "./uninstall.js";
 import { up } from "./up.js";
 
-const HELP = `directionally-local: run background coding agents on this server.
+const HELP = `Directionally Local: run background coding agents on this server.
+(dl is short for directionally-local; both work.)
 
 Usage (as root):
-  directionally-local up [--dry-run]       install or repair Hotcell + Autopilot as services
-  directionally-local doctor               check every part, with a fix for each failure
-  directionally-local status               what's installed and where to reach it
-  directionally-local uninstall [--purge]  remove the services and software (--purge: also config, data, accounts)
+  dl up [--dry-run]       install or repair Hotcell + Autopilot as services
+  dl doctor               check every part, with a fix for each failure
+  dl status               what's installed and where to reach it
+  dl uninstall [--purge]  remove the services and software (--purge: also config, data, accounts)
 
 up options:
   --dry-run                     print what would change; change nothing
@@ -25,7 +26,7 @@ Unattended installs answer the questions with environment variables:
   DL_GITHUB_TOKEN         GitHub token for cloning, pushing, and opening PRs
 
 Advanced:
-  DL_ACCESS=loopback      don't expose the server; reach it over an SSH tunnel
+  DL_ACCESS=loopback          don't expose the server; reach it over an SSH tunnel
   DL_SKIP_CREDENTIAL_CHECK=1  don't check the keys with OpenRouter and GitHub (offline installs)
 `;
 
@@ -77,7 +78,7 @@ export async function main(argv: string[], io: { out: (text: string) => void; er
       case "status": {
         const state = await readState(system);
         if (!state) {
-          log("Not installed. Run: sudo directionally-local up");
+          log("Not installed. Run: sudo dl up");
           return 1;
         }
         log(`Installed ${state.release} (updated ${state.updatedAt.slice(0, 10)})`);

@@ -3,7 +3,7 @@
 Rent a server, paste one line, and send coding tasks to it from your laptop. Each task runs in its own [Hotcell](https://github.com/sinameraji/hotcell) sandbox, driven by [Autopilot](https://github.com/sinameraji/autopilot), and comes back as a pull request, even with your laptop closed.
 
 ```sh
-curl -fsSL https://directionallylocal.com/install.sh | sh
+curl -fsSL https://directionallylocal.run | sh
 ```
 
 It asks three things:
@@ -31,15 +31,15 @@ The "fits ~N agents" figure is a conservative estimate from memory and CPUs (1 G
 
 ## Commands
 
-Run these as root on the server:
+Run these as root on the server. `dl` is short for `directionally-local`; both work.
 
 | Command | What it does |
 | --- | --- |
-| `directionally-local up` | Install or repair everything. Safe to re-run: it keeps your keys and generated secrets and skips work that's already done. |
-| `directionally-local up --dry-run` | Print what `up` would change, without changing anything. |
-| `directionally-local doctor` | Check every part, with a fix for each failure. |
-| `directionally-local status` | Show the installed versions and where to reach the server. |
-| `directionally-local uninstall` | Remove the services and software but keep configuration and data. Add `--purge` to delete those too, plus the service accounts and the sandbox image. |
+| `dl up` | Install or repair everything. Safe to re-run: it keeps your keys and generated secrets and skips work that's already done. |
+| `dl up --dry-run` | Print what `up` would change, without changing anything. |
+| `dl doctor` | Check every part, with a fix for each failure. |
+| `dl status` | Show the installed versions and where to reach the server. |
+| `dl uninstall` | Remove the services and software but keep configuration and data. Add `--purge` to delete those too, plus the service accounts and the sandbox image. |
 
 For unattended installs, set the answers as environment variables: `DL_TAILSCALE_AUTH_KEY`, `DL_OPENROUTER_API_KEY` and `DL_GITHUB_TOKEN`. `DL_ACCESS=loopback` skips Tailscale; you then reach the server over an SSH tunnel.
 
@@ -52,6 +52,10 @@ For unattended installs, set the answers as environment variables: `DL_TAILSCALE
 - **Configuration** in `/etc/hotcell`, `/etc/autopilot` and `/etc/directionally-local`, readable only by root and the matching service account. Data lives in `/var/lib/hotcell` and `/var/lib/autopilot`.
 
 Supported: Ubuntu 24.04 and 22.04 and Debian 12, on x86_64 or arm64, with at least 4 GB of RAM and 15 GB free under `/var`.
+
+## The install script's address
+
+`site/` is the Cloudflare Worker for `https://directionallylocal.run`. It serves `install.sh` to `curl` at the bare domain (and `/install.sh`), sends browsers to directionallylocal.com, and serves nothing else. Subdomains of `directionallylocal.run` are users' instant addresses, and the domain is on the Public Suffix List, so the Worker never sets cookies. Deploy it with `npx wrangler deploy -c site/wrangler.toml`.
 
 ## Development
 

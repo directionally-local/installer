@@ -36,7 +36,7 @@ export class TtyPrompter implements Prompter {
     try {
       fd = openSync("/dev/tty", "r+");
     } catch {
-      throw new Error("No terminal to ask on; pass the answers as environment variables (see `directionally-local up --help`).");
+      throw new Error("No terminal to ask on; pass the answers as environment variables (see `dl --help`).");
     }
     const input = new ReadStream(fd);
     const output = new WriteStream(fd);

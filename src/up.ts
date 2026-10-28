@@ -354,7 +354,7 @@ async function setUpTailscale(system: System, authKey: string | undefined): Prom
   const served = await system.run("tailscale", ["serve", "--bg", "--https=443", `http://127.0.0.1:${AUTOPILOT_PORT}`], { allowFailure: true });
   if (served.code !== 0) {
     throw new Error(`Tailscale couldn't serve HTTPS: ${served.stderr.trim() || served.stdout.trim()}\n`
-      + "  Turn on MagicDNS and HTTPS certificates at https://login.tailscale.com/admin/dns, then run `directionally-local up` again.");
+      + "  Turn on MagicDNS and HTTPS certificates at https://login.tailscale.com/admin/dns, then run `dl up` again.");
   }
   if (system.dryRun) return DRY_RUN_URL;
   const status = await system.probe("tailscale", ["status", "--json"]);

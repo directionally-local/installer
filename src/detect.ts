@@ -59,7 +59,7 @@ export async function detectHost(system: System): Promise<HostFacts> {
 /** Problems that stop `up` before it changes anything. */
 export function preflightProblems(facts: HostFacts): string[] {
   const problems: string[] = [];
-  if (!facts.root) problems.push("Run as root (sudo directionally-local up).");
+  if (!facts.root) problems.push("Run as root (sudo dl up).");
   if (!facts.systemd) problems.push("systemd is required to run the services.");
   const versions = SUPPORTED_OS[facts.os.id];
   if (!versions?.includes(facts.os.versionId)) {

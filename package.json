@@ -4,7 +4,8 @@
   "description": "One-line server install for Directionally Local: Hotcell sandboxes and Autopilot, ready for autopilot --on",
   "type": "module",
   "bin": {
-    "directionally-local": "bin/directionally-local.mjs"
+    "directionally-local": "bin/directionally-local.mjs",
+    "dl": "bin/directionally-local.mjs"
   },
   "files": [
     "bin",
@@ -17,8 +18,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit",
-    "test": "tsx --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit && tsc -p site/tsconfig.json",
+    "test": "tsx --test \"src/**/*.test.ts\" \"site/**/*.test.ts\"",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {

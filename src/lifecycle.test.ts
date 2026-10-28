@@ -106,7 +106,7 @@ describe("cli", () => {
     let err = "";
     const io = { out: (text: string) => { out += text; }, err: (text: string) => { err += text; } };
     assert.equal(await main(["--help"], io), 0);
-    assert.match(out, /directionally-local up \[--dry-run\]/);
+    assert.match(out, /dl up \[--dry-run\]/);
     assert.equal(await main(["launch"], io), 2);
     assert.match(err, /Unknown command "launch"/);
     assert.equal(await main([], io), 2);
