@@ -1,7 +1,7 @@
 import { agentCapacity, detectHost } from "./detect.js";
 import { AUTOPILOT_PORT, CELL_MEMORY_MB, SERVICES } from "./layout.js";
-import { approvePairing, listLaptops, listServerRuns, ownerLink, pendingPairings, revokeLaptop, type ServerRun } from "./server-api.js";
-import { readState, type InstallState } from "./state.js";
+import { approvePairing, createLaptopCredential, listLaptops, listServerRuns, ownerLink, pendingPairings, revokeLaptop, type ServerRun } from "./server-api.js";
+import { describeAccess, readState, type InstallState } from "./state.js";
 import type { System } from "./system.js";
 import { palette } from "./ui.js";
 import { nextSteps } from "./up.js";
@@ -35,7 +35,7 @@ export async function serverHome(system: System, state: InstallState, write: Wri
   const doneThisWeek = runs?.filter((run) => !run.active && Date.parse(run.createdAt) >= week).length ?? 0;
   const row = (label: string, value: string, hint = "") => `  ${c.dim(label.padEnd(11))}${value}${hint ? `   ${c.dim(hint)}` : ""}\n`;
 
-  write(`\n  ${c.bold("Directionally Local")}  ${verdict}  ${c.dim(state.access.url)}\n\n  ${ABOUT}\n\n`);
+  write(`\n  ${c.bold("Directionally Local")}  ${verdict}  ${c.dim(describeAccess(state.access))}\n\n  ${ABOUT}\n\n`);
   write(row("Laptops", laptops === undefined ? c.dim("unknown (run dl up to update)") : laptops.length === 0 ? "none connected yet" : `${laptops.length} connected · ${laptops.map((laptop) => laptop.name).join(", ")}`, "dl laptops"));
   write(row("Runs", runs === undefined ? c.dim("unknown (run dl up to update)") : `${running} running · ${doneThisWeek} this week`, "dl runs"));
   write(row("Capacity", `~${agentCapacity(facts, CELL_MEMORY_MB)} agents at once (estimate)`));
@@ -48,7 +48,7 @@ export async function serverHome(system: System, state: InstallState, write: Wri
 /** `dl status --brief`: one line, for the login message. Never slow, never fails loudly. */
 export async function briefStatus(system: System, state: InstallState, write: Write, c: Colors): Promise<void> {
   const status = await health(system);
-  write(`\n  ${c.bold("Directionally Local")}  ${status.ok ? c.green("● healthy") : c.red(`● ${status.problems.join(", ")}`)}  ${c.dim(state.access.url)}\n  ${c.dim("Type")} dl ${c.dim("for what this is and what's running.")}\n\n`);
+  write(`\n  ${c.bold("Directionally Local")}  ${status.ok ? c.green("● healthy") : c.red(`● ${status.problems.join(", ")}`)}  ${c.dim(describeAccess(state.access))}\n  ${c.dim("Type")} dl ${c.dim("for what this is and what's running.")}\n\n`);
 }
 
 /**
@@ -72,6 +72,19 @@ export async function connectLaptop(system: System, state: InstallState, code: s
   });
   write(`\n  ${c.dim("The laptop shows a code; approve it in that browser, or here with")} dl connect-laptop <code>\n\n`);
   return 0;
+}
+
+/**
+ * `dl pair --name NAME --json`: a credential for the laptop that's setting this server up
+ * over SSH, printed as one JSON line for it to keep. The token appears nowhere else.
+ */
+export async function pairLaptop(system: System, state: InstallState, name: string, write: Write): Promise<void> {
+  const trimmed = name.trim();
+  if (!trimmed || trimmed.length > 100 || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+    throw new Error("--name must be 1 to 100 printable characters, e.g. the laptop's hostname.");
+  }
+  const paired = await createLaptopCredential(system, trimmed, state.access.url);
+  write(`${JSON.stringify({ token: paired.token, credentialId: paired.credentialId, name: paired.name, expiresAt: paired.expiresAt, url: paired.url })}\n`);
 }
 
 export async function laptopsCommand(system: System, args: string[], write: Write, c: Colors): Promise<number> {

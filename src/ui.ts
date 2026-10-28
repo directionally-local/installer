@@ -255,6 +255,54 @@ export class PlainUi implements Ui {
   finish(): void {}
 }
 
+/** One progress event of `dl up --events json`; see JsonUi. */
+export type JsonEvent =
+  | { event: "title"; text: string }
+  | { event: "line"; status: "done" | "failed" | "info"; label: string; detail?: string }
+  | { event: "plan"; steps: Array<{ id: string; label: string }> }
+  | { event: "start"; id: string; detail?: string }
+  | { event: "done"; id: string; detail?: string }
+  | { event: "fail"; id: string; message: string }
+  | { event: "warn"; text: string }
+  | { event: "questions"; text: string }
+  | { event: "answered"; label: string; detail?: string }
+  | { event: "ready"; headline: string; items: SummaryItem[]; about?: string[]; footer?: string }
+  | { event: "error"; message: string };
+
+/**
+ * For the laptop that runs `dl up` over SSH and draws the progress itself: one JSON object
+ * per line (NDJSON) on stdout, nothing else there. Nothing is asked in this mode, so a
+ * rejected answer is only a warning, and a prompt is never shown.
+ */
+export class JsonUi implements Ui {
+  readonly interactive = false;
+
+  constructor(private readonly write: (text: string) => void = (text) => process.stdout.write(text)) {}
+
+  title(text: string): void { this.emit({ event: "title", text }); }
+  line(status: "done" | "failed" | "info", label: string, detail?: string): void { this.emit({ event: "line", status, label, detail }); }
+  plan(steps: Array<{ id: string; label: string }>): void { this.emit({ event: "plan", steps: steps.map(({ id, label }) => ({ id, label })) }); }
+  start(id: string, detail?: string): void { this.emit({ event: "start", id, detail }); }
+  done(id: string, detail?: string): void { this.emit({ event: "done", id, detail }); }
+  fail(id: string, message: string): void { this.emit({ event: "fail", id, message }); }
+  questions(intro: string): void { this.emit({ event: "questions", text: intro }); }
+  prompt(label: string): string { return label; }
+  answered(label: string, detail?: string): void { this.emit({ event: "answered", label, detail }); }
+  rejected(message: string): void { this.emit({ event: "warn", text: message }); }
+  ready(headline: string, items: SummaryItem[], extra: ReadyExtra = {}): void {
+    this.emit({ event: "ready", headline, items: items.map(({ label, value }) => ({ label, value })), about: extra.about, footer: extra.footer });
+  }
+  warn(text: string): void { this.emit({ event: "warn", text }); }
+  /** The last event of a failed run (not part of Ui: the CLI reports failures, not `up`). */
+  error(message: string): void { this.emit({ event: "error", message }); }
+  finish(): void {}
+
+  private emit(event: JsonEvent): void {
+    // JSON.stringify drops undefined fields and escapes newlines, so each event is one line.
+    this.write(`${JSON.stringify(event)}\n`);
+  }
+}
+
 /** Records events for tests. */
 export class RecordingUi implements Ui {
   readonly interactive = false;

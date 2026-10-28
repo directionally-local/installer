@@ -1,8 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { briefStatus, connectLaptop, laptopsCommand, serverHome, serverRunsCommand } from "./home.js";
+import { briefStatus, connectLaptop, laptopsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
 import { ScriptedPrompter } from "./prompt.js";
-import { readState } from "./state.js";
+import { readState, writeState } from "./state.js";
 import { FakeSystem } from "./test-support/fake-system.js";
 import { palette } from "./ui.js";
 import { up } from "./up.js";
@@ -85,5 +85,56 @@ describe("dl on the server", () => {
     system.serverRuns = [{ conversationId: "bbbbbbbb-2", status: "completed", active: false, repository: "me/app", branch: "aster/bbbbbbbb", pullRequestURL: "https://github.com/me/app/pull/7", startedBy: "MacBook", createdAt: new Date().toISOString() }];
     await serverRunsCommand(system, write, c);
     assert.match(out(), /✓ bbbbbbbb {2}completed +me\/app +https:\/\/github\.com\/me\/app\/pull\/7 {2}· MacBook/);
+  });
+});
+
+describe("a server set up from the laptop", () => {
+  async function sshServer() {
+    const { system, out, write, reset } = await server();
+    const state = (await readState(system))!;
+    await writeState(system, { ...state, access: { mode: "ssh", url: "http://127.0.0.1:4096" } });
+    return { system, out, write, reset, state: (await readState(system))! };
+  }
+
+  it("home and the login line say it's reached over SSH from the laptop", async () => {
+    const { system, out, write, reset, state } = await sshServer();
+    await serverHome(system, state, write, c);
+    assert.match(out(), /Directionally Local {2}● healthy {2}over SSH from your laptop/);
+    reset();
+    await briefStatus(system, state, write, c);
+    assert.match(out(), /● healthy {2}over SSH from your laptop/);
+  });
+
+  it("dl pair makes a 90-day credential for the laptop and prints it only in its JSON line", async () => {
+    const { system, out, write, state } = await sshServer();
+    const logged = system.logs.length;
+    await pairLaptop(system, state, "  Sina's MacBook ", write);
+    const printed = out();
+    assert.ok(printed.endsWith("\n") && printed.trimEnd().split("\n").length === 1, "exactly one line");
+    const paired = JSON.parse(printed) as Record<string, unknown>;
+    const created = system.created.at(-1)!;
+    assert.deepEqual(paired, { token: created.token, credentialId: "cred-1", name: "Sina's MacBook", expiresAt: "2027-01-26T08:00:00.000Z", url: "http://127.0.0.1:4096" });
+    assert.deepEqual([created.workspace, created.days], ["default", 90]);
+    const command = system.commands.find(({ args }) => args.includes("token") && args.includes("create"))!;
+    assert.deepEqual(command.args.slice(0, 7), ["-u", "autopilot", "--", "env", "HOME=/var/lib/autopilot", "AUTOPILOT_ASTER_CONFIG=/etc/autopilot/aster.json", "AUTOPILOT_ASTER_DB=/var/lib/autopilot/aster.db"]);
+    assert.deepEqual(command.args.slice(-10), ["aster", "token", "create", "--name", "Sina's MacBook", "--workspace", "default", "--expires-in-days", "90", "--json"]);
+    assert.equal(command.secretOutput, true, "the output, which holds the token, stays out of the install log");
+    assert.ok(!system.ran.some((line) => line.includes(created.token)));
+    assert.ok(!system.logs.slice(logged).some((line) => line.includes(created.token)));
+  });
+
+  it("dl pair refuses a bad name and reports Autopilot failing without echoing its output", async () => {
+    const { system, write, state } = await sshServer();
+    await assert.rejects(pairLaptop(system, state, "   ", write), /--name must be/);
+    await assert.rejects(pairLaptop(system, state, "a\nb", write), /--name must be/);
+    const run = system.run.bind(system);
+    system.run = async (command, args, options) => args.includes("create")
+      ? { code: 0, stdout: "aster_secret_token not json\n", stderr: "" }
+      : run(command, args, options);
+    await assert.rejects(pairLaptop(system, state, "MacBook", write), (error: Error) => !error.message.includes("aster_secret_token") && /wasn't what dl expects/.test(error.message));
+    system.run = async (command, args, options) => args.includes("create")
+      ? { code: 1, stdout: "", stderr: "unknown option --workspace" }
+      : run(command, args, options);
+    await assert.rejects(pairLaptop(system, state, "MacBook", write), /Couldn't create a credential for the laptop: unknown option --workspace; run dl up/);
   });
 });
