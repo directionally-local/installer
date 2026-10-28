@@ -60,6 +60,11 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
   const check = env.DL_SKIP_CREDENTIAL_CHECK === "1" ? undefined : fetchImpl;
   const answers = await collectAnswers(system, options.prompter, env, check, facts, access);
 
+  if (access === "tailscale") {
+    say("== Joining your tailnet");
+    await joinTailnet(system, answers.tailscaleAuthKey);
+  }
+
   say("== Docker");
   if (facts.docker) {
     say("  already running");
@@ -135,7 +140,7 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
     || (await system.probe("sh", ["-c", `ss -ltn | grep -q '127.0.0.1:${HOTCELL_PORT}'`])).code === 0);
 
   const url = access === "tailscale"
-    ? (say("== Access: private, over Tailscale"), await setUpTailscale(system, answers.tailscaleAuthKey))
+    ? (say("== Access: private, over Tailscale"), await serveOverTailscale(system))
     : (say("== Access: this machine only (use an SSH tunnel)"), `http://127.0.0.1:${AUTOPILOT_PORT}`);
 
   await system.writeFile(PATHS.autopilotEnv, autopilotEnv({ hotcellApiKey, image, bridgeIp, publicUrl: url }), { mode: 0o640, owner: `root:${USERS.autopilot}`, secret: true });
@@ -379,8 +384,11 @@ async function tailscaleIsUp(system: System): Promise<boolean> {
   }
 }
 
-/** Joins the tailnet if needed and serves Autopilot on the machine's HTTPS ts.net name. */
-async function setUpTailscale(system: System, authKey: string | undefined): Promise<string> {
+/**
+ * Joins the tailnet right after the questions, before the long steps: the auth key is
+ * used at once, so a later failure never has to ask for it again (it's never kept on disk).
+ */
+async function joinTailnet(system: System, authKey: string | undefined): Promise<void> {
   if ((await system.probe("tailscale", ["version"])).code !== 0) {
     await system.run("sh", ["-c", "curl -fsSL https://tailscale.com/install.sh | sh"], { inherit: true, describe: "install Tailscale (tailscale.com/install.sh)" });
   }
@@ -395,6 +403,10 @@ async function setUpTailscale(system: System, authKey: string | undefined): Prom
       await system.remove(keyFile);
     }
   }
+}
+
+/** Serves Autopilot on the machine's HTTPS ts.net name; returns that URL. */
+async function serveOverTailscale(system: System): Promise<string> {
   const served = await system.run("tailscale", ["serve", "--bg", "--https=443", `http://127.0.0.1:${AUTOPILOT_PORT}`], { allowFailure: true });
   if (served.code !== 0) {
     throw new Error(`Tailscale couldn't serve HTTPS: ${served.stderr.trim() || served.stdout.trim()}\n`
