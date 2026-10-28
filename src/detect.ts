@@ -11,7 +11,10 @@ export interface HostFacts {
   kvm: boolean;
   systemd: boolean;
   root: boolean;
+  /** The Docker daemon answers. */
   docker: boolean;
+  /** Docker's daemon is installed (docker.io or docker-ce), running or not. */
+  dockerInstalled: boolean;
   /** The Docker bridge address sandboxes reach the host on (gateway, GitHub proxy). */
   dockerBridgeIp: string | undefined;
   /** e.g. "22.23.4"; undefined when node isn't on PATH. */
@@ -28,7 +31,7 @@ export const MIN_MEMORY_MB = 3_500;
 export const MIN_DISK_GB = 15;
 
 export async function detectHost(system: System): Promise<HostFacts> {
-  const [osRelease, meminfo, nproc, df, arch, kvm, systemd, uid, docker, bridge, node, tailscale] = await Promise.all([
+  const [osRelease, meminfo, nproc, df, arch, kvm, systemd, uid, docker, bridge, node, tailscale, dockerd] = await Promise.all([
     system.readFile("/etc/os-release"),
     system.readFile("/proc/meminfo"),
     system.probe("nproc", []),
@@ -41,6 +44,7 @@ export async function detectHost(system: System): Promise<HostFacts> {
     system.probe("ip", ["-4", "-o", "addr", "show", "docker0"]),
     system.probe("node", ["-p", "process.versions.node"]),
     system.probe("tailscale", ["version"]),
+    system.exists("/usr/bin/dockerd"),
   ]);
   return {
     os: parseOsRelease(osRelease ?? ""),
@@ -52,6 +56,7 @@ export async function detectHost(system: System): Promise<HostFacts> {
     systemd,
     root: uid.stdout.trim() === "0",
     docker: docker.code === 0 && docker.stdout.trim() !== "",
+    dockerInstalled: dockerd,
     dockerBridgeIp: parseInterfaceIp(bridge.stdout),
     nodeVersion: node.code === 0 && node.stdout.trim() ? node.stdout.trim() : undefined,
     tailscale: tailscale.code === 0,

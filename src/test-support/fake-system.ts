@@ -21,7 +21,12 @@ export class FakeSystem implements System {
   readonly images = new Set<string>();
   readonly enabled = new Set<string>();
   readonly containers: string[] = [];
+  /** The daemon answers. */
   docker: boolean;
+  /** dockerd is installed (it may be stopped). */
+  dockerInstalled: boolean;
+  /** docker.socket is up; without it, starting docker.service fails, as on real Ubuntu. */
+  dockerSocket = false;
   tailscaleInstalled: boolean;
   tailscaleUp: boolean;
   ufwActive = false;
@@ -34,6 +39,8 @@ export class FakeSystem implements System {
 
   constructor(options: { docker?: boolean; tailscale?: boolean; tailscaleUp?: boolean } = {}) {
     this.docker = options.docker ?? false;
+    this.dockerInstalled = this.docker;
+    this.dockerSocket = this.docker;
     this.tailscaleInstalled = options.tailscale ?? false;
     this.tailscaleUp = options.tailscaleUp ?? false;
     this.files.set("/etc/os-release", { content: 'ID=ubuntu\nVERSION_ID="24.04"\nPRETTY_NAME="Ubuntu 24.04.1 LTS"\n', mode: 0o644 });
@@ -75,6 +82,7 @@ export class FakeSystem implements System {
 
   async exists(path: string): Promise<boolean> {
     if (path === "/dev/kvm") return false;
+    if (path === "/usr/bin/dockerd") return this.dockerInstalled;
     return this.files.has(path) || this.dirs.has(path) || [...this.files.keys()].some((file) => file.startsWith(`${path}/`));
   }
 
@@ -105,7 +113,8 @@ export class FakeSystem implements System {
         return ok();
       case "ip": return this.docker ? ok("4: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\n") : fail("no docker0");
       case "sh":
-        if (line.includes("get.docker.com")) this.docker = true;
+        // Docker's script installs the packages; the daemon still has to be started properly.
+        if (line.includes("get.docker.com")) this.dockerInstalled = true;
         if (line.includes("tailscale.com/install.sh")) this.tailscaleInstalled = true;
         return ok();
       case "useradd":
@@ -135,6 +144,11 @@ export class FakeSystem implements System {
         if (args.includes("unattended-upgrades")) this.unattendedUpgrades = true;
         return ok();
       case "systemctl":
+        if (args[0] === "enable" && args.includes("docker.socket") && this.dockerInstalled) this.dockerSocket = true;
+        if (args[0] === "restart" && args[1] === "docker.service") {
+          if (!this.dockerSocket) return fail("dockerd: failed to load listeners: no sockets found via socket activation");
+          this.docker = true;
+        }
         if (args[0] === "enable") for (const unit of args.filter((arg) => arg.endsWith(".service"))) this.enabled.add(unit);
         if (args[0] === "disable") for (const unit of args.filter((arg) => arg.endsWith(".service"))) this.enabled.delete(unit);
         if (args[0] === "is-active") return ok(this.enabled.has(args[1]!) ? "active\n" : "inactive\n");
