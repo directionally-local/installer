@@ -27,7 +27,9 @@ export class FakeSystem implements System {
   ufwActive = false;
   hotcellKeys = new Set<string>();
   memoryKb = 8 * 1024 * 1024;
-  nodeVersion = "22.23.4";
+  nodeVersion = "24.22.1";
+  unattendedUpgrades = true;
+  nodeFromNodeSource = true;
   serving = false;
 
   constructor(options: { docker?: boolean; tailscale?: boolean; tailscaleUp?: boolean } = {}) {
@@ -127,6 +129,11 @@ export class FakeSystem implements System {
         if (args.includes("init")) this.dirs.add("/var/lib/autopilot/workspaces/default/.git");
         return ok();
       case "mktemp": return ok("/tmp/tmp.build\n");
+      case "dpkg-query": return ok(this.unattendedUpgrades ? "install ok installed" : "");
+      case "apt-cache": return ok(this.nodeFromNodeSource ? "nodejs:\n  Installed: 24.22.1-1nodesource1\n  500 https://deb.nodesource.com/node_24.x nodistro/main arm64 Packages\n" : "nodejs:\n  Installed: 18.19.1+dfsg-6ubuntu5\n");
+      case "apt-get":
+        if (args.includes("unattended-upgrades")) this.unattendedUpgrades = true;
+        return ok();
       case "systemctl":
         if (args[0] === "enable") for (const unit of args.filter((arg) => arg.endsWith(".service"))) this.enabled.add(unit);
         if (args[0] === "disable") for (const unit of args.filter((arg) => arg.endsWith(".service"))) this.enabled.delete(unit);

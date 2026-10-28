@@ -18,6 +18,10 @@ export const PATHS = {
   units: "/etc/systemd/system",
 } as const;
 
+/** Lets Ubuntu's unattended-upgrades install Node.js fixes from NodeSource, like its own packages. */
+export const NODE_AUTO_UPDATES = "/etc/apt/apt.conf.d/52directionally-local-nodejs";
+export const AUTO_UPGRADES = "/etc/apt/apt.conf.d/20auto-upgrades";
+
 export const SERVICES = {
   hotcell: "hotcell.service",
   autopilot: "autopilot.service",
@@ -172,6 +176,23 @@ WantedBy=multi-user.target
 `;
 }
 
+export function nodeAutoUpdates(): string {
+  return `// Written by directionally-local: install Node.js security fixes from NodeSource
+// automatically, the way Ubuntu's own packages are. Delete this file to opt out.
+// Matched by site: NodeSource's Release file has no meaningful Origin or Label.
+Unattended-Upgrade::Origins-Pattern {
+        "site=deb.nodesource.com";
+};
+`;
+}
+
+/** Ubuntu's default: refresh package lists and run unattended-upgrades daily. */
+export function autoUpgrades(): string {
+  return `APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+`;
+}
+
 /** Keeps sandboxes away from the cloud metadata endpoint (instance credentials). */
 export function metadataBlockUnit(): string {
   const rule = "DOCKER-USER -d 169.254.169.254/32 -j DROP";
@@ -194,7 +215,7 @@ WantedBy=multi-user.target
 
 /** The sandbox image: Node, git, common build tools, and the Autopilot runtime baked in. */
 export function cellDockerfile(): string {
-  return `FROM node:22-bookworm
+  return `FROM node:24-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates python3 python3-pip \\
     && rm -rf /var/lib/apt/lists/*
 COPY autopilot.tgz /tmp/autopilot.tgz
