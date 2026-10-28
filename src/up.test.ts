@@ -33,7 +33,7 @@ describe("directionally-local up", () => {
     assert.equal(result.url, "https://box.tail1234.ts.net");
     assert.match(result.ownerLink ?? "", /^https:\/\/box\.tail1234\.ts\.net\/api\/v1\/auth\/claim\?token=aster_claim_/);
     assert.equal(result.capacity, 6, "8 GB minus the host's share, 1 GB per sandbox");
-    assert.ok(system.logs.includes("✓ Ready. Fits ~6 agents at once."));
+    assert.ok(system.logs.includes("✓ Ready. Fits ~6 agents at once (estimate)."));
     assert.ok(system.logs.some((line) => line.includes("autopilot remote add https://box.tail1234.ts.net")));
 
     // Docker, accounts, software, image, services, access.

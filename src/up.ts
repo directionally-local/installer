@@ -151,7 +151,7 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
   const ownerLink = await createOwnerLink(system, url);
   const capacity = agentCapacity(facts, CELL_MEMORY_MB);
   say("");
-  say(`✓ Ready. Fits ~${capacity} agent${capacity === 1 ? "" : "s"} at once.`);
+  say(`✓ Ready. Fits ~${capacity} agent${capacity === 1 ? "" : "s"} at once (estimate).`);
   if (ownerLink) say(`  Open once to approve laptops in your browser: ${ownerLink}`);
   if (access === "tailscale") {
     say(`  On your laptop (signed in to the same tailnet): autopilot remote add ${url}`);

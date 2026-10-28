@@ -15,7 +15,7 @@ It asks three things:
 It ends with:
 
 ```
-✓ Ready. Fits ~6 agents at once.
+✓ Ready. Fits ~6 agents at once (estimate).
   Open once to approve laptops in your browser: https://box.tail1234.ts.net/api/v1/auth/claim?token=…
   On your laptop (signed in to the same tailnet): autopilot remote add https://box.tail1234.ts.net
 ```
