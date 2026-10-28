@@ -1,7 +1,15 @@
 {
   "name": "directionallylocal",
   "version": "0.1.1",
-  "description": "One-line server install for Directionally Local: Hotcell sandboxes and Autopilot, ready for autopilot --on",
+  "description": "Directionally Local: background coding agents on your own server. One-line server install, and the dl command for your server and laptop.",
+  "homepage": "https://directionallylocal.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/directionally-local/installer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/directionally-local/installer/issues"
+  },
   "type": "module",
   "bin": {
     "directionallylocal": "bin/directionallylocal.mjs",

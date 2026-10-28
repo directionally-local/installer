@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { main } from "./cli.js";
@@ -99,6 +100,14 @@ describe("rendered files", () => {
       assert.match(unit, /^NoNewPrivileges=true$/m);
     }
     assert.match(autopilotUnit(), /serve --hostname 127\.0\.0\.1 --port 4096/);
+  });
+});
+
+describe("package", () => {
+  it("names its repository, which npm checks against the release's provenance", async () => {
+    const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as { repository?: { url?: string } };
+    // A missing or different URL fails `npm publish --provenance` with E422.
+    assert.equal(pkg.repository?.url, "git+https://github.com/directionally-local/installer.git");
   });
 });
 
