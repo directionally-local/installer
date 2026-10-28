@@ -4,6 +4,8 @@ import { parseArgs } from "node:util";
 import { doctor, formatChecks } from "./doctor.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, serverHome, serverRunsCommand } from "./home.js";
 import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, watch } from "./laptop/commands.js";
+import { loadRemotes } from "./laptop/config.js";
+import { setup } from "./laptop/setup.js";
 import { TtyPrompter } from "./prompt.js";
 import { readState } from "./state.js";
 import { DryRunSystem, RealSystem, type System } from "./system.js";
@@ -16,7 +18,9 @@ Send a task from your laptop; it runs in its own sandbox and comes back as a pul
 (dl is short for directionallylocal; both work.)
 
 On your laptop:
-  dl connect URL          connect to your server (approve the code it shows)
+  dl                      set up where agents run (the first time; afterwards, an overview)
+  dl setup                set up, or repair, a server over SSH (safe to re-run)
+  dl connect URL          connect to a server someone else set up (approve the code it shows)
   dl run "TASK"           run a task on the server, from inside a GitHub repository
                           (your uncommitted changes go along; Ctrl-C stops watching, not the task)
   dl runs                 your tasks and their pull requests
@@ -128,6 +132,8 @@ export async function main(
           if (values.brief) return 0;
           // A laptop connected to servers gets its own home; otherwise, what this is and how to start.
           if (!command && await laptopHome(laptopIO)) return 0;
+          // A laptop with nothing set up yet: the wizard (it needs someone to answer it).
+          if (!command && terminal && !isRoot() && (await loadRemotes()).length === 0) return await setup({ io: laptopIO, terminal });
           io.out(NOT_A_SERVER(colors));
           return command ? 1 : 0;
         }
@@ -143,6 +149,9 @@ export async function main(
         await serverHome(system, state, io.out, colors);
         return 0;
       }
+      case "setup":
+        // TODO(integration): pass localSetup: setUpOnThisComputer from ./local/setup.js.
+        return await setup({ io: laptopIO, terminal });
       case "connect": {
         const url = parsed.positionals[1];
         if (!url) {
@@ -231,7 +240,10 @@ const NOT_A_SERVER = (c: ReturnType<typeof palette>) => `
   Background coding agents on your own server: send a task from your laptop,
   get a pull request back.
 
-  ${c.dim("Set up a server (as root, on Ubuntu or Debian):")}
+  ${c.dim("Set it up from your laptop (asks a few questions):")}
+     dl setup
+
+  ${c.dim("Or on a server (as root, on Ubuntu or Debian):")}
      curl -fsSL https://directionallylocal.run | sh
 
   ${c.dim("Already have one? Connect this laptop to it:")}

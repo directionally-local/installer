@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { cancel, connect, pull, run, runs, servers, watch, type LaptopIO } from "./commands.js";
-import { loadRemotes } from "./config.js";
+import { fakeTunnels } from "../test-support/fake-tunnel.js";
+import { loadRemotes, saveRemote } from "./config.js";
+import { createOpener } from "./tunnel.js";
 
 /**
  * A small stand-in for a Directionally Local server's API (Autopilot's /api/v1): device
@@ -170,10 +172,45 @@ describe("dl on a laptop", () => {
     assert.equal(fake.cancelled.length, 1);
   });
 
+  it("reaches a server set up over SSH through a tunnel that each command opens and closes", { timeout: 30_000 }, async () => {
+    await saveRemote({
+      name: "box", url: "http://127.0.0.1:4096", token: "aster_laptop_token_0000000000000000000000000000000000", credentialId: "cred-1",
+      expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T00:00:00.000Z", ssh: { target: "root@203.0.113.10" },
+    });
+    const port = Number(new URL(fake.url).port);
+    const tunnels = fakeTunnels(port, { delayMs: 5 });
+    const open = createOpener({ spawn: tunnels.spawn, pollMs: 5 });
+    const dir = await checkout();
+    assert.equal(await run({ task: "fix it", cwd: dir, repository: "me/app", open }, capture()), 0);
+    const listIO = capture();
+    await runs({ open }, listIO);
+    assert.match(listIO.text(), /✓ 3f2a9c1e {2}completed +me\/app/);
+    assert.equal(await watch({ id: "3f2a9c1e", open }, capture()), 0);
+    await cancel({ id: "3f2a9c1e", open }, capture());
+    assert.equal(fake.cancelled.length, 1);
+    assert.equal(tunnels.spawned.length, 4, "one tunnel per command");
+    for (const tunnel of tunnels.spawned) {
+      assert.equal(tunnel.killed, true, "closed when the command ended");
+      assert.match(tunnel.args.at(-2)!, /^127\.0\.0\.1:\d+:127\.0\.0\.1:4096$/);
+      assert.equal(tunnel.args.at(-1), "root@203.0.113.10");
+    }
+    const list = capture();
+    assert.equal(await servers([], list), 0);
+    assert.match(list.text(), /box +ssh root@203\.0\.113\.10/);
+  });
+
+  it("says why a task can't be found when the tunnel fails", async () => {
+    await saveRemote({
+      name: "box", url: "http://127.0.0.1:4096", token: "t", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T00:00:00.000Z", ssh: { target: "root@203.0.113.10" },
+    });
+    const open = createOpener({ spawn: fakeTunnels(undefined, { failWith: "ssh: connect to host 203.0.113.10 port 22: Operation timed out" }).spawn, pollMs: 5 });
+    await assert.rejects(() => cancel({ id: "3f2a9c1e", open }, capture()), /No task 3f2a9c1e on any connected server\nbox: Couldn't open an SSH tunnel to box[\s\S]*Operation timed out/);
+  });
+
   it("guides a laptop that isn't connected yet", async () => {
     const io = capture();
     await assert.rejects(() => runs({}, io), /isn't connected to a server yet\. Run: dl connect/);
     assert.equal(await servers([], io), 0);
-    assert.match(io.text(), /Not connected to a server yet\. {2}dl connect https:\/\/your-server/);
+    assert.match(io.text(), /Not connected to a server yet\. {2}dl setup {2}or, for a server someone else set up: dl connect https:\/\/your-server/);
   });
 });

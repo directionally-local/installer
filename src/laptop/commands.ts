@@ -6,12 +6,16 @@ import { palette } from "../ui.js";
 import { RemoteApiError, RemoteClient, TERMINAL_STATUSES, type RemoteConversation, type RemoteEvent } from "./client.js";
 import { defaultRemoteName, loadRemotes, normalizeServerUrl, REMOTE_NAME_RE, removeRemote, resolveRemote, saveRemote, type RemoteServer } from "./config.js";
 import { detectGitHubRepository, snapshotWorkingTree } from "./git.js";
+import { sshCommandLine } from "./ssh.js";
 import { openBrowser } from "./open-browser.js";
+import { withConnections, type Connections, type RemoteOpener } from "./tunnel.js";
 
 /**
  * `dl` on a laptop: connect to a server, send it tasks, follow them, and check out the
  * pull requests. It talks to the server's API directly (the same one Autopilot's
  * `--on` uses, and shares its list of servers), so the laptop needs nothing else.
+ * Servers set up with `dl setup` are reached through an SSH tunnel that each command
+ * opens and closes (see tunnel.ts); `open` lets tests swap the tunnel out.
  */
 
 const execFileAsync = promisify(execFile);
@@ -76,10 +80,14 @@ export async function run(input: {
   repository?: string;
   detach?: boolean;
   signal?: AbortSignal;
+  open?: RemoteOpener;
 }, io = processIO): Promise<number> {
-  const c = palette(io.color === true);
   const remote = await resolveRemote(input.server);
-  const client = new RemoteClient(remote.url, remote.token);
+  return withConnections(input.open, async (connections) => runOn(await connections.client(remote), remote, input, io));
+}
+
+async function runOn(client: RemoteClient, remote: RemoteServer, input: Parameters<typeof run>[0], io: LaptopIO): Promise<number> {
+  const c = palette(io.color === true);
   const repository = input.repository ?? await detectGitHubRepository(input.cwd);
   const snapshot = await snapshotWorkingTree(input.cwd);
   const [workspaces, models] = await Promise.all([client.workspaces(), client.models()]);
@@ -109,21 +117,25 @@ export async function run(input: {
 }
 
 /** `dl runs`: tasks on every connected server, newest first. */
-export async function runs(input: { server?: string; json?: boolean }, io = processIO): Promise<void> {
-  const c = palette(io.color === true);
+export async function runs(input: { server?: string; json?: boolean; open?: RemoteOpener }, io = processIO): Promise<void> {
   const remotes = input.server ? [await resolveRemote(input.server)] : await loadRemotes();
   if (remotes.length === 0) throw new Error("This laptop isn't connected to a server yet. Run: dl connect https://your-server");
+  return withConnections(input.open, (connections) => listRuns(remotes, connections, input.json === true, io));
+}
+
+async function listRuns(remotes: RemoteServer[], connections: Connections, json: boolean, io: LaptopIO): Promise<void> {
+  const c = palette(io.color === true);
   const rows: Array<RemoteConversation & { server: string }> = [];
   for (const remote of remotes) {
     try {
-      const list = await new RemoteClient(remote.url, remote.token).listConversations();
+      const list = await (await connections.client(remote)).listConversations();
       rows.push(...list.filter((entry) => entry.kind === "code").map((entry) => ({ ...entry, server: remote.name })));
     } catch (error) {
       io.err(`  ${c.red("✗")} ${remote.name}: ${describeError(error)}\n`);
     }
   }
   rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  if (input.json) {
+  if (json) {
     io.out(`${JSON.stringify(rows, null, 2)}\n`);
     return;
   }
@@ -142,24 +154,29 @@ export async function runs(input: { server?: string; json?: boolean }, io = proc
 }
 
 /** `dl watch <id>`: replay and follow a task's output. */
-export async function watch(input: { id: string; server?: string; signal?: AbortSignal }, io = processIO): Promise<number> {
-  const { remote, run: found } = await findRun(input.id, input.server);
-  const client = new RemoteClient(remote.url, remote.token);
-  const finished = TERMINAL_STATUSES.has(found.status) && !found.activeRunId;
-  return follow(client, remote, found.conversationId, 0, input.signal, io, finished ? found.lastEventId : undefined);
+export async function watch(input: { id: string; server?: string; signal?: AbortSignal; open?: RemoteOpener }, io = processIO): Promise<number> {
+  return withConnections(input.open, async (connections) => {
+    const { remote, run: found } = await findRun(input.id, input.server, connections);
+    const client = await connections.client(remote);
+    const finished = TERMINAL_STATUSES.has(found.status) && !found.activeRunId;
+    return follow(client, remote, found.conversationId, 0, input.signal, io, finished ? found.lastEventId : undefined);
+  });
 }
 
-export async function cancel(input: { id: string; server?: string }, io = processIO): Promise<void> {
+export async function cancel(input: { id: string; server?: string; open?: RemoteOpener }, io = processIO): Promise<void> {
   const c = palette(io.color === true);
-  const { remote, run: found } = await findRun(input.id, input.server);
-  await new RemoteClient(remote.url, remote.token).cancel(found.conversationId);
-  io.out(`  ${c.green("✓")} Stopped ${found.conversationId.slice(0, 8)}\n`);
+  await withConnections(input.open, async (connections) => {
+    const { remote, run: found } = await findRun(input.id, input.server, connections);
+    await (await connections.client(remote)).cancel(found.conversationId);
+    io.out(`  ${c.green("✓")} Stopped ${found.conversationId.slice(0, 8)}\n`);
+  });
 }
 
 /** `dl pull <id>`: check out a task's branch here. */
-export async function pull(input: { id: string; server?: string; cwd: string }, io = processIO): Promise<void> {
+export async function pull(input: { id: string; server?: string; cwd: string; open?: RemoteOpener }, io = processIO): Promise<void> {
   const c = palette(io.color === true);
-  const { run: found } = await findRun(input.id, input.server);
+  // The server is only asked for the branch name; the code itself comes from GitHub.
+  const { run: found } = await withConnections(input.open, (connections) => findRun(input.id, input.server, connections));
   const branch = found.branch;
   if (!branch) throw new Error("That task has no branch");
   if (found.activeRunId) io.err(`  ${c.yellow("!")} It's still running; you'll get what it has pushed so far.\n`);
@@ -184,39 +201,43 @@ export async function servers(args: string[], io = processIO): Promise<number> {
   const c = palette(io.color === true);
   if (args[0] === "remove") {
     const name = args[1] ?? "";
-    if (!(await removeRemote(name))) {
+    const removed = (await loadRemotes()).find((remote) => remote.name === name);
+    if (!removed || !(await removeRemote(name))) {
       io.err(`  ${c.red("✗")} Not connected to "${name}".\n`);
       return 1;
     }
-    io.out(`  ${c.green("✓")} Forgot ${name}. To disconnect it on the server too: sudo dl laptops remove "${clientName()}"\n`);
+    const onServer = `sudo dl laptops remove "${clientName()}"`;
+    io.out(`  ${c.green("✓")} Forgot ${name}. To disconnect it on the server too: ${removed.ssh ? `${sshCommandLine(removed.ssh)} '${onServer}'` : onServer}\n`);
     return 0;
   }
   const remotes = await loadRemotes();
   if (remotes.length === 0) {
-    io.out(`\n  Not connected to a server yet.  ${c.bold("dl connect https://your-server")}\n\n`);
+    io.out(`\n  Not connected to a server yet.  ${c.bold("dl setup")}  ${c.dim("or, for a server someone else set up:")} ${c.bold("dl connect https://your-server")}\n\n`);
     return 0;
   }
   io.out("\n");
-  for (const remote of remotes) io.out(`  ${c.green("●")} ${remote.name.padEnd(16)} ${remote.url}  ${c.dim(`until ${remote.expiresAt.slice(0, 10)}`)}\n`);
+  for (const remote of remotes) io.out(`  ${c.green("●")} ${remote.name.padEnd(16)} ${where(remote)}  ${c.dim(`until ${remote.expiresAt.slice(0, 10)}`)}\n`);
   io.out("\n");
   return 0;
 }
 
 /** `dl` on a laptop: what this is, which servers it's connected to, what to type next. */
-export async function laptopHome(io = processIO): Promise<boolean> {
+export async function laptopHome(io = processIO, open?: RemoteOpener): Promise<boolean> {
   const c = palette(io.color === true);
   const remotes = await loadRemotes();
   if (remotes.length === 0) return false;
   let running = 0;
   let total = 0;
-  for (const remote of remotes) {
-    const list = await new RemoteClient(remote.url, remote.token).listConversations().catch(() => undefined);
-    running += list?.filter((entry) => entry.activeRunId !== null).length ?? 0;
-    total += list?.length ?? 0;
-  }
+  await withConnections(open, async (connections) => {
+    for (const remote of remotes) {
+      const list = await connections.client(remote).then((client) => client.listConversations()).catch(() => undefined);
+      running += list?.filter((entry) => entry.activeRunId !== null).length ?? 0;
+      total += list?.length ?? 0;
+    }
+  });
   io.out(`\n  ${c.bold("Directionally Local")}  ${c.dim("on this laptop")}\n\n`);
   io.out("  Background coding agents on your own server: send a task, get a pull request back.\n\n");
-  io.out(`  ${c.dim("Servers".padEnd(11))}${remotes.map((remote) => `${remote.name} ${c.dim(remote.url)}`).join(", ")}   ${c.dim("dl servers")}\n`);
+  io.out(`  ${c.dim("Servers".padEnd(11))}${remotes.map((remote) => `${remote.name} ${c.dim(where(remote))}`).join(", ")}   ${c.dim("dl servers")}\n`);
   io.out(`  ${c.dim("Tasks".padEnd(11))}${running} running · ${total} in all   ${c.dim("dl runs")}\n\n`);
   io.out(`  ${c.dim("Send a task, from inside a GitHub repository:")}\n     ${c.bold('dl run "fix the flaky checkout test"')}\n\n`);
   return true;
@@ -307,16 +328,21 @@ class EventRenderer {
   }
 }
 
-async function findRun(id: string, server?: string): Promise<{ remote: RemoteServer; run: RemoteConversation }> {
+async function findRun(id: string, server: string | undefined, connections: Connections): Promise<{ remote: RemoteServer; run: RemoteConversation }> {
   const needle = id.trim().toLowerCase();
   if (!/^[0-9a-f-]{4,36}$/.test(needle)) throw new Error("Task IDs are the short hex IDs dl runs shows");
   const remotes = server ? [await resolveRemote(server)] : await loadRemotes();
   const matches: Array<{ remote: RemoteServer; run: RemoteConversation }> = [];
+  const unreachable: string[] = [];
   for (const remote of remotes) {
-    const list = await new RemoteClient(remote.url, remote.token).listConversations(200).catch(() => []);
+    const list = await connections.client(remote).then((client) => client.listConversations(200)).catch((error: unknown) => {
+      unreachable.push(`${remote.name}: ${describeError(error)}`);
+      return [];
+    });
     for (const entry of list) if (entry.conversationId.startsWith(needle)) matches.push({ remote, run: entry });
   }
-  if (matches.length === 0) throw new Error(`No task ${id} on ${server ?? "any connected server"}`);
+  // Say why when a server couldn't be asked (e.g. its SSH tunnel failed), rather than "no task".
+  if (matches.length === 0) throw new Error(`No task ${id} on ${server ?? "any connected server"}${unreachable.length ? `\n${unreachable.join("\n")}` : ""}`);
   if (matches.length > 1) throw new Error(`${id} matches several tasks; use more characters`);
   return matches[0]!;
 }
@@ -330,6 +356,11 @@ function pickModel(models: string[], requested: string | undefined, preferred: s
   const first = models[0];
   if (!first) throw new Error("The server offers no models");
   return first;
+}
+
+/** Where a server is, as people know it: its URL, or the SSH destination its tunnel goes to. */
+function where(remote: RemoteServer): string {
+  return remote.ssh ? `ssh ${remote.ssh.target}${remote.ssh.port ? `:${remote.ssh.port}` : ""}` : remote.url;
 }
 
 function clientName(): string {
