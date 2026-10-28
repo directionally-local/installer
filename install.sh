@@ -14,15 +14,17 @@ set -eu
 say() { printf '%s\n' "$*"; }
 fail() { printf '\n  directionallylocal: %s\n' "$*" >&2; exit 1; }
 
-# The same look as `dl up`: a step shows "·" while it runs and becomes "✓" when done.
-# Without a terminal (or with NO_COLOR) it's plain lines.
+# The same look as `dl up`: a running step has a spinner and a timer, and becomes "✓"
+# when done. Without a terminal (or with NO_COLOR) it's plain lines.
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
   FANCY=1
 else
   FANCY=""
 fi
+STEP=""
 step() {
-  if [ -n "$FANCY" ]; then printf '  \033[36m·\033[0m %s' "$1"; else say ".. $1"; fi
+  STEP=$1
+  if [ -n "$FANCY" ]; then printf '  \033[36m⠋\033[0m %s' "$1"; else say ".. $1"; fi
 }
 step_done() {
   if [ -n "$FANCY" ]; then printf '\r\033[2K  \033[32m✓\033[0m %-33s\033[2m%s\033[0m\n' "$1" "${2:-}"; else say "ok $1${2:+: $2}"; fi
@@ -40,11 +42,43 @@ as_root() {
   fi
 }
 
+# The spinner frame for tick $1 (POSIX sh has no arrays, and multibyte cut isn't portable).
+frame() {
+  case $(($1 % 10)) in
+    0) printf '⠋' ;; 1) printf '⠙' ;; 2) printf '⠹' ;; 3) printf '⠸' ;; 4) printf '⠼' ;;
+    5) printf '⠴' ;; 6) printf '⠦' ;; 7) printf '⠧' ;; 8) printf '⠇' ;; *) printf '⠏' ;;
+  esac
+}
+
+# On failure, show only this step's own output, not the earlier steps' in the same log.
+show_step_log() {
+  tail -n "+$(($1 + 1))" "$LOG" | tail -n 15 | while IFS= read -r line; do
+    if [ -n "$FANCY" ]; then printf '    \033[2m%s\033[0m\n' "$line" >&2; else printf '    %s\n' "$line" >&2; fi
+  done
+}
+
 quietly() {
   what=$1
   shift
-  if ! "$@" >>"$LOG" 2>&1; then
-    tail -n 20 "$LOG" >&2
+  from=$(wc -l <"$LOG")
+  if [ -z "$FANCY" ]; then
+    "$@" >>"$LOG" 2>&1 || { show_step_log "$from"; fail "$what failed"; }
+    return 0
+  fi
+  # Run in the background and animate the current step until it finishes.
+  "$@" >>"$LOG" 2>&1 &
+  pid=$!
+  started=$(date +%s)
+  tick=0
+  while kill -0 "$pid" 2>/dev/null; do
+    elapsed=$(($(date +%s) - started))
+    printf '\r\033[2K  \033[36m%s\033[0m %-33s\033[2m%d:%02d\033[0m' "$(frame "$tick")" "$STEP" $((elapsed / 60)) $((elapsed % 60))
+    tick=$((tick + 1))
+    sleep 0.1
+  done
+  if ! wait "$pid"; then
+    printf '\r\033[2K  \033[31m✗\033[0m %s\n\n' "$STEP"
+    show_step_log "$from"
     fail "$what failed"
   fi
 }
