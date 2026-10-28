@@ -6,6 +6,8 @@ import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, se
 import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, watch } from "./laptop/commands.js";
 import { loadRemotes } from "./laptop/config.js";
 import { setup } from "./laptop/setup.js";
+import { localCommand } from "./local/cli.js";
+import { setUpOnThisComputer } from "./local/setup.js";
 import { TtyPrompter } from "./prompt.js";
 import { readState } from "./state.js";
 import { DryRunSystem, RealSystem, type System } from "./system.js";
@@ -28,6 +30,8 @@ On your laptop:
   dl pull ID              check out a task's branch here
   dl servers              connected servers (dl servers remove NAME)
   run options: --server NAME, -m MODEL, --repo OWNER/NAME, --detach
+  dl local status         agents running on this computer: running?, where, how many fit
+  dl local uninstall [--purge]   stop and remove them (--purge also deletes keys and data)
 
 On the server:
   dl                      what this is, whether it's healthy, laptops, and runs
@@ -197,7 +201,7 @@ export async function main(
           // A laptop connected to servers gets its own home; otherwise, what this is and how to start.
           if (!command && await laptopHome(laptopIO)) return 0;
           // A laptop with nothing set up yet: the wizard (it needs someone to answer it).
-          if (!command && terminal && !isRoot() && (await loadRemotes()).length === 0) return await setup({ io: laptopIO, terminal });
+          if (!command && terminal && !isRoot() && (await loadRemotes()).length === 0) return await setup({ io: laptopIO, terminal, localSetup: (input) => setUpOnThisComputer(input) });
           io.out(NOT_A_SERVER(colors));
           return command ? 1 : 0;
         }
@@ -214,8 +218,7 @@ export async function main(
         return 0;
       }
       case "setup":
-        // TODO(integration): pass localSetup: setUpOnThisComputer from ./local/setup.js.
-        return await setup({ io: laptopIO, terminal });
+        return await setup({ io: laptopIO, terminal, localSetup: (input) => setUpOnThisComputer(input) });
       case "connect": {
         const url = parsed.positionals[1];
         if (!url) {
@@ -282,6 +285,8 @@ export async function main(
         if (command === "runs") return await serverRunsCommand(system, io.out, colors);
         return await logsCommand(system, [...rest, ...(values.follow ? ["-f"] : [])]);
       }
+      case "local":
+        return await localCommand(parsed.positionals.slice(1), { purge: Boolean(values.purge) }, io, colors, ui);
       case "uninstall":
         await uninstall(system, { purge: Boolean(values.purge) });
         return 0;
