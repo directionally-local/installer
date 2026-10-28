@@ -1,4 +1,4 @@
-import { AUTOPILOT_PORT, PATHS, SERVICES, USERS } from "./layout.js";
+import { AUTOPILOT_PORT, NODE_AUTO_UPDATES, PATHS, SERVICES, USERS } from "./layout.js";
 import { readState } from "./state.js";
 import type { System } from "./system.js";
 
@@ -34,6 +34,8 @@ export async function uninstall(system: System, options: UninstallOptions = {}):
   const containers = (await system.probe("docker", ["ps", "-aq", "--filter", "label=sbx.managed=true"])).stdout.split("\n").filter(Boolean);
   if (containers.length > 0) await system.run("docker", ["rm", "-f", ...containers], { allowFailure: true });
   await system.remove(PATHS.root);
+  // Node.js stays installed, and so do Ubuntu's own automatic updates; only our addition goes.
+  await system.remove(NODE_AUTO_UPDATES);
 
   if (!options.purge) {
     say(`Removed the services and software. Kept configuration and data (${PATHS.stateDir}, ${PATHS.autopilotEtc}, ${PATHS.hotcellEtc}, /var/lib/{autopilot,hotcell}); --purge deletes them.`);

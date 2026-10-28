@@ -45,7 +45,8 @@ For unattended installs, set the answers as environment variables: `DL_TAILSCALE
 
 ## What it sets up
 
-- **Docker,** if it's missing, plus a rule that keeps sandboxes away from the cloud metadata endpoint.
+- **Node.js 24 LTS,** if Node is missing or lacks the fix for CVE-2026-111497 (22.23.4+, 24.22.1+ and 26.12.1+ are accepted). Node security releases from NodeSource are added to Ubuntu's automatic updates, which otherwise skip them. Delete `/etc/apt/apt.conf.d/52directionally-local-nodejs` to opt out.
+- **Docker,** if it's missing, plus a rule that keeps sandboxes away from the cloud metadata endpoint. Docker isn't updated automatically, because its repo ships major upgrades and restarting the Docker daemon can stop running sandboxes.
 - **Hotcell and Autopilot from npm,** under `/opt/directionally-local/releases/<versions>`, with `current` pointing at the active release.
 - **Two systemd services, each under its own unprivileged account:** `hotcell.service` (sandboxes and the credential gateway, on loopback) and `autopilot.service` (the API that laptops pair with, on `127.0.0.1:4096`). Only Tailscale Serve exposes it.
 - **A sandbox image** with Node, git, Python, and the Autopilot runtime baked in.

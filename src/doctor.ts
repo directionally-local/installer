@@ -1,6 +1,6 @@
 import { detectHost, MIN_DISK_GB } from "./detect.js";
 import { nodeAdvisory } from "./node-advisory.js";
-import { AUTOPILOT_PORT, HOTCELL_PORT, PATHS, SERVICES, parseEnvFile } from "./layout.js";
+import { AUTOPILOT_PORT, AUTO_UPGRADES, HOTCELL_PORT, NODE_AUTO_UPDATES, PATHS, SERVICES, parseEnvFile } from "./layout.js";
 import { readState } from "./state.js";
 import type { System } from "./system.js";
 
@@ -28,6 +28,14 @@ export async function doctor(system: System): Promise<Check[]> {
     ok: node.ok && node.message === undefined,
     detail: node.message ?? `${facts.nodeVersion} (patched)`,
     fix: "re-run install.sh to upgrade Node.js (apt-get install --only-upgrade nodejs for a patch)",
+  });
+  const periodic = /APT::Periodic::Unattended-Upgrade\s+"1"/.test((await system.readFile(AUTO_UPGRADES)) ?? "");
+  const nodeUpdates = await system.exists(NODE_AUTO_UPDATES);
+  add({
+    name: "security updates",
+    ok: periodic && nodeUpdates,
+    detail: periodic && nodeUpdates ? "daily, including Node.js" : !periodic ? "unattended-upgrades is off" : "Node.js isn't included",
+    fix: "sudo dl up",
   });
   add({ name: "disk", ok: facts.diskFreeGb >= MIN_DISK_GB, detail: `${facts.diskFreeGb} GB free under /var`, fix: "free space: docker system prune, or grow the disk" });
   add(facts.docker

@@ -3,8 +3,8 @@ import { hostname } from "node:os";
 import { agentCapacity, detectHost, preflightProblems, type HostFacts } from "./detect.js";
 import {
   AUTOPILOT_PORT, CELL_MEMORY_MB, GITHUB_PROXY_PORT, HOTCELL_EGRESS_PORT, HOTCELL_PORT, PATHS, SERVICES, USERS,
-  asterConfig, autopilotBin, autopilotEnv, autopilotUnit, cellDockerfile, cellImage, githubEnv, hotcellBin,
-  hotcellEnv, hotcellUnit, metadataBlockUnit, parseEnvFile,
+  AUTO_UPGRADES, NODE_AUTO_UPDATES, asterConfig, autoUpgrades, autopilotBin, autopilotEnv, autopilotUnit,
+  cellDockerfile, cellImage, githubEnv, hotcellBin, hotcellEnv, hotcellUnit, metadataBlockUnit, nodeAutoUpdates, parseEnvFile,
 } from "./layout.js";
 import type { Prompter } from "./prompt.js";
 import { readState, writeState, type AccessMode, type InstallState } from "./state.js";
@@ -70,6 +70,9 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
   }
   const bridgeIp = facts.dockerBridgeIp ?? (system.dryRun ? DRY_RUN_BRIDGE_IP : undefined);
   if (!bridgeIp) throw new Error("Docker is running but its docker0 bridge has no IPv4 address; sandboxes couldn't reach the gateway.");
+
+  say("== Automatic security updates");
+  await ensureAutomaticUpdates(system);
 
   say("== Service accounts");
   await ensureUser(system, USERS.hotcell, PATHS.hotcellHome, ["docker"]);
@@ -256,6 +259,25 @@ export async function validateGitHubToken(token: string, fetchImpl: typeof fetch
     return undefined;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Ubuntu's unattended-upgrades only patches Ubuntu's own packages, so Node.js from
+ * NodeSource would never pick up a security release by itself. Docker's repo is left out
+ * on purpose: it ships major upgrades, and restarting dockerd can stop running sandboxes.
+ */
+async function ensureAutomaticUpdates(system: System): Promise<void> {
+  const installed = await system.probe("dpkg-query", ["-W", "-f=${Status}", "unattended-upgrades"]);
+  if (!installed.stdout.includes("install ok installed")) {
+    await system.run("apt-get", ["install", "-y", "-qq", "unattended-upgrades"], { env: { DEBIAN_FRONTEND: "noninteractive" } });
+  }
+  // Keep an operator's own schedule; only turn the daily run on where it's missing.
+  if (!(await system.readFile(AUTO_UPGRADES))) await system.writeFile(AUTO_UPGRADES, autoUpgrades());
+  if ((await system.probe("apt-cache", ["policy", "nodejs"])).stdout.includes("deb.nodesource.com")) {
+    await system.writeFile(NODE_AUTO_UPDATES, nodeAutoUpdates());
+  } else {
+    system.log("  Node.js isn't from NodeSource here; keep it patched yourself (22.23.4+, 24.22.1+ or 26.12.1+).");
   }
 }
 

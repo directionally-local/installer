@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://directionallylocal.run | sh
 #
-# Installs Node.js 22 if needed and the directionally-local CLI (also `dl`), then runs
+# Installs Node.js 24 if needed and the directionally-local CLI (also `dl`), then runs
 # `dl up`, which asks how to reach this server and for the model
 # key, and sets up Hotcell + Autopilot as services. Safe to run again.
 #
@@ -70,10 +70,10 @@ main() {
   fi
 
   # Node must have the fix for CVE-2026-111497 (Brotli RCE via fetch): 22.23.4+, 24.22.1+ or
-  # 26.12.1+, the same rule as Hotcell's engines. An older or unsupported Node is upgraded,
-  # staying on its LTS line when it's one of these.
+  # 26.12.1+, the same rule as Hotcell's engines. A missing or unsupported Node gets 24 LTS
+  # (security fixes until April 2028); an unpatched 22, 24 or 26 is upgraded on its own line.
   if ! node_is_patched; then
-    line=22
+    line=24
     case "$(node_major)" in 24|26) line=$(node_major) ;; esac
     say "Installing Node.js ${line} (latest patch)..."
     quietly "adding the Node.js ${line} repository" as_root sh -c "curl -fsSL https://deb.nodesource.com/setup_${line}.x | bash -"
