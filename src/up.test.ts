@@ -22,7 +22,7 @@ const fetchOk = (async (url: string | URL | Request) =>
 
 const noSleep = async () => {};
 
-describe("directionally-local up", () => {
+describe("directionallylocal up", () => {
   it("installs everything on a fresh Ubuntu server and keeps secrets out of argv and logs", async () => {
     const system = new FakeSystem();
     const prompter = answers();
@@ -40,10 +40,10 @@ describe("directionally-local up", () => {
     // Docker, accounts, software, image, services, access.
     assert.ok(system.ran.some((command) => command.includes("get.docker.com")));
     assert.ok(system.users.has("hotcell") && system.users.has("autopilot"));
-    assert.ok(system.ran.includes("npm install --prefix /opt/directionally-local/releases/autopilot-2.2.0_hotcell-0.1.26 --no-audit --no-fund --omit=dev autopilot-ai@2.2.0 hotcell@0.1.26"));
-    assert.ok(system.images.has("directionally-local-cell:2.2.0"));
+    assert.ok(system.ran.includes("npm install --prefix /opt/directionallylocal/releases/autopilot-2.2.0_hotcell-0.1.26 --no-audit --no-fund --omit=dev autopilot-ai@2.2.0 hotcell@0.1.26"));
+    assert.ok(system.images.has("directionallylocal-cell:2.2.0"));
     assert.ok(system.ran.some((command) => command.startsWith("docker build --pull ")), "fresh base layers, never a stale cached Node");
-    for (const unit of ["directionally-local-metadata-block.service", "hotcell.service", "autopilot.service"]) assert.ok(system.enabled.has(unit), unit);
+    for (const unit of ["directionallylocal-metadata-block.service", "hotcell.service", "autopilot.service"]) assert.ok(system.enabled.has(unit), unit);
     assert.ok(system.ran.includes("tailscale serve --bg --https=443 http://127.0.0.1:4096"));
     // The auth key is used before the long steps, so a later failure never re-asks for it.
     const joined = system.ran.findIndex((command) => command.startsWith("tailscale up"));
@@ -56,8 +56,8 @@ describe("directionally-local up", () => {
       assert.ok(!system.ran.some((command) => command.includes(secret)), "no secret in any command line");
       assert.ok(!system.logs.some((line) => line.includes(secret)), "no secret in the output");
     }
-    assert.ok(system.ran.some((command) => command.startsWith("tailscale up --auth-key=file:/etc/directionally-local/tailscale-auth-key")));
-    assert.equal(system.files.has("/etc/directionally-local/tailscale-auth-key"), false, "the auth key file is removed after use");
+    assert.ok(system.ran.some((command) => command.startsWith("tailscale up --auth-key=file:/etc/directionallylocal/tailscale-auth-key")));
+    assert.equal(system.files.has("/etc/directionallylocal/tailscale-auth-key"), false, "the auth key file is removed after use");
     assert.deepEqual(system.files.get(PATHS.githubEnv)?.mode, 0o640);
     assert.equal(parseEnvFile(system.files.get(PATHS.githubEnv)?.content).GITHUB_TOKEN, GITHUB_TOKEN);
     const autopilotEnv = parseEnvFile(system.files.get(PATHS.autopilotEnv)?.content);
@@ -117,8 +117,8 @@ describe("directionally-local up", () => {
       sleep: noSleep,
     });
     assert.ok(!system.ran.some((command) => command.includes("get.docker.com")));
-    assert.ok(system.ran.includes("ufw allow in on docker0 to 172.17.0.1 port 4752 proto tcp comment directionally-local sandboxes"));
-    assert.ok(system.ran.includes("ufw allow in on docker0 to 172.17.0.1 port 4760 proto tcp comment directionally-local sandboxes"));
+    assert.ok(system.ran.includes("ufw allow in on docker0 to 172.17.0.1 port 4752 proto tcp comment directionallylocal sandboxes"));
+    assert.ok(system.ran.includes("ufw allow in on docker0 to 172.17.0.1 port 4760 proto tcp comment directionallylocal sandboxes"));
   });
 
   it("re-asks a rejected key and refuses an unsupported machine before changing anything", async () => {

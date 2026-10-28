@@ -299,7 +299,7 @@ export async function validateGitHubToken(token: string, fetchImpl: typeof fetch
   if (!/^(github_pat_|ghp_|gho_)[A-Za-z0-9_]{20,}$/.test(token)) return { problem: "That doesn't look like a GitHub token (github_pat_… or ghp_…)." };
   if (!fetchImpl) return {};
   try {
-    const response = await fetchImpl("https://api.github.com/user", { headers: { Authorization: `Bearer ${token}`, "User-Agent": "directionally-local" } });
+    const response = await fetchImpl("https://api.github.com/user", { headers: { Authorization: `Bearer ${token}`, "User-Agent": "directionallylocal" } });
     if (response.status === 401) return { problem: "GitHub rejected that token." };
     if (response.ok) {
       const user = await response.json() as { login?: string };
@@ -389,7 +389,7 @@ async function ensureWorkspace(system: System): Promise<void> {
 /** Builds the sandbox image unless it exists; returns whether it already did. */
 async function ensureCellImage(system: System, image: string, autopilotVersion: string): Promise<boolean> {
   if ((await system.probe("docker", ["image", "inspect", image])).code === 0) return true;
-  const dir = system.dryRun ? "/tmp/directionally-local-image" : (await system.run("mktemp", ["-d"])).stdout.trim();
+  const dir = system.dryRun ? "/tmp/directionallylocal-image" : (await system.run("mktemp", ["-d"])).stdout.trim();
   try {
     await system.run("npm", ["pack", `autopilot-ai@${autopilotVersion}`, "--pack-destination", dir, "--silent"]);
     await system.run("sh", ["-c", `mv ${dir}/autopilot-ai-*.tgz ${dir}/autopilot.tgz`]);
@@ -406,7 +406,7 @@ async function allowBridgePorts(system: System, bridgeIp: string): Promise<void>
   const status = await system.probe("ufw", ["status"]);
   if (status.code !== 0 || !/Status: active/.test(status.stdout)) return;
   for (const port of [HOTCELL_EGRESS_PORT, GITHUB_PROXY_PORT]) {
-    await system.run("ufw", ["allow", "in", "on", "docker0", "to", bridgeIp, "port", String(port), "proto", "tcp", "comment", "directionally-local sandboxes"]);
+    await system.run("ufw", ["allow", "in", "on", "docker0", "to", bridgeIp, "port", String(port), "proto", "tcp", "comment", "directionallylocal sandboxes"]);
   }
 }
 
@@ -478,5 +478,5 @@ async function waitUntil(system: System, sleep: (ms: number) => Promise<void>, w
 }
 
 function machineName(): string {
-  return hostname().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 63) || "directionally-local";
+  return hostname().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 63) || "directionallylocal";
 }

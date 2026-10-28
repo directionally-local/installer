@@ -46,7 +46,7 @@ describe("uninstall", () => {
     system.containers.push("abc123");
     await uninstall(system);
     assert.deepEqual([...system.enabled], ["docker.service"], "none of ours left enabled; Docker stays");
-    for (const unit of ["hotcell.service", "autopilot.service", "directionally-local-metadata-block.service"]) {
+    for (const unit of ["hotcell.service", "autopilot.service", "directionallylocal-metadata-block.service"]) {
       assert.equal(system.files.has(`${PATHS.units}/${unit}`), false, unit);
     }
     assert.equal(await system.exists(PATHS.root), false);
@@ -61,7 +61,7 @@ describe("uninstall", () => {
     await uninstall(system, { purge: true });
     for (const path of [PATHS.state, PATHS.githubEnv, PATHS.hotcellEnv, PATHS.asterConfig]) assert.equal(system.files.has(path), false, path);
     assert.ok(system.ran.includes("userdel autopilot") && system.ran.includes("userdel hotcell"));
-    assert.ok(system.ran.includes("docker image rm directionally-local-cell:2.2.0"));
+    assert.ok(system.ran.includes("docker image rm directionallylocal-cell:2.2.0"));
   });
 });
 

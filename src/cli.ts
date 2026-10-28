@@ -10,7 +10,7 @@ import { PlainUi, TerminalUi, palette, type Ui } from "./ui.js";
 import { up } from "./up.js";
 
 const HELP = `Directionally Local: run background coding agents on this server.
-(dl is short for directionally-local; both work.)
+(dl is short for directionallylocal; both work.)
 
 Usage (as root):
   dl up [--dry-run]       install or repair Hotcell + Autopilot as services
@@ -125,7 +125,7 @@ function packageVersion(): string {
 }
 
 /** Where `dl up` keeps other tools' output; shown only when something fails. */
-export const UP_LOG = "/var/log/directionally-local/up.log";
+export const UP_LOG = "/var/log/directionallylocal/up.log";
 
 async function logTail(path: string, c: ReturnType<typeof palette>): Promise<string> {
   const text = await readFile(path, "utf8").catch(() => "");

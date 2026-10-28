@@ -1,11 +1,11 @@
 /** Where everything lives on the server, and the files the installer writes there. */
 
 export const PATHS = {
-  root: "/opt/directionally-local",
-  releases: "/opt/directionally-local/releases",
-  current: "/opt/directionally-local/current",
-  state: "/etc/directionally-local/state.json",
-  stateDir: "/etc/directionally-local",
+  root: "/opt/directionallylocal",
+  releases: "/opt/directionallylocal/releases",
+  current: "/opt/directionallylocal/current",
+  state: "/etc/directionallylocal/state.json",
+  stateDir: "/etc/directionallylocal",
   hotcellEnv: "/etc/hotcell/hotcell.env",
   hotcellEtc: "/etc/hotcell",
   hotcellHome: "/var/lib/hotcell",
@@ -19,13 +19,13 @@ export const PATHS = {
 } as const;
 
 /** Lets Ubuntu's unattended-upgrades install Node.js fixes from NodeSource, like its own packages. */
-export const NODE_AUTO_UPDATES = "/etc/apt/apt.conf.d/52directionally-local-nodejs";
+export const NODE_AUTO_UPDATES = "/etc/apt/apt.conf.d/52directionallylocal-nodejs";
 export const AUTO_UPGRADES = "/etc/apt/apt.conf.d/20auto-upgrades";
 
 export const SERVICES = {
   hotcell: "hotcell.service",
   autopilot: "autopilot.service",
-  metadataBlock: "directionally-local-metadata-block.service",
+  metadataBlock: "directionallylocal-metadata-block.service",
 } as const;
 
 export const USERS = { hotcell: "hotcell", autopilot: "autopilot" } as const;
@@ -45,7 +45,7 @@ export function autopilotBin(): string {
 }
 
 export function cellImage(autopilotVersion: string): string {
-  return `directionally-local-cell:${autopilotVersion}`;
+  return `directionallylocal-cell:${autopilotVersion}`;
 }
 
 /** Renders KEY=value lines; values never contain newlines, so they need no quoting for systemd. */
@@ -53,7 +53,7 @@ export function envFile(header: string, values: Record<string, string>): string 
   for (const [key, value] of Object.entries(values)) {
     if (!/^[A-Z][A-Z0-9_]*$/.test(key) || /[\n\r]/.test(value)) throw new Error(`invalid env entry ${key}`);
   }
-  return `# ${header}\n# Written by directionally-local; edit with care, \`directionally-local up\` keeps your values.\n${
+  return `# ${header}\n# Written by directionallylocal; edit with care, \`directionallylocal up\` keeps your values.\n${
     Object.entries(values).map(([key, value]) => `${key}=${value}`).join("\n")
   }\n`;
 }
@@ -177,7 +177,7 @@ WantedBy=multi-user.target
 }
 
 export function nodeAutoUpdates(): string {
-  return `// Written by directionally-local: install Node.js security fixes from NodeSource
+  return `// Written by directionallylocal: install Node.js security fixes from NodeSource
 // automatically, the way Ubuntu's own packages are. Delete this file to opt out.
 // Matched by site: NodeSource's Release file has no meaningful Origin or Label.
 Unattended-Upgrade::Origins-Pattern {

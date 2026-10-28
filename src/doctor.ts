@@ -13,7 +13,7 @@ export interface Check {
   fix?: string;
 }
 
-/** `directionally-local doctor`: every moving part, with a fix for each failure. */
+/** `directionallylocal doctor`: every moving part, with a fix for each failure. */
 export async function doctor(system: System): Promise<Check[]> {
   const checks: Check[] = [];
   const add = (check: Check) => checks.push(check);

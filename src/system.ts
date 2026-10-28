@@ -69,7 +69,7 @@ export class RealSystem implements System {
     if (options.outputLog) {
       mkdirSync(dirname(options.outputLog), { recursive: true, mode: 0o700 });
       this.logFd = openSync(options.outputLog, "w", 0o600);
-      appendFileSync(this.logFd, `# directionally-local ${new Date().toISOString()}\n`);
+      appendFileSync(this.logFd, `# directionallylocal ${new Date().toISOString()}\n`);
     }
   }
 
