@@ -68,3 +68,46 @@ jobs:
           done
           echo "::error::$NAME@$VERSION wasn't installable after publishing."
           exit 1
+
+  # The install script at https://directionallylocal.run is part of the release: it's
+  # deployed only after that version is on npm, so the one-liner and
+  # `npm install directionallylocal@latest` always match. Needs two repository (or
+  # organization) secrets: CLOUDFLARE_API_TOKEN (the "Edit Cloudflare Workers" token
+  # template, limited to the directionallylocal.run zone) and CLOUDFLARE_ACCOUNT_ID.
+  deploy-site:
+    needs: [release-please, publish]
+    if: needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: cloudflare
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          check-latest: true
+
+      - run: npm ci
+      - run: npx tsx --test "site/**/*.test.ts"
+
+      - name: Deploy the Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy -c site/wrangler.toml
+
+      - name: Check the live script is this release's install.sh
+        run: |
+          for attempt in $(seq 1 12); do
+            if curl -fsSL https://directionallylocal.run | cmp -s - install.sh; then
+              echo "https://directionallylocal.run serves this release's install.sh."
+              exit 0
+            fi
+            echo "Not updated yet ($attempt/12)."
+            sleep 10
+          done
+          echo "::error::https://directionallylocal.run doesn't serve this release's install.sh."
+          exit 1
