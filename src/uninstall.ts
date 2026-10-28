@@ -1,4 +1,4 @@
-import { AUTOPILOT_PORT, NODE_AUTO_UPDATES, PATHS, SERVICES, USERS } from "./layout.js";
+import { AUTOPILOT_PORT, MOTD_SCRIPT, NODE_AUTO_UPDATES, PATHS, SERVICES, USERS } from "./layout.js";
 import { readState } from "./state.js";
 import type { System } from "./system.js";
 
@@ -36,6 +36,7 @@ export async function uninstall(system: System, options: UninstallOptions = {}):
   await system.remove(PATHS.root);
   // Node.js stays installed, and so do Ubuntu's own automatic updates; only our addition goes.
   await system.remove(NODE_AUTO_UPDATES);
+  await system.remove(MOTD_SCRIPT);
 
   if (!options.purge) {
     say(`Removed the services and software. Kept configuration and data (${PATHS.stateDir}, ${PATHS.autopilotEtc}, ${PATHS.hotcellEtc}, /var/lib/{autopilot,hotcell}); --purge deletes them.`);

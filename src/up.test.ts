@@ -33,8 +33,14 @@ describe("directionallylocal up", () => {
     assert.equal(result.url, "https://box.tail1234.ts.net");
     assert.match(result.ownerLink ?? "", /^https:\/\/box\.tail1234\.ts\.net\/api\/v1\/auth\/claim\?token=aster_claim_/);
     assert.equal(result.capacity, 6, "8 GB minus the host's share, 1 GB per sandbox");
-    assert.ok(system.logs.includes("Ready · fits ~6 agents at once (estimate)"));
-    assert.ok(system.logs.includes("  On your laptop (signed in to the same tailnet): autopilot remote add https://box.tail1234.ts.net"));
+    assert.ok(system.logs.includes("Ready"));
+    // It says what this is, then the next steps use dl, not Autopilot or Tailscale commands.
+    assert.ok(system.logs.some((line) => line.startsWith("This server now runs coding agents for you.") && line.includes("fits ~6 at once (estimate)")));
+    assert.ok(system.logs.includes("  On your laptop (signed in to the same tailnet), connect it: npm install -g directionallylocal ; dl connect https://box.tail1234.ts.net"));
+    assert.ok(system.logs.some((line) => line.includes('dl run "fix the flaky checkout test"')));
+    assert.ok(system.logs.includes("Forgot any of this? Type  dl  on this server."));
+    assert.ok(!system.logs.some((line) => /autopilot remote add|tailscale up/.test(line)));
+    assert.match(system.files.get("/etc/update-motd.d/60-directionallylocal")?.content ?? "", /dl status --brief/);
     assert.ok(system.logs.includes("ok Joining your tailnet: joined as box"));
 
     // Docker, accounts, software, image, services, access.

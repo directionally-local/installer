@@ -4,12 +4,13 @@ import { agentCapacity, detectHost, preflightProblems, type HostFacts } from "./
 import {
   AUTOPILOT_PORT, CELL_MEMORY_MB, GITHUB_PROXY_PORT, HOTCELL_EGRESS_PORT, HOTCELL_PORT, PATHS, SERVICES, USERS,
   AUTO_UPGRADES, NODE_AUTO_UPDATES, asterConfig, autoUpgrades, autopilotBin, autopilotEnv, autopilotUnit,
-  cellDockerfile, cellImage, githubEnv, hotcellBin, hotcellEnv, hotcellUnit, metadataBlockUnit, nodeAutoUpdates, parseEnvFile,
+  MOTD_SCRIPT, cellDockerfile, cellImage, githubEnv, hotcellBin, hotcellEnv, hotcellUnit, metadataBlockUnit, motdScript, nodeAutoUpdates, parseEnvFile,
 } from "./layout.js";
 import type { Prompter } from "./prompt.js";
 import { readState, writeState, type AccessMode, type InstallState } from "./state.js";
 import type { System } from "./system.js";
-import { PlainUi, type Ui } from "./ui.js";
+import { PlainUi, type SummaryItem, type Ui } from "./ui.js";
+import { ownerLink } from "./server-api.js";
 
 export interface UpOptions {
   prompter: Prompter;
@@ -188,15 +189,36 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
   };
   await writeState(system, state);
 
-  const ownerLink = await createOwnerLink(system, url);
+  const link = await ownerLink(system, url);
   const capacity = agentCapacity(facts, CELL_MEMORY_MB);
-  ui.ready(`Ready · fits ~${capacity} agent${capacity === 1 ? "" : "s"} at once (estimate)`, [
-    ...(ownerLink ? [{ label: "Open once in your browser, to approve laptops", value: ownerLink }] : []),
-    access === "tailscale"
-      ? { label: "On your laptop (signed in to the same tailnet)", value: `autopilot remote add ${url}` }
-      : { label: "On your laptop, after ssh -N -L 4096:127.0.0.1:4096 root@<this-server>", value: `autopilot remote add ${url}` },
-  ]);
-  return { url, ownerLink, capacity, state };
+  await installLoginStatus(system);
+  ui.ready("Ready", nextSteps({ url, ownerLink: link, access }), {
+    about: [
+      "This server now runs coding agents for you. Send it a task from your laptop:",
+      "it works in its own sandbox, opens a pull request, and keeps going while",
+      `your laptop is closed. It fits ~${capacity} at once (estimate).`,
+    ],
+    footer: "Forgot any of this? Type  dl  on this server.",
+  });
+  return { url, ownerLink: link, capacity, state };
+}
+
+/** What to do next, shown at the end of `dl up` and by `dl connect-laptop`. */
+export function nextSteps(input: { url: string; ownerLink: string | undefined; access: AccessMode }): SummaryItem[] {
+  const reach = input.access === "tailscale"
+    ? "On your laptop (signed in to the same tailnet)"
+    : `On your laptop, after: ssh -N -L ${AUTOPILOT_PORT}:127.0.0.1:${AUTOPILOT_PORT} root@<this-server>`;
+  return [
+    ...(input.ownerLink ? [{ label: "Open this once in your laptop's browser, so it can approve laptops", value: input.ownerLink }] : []),
+    { label: `${reach}, connect it`, value: `npm install -g directionallylocal\ndl connect ${input.url}` },
+    { label: "Send it a task, from inside a GitHub repository", value: `dl run "fix the flaky checkout test"\ndl runs                 see progress and pull requests` },
+  ];
+}
+
+/** A short status line when someone logs in, so a server visited weeks later explains itself. */
+async function installLoginStatus(system: System): Promise<void> {
+  if (!(await system.exists("/etc/update-motd.d"))) return;
+  await system.writeFile(MOTD_SCRIPT, motdScript(), { mode: 0o755 });
 }
 
 function accessMode(env: NodeJS.ProcessEnv, previous: InstallState | undefined): AccessMode {
@@ -457,15 +479,6 @@ async function serveOverTailscale(system: System): Promise<string> {
   const dnsName = (JSON.parse(status.stdout || "{}") as { Self?: { DNSName?: string } }).Self?.DNSName?.replace(/\.$/, "");
   if (!dnsName) throw new Error("Tailscale is up but reported no DNS name for this machine; is MagicDNS on?");
   return `https://${dnsName}`;
-}
-
-async function createOwnerLink(system: System, url: string): Promise<string | undefined> {
-  const result = await system.run("runuser", [
-    "-u", USERS.autopilot, "--", "env", `HOME=${PATHS.autopilotHome}`, `AUTOPILOT_ASTER_CONFIG=${PATHS.asterConfig}`,
-    `AUTOPILOT_ASTER_DB=${PATHS.autopilotHome}/aster.db`, "/usr/bin/node", autopilotBin(), "aster", "owner", "link", "--url", url,
-  ], { allowFailure: true, describe: "autopilot aster owner link (as autopilot)", secretOutput: true });
-  const link = result.stdout.trim().split("\n").at(-1);
-  return result.code === 0 && link?.startsWith("http") ? link : undefined;
 }
 
 async function waitUntil(system: System, sleep: (ms: number) => Promise<void>, what: string, ready: () => Promise<boolean>, unit = what.toLowerCase()): Promise<void> {

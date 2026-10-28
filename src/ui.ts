@@ -13,6 +13,13 @@ export interface SummaryItem {
   value: string;
 }
 
+export interface ReadyExtra {
+  /** A few lines saying what this is, under the headline. */
+  about?: string[];
+  /** A last line, e.g. how to see this again. */
+  footer?: string;
+}
+
 export interface Ui {
   readonly interactive: boolean;
   title(text: string): void;
@@ -29,7 +36,7 @@ export interface Ui {
   rejected(message: string): void;
   /** Styles a prompt: label, a dim hint, and an input marker. */
   prompt(label: string, hint?: string): string;
-  ready(headline: string, items: SummaryItem[]): void;
+  ready(headline: string, items: SummaryItem[], extra?: ReadyExtra): void;
   /** A problem worth reading after the checklist (not a failure). */
   warn(text: string): void;
   finish(): void;
@@ -127,13 +134,16 @@ export class TerminalUi implements Ui {
     this.write(`\x1b[2F\x1b[J  ${this.c.yellow("!")} ${message}\n`);
   }
 
-  ready(headline: string, items: SummaryItem[]): void {
+  ready(headline: string, items: SummaryItem[], extra: ReadyExtra = {}): void {
     this.stop();
     this.write(`\n  ${this.c.green("✓")} ${this.c.bold(headline)}\n`);
+    if (extra.about) this.write(`\n${extra.about.map((line) => `  ${line}`).join("\n")}\n`);
     items.forEach((item, index) => {
-      // Values are never truncated: they're meant to be copied.
-      this.write(`\n  ${this.c.cyan(String(index + 1))}  ${item.label}\n     ${item.value}\n`);
+      // Values are never truncated: they're meant to be copied. Each line is its own command.
+      const value = item.value.split("\n").map((line) => `     ${this.c.bold(line)}`).join("\n");
+      this.write(`\n  ${this.c.cyan(String(index + 1))}  ${item.label}\n${value}\n`);
     });
+    if (extra.footer) this.write(`\n  ${this.c.dim(extra.footer)}\n`);
     this.write("\n");
     this.flushWarnings();
   }
@@ -235,9 +245,11 @@ export class PlainUi implements Ui {
   prompt(label: string, hint?: string): string { return `${label}${hint ? ` (${hint})` : ""}: `; }
   answered(label: string, detail?: string): void { this.write(`ok ${label}${detail ? `: ${detail}` : ""}\n`); }
   rejected(message: string): void { this.write(`!! ${message}\n`); }
-  ready(headline: string, items: SummaryItem[]): void {
+  ready(headline: string, items: SummaryItem[], extra: ReadyExtra = {}): void {
     this.write(`\n${headline}\n`);
-    for (const item of items) this.write(`  ${item.label}: ${item.value}\n`);
+    if (extra.about) this.write(`${extra.about.join(" ")}\n`);
+    for (const item of items) this.write(`  ${item.label}: ${item.value.split("\n").join(" ; ")}\n`);
+    if (extra.footer) this.write(`${extra.footer}\n`);
   }
   warn(text: string): void { this.write(`!! ${text}\n`); }
   finish(): void {}
@@ -257,7 +269,9 @@ export class RecordingUi implements Ui {
   prompt(label: string): string { return label; }
   answered(label: string, detail?: string): void { this.events.push(`answered ${label}${detail ? ` | ${detail}` : ""}`); }
   rejected(message: string): void { this.events.push(`rejected ${message}`); }
-  ready(headline: string, items: SummaryItem[]): void { this.events.push(`ready ${headline}`, ...items.map((item) => `item ${item.label} | ${item.value}`)); }
+  ready(headline: string, items: SummaryItem[], extra: ReadyExtra = {}): void {
+    this.events.push(`ready ${headline}`, ...(extra.about ?? []).map((line) => `about ${line}`), ...items.map((item) => `item ${item.label} | ${item.value}`), ...(extra.footer ? [`footer ${extra.footer}`] : []));
+  }
   warn(text: string): void { this.events.push(`warn ${text}`); }
   finish(): void {}
 }

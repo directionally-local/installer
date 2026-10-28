@@ -186,6 +186,16 @@ Unattended-Upgrade::Origins-Pattern {
 `;
 }
 
+/** Prints `dl`'s one-line status at login (Ubuntu's update-motd); silent if dl is gone. */
+export const MOTD_SCRIPT = "/etc/update-motd.d/60-directionallylocal";
+
+export function motdScript(): string {
+  return `#!/bin/sh
+# Written by directionallylocal: a one-line status at login. Delete this file to opt out.
+command -v dl >/dev/null 2>&1 && dl status --brief 2>/dev/null || true
+`;
+}
+
 /** Ubuntu's default: refresh package lists and run unattended-upgrades daily. */
 export function autoUpgrades(): string {
   return `APT::Periodic::Update-Package-Lists "1";

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { doctor, formatChecks } from "./doctor.js";
+import { briefStatus, connectLaptop, laptopsCommand, logsCommand, serverHome, serverRunsCommand } from "./home.js";
 import { TtyPrompter } from "./prompt.js";
 import { readState } from "./state.js";
 import { DryRunSystem, RealSystem, type System } from "./system.js";
@@ -9,17 +10,22 @@ import { uninstall } from "./uninstall.js";
 import { PlainUi, TerminalUi, palette, type Ui } from "./ui.js";
 import { up } from "./up.js";
 
-const HELP = `Directionally Local: run background coding agents on this server.
+const HELP = `Directionally Local: background coding agents on your own server.
+Send a task from your laptop; it runs in its own sandbox and comes back as a pull request.
 (dl is short for directionallylocal; both work.)
 
-Usage (as root):
-  dl up [--dry-run]       install or repair Hotcell + Autopilot as services
-  dl doctor               check every part, with a fix for each failure
-  dl status               what's installed and where to reach it
-  dl uninstall [--purge]  remove the services and software (--purge: also config, data, accounts)
+On the server:
+  dl                      what this is, whether it's healthy, laptops, and runs
+  dl up [--dry-run]       install, or repair, everything (safe to re-run)
+  dl connect-laptop       how to connect a laptop, and a link to approve it in a browser
+  dl connect-laptop CODE  approve the code a laptop shows
+  dl laptops              connected laptops (dl laptops remove NAME to disconnect one)
+  dl runs                 tasks running or done, with their pull requests
+  dl logs [hotcell|autopilot] [-f]   the services' logs
+  dl doctor               check every part, with a fix for each problem
+  dl uninstall [--purge]  remove everything (--purge also removes config and data)
 
 up options:
-  --dry-run                     print what would change; change nothing
   --autopilot-version <x.y.z>   default: latest on npm
   --hotcell-version <x.y.z>     default: latest on npm
 
@@ -53,6 +59,8 @@ export async function main(
         "hotcell-version": { type: "string" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
+        brief: { type: "boolean" },
+        follow: { type: "boolean", short: "f" },
       },
     });
   } catch (error) {
@@ -65,15 +73,16 @@ export async function main(
     io.out(`${packageVersion()}\n`);
     return 0;
   }
-  if (values.help || !command || command === "help") {
+  if (values.help || command === "help") {
     io.out(HELP);
-    return command || values.help ? 0 : 2;
+    return 0;
   }
   const log = (line: string) => io.out(`${line}\n`);
   // The live checklist needs a terminal; a dry run prints its plan line by line instead.
   const terminal = options.terminal ?? (process.stdout.isTTY === true);
   const live = terminal && command === "up" && !values["dry-run"];
   const ui: Ui = live ? new TerminalUi(io.out) : new PlainUi(io.out);
+  const colors = palette(terminal && !process.env.NO_COLOR && process.env.TERM !== "dumb");
   const system: System = values["dry-run"] ? new DryRunSystem(log) : new RealSystem(log, live ? { outputLog: UP_LOG } : {});
 
   try {
@@ -92,16 +101,44 @@ export async function main(
         log(formatChecks(checks, terminal && !process.env.NO_COLOR));
         return checks.every((check) => check.ok) ? 0 : 1;
       }
+      case undefined:
       case "status": {
         const state = await readState(system);
         if (!state) {
-          log("Not installed. Run: sudo dl up");
+          if (values.brief) return 0;
+          io.out(NOT_A_SERVER(colors));
+          return command ? 1 : 0;
+        }
+        if (values.brief) {
+          await briefStatus(system, state, io.out, colors);
+          return 0;
+        }
+        if (!isRoot()) {
+          await briefStatus(system, state, io.out, colors);
+          io.out(`  ${colors.dim("For laptops and runs:")} sudo dl\n\n`);
+          return 0;
+        }
+        await serverHome(system, state, io.out, colors);
+        return 0;
+      }
+      case "connect-laptop":
+      case "laptops":
+      case "runs":
+      case "logs": {
+        const state = await readState(system);
+        if (!state) {
+          io.out(NOT_A_SERVER(colors));
           return 1;
         }
-        log(`Installed ${state.release} (updated ${state.updatedAt.slice(0, 10)})`);
-        log(`Reach it at ${state.access.url} (${state.access.mode})`);
-        log(`On your laptop: autopilot remote add ${state.access.url}`);
-        return 0;
+        if (!isRoot()) {
+          io.err(`  Run it as root: sudo dl ${parsed.positionals.join(" ")}\n`);
+          return 1;
+        }
+        const rest = parsed.positionals.slice(1);
+        if (command === "connect-laptop") return await connectLaptop(system, state, rest[0], io.out, colors);
+        if (command === "laptops") return await laptopsCommand(system, rest, io.out, colors);
+        if (command === "runs") return await serverRunsCommand(system, io.out, colors);
+        return await logsCommand(system, [...rest, ...(values.follow ? ["-f"] : [])]);
       }
       case "uninstall":
         await uninstall(system, { purge: Boolean(values.purge) });
@@ -117,6 +154,21 @@ export async function main(
     if (live) io.err(await logTail(UP_LOG, c));
     return 1;
   }
+}
+
+const NOT_A_SERVER = (c: ReturnType<typeof palette>) => `
+  ${c.bold("Directionally Local")}  ${c.dim("isn't set up on this machine.")}
+
+  Background coding agents on your own server: send a task from your laptop,
+  get a pull request back.
+
+  ${c.dim("Set up a server (as root, on Ubuntu or Debian):")}
+     curl -fsSL https://directionallylocal.run | sh
+
+`;
+
+function isRoot(): boolean {
+  return process.getuid?.() === 0;
 }
 
 /** From package.json, which sits one level above both src/ and dist/. */
