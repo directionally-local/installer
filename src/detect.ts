@@ -1,3 +1,4 @@
+import { nodeAdvisory } from "./node-advisory.js";
 import type { System } from "./system.js";
 
 export interface HostFacts {
@@ -13,7 +14,8 @@ export interface HostFacts {
   docker: boolean;
   /** The Docker bridge address sandboxes reach the host on (gateway, GitHub proxy). */
   dockerBridgeIp: string | undefined;
-  nodeMajor: number | undefined;
+  /** e.g. "22.23.4"; undefined when node isn't on PATH. */
+  nodeVersion: string | undefined;
   tailscale: boolean;
 }
 
@@ -51,7 +53,7 @@ export async function detectHost(system: System): Promise<HostFacts> {
     root: uid.stdout.trim() === "0",
     docker: docker.code === 0 && docker.stdout.trim() !== "",
     dockerBridgeIp: parseInterfaceIp(bridge.stdout),
-    nodeMajor: node.code === 0 ? Number(node.stdout.trim().split(".")[0]) || undefined : undefined,
+    nodeVersion: node.code === 0 && node.stdout.trim() ? node.stdout.trim() : undefined,
     tailscale: tailscale.code === 0,
   };
 }
@@ -67,6 +69,9 @@ export function preflightProblems(facts: HostFacts): string[] {
   }
   if (facts.arch !== "x86_64" && facts.arch !== "aarch64") problems.push(`CPU architecture ${facts.arch} isn't supported.`);
   if (facts.memoryMb < MIN_MEMORY_MB) problems.push(`At least 4 GB of RAM is needed (found ${(facts.memoryMb / 1024).toFixed(1)} GB).`);
+  // The services run on this Node; never install onto one with a known RCE.
+  const node = nodeAdvisory(facts.nodeVersion ?? "");
+  if (!node.ok) problems.push(`${node.message} Re-run install.sh, which upgrades Node.`);
   if (facts.diskFreeGb < MIN_DISK_GB) problems.push(`At least ${MIN_DISK_GB} GB free under /var is needed (found ${facts.diskFreeGb} GB).`);
   return problems;
 }

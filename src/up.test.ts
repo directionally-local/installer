@@ -41,6 +41,7 @@ describe("directionally-local up", () => {
     assert.ok(system.users.has("hotcell") && system.users.has("autopilot"));
     assert.ok(system.ran.includes("npm install --prefix /opt/directionally-local/releases/autopilot-2.2.0_hotcell-0.1.26 --no-audit --no-fund --omit=dev autopilot-ai@2.2.0 hotcell@0.1.26"));
     assert.ok(system.images.has("directionally-local-cell:2.2.0"));
+    assert.ok(system.ran.some((command) => command.startsWith("docker build --pull ")), "fresh base layers, never a stale cached Node");
     for (const unit of ["directionally-local-metadata-block.service", "hotcell.service", "autopilot.service"]) assert.ok(system.enabled.has(unit), unit);
     assert.ok(system.ran.includes("tailscale serve --bg --https=443 http://127.0.0.1:4096"));
 

@@ -1,4 +1,5 @@
 import { detectHost, MIN_DISK_GB } from "./detect.js";
+import { nodeAdvisory } from "./node-advisory.js";
 import { AUTOPILOT_PORT, HOTCELL_PORT, PATHS, SERVICES, parseEnvFile } from "./layout.js";
 import { readState } from "./state.js";
 import type { System } from "./system.js";
@@ -21,6 +22,13 @@ export async function doctor(system: System): Promise<Check[]> {
     : { name: "install", ok: false, detail: "not installed", fix: "sudo dl up" });
 
   const facts = await detectHost(system);
+  const node = nodeAdvisory(facts.nodeVersion ?? "");
+  add({
+    name: "node",
+    ok: node.ok && node.message === undefined,
+    detail: node.message ?? `${facts.nodeVersion} (patched)`,
+    fix: "re-run install.sh to upgrade Node.js (apt-get install --only-upgrade nodejs for a patch)",
+  });
   add({ name: "disk", ok: facts.diskFreeGb >= MIN_DISK_GB, detail: `${facts.diskFreeGb} GB free under /var`, fix: "free space: docker system prune, or grow the disk" });
   add(facts.docker
     ? { name: "docker", ok: true, detail: "running" }

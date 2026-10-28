@@ -35,6 +35,20 @@ quietly() {
   fi
 }
 
+node_major() {
+  node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0
+}
+
+node_is_patched() {
+  command -v node >/dev/null 2>&1 || return 1
+  node -e '
+    const [major, minor, patch] = process.versions.node.split(".").map(Number);
+    const fixed = { 22: [23, 4], 24: [22, 1], 26: [12, 1] }[major];
+    const ok = major > 26 || (fixed && (minor > fixed[0] || (minor === fixed[0] && patch >= fixed[1])));
+    process.exit(ok ? 0 : 1);
+  ' 2>/dev/null
+}
+
 # Wrapped in a function so a truncated download never runs half a script.
 main() {
   if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
@@ -55,14 +69,16 @@ main() {
     quietly "installing curl" as_root apt-get install -y -qq curl ca-certificates
   fi
 
-  node_major=0
-  if command -v node >/dev/null 2>&1; then
-    node_major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
-  fi
-  if [ "$node_major" -lt 22 ]; then
-    say "Installing Node.js 22..."
-    quietly "adding the Node.js 22 repository" as_root sh -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -"
-    quietly "installing Node.js 22" as_root apt-get install -y -qq nodejs
+  # Node must have the fix for CVE-2026-111497 (Brotli RCE via fetch): 22.23.4+, 24.22.1+ or
+  # 26.12.1+, the same rule as Hotcell's engines. An older or unsupported Node is upgraded,
+  # staying on its LTS line when it's one of these.
+  if ! node_is_patched; then
+    line=22
+    case "$(node_major)" in 24|26) line=$(node_major) ;; esac
+    say "Installing Node.js ${line} (latest patch)..."
+    quietly "adding the Node.js ${line} repository" as_root sh -c "curl -fsSL https://deb.nodesource.com/setup_${line}.x | bash -"
+    quietly "installing Node.js ${line}" as_root apt-get install -y -qq nodejs
+    node_is_patched || fail "Node.js $(node -v 2>/dev/null || echo '?') is still missing the CVE-2026-111497 fix; install 22.23.4+, 24.22.1+ or 26.12.1+ and re-run"
   fi
 
   package="${DL_PACKAGE:-directionally-local@${DL_VERSION:-latest}}"

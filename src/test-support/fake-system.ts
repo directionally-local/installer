@@ -27,6 +27,7 @@ export class FakeSystem implements System {
   ufwActive = false;
   hotcellKeys = new Set<string>();
   memoryKb = 8 * 1024 * 1024;
+  nodeVersion = "22.23.4";
   serving = false;
 
   constructor(options: { docker?: boolean; tailscale?: boolean; tailscaleUp?: boolean } = {}) {
@@ -90,7 +91,7 @@ export class FakeSystem implements System {
       case "id":
         if (args[0] === "-u" && args[1]) return this.users.has(args[1]) ? ok("998\n") : fail("no such user");
         return ok("0\n");
-      case "node": return ok("22.11.0\n");
+      case "node": return ok(`${this.nodeVersion}\n`);
       case "docker":
         if (args[0] === "version") return this.docker ? ok("27.3.1\n") : fail("not installed");
         if (args[0] === "image" && args[1] === "inspect") return this.images.has(args[2]!) ? ok("[]") : fail("no such image");

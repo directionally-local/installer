@@ -310,7 +310,7 @@ async function ensureCellImage(system: System, image: string, autopilotVersion: 
     await system.run("npm", ["pack", `autopilot-ai@${autopilotVersion}`, "--pack-destination", dir, "--silent"]);
     await system.run("sh", ["-c", `mv ${dir}/autopilot-ai-*.tgz ${dir}/autopilot.tgz`]);
     await system.writeFile(`${dir}/Dockerfile`, cellDockerfile());
-    await system.run("docker", ["build", "-q", "-t", image, dir], { inherit: true });
+    await system.run("docker", ["build", "--pull", "-q", "-t", image, dir], { inherit: true });
   } finally {
     await system.remove(dir);
   }
