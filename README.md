@@ -1,6 +1,6 @@
 # Directionally Local installer
 
-Rent a server, paste one line, and send coding tasks to it from your laptop. Each task runs in its own [Hotcell](https://github.com/sinameraji/hotcell) sandbox, driven by [Autopilot](https://github.com/sinameraji/autopilot), and comes back as a pull request, even with your laptop closed.
+Rent a server, paste one line, and send coding tasks to it from your laptop. Each task runs in its own [Hotcell](https://github.com/directionally-local/hotcell) sandbox, driven by [Autopilot](https://github.com/directionally-local/autopilot), and comes back as a pull request, even with your laptop closed.
 
 ```sh
 curl -fsSL https://directionallylocal.run | sh
