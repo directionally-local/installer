@@ -9,9 +9,12 @@ import {
 import type { Prompter } from "./prompt.js";
 import { readState, writeState, type AccessMode, type InstallState } from "./state.js";
 import type { System } from "./system.js";
+import { PlainUi, type Ui } from "./ui.js";
 
 export interface UpOptions {
   prompter: Prompter;
+  /** Where progress shows; a plain line per event when omitted. */
+  ui?: Ui;
   /**
    * Answers for unattended installs: DL_TAILSCALE_AUTH_KEY, DL_OPENROUTER_API_KEY, DL_GITHUB_TOKEN.
    * DL_ACCESS=loopback skips Tailscale (SSH tunnel access); DL_SKIP_CREDENTIAL_CHECK=1 skips online validation.
@@ -38,117 +41,139 @@ interface Answers {
   githubToken: string | undefined;
 }
 
+/** A validation outcome: a problem to show, or a detail to confirm the answer with. */
+export interface Checked { problem?: string; detail?: string }
+
 const DRY_RUN_BRIDGE_IP = "172.17.0.1";
 const DRY_RUN_URL = "https://<this-machine>.<tailnet>.ts.net";
 
-/** `directionally-local up`: install or repair Hotcell + Autopilot as services. Safe to re-run. */
+/** `dl up`: install or repair Hotcell + Autopilot as services. Safe to re-run. */
 export async function up(system: System, options: UpOptions): Promise<UpResult> {
   const env = options.env ?? process.env;
   const fetchImpl = options.fetchImpl ?? fetch;
   const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const say = (line: string) => system.log(line);
+  const ui = options.ui ?? new PlainUi((text) => { for (const line of text.replace(/\n$/, "").split("\n")) system.log(line); });
 
-  say("== Checking this machine");
+  // install.sh already showed the title on this screen.
+  if (env.DL_TITLE_SHOWN !== "1") ui.title("Directionally Local");
   let facts = await detectHost(system);
   const problems = preflightProblems(facts);
-  if (problems.length > 0) throw new Error(`Can't install here:\n  - ${problems.join("\n  - ")}`);
-  say(`  ${facts.os.prettyName}, ${facts.cpus} CPUs, ${(facts.memoryMb / 1024).toFixed(1)} GB RAM, ${facts.diskFreeGb} GB free${facts.kvm ? ", KVM available" : ""}`);
+  if (problems.length > 0) {
+    ui.line("failed", "This machine can't run it yet");
+    throw new Error(`Can't install here:\n  - ${problems.join("\n  - ")}`);
+  }
+  ui.line("done", "Checked this machine", `${facts.os.prettyName.replace(/ LTS$/, "")} · ${facts.cpus} CPU · ${(facts.memoryMb / 1024).toFixed(1)} GB · ${facts.diskFreeGb} GB free`);
 
   // Every question comes first, so the long part runs unattended.
   const previous = await readState(system);
   const access = accessMode(env, previous);
   const check = env.DL_SKIP_CREDENTIAL_CHECK === "1" ? undefined : fetchImpl;
-  const answers = await collectAnswers(system, options.prompter, env, check, facts, access);
+  const answers = await collectAnswers(system, ui, options.prompter, env, check, facts, access);
+
+  ui.plan([
+    ...(access === "tailscale" ? [{ id: "tailnet", label: "Joining your tailnet" }] : []),
+    { id: "docker", label: "Setting up Docker" },
+    { id: "software", label: "Installing Hotcell + Autopilot" },
+    { id: "image", label: "Building the sandbox image" },
+    { id: "services", label: "Starting services" },
+    { id: "access", label: access === "tailscale" ? "Opening private access" : "Starting the API" },
+  ]);
+  const step = async <T>(id: string, work: () => Promise<{ value: T; detail?: string }>): Promise<T> => {
+    ui.start(id);
+    try {
+      const { value, detail } = await work();
+      ui.done(id, detail);
+      return value;
+    } catch (error) {
+      ui.fail(id, (error as Error).message);
+      throw error;
+    }
+  };
 
   if (access === "tailscale") {
-    say("== Joining your tailnet");
-    await joinTailnet(system, answers.tailscaleAuthKey);
+    await step("tailnet", async () => ({ value: undefined, detail: await joinTailnet(system, answers.tailscaleAuthKey) }));
   }
 
-  say("== Docker");
-  if (facts.docker) {
-    say("  already running");
-  } else {
-    // An installed Docker (Ubuntu's docker.io or Docker's docker-ce) is started, never
-    // replaced: get.docker.com swapping packages under a running install is how the socket
-    // and service fall out of step.
-    if (facts.dockerInstalled) {
-      say("  installed but not running; starting it");
-    } else {
-      await system.run("sh", ["-c", "curl -fsSL https://get.docker.com | sh"], { inherit: true, describe: "install Docker (get.docker.com)" });
+  const bridgeIp = await step("docker", async () => {
+    let detail = "already running";
+    if (!facts.docker) {
+      // An installed Docker (Ubuntu's docker.io or Docker's docker-ce) is started, never
+      // replaced: get.docker.com swapping packages under a running install is how the socket
+      // and service fall out of step.
+      if (facts.dockerInstalled) {
+        detail = "was installed; started it";
+      } else {
+        await system.run("sh", ["-c", "curl -fsSL https://get.docker.com | sh"], { inherit: true, describe: "install Docker (get.docker.com)" });
+        detail = "installed";
+      }
+      await startDocker(system, sleep);
+      facts = await detectHost(system);
     }
-    await startDocker(system, sleep);
-    facts = await detectHost(system);
-  }
-  const bridgeIp = facts.dockerBridgeIp ?? (system.dryRun ? DRY_RUN_BRIDGE_IP : undefined);
-  if (!bridgeIp) throw new Error("Docker is running but its docker0 bridge has no IPv4 address; sandboxes couldn't reach the gateway.");
+    const ip = facts.dockerBridgeIp ?? (system.dryRun ? DRY_RUN_BRIDGE_IP : undefined);
+    if (!ip) throw new Error("Docker is running but its docker0 bridge has no IPv4 address; sandboxes couldn't reach the gateway.");
+    return { value: ip, detail };
+  });
 
-  say("== Automatic security updates");
-  await ensureAutomaticUpdates(system);
-
-  say("== Service accounts");
-  await ensureUser(system, USERS.hotcell, PATHS.hotcellHome, ["docker"]);
-  await ensureUser(system, USERS.autopilot, PATHS.autopilotHome, []);
-
-  say("== Hotcell and Autopilot");
-  const autopilotVersion = options.autopilotVersion ?? await latestVersion(system, "autopilot-ai");
-  const hotcellVersion = options.hotcellVersion ?? await latestVersion(system, "hotcell");
-  const release = `autopilot-${autopilotVersion}_hotcell-${hotcellVersion}`;
-  const releaseDir = `${PATHS.releases}/${release}`;
-  if (await system.exists(`${releaseDir}/node_modules/autopilot-ai/package.json`) && await system.exists(`${releaseDir}/node_modules/hotcell/package.json`)) {
-    say(`  ${release} already installed`);
-  } else {
-    await system.mkdir(releaseDir, { mode: 0o755 });
-    await system.run("npm", ["install", "--prefix", releaseDir, "--no-audit", "--no-fund", "--omit=dev", `autopilot-ai@${autopilotVersion}`, `hotcell@${hotcellVersion}`], { inherit: true });
-  }
-  await system.run("ln", ["-sfn", releaseDir, PATHS.current]);
-
-  say("== Hotcell configuration and model key");
-  const hotcellValues = parseEnvFile(await system.readFile(PATHS.hotcellEnv));
-  const hotcellApiKey = hotcellValues.HOTCELL_API_KEY || randomBytes(24).toString("hex");
-  await system.mkdir(PATHS.hotcellEtc, { mode: 0o750, owner: `root:${USERS.hotcell}` });
-  await system.writeFile(PATHS.hotcellEnv, hotcellEnv({ apiKey: hotcellApiKey, bridgeIp }), { mode: 0o640, owner: `root:${USERS.hotcell}`, secret: true });
-  if (answers.openRouterKey) {
-    // Into Hotcell's keystore over stdin: never in argv, env files, or Autopilot's config.
-    await asHotcell(system, ["keys", "add", "openrouter", "--stdin"], { input: answers.openRouterKey, describe: "hotcell keys add openrouter --stdin (as hotcell)" });
-  }
-
-  say("== Autopilot configuration");
-  await system.mkdir(PATHS.autopilotEtc, { mode: 0o750, owner: `root:${USERS.autopilot}` });
-  if (answers.githubToken) {
-    await system.writeFile(PATHS.githubEnv, githubEnv(answers.githubToken), { mode: 0o640, owner: `root:${USERS.autopilot}`, secret: true });
-  }
-  if (!(await system.readFile(PATHS.asterConfig))) {
-    await system.writeFile(PATHS.asterConfig, asterConfig(), { mode: 0o640, owner: `root:${USERS.autopilot}` });
-  }
-  await ensureWorkspace(system);
+  const { autopilotVersion, hotcellVersion, release } = await step("software", async () => {
+    await ensureAutomaticUpdates(system, ui);
+    await ensureUser(system, USERS.hotcell, PATHS.hotcellHome, ["docker"]);
+    await ensureUser(system, USERS.autopilot, PATHS.autopilotHome, []);
+    const autopilot = options.autopilotVersion ?? await latestVersion(system, "autopilot-ai");
+    const hotcell = options.hotcellVersion ?? await latestVersion(system, "hotcell");
+    const name = `autopilot-${autopilot}_hotcell-${hotcell}`;
+    const releaseDir = `${PATHS.releases}/${name}`;
+    if (!(await system.exists(`${releaseDir}/node_modules/autopilot-ai/package.json`) && await system.exists(`${releaseDir}/node_modules/hotcell/package.json`))) {
+      await system.mkdir(releaseDir, { mode: 0o755 });
+      await system.run("npm", ["install", "--prefix", releaseDir, "--no-audit", "--no-fund", "--omit=dev", `autopilot-ai@${autopilot}`, `hotcell@${hotcell}`], { inherit: true });
+    }
+    await system.run("ln", ["-sfn", releaseDir, PATHS.current]);
+    // Store the keys as soon as their homes exist, so a later failure never asks again.
+    if (answers.openRouterKey) {
+      // Into Hotcell's keystore over stdin: never in argv, env files, or Autopilot's config.
+      await asHotcell(system, ["keys", "add", "openrouter", "--stdin"], { input: answers.openRouterKey, describe: "hotcell keys add openrouter --stdin (as hotcell)" });
+    }
+    await system.mkdir(PATHS.autopilotEtc, { mode: 0o750, owner: `root:${USERS.autopilot}` });
+    if (answers.githubToken) {
+      await system.writeFile(PATHS.githubEnv, githubEnv(answers.githubToken), { mode: 0o640, owner: `root:${USERS.autopilot}`, secret: true });
+    }
+    return { value: { autopilotVersion: autopilot, hotcellVersion: hotcell, release: name }, detail: `Autopilot ${autopilot} · Hotcell ${hotcell}` };
+  });
 
   const image = cellImage(autopilotVersion);
-  say(`== Sandbox image ${image}`);
-  await ensureCellImage(system, image, autopilotVersion);
+  await step("image", async () => ({ value: undefined, detail: await ensureCellImage(system, image, autopilotVersion) ? "already built" : `Node 24 · Autopilot ${autopilotVersion}` }));
 
-  say("== Services");
-  await allowBridgePorts(system, bridgeIp);
-  await system.writeFile(`${PATHS.units}/${SERVICES.metadataBlock}`, metadataBlockUnit());
-  await system.writeFile(`${PATHS.units}/${SERVICES.hotcell}`, hotcellUnit());
-  await system.writeFile(`${PATHS.units}/${SERVICES.autopilot}`, autopilotUnit());
-  await system.run("systemctl", ["daemon-reload"]);
-  await system.run("systemctl", ["enable", "--now", SERVICES.metadataBlock]);
-  await system.run("systemctl", ["enable", SERVICES.hotcell]);
-  await system.run("systemctl", ["restart", SERVICES.hotcell]);
-  await waitUntil(system, sleep, "Hotcell", async () => (await system.probe("curl", ["-fsS", "-o", "/dev/null", `http://127.0.0.1:${HOTCELL_PORT}/`])).code === 0
-    || (await system.probe("sh", ["-c", `ss -ltn | grep -q '127.0.0.1:${HOTCELL_PORT}'`])).code === 0);
+  const hotcellApiKey = await step("services", async () => {
+    const hotcellValues = parseEnvFile(await system.readFile(PATHS.hotcellEnv));
+    const apiKey = hotcellValues.HOTCELL_API_KEY || randomBytes(24).toString("hex");
+    await system.mkdir(PATHS.hotcellEtc, { mode: 0o750, owner: `root:${USERS.hotcell}` });
+    await system.writeFile(PATHS.hotcellEnv, hotcellEnv({ apiKey, bridgeIp }), { mode: 0o640, owner: `root:${USERS.hotcell}`, secret: true });
+    if (!(await system.readFile(PATHS.asterConfig))) {
+      await system.writeFile(PATHS.asterConfig, asterConfig(), { mode: 0o640, owner: `root:${USERS.autopilot}` });
+    }
+    await ensureWorkspace(system);
+    await allowBridgePorts(system, bridgeIp);
+    await system.writeFile(`${PATHS.units}/${SERVICES.metadataBlock}`, metadataBlockUnit());
+    await system.writeFile(`${PATHS.units}/${SERVICES.hotcell}`, hotcellUnit());
+    await system.writeFile(`${PATHS.units}/${SERVICES.autopilot}`, autopilotUnit());
+    await system.run("systemctl", ["daemon-reload"]);
+    await system.run("systemctl", ["enable", "--now", SERVICES.metadataBlock]);
+    await system.run("systemctl", ["enable", SERVICES.hotcell]);
+    await system.run("systemctl", ["restart", SERVICES.hotcell]);
+    await waitUntil(system, sleep, "Hotcell", async () => (await system.probe("curl", ["-fsS", "-o", "/dev/null", `http://127.0.0.1:${HOTCELL_PORT}/`])).code === 0
+      || (await system.probe("sh", ["-c", `ss -ltn | grep -q '127.0.0.1:${HOTCELL_PORT}'`])).code === 0);
+    return { value: apiKey, detail: "sandboxes and keys ready" };
+  });
 
-  const url = access === "tailscale"
-    ? (say("== Access: private, over Tailscale"), await serveOverTailscale(system))
-    : (say("== Access: this machine only (use an SSH tunnel)"), `http://127.0.0.1:${AUTOPILOT_PORT}`);
-
-  await system.writeFile(PATHS.autopilotEnv, autopilotEnv({ hotcellApiKey, image, bridgeIp, publicUrl: url }), { mode: 0o640, owner: `root:${USERS.autopilot}`, secret: true });
-  await system.run("systemctl", ["enable", SERVICES.autopilot]);
-  await system.run("systemctl", ["restart", SERVICES.autopilot]);
-  // Without a token the Aster API answers 401: the server is up and refusing strangers.
-  await waitUntil(system, sleep, "Autopilot", async () =>
-    (await system.probe("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", `http://127.0.0.1:${AUTOPILOT_PORT}/api/v1/health`])).stdout.trim() === "401");
+  const url = await step("access", async () => {
+    const address = access === "tailscale" ? await serveOverTailscale(system) : `http://127.0.0.1:${AUTOPILOT_PORT}`;
+    await system.writeFile(PATHS.autopilotEnv, autopilotEnv({ hotcellApiKey, image, bridgeIp, publicUrl: address }), { mode: 0o640, owner: `root:${USERS.autopilot}`, secret: true });
+    await system.run("systemctl", ["enable", SERVICES.autopilot]);
+    await system.run("systemctl", ["restart", SERVICES.autopilot]);
+    // Without a token the Aster API answers 401: the server is up and refusing strangers.
+    await waitUntil(system, sleep, "Autopilot", async () =>
+      (await system.probe("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", `http://127.0.0.1:${AUTOPILOT_PORT}/api/v1/health`])).stdout.trim() === "401");
+    return { value: address, detail: address.replace(/^https?:\/\//, "") };
+  });
 
   const now = (options.now ?? (() => new Date()))().toISOString();
   const state: InstallState = {
@@ -165,14 +190,12 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
 
   const ownerLink = await createOwnerLink(system, url);
   const capacity = agentCapacity(facts, CELL_MEMORY_MB);
-  say("");
-  say(`✓ Ready. Fits ~${capacity} agent${capacity === 1 ? "" : "s"} at once (estimate).`);
-  if (ownerLink) say(`  Open once to approve laptops in your browser: ${ownerLink}`);
-  if (access === "tailscale") {
-    say(`  On your laptop (signed in to the same tailnet): autopilot remote add ${url}`);
-  } else {
-    say(`  On your laptop: ssh -N -L ${AUTOPILOT_PORT}:127.0.0.1:${AUTOPILOT_PORT} root@<this-server>, then: autopilot remote add ${url}`);
-  }
+  ui.ready(`Ready · fits ~${capacity} agent${capacity === 1 ? "" : "s"} at once (estimate)`, [
+    ...(ownerLink ? [{ label: "Open once in your browser, to approve laptops", value: ownerLink }] : []),
+    access === "tailscale"
+      ? { label: "On your laptop (signed in to the same tailnet)", value: `autopilot remote add ${url}` }
+      : { label: "On your laptop, after ssh -N -L 4096:127.0.0.1:4096 root@<this-server>", value: `autopilot remote add ${url}` },
+  ]);
   return { url, ownerLink, capacity, state };
 }
 
@@ -185,6 +208,7 @@ function accessMode(env: NodeJS.ProcessEnv, previous: InstallState | undefined):
 
 async function collectAnswers(
   system: System,
+  ui: Ui,
   prompter: Prompter,
   env: NodeJS.ProcessEnv,
   fetchImpl: typeof fetch | undefined,
@@ -201,47 +225,60 @@ async function collectAnswers(
       githubToken: hasGitHub ? undefined : "<asked>",
     };
   }
+  const typed = [
+    !tailscaleRunning && !env.DL_TAILSCALE_AUTH_KEY,
+    !hasModelKey && !env.DL_OPENROUTER_API_KEY,
+    !hasGitHub && !env.DL_GITHUB_TOKEN,
+  ].filter(Boolean).length;
+  if (typed > 0) ui.questions(`${typed === 1 ? "One key" : `${typed} keys`}, then it runs on its own. Typing is hidden.`);
 
-  system.log("== A few questions (the rest runs on its own)");
-  const tailscaleAuthKey = tailscaleRunning ? undefined : await askValidated(
+  const tailscaleAuthKey = tailscaleRunning ? undefined : await askValidated(ui,
     env.DL_TAILSCALE_AUTH_KEY,
-    () => prompter.secret("Tailscale auth key (create one at https://login.tailscale.com/admin/settings/keys): "),
-    async (value) => /^tskey-[A-Za-z0-9-]+$/.test(value) ? undefined : "That doesn't look like a Tailscale auth key (tskey-…).",
-    system,
+    "Tailscale auth key",
+    () => prompter.secret(ui.prompt("Tailscale auth key", "login.tailscale.com/admin/settings/keys")),
+    async (value) => /^tskey-[A-Za-z0-9-]+$/.test(value) ? {} : { problem: "That doesn't look like a Tailscale auth key (tskey-…)." },
   );
-  const openRouterKey = hasModelKey ? undefined : await askValidated(
+  const openRouterKey = hasModelKey ? undefined : await askValidated(ui,
     env.DL_OPENROUTER_API_KEY,
-    () => prompter.secret("OpenRouter API key (kept in Hotcell on this server; sandboxes and laptops never see it): "),
-    (value) => validateOpenRouterKey(value, fetchImpl),
-    system,
+    "OpenRouter API key",
+    () => prompter.secret(ui.prompt("OpenRouter API key", "stays in Hotcell; sandboxes and laptops never see it")),
+    async (value) => ({ ...await validateOpenRouterKey(value, fetchImpl).then((problem) => problem ? { problem } : { detail: "kept in Hotcell" }) }),
   );
-  const githubToken = hasGitHub ? undefined : await askValidated(
+  const githubToken = hasGitHub ? undefined : await askValidated(ui,
     env.DL_GITHUB_TOKEN,
-    () => prompter.secret("GitHub token for cloning, pushing, and opening PRs (fine-grained: Contents + Pull requests read/write; https://github.com/settings/personal-access-tokens/new): "),
-    (value) => validateGitHubToken(value, fetchImpl, system),
-    system,
+    "GitHub token",
+    () => prompter.secret(ui.prompt("GitHub token", "fine-grained · Contents + Pull requests read/write")),
+    (value) => validateGitHubToken(value, fetchImpl),
   );
   return { tailscaleAuthKey, openRouterKey, githubToken };
 }
 
 /** Takes an env answer as-is (failing fast if invalid) or asks up to three times. */
 async function askValidated(
+  ui: Ui,
   fromEnv: string | undefined,
+  label: string,
   ask: () => Promise<string>,
-  validate: (value: string) => Promise<string | undefined>,
-  system: System,
+  validate: (value: string) => Promise<Checked>,
 ): Promise<string> {
   if (fromEnv) {
-    const problem = await validate(fromEnv.trim());
+    const { problem, detail } = await validate(fromEnv.trim());
     if (problem) throw new Error(problem);
+    ui.line("done", label, detail ? `${detail} · from the environment` : "from the environment");
     return fromEnv.trim();
   }
   for (let attempt = 1; ; attempt++) {
     const value = (await ask()).trim();
-    const problem = value ? await validate(value) : "An answer is required.";
-    if (!problem) return value;
-    if (attempt >= 3) throw new Error(problem);
-    system.log(`  ${problem} Try again.`);
+    const { problem, detail } = value ? await validate(value) : { problem: "An answer is required.", detail: undefined };
+    if (!problem) {
+      ui.answered(label, detail);
+      return value;
+    }
+    if (attempt >= 3) {
+      ui.rejected(problem);
+      throw new Error(problem);
+    }
+    ui.rejected(`${problem} Try again.`);
   }
 }
 
@@ -258,19 +295,19 @@ export async function validateOpenRouterKey(key: string, fetchImpl: typeof fetch
   }
 }
 
-export async function validateGitHubToken(token: string, fetchImpl: typeof fetch | undefined, system: System): Promise<string | undefined> {
-  if (!/^(github_pat_|ghp_|gho_)[A-Za-z0-9_]{20,}$/.test(token)) return "That doesn't look like a GitHub token (github_pat_… or ghp_…).";
-  if (!fetchImpl) return undefined;
+export async function validateGitHubToken(token: string, fetchImpl: typeof fetch | undefined): Promise<Checked> {
+  if (!/^(github_pat_|ghp_|gho_)[A-Za-z0-9_]{20,}$/.test(token)) return { problem: "That doesn't look like a GitHub token (github_pat_… or ghp_…)." };
+  if (!fetchImpl) return {};
   try {
     const response = await fetchImpl("https://api.github.com/user", { headers: { Authorization: `Bearer ${token}`, "User-Agent": "directionally-local" } });
-    if (response.status === 401) return "GitHub rejected that token.";
+    if (response.status === 401) return { problem: "GitHub rejected that token." };
     if (response.ok) {
       const user = await response.json() as { login?: string };
-      if (user.login) system.log(`  GitHub: signed in as ${user.login}`);
+      if (user.login) return { detail: `signed in as ${user.login}` };
     }
-    return undefined;
+    return {};
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -279,7 +316,7 @@ export async function validateGitHubToken(token: string, fetchImpl: typeof fetch
  * NodeSource would never pick up a security release by itself. Docker's repo is left out
  * on purpose: it ships major upgrades, and restarting dockerd can stop running sandboxes.
  */
-async function ensureAutomaticUpdates(system: System): Promise<void> {
+async function ensureAutomaticUpdates(system: System, ui: Ui): Promise<void> {
   const installed = await system.probe("dpkg-query", ["-W", "-f=${Status}", "unattended-upgrades"]);
   if (!installed.stdout.includes("install ok installed")) {
     await system.run("apt-get", ["install", "-y", "-qq", "unattended-upgrades"], { env: { DEBIAN_FRONTEND: "noninteractive" } });
@@ -289,7 +326,7 @@ async function ensureAutomaticUpdates(system: System): Promise<void> {
   if ((await system.probe("apt-cache", ["policy", "nodejs"])).stdout.includes("deb.nodesource.com")) {
     await system.writeFile(NODE_AUTO_UPDATES, nodeAutoUpdates());
   } else {
-    system.log("  Node.js isn't from NodeSource here; keep it patched yourself (22.23.4+, 24.22.1+ or 26.12.1+).");
+    ui.warn("Node.js isn't from NodeSource here, so it won't update itself; keep it at 22.23.4+, 24.22.1+ or 26.12.1+.");
   }
 }
 
@@ -349,11 +386,9 @@ async function ensureWorkspace(system: System): Promise<void> {
   await git(["-c", "user.name=Autopilot", "-c", "user.email=autopilot@localhost", "commit", "--quiet", "-m", "Initialize workspace"]);
 }
 
-async function ensureCellImage(system: System, image: string, autopilotVersion: string): Promise<void> {
-  if ((await system.probe("docker", ["image", "inspect", image])).code === 0) {
-    system.log("  already built");
-    return;
-  }
+/** Builds the sandbox image unless it exists; returns whether it already did. */
+async function ensureCellImage(system: System, image: string, autopilotVersion: string): Promise<boolean> {
+  if ((await system.probe("docker", ["image", "inspect", image])).code === 0) return true;
   const dir = system.dryRun ? "/tmp/directionally-local-image" : (await system.run("mktemp", ["-d"])).stdout.trim();
   try {
     await system.run("npm", ["pack", `autopilot-ai@${autopilotVersion}`, "--pack-destination", dir, "--silent"]);
@@ -363,6 +398,7 @@ async function ensureCellImage(system: System, image: string, autopilotVersion: 
   } finally {
     await system.remove(dir);
   }
+  return false;
 }
 
 /** With UFW on, sandboxes still need the gateway and GitHub proxy on the bridge address. */
@@ -388,7 +424,7 @@ async function tailscaleIsUp(system: System): Promise<boolean> {
  * Joins the tailnet right after the questions, before the long steps: the auth key is
  * used at once, so a later failure never has to ask for it again (it's never kept on disk).
  */
-async function joinTailnet(system: System, authKey: string | undefined): Promise<void> {
+async function joinTailnet(system: System, authKey: string | undefined): Promise<string> {
   if ((await system.probe("tailscale", ["version"])).code !== 0) {
     await system.run("sh", ["-c", "curl -fsSL https://tailscale.com/install.sh | sh"], { inherit: true, describe: "install Tailscale (tailscale.com/install.sh)" });
   }
@@ -403,6 +439,10 @@ async function joinTailnet(system: System, authKey: string | undefined): Promise
       await system.remove(keyFile);
     }
   }
+  if (system.dryRun) return "on your tailnet";
+  const status = await system.probe("tailscale", ["status", "--json"]);
+  const name = (JSON.parse(status.stdout || "{}") as { Self?: { DNSName?: string } }).Self?.DNSName?.replace(/\.$/, "");
+  return name ? `${authKey ? "joined as" : "already on it as"} ${name.split(".")[0]}` : "joined";
 }
 
 /** Serves Autopilot on the machine's HTTPS ts.net name; returns that URL. */
@@ -423,7 +463,7 @@ async function createOwnerLink(system: System, url: string): Promise<string | un
   const result = await system.run("runuser", [
     "-u", USERS.autopilot, "--", "env", `HOME=${PATHS.autopilotHome}`, `AUTOPILOT_ASTER_CONFIG=${PATHS.asterConfig}`,
     `AUTOPILOT_ASTER_DB=${PATHS.autopilotHome}/aster.db`, "/usr/bin/node", autopilotBin(), "aster", "owner", "link", "--url", url,
-  ], { allowFailure: true, describe: "autopilot aster owner link (as autopilot)" });
+  ], { allowFailure: true, describe: "autopilot aster owner link (as autopilot)", secretOutput: true });
   const link = result.stdout.trim().split("\n").at(-1);
   return result.code === 0 && link?.startsWith("http") ? link : undefined;
 }

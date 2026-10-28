@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { appendFileSync, mkdirSync, openSync } from "node:fs";
 import { chmod, chown, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
@@ -13,6 +14,8 @@ export interface RunOptions {
   inherit?: boolean;
   /** Shown in place of the command in the plan, e.g. when an argument is sensitive. */
   describe?: string;
+  /** Output carries a secret (e.g. a one-time link): keep it out of the install log. */
+  secretOutput?: boolean;
 }
 
 export interface RunResult {
@@ -52,20 +55,48 @@ export class CommandError extends Error {
 
 export class RealSystem implements System {
   readonly dryRun = false;
+  private readonly logFd: number | undefined;
 
-  constructor(private readonly output: (line: string) => void = (line) => process.stdout.write(`${line}\n`)) {}
+  /**
+   * With `outputLog`, every command and its output goes to that file instead of the screen,
+   * including long installs that would otherwise stream (`inherit`), so the terminal UI owns
+   * the screen. Without it, those installs stream as before (plain mode, logs, CI).
+   */
+  constructor(
+    private readonly output: (line: string) => void = (line) => process.stdout.write(`${line}\n`),
+    options: { outputLog?: string } = {},
+  ) {
+    if (options.outputLog) {
+      mkdirSync(dirname(options.outputLog), { recursive: true, mode: 0o700 });
+      this.logFd = openSync(options.outputLog, "w", 0o600);
+      appendFileSync(this.logFd, `# directionally-local ${new Date().toISOString()}\n`);
+    }
+  }
 
   run(command: string, args: string[], options: RunOptions = {}): Promise<RunResult> {
+    return this.spawn(command, args, options, true);
+  }
+
+  private spawn(command: string, args: string[], options: RunOptions, logged: boolean): Promise<RunResult> {
+    const log = logged ? this.logFd : undefined;
+    const stream = options.inherit && this.logFd === undefined;
+    if (log !== undefined) appendFileSync(log, `\n$ ${options.describe ?? [command, ...args].join(" ")}\n`);
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd: options.cwd,
         env: { ...process.env, ...options.env },
-        stdio: [options.input === undefined ? "ignore" : "pipe", options.inherit ? "inherit" : "pipe", options.inherit ? "inherit" : "pipe"],
+        stdio: [options.input === undefined ? "ignore" : "pipe", stream ? "inherit" : "pipe", stream ? "inherit" : "pipe"],
       });
       let stdout = "";
       let stderr = "";
-      child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-      child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      child.stdout?.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+        if (log !== undefined && !options.secretOutput) appendFileSync(log, chunk);
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+        if (log !== undefined) appendFileSync(log, chunk);
+      });
       child.on("error", (error) => {
         const result = { code: 127, stdout, stderr: stderr || error.message };
         if (options.allowFailure) resolve(result);
@@ -73,6 +104,7 @@ export class RealSystem implements System {
       });
       child.on("close", (code) => {
         const result = { code: code ?? 1, stdout, stderr };
+        if (log !== undefined && result.code !== 0) appendFileSync(log, `(exit ${result.code})\n`);
         if (result.code !== 0 && !options.allowFailure) reject(new CommandError(options.describe ?? [command, ...args].join(" "), result));
         else resolve(result);
       });
@@ -80,8 +112,9 @@ export class RealSystem implements System {
     });
   }
 
+  /** Detection probes are frequent and read-only; they stay out of the install log. */
   probe(command: string, args: string[], options: Pick<RunOptions, "env" | "input"> = {}): Promise<RunResult> {
-    return this.run(command, args, { ...options, allowFailure: true });
+    return this.spawn(command, args, { ...options, allowFailure: true }, false);
   }
 
   async readFile(path: string): Promise<string | undefined> {

@@ -18,7 +18,7 @@ describe("Docker", () => {
     system.dockerInstalled = true;
     await install(system);
     assert.ok(!system.ran.some((command) => command.includes("get.docker.com")), "never reinstalls over an existing Docker");
-    assert.ok(system.logs.includes("  installed but not running; starting it"));
+    assert.ok(system.logs.includes("ok Setting up Docker: was installed; started it"));
     assert.ok(system.docker);
   });
 

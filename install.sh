@@ -12,7 +12,21 @@
 set -eu
 
 say() { printf '%s\n' "$*"; }
-fail() { printf 'directionally-local: %s\n' "$*" >&2; exit 1; }
+fail() { printf '\n  directionally-local: %s\n' "$*" >&2; exit 1; }
+
+# The same look as `dl up`: a step shows "·" while it runs and becomes "✓" when done.
+# Without a terminal (or with NO_COLOR) it's plain lines.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+  FANCY=1
+else
+  FANCY=""
+fi
+step() {
+  if [ -n "$FANCY" ]; then printf '  \033[36m·\033[0m %s' "$1"; else say ".. $1"; fi
+}
+step_done() {
+  if [ -n "$FANCY" ]; then printf '\r\033[2K  \033[32m✓\033[0m %-33s\033[2m%s\033[0m\n' "$1" "${2:-}"; else say "ok $1${2:+: $2}"; fi
+}
 
 # Quiet steps: output goes to a log that's shown only if the step fails.
 LOG=$(mktemp)
@@ -51,6 +65,7 @@ node_is_patched() {
 
 # Wrapped in a function so a truncated download never runs half a script.
 main() {
+  if [ -n "$FANCY" ]; then printf '\n  \033[1mDirectionally Local\033[0m\n\n'; else say "Directionally Local"; fi
   if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
     fail "run as root (or install sudo)"
   fi
@@ -75,18 +90,22 @@ main() {
   if ! node_is_patched; then
     line=24
     case "$(node_major)" in 24|26) line=$(node_major) ;; esac
-    say "Installing Node.js ${line} (latest patch)..."
+    step "Installing Node.js ${line}"
     quietly "adding the Node.js ${line} repository" as_root sh -c "curl -fsSL https://deb.nodesource.com/setup_${line}.x | bash -"
     quietly "installing Node.js ${line}" as_root apt-get install -y -qq nodejs
     node_is_patched || fail "Node.js $(node -v 2>/dev/null || echo '?') is still missing the CVE-2026-111497 fix; install 22.23.4+, 24.22.1+ or 26.12.1+ and re-run"
+    step_done "Installed Node.js" "$(node -v)"
   fi
 
   package="${DL_PACKAGE:-directionally-local@${DL_VERSION:-latest}}"
-  say "Installing ${package}..."
+  step "Getting the installer"
   quietly "installing $package" as_root npm install -g --no-audit --no-fund --loglevel=error "$package"
+  step_done "Got the installer" "dl $(dl --version 2>/dev/null || echo "")"
 
   # Prompts read the terminal, not this piped script. Test by opening it: the device
   # node exists even when there's no controlling terminal.
+  # dl up continues the same screen, so it skips its own title.
+  export DL_TITLE_SHOWN=1
   if (exec </dev/tty) 2>/dev/null; then
     as_root directionally-local up </dev/tty
   else
