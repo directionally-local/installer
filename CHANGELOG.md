@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/directionally-local/installer/compare/v0.2.0...v0.3.0) (2026-10-28)
+
+
+### Features
+
+* start from the laptop: dl sets up your server over SSH, or runs agents on this computer ([e1e3411](https://github.com/directionally-local/installer/commit/e1e3411d476958f3cd95fa78a10392fd8afdafe6))
+
+
+### Bug Fixes
+
+* report a finished install.sh step under its starting label in plain output ([02e2e57](https://github.com/directionally-local/installer/commit/02e2e57c58264ed3b53cfd6561e88806c4e4545f))
+
 ## [0.2.0](https://github.com/directionally-local/installer/compare/v0.1.2...v0.2.0) (2026-10-28)
 
 
