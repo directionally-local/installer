@@ -35,8 +35,10 @@ describe("doctor", () => {
     system.hotcellKeys.clear();
     const broken = await doctor(system);
     const failed = broken.filter((check) => !check.ok);
-    assert.deepEqual(failed.map((check) => check.name), ["hotcell.service", "model key"]);
-    assert.match(formatChecks(broken), /✗ hotcell\.service[\s\S]*fix: journalctl -u hotcell\.service/);
+    assert.deepEqual(failed.map((check) => check.name), ["sandboxes", "model key"]);
+    // Fixes are dl commands, never Tailscale, systemd, or journalctl.
+    assert.match(formatChecks(broken), /✗ sandboxes[\s\S]*fix: dl logs hotcell · then dl up/);
+    assert.doesNotMatch(formatChecks(broken), /journalctl|systemctl|tailscale serve/);
   });
 });
 
@@ -46,7 +48,7 @@ describe("uninstall", () => {
     system.containers.push("abc123");
     await uninstall(system);
     assert.deepEqual([...system.enabled], ["docker.service"], "none of ours left enabled; Docker stays");
-    for (const unit of ["hotcell.service", "autopilot.service", "directionally-local-metadata-block.service"]) {
+    for (const unit of ["hotcell.service", "autopilot.service", "directionallylocal-metadata-block.service"]) {
       assert.equal(system.files.has(`${PATHS.units}/${unit}`), false, unit);
     }
     assert.equal(await system.exists(PATHS.root), false);
@@ -61,7 +63,7 @@ describe("uninstall", () => {
     await uninstall(system, { purge: true });
     for (const path of [PATHS.state, PATHS.githubEnv, PATHS.hotcellEnv, PATHS.asterConfig]) assert.equal(system.files.has(path), false, path);
     assert.ok(system.ran.includes("userdel autopilot") && system.ran.includes("userdel hotcell"));
-    assert.ok(system.ran.includes("docker image rm directionally-local-cell:2.2.0"));
+    assert.ok(system.ran.includes("docker image rm directionallylocal-cell:2.2.0"));
   });
 });
 
@@ -109,7 +111,9 @@ describe("cli", () => {
     assert.match(out, /dl up \[--dry-run\]/);
     assert.equal(await main(["launch"], io), 2);
     assert.match(err, /Unknown command "launch"/);
-    assert.equal(await main([], io), 2);
+    out = "";
+    assert.equal(await main([], io), 0, "bare dl explains itself, even off a server");
+    assert.match(out, /isn't set up on this machine[\s\S]*curl -fsSL https:\/\/directionallylocal\.run \| sh/);
     out = "";
     assert.equal(await main(["--version"], io), 0);
     assert.match(out, /^\d+\.\d+\.\d+\n$/);

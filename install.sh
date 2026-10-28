@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://directionallylocal.run | sh
 #
-# Installs Node.js 24 if needed and the directionally-local CLI (also `dl`), then runs
+# Installs Node.js 24 if needed and the directionallylocal CLI (also `dl`), then runs
 # `dl up`, which asks how to reach this server and for the model
 # key, and sets up Hotcell + Autopilot as services. Safe to run again.
 #
@@ -12,7 +12,7 @@
 set -eu
 
 say() { printf '%s\n' "$*"; }
-fail() { printf '\n  directionally-local: %s\n' "$*" >&2; exit 1; }
+fail() { printf '\n  directionallylocal: %s\n' "$*" >&2; exit 1; }
 
 # The same look as `dl up`: a step shows "·" while it runs and becomes "✓" when done.
 # Without a terminal (or with NO_COLOR) it's plain lines.
@@ -97,7 +97,7 @@ main() {
     step_done "Installed Node.js" "$(node -v)"
   fi
 
-  package="${DL_PACKAGE:-directionally-local@${DL_VERSION:-latest}}"
+  package="${DL_PACKAGE:-directionallylocal@${DL_VERSION:-latest}}"
   step "Getting the installer"
   quietly "installing $package" as_root npm install -g --no-audit --no-fund --loglevel=error "$package"
   step_done "Got the installer" "dl $(dl --version 2>/dev/null || echo "")"
@@ -107,9 +107,9 @@ main() {
   # dl up continues the same screen, so it skips its own title.
   export DL_TITLE_SHOWN=1
   if (exec </dev/tty) 2>/dev/null; then
-    as_root directionally-local up </dev/tty
+    as_root directionallylocal up </dev/tty
   else
-    as_root directionally-local up
+    as_root directionallylocal up
   fi
 }
 

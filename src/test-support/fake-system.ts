@@ -33,6 +33,12 @@ export class FakeSystem implements System {
   hotcellKeys = new Set<string>();
   memoryKb = 8 * 1024 * 1024;
   nodeVersion = "24.22.1";
+  /** What Autopilot's server CLI reports (aster token list / runs / pair list). */
+  laptops: Array<{ id: string; name: string; status: string; scopes: string[]; createdAt: string; lastUsedAt: string | null }> = [];
+  serverRuns: Array<Record<string, unknown>> = [];
+  pendingCodes: Array<{ code: string; name: string }> = [];
+  approved: string[] = [];
+  revoked: string[] = [];
   unattendedUpgrades = true;
   nodeFromNodeSource = true;
   serving = false;
@@ -45,6 +51,7 @@ export class FakeSystem implements System {
     this.tailscaleUp = options.tailscaleUp ?? false;
     this.files.set("/etc/os-release", { content: 'ID=ubuntu\nVERSION_ID="24.04"\nPRETTY_NAME="Ubuntu 24.04.1 LTS"\n', mode: 0o644 });
     this.dirs.add("/run/systemd/system");
+    this.dirs.add("/etc/update-motd.d");
   }
 
   get ran(): string[] {
@@ -135,6 +142,21 @@ export class FakeSystem implements System {
         if (args.includes("keys") && args.includes("add")) this.hotcellKeys.add(args[args.indexOf("add") + 1]!);
         if (args.includes("keys") && args.includes("ls")) return ok([...this.hotcellKeys].map((key) => `  ${key}  file\n`).join(""));
         if (args.includes("owner") && args.includes("link")) return ok(`${args.at(-1)}/api/v1/auth/claim?token=aster_claim_${"x".repeat(43)}\n`);
+        if (args.includes("token") && args.includes("list")) return ok(`${JSON.stringify(this.laptops)}\n`);
+        if (args.includes("token") && args.includes("revoke")) {
+          this.revoked.push(args.at(-1)!);
+          return ok(`Revoked credential ${args.at(-1)}\n`);
+        }
+        if (args.includes("runs") && args.includes("--json")) return ok(`${JSON.stringify(this.serverRuns)}\n`);
+        if (args.includes("pair") && args.includes("list")) {
+          return ok(this.pendingCodes.length ? this.pendingCodes.map((entry) => `${entry.code}  ${entry.name}  expires 2026-10-28T08:00:00.000Z`).join("\n") + "\n" : "No pairings waiting.\n");
+        }
+        if (args.includes("pair") && args.includes("approve")) {
+          const code = args.at(-1)!;
+          if (!this.pendingCodes.some((entry) => entry.code === code)) return fail("No pairing with that code.");
+          this.approved.push(code);
+          return ok("Approved. The device finishes signing in on its own.\n");
+        }
         if (args.includes("init")) this.dirs.add("/var/lib/autopilot/workspaces/default/.git");
         return ok();
       case "mktemp": return ok("/tmp/tmp.build\n");

@@ -1,4 +1,4 @@
-import { AUTOPILOT_PORT, NODE_AUTO_UPDATES, PATHS, SERVICES, USERS } from "./layout.js";
+import { AUTOPILOT_PORT, MOTD_SCRIPT, NODE_AUTO_UPDATES, PATHS, SERVICES, USERS } from "./layout.js";
 import { readState } from "./state.js";
 import type { System } from "./system.js";
 
@@ -8,7 +8,7 @@ export interface UninstallOptions {
 }
 
 /**
- * `directionally-local uninstall`: stops and removes every service and the installed
+ * `directionallylocal uninstall`: stops and removes every service and the installed
  * software. Data and secrets stay unless --purge, so a later `up` picks up where it was.
  * Docker and Tailscale stay installed; Tailscale only stops serving Autopilot.
  */
@@ -36,6 +36,7 @@ export async function uninstall(system: System, options: UninstallOptions = {}):
   await system.remove(PATHS.root);
   // Node.js stays installed, and so do Ubuntu's own automatic updates; only our addition goes.
   await system.remove(NODE_AUTO_UPDATES);
+  await system.remove(MOTD_SCRIPT);
 
   if (!options.purge) {
     say(`Removed the services and software. Kept configuration and data (${PATHS.stateDir}, ${PATHS.autopilotEtc}, ${PATHS.hotcellEtc}, /var/lib/{autopilot,hotcell}); --purge deletes them.`);
@@ -49,5 +50,5 @@ export async function uninstall(system: System, options: UninstallOptions = {}):
   for (const user of [USERS.autopilot, USERS.hotcell]) {
     if ((await system.probe("id", ["-u", user])).code === 0) await system.run("userdel", [user], { allowFailure: true });
   }
-  say("Removed everything directionally-local installed. Docker and Tailscale are still installed.");
+  say("Removed everything directionallylocal installed. Docker and Tailscale are still installed.");
 }

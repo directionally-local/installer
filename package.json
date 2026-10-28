@@ -1,11 +1,11 @@
 {
-  "name": "directionally-local",
+  "name": "directionallylocal",
   "version": "0.1.0",
   "description": "One-line server install for Directionally Local: Hotcell sandboxes and Autopilot, ready for autopilot --on",
   "type": "module",
   "bin": {
-    "directionally-local": "bin/directionally-local.mjs",
-    "dl": "bin/directionally-local.mjs"
+    "directionallylocal": "bin/directionallylocal.mjs",
+    "dl": "bin/directionallylocal.mjs"
   },
   "files": [
     "bin",

@@ -28,6 +28,8 @@ export async function readState(system: System): Promise<InstallState | undefine
 }
 
 export async function writeState(system: System, state: InstallState): Promise<void> {
-  await system.mkdir(PATHS.stateDir, { mode: 0o700 });
-  await system.writeFile(PATHS.state, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  // Readable by everyone: versions and the address aren't secret, and any login can see the
+  // status. Secrets in this directory (a Tailscale key, briefly) are written 0600.
+  await system.mkdir(PATHS.stateDir, { mode: 0o755 });
+  await system.writeFile(PATHS.state, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o644 });
 }

@@ -4,12 +4,13 @@ import { agentCapacity, detectHost, preflightProblems, type HostFacts } from "./
 import {
   AUTOPILOT_PORT, CELL_MEMORY_MB, GITHUB_PROXY_PORT, HOTCELL_EGRESS_PORT, HOTCELL_PORT, PATHS, SERVICES, USERS,
   AUTO_UPGRADES, NODE_AUTO_UPDATES, asterConfig, autoUpgrades, autopilotBin, autopilotEnv, autopilotUnit,
-  cellDockerfile, cellImage, githubEnv, hotcellBin, hotcellEnv, hotcellUnit, metadataBlockUnit, nodeAutoUpdates, parseEnvFile,
+  MOTD_SCRIPT, cellDockerfile, cellImage, githubEnv, hotcellBin, hotcellEnv, hotcellUnit, metadataBlockUnit, motdScript, nodeAutoUpdates, parseEnvFile,
 } from "./layout.js";
 import type { Prompter } from "./prompt.js";
 import { readState, writeState, type AccessMode, type InstallState } from "./state.js";
 import type { System } from "./system.js";
-import { PlainUi, type Ui } from "./ui.js";
+import { PlainUi, type SummaryItem, type Ui } from "./ui.js";
+import { ownerLink } from "./server-api.js";
 
 export interface UpOptions {
   prompter: Prompter;
@@ -188,15 +189,36 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
   };
   await writeState(system, state);
 
-  const ownerLink = await createOwnerLink(system, url);
+  const link = await ownerLink(system, url);
   const capacity = agentCapacity(facts, CELL_MEMORY_MB);
-  ui.ready(`Ready · fits ~${capacity} agent${capacity === 1 ? "" : "s"} at once (estimate)`, [
-    ...(ownerLink ? [{ label: "Open once in your browser, to approve laptops", value: ownerLink }] : []),
-    access === "tailscale"
-      ? { label: "On your laptop (signed in to the same tailnet)", value: `autopilot remote add ${url}` }
-      : { label: "On your laptop, after ssh -N -L 4096:127.0.0.1:4096 root@<this-server>", value: `autopilot remote add ${url}` },
-  ]);
-  return { url, ownerLink, capacity, state };
+  await installLoginStatus(system);
+  ui.ready("Ready", nextSteps({ url, ownerLink: link, access }), {
+    about: [
+      "This server now runs coding agents for you. Send it a task from your laptop:",
+      "it works in its own sandbox, opens a pull request, and keeps going while",
+      `your laptop is closed. It fits ~${capacity} at once (estimate).`,
+    ],
+    footer: "Forgot any of this? Type  dl  on this server.",
+  });
+  return { url, ownerLink: link, capacity, state };
+}
+
+/** What to do next, shown at the end of `dl up` and by `dl connect-laptop`. */
+export function nextSteps(input: { url: string; ownerLink: string | undefined; access: AccessMode }): SummaryItem[] {
+  const reach = input.access === "tailscale"
+    ? "On your laptop (signed in to the same tailnet)"
+    : `On your laptop, after: ssh -N -L ${AUTOPILOT_PORT}:127.0.0.1:${AUTOPILOT_PORT} root@<this-server>`;
+  return [
+    ...(input.ownerLink ? [{ label: "Open this once in your laptop's browser, so it can approve laptops", value: input.ownerLink }] : []),
+    { label: `${reach}, connect it`, value: `npm install -g directionallylocal\ndl connect ${input.url}` },
+    { label: "Send it a task, from inside a GitHub repository", value: `dl run "fix the flaky checkout test"\ndl runs                 see progress and pull requests` },
+  ];
+}
+
+/** A short status line when someone logs in, so a server visited weeks later explains itself. */
+async function installLoginStatus(system: System): Promise<void> {
+  if (!(await system.exists("/etc/update-motd.d"))) return;
+  await system.writeFile(MOTD_SCRIPT, motdScript(), { mode: 0o755 });
 }
 
 function accessMode(env: NodeJS.ProcessEnv, previous: InstallState | undefined): AccessMode {
@@ -299,7 +321,7 @@ export async function validateGitHubToken(token: string, fetchImpl: typeof fetch
   if (!/^(github_pat_|ghp_|gho_)[A-Za-z0-9_]{20,}$/.test(token)) return { problem: "That doesn't look like a GitHub token (github_pat_… or ghp_…)." };
   if (!fetchImpl) return {};
   try {
-    const response = await fetchImpl("https://api.github.com/user", { headers: { Authorization: `Bearer ${token}`, "User-Agent": "directionally-local" } });
+    const response = await fetchImpl("https://api.github.com/user", { headers: { Authorization: `Bearer ${token}`, "User-Agent": "directionallylocal" } });
     if (response.status === 401) return { problem: "GitHub rejected that token." };
     if (response.ok) {
       const user = await response.json() as { login?: string };
@@ -389,7 +411,7 @@ async function ensureWorkspace(system: System): Promise<void> {
 /** Builds the sandbox image unless it exists; returns whether it already did. */
 async function ensureCellImage(system: System, image: string, autopilotVersion: string): Promise<boolean> {
   if ((await system.probe("docker", ["image", "inspect", image])).code === 0) return true;
-  const dir = system.dryRun ? "/tmp/directionally-local-image" : (await system.run("mktemp", ["-d"])).stdout.trim();
+  const dir = system.dryRun ? "/tmp/directionallylocal-image" : (await system.run("mktemp", ["-d"])).stdout.trim();
   try {
     await system.run("npm", ["pack", `autopilot-ai@${autopilotVersion}`, "--pack-destination", dir, "--silent"]);
     await system.run("sh", ["-c", `mv ${dir}/autopilot-ai-*.tgz ${dir}/autopilot.tgz`]);
@@ -406,7 +428,7 @@ async function allowBridgePorts(system: System, bridgeIp: string): Promise<void>
   const status = await system.probe("ufw", ["status"]);
   if (status.code !== 0 || !/Status: active/.test(status.stdout)) return;
   for (const port of [HOTCELL_EGRESS_PORT, GITHUB_PROXY_PORT]) {
-    await system.run("ufw", ["allow", "in", "on", "docker0", "to", bridgeIp, "port", String(port), "proto", "tcp", "comment", "directionally-local sandboxes"]);
+    await system.run("ufw", ["allow", "in", "on", "docker0", "to", bridgeIp, "port", String(port), "proto", "tcp", "comment", "directionallylocal sandboxes"]);
   }
 }
 
@@ -459,15 +481,6 @@ async function serveOverTailscale(system: System): Promise<string> {
   return `https://${dnsName}`;
 }
 
-async function createOwnerLink(system: System, url: string): Promise<string | undefined> {
-  const result = await system.run("runuser", [
-    "-u", USERS.autopilot, "--", "env", `HOME=${PATHS.autopilotHome}`, `AUTOPILOT_ASTER_CONFIG=${PATHS.asterConfig}`,
-    `AUTOPILOT_ASTER_DB=${PATHS.autopilotHome}/aster.db`, "/usr/bin/node", autopilotBin(), "aster", "owner", "link", "--url", url,
-  ], { allowFailure: true, describe: "autopilot aster owner link (as autopilot)", secretOutput: true });
-  const link = result.stdout.trim().split("\n").at(-1);
-  return result.code === 0 && link?.startsWith("http") ? link : undefined;
-}
-
 async function waitUntil(system: System, sleep: (ms: number) => Promise<void>, what: string, ready: () => Promise<boolean>, unit = what.toLowerCase()): Promise<void> {
   if (system.dryRun) return;
   for (let attempt = 0; attempt < 60; attempt++) {
@@ -478,5 +491,5 @@ async function waitUntil(system: System, sleep: (ms: number) => Promise<void>, w
 }
 
 function machineName(): string {
-  return hostname().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 63) || "directionally-local";
+  return hostname().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 63) || "directionallylocal";
 }
