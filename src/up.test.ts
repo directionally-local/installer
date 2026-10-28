@@ -44,6 +44,9 @@ describe("directionally-local up", () => {
     assert.ok(system.ran.some((command) => command.startsWith("docker build --pull ")), "fresh base layers, never a stale cached Node");
     for (const unit of ["directionally-local-metadata-block.service", "hotcell.service", "autopilot.service"]) assert.ok(system.enabled.has(unit), unit);
     assert.ok(system.ran.includes("tailscale serve --bg --https=443 http://127.0.0.1:4096"));
+    // The auth key is used before the long steps, so a later failure never re-asks for it.
+    const joined = system.ran.findIndex((command) => command.startsWith("tailscale up"));
+    assert.ok(joined >= 0 && joined < system.ran.findIndex((command) => command.startsWith("npm install")));
 
     // The model key reaches Hotcell over stdin only; the GitHub token only its 0640 env file.
     const keysAdd = system.commands.find(({ args }) => args.includes("keys") && args.includes("add"))!;
@@ -70,6 +73,23 @@ describe("directionally-local up", () => {
     const state = await readState(system);
     assert.equal(state?.release, "autopilot-2.2.0_hotcell-0.1.26");
     assert.deepEqual(state?.access, { mode: "tailscale", url: "https://box.tail1234.ts.net" });
+  });
+
+  it("asks nothing again after a failure past the questions", async () => {
+    const system = new FakeSystem();
+    system.dockerInstalled = true;
+    system.dockerSocket = true;
+    const run = system.run.bind(system);
+    let failBuild = true;
+    system.run = async (command, args, options) => {
+      if (failBuild && command === "docker" && args[0] === "build") throw new Error("Cannot connect to the Docker daemon");
+      return run(command, args, options);
+    };
+    await assert.rejects(() => up(system, { prompter: answers(), fetchImpl: fetchOk, sleep: noSleep }), /Cannot connect/);
+    failBuild = false;
+    const again = new ScriptedPrompter({});
+    await up(system, { prompter: again, fetchImpl: fetchOk, sleep: noSleep });
+    assert.deepEqual(again.asked, [], "Tailscale, model key, and GitHub are all remembered");
   });
 
   it("re-runs as a repair: no questions, same secrets, nothing reinstalled", async () => {
