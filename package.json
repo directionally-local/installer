@@ -1,6 +1,6 @@
 {
   "name": "directionallylocal",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Directionally Local: background coding agents on your own server. One-line server install, and the dl command for your server and laptop.",
   "homepage": "https://directionallylocal.com",
   "repository": {
