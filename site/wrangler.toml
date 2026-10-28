@@ -1,0 +1,8 @@
+# The install script at https://directionallylocal.run (deploy: npx wrangler deploy -c site/wrangler.toml).
+# Only the bare domain is routed here; <name>.directionallylocal.run are users' instant addresses.
+name = "directionallylocal-run"
+main = "index.ts"
+compatibility_date = "2026-10-01"
+workers_dev = false
+routes = [{ pattern = "directionallylocal.run", custom_domain = true }]
+rules = [{ type = "Text", globs = ["**/*.sh"], fallthrough = true }]
