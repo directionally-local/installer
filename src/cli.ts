@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { doctor, formatChecks } from "./doctor.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, serverHome, serverRunsCommand } from "./home.js";
 import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, watch } from "./laptop/commands.js";
+import { localCommand } from "./local/cli.js";
 import { TtyPrompter } from "./prompt.js";
 import { readState } from "./state.js";
 import { DryRunSystem, RealSystem, type System } from "./system.js";
@@ -24,6 +25,8 @@ On your laptop:
   dl pull ID              check out a task's branch here
   dl servers              connected servers (dl servers remove NAME)
   run options: --server NAME, -m MODEL, --repo OWNER/NAME, --detach
+  dl local status         agents running on this computer: running?, where, how many fit
+  dl local uninstall [--purge]   stop and remove them (--purge also deletes keys and data)
 
 On the server:
   dl                      what this is, whether it's healthy, laptops, and runs
@@ -209,6 +212,8 @@ export async function main(
         if (command === "runs") return await serverRunsCommand(system, io.out, colors);
         return await logsCommand(system, [...rest, ...(values.follow ? ["-f"] : [])]);
       }
+      case "local":
+        return await localCommand(parsed.positionals.slice(1), { purge: Boolean(values.purge) }, io, colors, ui);
       case "uninstall":
         await uninstall(system, { purge: Boolean(values.purge) });
         return 0;
