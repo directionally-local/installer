@@ -1,11 +1,14 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { main } from "./cli.js";
+import { Readable } from "node:stream";
+import { main, readAnswers } from "./cli.js";
 import { agentCapacity, parseDfFreeGb, parseInterfaceIp, parseMemTotalMb, parseOsRelease } from "./detect.js";
 import { doctor, formatChecks } from "./doctor.js";
 import { PATHS, autopilotUnit, envFile, hotcellUnit, parseEnvFile } from "./layout.js";
 import { ScriptedPrompter } from "./prompt.js";
+import { readState, writeState } from "./state.js";
 import { FakeSystem } from "./test-support/fake-system.js";
 import { uninstall } from "./uninstall.js";
 import { up } from "./up.js";
@@ -40,6 +43,20 @@ describe("doctor", () => {
     // Fixes are dl commands, never Tailscale, systemd, or journalctl.
     assert.match(formatChecks(broken), /✗ sandboxes[\s\S]*fix: dl logs hotcell · then dl up/);
     assert.doesNotMatch(formatChecks(broken), /journalctl|systemctl|tailscale serve/);
+  });
+});
+
+describe("doctor over SSH access", () => {
+  it("skips the Tailscale checks and says how it's reached", async () => {
+    const system = await installed();
+    const state = (await readState(system))!;
+    await writeState(system, { ...state, access: { mode: "ssh", url: "http://127.0.0.1:4096" } });
+    const commands = system.commands.length;
+    const checks = await doctor(system);
+    assert.deepEqual(checks.filter((check) => !check.ok).map((check) => check.name), []);
+    assert.ok(!checks.some((check) => check.name === "private access" || check.name === "reachable"));
+    assert.match(checks.find((check) => check.name === "installed")!.detail, /, over SSH from your laptop$/);
+    assert.equal(system.commands.length, commands, "doctor only probes");
   });
 });
 
@@ -126,5 +143,37 @@ describe("cli", () => {
     out = "";
     assert.equal(await main(["--version"], io), 0);
     assert.match(out, /^\d+\.\d+\.\d+\n$/);
+  });
+
+  it("lists the laptop's setup commands in help and checks their flags", async () => {
+    let out = "";
+    let err = "";
+    const io = { out: (text: string) => { out += text; }, err: (text: string) => { err += text; } };
+    assert.equal(await main(["help"], io), 0);
+    assert.match(out, /Used by the laptop's setup[\s\S]*dl up --access ssh --answers-stdin --events json[\s\S]*dl up --needs \[--access ssh\][\s\S]*dl pair --name NAME --json/);
+    assert.equal(await main(["up", "--events", "xml"], io), 2);
+    assert.match(err, /--events takes json/);
+    assert.equal(await main(["up", "--access", "public", "--needs"], io), 2);
+    assert.match(err, /--access must be tailscale, loopback or ssh/);
+    err = "";
+    assert.equal(await main(["pair", "--name", "MacBook"], io), 2, "the JSON is the only form");
+    assert.match(err, /Usage: dl pair --name NAME --json/);
+    assert.equal(await main(["pair", "--json"], io), 2);
+  });
+
+  it("dl pair off a server says it isn't installed", { skip: existsSync(PATHS.state) && "this machine is a server" }, async () => {
+    let err = "";
+    const io = { out: () => {}, err: (text: string) => { err += text; } };
+    assert.equal(await main(["pair", "--name", "MacBook", "--json"], io), 1);
+    assert.match(err, /isn't installed on this server yet; run dl up first/);
+  });
+
+  it("reads the stdin answers to the end, or to the first line that parses", async () => {
+    assert.equal(await readAnswers(Readable.from(['{"openrouterKey":', '"sk-or-x"}'])), '{"openrouterKey":"sk-or-x"}');
+    // A laptop that leaves the channel open: the object ends a line, so reading stops there.
+    const open = new Readable({ read() {} });
+    open.push('{"githubToken":\n"ghp_x"}\n');
+    assert.equal(await readAnswers(open), '{"githubToken":\n"ghp_x"}\n');
+    await assert.rejects(readAnswers(Object.assign(Readable.from([]), { isTTY: true })), /from a pipe, not a terminal/);
   });
 });

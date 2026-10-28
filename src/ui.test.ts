@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { PlainUi, TerminalUi } from "./ui.js";
+import { JsonUi, PlainUi, TerminalUi } from "./ui.js";
 
 /** Replays what TerminalUi wrote onto a virtual screen: the frame a user would see. */
 function screen(output: string): string[] {
@@ -94,5 +94,50 @@ describe("plain UI", () => {
     ui.ready("Ready", [{ label: "On your laptop", value: "autopilot remote add https://x" }]);
     assert.equal(out, ".. Setting up Docker\nok Setting up Docker: already running\n\nReady\n  On your laptop: autopilot remote add https://x\n");
     assert.doesNotMatch(out, /\x1b/);
+  });
+});
+
+describe("JSON UI", () => {
+  it("writes one parseable event per line, nothing else, and ends a failure with an error event", () => {
+    let out = "";
+    const ui = new JsonUi((text) => { out += text; });
+    ui.title("Directionally Local");
+    ui.line("done", "Checked this machine", "Ubuntu 24.04 · 4 CPU");
+    ui.line("done", "OpenRouter API key", "kept in Hotcell · from your laptop");
+    ui.plan([{ id: "docker", label: "Setting up Docker" }, { id: "access", label: "Starting the API" }]);
+    ui.start("docker");
+    ui.done("docker", "already running");
+    ui.warn("Node.js isn't from NodeSource here");
+    ui.questions("Two keys");
+    ui.answered("GitHub token", "signed in as octo");
+    ui.rejected("That doesn't look like a GitHub token.");
+    ui.ready("Ready", [{ label: "On your laptop", value: 'dl run "fix it"' }]);
+    ui.ready("Ready", [], { about: ["line one"], footer: "Type dl" });
+    ui.start("access");
+    ui.fail("access", "Autopilot didn't come up\nsecond line");
+    ui.error("Autopilot didn't come up\nsecond line");
+    ui.finish();
+
+    assert.ok(out.endsWith("\n"));
+    const lines = out.slice(0, -1).split("\n");
+    const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.deepEqual(events, [
+      { event: "title", text: "Directionally Local" },
+      { event: "line", status: "done", label: "Checked this machine", detail: "Ubuntu 24.04 · 4 CPU" },
+      { event: "line", status: "done", label: "OpenRouter API key", detail: "kept in Hotcell · from your laptop" },
+      { event: "plan", steps: [{ id: "docker", label: "Setting up Docker" }, { id: "access", label: "Starting the API" }] },
+      { event: "start", id: "docker" },
+      { event: "done", id: "docker", detail: "already running" },
+      { event: "warn", text: "Node.js isn't from NodeSource here" },
+      { event: "questions", text: "Two keys" },
+      { event: "answered", label: "GitHub token", detail: "signed in as octo" },
+      { event: "warn", text: "That doesn't look like a GitHub token." },
+      { event: "ready", headline: "Ready", items: [{ label: "On your laptop", value: 'dl run "fix it"' }] },
+      { event: "ready", headline: "Ready", items: [], about: ["line one"], footer: "Type dl" },
+      { event: "start", id: "access" },
+      { event: "fail", id: "access", message: "Autopilot didn't come up\nsecond line" },
+      { event: "error", message: "Autopilot didn't come up\nsecond line" },
+    ], "a multi-line message stays inside one event");
+    assert.equal(ui.prompt("GitHub token"), "GitHub token", "prompts are never drawn");
   });
 });

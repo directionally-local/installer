@@ -1,8 +1,18 @@
 import { PATHS } from "./layout.js";
 import type { System } from "./system.js";
 
-/** tailscale: private HTTPS on the tailnet. loopback: no exposure; reach it over an SSH tunnel. */
-export type AccessMode = "tailscale" | "loopback";
+/**
+ * tailscale: private HTTPS on the tailnet. loopback: no exposure; reach it over an SSH tunnel.
+ * ssh: like loopback, but set up from the laptop, which keeps its own SSH tunnel to it.
+ */
+export type AccessMode = "tailscale" | "loopback" | "ssh";
+
+export const ACCESS_MODES: readonly AccessMode[] = ["tailscale", "loopback", "ssh"];
+
+/** How people reach this server, in words (the address alone means little for a tunnel). */
+export function describeAccess(access: InstallState["access"]): string {
+  return access.mode === "ssh" ? "over SSH from your laptop" : access.url;
+}
 
 /** What `up` installed, so `doctor`, `status`, and `uninstall` know what's there. */
 export interface InstallState {

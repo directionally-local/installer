@@ -4,7 +4,8 @@ import { PATHS, parseEnvFile } from "./layout.js";
 import { ScriptedPrompter } from "./prompt.js";
 import { readState } from "./state.js";
 import { FakeSystem } from "./test-support/fake-system.js";
-import { up, validateGitHubToken, validateOpenRouterKey } from "./up.js";
+import { JsonUi } from "./ui.js";
+import { needs, parseAccessMode, parseProvidedAnswers, up, validateGitHubToken, validateOpenRouterKey } from "./up.js";
 
 const OPENROUTER_KEY = `sk-or-v1-${"a".repeat(40)}`;
 const GITHUB_TOKEN = `github_pat_${"b".repeat(40)}`;
@@ -21,6 +22,29 @@ const fetchOk = (async (url: string | URL | Request) =>
   String(url).includes("api.github.com") ? Response.json({ login: "octo" }) : Response.json({ data: {} })) as typeof fetch;
 
 const noSleep = async () => {};
+
+/** For the laptop's mode: any question is a bug, since there's no one to answer it. */
+const neverAsk = {
+  choose: async () => { throw new Error("asked a question"); },
+  text: async () => { throw new Error("asked a question"); },
+  secret: async () => { throw new Error("asked a question"); },
+};
+
+/** Everything a FakeSystem has, to prove a command changed nothing. */
+function snapshot(system: FakeSystem) {
+  return JSON.stringify({
+    files: [...system.files], dirs: [...system.dirs], users: [...system.users], images: [...system.images], enabled: [...system.enabled],
+    keys: [...system.hotcellKeys], ran: system.ran, logs: system.logs, docker: system.docker, tailscaleUp: system.tailscaleUp, serving: system.serving,
+  });
+}
+
+/** Runs `up` the way the laptop does: ssh access, answers given, progress as JSON events. */
+async function laptopUp(system: FakeSystem, answers: Parameters<typeof up>[1]["answers"], env: NodeJS.ProcessEnv = {}) {
+  let out = "";
+  const result = up(system, { prompter: neverAsk, ui: new JsonUi((text) => { out += text; }), access: "ssh", answers, env, fetchImpl: fetchOk, sleep: noSleep });
+  const events = () => out.trimEnd().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+  return { result, events, out: () => out };
+}
 
 describe("directionallylocal up", () => {
   it("installs everything on a fresh Ubuntu server and keeps secrets out of argv and logs", async () => {
@@ -156,5 +180,110 @@ describe("directionallylocal up", () => {
     assert.match((await validateGitHubToken(GITHUB_TOKEN, rejected)).problem ?? "", /rejected/);
     assert.deepEqual(await validateGitHubToken(GITHUB_TOKEN, fetchOk), { detail: "signed in as octo" });
     assert.ok(system.commands.length === 0);
+  });
+});
+
+describe("the laptop's setup over SSH", () => {
+  it("installs with ssh access from answers on stdin: no questions, no Tailscale, progress as JSON", async () => {
+    const system = new FakeSystem();
+    // The environment's answers are ignored when the laptop sends its own.
+    const run = await laptopUp(system, { openrouterKey: OPENROUTER_KEY, githubToken: GITHUB_TOKEN }, { DL_OPENROUTER_API_KEY: "sk-or-ignored", DL_TAILSCALE_AUTH_KEY: TAILSCALE_KEY });
+    const result = await run.result;
+
+    assert.equal(result.url, "http://127.0.0.1:4096");
+    assert.equal(result.ownerLink, undefined, "the laptop pairs itself; no owner link is made");
+    assert.ok(!system.ran.some((command) => command.startsWith("tailscale") || command.includes("tailscale.com")), "no Tailscale at all");
+    assert.ok(!system.ran.some((command) => command.includes("owner link")));
+    assert.deepEqual((await readState(system))?.access, { mode: "ssh", url: "http://127.0.0.1:4096" });
+    assert.equal(parseEnvFile(system.files.get(PATHS.autopilotEnv)?.content).AUTOPILOT_PUBLIC_URL, "http://127.0.0.1:4096");
+    assert.equal(system.commands.find(({ args }) => args.includes("keys") && args.includes("add"))?.input, OPENROUTER_KEY);
+    assert.equal(parseEnvFile(system.files.get(PATHS.githubEnv)?.content).GITHUB_TOKEN, GITHUB_TOKEN);
+
+    const events = run.events();
+    assert.deepEqual(events[0], { event: "title", text: "Directionally Local" });
+    assert.ok(events.some((event) => event.event === "line" && event.label === "OpenRouter API key" && event.detail === "kept in Hotcell · from your laptop"));
+    assert.ok(events.some((event) => event.event === "line" && event.label === "GitHub token" && event.detail === "signed in as octo · from your laptop"));
+    assert.ok(!events.some((event) => event.event === "questions"));
+    const plan = events.find((event) => event.event === "plan") as { steps: Array<{ id: string }> };
+    assert.deepEqual(plan.steps.map((step) => step.id), ["docker", "software", "image", "services", "access"]);
+    assert.deepEqual(events.at(-1), { event: "ready", headline: "Ready", items: [{ label: "On your laptop, from inside a GitHub repository", value: 'dl run "fix the flaky checkout test"' }] });
+    for (const secret of [OPENROUTER_KEY, GITHUB_TOKEN]) {
+      assert.ok(!run.out().includes(secret), "no secret in the events");
+      assert.ok(!system.ran.some((command) => command.includes(secret)), "no secret in any command line");
+      assert.ok(!system.logs.some((line) => line.includes(secret)), "no secret in the log");
+    }
+    assert.deepEqual(system.logs, [], "with a UI given, nothing else is printed");
+
+    // A repair needs nothing: what the server has is kept.
+    const again = await laptopUp(system, {});
+    await again.result;
+    assert.equal(again.events().at(-1)?.event, "ready");
+  });
+
+  it("fails before changing anything when a required answer is missing or invalid", async () => {
+    const system = new FakeSystem();
+    const missing = await laptopUp(system, { openrouterKey: OPENROUTER_KEY });
+    await assert.rejects(missing.result, /This server needs a GitHub token and none was given by your laptop\./);
+    assert.ok(missing.events().some((event) => event.event === "line" && event.status === "failed" && event.label === "GitHub token"));
+
+    const invalid = await laptopUp(system, { openrouterKey: "sk-proj-nope", githubToken: GITHUB_TOKEN });
+    await assert.rejects(invalid.result, /doesn't look like an OpenRouter key/);
+    assert.deepEqual(system.commands, [], "only probes ran");
+    assert.equal(system.files.has(PATHS.state), false);
+  });
+
+  it("switching an install from Tailscale to ssh stops publishing it on the tailnet", async () => {
+    const system = new FakeSystem();
+    await up(system, { prompter: answers(), fetchImpl: fetchOk, sleep: noSleep });
+    assert.equal(system.serving, true);
+    await (await laptopUp(system, {})).result;
+    assert.equal(system.serving, false);
+    assert.deepEqual((await readState(system))?.access, { mode: "ssh", url: "http://127.0.0.1:4096" });
+  });
+
+  it("keeps loopback access as before", async () => {
+    const system = new FakeSystem();
+    const result = await up(system, { prompter: answers(), env: { DL_ACCESS: "loopback" }, fetchImpl: fetchOk, sleep: noSleep });
+    assert.equal(result.url, "http://127.0.0.1:4096");
+    assert.deepEqual((await readState(system))?.access, { mode: "loopback", url: "http://127.0.0.1:4096" });
+    assert.ok(!system.ran.some((command) => command.startsWith("tailscale")));
+    assert.ok(system.logs.some((line) => line.includes("ssh -N -L 4096:127.0.0.1:4096 root@<this-server>")));
+    assert.ok(result.ownerLink, "the owner link is still made for loopback");
+  });
+
+  it("names the access mode from --access or DL_ACCESS, and refuses others", async () => {
+    assert.equal(parseAccessMode("ssh"), "ssh");
+    assert.throws(() => parseAccessMode("public"), /--access must be tailscale, loopback or ssh \(got "public"\)/);
+    const system = new FakeSystem();
+    await assert.rejects(up(system, { prompter: neverAsk, env: { DL_ACCESS: "public" }, fetchImpl: fetchOk, sleep: noSleep }), /DL_ACCESS must be tailscale, loopback or ssh/);
+    // The flag wins over the environment.
+    assert.deepEqual(await needs(new FakeSystem(), { access: "ssh", env: { DL_ACCESS: "tailscale" } }), ["openrouter", "github"]);
+  });
+
+  it("parses the stdin answers without ever quoting them", () => {
+    assert.deepEqual(parseProvidedAnswers(`{"openrouterKey":"${OPENROUTER_KEY}","githubToken":"${GITHUB_TOKEN}","extra":1}\n`), { openrouterKey: OPENROUTER_KEY, githubToken: GITHUB_TOKEN });
+    assert.deepEqual(parseProvidedAnswers("{}"), {});
+    for (const bad of [`{"openrouterKey":"${OPENROUTER_KEY}"`, `["${OPENROUTER_KEY}"]`, "", `{"githubToken":42}`]) {
+      assert.throws(() => parseProvidedAnswers(bad), (error: Error) => !error.message.includes(OPENROUTER_KEY) && /stdin/.test(error.message));
+    }
+  });
+
+  it("--needs lists what a fresh machine lacks, and nothing once installed, changing nothing", async () => {
+    const fresh = new FakeSystem();
+    const before = snapshot(fresh);
+    assert.deepEqual(await needs(fresh, { access: "ssh" }), ["openrouter", "github"]);
+    assert.deepEqual(await needs(fresh, { env: {} }), ["tailscale", "openrouter", "github"], "tailscale is the default access on a fresh machine");
+    assert.deepEqual(await needs(new FakeSystem({ tailscale: true, tailscaleUp: true }), { access: "tailscale" }), ["openrouter", "github"], "already on a tailnet");
+    assert.equal(snapshot(fresh), before, "nothing changed");
+
+    const installed = new FakeSystem();
+    await (await laptopUp(installed, { openrouterKey: OPENROUTER_KEY, githubToken: GITHUB_TOKEN })).result;
+    const after = snapshot(installed);
+    assert.deepEqual(await needs(installed, { env: {} }), [], "ssh is remembered from the state");
+    assert.deepEqual(await needs(installed, { access: "tailscale" }), ["tailscale"]);
+    installed.hotcellKeys.clear();
+    assert.deepEqual(await needs(installed, { access: "ssh" }), ["openrouter"]);
+    installed.hotcellKeys.add("openrouter");
+    assert.equal(snapshot(installed), after, "nothing changed");
   });
 });

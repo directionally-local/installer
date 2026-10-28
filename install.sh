@@ -8,6 +8,7 @@
 # key, and sets up Hotcell + Autopilot as services. Safe to run again.
 #
 # Unattended: export DL_TAILSCALE_AUTH_KEY, DL_OPENROUTER_API_KEY and DL_GITHUB_TOKEN first.
+# Install only (the laptop's setup, which then runs `dl up` itself over SSH): DL_INSTALL_ONLY=1.
 # Pin a version: DL_VERSION=0.1.0. Install from a local tarball: DL_PACKAGE=/path/to.tgz.
 set -eu
 
@@ -135,6 +136,12 @@ main() {
   step "Getting the installer"
   quietly "installing $package" as_root npm install -g --no-audit --no-fund --loglevel=error "$package"
   step_done "Got the installer" "dl $(dl --version 2>/dev/null || echo "")"
+
+  # The laptop's setup stops here: it asks for the keys itself and runs `dl up` next,
+  # with its own progress display.
+  if [ "${DL_INSTALL_ONLY:-}" = "1" ]; then
+    return 0
+  fi
 
   # Prompts read the terminal, not this piped script. Test by opening it: the device
   # node exists even when there's no controlling terminal.
