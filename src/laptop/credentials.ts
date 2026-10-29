@@ -73,7 +73,7 @@ export async function gatherKeys(needs: readonly Need[], input: { ui: Ui; prompt
   return answers;
 }
 
-async function githubToken({ ui, prompter, sources }: { ui: Ui; prompter: Prompter; sources: KeySources }): Promise<string> {
+export async function githubToken({ ui, prompter, sources }: { ui: Ui; prompter: Prompter; sources: KeySources }): Promise<string> {
   const fromCli = (await sources.gh().catch(() => undefined))?.trim();
   if (fromCli) {
     const checked = await validateGitHubToken(fromCli, sources.fetch);
@@ -94,7 +94,7 @@ async function githubToken({ ui, prompter, sources }: { ui: Ui; prompter: Prompt
   });
 }
 
-async function openrouterKey({ ui, prompter, sources }: { ui: Ui; prompter: Prompter; sources: KeySources }): Promise<string> {
+export async function openrouterKey({ ui, prompter, sources }: { ui: Ui; prompter: Prompter; sources: KeySources }): Promise<string> {
   const candidates: Array<{ key: string; question: string; from: string }> = [];
   const fromEnv = sources.env.OPENROUTER_API_KEY?.trim();
   if (fromEnv) candidates.push({ key: fromEnv, question: "Use the OpenRouter key in OPENROUTER_API_KEY?", from: "from OPENROUTER_API_KEY" });

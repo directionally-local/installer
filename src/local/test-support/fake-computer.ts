@@ -25,6 +25,8 @@ export class FakeComputer implements System {
   readonly containers: Array<{ id: string; labels: string[] }> = [];
   /** launchd labels or systemd units that are running. */
   readonly running = new Set<string>();
+  /** Services restarted in place (launchctl kickstart -k, systemctl --user restart), in order. */
+  readonly restarted: string[] = [];
   /** Ports something else on this computer listens on. */
   readonly busy = new Set<number>();
   readonly credentials: Array<{ id: string; name: string; status: string; token: string; expiresAt: number }> = [];
@@ -136,7 +138,12 @@ export class FakeComputer implements System {
         this.files.set(`${home}/keys.json`, { content: "{}", mode: 0o600 });
         return ok("stored\n");
       }
-      if (args[1] === "keys" && args[2] === "ls") return !this.files.has(`${options.env?.HOTCELL_HOME ?? ""}/keys.json`) ? ok("") : ok([...this.hotcellKeys.keys()].map((key) => `  ${key}  file\n`).join(""));
+      if (args[1] === "keys" && args[2] === "ls") {
+        if (!this.files.has(`${options.env?.HOTCELL_HOME ?? ""}/keys.json`)) return ok("");
+        // Like Hotcell's own listing: a header, then each provider with its masked value.
+        const mask = (value: string) => value.length <= 8 ? "•".repeat(Math.max(4, value.length)) : `${value.slice(0, 5)}…${value.slice(-2)}`;
+        return ok(`PROVIDER  KEY           SOURCE\n${[...this.hotcellKeys].map(([key, value]) => `${key.padEnd(8)}  ${mask(value).padEnd(12)}  file\n`).join("")}`);
+      }
       return ok();
     }
     if (command.endsWith("/node") && args[0]?.endsWith("autopilot-ai/bin/autopilot.mjs")) {
@@ -173,7 +180,10 @@ export class FakeComputer implements System {
       case "ip": return this.bridgeIp ? ok(`4: docker0    inet ${this.bridgeIp}/16 brd 172.17.255.255 scope global docker0\n`) : fail("no docker0");
       case "systemctl":
         if (args[1] === "is-system-running") return this.systemdUser ? ok("running\n") : fail("Failed to connect to bus");
-        if (args[1] === "restart") this.running.add(args[2]!);
+        if (args[1] === "restart") {
+          this.running.add(args[2]!);
+          this.restarted.push(args[2]!);
+        }
         if (args[1] === "disable" && args[2] === "--now") this.running.delete(args[3]!);
         if (args[1] === "is-active") return ok(this.running.has(args[2]!) ? "active\n" : "inactive\n");
         return ok();
@@ -188,6 +198,13 @@ export class FakeComputer implements System {
         if (args[0] === "bootout") {
           const label = args[1]!.split("/").at(-1)!;
           return this.running.delete(label) ? ok() : fail("Boot-out failed: 3: No such process");
+        }
+        if (args[0] === "kickstart") {
+          // -k restarts a loaded service; one that isn't loaded can't be kickstarted.
+          const label = args.at(-1)!.split("/").at(-1)!;
+          if (!this.running.has(label)) return fail("Could not find service");
+          this.restarted.push(label);
+          return ok();
         }
         if (args[0] === "print") {
           const label = args[1]!.split("/").at(-1)!;

@@ -390,7 +390,7 @@ async function openDockerApp(ctx: Context, facts: ComputerFacts, options: LocalO
   return facts;
 }
 
-function hotcellCliEnv(paths: LocalPaths): Record<string, string> {
+export function hotcellCliEnv(paths: LocalPaths): Record<string, string> {
   return { HOME: paths.hotcellHome, HOTCELL_HOME: paths.hotcellHome, HOTCELL_KEYSTORE: "file" };
 }
 

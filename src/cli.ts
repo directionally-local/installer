@@ -2,9 +2,11 @@ import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { doctor, formatChecks } from "./doctor.js";
+import { serverKeysCommand } from "./keys.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
 import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, watch } from "./laptop/commands.js";
 import { loadRemotes } from "./laptop/config.js";
+import { keys } from "./laptop/keys.js";
 import { setup } from "./laptop/setup.js";
 import { localCommand } from "./local/cli.js";
 import { setUpOnThisComputer } from "./local/setup.js";
@@ -29,6 +31,7 @@ On your laptop:
   dl watch ID             follow a task      dl cancel ID   stop one
   dl pull ID              check out a task's branch here
   dl servers              connected servers (dl servers remove NAME)
+  dl keys [openrouter|github]   which keys are set, or replace one (--server NAME)
   run options: --server NAME, -m MODEL, --repo OWNER/NAME, --detach
   dl local status         agents running on this computer: running?, where, how many fit
   dl local uninstall [--purge]   stop and remove them (--purge also deletes keys and data)
@@ -42,6 +45,7 @@ On the server:
   dl runs                 tasks running or done, with their pull requests
   dl logs [hotcell|autopilot] [-f]   the services' logs
   dl doctor               check every part, with a fix for each problem
+  dl keys [set openrouter|github]   which keys are set, or replace one (hidden input)
   dl uninstall [--purge]  remove everything (--purge also removes config and data)
 
 up options:
@@ -63,6 +67,7 @@ Used by the laptop's setup (over SSH, as root):
                               install with the keys as one JSON object on stdin; progress as JSON lines
   dl up --needs [--access ssh]   which keys dl up would still need, as JSON; changes nothing
   dl pair --name NAME --json     a credential for that laptop, as JSON
+  dl keys set openrouter|github --stdin --json   replace a key read from stdin
 `;
 
 export async function main(
@@ -98,6 +103,7 @@ export async function main(
         "answers-stdin": { type: "boolean" },
         events: { type: "string" },
         needs: { type: "boolean" },
+        stdin: { type: "boolean" },
       },
     });
   } catch (error) {
@@ -284,6 +290,17 @@ export async function main(
         if (command === "laptops") return await laptopsCommand(system, rest, io.out, colors);
         if (command === "runs") return await serverRunsCommand(system, io.out, colors);
         return await logsCommand(system, [...rest, ...(values.follow ? ["-f"] : [])]);
+      }
+      case "keys": {
+        // On a server, its own keys (as root); on a laptop, the keys where its agents run.
+        if (!(await readState(system))) return await keys(parsed.positionals.slice(1), { ...(values.server ? { server: values.server } : {}), io: laptopIO, terminal });
+        if (!isRoot()) {
+          io.err(`  Run it as root: sudo dl ${parsed.positionals.join(" ")}\n`);
+          return 1;
+        }
+        return await serverKeysCommand(system, parsed.positionals.slice(1), { json: Boolean(values.json), stdin: Boolean(values.stdin) }, {
+          out: io.out, err: io.err, colors, stdin: options.stdin ?? process.stdin, prompter: new TtyPrompter(),
+        });
       }
       case "local":
         return await localCommand(parsed.positionals.slice(1), { purge: Boolean(values.purge) }, io, colors, ui);

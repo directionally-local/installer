@@ -495,7 +495,7 @@ async function latestVersion(system: System, pkg: string): Promise<string> {
   return version;
 }
 
-function asHotcell(system: System, args: string[], options: { input?: string; describe?: string } = {}) {
+export function asHotcell(system: System, args: string[], options: { input?: string; describe?: string } = {}) {
   return system.run("runuser", [
     "-u", USERS.hotcell, "--", "env", `HOTCELL_HOME=${PATHS.hotcellHome}`, "HOTCELL_KEYSTORE=file",
     "/usr/bin/node", hotcellBin(), ...args,
@@ -594,7 +594,7 @@ async function serveOverTailscale(system: System): Promise<string> {
   return `https://${dnsName}`;
 }
 
-async function waitUntil(system: System, sleep: (ms: number) => Promise<void>, what: string, ready: () => Promise<boolean>, unit = what.toLowerCase()): Promise<void> {
+export async function waitUntil(system: System, sleep: (ms: number) => Promise<void>, what: string, ready: () => Promise<boolean>, unit = what.toLowerCase()): Promise<void> {
   if (system.dryRun) return;
   for (let attempt = 0; attempt < 60; attempt++) {
     if (await ready()) return;

@@ -23,6 +23,17 @@ export class FakeSshServer {
   installFails = false;
   bootstrapFails = false;
   paired: string[] = [];
+  /** The server's dl predates `dl keys`. */
+  oldDl = false;
+  /** Replaced keys, as the server got them on stdin. */
+  replaced: Array<{ key: string; value: string }> = [];
+  /** What `dl keys set` answers instead of storing, e.g. "OpenRouter rejected that key." */
+  rejectKey: string | undefined;
+  /** What `dl keys --json` reports. */
+  listing: unknown[] = [
+    { key: "openrouter", set: true, detail: "sk-or…aa" },
+    { key: "github", set: true, detail: "signed in as sinameraji" },
+  ];
 
   readonly exec: SshExec = async (access, command, options: SshExecOptions = {}) => {
     this.calls.push({ access: { ...access }, command, ...(options.input !== undefined ? { input: options.input } : {}) });
@@ -75,6 +86,18 @@ export class FakeSshServer {
         { event: "ready", headline: "Ready", items: [{ label: "On your laptop, from inside a GitHub repository", value: 'dl run "fix the flaky checkout test"' }] },
       );
       return result(0, events.map((event) => `${JSON.stringify(event)}\n`).join(""));
+    }
+    if (/\bdl keys\b/.test(command)) {
+      if (this.oldDl) return result(2, "", `Unknown option '--${command.includes("--stdin") ? "stdin" : "json"}'\n`);
+      const set = /dl keys set (\S+) --stdin --json$/.exec(command);
+      if (set) {
+        const key = set[1]!;
+        if (this.rejectKey) return result(1, `${JSON.stringify({ ok: false, key, error: this.rejectKey })}\n`);
+        this.replaced.push({ key, value: (options.input ?? "").split("\n")[0]! });
+        this.keys.add(key);
+        return result(0, `${JSON.stringify({ ok: true, key, detail: key === "github" ? "signed in as sinameraji; Autopilot restarted" : "replaced in Hotcell; Hotcell restarted" })}\n`);
+      }
+      if (/dl keys --json$/.test(command)) return result(0, `${JSON.stringify({ keys: this.listing })}\n`);
     }
     if (command.includes("dl pair")) {
       const name = /--name '([^']*)'/.exec(command)?.[1] ?? "?";
