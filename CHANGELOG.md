@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/directionally-local/installer/compare/v0.8.0...v0.8.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* offer this computer as the default, and don't offer it on Windows ([877d4b3](https://github.com/directionally-local/installer/commit/877d4b33085a01b9a041cc590e4771870afa78d7))
+* offer this computer as the default, and don't offer it on Windows ([1809d1d](https://github.com/directionally-local/installer/commit/1809d1d931ea69e05addafe54ef559ddfaf6634d))
+
 ## [0.8.0](https://github.com/directionally-local/installer/compare/v0.7.0...v0.8.0) (2026-10-29)
 
 
