@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/directionally-local/installer/compare/v0.4.0...v0.4.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* give Hotcell current model prices so spend-capped tasks aren't refused ([84542f2](https://github.com/directionally-local/installer/commit/84542f22e53d68eec07750c104c644bbeecc39b5))
+* give Hotcell OpenRouter's model prices so spend-capped tasks can run ([256736b](https://github.com/directionally-local/installer/commit/256736b7f99ec65f367b2a387f35fb6c1ce1fb74))
+
 ## [0.4.0](https://github.com/directionally-local/installer/compare/v0.3.0...v0.4.0) (2026-10-29)
 
 
