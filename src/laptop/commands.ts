@@ -160,12 +160,15 @@ async function listRuns(remotes: RemoteServer[], connections: Connections, json:
     io.out(`\n  No tasks yet. From inside a GitHub repository:  ${c.bold('dl run "fix the flaky checkout test"')}\n\n`);
     return;
   }
+  const reasons = await failureReasons(rows, remotes, connections);
   io.out("\n");
   for (const entry of rows) {
     const running = entry.activeRunId !== null;
     const glyph = running ? c.cyan("◐") : entry.status === "completed" || entry.status === "merged" ? c.green("✓") : ["failed", "interrupted"].includes(entry.status) ? c.red("✗") : c.dim("○");
     const multi = remotes.length > 1 ? `${entry.server}  ` : "";
     io.out(`  ${glyph} ${entry.conversationId.slice(0, 8)}  ${multi}${(running ? "running" : entry.status).padEnd(11)} ${(entry.repository ?? "").padEnd(26)} ${c.dim(entry.pullRequestURL ?? entry.branch ?? "")}\n`);
+    const reason = reasons.get(entry.conversationId);
+    if (reason) io.out(`      ${c.dim(oneLine(reason, 100))}\n`);
   }
   io.out(`\n  ${c.dim("Follow one:")} dl watch <id>   ${c.dim("Check one out:")} dl pull <id>\n\n`);
 }
@@ -333,11 +336,15 @@ async function follow(
   signal?.addEventListener("abort", stop, { once: true });
   const renderer = new EventRenderer(io, c);
   let outcome: string | undefined;
+  let finalEvent: RemoteEvent | undefined;
   try {
     if (replayUntil === undefined || replayUntil > cursor) {
       for await (const event of client.events(conversationId, cursor, controller.signal)) {
         renderer.render(event);
-        if (RUN_END_EVENTS.has(event.type)) outcome = event.type;
+        if (RUN_END_EVENTS.has(event.type)) {
+          outcome = event.type;
+          finalEvent = event;
+        }
         if (replayUntil === undefined ? RUN_END_EVENTS.has(event.type) : event.id >= replayUntil) break;
       }
     }
@@ -360,8 +367,13 @@ async function follow(
     return 0;
   }
   io.err(`\n  ${c.red("✗")} ${id} ${outcome}\n`);
+  const reason = failureReason(finalEvent);
+  if (reason) for (const line of wrap(reason, 100, 3)) io.err(`    ${c.dim(line)}\n`);
   if (renderer.unpriced || isModelNotPriced(JSON.stringify(final))) {
     io.err(`  This model isn't in your server's price list yet. Run ${c.bold("dl setup")} to refresh it, or pick another model with -m.\n`);
+  } else {
+    const hint = reason ? failureHint(reason) : undefined;
+    if (hint) io.err(`  ${c.dim(hint)}\n`);
   }
   io.err("\n");
   return 1;
@@ -467,6 +479,73 @@ function rewrite(io: LaptopIO): string {
 function oneLine(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** The reason a run ended, from its final event. Servers have used `reason`, `error` and `message`. */
+export function failureReason(event: RemoteEvent | undefined): string | undefined {
+  if (!event) return undefined;
+  for (const key of ["reason", "error", "message", "detail"]) {
+    const value = event.data[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+/** A next step for the reasons we recognise, or undefined. */
+export function failureHint(reason: string): string | undefined {
+  const text = reason.toLowerCase();
+  if (/context window|token limit|too many tokens|maximum context/.test(text)) return "pick a model with a bigger window: dl model";
+  if (/not priced|no such model|model not found|not offered|unknown model/.test(text)) return "pick another model: dl model";
+  if (/rate limit|429|quota/.test(text)) return "wait a moment, or check the OpenRouter key: dl keys openrouter";
+  if (/git_push_failed|push failed|permission denied|bad credentials|401/.test(text)) return "check the GitHub token: dl keys github";
+  if (/out of memory|oom|killed/.test(text)) return "the sandbox ran out of memory; try a smaller task";
+  return undefined;
+}
+
+/** `text` broken into at most `maxLines` lines of `width`, with an ellipsis when it was cut. */
+export function wrap(text: string, width: number, maxLines: number): string[] {
+  const words = text.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    if (line && line.length + 1 + word.length > width) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = line ? `${line} ${word}` : word;
+    }
+  }
+  if (line) lines.push(line);
+  if (lines.length <= maxLines) return lines;
+  const kept = lines.slice(0, maxLines);
+  kept[maxLines - 1] = `${kept[maxLines - 1]!.slice(0, width - 1)}…`;
+  return kept;
+}
+
+/** How many failed tasks `dl runs` asks about; each one is a request. */
+const REASON_LOOKUPS = 10;
+
+/** One line per failed task, from its final event. */
+async function failureReasons(
+  rows: Array<RemoteConversation & { server: string }>,
+  remotes: RemoteServer[],
+  connections: Connections,
+): Promise<Map<string, string>> {
+  const reasons = new Map<string, string>();
+  let lookups = 0;
+  for (const entry of rows) {
+    if (lookups >= REASON_LOOKUPS) break;
+    if (entry.activeRunId !== null || !["failed", "interrupted"].includes(entry.status)) continue;
+    const remote = remotes.find((candidate) => candidate.name === entry.server);
+    if (!remote) continue;
+    lookups++;
+    const event = await connections.client(remote)
+      .then((client) => client.lastEvent(entry.conversationId, entry.lastEventId))
+      .catch(() => undefined);
+    const reason = failureReason(event);
+    if (reason) reasons.set(entry.conversationId, reason);
+  }
+  return reasons;
 }
 
 export function describeError(error: unknown): string {

@@ -131,6 +131,24 @@ export class RemoteClient {
   }
 
   /**
+   * The newest event of a finished conversation: one request, then the stream is dropped.
+   * `dl runs` uses it to say why a task failed without replaying the whole run.
+   */
+  async lastEvent(conversationId: string, lastEventId: number): Promise<RemoteEvent | undefined> {
+    const controller = new AbortController();
+    try {
+      for await (const event of this.events(conversationId, Math.max(0, lastEventId - 1), controller.signal)) {
+        return event;
+      }
+    } catch {
+      return undefined;
+    } finally {
+      controller.abort();
+    }
+    return undefined;
+  }
+
+  /**
    * Events after `cursor`, reconnecting with the last seen ID when the stream drops,
    * until the caller stops iterating or the signal aborts.
    */
