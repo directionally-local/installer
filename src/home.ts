@@ -4,6 +4,7 @@ import { approvePairing, createLaptopCredential, listLaptops, listServerRuns, ow
 import { describeAccess, readState, type InstallState } from "./state.js";
 import type { System } from "./system.js";
 import { palette } from "./ui.js";
+import { readPreviews } from "./preview.js";
 import { nextSteps } from "./up.js";
 
 type Write = (text: string) => void;
@@ -26,8 +27,8 @@ async function health(system: System): Promise<{ ok: boolean; problems: string[]
 
 /** `dl` on a server: what this is, whether it's healthy, who's connected, what's running, what to do. */
 export async function serverHome(system: System, state: InstallState, write: Write, c: Colors): Promise<void> {
-  const [status, laptops, runs, pending, facts] = await Promise.all([
-    health(system), listLaptops(system), listServerRuns(system), pendingPairings(system), detectHost(system),
+  const [status, laptops, runs, pending, facts, previews] = await Promise.all([
+    health(system), listLaptops(system), listServerRuns(system), pendingPairings(system), detectHost(system), readPreviews(system),
   ]);
   const verdict = status.ok ? c.green("● healthy") : c.red(`● ${status.problems.join(", ")}`);
   const week = Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -39,6 +40,9 @@ export async function serverHome(system: System, state: InstallState, write: Wri
   write(row("Laptops", laptops === undefined ? c.dim("unknown (run dl up to update)") : laptops.length === 0 ? "none connected yet" : `${laptops.length} connected · ${laptops.map((laptop) => laptop.name).join(", ")}`, "dl laptops"));
   write(row("Runs", runs === undefined ? c.dim("unknown (run dl up to update)") : `${running} running · ${doneThisWeek} this week`, "dl runs"));
   write(row("Capacity", `~${agentCapacity(facts, CELL_MEMORY_MB)} agents at once (estimate)`));
+  if (previews.previews.length > 0) {
+    write(row("Previews", `${previews.previews.length} live · ${previews.previews.map((preview) => preview.id).join(", ")}`, "dl previews"));
+  }
   if (pending.length > 0) {
     write(`\n  ${c.yellow("!")} Waiting for approval: ${pending.map((entry) => `${c.bold(entry.code)} (${entry.name})`).join(", ")}   ${c.dim("dl connect-laptop <code>")}\n`);
   }

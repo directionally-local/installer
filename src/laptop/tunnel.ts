@@ -45,17 +45,20 @@ export function tunnelArgs(access: SshAccess, localPort: number, remotePort: num
   return ["-N", "-o", "ExitOnForwardFailure=yes", ...sshOptions(access), "-L", `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`, access.target];
 }
 
-export function createOpener(options: TunnelOptions = {}): RemoteOpener {
+/**
+ * A tunnel to one of the server's loopback ports. `dl preview` uses it for a preview's port;
+ * everything else goes through `createOpener`, which forwards the API's.
+ */
+export type PortForwarder = (access: SshAccess, remotePort: number, display?: string) => Promise<Endpoint>;
+
+export function createForwarder(options: TunnelOptions = {}): PortForwarder {
   const spawnTunnel = options.spawn ?? realSpawn;
   const freePort = options.freePort ?? pickFreePort;
   const accepts = options.accepts ?? acceptsConnections;
   const timeoutMs = options.timeoutMs ?? 20_000;
   const pollMs = options.pollMs ?? 100;
 
-  return async (remote) => {
-    if (!remote.ssh) return { url: remote.url, close: async () => {} };
-    const access = remote.ssh;
-    const remotePort = Number(new URL(remote.url).port || 80);
+  return async (access, remotePort, display = access.target) => {
     const port = await freePort();
     const child = spawnTunnel(tunnelArgs(access, port, remotePort));
     let stderr = "";
@@ -82,15 +85,23 @@ export function createOpener(options: TunnelOptions = {}): RemoteOpener {
       if (exited) {
         await close();
         const detail = stderr.trim().split("\n").at(-1)?.trim();
-        throw new Error(`Couldn't open an SSH tunnel to ${remote.name} (${access.target})${detail ? `: ${detail}` : ""}\n  Check that this works: ${sshCommandLine(access)}`);
+        throw new Error(`Couldn't open an SSH tunnel to ${display} (${access.target})${detail ? `: ${detail}` : ""}\n  Check that this works: ${sshCommandLine(access)}`);
       }
       if (await accepts(port)) return { url: `http://127.0.0.1:${port}`, close };
       if (Date.now() >= deadline) {
         await close();
-        throw new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s opening an SSH tunnel to ${remote.name} (${access.target}).\n  Check that this works: ${sshCommandLine(access)}`);
+        throw new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s opening an SSH tunnel to ${display} (${access.target}).\n  Check that this works: ${sshCommandLine(access)}`);
       }
       await new Promise((resolve) => setTimeout(resolve, pollMs));
     }
+  };
+}
+
+export function createOpener(options: TunnelOptions = {}): RemoteOpener {
+  const forward = createForwarder(options);
+  return async (remote) => {
+    if (!remote.ssh) return { url: remote.url, close: async () => {} };
+    return forward(remote.ssh, Number(new URL(remote.url).port || 80), remote.name);
   };
 }
 

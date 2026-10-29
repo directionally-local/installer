@@ -71,6 +71,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl runs` | Your tasks and their pull requests. `--json` for scripts. |
 | `dl watch ID` / `dl cancel ID` | Follow a task, or stop one. |
 | `dl pull ID` | Check out a task's branch here. |
+| `dl preview ID` | Deploy a task's Workers branch on the server with Serverless Objects and open it here, over the SSH tunnel. |
 | `dl servers` | Where agents run. `dl servers rename OLD NEW`, `dl servers remove NAME`. |
 | `dl use [NAME]` | Where tasks go without `--server`. With no name, shows it. |
 | `dl keys [openrouter\|github]` | Which keys are set, or replace one. `--server NAME` picks the server. |
@@ -93,6 +94,8 @@ Run these as root. `dl` on its own shows what this is, whether it's healthy, the
 | `dl laptops` | Connected laptops. `dl laptops remove NAME` disconnects one. |
 | `dl runs` | Tasks running or done, with their pull requests. |
 | `dl logs [hotcell\|autopilot] [-f]` | The services' logs. |
+| `dl preview ID [--remove]` | Deploy a task's branch as a preview, or stop it. Needs `DL_PREVIEWS_BUCKET`. |
+| `dl previews` | Live previews: task, port, branch. |
 | `dl doctor` | Check every part, with a fix for each failure. |
 | `dl keys [set openrouter\|github]` | Which keys are set, or replace one (hidden input). |
 | `dl status` | Show the installed versions and where to reach the server. |
