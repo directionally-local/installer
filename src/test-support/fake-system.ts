@@ -33,6 +33,8 @@ export class FakeSystem implements System {
   tailscaleUp: boolean;
   ufwActive = false;
   hotcellKeys = new Set<string>();
+  /** What `hotcell keys add … --stdin` stored, by provider. */
+  hotcellKeyValues = new Map<string, string>();
   memoryKb = 8 * 1024 * 1024;
   nodeVersion = "24.22.1";
   /** What Autopilot's server CLI reports (aster token list / runs / pair list). */
@@ -143,8 +145,18 @@ export class FakeSystem implements System {
         for (const [path, file] of [...this.files]) if (path.startsWith(`${args[1]}/`)) this.files.set(path.replace(args[1]!, args[2]!), file);
         return ok();
       case "runuser":
-        if (args.includes("keys") && args.includes("add")) this.hotcellKeys.add(args[args.indexOf("add") + 1]!);
-        if (args.includes("keys") && args.includes("ls")) return ok([...this.hotcellKeys].map((key) => `  ${key}  file\n`).join(""));
+        if (args.includes("keys") && args.includes("add")) {
+          const provider = args[args.indexOf("add") + 1]!;
+          this.hotcellKeys.add(provider);
+          if (options.input !== undefined) this.hotcellKeyValues.set(provider, options.input);
+          return ok(`✓ stored ${provider}   · ~/.hotcell/keys.json (chmod 600)\n`);
+        }
+        if (args.includes("keys") && args.includes("ls")) {
+          // Like Hotcell's own listing: a header, then each provider with its masked value.
+          const mask = (value: string) => value.length <= 8 ? "•".repeat(Math.max(4, value.length)) : `${value.slice(0, 5)}…${value.slice(-2)}`;
+          if (this.hotcellKeys.size === 0) return ok("no provider keys yet — add one:  hotcell keys add openrouter\n");
+          return ok(`PROVIDER  KEY           SOURCE\n${[...this.hotcellKeys].map((key) => `${key.padEnd(8)}  ${mask(this.hotcellKeyValues.get(key) ?? "sk-or-v1-unknown00").padEnd(12)}  file\n`).join("")}`);
+        }
         if (args.includes("owner") && args.includes("link")) return ok(`${args.at(-1)}/api/v1/auth/claim?token=aster_claim_${"x".repeat(43)}\n`);
         if (args.includes("token") && args.includes("list")) return ok(`${JSON.stringify(this.laptops)}\n`);
         if (args.includes("token") && args.includes("create")) {

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
+import { access as fileAccess, readdir, readFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { TtyPrompter, type Prompter } from "../prompt.js";
 import { palette, PlainUi, TerminalUi, type Ui } from "../ui.js";
@@ -38,6 +38,8 @@ export interface SetupDeps {
   remotesFile?: string;
   installUrl?: string;
   localSetup?: LocalSetup;
+  /** `dl setup --identity FILE`: the private key to use, instead of trying the ones in ~/.ssh. */
+  identityFile?: string;
   now?: () => Date;
 }
 
@@ -75,32 +77,13 @@ export async function setupWizard(deps: SetupDeps): Promise<RemoteServer | undef
 }
 
 async function setUpServer(deps: SetupDeps): Promise<RemoteServer> {
-  const c = palette(deps.color);
   const home = deps.sources.home;
   const sshDir = join(home, ".ssh");
   const hosts = parseSshConfig(await deps.sources.readFile(join(sshDir, "config")) ?? "", home);
 
   // 1. Which server, and can we get in?
-  let { access, display } = await chooseServer(deps, hosts);
-  let facts: ServerFacts | undefined;
-  for (let attempt = 0; !facts; attempt++) {
-    const ui = deps.newUi();
-    ui.plan([{ id: "ssh", label: "Server" }]);
-    ui.start("ssh", display);
-    try {
-      facts = await checkServer(access, deps.ssh, display);
-    } catch (error) {
-      ui.fail("ssh", error instanceof SshAuthError ? "SSH key not accepted" : "can't set up here");
-      ui.finish();
-      if (!(error instanceof SshAuthError) || attempt >= 2) throw explainAuth(error, access);
-      access = { ...access, identityFile: await chooseKey(deps, sshDir, access) };
-      continue;
-    }
-    display = `${facts.user}@${display.replace(/^[^@]*@/, "")}`;
-    ui.done("ssh", `${display}  ${facts.os} · ${facts.arch}`);
-    ui.finish();
-    if (facts.newHostKey) deps.newUi().line("info", "New server", "first connection: trusted its host key (accept-new)");
-  }
+  const chosen = await chooseServer(deps, hosts);
+  const { access, facts } = await reachServer(deps, sshDir, deps.identityFile ? { ...chosen.access, identityFile: deps.identityFile } : chosen.access, chosen.display);
 
   // 2. Install dl there, then ask only for the keys it still lacks.
   await bootstrap(access, facts, deps.ssh, deps.newUi(), deps.installUrl);
@@ -123,7 +106,7 @@ async function setUpServer(deps: SetupDeps): Promise<RemoteServer> {
   if (!remote) {
     const pairing = await pairLaptop(access, facts, deps.ssh, `${laptopName(deps.hostname)} (dl)`);
     remote = {
-      name: saved?.name ?? await remoteName(access, remotesFile),
+      name: saved?.name ?? await remoteName(access, remotesFile, chosen.alias ?? facts.hostname),
       url: normalizeServerUrl(pairing.url),
       token: pairing.token,
       credentialId: pairing.credentialId,
@@ -149,7 +132,7 @@ async function setUpServer(deps: SetupDeps): Promise<RemoteServer> {
   return remote;
 }
 
-async function chooseServer(deps: SetupDeps, hosts: SshHost[]): Promise<{ access: SshAccess; display: string }> {
+async function chooseServer(deps: SetupDeps, hosts: SshHost[]): Promise<{ access: SshAccess; display: string; alias?: string }> {
   const c = palette(deps.color);
   const ui = deps.newUi();
   if (hosts.length > 0) {
@@ -167,6 +150,7 @@ async function chooseServer(deps: SetupDeps, hosts: SshHost[]): Promise<{ access
     if (host) {
       ui.answered("SSH", host.alias);
       return {
+        alias: host.alias,
         access: { target: host.alias },
         display: `${host.user ? `${host.user}@` : ""}${host.hostName ?? host.alias}${host.port && host.port !== 22 ? `:${host.port}` : ""}`,
       };
@@ -186,29 +170,81 @@ async function chooseServer(deps: SetupDeps, hosts: SshHost[]): Promise<{ access
   }
 }
 
-/** The server refused the default keys: offer the ones in ~/.ssh and retry with -i. */
-async function chooseKey(deps: SetupDeps, sshDir: string, access: SshAccess): Promise<string> {
-  const c = palette(deps.color);
-  const keys = discoverKeys(sshDir, await deps.sources.listDir(sshDir)).filter((key) => key !== access.identityFile);
-  if (keys.length === 0) throw explainAuth(new SshAuthError(access, "no other keys in ~/.ssh"), access);
-  deps.write(`\n  ${c.dim("Which key does this server accept?")}\n`);
-  keys.forEach((key, index) => deps.write(`  ${c.cyan(String(index + 1))}  ${key.replace(deps.sources.home, "~")}\n`));
-  deps.write("\n");
+/**
+ * Connects and checks the server. If it refuses the default keys (ssh's own: the agent and
+ * ~/.ssh/id_*), each key pair in ~/.ssh is tried in turn with -i, without asking: auth
+ * refusals come back fast, so this takes seconds. Only when none works does it stop, with
+ * what to do. A key named with --identity is the only one tried.
+ */
+async function reachServer(deps: SetupDeps, sshDir: string, first: SshAccess, target: string): Promise<{ access: SshAccess; facts: ServerFacts }> {
+  const home = deps.sources.home;
   const ui = deps.newUi();
-  const answer = (await deps.prompter.text(ui.prompt("SSH key", `1-${keys.length}`))).trim();
-  const key = keys[(Number(answer) || 1) - 1] ?? keys[0]!;
-  ui.answered("SSH key", key.replace(deps.sources.home, "~"));
-  return key;
+  ui.plan([{ id: "ssh", label: "Server" }]);
+  ui.start("ssh", target);
+  const tried: string[] = [];
+  let searching = false;
+  let newHostKey = false;
+  const attempt = async (access: SshAccess): Promise<ServerFacts | undefined> => {
+    try {
+      return await checkServer(access, deps.ssh, target);
+    } catch (error) {
+      if (error instanceof SshAuthError) {
+        newHostKey ||= error.newHostKey;
+        if (access.identityFile) tried.push(access.identityFile);
+        return undefined;
+      }
+      if (searching) ui.plan([{ id: "ssh", label: "Server" }]);
+      ui.fail("ssh", "can't set up here");
+      ui.finish();
+      throw error;
+    }
+  };
+
+  let access = first;
+  let facts = await attempt(access);
+  if (!facts && !first.identityFile) {
+    const keys = discoverKeys(sshDir, await deps.sources.listDir(sshDir));
+    searching = keys.length > 0;
+    if (searching) ui.plan([{ id: "keys", label: "Trying your SSH keys…" }]);
+    for (const key of keys) {
+      access = { ...first, identityFile: key };
+      ui.start("keys", tilde(key, home));
+      facts = await attempt(access);
+      if (facts) break;
+    }
+  }
+  if (searching) ui.plan([{ id: "ssh", label: "Server" }]);
+  if (!facts) {
+    ui.fail("ssh", first.identityFile ? `${tilde(first.identityFile, home)} not accepted` : tried.length > 0 ? "none of your SSH keys was accepted" : "SSH key not accepted");
+    ui.finish();
+    throw noKeyWorks(first, tried, discoverKeys(sshDir, await deps.sources.listDir(sshDir)), home);
+  }
+  const display = `${facts.user}@${target.replace(/^[^@]*@/, "")}`;
+  ui.done("ssh", access.identityFile ? `${display} with ${tilde(access.identityFile, home)} · ${facts.os} · ${facts.arch}` : `${display}  ${facts.os} · ${facts.arch}`);
+  ui.finish();
+  if (facts.newHostKey || newHostKey) deps.newUi().line("info", "New server", "first connection: trusted its host key (accept-new)");
+  return { access, facts };
 }
 
-function explainAuth(error: unknown, access: SshAccess): Error {
-  if (!(error instanceof SshAuthError)) return error instanceof Error ? error : new Error(String(error));
-  return new Error([
-    error.message,
-    "  Add this computer's public key to the server (it asks for the password once):",
-    `     ssh-copy-id ${access.port ? `-p ${access.port} ` : ""}${access.target}`,
+/** Every key was refused: what to do next, with this server and this laptop's own key filled in. */
+function noKeyWorks(access: SshAccess, tried: string[], keys: string[], home: string): Error {
+  const port = access.port ? `-p ${access.port} ` : "";
+  const key = keys[0] ? tilde(keys[0], home) : undefined;
+  const lines = [
+    access.identityFile
+      ? `${access.target} didn't accept ${tilde(access.identityFile, home)}.`
+      : `${access.target} didn't accept this computer's SSH keys (${["the default ones", ...tried.map((file) => tilde(file, home))].join(", ")}).`,
+    "  Add your public key to the server (it asks for the password once):",
+    ...(key ? [] : ["     ssh-keygen -t ed25519"]),
+    `     ssh-copy-id -i ${key ?? "~/.ssh/id_ed25519"}.pub ${port}${access.target}`,
     "  If your key has a passphrase, load it first with: ssh-add",
-  ].join("\n"));
+    "  Or name the key this server takes: dl setup --identity ~/.ssh/KEY",
+  ];
+  return new Error(lines.join("\n"));
+}
+
+function tilde(path: string, home: string): string {
+  return path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
 }
 
 function sameServer(remote: RemoteServer, access: SshAccess): boolean {
@@ -222,18 +258,26 @@ async function stillWorks(remote: RemoteServer, open: RemoteOpener): Promise<boo
   }).catch(() => false);
 }
 
-/** box (from an ssh alias) or 203-0-113-10, unique unless it's this same server again. */
-async function remoteName(access: SshAccess, remotesFile: string): Promise<string> {
+/**
+ * What this laptop calls the server: the ~/.ssh/config alias the user picked, else the
+ * server's own hostname, else its address (203-0-113-10). Unique unless it's this same server.
+ */
+async function remoteName(access: SshAccess, remotesFile: string, preferred: string | undefined): Promise<string> {
   const host = hostOf(access.target).toLowerCase();
-  const label = /^\d+(\.\d+){3}$/.test(host) || host.includes(":") ? host.replace(/[.:]/g, "-") : host.split(".")[0] ?? "server";
-  const base = label.replace(/[^a-z0-9-]/g, "-").replace(/^-+/, "").slice(0, 36) || "server";
-  const name = REMOTE_NAME_RE.test(base) ? base : "server";
+  const fromAddress = /^\d+(\.\d+){3}$/.test(host) || host.includes(":") ? host.replace(/[.:]/g, "-") : host.split(".")[0] ?? "";
+  const name = [preferred, fromAddress].map((label) => serverLabel(label ?? "")).find((label) => label !== undefined) ?? "server";
   const remotes = await loadRemotes(remotesFile);
   for (let n = 1; ; n++) {
     const candidate = n === 1 ? name : `${name}-${n}`;
     const existing = remotes.find((remote) => remote.name === candidate);
     if (!existing || sameServer(existing, access)) return candidate;
   }
+}
+
+/** A hostname as a server name (lowercase, dashes, room for a -2), or undefined if nothing usable is left. */
+export function serverLabel(text: string): string | undefined {
+  const label = text.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 36).replace(/-+$/, "");
+  return REMOTE_NAME_RE.test(label) && label !== "localhost" ? label : undefined;
 }
 
 function finishScreen(ui: Ui, capacity: number | undefined): void {
@@ -259,11 +303,17 @@ async function pick<T extends string>(ui: Ui, prompter: Prompter, label: string,
 }
 
 /** `dl setup` with the real terminal, ssh, gh, and filesystem. */
-export async function setup(options: { io: LaptopIO; terminal: boolean; localSetup?: LocalSetup }): Promise<number> {
+export async function setup(options: { io: LaptopIO; terminal: boolean; localSetup?: LocalSetup; identityFile?: string }): Promise<number> {
   const { io, terminal } = options;
   const color = io.color === true;
   const execFileAsync = promisify(execFile);
   const home = homedir();
+  let identityFile: string | undefined;
+  if (options.identityFile !== undefined) {
+    // The private key, even when the .pub next to it was named.
+    identityFile = resolve(options.identityFile.replace(/^~(?=$|\/)/, home).replace(/\.pub$/, ""));
+    await fileAccess(identityFile).catch(() => { throw new Error(`No SSH key at ${options.identityFile} (--identity takes the private key, e.g. ~/.ssh/id_ed25519)`); });
+  }
   await setupWizard({
     newUi: () => terminal ? new TerminalUi(io.out, undefined, color) : new PlainUi(io.out),
     prompter: new TtyPrompter(),
@@ -282,6 +332,7 @@ export async function setup(options: { io: LaptopIO; terminal: boolean; localSet
     hostname: hostname(),
     installUrl: process.env.DL_INSTALL_URL || INSTALL_URL,
     ...(options.localSetup ? { localSetup: options.localSetup } : {}),
+    ...(identityFile ? { identityFile } : {}),
   });
   return 0;
 }

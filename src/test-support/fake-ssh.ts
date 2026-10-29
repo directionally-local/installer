@@ -14,15 +14,30 @@ export interface SshCall {
  */
 export class FakeSshServer {
   readonly calls: SshCall[] = [];
-  /** Keys the server accepts; undefined means any (the agent's default key works). */
+  /**
+   * Private keys (the -i path) the server accepts. Undefined means any, including ssh's
+   * defaults; a list means only those keys, so a connection without -i is refused.
+   */
   acceptedKeys: string[] | undefined;
-  probe = "0\nroot\nubuntu 24.04\naarch64\nroot\n";
+  /** id -u, id -un, OS, CPU, root/sudo/nosudo, then `hostname -s`. */
+  probe = "0\nroot\nubuntu 24.04\naarch64\nroot\nubuntu-4gb-nbg1-1\n";
   newHost = true;
   installed = false;
   keys = new Set<string>();
   installFails = false;
   bootstrapFails = false;
   paired: string[] = [];
+  /** The server's dl predates `dl keys`. */
+  oldDl = false;
+  /** Replaced keys, as the server got them on stdin. */
+  replaced: Array<{ key: string; value: string }> = [];
+  /** What `dl keys set` answers instead of storing, e.g. "OpenRouter rejected that key." */
+  rejectKey: string | undefined;
+  /** What `dl keys --json` reports. */
+  listing: unknown[] = [
+    { key: "openrouter", set: true, detail: "sk-or…aa" },
+    { key: "github", set: true, detail: "signed in as sinameraji" },
+  ];
 
   readonly exec: SshExec = async (access, command, options: SshExecOptions = {}) => {
     this.calls.push({ access: { ...access }, command, ...(options.input !== undefined ? { input: options.input } : {}) });
@@ -33,14 +48,13 @@ export class FakeSshServer {
       err(stderr);
       return { code, stdout, stderr };
     };
+    // As with real ssh, the host key is saved on the first connection, even one whose key is refused.
+    const warning = this.newHost ? "Warning: Permanently added '203.0.113.10' (ED25519) to the list of known hosts.\n" : "";
+    this.newHost = false;
     if (this.acceptedKeys && !(access.identityFile && this.acceptedKeys.includes(access.identityFile))) {
-      return result(255, "", `${access.target}: Permission denied (publickey).\n`);
+      return result(255, "", `${warning}${access.target}: Permission denied (publickey).\n`);
     }
-    if (command.startsWith("id -u;")) {
-      const warning = this.newHost ? "Warning: Permanently added '203.0.113.10' (ED25519) to the list of known hosts.\n" : "";
-      this.newHost = false;
-      return result(0, this.probe, warning);
-    }
+    if (command.startsWith("id -u;")) return result(0, this.probe, warning);
     if (command.includes("dl-install.sh")) {
       if (this.bootstrapFails) return result(1, ".. Installing Node.js\nE: Unable to locate package nodejs\n", "directionallylocal: Installing Node.js failed\n");
       this.installed = true;
@@ -59,7 +73,7 @@ export class FakeSshServer {
         { event: "title", text: "Directionally Local" },
         { event: "line", status: "done", label: "Checked this machine", detail: "Ubuntu 24.04 · 4 CPU · 7.5 GB · 70 GB free" },
         { event: "answered", label: "OpenRouter key", detail: "stored in Hotcell" },
-        { event: "plan", steps: [{ id: "docker", label: "Setting up Docker" }, { id: "image", label: "Building the sandbox image" }] },
+        { event: "plan", steps: [{ id: "docker", label: "Setting up Docker" }, { id: "image", label: "Building the sandbox image" }, { id: "access", label: "Starting the server" }] },
         { event: "start", id: "docker" },
         { event: "done", id: "docker", detail: "27.3.1" },
         { event: "start", id: "image" },
@@ -70,11 +84,25 @@ export class FakeSshServer {
       }
       events.push(
         { event: "done", id: "image", detail: "built" },
+        { event: "start", id: "access" },
+        { event: "done", id: "access", detail: "private · reached over SSH" },
         { event: "warn", text: "Swap is off" },
         // As in SSH mode: no estimate here, so the laptop works it out from the machine check.
         { event: "ready", headline: "Ready", items: [{ label: "On your laptop, from inside a GitHub repository", value: 'dl run "fix the flaky checkout test"' }] },
       );
       return result(0, events.map((event) => `${JSON.stringify(event)}\n`).join(""));
+    }
+    if (/\bdl keys\b/.test(command)) {
+      if (this.oldDl) return result(2, "", `Unknown option '--${command.includes("--stdin") ? "stdin" : "json"}'\n`);
+      const set = /dl keys set (\S+) --stdin --json$/.exec(command);
+      if (set) {
+        const key = set[1]!;
+        if (this.rejectKey) return result(1, `${JSON.stringify({ ok: false, key, error: this.rejectKey })}\n`);
+        this.replaced.push({ key, value: (options.input ?? "").split("\n")[0]! });
+        this.keys.add(key);
+        return result(0, `${JSON.stringify({ ok: true, key, detail: key === "github" ? "signed in as sinameraji; Autopilot restarted" : "replaced in Hotcell; Hotcell restarted" })}\n`);
+      }
+      if (/dl keys --json$/.test(command)) return result(0, `${JSON.stringify({ keys: this.listing })}\n`);
     }
     if (command.includes("dl pair")) {
       const name = /--name '([^']*)'/.exec(command)?.[1] ?? "?";

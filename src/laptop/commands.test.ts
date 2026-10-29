@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { cancel, connect, pull, run, runs, servers, watch, type LaptopIO } from "./commands.js";
+import { cancel, connect, DEFAULT_MODEL, laptopHome, pickModel, pull, readAutopilotModel, run, runs, servers, use, watch, type LaptopIO } from "./commands.js";
 import { fakeTunnels } from "../test-support/fake-tunnel.js";
-import { loadRemotes, saveRemote } from "./config.js";
+import { loadRemotes, loadRemotesFile, saveRemote, type RemoteServer } from "./config.js";
 import { createOpener } from "./tunnel.js";
 
 /**
@@ -16,6 +16,8 @@ import { createOpener } from "./tunnel.js";
  */
 class FakeServer {
   approved = false;
+  /** In the order OpenRouter's catalog might list them: the first is never the right pick. */
+  models = ["01-ai/yi-large", DEFAULT_MODEL, "test/model"];
   readonly created: Array<Record<string, unknown>> = [];
   readonly cancelled: string[] = [];
   private conversation: Record<string, unknown> | undefined;
@@ -55,7 +57,7 @@ class FakeServer {
     if (req.headers.authorization !== "Bearer aster_laptop_token_0000000000000000000000000000000000") return send(401, { error: { code: "invalid_credential", message: "no" } });
     if (path === "/api/v1/health") return send(200, { status: "ok", capabilities: [] });
     if (path === "/api/v1/workspaces") return send(200, { workspaces: [{ id: "default", displayName: "Default" }] });
-    if (path === "/api/v1/models") return send(200, { models: ["test/model"] });
+    if (path === "/api/v1/models") return send(200, { models: this.models });
     if (path === "/api/v1/conversations" && req.method === "POST") {
       this.created.push(body);
       this.conversation = { conversationId: "3f2a9c1e-0000-4000-8000-000000000000", workspaceId: "default", model: "test/model", status: "ready", activeRunId: null, lastEventId: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: "code", repository: "me/app", branch: "aster/3f2a9c1e" };
@@ -106,6 +108,13 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+const noAutopilotModel = async () => undefined;
+const TOKEN = "aster_laptop_token_0000000000000000000000000000000000";
+
+function place(name: string, url: string): RemoteServer {
+  return { name, url, token: TOKEN, credentialId: `cred-${name}`, expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T00:00:00.000Z" };
+}
+
 function capture(): LaptopIO & { text: () => string } {
   let text = "";
   return { out: (chunk) => { text += chunk; }, err: (chunk) => { text += chunk; }, color: false, text: () => text };
@@ -143,10 +152,11 @@ describe("dl on a laptop", () => {
     const dir = await checkout();
     await writeFile(join(dir, "README.md"), "hello\nlocal edit\n");
     const runIO = capture();
-    assert.equal(await run({ task: "fix the flaky test", cwd: dir, repository: "me/app" }, runIO), 0);
+    assert.equal(await run({ task: "fix the flaky test", cwd: dir, repository: "me/app", autopilotModel: noAutopilotModel }, runIO), 0);
     assert.match(String(fake.created[0]?.patch), /\+local edit/);
+    assert.equal(fake.created[0]?.model, DEFAULT_MODEL, "not the first in the catalog");
     const text = runIO.text();
-    assert.match(text, /Sending to box: me\/app at [0-9a-f]{7} \+ 1 local change/);
+    assert.match(text, /Sending to box: me\/app at [0-9a-f]{7} \+ 1 local change {2}moonshotai\/kimi-k2\.6\n/);
     assert.match(text, /✓ Started 3f2a9c1e on box/);
     assert.match(text, /› shell npm test/);
     assert.match(text, /Fixed the flaky test\./);
@@ -181,7 +191,7 @@ describe("dl on a laptop", () => {
     const tunnels = fakeTunnels(port, { delayMs: 5 });
     const open = createOpener({ spawn: tunnels.spawn, pollMs: 5 });
     const dir = await checkout();
-    assert.equal(await run({ task: "fix it", cwd: dir, repository: "me/app", open }, capture()), 0);
+    assert.equal(await run({ task: "fix it", cwd: dir, repository: "me/app", open, autopilotModel: noAutopilotModel }, capture()), 0);
     const listIO = capture();
     await runs({ open }, listIO);
     assert.match(listIO.text(), /✓ 3f2a9c1e {2}completed +me\/app/);
@@ -196,7 +206,7 @@ describe("dl on a laptop", () => {
     }
     const list = capture();
     assert.equal(await servers([], list), 0);
-    assert.match(list.text(), /box +ssh root@203\.0\.113\.10/);
+    assert.match(list.text(), /● box +ssh root@203\.0\.113\.10/);
   });
 
   it("says why a task can't be found when the tunnel fails", async () => {
@@ -207,10 +217,120 @@ describe("dl on a laptop", () => {
     await assert.rejects(() => cancel({ id: "3f2a9c1e", open }, capture()), /No task 3f2a9c1e on any connected server\nbox: Couldn't open an SSH tunnel to box[\s\S]*Operation timed out/);
   });
 
+  it("renames a server with dl servers rename", async () => {
+    await saveRemote({
+      name: "91-107-187-162", url: "http://127.0.0.1:4096", token: "t", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T00:00:00.000Z", ssh: { target: "root@91.107.187.162" },
+    });
+    const io = capture();
+    assert.equal(await servers(["rename", "91-107-187-162", "hetzner"], io), 0);
+    assert.match(io.text(), /✓ Renamed 91-107-187-162 to hetzner/);
+    assert.deepEqual((await loadRemotes()).map((remote) => [remote.name, remote.ssh?.target]), [["hetzner", "root@91.107.187.162"]]);
+
+    const bad = capture();
+    assert.equal(await servers(["rename", "hetzner", "My Box"], bad), 1);
+    assert.match(bad.text(), /✗ "My Box" can't be a server name/);
+    assert.equal(await servers(["rename", "nope", "x"], bad), 1);
+    assert.match(bad.text(), /No server named "nope"\. Connected: hetzner\./);
+    assert.equal(await servers(["rename", "hetzner"], bad), 2);
+    assert.match(bad.text(), /Usage: dl servers rename OLD NEW/);
+  });
+
   it("guides a laptop that isn't connected yet", async () => {
     const io = capture();
-    await assert.rejects(() => runs({}, io), /isn't connected to a server yet\. Run: dl connect/);
+    await assert.rejects(() => runs({}, io), /Nothing is set up yet\. Run: dl setup {2}\(or, for a server someone else set up: dl connect/);
     assert.equal(await servers([], io), 0);
-    assert.match(io.text(), /Not connected to a server yet\. {2}dl setup {2}or, for a server someone else set up: dl connect https:\/\/your-server/);
+    assert.match(io.text(), /Nothing set up yet\. {2}dl setup {2}or, for a server someone else set up: dl connect https:\/\/your-server/);
+  });
+
+  it("picks the model: -m, else the laptop's Autopilot model, else kimi-k2.6, never the first in the catalog", { timeout: 30_000 }, async () => {
+    await saveRemote(place("box", fake.url));
+    const dir = await checkout();
+    const sent = async (input: { model?: string; autopilotModel?: () => Promise<string | undefined> }) => {
+      const io = capture();
+      assert.equal(await run({ task: "fix it", cwd: dir, repository: "me/app", detach: true, autopilotModel: noAutopilotModel, ...input }, io), 0);
+      const model = String(fake.created.at(-1)?.model);
+      assert.match(io.text(), new RegExp(`Sending to box: me/app at [0-9a-f]{7} {2}${model.replace(/[./]/g, "\\$&")}\n`), "the first line names the model");
+      return model;
+    };
+    assert.equal(await sent({ model: "test/model", autopilotModel: async () => "01-ai/yi-large" }), "test/model");
+    assert.equal(await sent({ autopilotModel: async () => "test/model" }), "test/model");
+    assert.equal(await sent({ autopilotModel: async () => "someone/not-offered" }), DEFAULT_MODEL);
+    assert.equal(await sent({}), DEFAULT_MODEL);
+    await assert.rejects(() => sent({ model: "someone/not-offered" }), /doesn't offer someone\/not-offered\. Pick one: dl run -m <model> "task" {2}\(model IDs: https:\/\/openrouter\.ai\/models\)/);
+    fake.models = ["01-ai/yi-large", "test/model"];
+    await assert.rejects(() => sent({ autopilotModel: async () => "someone/not-offered" }), /doesn't offer your Autopilot model \(someone\/not-offered\) or moonshotai\/kimi-k2\.6\. Pick one: dl run -m <model>/);
+  });
+
+  it("chooses the model in order, and explains how to pick when none fits", () => {
+    const catalog = ["01-ai/yi-large", DEFAULT_MODEL, "openai/gpt-5"];
+    assert.equal(pickModel(catalog, "openai/gpt-5", DEFAULT_MODEL), "openai/gpt-5");
+    assert.equal(pickModel(catalog, undefined, "openai/gpt-5"), "openai/gpt-5");
+    assert.equal(pickModel(catalog, undefined, "kimi-k2.6"), DEFAULT_MODEL, "a Requesty-style ID the server doesn't offer");
+    assert.equal(pickModel(catalog, undefined, undefined), DEFAULT_MODEL);
+    assert.throws(() => pickModel(["01-ai/yi-large"], undefined, undefined), /doesn't offer moonshotai\/kimi-k2\.6\. Pick one: dl run -m <model> "task" {2}\(model IDs: https:\/\/openrouter\.ai\/models\)/);
+    assert.throws(() => pickModel(["01-ai/yi-large"], undefined, DEFAULT_MODEL), /doesn't offer moonshotai\/kimi-k2\.6\. Pick one/);
+    assert.throws(() => pickModel([], undefined, undefined), /offers no models/);
+  });
+
+  it("reads the laptop's Autopilot model from KIMI_MODEL or its config", async () => {
+    const files: Record<string, string> = {
+      "/home/me/.config/kimiflare/config.json": JSON.stringify({ model: "openai/gpt-5", openrouterApiKey: "sk-or-x" }),
+      "/xdg/kimiflare/config.json": JSON.stringify({ model: " anthropic/claude-x " }),
+      "/bad/kimiflare/config.json": "{ not json",
+      "/nomodel/kimiflare/config.json": JSON.stringify({ model: 3 }),
+    };
+    const readFile = async (path: string) => files[path];
+    const read = (env: NodeJS.ProcessEnv) => readAutopilotModel({ env, home: "/home/me", readFile });
+    assert.equal(await read({}), "openai/gpt-5");
+    assert.equal(await read({ KIMI_MODEL: "moonshotai/kimi-k2.6" }), "moonshotai/kimi-k2.6", "Autopilot's own override wins");
+    assert.equal(await read({ XDG_CONFIG_HOME: "/xdg" }), "anthropic/claude-x");
+    assert.equal(await read({ XDG_CONFIG_HOME: "/bad" }), undefined);
+    assert.equal(await read({ XDG_CONFIG_HOME: "/nomodel" }), undefined);
+    assert.equal(await read({ XDG_CONFIG_HOME: "/missing" }), undefined);
+  });
+
+  it("sends tasks to the default when several places are set up, and dl use changes it", { timeout: 30_000 }, async () => {
+    await saveRemote(place("box", fake.url));
+    await saveRemote(place("this-computer", fake.url));
+    const dir = await checkout();
+    const runIO = capture();
+    assert.equal(await run({ task: "fix it", cwd: dir, repository: "me/app", detach: true, autopilotModel: noAutopilotModel }, runIO), 0);
+    assert.match(runIO.text(), /Sending to box \(default\): me\/app/);
+    assert.equal((await loadRemotesFile()).lastUsed, "box");
+
+    const list = capture();
+    await servers([], list);
+    assert.match(list.text(), /● box +http:\/\/127\.0\.0\.1:\d+/);
+    assert.match(list.text(), /○ this-computer +this computer/);
+    assert.match(list.text(), /Change it: dl use NAME/);
+
+    const shown = capture();
+    assert.equal(await use([], shown), 0);
+    assert.match(shown.text(), /Tasks go to box unless you pass --server NAME\. {2}Change it: dl use NAME \(box, this-computer\)/);
+    const bad = capture();
+    assert.equal(await use(["nope"], bad), 1);
+    assert.match(bad.text(), /✗ Nothing named "nope" is set up\. Set up: box, this-computer/);
+    const set = capture();
+    assert.equal(await use(["this-computer"], set), 0);
+    assert.match(set.text(), /✓ Tasks now go to this-computer this computer unless you pass --server NAME/);
+    assert.equal((await loadRemotesFile()).default, "this-computer");
+
+    const again = capture();
+    assert.equal(await run({ task: "fix it", cwd: dir, repository: "me/app", detach: true, autopilotModel: noAutopilotModel }, again), 0);
+    assert.match(again.text(), /Sending to this-computer \(default\): /);
+    const named = capture();
+    assert.equal(await run({ task: "fix it", cwd: dir, repository: "me/app", server: "box", detach: true, autopilotModel: noAutopilotModel }, named), 0);
+    assert.match(named.text(), /Sending to box: /);
+
+    const home = capture();
+    assert.equal(await laptopHome(home), true);
+    assert.match(home.text(), /Coding agents that run on this computer or your own server/);
+    assert.match(home.text(), /Runs on +○ box http:\/\/127\.0\.0\.1:\d+, ● this-computer this computer +dl servers · dl use NAME/);
+  });
+
+  it("dl use with nothing set up points at dl setup", async () => {
+    const io = capture();
+    assert.equal(await use([], io), 0);
+    assert.match(io.text(), /Nothing set up yet\. {2}dl setup/);
   });
 });

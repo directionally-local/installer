@@ -1,25 +1,35 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { hostname } from "node:os";
+import { readFile } from "node:fs/promises";
+import { homedir, hostname } from "node:os";
 import { promisify } from "node:util";
 import { palette } from "../ui.js";
 import { RemoteApiError, RemoteClient, TERMINAL_STATUSES, type RemoteConversation, type RemoteEvent } from "./client.js";
-import { defaultRemoteName, loadRemotes, normalizeServerUrl, REMOTE_NAME_RE, removeRemote, resolveRemote, saveRemote, type RemoteServer } from "./config.js";
+import {
+  defaultRemoteName, loadRemotes, loadRemotesFile, normalizeServerUrl, recordLastUsed, REMOTE_NAME_RE, removeRemote, renameRemote, resolveRemote, resolveTarget,
+  saveRemote, setDefaultRemote, type RemoteServer, type TargetReason,
+} from "./config.js";
+import { autopilotConfigPath } from "./credentials.js";
+import { PAIRED_NAME } from "../local/layout.js";
 import { detectGitHubRepository, snapshotWorkingTree } from "./git.js";
 import { sshCommandLine } from "./ssh.js";
 import { openBrowser } from "./open-browser.js";
 import { withConnections, type Connections, type RemoteOpener } from "./tunnel.js";
 
 /**
- * `dl` on a laptop: connect to a server, send it tasks, follow them, and check out the
- * pull requests. It talks to the server's API directly (the same one Autopilot's
- * `--on` uses, and shares its list of servers), so the laptop needs nothing else.
+ * `dl` on a laptop: send tasks to where agents run (this computer, or your own server),
+ * follow them, and check out the pull requests. It talks to the server's API directly (the
+ * same one Autopilot's `--on` uses, and shares its list of servers), so the laptop needs
+ * nothing else.
  * Servers set up with `dl setup` are reached through an SSH tunnel that each command
  * opens and closes (see tunnel.ts); `open` lets tests swap the tunnel out.
  */
 
 const execFileAsync = promisify(execFile);
 const RUN_END_EVENTS = new Set(["completed", "failed", "cancelled", "interrupted"]);
+
+/** The model a task gets when neither -m nor the laptop's Autopilot picks one the server offers. */
+export const DEFAULT_MODEL = "moonshotai/kimi-k2.6";
 
 export interface LaptopIO {
   out: (text: string) => void;
@@ -81,12 +91,15 @@ export async function run(input: {
   detach?: boolean;
   signal?: AbortSignal;
   open?: RemoteOpener;
+  /** The laptop's Autopilot default model; reads Autopilot's config unless replaced (tests). */
+  autopilotModel?: () => Promise<string | undefined>;
 }, io = processIO): Promise<number> {
-  const remote = await resolveRemote(input.server);
-  return withConnections(input.open, async (connections) => runOn(await connections.client(remote), remote, input, io));
+  const { remote, reason } = await resolveTarget(input.server);
+  const preferred = input.preferredModel ?? await (input.autopilotModel ?? (() => readAutopilotModel()))();
+  return withConnections(input.open, async (connections) => runOn(await connections.client(remote), remote, reason, { ...input, ...(preferred ? { preferredModel: preferred } : {}) }, io));
 }
 
-async function runOn(client: RemoteClient, remote: RemoteServer, input: Parameters<typeof run>[0], io: LaptopIO): Promise<number> {
+async function runOn(client: RemoteClient, remote: RemoteServer, reason: TargetReason, input: Parameters<typeof run>[0], io: LaptopIO): Promise<number> {
   const c = palette(io.color === true);
   const repository = input.repository ?? await detectGitHubRepository(input.cwd);
   const snapshot = await snapshotWorkingTree(input.cwd);
@@ -96,7 +109,8 @@ async function runOn(client: RemoteClient, remote: RemoteServer, input: Paramete
   const model = pickModel(models, input.model, input.preferredModel);
 
   const changes = snapshot.files.length ? ` + ${snapshot.files.length} local change${snapshot.files.length === 1 ? "" : "s"}` : "";
-  io.err(`\n  ${c.cyan("·")} Sending to ${c.bold(remote.name)}: ${repository} at ${snapshot.baseCommit.slice(0, 7)}${changes}  ${c.dim(model)}\n`);
+  const why = reason === "default" || reason === "last used" ? ` ${c.dim(`(${reason})`)}` : "";
+  io.err(`\n  ${c.cyan("·")} Sending to ${c.bold(remote.name)}${why}: ${repository} at ${snapshot.baseCommit.slice(0, 7)}${changes}  ${c.dim(model)}\n`);
   const conversation = await client.createCodeConversation({
     workspaceId: workspace.id,
     model,
@@ -106,6 +120,8 @@ async function runOn(client: RemoteClient, remote: RemoteServer, input: Paramete
     idempotencyKey: `dl-${randomUUID()}`,
   });
   await client.submitTurn(conversation.conversationId, input.task, `dl-${randomUUID()}`);
+  // Only a fallback (a default, or the only place, always wins), so failing to write it is harmless.
+  await recordLastUsed(remote.name).catch(() => undefined);
   const id = conversation.conversationId.slice(0, 8);
   io.err(`${rewrite(io)}  ${c.green("✓")} Started ${c.bold(id)} on ${remote.name}  ${c.dim(`branch ${conversation.branch ?? "?"}`)}\n`);
   if (input.detach) {
@@ -119,7 +135,7 @@ async function runOn(client: RemoteClient, remote: RemoteServer, input: Paramete
 /** `dl runs`: tasks on every connected server, newest first. */
 export async function runs(input: { server?: string; json?: boolean; open?: RemoteOpener }, io = processIO): Promise<void> {
   const remotes = input.server ? [await resolveRemote(input.server)] : await loadRemotes();
-  if (remotes.length === 0) throw new Error("This laptop isn't connected to a server yet. Run: dl connect https://your-server");
+  if (remotes.length === 0) throw new Error("Nothing is set up yet. Run: dl setup  (or, for a server someone else set up: dl connect https://your-server)");
   return withConnections(input.open, (connections) => listRuns(remotes, connections, input.json === true, io));
 }
 
@@ -196,9 +212,10 @@ export async function pull(input: { id: string; server?: string; cwd: string; op
   io.out(`  ${c.green("✓")} On ${c.bold(branch)}${found.pullRequestURL ? `  ${c.dim(found.pullRequestURL)}` : ""}\n`);
 }
 
-/** `dl servers [remove NAME]`: the servers this laptop is connected to. */
+/** `dl servers [remove NAME | rename OLD NEW]`: the servers this laptop is connected to. */
 export async function servers(args: string[], io = processIO): Promise<number> {
   const c = palette(io.color === true);
+  if (args[0] === "rename") return renameServer(args.slice(1), io);
   if (args[0] === "remove") {
     const name = args[1] ?? "";
     const removed = (await loadRemotes()).find((remote) => remote.name === name);
@@ -212,12 +229,66 @@ export async function servers(args: string[], io = processIO): Promise<number> {
   }
   const remotes = await loadRemotes();
   if (remotes.length === 0) {
-    io.out(`\n  Not connected to a server yet.  ${c.bold("dl setup")}  ${c.dim("or, for a server someone else set up:")} ${c.bold("dl connect https://your-server")}\n\n`);
+    io.out(`\n  Nothing set up yet.  ${c.bold("dl setup")}  ${c.dim("or, for a server someone else set up:")} ${c.bold("dl connect https://your-server")}\n\n`);
     return 0;
   }
+  const current = await defaultName();
   io.out("\n");
-  for (const remote of remotes) io.out(`  ${c.green("●")} ${remote.name.padEnd(16)} ${where(remote)}  ${c.dim(`until ${remote.expiresAt.slice(0, 10)}`)}\n`);
-  io.out("\n");
+  for (const remote of remotes) io.out(`  ${mark(remote, current, c)} ${remote.name.padEnd(16)} ${where(remote)}  ${c.dim(`until ${remote.expiresAt.slice(0, 10)}`)}\n`);
+  io.out(remotes.length > 1 ? `\n  ${c.dim(`● is where tasks go without --server. Change it: dl use NAME`)}\n\n` : "\n");
+  return 0;
+}
+
+/** `dl use [NAME]`: set, or show, where commands go when no --server is given. */
+export async function use(args: string[], io = processIO): Promise<number> {
+  const c = palette(io.color === true);
+  const name = args[0];
+  if (name === undefined) {
+    const file = await loadRemotesFile();
+    if (file.remotes.length === 0) {
+      io.out(`  Nothing set up yet.  ${c.bold("dl setup")}\n`);
+      return 0;
+    }
+    const current = await defaultName();
+    io.out(current
+      ? `  Tasks go to ${c.bold(current)} unless you pass --server NAME.${file.remotes.length > 1 ? `  ${c.dim(`Change it: dl use NAME (${file.remotes.map((entry) => entry.name).join(", ")})`)}` : ""}\n`
+      : `  No default yet. Pick one: dl use NAME  ${c.dim(`(${file.remotes.map((entry) => entry.name).join(", ")})`)}\n`);
+    return 0;
+  }
+  try {
+    const remote = await setDefaultRemote(name);
+    io.out(`  ${c.green("✓")} Tasks now go to ${c.bold(remote.name)} ${c.dim(where(remote))} unless you pass --server NAME.\n`);
+    return 0;
+  } catch (error) {
+    io.err(`  ${c.red("✗")} ${describeError(error)}\n`);
+    return 1;
+  }
+}
+
+/** Where a command without --server goes, or undefined when that's ambiguous. */
+async function defaultName(): Promise<string | undefined> {
+  return resolveTarget(undefined).then((target) => target.remote.name, () => undefined);
+}
+
+function mark(remote: RemoteServer, current: string | undefined, c: ReturnType<typeof palette>): string {
+  return remote.name === current ? c.green("●") : c.dim("○");
+}
+
+/** `dl servers rename OLD NEW`: only this laptop's name for it; the server doesn't change. */
+export async function renameServer(args: string[], io = processIO, path?: string): Promise<number> {
+  const c = palette(io.color === true);
+  const [from, to] = args;
+  if (!from || !to || args.length > 2) {
+    io.err(`  Usage: dl servers rename OLD NEW   ${c.dim("(names: lowercase letters, digits, and dashes)")}\n`);
+    return 2;
+  }
+  try {
+    await renameRemote(from, to, path);
+  } catch (error) {
+    io.err(`  ${c.red("✗")} ${(error as Error).message}.\n`.replace(/\.\.\n$/, ".\n"));
+    return 1;
+  }
+  io.out(`  ${c.green("✓")} Renamed ${from} to ${c.bold(to)}  ${c.dim(`dl run --server ${to} …`)}\n`);
   return 0;
 }
 
@@ -235,9 +306,10 @@ export async function laptopHome(io = processIO, open?: RemoteOpener): Promise<b
       total += list?.length ?? 0;
     }
   });
+  const current = await defaultName();
   io.out(`\n  ${c.bold("Directionally Local")}  ${c.dim("on this laptop")}\n\n`);
-  io.out("  Background coding agents on your own server: send a task, get a pull request back.\n\n");
-  io.out(`  ${c.dim("Servers".padEnd(11))}${remotes.map((remote) => `${remote.name} ${c.dim(where(remote))}`).join(", ")}   ${c.dim("dl servers")}\n`);
+  io.out("  Coding agents that run on this computer or your own server: send a task, get a pull request back.\n\n");
+  io.out(`  ${c.dim("Runs on".padEnd(11))}${remotes.map((remote) => `${mark(remote, current, c)} ${remote.name} ${c.dim(where(remote))}`).join(", ")}   ${c.dim(remotes.length > 1 ? "dl servers · dl use NAME" : "dl servers")}\n`);
   io.out(`  ${c.dim("Tasks".padEnd(11))}${running} running · ${total} in all   ${c.dim("dl runs")}\n\n`);
   io.out(`  ${c.dim("Send a task, from inside a GitHub repository:")}\n     ${c.bold('dl run "fix the flaky checkout test"')}\n\n`);
   return true;
@@ -347,20 +419,51 @@ async function findRun(id: string, server: string | undefined, connections: Conn
   return matches[0]!;
 }
 
-function pickModel(models: string[], requested: string | undefined, preferred: string | undefined): string {
+/**
+ * The task's model: -m/--model; else the laptop's Autopilot default, if the server offers it;
+ * else DEFAULT_MODEL, if offered. Never just the first in the server's list (that's the
+ * whole OpenRouter catalog, in no useful order).
+ */
+export function pickModel(models: string[], requested: string | undefined, preferred: string | undefined): string {
+  const how = `Pick one: dl run -m <model> "task"  (model IDs: https://openrouter.ai/models)`;
   if (requested) {
-    if (!models.includes(requested)) throw new Error(`The server doesn't offer ${requested}`);
+    if (!models.includes(requested)) throw new Error(`The server doesn't offer ${requested}. ${how}`);
     return requested;
   }
   if (preferred && models.includes(preferred)) return preferred;
-  const first = models[0];
-  if (!first) throw new Error("The server offers no models");
-  return first;
+  if (models.includes(DEFAULT_MODEL)) return DEFAULT_MODEL;
+  if (models.length === 0) throw new Error("The server offers no models; check its OpenRouter key (on the server: dl doctor)");
+  const tried = preferred && preferred !== DEFAULT_MODEL ? `your Autopilot model (${preferred}) or ${DEFAULT_MODEL}` : DEFAULT_MODEL;
+  throw new Error(`The server doesn't offer ${tried}. ${how}`);
 }
 
-/** Where a server is, as people know it: its URL, or the SSH destination its tunnel goes to. */
+/**
+ * The laptop's Autopilot default model: KIMI_MODEL (Autopilot's own override) or the
+ * `model` in its config. undefined when neither is set or the config can't be read.
+ */
+export async function readAutopilotModel(sources: {
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+  readFile?: (path: string) => Promise<string | undefined>;
+} = {}): Promise<string | undefined> {
+  const env = sources.env ?? process.env;
+  const fromEnv = env.KIMI_MODEL?.trim();
+  if (fromEnv) return fromEnv;
+  const read = sources.readFile ?? ((path: string) => readFile(path, "utf8").catch(() => undefined));
+  const raw = await read(autopilotConfigPath(env, sources.home ?? homedir()));
+  if (!raw) return undefined;
+  try {
+    const model = (JSON.parse(raw) as { model?: unknown }).model;
+    return typeof model === "string" && model.trim() ? model.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Where a place is, as people know it: this computer, its URL, or the SSH destination its tunnel goes to. */
 function where(remote: RemoteServer): string {
-  return remote.ssh ? `ssh ${remote.ssh.target}${remote.ssh.port ? `:${remote.ssh.port}` : ""}` : remote.url;
+  if (remote.ssh) return `ssh ${remote.ssh.target}${remote.ssh.port ? `:${remote.ssh.port}` : ""}`;
+  return remote.name === PAIRED_NAME ? "this computer" : remote.url;
 }
 
 function clientName(): string {

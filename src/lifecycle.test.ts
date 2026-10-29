@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { describe, it } from "node:test";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { main, readAnswers } from "./cli.js";
@@ -129,17 +131,39 @@ describe("package", () => {
 });
 
 describe("cli", () => {
+  // Bare `dl` reads the laptop's remotes; keep this machine's own out of it.
+  const previousRemotes = process.env.AUTOPILOT_REMOTES_FILE;
+  let remotesRoot = "";
+  before(async () => {
+    remotesRoot = await mkdtemp(join(tmpdir(), "dl-cli-"));
+    process.env.AUTOPILOT_REMOTES_FILE = join(remotesRoot, "remotes.json");
+  });
+  after(async () => {
+    if (previousRemotes === undefined) delete process.env.AUTOPILOT_REMOTES_FILE;
+    else process.env.AUTOPILOT_REMOTES_FILE = previousRemotes;
+    await rm(remotesRoot, { recursive: true, force: true });
+  });
+
   it("prints help and rejects unknown commands", async () => {
     let out = "";
     let err = "";
     const io = { out: (text: string) => { out += text; }, err: (text: string) => { err += text; } };
     assert.equal(await main(["--help"], io), 0);
     assert.match(out, /dl up \[--dry-run\]/);
+    assert.match(out, /^Directionally Local: coding agents that run on this computer or on your own server\./);
+    assert.match(out, /dl +set up the first time; afterwards, an overview\n +dl setup +set up or repair where your agents run/);
+    assert.match(out, /dl use \[NAME\] +where tasks go without --server/);
+    assert.match(out, /-m\/--model MODEL/);
+    assert.match(out, /dl local status[\s\S]*dl local uninstall[\s\S]*On the server:/);
+    assert.doesNotMatch(out, /background coding agents on your own server/i);
     assert.equal(await main(["launch"], io), 2);
     assert.match(err, /Unknown command "launch"/);
     out = "";
     assert.equal(await main([], io), 0, "bare dl explains itself, even off a server");
-    assert.match(out, /isn't set up on this machine[\s\S]*curl -fsSL https:\/\/directionallylocal\.run \| sh/);
+    assert.match(out, /isn't set up on this machine[\s\S]*run on this computer or on your own server[\s\S]*curl -fsSL https:\/\/directionallylocal\.run \| sh/);
+    out = "";
+    assert.equal(await main(["use"], io), 0);
+    assert.match(out, /Nothing set up yet\. {2}dl setup/);
     out = "";
     assert.equal(await main(["--version"], io), 0);
     assert.match(out, /^\d+\.\d+\.\d+\n$/);

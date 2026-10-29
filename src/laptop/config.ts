@@ -25,10 +25,28 @@ export interface SshAccess {
   identityFile?: string;
 }
 
+/**
+ * The remotes file, shared with Autopilot's `--on` (whose loader reads only `version` and
+ * `remotes`, so the optional top-level fields below are invisible to it).
+ */
 interface RemotesFile {
   version: 1;
   remotes: RemoteServer[];
+  /** The place commands use when none is named: `dl use NAME`. */
+  default?: string;
+  /** The place the last task was sent to; the fallback when there's no default. */
+  lastUsed?: string;
 }
+
+/** The remotes plus where commands go when no name is given. */
+export interface Remotes {
+  remotes: RemoteServer[];
+  default?: string;
+  lastUsed?: string;
+}
+
+/** Why a command went where it did, for its first line. */
+export type TargetReason = "named" | "default" | "only" | "last used";
 
 export const REMOTE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
@@ -39,43 +57,122 @@ export function remotesPath(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 export async function loadRemotes(path = remotesPath()): Promise<RemoteServer[]> {
+  return (await loadRemotesFile(path)).remotes;
+}
+
+/**
+ * The remotes with the default and last-used names. A name that no longer matches a
+ * remote (it was removed, or renamed by something that didn't know) is dropped.
+ */
+export async function loadRemotesFile(path = remotesPath()): Promise<Remotes> {
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { remotes: [] };
     throw error;
   }
   const parsed = JSON.parse(raw) as Partial<RemotesFile>;
-  return Array.isArray(parsed.remotes) ? parsed.remotes.filter(isRemote) : [];
+  const remotes = Array.isArray(parsed.remotes) ? parsed.remotes.filter(isRemote) : [];
+  const known = (name: unknown): name is string => typeof name === "string" && remotes.some((entry) => entry.name === name);
+  return {
+    remotes,
+    ...(known(parsed.default) ? { default: parsed.default } : {}),
+    ...(known(parsed.lastUsed) ? { lastUsed: parsed.lastUsed } : {}),
+  };
 }
 
-/** Adds or replaces a remote by name. The file holds bearer tokens, so it is 0600 in a 0700 directory. */
+/**
+ * Adds or replaces a remote by name. The file holds bearer tokens, so it is 0600 in a 0700
+ * directory. When no default is set yet, the first place saved becomes it (an older file's
+ * first entry, if it had any), so the first setup needs no `dl use`.
+ */
 export async function saveRemote(remote: RemoteServer, path = remotesPath()): Promise<void> {
-  const remotes = (await loadRemotes(path)).filter((entry) => entry.name !== remote.name);
+  const file = await loadRemotesFile(path);
+  const remotes = file.remotes.filter((entry) => entry.name !== remote.name);
   remotes.push(remote);
-  await writeRemotes(remotes, path);
+  await writeRemotes({ ...file, remotes, default: file.default ?? file.remotes[0]?.name ?? remote.name }, path);
 }
 
 export async function removeRemote(name: string, path = remotesPath()): Promise<boolean> {
-  const remotes = await loadRemotes(path);
-  const kept = remotes.filter((entry) => entry.name !== name);
-  if (kept.length === remotes.length) return false;
-  await writeRemotes(kept, path);
+  const file = await loadRemotesFile(path);
+  const kept = file.remotes.filter((entry) => entry.name !== name);
+  if (kept.length === file.remotes.length) return false;
+  // Forgetting the default leaves none; with one place left, that one is used anyway.
+  await writeRemotes({
+    remotes: kept,
+    ...(file.default && file.default !== name ? { default: file.default } : {}),
+    ...(file.lastUsed && file.lastUsed !== name ? { lastUsed: file.lastUsed } : {}),
+  }, path);
   return true;
 }
 
-/** The named remote, or the only one when no name is given. */
-export async function resolveRemote(name: string | undefined, path = remotesPath()): Promise<RemoteServer> {
-  const remotes = await loadRemotes(path);
-  if (remotes.length === 0) throw new Error("No servers paired yet. Run: autopilot remote add https://your-server");
-  if (name === undefined) {
-    if (remotes.length === 1) return remotes[0]!;
-    throw new Error(`Several servers are paired; pick one with --on (${remotes.map((entry) => entry.name).join(", ")})`);
+/**
+ * `dl servers rename OLD NEW`: renames a place in this laptop's list (the server itself doesn't
+ * change). The `default` and `lastUsed` pointers follow the entry to its new name.
+ */
+export async function renameRemote(from: string, to: string, path = remotesPath()): Promise<void> {
+  if (!REMOTE_NAME_RE.test(to)) throw new Error(`"${to}" can't be a server name: use lowercase letters, digits, and dashes (up to 40), starting with a letter or digit`);
+  const file = await loadRemotesFile(path);
+  if (!file.remotes.some((entry) => entry.name === from)) {
+    throw new Error(`No server named "${from}". Connected: ${file.remotes.map((entry) => entry.name).join(", ") || "none"}`);
   }
-  const remote = remotes.find((entry) => entry.name === name);
-  if (!remote) throw new Error(`No server named "${name}". Paired: ${remotes.map((entry) => entry.name).join(", ")}`);
+  if (from === to) return;
+  if (file.remotes.some((entry) => entry.name === to)) throw new Error(`There's already a server named "${to}"`);
+  const follow = (name: string | undefined) => (name === from ? to : name);
+  const defaultName = follow(file.default);
+  const lastUsed = follow(file.lastUsed);
+  await writeRemotes({
+    remotes: file.remotes.map((entry) => (entry.name === from ? { ...entry, name: to } : entry)),
+    ...(defaultName ? { default: defaultName } : {}),
+    ...(lastUsed ? { lastUsed } : {}),
+  }, path);
+}
+
+/** `dl use NAME`: where commands go when none is named. */
+export async function setDefaultRemote(name: string, path = remotesPath()): Promise<RemoteServer> {
+  const file = await loadRemotesFile(path);
+  const remote = file.remotes.find((entry) => entry.name === name);
+  if (!remote) throw new Error(unknownName(name, file.remotes));
+  await writeRemotes({ ...file, default: name }, path);
   return remote;
+}
+
+/** Remembers where the last task went (the fallback when there's no default). */
+export async function recordLastUsed(name: string, path = remotesPath()): Promise<void> {
+  const file = await loadRemotesFile(path);
+  if (file.lastUsed === name || !file.remotes.some((entry) => entry.name === name)) return;
+  await writeRemotes({ ...file, lastUsed: name }, path);
+}
+
+/** The named remote, else the default, else the only one, else the last one used. */
+export async function resolveRemote(name: string | undefined, path = remotesPath()): Promise<RemoteServer> {
+  return (await resolveTarget(name, path)).remote;
+}
+
+/** resolveRemote, and why that one (for the command's first line). */
+export async function resolveTarget(name: string | undefined, path = remotesPath()): Promise<{ remote: RemoteServer; reason: TargetReason }> {
+  const file = await loadRemotesFile(path);
+  const { remotes } = file;
+  if (remotes.length === 0) throw new Error("Nothing is set up yet. Run: dl setup");
+  const named = (wanted: string) => remotes.find((entry) => entry.name === wanted);
+  if (name !== undefined) {
+    const remote = named(name);
+    if (!remote) throw new Error(unknownName(name, remotes));
+    return { remote, reason: "named" };
+  }
+  if (remotes.length === 1) return { remote: remotes[0]!, reason: "only" };
+  const chosen = file.default ? named(file.default) : undefined;
+  if (chosen) return { remote: chosen, reason: "default" };
+  const last = file.lastUsed ? named(file.lastUsed) : undefined;
+  if (last) return { remote: last, reason: "last used" };
+  throw new Error(`Several places are set up (${remotes.map((entry) => entry.name).join(", ")}). Pick one with --server NAME, or set a default: dl use NAME`);
+}
+
+function unknownName(name: string, remotes: RemoteServer[]): string {
+  return remotes.length
+    ? `Nothing named "${name}" is set up. Set up: ${remotes.map((entry) => entry.name).join(", ")}`
+    : `Nothing named "${name}" is set up; nothing is yet. Run: dl setup`;
 }
 
 /** A short default name from the URL's host: https://acme.example.com -> acme. */
@@ -102,10 +199,16 @@ export function normalizeServerUrl(input: string): string {
   return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
 }
 
-async function writeRemotes(remotes: RemoteServer[], path: string): Promise<void> {
+async function writeRemotes(file: Remotes, path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${process.pid}.tmp`;
-  await writeFile(temp, `${JSON.stringify({ version: 1, remotes } satisfies RemotesFile, null, 2)}\n`, { mode: 0o600 });
+  const body: RemotesFile = {
+    version: 1,
+    remotes: file.remotes,
+    ...(file.default ? { default: file.default } : {}),
+    ...(file.lastUsed ? { lastUsed: file.lastUsed } : {}),
+  };
+  await writeFile(temp, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
   await chmod(temp, 0o600);
   await rename(temp, path);
 }
