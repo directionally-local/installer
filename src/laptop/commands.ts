@@ -15,6 +15,8 @@ import { DEFAULT_MODEL, laptopModel } from "./settings.js";
 import { sshCommandLine } from "./ssh.js";
 import { openBrowser } from "./open-browser.js";
 import { withConnections, type Connections, type RemoteOpener } from "./tunnel.js";
+import { outdatedServers, type LatestVersions } from "./update.js";
+import type { SshExec } from "./ssh.js";
 
 export { DEFAULT_MODEL, readAutopilotModel } from "./settings.js";
 
@@ -294,7 +296,12 @@ export async function renameServer(args: string[], io = processIO, path?: string
 }
 
 /** `dl` on a laptop: what this is, which servers it's connected to, what to type next. */
-export async function laptopHome(io = processIO, open?: RemoteOpener, model: () => Promise<string | undefined> = laptopModel): Promise<boolean> {
+export async function laptopHome(
+  io = processIO,
+  open?: RemoteOpener,
+  model: () => Promise<string | undefined> = laptopModel,
+  versions?: { ssh: SshExec; latest?: () => Promise<LatestVersions | undefined> },
+): Promise<boolean> {
   const c = palette(io.color === true);
   const remotes = await loadRemotes();
   if (remotes.length === 0) return false;
@@ -307,12 +314,18 @@ export async function laptopHome(io = processIO, open?: RemoteOpener, model: () 
       total += list?.length ?? 0;
     }
   });
-  const [current, chosen] = await Promise.all([defaultName(), model()]);
+  const [current, chosen, outdated] = await Promise.all([
+    defaultName(),
+    model(),
+    versions ? outdatedServers(remotes, versions).catch(() => []) : Promise.resolve([]),
+  ]);
   io.out(`\n  ${c.bold("Directionally Local")}  ${c.dim("on this laptop")}\n\n`);
   io.out("  Coding agents that run on this computer or your own server: send a task, get a pull request back.\n\n");
   io.out(`  ${c.dim("Runs on".padEnd(11))}${remotes.map((remote) => `${mark(remote, current, c)} ${remote.name} ${c.dim(where(remote))}`).join(", ")}   ${c.dim(remotes.length > 1 ? "dl servers · dl use NAME" : "dl servers")}\n`);
   io.out(`  ${c.dim("Tasks".padEnd(11))}${running} running · ${total} in all   ${c.dim("dl runs")}\n`);
-  io.out(`  ${c.dim("Model".padEnd(11))}${chosen ?? DEFAULT_MODEL}   ${c.dim("dl model")}\n\n`);
+  io.out(`  ${c.dim("Model".padEnd(11))}${chosen ?? DEFAULT_MODEL}   ${c.dim("dl model")}\n`);
+  for (const entry of outdated) io.out(`  ${c.yellow("!")} ${entry.name} is behind: ${entry.notice}   ${c.dim(`dl update ${entry.name}`)}\n`);
+  io.out("\n");
   io.out(`  ${c.dim("Start a session: cd into a GitHub repository, then type")}  ${c.bold("dl")}\n`);
   io.out(`  ${c.dim("Or hand off a one-off task:")}  ${c.bold('dl run "fix the flaky checkout test"')}\n\n`);
   return true;
