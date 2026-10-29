@@ -7,6 +7,7 @@ import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, se
 import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, use, watch } from "./laptop/commands.js";
 import { loadRemotes } from "./laptop/config.js";
 import { keys } from "./laptop/keys.js";
+import { projectSession } from "./laptop/session.js";
 import { setup } from "./laptop/setup.js";
 import { localCommand } from "./local/cli.js";
 import { setUpOnThisComputer } from "./local/setup.js";
@@ -24,6 +25,8 @@ Send a task; it runs in its own sandbox and comes back as a pull request.
 On your laptop:
   dl                      set up the first time; afterwards, an overview
   dl setup                set up or repair where your agents run (safe to re-run)
+  dl  (in a GitHub repo)  talk to the repository's agent; it keeps running when you leave
+  dl new                  in a GitHub repo: start a fresh conversation for it
   dl connect URL          connect to a server someone else set up (approve the code it shows)
   dl run "TASK"           run a task, from inside a GitHub repository
                           (your uncommitted changes go along; Ctrl-C stops watching, not the task)
@@ -206,6 +209,11 @@ export async function main(
         const state = await readState(system);
         if (!state) {
           if (values.brief) return 0;
+          // Inside a GitHub repository, that repository's conversation; elsewhere, the laptop's home.
+          if (!command && terminal && (await loadRemotes()).length > 0) {
+            const code = await projectSession({ cwd: process.cwd(), ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}) }, laptopIO);
+            if (code !== undefined) return code;
+          }
           // A laptop connected to servers gets its own home; otherwise, what this is and how to start.
           if (!command && await laptopHome(laptopIO)) return 0;
           // A laptop with nothing set up yet: the wizard (it needs someone to answer it).
@@ -265,6 +273,12 @@ export async function main(
         if (command === "cancel") await cancel({ id, ...server }, laptopIO);
         else await pull({ id, cwd: process.cwd(), ...server }, laptopIO);
         return 0;
+      }
+      case "new": {
+        const code = await projectSession({ cwd: process.cwd(), fresh: true, ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}) }, laptopIO);
+        if (code !== undefined) return code;
+        io.err(`  dl new starts a fresh conversation from inside a GitHub repository (with something set up: dl setup).\n`);
+        return 1;
       }
       case "servers":
         return await servers(parsed.positionals.slice(1), laptopIO);
