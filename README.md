@@ -71,3 +71,7 @@ npm test          # node:test through tsx; a simulated server exercises up, doct
 npm run typecheck
 npm run build
 ```
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
