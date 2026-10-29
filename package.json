@@ -29,6 +29,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit && tsc -p site/tsconfig.json",
     "test": "tsx --test \"src/**/*.test.ts\" \"site/**/*.test.ts\"",
+    "sync:site-script": "node site/generate-install-script.mjs",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {

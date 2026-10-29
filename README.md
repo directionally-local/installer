@@ -63,6 +63,8 @@ Supported: Ubuntu 24.04 and 22.04 and Debian 12, on x86_64 or arm64, with at lea
 
 `site/` is the Cloudflare Worker for `https://directionallylocal.run`. It serves `install.sh` to `curl` at the bare domain (and `/install.sh`), sends browsers to directionallylocal.com, and serves nothing else. Subdomains of `directionallylocal.run` are users' instant addresses, and the domain is on the Public Suffix List, so the Worker never sets cookies. Deploy it with `npx wrangler deploy -c site/wrangler.toml`.
 
+`site/wrangler.jsonc` is the portable config that celld and Serverless Objects read; `site/wrangler.toml` keeps the Cloudflare-only `routes` and `workers_dev`. The install script is checked in as `site/install-script.ts` so the Worker has no non-JavaScript imports; regenerate it with `npm run sync:site-script` after editing `install.sh`. `sobjects build --strict site` checks that the Worker stays portable. The design for the name service and approvals page is in [`docs/plans/portable-services.md`](docs/plans/portable-services.md).
+
 ## Development
 
 ```sh
@@ -70,6 +72,7 @@ npm install
 npm test          # node:test through tsx; a simulated server exercises up, doctor, and uninstall
 npm run typecheck
 npm run build
+npm run sync:site-script   # after editing install.sh
 ```
 
 ## License

@@ -1,8 +1,8 @@
-import script from "../install.sh";
 import { respond } from "./handler.js";
+import { INSTALL_SCRIPT } from "./install-script.js";
 
 export default {
   fetch(request: Request): Response {
-    return respond(request, script);
+    return respond(request, INSTALL_SCRIPT);
   },
 };
