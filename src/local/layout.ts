@@ -21,6 +21,8 @@ export interface LocalPaths {
   githubEnv: string;
   asterConfig: string;
   hotcellHome: string;
+  /** OpenRouter's prices, so Hotcell's spend-capped gateway forwards current models. */
+  modelPrices: string;
   autopilotHome: string;
   workspace: string;
   /** ~/Library/LaunchAgents (macOS) or ~/.config/systemd/user (Linux). */
@@ -44,6 +46,7 @@ export function localPaths(home: string, platform: LocalPlatform): LocalPaths {
     githubEnv: join(config, "github.env"),
     asterConfig: join(config, "aster.json"),
     hotcellHome: join(root, "hotcell"),
+    modelPrices: join(root, "hotcell", "model-prices.json"),
     autopilotHome,
     workspace: join(autopilotHome, "workspaces", "default"),
     services: platform === "darwin" ? join(home, "Library", "LaunchAgents") : join(home, ".config", "systemd", "user"),
@@ -127,6 +130,8 @@ export function localHotcellEnv(input: { paths: LocalPaths; apiKey: string; port
     HOTCELL_EGRESS_HOST: input.net.listenHost,
     HOTCELL_EGRESS_PORT: String(ports.hotcellEgress),
     HOTCELL_EGRESS_ADVERTISE_HOST: "host.docker.internal",
+    // Under a spend cap the gateway refuses models it can't price; setup refreshes this list.
+    HOTCELL_MODEL_PRICES: paths.modelPrices,
   });
 }
 

@@ -7,6 +7,7 @@ import { formatLocalStatus } from "./cli.js";
 import { launchAgentPlist, localEnvFile, localPaths, parseLocalEnvFile, serviceSpecs, systemdUserUnit, PREFERRED_PORTS } from "./layout.js";
 import { localStatus, setUpOnThisComputer, uninstallFromThisComputer, type LocalOptions } from "./setup.js";
 import { FakeComputer } from "./test-support/fake-computer.js";
+import { withCatalog } from "../test-support/fake-catalog.js";
 
 const OPENROUTER_KEY = `sk-or-v1-${"a".repeat(40)}`;
 const GITHUB_TOKEN = `github_pat_${"b".repeat(40)}`;
@@ -27,6 +28,7 @@ function options(system: FakeComputer, extra: Partial<LocalOptions> = {}): Local
     hostname: "Adas-MacBook-Air.local",
     sleep: async () => {},
     now: () => new Date("2026-10-28T10:00:00Z"),
+    fetchImpl: withCatalog(fetchNothing),
     ...extra,
   };
 }
@@ -40,6 +42,9 @@ async function setUp(system: FakeComputer, extra: Partial<LocalOptions> = {}, ui
   });
   return { remote, ui };
 }
+
+/** Only OpenRouter's model list is fetched during setup. */
+const fetchNothing = (async (url: string | URL | Request) => { throw new Error(`unexpected fetch ${String(url)}`); }) as typeof fetch;
 
 const env = (system: FakeComputer, name: string) => parseLocalEnvFile(system.files.get(`${ROOT}/config/${name}`)?.content);
 
@@ -218,6 +223,32 @@ describe("on this computer: setup", () => {
     assert.ok(rerun.includes("launchctl bootout gui/501/com.directionallylocal.hotcell"));
   });
 
+  it("writes OpenRouter's prices under Hotcell's home before it starts, and keeps them when offline", async () => {
+    const system = new FakeComputer();
+    const install = system.run.bind(system);
+    let pricesAtStart: string | undefined;
+    system.run = async (command, args, runOptions) => {
+      if (command === "launchctl" && args[0] === "bootstrap" && args[2]?.includes("hotcell")) pricesAtStart = system.files.get(`${ROOT}/hotcell/model-prices.json`)?.content;
+      return install(command, args, runOptions);
+    };
+    const { ui } = await setUp(system);
+    const prices = system.files.get(`${ROOT}/hotcell/model-prices.json`)!;
+    assert.deepEqual(Object.keys(JSON.parse(prices.content) as object), ["meta-llama/llama-5-8b:free", "moonshotai/kimi-k2.6", "openai/gpt-6-luna"]);
+    assert.equal(pricesAtStart, prices.content, "in place when Hotcell starts, which is when it reads them");
+    assert.equal(env(system, "hotcell.env").HOTCELL_MODEL_PRICES, `${ROOT}/hotcell/model-prices.json`);
+    assert.ok(ui.events.some((event) => event.startsWith("done services") && event.endsWith("· prices for 3 models")), ui.events.join("\n"));
+
+    const offline = (async () => { throw new Error("getaddrinfo ENOTFOUND openrouter.ai"); }) as unknown as typeof fetch;
+    const again = await setUp(system, { fetchImpl: offline });
+    assert.equal(system.files.get(`${ROOT}/hotcell/model-prices.json`)!.content, prices.content);
+    assert.ok(again.ui.events.some((event) => event.startsWith("warn Couldn't refresh model prices") && event.includes("kept the last list (3 models)")));
+
+    const fresh = new FakeComputer();
+    const first = await setUp(fresh, { fetchImpl: offline });
+    assert.equal(fresh.files.has(`${ROOT}/hotcell/model-prices.json`), false);
+    assert.ok(first.ui.events.some((event) => event.includes('Tasks will fail with "model not priced" until dl setup can reach openrouter.ai.')));
+  });
+
   it("moves to free ports when the usual ones are taken", async () => {
     const system = new FakeComputer();
     system.busy.add(PREFERRED_PORTS.autopilot);
@@ -307,6 +338,16 @@ describe("on this computer: status and uninstall", () => {
     assert.match(text, /~6 agents at once/);
     assert.match(text, /~\/\.directionallylocal\/logs/);
     assert.match(text, /tasks pause while this computer sleeps/);
+    const pricesFile = `${ROOT}/hotcell/model-prices.json`;
+    system.mtimes.set(pricesFile, Date.parse("2026-10-28T09:00:00Z") / 1000);
+    assert.match(formatLocalStatus(await localStatus(options(system)), palette(false), HOME), /✓ Prices +3 models · updated today\n/);
+    system.mtimes.set(pricesFile, Date.parse("2026-10-10T09:00:00Z") / 1000);
+    const stale = formatLocalStatus(await localStatus(options(system)), palette(false), HOME);
+    assert.match(stale, /on this computer {2}running/);
+    assert.match(stale, /! Prices +3 models · 18 days old; dl setup refreshes it\n/);
+    system.files.delete(pricesFile);
+    assert.match(formatLocalStatus(await localStatus(options(system)), palette(false), HOME), /needs attention[\s\S]*✗ Prices +missing/);
+    await setUp(system);
 
     system.running.delete("com.directionallylocal.autopilot");
     assert.match(formatLocalStatus(await localStatus(options(system)), palette(false), HOME), /needs attention[\s\S]*Autopilot +stopped, not answering/);

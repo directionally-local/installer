@@ -11,6 +11,7 @@ import { ACCESS_MODES, readState, writeState, type AccessMode, type InstallState
 import type { System } from "./system.js";
 import { PlainUi, type SummaryItem, type Ui } from "./ui.js";
 import { ownerLink } from "./server-api.js";
+import { refreshModelPrices } from "./model-prices.js";
 
 export interface UpOptions {
   prompter: Prompter;
@@ -164,6 +165,14 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
     const hotcellValues = parseEnvFile(await system.readFile(PATHS.hotcellEnv));
     const apiKey = hotcellValues.HOTCELL_API_KEY || randomBytes(24).toString("hex");
     await system.mkdir(PATHS.hotcellEtc, { mode: 0o750, owner: `root:${USERS.hotcell}` });
+    // Read once at Hotcell's start, so it's in place before the restart below.
+    const prices = await refreshModelPrices(system, {
+      path: PATHS.modelPrices,
+      write: { mode: 0o644, owner: `${USERS.hotcell}:${USERS.hotcell}` },
+      fetchImpl,
+      warn: (text) => ui.warn(text),
+      retry: "dl up",
+    });
     await system.writeFile(PATHS.hotcellEnv, hotcellEnv({ apiKey, bridgeIp }), { mode: 0o640, owner: `root:${USERS.hotcell}`, secret: true });
     if (!(await system.readFile(PATHS.asterConfig))) {
       await system.writeFile(PATHS.asterConfig, asterConfig(), { mode: 0o640, owner: `root:${USERS.autopilot}` });
@@ -179,7 +188,7 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
     await system.run("systemctl", ["restart", SERVICES.hotcell]);
     await waitUntil(system, sleep, "Hotcell", async () => (await system.probe("curl", ["-fsS", "-o", "/dev/null", `http://127.0.0.1:${HOTCELL_PORT}/`])).code === 0
       || (await system.probe("sh", ["-c", `ss -ltn | grep -q '127.0.0.1:${HOTCELL_PORT}'`])).code === 0);
-    return { value: apiKey, detail: "sandboxes and keys ready" };
+    return { value: apiKey, detail: `sandboxes and keys ready${prices ? ` · ${prices}` : ""}` };
   });
 
   const url = await step("access", async () => {

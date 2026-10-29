@@ -7,6 +7,7 @@ import { ScriptedPrompter } from "./prompt.js";
 import { FakeSystem } from "./test-support/fake-system.js";
 import { palette } from "./ui.js";
 import { up } from "./up.js";
+import { withCatalog } from "./test-support/fake-catalog.js";
 
 const OLD_OPENROUTER = `sk-or-v1-${"a".repeat(40)}`;
 const OLD_GITHUB = `github_pat_${"b".repeat(40)}`;
@@ -14,8 +15,8 @@ const NEW_OPENROUTER = `sk-or-v1-${"n".repeat(38)}zq`;
 const NEW_GITHUB = `github_pat_${"c".repeat(40)}`;
 
 /** OpenRouter and GitHub accept everything, and GitHub says whose token it is. */
-const fetchOk = (async (url: string | URL | Request) =>
-  String(url).includes("api.github.com") ? Response.json({ login: "octo" }) : Response.json({ data: {} })) as typeof fetch;
+const fetchOk = withCatalog((async (url: string | URL | Request) =>
+  String(url).includes("api.github.com") ? Response.json({ login: "octo" }) : Response.json({ data: {} })) as typeof fetch);
 const fetchRejects = (async () => new Response("{}", { status: 401 })) as unknown as typeof fetch;
 
 async function installed(): Promise<FakeSystem> {

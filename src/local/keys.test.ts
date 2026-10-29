@@ -6,6 +6,7 @@ import { listLocalKeys, setLocalKey, type LocalKeyOptions } from "./keys.js";
 import { parseLocalEnvFile } from "./layout.js";
 import { setUpOnThisComputer } from "./setup.js";
 import { FakeComputer } from "./test-support/fake-computer.js";
+import { withCatalog } from "../test-support/fake-catalog.js";
 
 const OLD_OPENROUTER = `sk-or-v1-${"a".repeat(40)}`;
 const OLD_GITHUB = `github_pat_${"b".repeat(40)}`;
@@ -31,7 +32,7 @@ function options(system: FakeComputer, extra: Partial<LocalKeyOptions> = {}): Lo
 }
 
 async function installed(system = new FakeComputer(), extra: Partial<LocalKeyOptions> = {}): Promise<FakeComputer> {
-  await setUpOnThisComputer({ ui: new RecordingUi(), prompter: new ScriptedPrompter({}), answers: { openrouterKey: OLD_OPENROUTER, githubToken: OLD_GITHUB }, ...options(system, extra) });
+  await setUpOnThisComputer({ ui: new RecordingUi(), prompter: new ScriptedPrompter({}), answers: { openrouterKey: OLD_OPENROUTER, githubToken: OLD_GITHUB }, ...options(system, { fetchImpl: withCatalog(fetchOk), ...extra }) });
   system.commands.length = 0;
   system.restarted.length = 0;
   return system;
