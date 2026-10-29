@@ -6,15 +6,24 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { FakeSshServer } from "../test-support/fake-ssh.js";
 import { fakeTunnels } from "../test-support/fake-tunnel.js";
-import { ScriptedPrompter } from "../prompt.js";
+import { ScriptedPrompter, type SelectOption, type SelectResult } from "../prompt.js";
 import { RecordingUi } from "../ui.js";
-import { loadRemotes, saveRemote, type RemoteServer } from "./config.js";
+import { loadRemotes, loadRemotesFile, saveRemote, type RemoteServer } from "./config.js";
 import { serverLabel, setupWizard, type LocalSetup, type SetupDeps } from "./setup.js";
 import { createOpener } from "./tunnel.js";
 
 const GH = `gho_${"a".repeat(36)}`;
 const OR = "sk-or-v1-fromautopilot0000";
 const TOKEN = `aster_laptop_token_${"0".repeat(34)}`;
+
+/** A ScriptedPrompter that also keeps each list it was shown. */
+class RecordingSelect extends ScriptedPrompter {
+  readonly selects: Array<{ question: string; options: SelectOption[]; initial: number }> = [];
+  override async select(question: string, options: SelectOption[], initial = 0): Promise<SelectResult> {
+    this.selects.push({ question, options, initial });
+    return super.select(question, options, initial);
+  }
+}
 
 let root: string;
 let api: Server;
@@ -81,9 +90,7 @@ describe("dl setup on a laptop", () => {
     const remote = await setupWizard(first.deps);
 
     assert.match(first.text(), /Directionally Local\n  Background coding agents\. Where should they run\?/);
-    assert.match(first.text(), /1 {2}On this computer {7}start now · nothing to rent · pauses when this computer sleeps/);
-    assert.match(first.text(), /2 {2}On my own server {7}keeps going when your laptop is closed · needs SSH access/);
-    assert.match(first.text(), /1 {2}box {20}root@203\.0\.113\.10\n {2}2 {2}Another server/);
+    assert.ok(!/\d {2}On this computer/.test(first.text()), "the places are a list to pick from, not printed numbers");
     const events = first.ui.events;
     assert.ok(events.includes("answered Where | On my own server"));
     assert.ok(events.includes("done ssh | root@203.0.113.10  Ubuntu 24.04 · arm64"), events.join("\n"));
@@ -92,9 +99,14 @@ describe("dl setup on a laptop", () => {
     assert.ok(events.includes("done image | built"));
     assert.ok(events.includes("done access | private · reached over SSH"));
     assert.ok(events.includes("line done This laptop | connected as box"));
-    assert.ok(events.includes("ready Ready · fits ~6 agents at once (estimate)"));
-    assert.ok(events.includes('item From any GitHub repository | dl run "fix the flaky checkout test"'));
-    assert.ok(events.includes("item See progress, then check out the result | dl runs\ndl pull ID"));
+    assert.ok(events.includes("questions 2 keys, kept on your server only; then it sets itself up."));
+    assert.deepEqual(events.slice(events.indexOf("ready Ready · fits ~6 agents at once (estimate)")), [
+      "ready Ready · fits ~6 agents at once (estimate)",
+      "item Start a session: cd into a GitHub repository, then type | dl",
+      'item Or hand off a one-off task | dl run "fix the flaky checkout test"',
+      "footer dl status shows where agents run and what they're doing.",
+    ]);
+    assert.ok(!first.prompter.asked.some((question) => question.includes("by default")), "the first place becomes the default without asking");
 
     // The keys went to the server on stdin, never in a command line.
     const install = server.calls.find((call) => call.command.includes("--answers-stdin"))!;
@@ -223,11 +235,44 @@ describe("dl setup on a laptop", () => {
     const local: RemoteServer = { name: "this-computer", url: "http://127.0.0.1:4096", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" };
     let received: Parameters<LocalSetup>[0]["answers"] | undefined;
     const run = deps(new FakeSshServer(), { Where: "1", "GitHub CLI": "", "Autopilot": "" }, {
-      localSetup: async ({ answers }) => { received = answers; return local; },
+      localSetup: async ({ answers }) => { received = answers; return { remote: local, capacity: 4 }; },
     });
     assert.deepEqual(await setupWizard(run.deps), local);
     assert.deepEqual(received, { githubToken: GH, openrouterKey: OR });
     assert.deepEqual(await loadRemotes(join(root, "remotes.json")), [local]);
-    assert.ok(run.ui.events.includes("ready Ready"));
+    const events = run.ui.events;
+    assert.ok(events.includes("questions 2 keys, kept on this computer only; then it sets itself up."), events.join("\n"));
+    assert.ok(run.prompter.asked.includes("Use your GitHub CLI login (sinameraji)? It stays on this computer."), run.prompter.asked.join("\n"));
+    assert.ok(run.prompter.asked.includes("Use the OpenRouter key from Autopilot? It stays on this computer."));
+    assert.ok(!events.some((event) => event.includes("your server")), "nothing says 'server' for this computer");
+    assert.ok(events.includes("ready Ready · fits ~4 agents at once (estimate)"));
+    assert.ok(!run.prompter.asked.some((question) => question.includes("by default")), "one place: no default question");
+  });
+
+  it("asks where tasks go by default when setup adds a second place, preselecting the new one", async () => {
+    const remotesFile = join(root, "remotes.json");
+    const local: RemoteServer = { name: "this-computer", url: "http://127.0.0.1:4096", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" };
+    const server = new FakeSshServer();
+    // A server first: it becomes the default by itself.
+    await setupWizard(deps(server, { Where: "2", Server: "1", "GitHub CLI": "", "Autopilot": "" }).deps);
+    assert.equal((await loadRemotesFile(remotesFile)).default, "box");
+
+    // Then this computer: asked, with the new place preselected (Enter keeps it).
+    const prompter = new RecordingSelect({ "by default": "", Where: "1", "GitHub CLI": "", "Autopilot": "" });
+    const run = deps(server, {}, { prompter, localSetup: async () => ({ remote: local, capacity: 4 }) });
+    await setupWizard(run.deps);
+    const question = prompter.selects.find((entry) => entry.question.includes("Where should tasks go by default?"))!;
+    assert.deepEqual(question.options.map((option) => `${option.label} · ${option.detail}`), ["box · server · box", "this-computer · this computer"]);
+    assert.equal(question.initial, 1);
+    assert.equal((await loadRemotesFile(remotesFile)).default, "this-computer");
+    assert.ok(run.ui.events.includes("answered Default | this-computer"));
+
+    // Re-running setup for a place that's already there doesn't ask again; picking the other one sticks.
+    const again = new RecordingSelect({ Where: "1", "GitHub CLI": "", "Autopilot": "" });
+    await setupWizard(deps(server, {}, { prompter: again, localSetup: async () => ({ remote: local, capacity: 4 }) }).deps);
+    assert.ok(!again.selects.some((entry) => entry.question.includes("by default")));
+    const other = new RecordingSelect({ "by default": "box", Where: "1", "GitHub CLI": "", "Autopilot": "" });
+    await setupWizard(deps(server, {}, { prompter: other, localSetup: async () => ({ remote: { ...local, name: "laptop-2" }, capacity: 4 }) }).deps);
+    assert.equal((await loadRemotesFile(remotesFile)).default, "box");
   });
 });

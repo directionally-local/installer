@@ -27,6 +27,7 @@ const noSleep = async () => {};
 /** For the laptop's mode: any question is a bug, since there's no one to answer it. */
 const neverAsk = {
   choose: async () => { throw new Error("asked a question"); },
+  select: async () => { throw new Error("asked a question"); },
   text: async () => { throw new Error("asked a question"); },
   secret: async () => { throw new Error("asked a question"); },
 };
@@ -196,6 +197,7 @@ describe("directionallylocal up", () => {
     const replies = ["not-a-key", OPENROUTER_KEY];
     const prompter = {
       choose: async () => "tailscale",
+      select: async () => { throw new Error("asked a question"); },
       text: async () => "",
       secret: async (question: string) => question.includes("OpenRouter") ? replies.shift()! : GITHUB_TOKEN,
     };

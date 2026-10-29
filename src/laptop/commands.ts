@@ -312,7 +312,8 @@ export async function laptopHome(io = processIO, open?: RemoteOpener): Promise<b
   io.out("  Coding agents that run on this computer or your own server: send a task, get a pull request back.\n\n");
   io.out(`  ${c.dim("Runs on".padEnd(11))}${remotes.map((remote) => `${mark(remote, current, c)} ${remote.name} ${c.dim(where(remote))}`).join(", ")}   ${c.dim(remotes.length > 1 ? "dl servers · dl use NAME" : "dl servers")}\n`);
   io.out(`  ${c.dim("Tasks".padEnd(11))}${running} running · ${total} in all   ${c.dim("dl runs")}\n\n`);
-  io.out(`  ${c.dim("Send a task, from inside a GitHub repository:")}\n     ${c.bold('dl run "fix the flaky checkout test"')}\n\n`);
+  io.out(`  ${c.dim("Start a session: cd into a GitHub repository, then type")}  ${c.bold("dl")}\n`);
+  io.out(`  ${c.dim("Or hand off a one-off task:")}  ${c.bold('dl run "fix the flaky checkout test"')}\n\n`);
   return true;
 }
 

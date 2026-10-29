@@ -97,6 +97,15 @@ export function createOpener(options: TunnelOptions = {}): RemoteOpener {
 export const openRemote: RemoteOpener = createOpener();
 
 /**
+ * For an interactive session: ssh in its own process group, so Ctrl-C typed into the agent's
+ * screen (which the terminal sends to its whole foreground group) doesn't drop the tunnel.
+ * The session closes it itself when the agent exits, or when dl is told to stop.
+ */
+export const openRemoteForSession: RemoteOpener = createOpener({
+  spawn: (args) => spawn("ssh", args, { stdio: ["ignore", "ignore", "pipe"], detached: true }),
+});
+
+/**
  * The endpoints one command uses: at most one tunnel per server, reused across its
  * requests, all closed when the command ends (commands close it in `finally`, which also
  * runs when Ctrl-C aborts a watch).
