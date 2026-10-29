@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/directionally-local/installer/compare/v0.4.1...v0.5.0) (2026-10-29)
+
+
+### Features
+
+* open an agent session when dl is typed inside a GitHub project ([d2e0820](https://github.com/directionally-local/installer/commit/d2e0820e0f34dde5119e03b7422c6b16e2659842))
+
 ## [0.4.1](https://github.com/directionally-local/installer/compare/v0.4.0...v0.4.1) (2026-10-29)
 
 
