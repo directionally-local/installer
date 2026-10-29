@@ -45,6 +45,8 @@ Then, from inside a GitHub repository:
 
 ```sh
 dl                                  # talk to the repository's agent; it keeps running when you leave
+dl new                              # start another conversation; the previous ones stay reachable
+dl attach                           # jump into any conversation, on any place (or: dl attach ID)
 dl run "fix the flaky checkout test"  # one-off task; your uncommitted changes go along
 dl runs                             # tasks and their pull requests
 dl pull <id>                        # check one out here
@@ -62,9 +64,10 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 
 | Command | What it does |
 | --- | --- |
-| `dl` | Set up the first time; afterwards, an overview. Inside a GitHub repository, that repository's agent session. |
+| `dl` | Set up the first time; afterwards, an overview. Inside a GitHub repository, that repository's agent session (with a quick picker when several are running). |
 | `dl setup` | Set up or repair where your agents run. Safe to re-run. `--identity FILE` names the SSH key to use. |
-| `dl new` | In a GitHub repository: start a fresh conversation for it. |
+| `dl new` | In a GitHub repository: start a fresh conversation for it. The previous ones stay reachable with `dl attach`. |
+| `dl attach [ID]` | Jump into a conversation, from anywhere. With no ID, picks from every conversation on every place (blocked ones first). An ID prefix works when it's unique across places. |
 | `dl status` | Where your agents run and what they're doing. Works anywhere. |
 | `dl connect URL` | Connect to a server someone else set up; approve the code it shows. |
 | `dl run "TASK"` | Run a task, from inside a GitHub repository. Ctrl-C stops watching, not the task. |

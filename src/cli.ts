@@ -8,7 +8,7 @@ import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, u
 import { loadRemotes } from "./laptop/config.js";
 import { keys } from "./laptop/keys.js";
 import { model } from "./laptop/settings.js";
-import { projectSession } from "./laptop/session.js";
+import { attachSession, projectSession } from "./laptop/session.js";
 import { preview as laptopPreview } from "./laptop/preview.js";
 import { setup } from "./laptop/setup.js";
 import { realSshExec } from "./laptop/ssh.js";
@@ -32,6 +32,8 @@ On your laptop:
   dl setup                set up or repair where your agents run (safe to re-run)
   dl  (in a GitHub repo)  talk to the repository's agent; it keeps running when you leave
   dl new                  in a GitHub repo: start a fresh conversation for it
+                          (the previous ones stay reachable: dl attach)
+  dl attach [ID]          jump into a conversation, from anywhere (no ID: pick one)
   dl status               where your agents run and what they're doing (works anywhere)
   dl connect URL          connect to a server someone else set up (approve the code it shows)
   dl run "TASK"           run a task, from inside a GitHub repository
@@ -224,7 +226,12 @@ export async function main(
           if (values.brief) return 0;
           // Inside a GitHub repository, that repository's conversation; elsewhere, the laptop's home.
           if (!command && terminal && (await loadRemotes()).length > 0) {
-            const code = await projectSession({ cwd: process.cwd(), ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}) }, laptopIO);
+            const code = await projectSession({
+              cwd: process.cwd(),
+              ...(values.server ? { server: values.server } : {}),
+              ...(values.model ? { model: values.model } : {}),
+              prompter: new TtyPrompter({ color: colorOn }),
+            }, laptopIO);
             if (code !== undefined) return code;
           }
           // A laptop connected to servers gets its own home (`dl status` shows it from anywhere);
@@ -302,6 +309,18 @@ export async function main(
         if (code !== undefined) return code;
         io.err(`  dl new starts a fresh conversation from inside a GitHub repository (with something set up: dl setup).\n`);
         return 1;
+      }
+      case "attach": {
+        if (parsed.positionals.length > 2) {
+          io.err(`  Usage: dl attach [ID]   ${colors.dim("(no ID: pick from every conversation on every place)")}\n`);
+          return 2;
+        }
+        return await attachSession({
+          cwd: process.cwd(),
+          ...(parsed.positionals[1] ? { id: parsed.positionals[1] } : {}),
+          ...(values.server ? { server: values.server } : {}),
+          ...(terminal ? { prompter: new TtyPrompter({ color: colorOn }) } : {}),
+        }, laptopIO);
       }
       case "preview": {
         const id = parsed.positionals[1];

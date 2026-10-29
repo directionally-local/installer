@@ -10,11 +10,13 @@ import assert from "node:assert/strict";
 import { main } from "../cli.js";
 import { PATHS } from "../layout.js";
 import { fakeTunnels, type FakeTunnel } from "../test-support/fake-tunnel.js";
+import type { RemoteConversation } from "./client.js";
 import { DEFAULT_MODEL, type LaptopIO } from "./commands.js";
 import { saveRemote, type RemoteServer } from "./config.js";
-import { autopilotOnPath, bundledAutopilot, projectSession, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput } from "./session.js";
-import { loadSessions, rememberSession } from "./session-store.js";
+import { attachSession, autopilotOnPath, bundledAutopilot, projectSession, supportsAttachRemote, type AttachInput, type AutopilotCommand, type SessionChild, type SessionInput } from "./session.js";
+import { findSessions, loadSessions, rememberSession } from "./session-store.js";
 import { createOpener, type RemoteOpener } from "./tunnel.js";
+import type { Prompter, SelectOption, SelectResult } from "../prompt.js";
 
 const TOKEN = "aster_laptop_token_0000000000000000000000000000000000";
 const NEW_ID = "7c1d2e3f-0000-4000-8000-000000000000";
@@ -25,6 +27,8 @@ class FakeApi {
   models = ["01-ai/yi-large", DEFAULT_MODEL];
   /** Conversation ID -> status; missing means 404. */
   readonly conversations = new Map<string, string>();
+  /** What `listConversations` returns. */
+  readonly list: RemoteConversation[] = [];
   readonly requests: string[] = [];
   private server: Server | undefined;
   url = "";
@@ -52,7 +56,7 @@ class FakeApi {
     if (req.headers.authorization !== `Bearer ${TOKEN}`) return send(401, { error: { code: "invalid_credential", message: "no" } });
     if (path === "/api/v1/workspaces") return send(200, { workspaces: [{ id: "default", displayName: "Default" }] });
     if (path === "/api/v1/models") return send(200, { models: this.models });
-    if (path === "/api/v1/conversations") return send(200, { conversations: [] });
+    if (path === "/api/v1/conversations") return send(200, { conversations: this.list });
     const id = decodeURIComponent(path.replace(/^\/api\/v1\/conversations\//, ""));
     const status = this.conversations.get(id);
     if (status) return send(200, { conversationId: id, workspaceId: "default", model: DEFAULT_MODEL, status, activeRunId: null, lastEventId: 1, createdAt: "", updatedAt: "", kind: "code", repository: "me/app" });
@@ -176,6 +180,55 @@ function session(input: Partial<SessionInput> & { cwd: string }, io: LaptopIO): 
   }, io);
 }
 
+function attach(input: Partial<AttachInput> & { cwd: string }, io: LaptopIO): Promise<number> {
+  return attachSession({
+    autopilot: async () => AUTOPILOT,
+    probe: async () => true,
+    spawn: autopilot.spawn,
+    signals: new EventEmitter(),
+    ...input,
+  }, io);
+}
+
+/** A conversation as a server's list returns it. */
+function conversation(id: string, extra: Partial<RemoteConversation> = {}): RemoteConversation {
+  return {
+    conversationId: id,
+    workspaceId: "default",
+    model: DEFAULT_MODEL,
+    status: "ready",
+    activeRunId: null,
+    lastEventId: 1,
+    createdAt: "2026-10-28T00:00:00.000Z",
+    updatedAt: "2026-10-28T00:00:00.000Z",
+    kind: "code",
+    repository: "me/app",
+    ...extra,
+  };
+}
+
+/** Records the picker's options and answers with `pick` (an option value, or the index). */
+class RecordingPrompter implements Prompter {
+  options: SelectOption[] = [];
+  initial = 0;
+  question = "";
+
+  constructor(private readonly pick: string | number) {}
+
+  async select(question: string, options: SelectOption[], initial = 0): Promise<SelectResult> {
+    this.question = question;
+    this.options = options;
+    this.initial = initial;
+    const option = typeof this.pick === "number" ? options[this.pick] : options.find((entry) => entry.value === this.pick);
+    if (!option) throw new Error(`no option ${this.pick}`);
+    return { value: option.value };
+  }
+
+  async choose(): Promise<string> { throw new Error("not used"); }
+  async secret(): Promise<string> { throw new Error("not used"); }
+  async text(): Promise<string> { throw new Error("not used"); }
+}
+
 const flag = (args: string[], name: string) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
 
 describe("dl inside a project", () => {
@@ -263,7 +316,7 @@ describe("dl inside a project", () => {
     }
   });
 
-  it("dl new starts a fresh conversation and forgets the remembered one", { timeout: 30_000 }, async () => {
+  it("dl new starts a fresh conversation and keeps the previous one reachable", { timeout: 30_000 }, async () => {
     await saveRemote(place("dl-test", api.url));
     const dir = await checkout();
     await rememberSession({ place: "dl-test", repository: "me/app", root: dir, conversationId: OLD_ID });
@@ -271,7 +324,59 @@ describe("dl inside a project", () => {
     assert.equal(await session({ cwd: dir, fresh: true }, capture()), 0);
     assert.equal(flag(autopilot.launches[0]!.args, "--conversation"), undefined);
     assert.ok(!api.requests.includes(`GET /api/v1/conversations/${OLD_ID}`), "doesn't even ask about the old one");
-    assert.deepEqual((await loadSessions()).map((entry) => entry.conversationId), [NEW_ID]);
+    assert.deepEqual((await findSessions({ place: "dl-test", repository: "me/app", root: dir })).map((entry) => entry.conversationId), [NEW_ID, OLD_ID], "the old one stays, newest first");
+    // And `dl` reopens the new one, not the old.
+    assert.equal(await session({ cwd: dir }, capture()), 0);
+    assert.equal(flag(autopilot.launches[1]!.args, "--conversation"), NEW_ID);
+  });
+
+  it("remembers several conversations per repository, most recent first", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    const key = { place: "dl-test", repository: "me/app", root: dir };
+    await rememberSession({ ...key, conversationId: OLD_ID });
+    await rememberSession({ ...key, conversationId: NEW_ID });
+    assert.deepEqual((await findSessions(key)).map((entry) => entry.conversationId), [NEW_ID, OLD_ID]);
+    // Re-remembering the older one makes it the one `dl` reopens.
+    await rememberSession({ ...key, conversationId: OLD_ID });
+    assert.deepEqual((await findSessions(key)).map((entry) => entry.conversationId), [OLD_ID, NEW_ID]);
+    api.conversations.set(OLD_ID, "ready");
+    api.conversations.set(NEW_ID, "ready");
+    assert.equal(await session({ cwd: dir }, capture()), 0);
+    assert.equal(flag(autopilot.launches[0]!.args, "--conversation"), OLD_ID);
+    assert.equal((await loadSessions()).length, 2, "both stay remembered");
+  });
+
+  it("offers a quick picker when several conversations for the repository are running", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    const key = { place: "dl-test", repository: "me/app", root: dir };
+    await rememberSession({ ...key, conversationId: OLD_ID });
+    api.conversations.set(OLD_ID, "ready");
+    api.conversations.set(NEW_ID, "ready");
+    api.list.push(
+      conversation(OLD_ID, { activeRunId: "run-1", updatedAt: "2026-10-28T10:00:00.000Z" }),
+      conversation(NEW_ID, { activeRunId: "run-2", updatedAt: "2026-10-28T11:00:00.000Z" }),
+    );
+    const prompter = new RecordingPrompter(`dl-test/${NEW_ID}`);
+    assert.equal(await session({ cwd: dir, prompter }, capture()), 0);
+    assert.equal(prompter.question, "Which conversation?");
+    assert.deepEqual(prompter.options.map((option) => option.value), [`dl-test/${NEW_ID}`, `dl-test/${OLD_ID}`], "newest first");
+    assert.equal(prompter.initial, 1, "the one dl would reopen is preselected");
+    assert.equal(flag(autopilot.launches[0]!.args, "--conversation"), NEW_ID, "the picked one opens");
+    assert.deepEqual((await findSessions(key)).map((entry) => entry.conversationId), [NEW_ID, OLD_ID], "and becomes the one dl reopens");
+  });
+
+  it("doesn't ask when only one conversation for the repository is running", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    await rememberSession({ place: "dl-test", repository: "me/app", root: dir, conversationId: OLD_ID });
+    api.conversations.set(OLD_ID, "ready");
+    api.list.push(conversation(OLD_ID, { activeRunId: "run-1" }));
+    const prompter = new RecordingPrompter(0);
+    assert.equal(await session({ cwd: dir, prompter }, capture()), 0);
+    assert.equal(prompter.options.length, 0, "never asked");
+    assert.equal(flag(autopilot.launches[0]!.args, "--conversation"), OLD_ID);
   });
 
   it("holds the SSH tunnel open for the whole session and closes it when Autopilot exits", { timeout: 30_000 }, async () => {
@@ -379,6 +484,102 @@ describe("dl inside a project", () => {
     autopilot.code = 1;
     assert.equal(await session({ cwd: dir }, failed), 1);
     assert.doesNotMatch(failed.text(), /Update:|It keeps running/, "Autopilot already said what went wrong");
+  });
+});
+
+describe("dl attach", () => {
+  it("opens a conversation by ID prefix from anywhere, across places", { timeout: 30_000 }, async () => {
+    await saveRemote(place("one", api.url));
+    const other = new FakeApi();
+    await other.start();
+    try {
+      await saveRemote(place("two", other.url));
+      other.list.push(conversation(OLD_ID, { repository: "me/other", title: "Fix the flaky test" }));
+      const plain = join(root, "plain");
+      await mkdir(plain);
+      const io = capture();
+      assert.equal(await attach({ cwd: plain, id: OLD_ID.slice(0, 8) }, io), 0);
+      const args = autopilot.launches[0]!.args.slice(1);
+      assert.equal(args[0], "attach-remote");
+      assert.equal(flag(args, "--conversation"), OLD_ID);
+      assert.equal(flag(args, "--title"), "two · me/other");
+      assert.equal(args.includes("--workspace"), false, "no new conversation is created");
+      assert.equal(args.includes("--repo"), false);
+      assert.equal(autopilot.launches[0]!.env.AUTOPILOT_REMOTE_URL, other.url, "the place that has it");
+      assert.match(io.text(), /Connecting to two · me\/other … {2}\(3f2a9c1e\)/);
+      assert.match(io.text(), /It keeps running on two\./);
+    } finally {
+      await other.stop();
+    }
+  });
+
+  it("says when a prefix matches several conversations", { timeout: 30_000 }, async () => {
+    await saveRemote(place("one", api.url));
+    const other = new FakeApi();
+    await other.start();
+    try {
+      await saveRemote(place("two", other.url));
+      api.list.push(conversation("aaaa1111-0000-4000-8000-000000000000"));
+      other.list.push(conversation("aaaa2222-0000-4000-8000-000000000000"));
+      await assert.rejects(() => attach({ cwd: root, id: "aaaa" }, capture()), /aaaa matches several conversations; use more characters/);
+      await assert.rejects(() => attach({ cwd: root, id: "ffff" }, capture()), /No conversation ffff on any connected place/);
+      assert.equal(autopilot.launches.length, 0);
+    } finally {
+      await other.stop();
+    }
+  });
+
+  it("picks from every place, blocked conversations first", { timeout: 30_000 }, async () => {
+    await saveRemote(place("one", api.url));
+    const other = new FakeApi();
+    await other.start();
+    try {
+      await saveRemote(place("two", other.url));
+      const running = "11111111-0000-4000-8000-000000000000";
+      const blocked = "22222222-0000-4000-8000-000000000000";
+      const done = "33333333-0000-4000-8000-000000000000";
+      const elsewhere = "44444444-0000-4000-8000-000000000000";
+      api.list.push(
+        conversation(running, { activeRunId: "run-1", updatedAt: "2026-10-28T12:00:00.000Z", title: "Running" }),
+        conversation(blocked, { status: "waiting_approval", updatedAt: "2026-10-28T09:00:00.000Z", title: "Needs approval" }),
+        conversation(done, { status: "completed", updatedAt: "2026-10-28T13:00:00.000Z", title: "Done" }),
+      );
+      other.list.push(conversation(elsewhere, { repository: "me/other", activeRunId: "run-2", updatedAt: "2026-10-28T11:00:00.000Z" }));
+      const prompter = new RecordingPrompter(`two/${elsewhere}`);
+      const io = capture();
+      assert.equal(await attach({ cwd: root, prompter, now: () => Date.parse("2026-10-28T14:00:00.000Z") }, io), 0);
+      assert.equal(prompter.question, "Attach to");
+      assert.deepEqual(prompter.options.map((option) => option.value), [
+        `one/${blocked}`,
+        `one/${done}`,
+        `one/${running}`,
+        `two/${elsewhere}`,
+      ], "blocked first, then most recently active");
+      assert.equal(prompter.options[0]!.detail, "waiting_approval · me/app · Needs approval · 5h");
+      assert.equal(flag(autopilot.launches[0]!.args, "--conversation"), elsewhere);
+      assert.equal(autopilot.launches[0]!.env.AUTOPILOT_REMOTE_URL, other.url);
+    } finally {
+      await other.stop();
+    }
+  });
+
+  it("needs an ID when there's no terminal to pick on", async () => {
+    await saveRemote(place("one", api.url));
+    api.list.push(conversation(OLD_ID));
+    await assert.rejects(() => attach({ cwd: root }, capture()), /dl attach needs an ID here/);
+  });
+
+  it("makes the attached conversation the one dl reopens", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    const key = { place: "dl-test", repository: "me/app", root: dir };
+    await rememberSession({ ...key, conversationId: OLD_ID });
+    await rememberSession({ ...key, conversationId: NEW_ID });
+    api.list.push(conversation(OLD_ID), conversation(NEW_ID));
+    assert.equal(await attach({ cwd: dir, id: OLD_ID.slice(0, 8) }, capture()), 0);
+    assert.deepEqual((await findSessions(key)).map((entry) => entry.conversationId), [OLD_ID, NEW_ID]);
+    assert.equal(await session({ cwd: dir }, capture()), 0);
+    assert.equal(flag(autopilot.launches.at(-1)!.args, "--conversation"), OLD_ID);
   });
 });
 

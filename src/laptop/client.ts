@@ -17,6 +17,16 @@ export interface RemoteConversation {
   branch?: string | null;
   pullRequestNumber?: number;
   pullRequestURL?: string;
+  /**
+   * Newer servers send a summary alongside the raw status (autopilot's conversation
+   * summaries): a state such as `running`, `waiting_approval`, `completed` or `failed`,
+   * a title, the cost so far, and when it last did anything. Older servers omit them, so
+   * dl maps `status`/`activeRunId` itself (see conversations.ts).
+   */
+  state?: string;
+  title?: string;
+  costUsd?: number;
+  lastActivityAt?: string;
 }
 
 export interface RemoteEvent {
