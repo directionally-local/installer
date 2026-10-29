@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.2](https://github.com/directionally-local/installer/compare/v0.8.1...v0.8.2) (2026-10-29)
+
+
+### Bug Fixes
+
+* bundle Autopilot 3 and require a patched Node ([d6f1493](https://github.com/directionally-local/installer/commit/d6f149319189b8d012017acece5a01f819a2ed19))
+* bundle Autopilot 3 and require a patched Node ([bacc7be](https://github.com/directionally-local/installer/commit/bacc7be92b3556fd8573f26c951176c6bec90c58))
+
 ## [0.8.1](https://github.com/directionally-local/installer/compare/v0.8.0...v0.8.1) (2026-10-29)
 
 
