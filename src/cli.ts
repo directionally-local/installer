@@ -10,6 +10,8 @@ import { keys } from "./laptop/keys.js";
 import { model } from "./laptop/settings.js";
 import { projectSession } from "./laptop/session.js";
 import { setup } from "./laptop/setup.js";
+import { realSshExec } from "./laptop/ssh.js";
+import { update } from "./laptop/update.js";
 import { localCommand } from "./local/cli.js";
 import { setUpOnThisComputer } from "./local/setup.js";
 import { TtyPrompter } from "./prompt.js";
@@ -39,6 +41,8 @@ On your laptop:
   dl use [NAME]           where tasks go without --server (no NAME: show it)
   dl keys [openrouter|github]   which keys are set, or replace one (--server NAME)
   dl model [ID]           the model for tasks and sessions (no ID: pick from a list)
+  dl update [NAME]        update a server's Autopilot, Hotcell and sandbox image
+                          (--wait: wait for running tasks instead of asking)
   run options: --server NAME, -m/--model MODEL, --repo OWNER/NAME, --detach
   dl local status         agents running on this computer: running?, where, how many fit
   dl local uninstall [--purge]   stop and remove them (--purge also deletes keys and data)
@@ -112,6 +116,7 @@ export async function main(
         needs: { type: "boolean" },
         identity: { type: "string" },
         stdin: { type: "boolean" },
+        wait: { type: "boolean" },
       },
     });
   } catch (error) {
@@ -219,7 +224,7 @@ export async function main(
           }
           // A laptop connected to servers gets its own home (`dl status` shows it from anywhere);
           // otherwise, what this is and how to start.
-          if ((!command || command === "status") && await laptopHome(laptopIO)) return 0;
+          if ((!command || command === "status") && await laptopHome(laptopIO, undefined, undefined, { ssh: realSshExec })) return 0;
           // A laptop with nothing set up yet: the wizard (it needs someone to answer it).
           if (!command && terminal && !isRoot() && (await loadRemotes()).length === 0) return await setup({ io: laptopIO, terminal, localSetup: (input) => setUpOnThisComputer(input) });
           io.out(NOT_A_SERVER(colors));
@@ -239,6 +244,15 @@ export async function main(
       }
       case "setup":
         return await setup({ io: laptopIO, terminal, localSetup: (input) => setUpOnThisComputer(input), ...(values.identity ? { identityFile: values.identity } : {}) });
+      case "update":
+        return await update(parsed.positionals.slice(1), {
+          ssh: realSshExec,
+          prompter: new TtyPrompter(),
+          newUi: () => terminal ? new TerminalUi(io.out, undefined, colorOn) : new PlainUi(io.out),
+          io: laptopIO,
+          interactive: terminal,
+          wait: Boolean(values.wait),
+        });
       case "connect": {
         const url = parsed.positionals[1];
         if (!url) {

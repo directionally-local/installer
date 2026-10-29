@@ -50,6 +50,8 @@ dl runs                             # tasks and their pull requests
 dl pull <id>                        # check one out here
 ```
 
+`dl status` says when a server is behind npm, once a day: `! box is behind: Autopilot 2.7.0 → 2.7.2   dl update box`.
+
 The "fits ~N agents" figure is a conservative estimate: memory left after the host's own share (at least 1.5 GB or 15%), divided by 1 GB per sandbox, capped at two per CPU. Measured numbers will replace it.
 
 ## Commands
@@ -73,6 +75,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl use [NAME]` | Where tasks go without `--server`. With no name, shows it. |
 | `dl keys [openrouter\|github]` | Which keys are set, or replace one. `--server NAME` picks the server. |
 | `dl model [ID]` | The model for tasks and sessions. With no ID, picks from a list. |
+| `dl update [NAME]` | Update a server's Autopilot, Hotcell and sandbox image over SSH. `--wait` waits for running tasks instead of asking; with no terminal it waits anyway. |
 | `dl local status` | Agents running on this computer: running?, where, how many fit. |
 | `dl local uninstall [--purge]` | Stop and remove them. `--purge` also deletes keys and data. |
 
