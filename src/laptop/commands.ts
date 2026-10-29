@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { promisify } from "node:util";
+import { isModelNotPriced } from "../model-prices.js";
 import { palette } from "../ui.js";
 import { RemoteApiError, RemoteClient, TERMINAL_STATUSES, type RemoteConversation, type RemoteEvent } from "./client.js";
 import {
@@ -357,18 +358,25 @@ async function follow(
     io.err("\n");
     return 0;
   }
-  io.err(`\n  ${c.red("✗")} ${id} ${outcome}\n\n`);
+  io.err(`\n  ${c.red("✗")} ${id} ${outcome}\n`);
+  if (renderer.unpriced || isModelNotPriced(JSON.stringify(final))) {
+    io.err(`  This model isn't in your server's price list yet. Run ${c.bold("dl setup")} to refresh it, or pick another model with -m.\n`);
+  }
+  io.err("\n");
   return 1;
 }
 
 /** Writes the agent's text as it streams and one line per tool call. */
 class EventRenderer {
   private midLine = false;
+  /** Hotcell refused the model for lack of a price (a stale price list on the server). */
+  unpriced = false;
 
   constructor(private readonly io: LaptopIO, private readonly c: ReturnType<typeof palette>) {}
 
   render(event: RemoteEvent): void {
     const data = event.data;
+    if (event.type !== "assistant.delta" && !this.unpriced && isModelNotPriced(JSON.stringify(data))) this.unpriced = true;
     if (event.type === "assistant.delta") {
       const text = typeof data.text === "string" ? data.text : typeof data.delta === "string" ? data.delta : "";
       if (!text) return;

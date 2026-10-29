@@ -6,9 +6,10 @@ import { readState, writeState } from "./state.js";
 import { FakeSystem } from "./test-support/fake-system.js";
 import { palette } from "./ui.js";
 import { up } from "./up.js";
+import { withCatalog } from "./test-support/fake-catalog.js";
 
 const c = palette(false);
-const fetchOk = (async () => Response.json({ login: "octo" })) as unknown as typeof fetch;
+const fetchOk = withCatalog((async () => Response.json({ login: "octo" })) as unknown as typeof fetch);
 
 async function server(): Promise<{ system: FakeSystem; out: () => string; write: (text: string) => void; reset: () => void }> {
   const system = new FakeSystem();

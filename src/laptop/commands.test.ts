@@ -20,6 +20,8 @@ class FakeServer {
   models = ["01-ai/yi-large", DEFAULT_MODEL, "test/model"];
   readonly created: Array<Record<string, unknown>> = [];
   readonly cancelled: string[] = [];
+  /** The run fails with this reason instead of completing. */
+  failWith: string | undefined;
   private conversation: Record<string, unknown> | undefined;
   private server: Server | undefined;
   url = "";
@@ -65,7 +67,9 @@ class FakeServer {
     }
     if (path === "/api/v1/conversations" && req.method === "GET") return send(200, { conversations: this.conversation ? [this.conversation] : [] });
     if (path.endsWith("/turns")) {
-      this.conversation = { ...this.conversation, status: "completed", lastEventId: 4, pullRequestURL: "https://github.com/me/app/pull/42" };
+      this.conversation = this.failWith
+        ? { ...this.conversation, status: "failed", lastEventId: 4 }
+        : { ...this.conversation, status: "completed", lastEventId: 4, pullRequestURL: "https://github.com/me/app/pull/42" };
       return send(202, { runId: "run-1", status: "running" });
     }
     if (path.endsWith("/cancel")) {
@@ -78,7 +82,7 @@ class FakeServer {
       const events = [
         [2, "tool.activity", { tool: "shell", activity: "started", input: "npm test" }],
         [3, "assistant.delta", { text: "Fixed the flaky test." }],
-        [4, "completed", {}],
+        [4, this.failWith ? "failed" : "completed", this.failWith ? { error: this.failWith } : {}],
       ] as const;
       for (const [id, type, data] of events) if (id > after) res.write(`id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
       return;
@@ -180,6 +184,24 @@ describe("dl on a laptop", () => {
     const stopIO = capture();
     await cancel({ id: "3f2a9c1e" }, stopIO);
     assert.equal(fake.cancelled.length, 1);
+  });
+
+  it("explains a model the server has no price for", { timeout: 30_000 }, async () => {
+    await saveRemote(place("box", fake.url));
+    const dir = await checkout();
+    fake.failWith = "HTTP 403: model not priced: openai/gpt-6-luna — a spend cap applies, so the gateway can only forward models with a known price (add it via HOTCELL_MODEL_PRICES)";
+    const io = capture();
+    assert.equal(await run({ task: "fix it", cwd: dir, repository: "me/app", autopilotModel: noAutopilotModel }, io), 1);
+    assert.match(io.text(), /✗ 3f2a9c1e failed\n  This model isn't in your server's price list yet\. Run dl setup to refresh it, or pick another model with -m\./);
+    const replay = capture();
+    assert.equal(await watch({ id: "3f2a9c1e" }, replay), 1);
+    assert.match(replay.text(), /isn't in your server's price list yet/);
+
+    fake.failWith = "Docker went away";
+    const other = capture();
+    assert.equal(await run({ task: "fix it", cwd: dir, repository: "me/app", autopilotModel: noAutopilotModel }, other), 1);
+    assert.match(other.text(), /✗ 3f2a9c1e failed/);
+    assert.doesNotMatch(other.text(), /price list/);
   });
 
   it("reaches a server set up over SSH through a tunnel that each command opens and closes", { timeout: 30_000 }, async () => {

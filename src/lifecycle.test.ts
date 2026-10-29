@@ -15,8 +15,9 @@ import { readState, writeState } from "./state.js";
 import { FakeSystem } from "./test-support/fake-system.js";
 import { uninstall } from "./uninstall.js";
 import { up } from "./up.js";
+import { withCatalog } from "./test-support/fake-catalog.js";
 
-const fetchOk = (async () => Response.json({ login: "octo" })) as unknown as typeof fetch;
+const fetchOk = withCatalog((async () => Response.json({ login: "octo" })) as unknown as typeof fetch);
 
 async function installed(): Promise<FakeSystem> {
   const system = new FakeSystem();
@@ -46,6 +47,28 @@ describe("doctor", () => {
     // Fixes are dl commands, never Tailscale, systemd, or journalctl.
     assert.match(formatChecks(broken), /✗ sandboxes[\s\S]*fix: dl logs hotcell · then dl up/);
     assert.doesNotMatch(formatChecks(broken), /journalctl|systemctl|tailscale serve/);
+  });
+});
+
+describe("doctor: model prices", () => {
+  it("counts the models, warns (not fails) after a week, and fails when the list is missing", async () => {
+    const system = await installed();
+    const check = async (now = new Date()) => (await doctor(system, now)).find((entry) => entry.name === "model prices")!;
+    assert.deepEqual(await check(), { name: "model prices", ok: true, detail: "3 models · updated today", fix: "sudo dl up (downloads them from openrouter.ai)" });
+
+    const later = new Date(Date.now() + 10 * 86_400_000);
+    const stale = await check(later);
+    assert.equal(stale.ok, true);
+    assert.equal(stale.warn, true);
+    assert.equal(stale.detail, "3 models · 10 days old; dl up refreshes it");
+    const text = formatChecks(await doctor(system, later));
+    assert.match(text, /! model prices +3 models · 10 days old; dl up refreshes it\n/);
+    assert.match(text, /All good/);
+
+    system.files.delete(PATHS.modelPrices);
+    const missing = await check();
+    assert.equal(missing.ok, false);
+    assert.match(formatChecks(await doctor(system)), /✗ model prices +missing; tasks fail with "model not priced"\n +fix: sudo dl up/);
   });
 });
 
