@@ -96,7 +96,7 @@ export async function projectSession(input: SessionInput, io: LaptopIO): Promise
     note(describeError(error));
     return undefined;
   }
-  const { remote } = target;
+  const { remote, reason } = target;
   const key: SessionKey = { place: remote.name, repository, root };
   const file = input.sessionsFile ?? sessionsPath();
   const autopilot = await (input.autopilot ?? findAutopilot)();
@@ -181,7 +181,11 @@ export async function projectSession(input: SessionInput, io: LaptopIO): Promise
         // `dl new`: the old conversation keeps running on the place (dl runs lists it).
         if (input.fresh) await forgetSession(key, file);
 
-        io.err(`\n  ${c.cyan("·")} Connecting to ${c.bold(remote.name)} · ${repository} …  ${c.dim(`(${detail})`)}\n`);
+        // The place is on the Connecting line already; with more than one set up, also why this
+        // one and how to pick another, as `dl run` does (a place named with --server needs neither).
+        const chosen = reason === "default" || reason === "last used";
+        io.err(`\n  ${c.cyan("·")} Connecting to ${c.bold(remote.name)}${chosen ? ` ${c.dim(`(${reason})`)}` : ""} · ${repository} …  ${c.dim(`(${detail})`)}\n`);
+        if (chosen) io.err(`    ${c.dim("dl use NAME to change where dl runs")}\n`);
         // The token goes in the environment only: argv is visible to every user on the machine.
         const env = { ...process.env, AUTOPILOT_REMOTE_URL: client.baseUrl, AUTOPILOT_REMOTE_TOKEN: remote.token };
         let saved = remembered?.conversationId;

@@ -80,6 +80,8 @@ function deps(server: FakeSshServer, answers: Record<string, string>, extra: Par
     hostname: "sinas-mbp.local",
     remotesFile: join(root, "remotes.json"),
     settingsFile: join(root, "config.json"),
+    // The same on every machine the tests run on (Windows has its own test).
+    platform: "linux",
     now: () => new Date("2026-10-28T09:00:00.000Z"),
     ...extra,
   };
@@ -271,30 +273,84 @@ describe("dl setup on a laptop", () => {
     assert.ok(!run.prompter.asked.some((question) => question.includes("by default")), "one place: no default question");
   });
 
-  it("asks where tasks go by default when setup adds a second place, preselecting the new one", async () => {
-    const remotesFile = join(root, "remotes.json");
+  describe("this computer after a server", () => {
     const local: RemoteServer = { name: "this-computer", url: "http://127.0.0.1:4096", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" };
+    const QUESTION = "Make this computer the default? Tasks and sessions go to box now";
+    const KEYS = { Where: "1", "GitHub CLI": "", "Autopilot": "" };
+    const localRun = (server: FakeSshServer, answers: Record<string, string>, extra: Partial<SetupDeps> = {}) =>
+      deps(server, { ...KEYS, ...answers }, { localSetup: async () => ({ remote: local, capacity: 4 }), ...extra });
+
+    /** A server set up first: it becomes the default by itself. */
+    async function serverFirst(): Promise<FakeSshServer> {
+      const server = new FakeSshServer();
+      await setupWizard(deps(server, { Where: "2", Server: "1", "GitHub CLI": "", "Autopilot": "" }).deps);
+      assert.equal((await loadRemotesFile(join(root, "remotes.json"))).default, "box");
+      return server;
+    }
+
+    it("asks once whether this computer should be the default, and Enter makes it so", async () => {
+      const server = await serverFirst();
+      const run = localRun(server, { [QUESTION]: "" });
+      await setupWizard(run.deps);
+      assert.ok(run.prompter.asked.includes(QUESTION), run.prompter.asked.join("\n"));
+      assert.equal((await loadRemotesFile(join(root, "remotes.json"))).default, "this-computer");
+      assert.ok(run.ui.events.includes("answered Default | this computer"));
+      assert.equal((await loadSettings(join(root, "config.json"))).askedLocalDefault, true);
+
+      // Already the default: a re-run asks nothing and says nothing about it.
+      const again = localRun(server, {});
+      await setupWizard(again.deps);
+      assert.ok(!again.prompter.asked.some((question) => question.includes("default")));
+      assert.ok(!again.ui.events.some((event) => event.includes("Default")));
+    });
+
+    it("keeps the server on no, says how to change it, and doesn't ask again on a re-run", async () => {
+      const server = await serverFirst();
+      const run = localRun(server, { [QUESTION]: "n" });
+      await setupWizard(run.deps);
+      assert.equal((await loadRemotesFile(join(root, "remotes.json"))).default, "box");
+      assert.ok(run.ui.events.includes("line info Default | still box · dl use this-computer to run here instead"), run.ui.events.join("\n"));
+
+      const again = localRun(server, {});
+      await setupWizard(again.deps);
+      assert.ok(!again.prompter.asked.some((question) => question.includes("default")), "asked once");
+      assert.ok(again.ui.events.includes("line info Default | still box · dl use this-computer to run here instead"));
+      assert.equal((await loadRemotesFile(join(root, "remotes.json"))).default, "box");
+    });
+
+    it("asks on a re-run when this computer was set up before dl asked", async () => {
+      const server = await serverFirst();
+      await saveRemote(local, join(root, "remotes.json"));
+      assert.equal((await loadRemotesFile(join(root, "remotes.json"))).default, "box");
+      const run = localRun(server, { [QUESTION]: "y" });
+      await setupWizard(run.deps);
+      assert.equal((await loadRemotesFile(join(root, "remotes.json"))).default, "this-computer");
+    });
+
+    it("without a terminal keeps the default and prints dl use this-computer", async () => {
+      const server = await serverFirst();
+      const run = localRun(server, {}, { interactive: false });
+      await setupWizard(run.deps);
+      assert.ok(!run.prompter.asked.some((question) => question.includes("default")));
+      assert.equal((await loadRemotesFile(join(root, "remotes.json"))).default, "box");
+      assert.ok(run.ui.events.includes("line info Default | still box · dl use this-computer to run here instead"));
+      assert.equal((await loadSettings(join(root, "config.json"))).askedLocalDefault, undefined, "a later run at a terminal still asks");
+    });
+  });
+
+  it("on Windows doesn't offer this computer: says why, then sets up a server", async () => {
     const server = new FakeSshServer();
-    // A server first: it becomes the default by itself.
-    await setupWizard(deps(server, { Where: "2", Server: "1", "GitHub CLI": "", "Autopilot": "" }).deps);
-    assert.equal((await loadRemotesFile(remotesFile)).default, "box");
-
-    // Then this computer: asked, with the new place preselected (Enter keeps it).
-    const prompter = new RecordingSelect({ "by default": "", Where: "1", "GitHub CLI": "", "Autopilot": "" });
-    const run = deps(server, {}, { prompter, localSetup: async () => ({ remote: local, capacity: 4 }) });
-    await setupWizard(run.deps);
-    const question = prompter.selects.find((entry) => entry.question.includes("Where should tasks go by default?"))!;
-    assert.deepEqual(question.options.map((option) => `${option.label} · ${option.detail}`), ["box · server · box", "this-computer · this computer"]);
-    assert.equal(question.initial, 1);
-    assert.equal((await loadRemotesFile(remotesFile)).default, "this-computer");
-    assert.ok(run.ui.events.includes("answered Default | this-computer"));
-
-    // Re-running setup for a place that's already there doesn't ask again; picking the other one sticks.
-    const again = new RecordingSelect({ Where: "1", "GitHub CLI": "", "Autopilot": "" });
-    await setupWizard(deps(server, {}, { prompter: again, localSetup: async () => ({ remote: local, capacity: 4 }) }).deps);
-    assert.ok(!again.selects.some((entry) => entry.question.includes("by default")));
-    const other = new RecordingSelect({ "by default": "box", Where: "1", "GitHub CLI": "", "Autopilot": "" });
-    await setupWizard(deps(server, {}, { prompter: other, localSetup: async () => ({ remote: { ...local, name: "laptop-2" }, capacity: 4 }) }).deps);
-    assert.equal((await loadRemotesFile(remotesFile)).default, "box");
+    let called = false;
+    const run = deps(server, { Server: "1", "GitHub CLI": "", "Autopilot": "" }, {
+      platform: "win32",
+      localSetup: async () => { called = true; throw new Error("not on Windows"); },
+    });
+    const remote = await setupWizard(run.deps);
+    assert.equal(remote?.name, "box");
+    assert.equal(called, false);
+    assert.ok(!run.prompter.asked.some((question) => question.includes("Where")), "no choice with one real option");
+    const info = run.ui.events.find((event) => event.startsWith("line info On this computer"));
+    assert.match(info ?? "", /isn't supported on Windows yet; connect a server instead[\s\S]*WSL 2/);
+    assert.ok(run.ui.events.includes("answered Where | On my own server"));
   });
 });

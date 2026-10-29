@@ -231,10 +231,17 @@ describe("dl inside a project", () => {
     const clone = await checkout("second");
     await rememberSession({ place: "dl-test", repository: "me/app", root: dir, conversationId: OLD_ID });
     api.conversations.set(OLD_ID, "completed");
-    assert.equal(await session({ cwd: clone }, capture()), 0);
+    const byDefault = capture();
+    assert.equal(await session({ cwd: clone }, byDefault), 0);
     assert.equal(flag(autopilot.launches[0]!.args, "--conversation"), undefined, "another checkout starts its own");
-    assert.equal(await session({ cwd: dir, server: "other" }, capture()), 0);
+    // Two places: the line says why this one, and how to pick the other (once, not a second "on dl-test").
+    assert.match(byDefault.text(), /· Connecting to dl-test \(default\) · me\/app … .*\n {4}dl use NAME to change where dl runs\n/);
+    assert.equal(byDefault.text().match(/dl-test/g)?.length, 2, "the place is named on the Connecting line and the goodbye line only");
+    const named = capture();
+    assert.equal(await session({ cwd: dir, server: "other" }, named), 0);
     assert.equal(flag(autopilot.launches[1]!.args, "--conversation"), undefined, "another place starts its own");
+    assert.match(named.text(), /· Connecting to other · me\/app/);
+    assert.doesNotMatch(named.text(), /dl use NAME/, "a place named with --server needs no hint");
     assert.equal(await session({ cwd: dir }, capture()), 0);
     assert.equal(flag(autopilot.launches[2]!.args, "--conversation"), OLD_ID, "the default place reopens it");
     assert.equal((await loadSessions()).length, 3);

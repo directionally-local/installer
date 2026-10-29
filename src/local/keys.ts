@@ -8,7 +8,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { checkKey, githubListing, hotcellKeyListed, KeyRejectedError, type KeyListing, type KeyName, type KeyResult } from "../keys.js";
 import { RealSystem, type System } from "../system.js";
-import { supportedPlatform } from "./check.js";
+import { localUnsupported, supportedPlatform } from "./check.js";
 import { LOCAL_SERVICES, localGithubEnv, localHotcellBin, localPaths, parseLocalEnvFile, serviceFile, type LocalPaths, type LocalPlatform, type LocalService } from "./layout.js";
 import { httpStatus } from "./probes.js";
 import { userId } from "./services.js";
@@ -32,8 +32,9 @@ interface Installed {
 
 async function installed(options: LocalOptions): Promise<Installed> {
   const home = options.home ?? homedir();
-  const platform = supportedPlatform(options.platform ?? process.platform);
-  if (!platform) throw new Error("Agents run on this computer only on macOS and Linux.");
+  const raw = options.platform ?? process.platform;
+  const platform = supportedPlatform(raw);
+  if (!platform) throw new Error(localUnsupported(raw));
   const system = options.system ?? new RealSystem(() => {});
   const paths = localPaths(home, platform);
   const state = await readLocalState(system, paths);

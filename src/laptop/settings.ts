@@ -19,6 +19,8 @@ export const DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash-1017";
 
 export interface Settings {
   model?: string;
+  /** Setup asked once whether this computer should be the default place; it doesn't ask again. */
+  askedLocalDefault?: boolean;
 }
 
 /** The suggestions setup and `dl model` offer first; any OpenRouter ID works too. */
@@ -45,8 +47,11 @@ export async function loadSettings(path = settingsPath()): Promise<Settings> {
     throw error;
   }
   try {
-    const parsed = JSON.parse(raw) as { model?: unknown };
-    return typeof parsed.model === "string" && parsed.model.trim() ? { model: parsed.model.trim() } : {};
+    const parsed = JSON.parse(raw) as { model?: unknown; askedLocalDefault?: unknown };
+    return {
+      ...(typeof parsed.model === "string" && parsed.model.trim() ? { model: parsed.model.trim() } : {}),
+      ...(parsed.askedLocalDefault === true ? { askedLocalDefault: true } : {}),
+    };
   } catch {
     // A damaged file only loses the saved model; the next save rewrites it.
     return {};
@@ -54,7 +59,12 @@ export async function loadSettings(path = settingsPath()): Promise<Settings> {
 }
 
 export async function saveModel(model: string, path = settingsPath()): Promise<void> {
-  const settings = { ...(await loadSettings(path)), model };
+  await saveSettings({ model }, path);
+}
+
+/** Merges into dl's settings, keeping what's already there. */
+export async function saveSettings(changes: Settings, path = settingsPath()): Promise<void> {
+  const settings = { ...(await loadSettings(path)), ...changes };
   await mkdir(dirname(path), { recursive: true });
   const temp = `${path}.${process.pid}.tmp`;
   await writeFile(temp, `${JSON.stringify({ version: 1, ...settings }, null, 2)}\n`, { mode: 0o600 });

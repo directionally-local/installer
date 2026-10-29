@@ -11,7 +11,7 @@ dl
 
 `dl` asks where your agents should run:
 
-- **On this computer** — start now, nothing to rent, pauses when this computer sleeps.
+- **On this computer** — start now, nothing to rent, pauses when this computer sleeps. macOS and Linux; not offered on Windows yet (connect a server, or run `dl` inside WSL 2, which takes the Linux path).
 - **On my own server** — keeps going when your laptop is closed; needs SSH access.
 
 For a server, `dl` lists the hosts in `~/.ssh/config` (or takes `user@host[:port]`), checks it over SSH, installs itself there, and pairs this laptop. Nothing is exposed on the server: `dl` reaches it through an SSH tunnel.
