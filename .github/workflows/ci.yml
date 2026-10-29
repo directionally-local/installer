@@ -18,3 +18,16 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: shellcheck install.sh
+  # The site worker must stay deployable to Serverless Objects as well as
+  # Cloudflare. Pinned because the CLI is pre-alpha; bump it deliberately.
+  portability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx --yes serverless-objects@0.13.4 build --strict site
