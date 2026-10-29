@@ -23,7 +23,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=22"
+    "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -39,6 +39,6 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "autopilot-ai": "^2.7.0"
+    "autopilot-ai": "^3.0.2"
   }
 }
