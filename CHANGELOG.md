@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0](https://github.com/directionally-local/installer/compare/v0.3.0...v0.4.0) (2026-10-29)
+
+
+### Features
+
+* dl keys replaces the OpenRouter key or GitHub token where agents run ([564debe](https://github.com/directionally-local/installer/commit/564debed90c6ee31d9322c0a4115e879acc5008a))
+
+
+### Bug Fixes
+
+* pick a sensible model, add dl use for a default target, and reword help ([b6d3bc0](https://github.com/directionally-local/installer/commit/b6d3bc0cd3717a1f17b0646c7770ca0b0cac593b))
+* try SSH keys quietly, name servers after their hostname, clearer access step ([10403b1](https://github.com/directionally-local/installer/commit/10403b16bf4ed9f4c37725a544a07a5cd03cece3))
+* v0.3.1: sensible model, quiet SSH key search, server names, dl use, dl keys ([f83330e](https://github.com/directionally-local/installer/commit/f83330e0eeb12da9810abe17ff6461e51964fad6))
+
 ## [0.3.0](https://github.com/directionally-local/installer/compare/v0.2.0...v0.3.0) (2026-10-28)
 
 
