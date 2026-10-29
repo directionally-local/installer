@@ -61,19 +61,22 @@ export async function validateGitHubToken(token: string, fetchImpl: typeof fetch
   return {};
 }
 
+/** Where the keys end up, for the copy: "your server" (the default) or "this computer". */
+export type KeyPlace = "your server" | "this computer";
+
 /** Finds, confirms, or asks for exactly the keys in `needs`. */
-export async function gatherKeys(needs: readonly Need[], input: { ui: Ui; prompter: Prompter; sources: KeySources }): Promise<Answers> {
+export async function gatherKeys(needs: readonly Need[], input: { ui: Ui; prompter: Prompter; sources: KeySources; place?: KeyPlace }): Promise<Answers> {
   const { ui } = input;
   const answers: Answers = {};
   const wanted = needs.filter((need): need is "github" | "openrouter" => need === "github" || need === "openrouter");
   if (wanted.length === 0) return answers;
-  ui.questions(`${wanted.length === 1 ? "1 key" : "2 keys"}, kept on your server only; then it sets itself up.`);
+  ui.questions(`${wanted.length === 1 ? "1 key" : "2 keys"}, kept on ${input.place ?? "your server"} only; then it sets itself up.`);
   if (wanted.includes("github")) answers.githubToken = await githubToken(input);
   if (wanted.includes("openrouter")) answers.openrouterKey = await openrouterKey(input);
   return answers;
 }
 
-export async function githubToken({ ui, prompter, sources }: { ui: Ui; prompter: Prompter; sources: KeySources }): Promise<string> {
+export async function githubToken({ ui, prompter, sources, place = "your server" }: { ui: Ui; prompter: Prompter; sources: KeySources; place?: KeyPlace }): Promise<string> {
   const fromCli = (await sources.gh().catch(() => undefined))?.trim();
   if (fromCli) {
     const checked = await validateGitHubToken(fromCli, sources.fetch);
@@ -81,7 +84,7 @@ export async function githubToken({ ui, prompter, sources }: { ui: Ui; prompter:
       ui.warn(`Your GitHub CLI login didn't work (${checked.problem}); asking for a token instead.`);
     } else {
       const who = checked.login ? ` (${checked.login})` : "";
-      if (await confirm(ui, prompter, `Use your GitHub CLI login${who}? It stays on your server.`)) {
+      if (await confirm(ui, prompter, `Use your GitHub CLI login${who}? It stays on ${place}.`)) {
         ui.answered("GitHub", `${checked.login ? `signed in as ${checked.login} · ` : ""}from the GitHub CLI`);
         return fromCli;
       }
@@ -94,7 +97,7 @@ export async function githubToken({ ui, prompter, sources }: { ui: Ui; prompter:
   });
 }
 
-export async function openrouterKey({ ui, prompter, sources }: { ui: Ui; prompter: Prompter; sources: KeySources }): Promise<string> {
+export async function openrouterKey({ ui, prompter, sources, place = "your server" }: { ui: Ui; prompter: Prompter; sources: KeySources; place?: KeyPlace }): Promise<string> {
   const candidates: Array<{ key: string; question: string; from: string }> = [];
   const fromEnv = sources.env.OPENROUTER_API_KEY?.trim();
   if (fromEnv) candidates.push({ key: fromEnv, question: "Use the OpenRouter key in OPENROUTER_API_KEY?", from: "from OPENROUTER_API_KEY" });
@@ -107,7 +110,7 @@ export async function openrouterKey({ ui, prompter, sources }: { ui: Ui; prompte
       ui.warn(`The OpenRouter key ${candidate.from} didn't work (${problem})`);
       continue;
     }
-    if (await confirm(ui, prompter, `${candidate.question} It stays on your server.`)) {
+    if (await confirm(ui, prompter, `${candidate.question} It stays on ${place}.`)) {
       ui.answered("OpenRouter", candidate.from);
       return candidate.key;
     }

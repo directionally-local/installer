@@ -9,6 +9,7 @@ import { main, readAnswers } from "./cli.js";
 import { agentCapacity, parseDfFreeGb, parseInterfaceIp, parseMemTotalMb, parseOsRelease } from "./detect.js";
 import { doctor, formatChecks } from "./doctor.js";
 import { PATHS, autopilotUnit, envFile, hotcellUnit, parseEnvFile } from "./layout.js";
+import { saveRemote } from "./laptop/config.js";
 import { ScriptedPrompter } from "./prompt.js";
 import { readState, writeState } from "./state.js";
 import { FakeSystem } from "./test-support/fake-system.js";
@@ -183,6 +184,18 @@ describe("cli", () => {
     assert.equal(await main(["pair", "--name", "MacBook"], io), 2, "the JSON is the only form");
     assert.match(err, /Usage: dl pair --name NAME --json/);
     assert.equal(await main(["pair", "--json"], io), 2);
+  });
+
+  it("dl status shows the laptop's overview", { skip: existsSync(PATHS.state) && "this machine is a server" }, async () => {
+    let out = "";
+    const io = { out: (text: string) => { out += text; }, err: () => {} };
+    assert.equal(await main(["status"], io), 1, "nothing set up: says how to start");
+    assert.match(out, /isn't set up on this machine/);
+    await saveRemote({ name: "box", url: "http://127.0.0.1:9", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" });
+    out = "";
+    assert.equal(await main(["status"], io), 0);
+    assert.match(out, /Directionally Local {2}on this laptop[\s\S]*Runs on +● box/);
+    assert.match(await (async () => { out = ""; await main(["--help"], io); return out; })(), /dl status +where your agents run and what they're doing/);
   });
 
   it("dl pair off a server says it isn't installed", { skip: existsSync(PATHS.state) && "this machine is a server" }, async () => {

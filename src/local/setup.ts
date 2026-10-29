@@ -100,7 +100,13 @@ export async function checkThisComputer(options: LocalOptions = {}): Promise<{ f
   return { facts, problems: computerProblems(facts) };
 }
 
-export async function setUpOnThisComputer(input: SetupInput): Promise<RemoteServer> {
+/** What setting up here made: the connection to save, and how many agents fit at once (an estimate). */
+export interface LocalSetupResult {
+  remote: RemoteServer;
+  capacity: number;
+}
+
+export async function setUpOnThisComputer(input: SetupInput): Promise<LocalSetupResult> {
   const { ui } = input;
   const ctx = context(input, SETUP_LOG);
   const { system, paths, platform } = ctx;
@@ -257,10 +263,8 @@ export async function setUpOnThisComputer(input: SetupInput): Promise<RemoteServ
       expiresAt: new Date(credential.expiresAt).toISOString(),
       addedAt: at,
     };
-    return {
-      value: remote,
-      detail: `${url.replace(/^http:\/\//, "")} · fits ~${localCapacity(docker)} at once · tasks pause while this computer sleeps`,
-    };
+    // The address is an implementation detail here; how many fit goes on the wizard's Ready line.
+    return { value: { remote, capacity: localCapacity(docker) }, detail: "this computer · tasks pause while it sleeps" };
   });
 }
 

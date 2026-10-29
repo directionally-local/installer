@@ -24,6 +24,7 @@ Send a task; it runs in its own sandbox and comes back as a pull request.
 On your laptop:
   dl                      set up the first time; afterwards, an overview
   dl setup                set up or repair where your agents run (safe to re-run)
+  dl status               where your agents run and what they're doing (works anywhere)
   dl connect URL          connect to a server someone else set up (approve the code it shows)
   dl run "TASK"           run a task, from inside a GitHub repository
                           (your uncommitted changes go along; Ctrl-C stops watching, not the task)
@@ -206,8 +207,9 @@ export async function main(
         const state = await readState(system);
         if (!state) {
           if (values.brief) return 0;
-          // A laptop connected to servers gets its own home; otherwise, what this is and how to start.
-          if (!command && await laptopHome(laptopIO)) return 0;
+          // A laptop connected to servers gets its own home (`dl status` shows it from anywhere);
+          // otherwise, what this is and how to start.
+          if ((!command || command === "status") && await laptopHome(laptopIO)) return 0;
           // A laptop with nothing set up yet: the wizard (it needs someone to answer it).
           if (!command && terminal && !isRoot() && (await loadRemotes()).length === 0) return await setup({ io: laptopIO, terminal, localSetup: (input) => setUpOnThisComputer(input) });
           io.out(NOT_A_SERVER(colors));
