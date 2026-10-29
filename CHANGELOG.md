@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.0](https://github.com/directionally-local/installer/compare/v0.6.0...v0.7.0) (2026-10-29)
+
+
+### Features
+
+* dl update, and never restart a server under a running task ([aedb26d](https://github.com/directionally-local/installer/commit/aedb26d1d3e4dc52b7a3bb204f4ea2451e57a7cb))
+* dl update, and never restart a server under a running task ([4e54da6](https://github.com/directionally-local/installer/commit/4e54da6704496e8377ec4f5f15f63c791a97f08e)), closes [#34](https://github.com/directionally-local/installer/issues/34)
+* **services:** add the shared library and the name service skeleton ([979d969](https://github.com/directionally-local/installer/commit/979d96904a4ee833332fb49ba80957a412c611a4)), closes [#29](https://github.com/directionally-local/installer/issues/29)
+* **services:** add the shared library and the name service skeleton (Phase 1a of [#29](https://github.com/directionally-local/installer/issues/29)) ([b09a703](https://github.com/directionally-local/installer/commit/b09a7035232a202b7b5fa2c54c12b70d440c0a37))
+
+
+### Bug Fixes
+
+* show why a task failed ([edb7a52](https://github.com/directionally-local/installer/commit/edb7a524f108e443f01d6abd5fee1b774e01e78f))
+* show why a task failed ([497cbc0](https://github.com/directionally-local/installer/commit/497cbc01b1800245a97a1ba9c92caf1e3d9709c8)), closes [#33](https://github.com/directionally-local/installer/issues/33)
+
 ## [0.6.0](https://github.com/directionally-local/installer/compare/v0.5.0...v0.6.0) (2026-10-29)
 
 
