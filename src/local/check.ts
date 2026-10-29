@@ -86,9 +86,8 @@ export async function checkComputer(system: System, options: CheckOptions): Prom
 /** What stops setup before it changes anything, each with how to fix it. */
 export function computerProblems(facts: ComputerFacts): string[] {
   const problems: string[] = [];
-  if (facts.platform !== "darwin" && facts.platform !== "linux") {
-    return [`Running agents on this computer works on macOS and Linux, not ${facts.platform}. Set up a server instead: curl -fsSL https://directionallylocal.run | sh`];
-  }
+  const unsupported = localUnsupported(facts.platform);
+  if (unsupported) return [unsupported];
   if (facts.platform === "linux" && !facts.systemdUser) {
     problems.push("A systemd user session is needed to keep the agents running (systemctl --user). Log in to a desktop session, or set up a server instead.");
   }
@@ -120,6 +119,20 @@ function dockerFix(facts: ComputerFacts): string {
 /** How many agents fit at once, by what Docker has (the VM on macOS). */
 export function localCapacity(docker: Pick<DockerFacts, "memoryMb" | "cpus">): number {
   return agentCapacity({ memoryMb: docker.memoryMb, cpus: docker.cpus }, LOCAL_CELL_MEMORY_MB);
+}
+
+/**
+ * Why agents can't run on this computer's platform, or undefined on macOS and Linux. The
+ * local setup is POSIX throughout (sh, launchd or systemd --user, unix sockets), so other
+ * platforms are refused before anything runs. WSL reports "linux" and takes the Linux path.
+ */
+export function localUnsupported(platform: NodeJS.Platform): string | undefined {
+  if (supportedPlatform(platform)) return undefined;
+  if (platform === "win32") {
+    return "Running on this computer isn't supported on Windows yet; connect a server instead (dl setup, then \"On my own server\"). "
+      + "Inside WSL 2, dl runs as on Linux (it needs systemd and Docker there).";
+  }
+  return `Running agents on this computer works on macOS and Linux, not ${platform}. Connect a server instead: dl setup, then "On my own server".`;
 }
 
 export function supportedPlatform(platform: NodeJS.Platform): LocalPlatform | undefined {

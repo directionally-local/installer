@@ -76,7 +76,8 @@ describe("on this computer: checks", () => {
   });
 
   it("refuses other platforms, and Linux without a user session or Docker access", () => {
-    assert.match(computerProblems({ ...healthy(), platform: "win32" })[0]!, /macOS and Linux, not win32[\s\S]*set up a server/i);
+    assert.match(computerProblems({ ...healthy(), platform: "win32" })[0]!, /isn't supported on Windows yet; connect a server instead[\s\S]*WSL 2/);
+    assert.match(computerProblems({ ...healthy(), platform: "freebsd" })[0]!, /macOS and Linux, not freebsd[\s\S]*Connect a server/);
     const linux = computerProblems({ ...healthy(), platform: "linux", systemdUser: false, docker: undefined, dockerDenied: true });
     assert.match(linux[0]!, /systemd user session/);
     assert.match(linux[1]!, /usermod -aG docker/);
@@ -95,8 +96,20 @@ describe("on this computer: checks", () => {
     assert.equal(await stableNodePath(system, "/usr/local/bin/node"), "/usr/local/bin/node");
   });
 
-  it("refuses before changing anything: an unsupported platform, a vulnerable Node, root", async () => {
-    for (const extra of [{ platform: "win32" as const }, { nodeVersion: "24.1.0" }]) {
+  it("refuses Windows before running anything at all: no checklist, no probes, no sh", async () => {
+    const system = new FakeComputer();
+    const ui = new RecordingUi();
+    await assert.rejects(() => setUp(system, { platform: "win32" }, ui), /Running on this computer isn't supported on Windows yet; connect a server instead/);
+    assert.deepEqual(system.commands, []);
+    assert.deepEqual(system.probes, []);
+    assert.deepEqual(ui.events, []);
+    await assert.rejects(() => localStatus(options(system, { platform: "win32" })), /isn't supported on Windows yet/);
+    await assert.rejects(() => uninstallFromThisComputer({ ...options(system, { platform: "win32" }), ui }), /isn't supported on Windows yet/);
+    assert.deepEqual(system.probes, [], "status and uninstall don't probe either");
+  });
+
+  it("refuses before changing anything: a vulnerable Node, root", async () => {
+    for (const extra of [{ nodeVersion: "24.1.0" }]) {
       const system = new FakeComputer();
       const ui = new RecordingUi();
       await assert.rejects(() => setUp(system, extra, ui));

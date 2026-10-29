@@ -29,7 +29,7 @@ import { removeRemote } from "../laptop/config.js";
 import type { Prompter } from "../prompt.js";
 import { RealSystem, type System } from "../system.js";
 import type { Ui } from "../ui.js";
-import { checkComputer, computerProblems, localCapacity, servicePath, supportedPlatform, type ComputerFacts } from "./check.js";
+import { checkComputer, computerProblems, localCapacity, localUnsupported, servicePath, supportedPlatform, type ComputerFacts } from "./check.js";
 import {
   LOCAL_SERVICES, PAIRED_NAME, PREFERRED_PORTS, autopilotXdg, localAsterConfig, localAutopilotBin, localAutopilotEnv,
   localGithubEnv, localHotcellBin, localHotcellEnv, localPaths, parseLocalEnvFile, serviceSpecs,
@@ -80,10 +80,16 @@ interface Context {
   sleep: (ms: number) => Promise<void>;
 }
 
+/** Stops on a platform the local setup can't run on (Windows), before any command runs. */
+export function assertLocalSupported(platform: NodeJS.Platform = process.platform): void {
+  const unsupported = localUnsupported(platform);
+  if (unsupported) throw new Error(unsupported);
+}
+
 function context(options: LocalOptions, logName?: string): Context & { rawPlatform: NodeJS.Platform } {
   const home = options.home ?? homedir();
   const rawPlatform = options.platform ?? process.platform;
-  // Unsupported platforms still get paths (for a clear refusal); nothing is written there.
+  // Callers refuse unsupported platforms first (assertLocalSupported); this only keeps types simple.
   const platform = supportedPlatform(rawPlatform) ?? "linux";
   return {
     // Other tools' output goes to a log file (or nowhere), never the screen.
@@ -98,6 +104,7 @@ function context(options: LocalOptions, logName?: string): Context & { rawPlatfo
 
 /** Checks this computer without changing anything, e.g. before the wizard asks for keys. */
 export async function checkThisComputer(options: LocalOptions = {}): Promise<{ facts: ComputerFacts; problems: string[] }> {
+  assertLocalSupported(options.platform);
   const ctx = context(options);
   const facts = await checkComputer(ctx.system, checkOptions(ctx, options));
   return { facts, problems: computerProblems(facts) };
@@ -111,6 +118,8 @@ export interface LocalSetupResult {
 
 export async function setUpOnThisComputer(input: SetupInput): Promise<LocalSetupResult> {
   const { ui } = input;
+  // Before the checklist: on Windows nothing here (sh, launchd/systemd, unix sockets) works.
+  assertLocalSupported(input.platform);
   const ctx = context(input, SETUP_LOG);
   const { system, paths, platform } = ctx;
   const now = () => (input.now ?? (() => new Date()))().toISOString();
@@ -136,8 +145,6 @@ export async function setUpOnThisComputer(input: SetupInput): Promise<LocalSetup
 
   const { facts, uid } = await step("check", async () => {
     let facts = await checkComputer(system, checkOptions(ctx, input));
-    const unsupported = computerProblems(facts);
-    if (ctx.rawPlatform !== "darwin" && ctx.rawPlatform !== "linux") throw new Error(unsupported[0]);
     const uid = await userId(system);
     if (!facts.docker && facts.dockerApp && platform === "darwin") {
       ui.start("check", `opening ${facts.dockerApp}`);
@@ -293,6 +300,7 @@ export interface UninstallInput extends LocalOptions {
  */
 export async function uninstallFromThisComputer(input: UninstallInput): Promise<void> {
   const { ui } = input;
+  assertLocalSupported(input.platform);
   const ctx = context(input, "uninstall.log");
   const { system, paths, platform } = ctx;
   const state = await readLocalState(system, paths);
@@ -362,6 +370,7 @@ export interface LocalStatus {
 
 /** `dl local status`: is it running, where, and how much fits. Read-only. */
 export async function localStatus(options: LocalOptions = {}): Promise<LocalStatus> {
+  assertLocalSupported(options.platform);
   const ctx = context(options);
   const { system, paths, platform } = ctx;
   const state = await readLocalState(system, paths);

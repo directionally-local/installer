@@ -6,11 +6,12 @@ import { promisify } from "node:util";
 import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
 import { palette, PlainUi, TerminalUi, type Ui } from "../ui.js";
 import type { LaptopIO } from "./commands.js";
-import { loadRemotes, loadRemotesFile, normalizeServerUrl, REMOTE_NAME_RE, remotesPath, saveRemote, setDefaultRemote, type RemoteServer, type SshAccess } from "./config.js";
+import { localUnsupported } from "../local/check.js";
+import { loadRemotes, loadRemotesFile, normalizeServerUrl, REMOTE_NAME_RE, remotesPath, resolveTarget, saveRemote, setDefaultRemote, type RemoteServer, type SshAccess } from "./config.js";
 import { confirm, gatherKeys, type KeySources } from "./credentials.js";
 import { bootstrap, INSTALL_URL, installOnServer, pairLaptop, serverNeeds, type UiFactory } from "./remote-install.js";
 import { checkServer, describeHost, discoverKeys, hostOf, parseSshConfig, parseTarget, realSshExec, SshAuthError, type ServerFacts, type SshExec, type SshHost } from "./ssh.js";
-import { askModel, DEFAULT_MODEL, loadSettings, modelPrices, readAutopilotModel, saveModel } from "./settings.js";
+import { askModel, DEFAULT_MODEL, loadSettings, modelPrices, readAutopilotModel, saveModel, saveSettings } from "./settings.js";
 import { openRemote, withConnections, type RemoteOpener } from "./tunnel.js";
 
 /**
@@ -43,6 +44,10 @@ export interface SetupDeps {
   localSetup?: LocalSetup;
   /** `dl setup --identity FILE`: the private key to use, instead of trying the ones in ~/.ssh. */
   identityFile?: string;
+  /** Someone is at a terminal to answer a question setup could skip; true unless told otherwise. */
+  interactive?: boolean;
+  /** This laptop's platform (process.platform): "On this computer" isn't offered where it can't run. */
+  platform?: NodeJS.Platform;
   now?: () => Date;
 }
 
@@ -57,6 +62,13 @@ export async function setupWizard(deps: SetupDeps): Promise<RemoteServer | undef
   const c = palette(deps.color);
   deps.write(`\n  ${c.bold("Directionally Local")}\n  Background coding agents. Where should they run?\n\n`);
   const ui = deps.newUi();
+  // Where this computer can't run agents (Windows), the list would hold one real choice: say why, and go on.
+  const unsupported = localUnsupported(deps.platform ?? process.platform);
+  if (unsupported) {
+    ui.line("info", "On this computer", unsupported);
+    ui.answered("Where", "On my own server");
+    return setUpServer(deps);
+  }
   let where = (await deps.prompter.select(ui.prompt("Where"), PLACES, 0)).value as "local" | "server";
 
   ui.answered("Where", where === "local" ? "On this computer" : "On my own server");
@@ -78,7 +90,7 @@ export async function setupWizard(deps: SetupDeps): Promise<RemoteServer | undef
     const remotesFile = deps.remotesFile ?? remotesPath();
     const isNew = !(await loadRemotes(remotesFile)).some((entry) => entry.name === remote.name);
     await saveRemote(remote, remotesFile);
-    if (isNew) await chooseDefault(deps, remote, remotesFile);
+    await offerThisComputer(deps, remote, remotesFile, isNew);
     await chooseModel(deps);
     finishScreen(deps.newUi(), capacity);
     return remote;
@@ -180,7 +192,7 @@ async function chooseServer(deps: SetupDeps, hosts: SshHost[]): Promise<{ access
 
 /**
  * With two or more places set up, where `dl run` sends tasks unless told otherwise. Asked
- * only when setup adds a place, with the new one preselected; the first place becomes the
+ * only when setup adds a server, with the new one preselected (this computer: offerThisComputer); the first place becomes the
  * default by itself (saveRemote).
  */
 async function chooseDefault(deps: SetupDeps, added: RemoteServer, remotesFile: string): Promise<void> {
@@ -193,6 +205,35 @@ async function chooseDefault(deps: SetupDeps, added: RemoteServer, remotesFile: 
   const { value } = await deps.prompter.select(ui.prompt("Where should tasks go by default?"), options, initial);
   await setDefaultRemote(value, remotesFile);
   ui.answered("Default", value);
+  ui.finish();
+}
+
+/**
+ * After "on this computer", when commands would still go somewhere else (a server set up
+ * first stays the default, saveRemote): asks once, at a terminal, whether this computer
+ * should be the default instead. Asked again only when this computer is newly added.
+ * Otherwise (no terminal, already asked, or "no") it says where things go and how to change it.
+ */
+async function offerThisComputer(deps: SetupDeps, local: RemoteServer, remotesFile: string, isNew: boolean): Promise<void> {
+  const { remotes } = await loadRemotesFile(remotesFile);
+  if (remotes.length < 2) return;
+  const current = await resolveTarget(undefined, remotesFile).then((target) => target.remote.name, () => undefined);
+  if (current === local.name) return;
+  const hint = `dl use ${local.name}`;
+  const ui = deps.newUi();
+  deps.write("\n");
+  if (deps.interactive !== false && (isNew || !(await loadSettings(deps.settingsFile)).askedLocalDefault)) {
+    const question = current ? `Make this computer the default? Tasks and sessions go to ${current} now` : "Make this computer the default for tasks and sessions?";
+    const yes = await confirm(ui, deps.prompter, question);
+    await saveSettings({ askedLocalDefault: true }, deps.settingsFile);
+    if (yes) {
+      await setDefaultRemote(local.name, remotesFile);
+      ui.answered("Default", "this computer");
+      ui.finish();
+      return;
+    }
+  }
+  ui.line("info", "Default", current ? `still ${current} · ${hint} to run here instead` : `none yet · ${hint} to run here`);
   ui.finish();
 }
 
@@ -374,6 +415,7 @@ export async function setup(options: { io: LaptopIO; terminal: boolean; localSet
       installUrl: process.env.DL_INSTALL_URL || INSTALL_URL,
       ...(options.localSetup ? { localSetup: options.localSetup } : {}),
       ...(identityFile ? { identityFile } : {}),
+      interactive: terminal && process.stdin.isTTY === true,
     });
   } catch (error) {
     if (!(error instanceof PromptCancelled)) throw error;
