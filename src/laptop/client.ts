@@ -17,6 +17,16 @@ export interface RemoteConversation {
   branch?: string | null;
   pullRequestNumber?: number;
   pullRequestURL?: string;
+  /**
+   * Newer servers (autopilot#1046) send what a sidebar needs; older ones only have `status`,
+   * so `dl agent` maps that itself. Kept optional so both work.
+   */
+  state?: string;
+  title?: string;
+  costUsd?: number;
+  lastActivityAt?: string;
+  waitingFor?: { tool?: string; summary?: string } | null;
+  lastError?: string | null;
 }
 
 export interface RemoteEvent {
@@ -146,6 +156,22 @@ export class RemoteClient {
       controller.abort();
     }
     return undefined;
+  }
+
+  /**
+   * One pass over the event stream from `cursor`, for a snapshot read: no reconnecting, so a
+   * caller that has everything it needs stops at once instead of waiting for the next event.
+   */
+  async *eventSnapshot(conversationId: string, cursor: number, signal?: AbortSignal): AsyncGenerator<RemoteEvent> {
+    const response = await this.fetchImpl(this.url(`/conversations/${encodeURIComponent(conversationId)}/events`), {
+      headers: { ...this.authHeaders(), Accept: "text/event-stream", "Last-Event-ID": String(cursor) },
+      signal,
+    });
+    if (!response.ok || !response.body) throw await toApiError(response);
+    for await (const event of parseEventStream(response.body)) {
+      if (event.id <= cursor) continue;
+      yield event;
+    }
   }
 
   /**

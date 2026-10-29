@@ -435,9 +435,9 @@ class EventRenderer {
   }
 }
 
-async function findRun(id: string, server: string | undefined, connections: Connections): Promise<{ remote: RemoteServer; run: RemoteConversation }> {
+export async function findRun(id: string, server: string | undefined, connections: Connections, noun = "task"): Promise<{ remote: RemoteServer; run: RemoteConversation }> {
   const needle = id.trim().toLowerCase();
-  if (!/^[0-9a-f-]{4,36}$/.test(needle)) throw new Error("Task IDs are the short hex IDs dl runs shows");
+  if (!/^[0-9a-f-]{4,36}$/.test(needle)) throw new Error(`${noun === "task" ? "Task" : "Agent"} IDs are the short hex IDs dl runs shows`);
   const remotes = server ? [await resolveRemote(server)] : await loadRemotes();
   const matches: Array<{ remote: RemoteServer; run: RemoteConversation }> = [];
   const unreachable: string[] = [];
@@ -449,8 +449,8 @@ async function findRun(id: string, server: string | undefined, connections: Conn
     for (const entry of list) if (entry.conversationId.startsWith(needle)) matches.push({ remote, run: entry });
   }
   // Say why when a server couldn't be asked (e.g. its SSH tunnel failed), rather than "no task".
-  if (matches.length === 0) throw new Error(`No task ${id} on ${server ?? "any connected server"}${unreachable.length ? `\n${unreachable.join("\n")}` : ""}`);
-  if (matches.length > 1) throw new Error(`${id} matches several tasks; use more characters`);
+  if (matches.length === 0) throw new Error(`No ${noun} ${id} on ${server ?? "any connected server"}${unreachable.length ? `\n${unreachable.join("\n")}` : ""}`);
+  if (matches.length > 1) throw new Error(`${id} matches several ${noun}s; use more characters`);
   return matches[0]!;
 }
 
@@ -489,7 +489,7 @@ function rewrite(io: LaptopIO): string {
   return io.color === true ? "\x1b[1F\x1b[2K" : "";
 }
 
-function oneLine(text: string, max: number): string {
+export function oneLine(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }

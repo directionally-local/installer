@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { doctor, formatChecks } from "./doctor.js";
 import { serverKeysCommand } from "./keys.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
+import { agentCommand } from "./laptop/agents.js";
 import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, use, watch } from "./laptop/commands.js";
 import { loadRemotes } from "./laptop/config.js";
 import { keys } from "./laptop/keys.js";
@@ -38,6 +39,10 @@ On your laptop:
                           (your uncommitted changes go along; Ctrl-C stops watching, not the task)
   dl runs                 your tasks and their pull requests
   dl watch ID             follow a task      dl cancel ID   stop one
+  dl agent list           every agent and its state (--json for scripts)
+  dl agent prompt ID "text"   send a follow-up (--wait, --until done|blocked|idle)
+  dl agent read ID        the last lines of its output (--lines N, --json)
+  dl agent wait ID        block until it's done|blocked|idle (--timeout DURATION)
   dl pull ID              check out a task's branch here
   dl preview ID           deploy a task's Workers branch on the server and open it here
   dl servers              where agents run (dl servers remove NAME · dl servers rename OLD NEW)
@@ -122,6 +127,9 @@ export async function main(
         identity: { type: "string" },
         stdin: { type: "boolean" },
         wait: { type: "boolean" },
+        until: { type: "string" },
+        timeout: { type: "string" },
+        lines: { type: "string" },
       },
     });
   } catch (error) {
@@ -297,6 +305,15 @@ export async function main(
         else await pull({ id, cwd: process.cwd(), ...server }, laptopIO);
         return 0;
       }
+      case "agent":
+        return await agentCommand(parsed.positionals.slice(1), {
+          json: Boolean(values.json),
+          wait: Boolean(values.wait),
+          ...(values.until !== undefined ? { until: values.until } : {}),
+          ...(values.timeout !== undefined ? { timeout: values.timeout } : {}),
+          ...(values.lines !== undefined ? { lines: values.lines } : {}),
+          ...(values.server ? { server: values.server } : {}),
+        }, laptopIO);
       case "new": {
         const code = await projectSession({ cwd: process.cwd(), fresh: true, ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}) }, laptopIO);
         if (code !== undefined) return code;
