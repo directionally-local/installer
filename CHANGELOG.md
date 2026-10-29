@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.0](https://github.com/directionally-local/installer/compare/v0.5.0...v0.6.0) (2026-10-29)
+
+
+### Features
+
+* choose the model in dl setup and with dl model; default to DeepSeek V4.1 Flash ([94ed5f4](https://github.com/directionally-local/installer/commit/94ed5f41430c4420f4426cd440f45a4b96598ec4))
+* choose the model in dl setup and with dl model; default to DeepSeek V4.1 Flash ([ef6e8cb](https://github.com/directionally-local/installer/commit/ef6e8cb529e898b74fd320cd9514b5182defa108))
+
 ## [0.5.0](https://github.com/directionally-local/installer/compare/v0.4.1...v0.5.0) (2026-10-29)
 
 
