@@ -204,7 +204,7 @@ describe("dl inside a project", () => {
     assert.equal(launch.env.AUTOPILOT_REMOTE_URL, api.url);
     assert.equal(launch.env.AUTOPILOT_REMOTE_TOKEN, TOKEN);
     assert.ok(!launch.args.some((arg) => arg.includes(TOKEN)), "the token is never in argv");
-    assert.match(first.text(), /· Connecting to dl-test · me\/app … {2}\(new conversation from [0-9a-f]{7} \+ 1 local change, moonshotai\/kimi-k2\.6\)\n/);
+    assert.match(first.text(), /· Connecting to dl-test · me\/app … {2}\(new conversation from [0-9a-f]{7} \+ 1 local change, deepseek\/deepseek-v4\.1-flash-1017\)\n/);
     assert.match(first.text(), /It keeps running on dl-test\. Type dl here to come back, or dl runs\.\n/);
 
     const file = join(root, "config", "directionallylocal", "sessions.json");

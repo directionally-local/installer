@@ -7,6 +7,7 @@ import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, se
 import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, use, watch } from "./laptop/commands.js";
 import { loadRemotes } from "./laptop/config.js";
 import { keys } from "./laptop/keys.js";
+import { model } from "./laptop/settings.js";
 import { projectSession } from "./laptop/session.js";
 import { setup } from "./laptop/setup.js";
 import { localCommand } from "./local/cli.js";
@@ -37,6 +38,7 @@ On your laptop:
   dl servers              where agents run (dl servers remove NAME · dl servers rename OLD NEW)
   dl use [NAME]           where tasks go without --server (no NAME: show it)
   dl keys [openrouter|github]   which keys are set, or replace one (--server NAME)
+  dl model [ID]           the model for tasks and sessions (no ID: pick from a list)
   run options: --server NAME, -m/--model MODEL, --repo OWNER/NAME, --detach
   dl local status         agents running on this computer: running?, where, how many fit
   dl local uninstall [--purge]   stop and remove them (--purge also deletes keys and data)
@@ -286,6 +288,8 @@ export async function main(
         return await servers(parsed.positionals.slice(1), laptopIO);
       case "use":
         return await use(parsed.positionals.slice(1), laptopIO);
+      case "model":
+        return await model(parsed.positionals.slice(1), { io: laptopIO, terminal });
       case "runs":
         // On a server, its runs; on a laptop, the tasks it sent.
         if (!(await readState(system))) {

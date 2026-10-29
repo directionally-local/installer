@@ -9,7 +9,9 @@ import { fakeTunnels } from "../test-support/fake-tunnel.js";
 import { ScriptedPrompter, type SelectOption, type SelectResult } from "../prompt.js";
 import { RecordingUi } from "../ui.js";
 import { loadRemotes, loadRemotesFile, saveRemote, type RemoteServer } from "./config.js";
+import { loadSettings } from "./settings.js";
 import { serverLabel, setupWizard, type LocalSetup, type SetupDeps } from "./setup.js";
+import { withCatalog } from "../test-support/fake-catalog.js";
 import { createOpener } from "./tunnel.js";
 
 const GH = `gho_${"a".repeat(36)}`;
@@ -53,7 +55,7 @@ afterEach(async () => {
 
 function deps(server: FakeSshServer, answers: Record<string, string>, extra: Partial<SetupDeps> = {}) {
   const ui = new RecordingUi();
-  const prompter = new ScriptedPrompter(answers);
+  const prompter = new ScriptedPrompter({ Model: "", ...answers });
   let text = "";
   const tunnels = fakeTunnels(apiPort, { delayMs: 5 });
   const value: SetupDeps = {
@@ -77,6 +79,7 @@ function deps(server: FakeSshServer, answers: Record<string, string>, extra: Par
     },
     hostname: "sinas-mbp.local",
     remotesFile: join(root, "remotes.json"),
+    settingsFile: join(root, "config.json"),
     now: () => new Date("2026-10-28T09:00:00.000Z"),
     ...extra,
   };
@@ -123,10 +126,29 @@ describe("dl setup on a laptop", () => {
 
     const again = deps(server, { Where: "2", Server: "1" });
     await setupWizard(again.deps);
-    assert.deepEqual(again.prompter.asked, ["Where", "Server"], "no key questions for a configured server");
+    assert.deepEqual(again.prompter.asked, ["Where", "Server"], "no key or model questions the second time");
     assert.ok(again.ui.events.includes("line done Keys | already on the server"));
     assert.deepEqual(server.paired, ["sinas-mbp (dl)"], "the saved credential still works, so no second pairing");
     assert.equal((await loadRemotes(join(root, "remotes.json"))).length, 1);
+  });
+
+  it("asks for the model once, with Autopilot's preselected and OpenRouter's prices shown", async () => {
+    const server = new FakeSshServer();
+    const run = deps(server, { Where: "2", Server: "1", "Use your GitHub CLI": "", "Use the OpenRouter key": "" });
+    const prompter = new RecordingSelect({ Model: "", Where: "2", Server: "1", "Use your GitHub CLI": "", "Use the OpenRouter key": "" });
+    run.deps.prompter = prompter;
+    const { readFile } = run.deps.sources;
+    run.deps.sources = {
+      ...run.deps.sources,
+      readFile: async (path) => path === "/home/me/.config/kimiflare/config.json" ? JSON.stringify({ openrouterApiKey: OR, model: "moonshotai/kimi-k2.6" }) : readFile(path),
+      fetch: withCatalog(run.deps.sources.fetch!),
+    };
+    await setupWizard(run.deps);
+    const shown = prompter.selects.find((entry) => entry.question === "Model")!;
+    assert.equal(shown.options[shown.initial]!.value, "moonshotai/kimi-k2.6");
+    assert.match(shown.options[shown.initial]!.detail ?? "", /\$0\.6 in \/ \$2\.5 out per M tokens/);
+    assert.ok(run.ui.events.includes("answered Model | moonshotai/kimi-k2.6  (change it any time: dl model)"));
+    assert.equal((await loadSettings(join(root, "config.json"))).model, "moonshotai/kimi-k2.6");
   });
 
   it("tries the keys in ~/.ssh without asking when the server refuses the default ones", async () => {

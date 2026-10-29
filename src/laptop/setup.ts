@@ -10,6 +10,7 @@ import { loadRemotes, loadRemotesFile, normalizeServerUrl, REMOTE_NAME_RE, remot
 import { confirm, gatherKeys, type KeySources } from "./credentials.js";
 import { bootstrap, INSTALL_URL, installOnServer, pairLaptop, serverNeeds, type UiFactory } from "./remote-install.js";
 import { checkServer, describeHost, discoverKeys, hostOf, parseSshConfig, parseTarget, realSshExec, SshAuthError, type ServerFacts, type SshExec, type SshHost } from "./ssh.js";
+import { askModel, DEFAULT_MODEL, loadSettings, modelPrices, readAutopilotModel, saveModel } from "./settings.js";
 import { openRemote, withConnections, type RemoteOpener } from "./tunnel.js";
 
 /**
@@ -36,6 +37,8 @@ export interface SetupDeps {
   /** This laptop's name, for the credential the server issues it. */
   hostname: string;
   remotesFile?: string;
+  /** dl's own settings (the default model); ~/.config/directionallylocal/config.json unless replaced. */
+  settingsFile?: string;
   installUrl?: string;
   localSetup?: LocalSetup;
   /** `dl setup --identity FILE`: the private key to use, instead of trying the ones in ~/.ssh. */
@@ -76,6 +79,7 @@ export async function setupWizard(deps: SetupDeps): Promise<RemoteServer | undef
     const isNew = !(await loadRemotes(remotesFile)).some((entry) => entry.name === remote.name);
     await saveRemote(remote, remotesFile);
     if (isNew) await chooseDefault(deps, remote, remotesFile);
+    await chooseModel(deps);
     finishScreen(deps.newUi(), capacity);
     return remote;
   }
@@ -136,6 +140,7 @@ async function setUpServer(deps: SetupDeps): Promise<RemoteServer> {
   connectedUi.line("done", "This laptop", `connected as ${remote.name}`);
   connectedUi.finish();
   if (!known.some((entry) => entry.name === paired.name)) await chooseDefault(deps, remote, remotesFile);
+  await chooseModel(deps);
   finishScreen(deps.newUi(), capacity);
   return remote;
 }
@@ -188,6 +193,21 @@ async function chooseDefault(deps: SetupDeps, added: RemoteServer, remotesFile: 
   const { value } = await deps.prompter.select(ui.prompt("Where should tasks go by default?"), options, initial);
   await setDefaultRemote(value, remotesFile);
   ui.answered("Default", value);
+  ui.finish();
+}
+
+/**
+ * Which model tasks and sessions use, asked once: setup skips it when dl already has one
+ * (dl model changes it). Autopilot's own default is preselected for people who have one.
+ */
+async function chooseModel(deps: SetupDeps): Promise<void> {
+  if ((await loadSettings(deps.settingsFile)).model) return;
+  const [current, prices] = await Promise.all([readAutopilotModel(deps.sources), deps.sources.fetch ? modelPrices(deps.sources.fetch) : undefined]);
+  const ui = deps.newUi();
+  deps.write("\n");
+  const model = await askModel(deps.prompter, ui, current ?? DEFAULT_MODEL, prices);
+  await saveModel(model, deps.settingsFile);
+  ui.answered("Model", `${model}  (change it any time: dl model)`);
   ui.finish();
 }
 
