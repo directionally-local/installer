@@ -1,6 +1,7 @@
 import { detectHost, MIN_DISK_GB } from "./detect.js";
 import { nodeAdvisory } from "./node-advisory.js";
 import { AUTOPILOT_PORT, AUTO_UPGRADES, HOTCELL_PORT, NODE_AUTO_UPDATES, PATHS, SERVICES, parseEnvFile } from "./layout.js";
+import { fileMtime, modelPricesHealth } from "./model-prices.js";
 import { describeAccess, readState } from "./state.js";
 import { palette } from "./ui.js";
 import type { System } from "./system.js";
@@ -9,12 +10,14 @@ export interface Check {
   name: string;
   ok: boolean;
   detail: string;
-  /** What to do when it fails. */
+  /** What to do when it fails (or, with `warn`, when it's worth doing something). */
   fix?: string;
+  /** Works, but worth attention: shown with "!" and doesn't count as a failure. */
+  warn?: boolean;
 }
 
 /** `directionallylocal doctor`: every moving part, with a fix for each failure. */
-export async function doctor(system: System): Promise<Check[]> {
+export async function doctor(system: System, now = new Date()): Promise<Check[]> {
   const checks: Check[] = [];
   const add = (check: Check) => checks.push(check);
   const state = await readState(system);
@@ -60,6 +63,9 @@ export async function doctor(system: System): Promise<Check[]> {
   const hasModelKey = keys.code === 0 && /^\s*openrouter\b/m.test(keys.stdout);
   add({ name: "model key", ok: hasModelKey, detail: hasModelKey ? "OpenRouter key in Hotcell" : "no OpenRouter key in Hotcell", fix: "sudo dl up (asks for it)" });
 
+  const prices = modelPricesHealth(await system.readFile(PATHS.modelPrices), await fileMtime(system, PATHS.modelPrices), now, "dl up");
+  add({ name: "model prices", ok: prices.ok, ...(prices.warn ? { warn: true } : {}), detail: prices.detail, fix: "sudo dl up (downloads them from openrouter.ai)" });
+
   const github = Boolean(parseEnvFile(await system.readFile(PATHS.githubEnv)).GITHUB_TOKEN);
   add({ name: "github", ok: github, detail: github ? "token configured" : "no token; runs can't push or open PRs", fix: "sudo dl up (asks for it)" });
 
@@ -81,9 +87,9 @@ export function formatChecks(checks: Check[], color = false): string {
   const c = palette(color);
   const width = Math.max(...checks.map((check) => check.name.length)) + 2;
   const rows = checks.map((check) => {
-    const glyph = check.ok ? c.green("✓") : c.red("✗");
+    const glyph = !check.ok ? c.red("✗") : check.warn ? c.yellow("!") : c.green("✓");
     const fix = !check.ok && check.fix ? `\n     ${c.dim(`fix: ${check.fix}`)}` : "";
-    return `  ${glyph} ${check.name.padEnd(width)}${check.ok ? c.dim(check.detail) : c.red(check.detail)}${fix}`;
+    return `  ${glyph} ${check.name.padEnd(width)}${!check.ok ? c.red(check.detail) : check.warn ? c.yellow(check.detail) : c.dim(check.detail)}${fix}`;
   });
   const failed = checks.filter((check) => !check.ok).length;
   const verdict = failed === 0 ? `${c.green("✓")} ${c.bold("All good")}` : `${c.red("✗")} ${c.bold(`${failed} to fix`)}`;

@@ -6,6 +6,7 @@ import { readState } from "./state.js";
 import { FakeSystem } from "./test-support/fake-system.js";
 import { JsonUi } from "./ui.js";
 import { needs, parseAccessMode, parseProvidedAnswers, up, validateGitHubToken, validateOpenRouterKey } from "./up.js";
+import { withCatalog } from "./test-support/fake-catalog.js";
 
 const OPENROUTER_KEY = `sk-or-v1-${"a".repeat(40)}`;
 const GITHUB_TOKEN = `github_pat_${"b".repeat(40)}`;
@@ -18,8 +19,8 @@ const answers = () => new ScriptedPrompter({
 });
 
 /** OpenRouter and GitHub accept the test credentials. */
-const fetchOk = (async (url: string | URL | Request) =>
-  String(url).includes("api.github.com") ? Response.json({ login: "octo" }) : Response.json({ data: {} })) as typeof fetch;
+const fetchOk = withCatalog((async (url: string | URL | Request) =>
+  String(url).includes("api.github.com") ? Response.json({ login: "octo" }) : Response.json({ data: {} })) as typeof fetch);
 
 const noSleep = async () => {};
 
@@ -104,6 +105,45 @@ describe("directionallylocal up", () => {
     const state = await readState(system);
     assert.equal(state?.release, "autopilot-2.2.0_hotcell-0.1.26");
     assert.deepEqual(state?.access, { mode: "tailscale", url: "https://box.tail1234.ts.net" });
+  });
+
+  it("writes OpenRouter's prices for Hotcell's spend-capped gateway before Hotcell starts", async () => {
+    const system = new FakeSystem();
+    const run = system.run.bind(system);
+    let pricesAtRestart: string | undefined;
+    system.run = async (command, args, options) => {
+      if (command === "systemctl" && args.join(" ") === "restart hotcell.service") pricesAtRestart = system.files.get(PATHS.modelPrices)?.content;
+      return run(command, args, options);
+    };
+    await up(system, { prompter: answers(), fetchImpl: fetchOk, sleep: noSleep });
+    const prices = system.files.get(PATHS.modelPrices)!;
+    assert.equal(PATHS.modelPrices, "/var/lib/hotcell/model-prices.json");
+    assert.deepEqual({ mode: prices.mode, owner: prices.owner }, { mode: 0o644, owner: "hotcell:hotcell" });
+    assert.deepEqual(JSON.parse(prices.content), {
+      "meta-llama/llama-5-8b:free": { inputPerMTok: 0, outputPerMTok: 0 },
+      "moonshotai/kimi-k2.6": { inputPerMTok: 0.6, outputPerMTok: 2.5 },
+      "openai/gpt-6-luna": { inputPerMTok: 2.5, outputPerMTok: 10 },
+    });
+    assert.equal(pricesAtRestart, prices.content, "in place when Hotcell (re)starts, which is when it reads them");
+    assert.equal(parseEnvFile(system.files.get(PATHS.hotcellEnv)?.content).HOTCELL_MODEL_PRICES, PATHS.modelPrices);
+    assert.ok(system.logs.includes("ok Starting services: sandboxes and keys ready · prices for 3 models"), system.logs.join("\n"));
+  });
+
+  it("finishes the install when openrouter.ai can't be reached for prices, keeping the last list", async () => {
+    const offline = ((url: string | URL | Request, init?: RequestInit) =>
+      String(url).endsWith("/api/v1/models") ? Promise.reject(new Error("getaddrinfo ENOTFOUND openrouter.ai")) : fetchOk(url, init)) as typeof fetch;
+    const fresh = new FakeSystem();
+    await up(fresh, { prompter: answers(), fetchImpl: offline, sleep: noSleep });
+    assert.equal(fresh.files.has(PATHS.modelPrices), false);
+    assert.ok(fresh.logs.some((line) => /^!! Couldn't download model prices .*Tasks will fail with "model not priced" until dl up can reach openrouter\.ai\./.test(line)), fresh.logs.join("\n"));
+    assert.equal(parseEnvFile(fresh.files.get(PATHS.hotcellEnv)?.content).HOTCELL_MODEL_PRICES, PATHS.modelPrices);
+
+    const system = new FakeSystem();
+    await up(system, { prompter: answers(), fetchImpl: fetchOk, sleep: noSleep });
+    const before = system.files.get(PATHS.modelPrices)!.content;
+    await up(system, { prompter: new ScriptedPrompter({}), fetchImpl: offline, sleep: noSleep });
+    assert.equal(system.files.get(PATHS.modelPrices)!.content, before);
+    assert.ok(system.logs.some((line) => line.startsWith("!! Couldn't refresh model prices") && line.includes("kept the last list (3 models)")));
   });
 
   it("asks nothing again after a failure past the questions", async () => {

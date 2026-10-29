@@ -9,6 +9,8 @@ export const PATHS = {
   hotcellEnv: "/etc/hotcell/hotcell.env",
   hotcellEtc: "/etc/hotcell",
   hotcellHome: "/var/lib/hotcell",
+  /** OpenRouter's prices, so Hotcell's spend-capped gateway forwards current models. */
+  modelPrices: "/var/lib/hotcell/model-prices.json",
   autopilotEtc: "/etc/autopilot",
   autopilotEnv: "/etc/autopilot/autopilot.env",
   githubEnv: "/etc/autopilot/github.env",
@@ -80,6 +82,8 @@ export function hotcellEnv(input: { apiKey: string; bridgeIp: string }): string 
     HOTCELL_EGRESS_HOST: input.bridgeIp,
     HOTCELL_EGRESS_PORT: String(HOTCELL_EGRESS_PORT),
     HOTCELL_EGRESS_ADVERTISE_HOST: "host.docker.internal",
+    // Under a spend cap the gateway refuses models it can't price; `dl up` refreshes this list.
+    HOTCELL_MODEL_PRICES: PATHS.modelPrices,
   });
 }
 

@@ -16,6 +16,8 @@ export interface FakeCommand {
 export class FakeSystem implements System {
   readonly dryRun = false;
   readonly files = new Map<string, { content: string; mode: number; owner?: string }>();
+  /** Modification times (seconds) for `stat -c %Y`; set on every write. */
+  readonly mtimes = new Map<string, number>();
   readonly dirs = new Set<string>();
   readonly commands: FakeCommand[] = [];
   readonly logs: string[] = [];
@@ -82,6 +84,7 @@ export class FakeSystem implements System {
 
   async writeFile(path: string, content: string, options: WriteOptions = {}): Promise<void> {
     this.files.set(path, { content, mode: options.mode ?? 0o644, ...(options.owner ? { owner: options.owner } : {}) });
+    this.mtimes.set(path, Math.floor(Date.now() / 1000));
   }
 
   async mkdir(path: string): Promise<void> {
@@ -183,6 +186,10 @@ export class FakeSystem implements System {
         if (args.includes("init")) this.dirs.add("/var/lib/autopilot/workspaces/default/.git");
         return ok();
       case "mktemp": return ok("/tmp/tmp.build\n");
+      case "stat": {
+        const mtime = this.files.has(args.at(-1)!) ? this.mtimes.get(args.at(-1)!) : undefined;
+        return mtime === undefined ? fail("No such file or directory") : ok(`${mtime}\n`);
+      }
       case "dpkg-query": return ok(this.unattendedUpgrades ? "install ok installed" : "");
       case "apt-cache": return ok(this.nodeFromNodeSource ? "nodejs:\n  Installed: 24.22.1-1nodesource1\n  500 https://deb.nodesource.com/node_24.x nodistro/main arm64 Packages\n" : "nodejs:\n  Installed: 18.19.1+dfsg-6ubuntu5\n");
       case "apt-get":

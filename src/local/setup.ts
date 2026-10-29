@@ -35,6 +35,7 @@ import {
   localGithubEnv, localHotcellBin, localHotcellEnv, localPaths, parseLocalEnvFile, serviceSpecs,
   type LocalPaths, type LocalPlatform, type LocalPorts, type Networking,
 } from "./layout.js";
+import { fileMtime, modelPricesHealth, refreshModelPrices, type ModelPricesHealth } from "../model-prices.js";
 import { httpStatus, portFree } from "./probes.js";
 import { installService, removeServices, serviceState, stopService, userId, type ServiceManager, type ServiceState } from "./services.js";
 import { readLocalState, writeLocalState, type LocalState } from "./state.js";
@@ -53,6 +54,8 @@ export interface LocalOptions {
   hotcellVersion?: string;
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
+  /** Downloads OpenRouter's model prices. */
+  fetchImpl?: typeof fetch;
 }
 
 export interface SetupInput extends LocalOptions {
@@ -196,6 +199,14 @@ export async function setUpOnThisComputer(input: SetupInput): Promise<RemoteServ
     const previousAutopilot = parseLocalEnvFile(await system.readFile(paths.autopilotEnv));
     const ports = await choosePorts(ctx, node, net, previousPorts(previous, previousAutopilot));
     const apiKey = previous.HOTCELL_API_KEY || randomBytes(24).toString("hex");
+    // Hotcell reads it once at start, so it's in place before the service starts below.
+    const prices = await refreshModelPrices(system, {
+      path: paths.modelPrices,
+      write: { mode: 0o644 },
+      fetchImpl: input.fetchImpl ?? fetch,
+      warn: (text) => ui.warn(text),
+      retry: "dl setup",
+    });
     await system.writeFile(paths.hotcellEnv, localHotcellEnv({ paths, apiKey, ports, net }), { mode: 0o600, secret: true });
     if (!(await system.readFile(paths.asterConfig))) await system.writeFile(paths.asterConfig, localAsterConfig(paths), { mode: 0o600 });
     await ensureWorkspace(system, paths);
@@ -212,7 +223,7 @@ export async function setUpOnThisComputer(input: SetupInput): Promise<RemoteServ
     await waitUntil(ctx, "Autopilot", join(paths.logs, LOCAL_SERVICES.autopilot.log), async () =>
       await httpStatus(system, node, `http://127.0.0.1:${ports.autopilot}/api/v1/health`) === 401);
     await pruneReleases(system, paths, release);
-    return { value: ports, detail: `start at login · logs in ${tilde(paths.logs, ctx.home)}` };
+    return { value: ports, detail: `start at login · logs in ${tilde(paths.logs, ctx.home)}${prices ? ` · ${prices}` : ""}` };
   });
 
   const url = `http://127.0.0.1:${ports.autopilot}`;
@@ -339,6 +350,8 @@ export interface LocalStatus {
   answering: boolean;
   capacity: number | undefined;
   dockerRunning: boolean;
+  /** OpenRouter's price list for Hotcell's gateway: present, how many models, how old. */
+  modelPrices: ModelPricesHealth;
   paths: LocalPaths;
   platform: NodeJS.Platform;
 }
@@ -364,7 +377,8 @@ export async function localStatus(options: LocalOptions = {}): Promise<LocalStat
       capacity = localCapacity({ memoryMb: Math.round(Number(mem) / 1024 / 1024), cpus: Number(cpus) || 0 });
     }
   }
-  return { installed: Boolean(state), state, services: { hotcell, autopilot }, answering, capacity, dockerRunning, paths, platform: ctx.rawPlatform };
+  const modelPrices = modelPricesHealth(await system.readFile(paths.modelPrices), await fileMtime(system, paths.modelPrices, platform), (options.now ?? (() => new Date()))(), "dl setup");
+  return { installed: Boolean(state), state, services: { hotcell, autopilot }, answering, capacity, dockerRunning, modelPrices, paths, platform: ctx.rawPlatform };
 }
 
 function checkOptions(ctx: Context, options: LocalOptions) {

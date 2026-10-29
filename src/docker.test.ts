@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { ScriptedPrompter } from "./prompt.js";
 import { FakeSystem } from "./test-support/fake-system.js";
 import { up } from "./up.js";
+import { withCatalog } from "./test-support/fake-catalog.js";
 
-const fetchOk = (async () => Response.json({ login: "octo" })) as unknown as typeof fetch;
+const fetchOk = withCatalog((async () => Response.json({ login: "octo" })) as unknown as typeof fetch);
 const answers = () => new ScriptedPrompter({
   "Tailscale auth key": "tskey-auth-k1-abc",
   "OpenRouter API key": `sk-or-v1-${"a".repeat(40)}`,

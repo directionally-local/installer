@@ -44,12 +44,15 @@ export function formatLocalStatus(status: LocalStatus, c: Colors, home: string):
   const line = (ok: boolean, label: string, detail: string) => `  ${mark(ok)} ${label.padEnd(12)}${c.dim(detail)}\n`;
   const describe = (entry: LocalStatus["services"]["hotcell"]) =>
     entry.running ? `running${entry.pid ? ` (pid ${entry.pid})` : ""}` : entry.installed ? "stopped" : "not installed";
-  const healthy = services.hotcell.running && services.autopilot.running && status.answering && status.dockerRunning;
+  const healthy = services.hotcell.running && services.autopilot.running && status.answering && status.dockerRunning && status.modelPrices.ok;
   return [
     `\n  ${c.bold("Directionally Local")}  ${c.dim("on this computer")}  ${healthy ? c.green("running") : c.red("needs attention")}\n\n`,
     line(status.dockerRunning, "Docker", status.dockerRunning ? state.dockerRuntime : `${state.dockerRuntime} isn't running; start it`),
     line(services.hotcell.running, "Hotcell", `${describe(services.hotcell)} · 127.0.0.1:${state.ports.hotcell} · ${state.hotcellVersion}`),
     line(services.autopilot.running && status.answering, "Autopilot", `${describe(services.autopilot)}${status.answering ? "" : ", not answering"} · ${state.url} · ${state.autopilotVersion}`),
+    status.modelPrices.warn
+      ? `  ${c.yellow("!")} ${"Prices".padEnd(12)}${c.dim(status.modelPrices.detail)}\n`
+      : line(status.modelPrices.ok, "Prices", status.modelPrices.detail),
     `\n  ${c.dim("Fits")}        ${status.capacity !== undefined ? `~${status.capacity} agents at once (estimate, from Docker's memory)` : "unknown while Docker is stopped"}\n`,
     `  ${c.dim("Installed")}   ${short(status.paths.current)}\n`,
     `  ${c.dim("Logs")}        ${short(status.paths.logs)}\n`,

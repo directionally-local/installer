@@ -17,6 +17,8 @@ export interface FakeRun {
 export class FakeComputer implements System {
   readonly dryRun = false;
   readonly files = new Map<string, { content: string; mode: number }>();
+  /** Modification times (seconds) for `stat`; set on every write. */
+  readonly mtimes = new Map<string, number>();
   readonly dirs = new Map<string, number | undefined>();
   readonly commands: FakeRun[] = [];
   readonly probes: FakeRun[] = [];
@@ -74,6 +76,7 @@ export class FakeComputer implements System {
 
   async writeFile(path: string, content: string, options: WriteOptions = {}): Promise<void> {
     this.files.set(path, { content, mode: options.mode ?? 0o644 });
+    this.mtimes.set(path, Math.floor(Date.now() / 1000));
   }
 
   async mkdir(path: string, options: { mode?: number } = {}): Promise<void> {
@@ -229,6 +232,10 @@ export class FakeComputer implements System {
       case "ls":
         return ok([...this.dirs.keys()].filter((dir) => dir.startsWith(`${args[1]}/`) && !dir.slice(args[1]!.length + 1).includes("/")).map((dir) => dir.split("/").at(-1)).join("\n"));
       case "mktemp": return ok("/tmp/tmp.build\n");
+      case "stat": {
+        const mtime = this.files.has(args.at(-1)!) ? this.mtimes.get(args.at(-1)!) : undefined;
+        return mtime === undefined ? fail("No such file or directory") : ok(`${mtime}\n`);
+      }
       case "wc": return ok("0\n");
       case "/usr/local/bin/docker": {
         if (args[0] === "context") return ok(`unix://${this.home}/.docker/run/docker.sock\n`);
