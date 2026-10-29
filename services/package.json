@@ -1,0 +1,12 @@
+{
+  "name": "@directionallylocal/services",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Portable Workers apps for Directionally Local: the name service and the approvals page. The same source deploys to Cloudflare and to Serverless Objects.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "tsx --test \"shared/**/*.test.ts\" \"name/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

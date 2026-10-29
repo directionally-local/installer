@@ -1,7 +1,9 @@
 # Portable services: the name service and the approvals page
 
-Status: design. Nothing in this document is built yet, except the `site/`
-portability check described in [§8](#8-the-site-worker-today).
+Status: Phase 1a is built: `services/shared` and the name service skeleton
+(health, claim, status, renew, release) with its Durable Objects. The rest is
+design. The `site/` portability check from [§8](#8-the-site-worker-today) is
+built too.
 
 Part of [directionally-local/installer#29](https://github.com/directionally-local/installer/issues/29).
 

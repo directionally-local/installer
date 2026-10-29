@@ -31,3 +31,21 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx --yes serverless-objects@0.13.4 build --strict site
+  # The services must deploy to a self-hosted Serverless Objects node with no
+  # code changes. `--strict` catches Node.js built-ins; the lint catches the
+  # Cloudflare-only APIs it doesn't look at.
+  services:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        service: [name]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node scripts/check-portable-apis.mjs services/${{ matrix.service }} services/shared
+      - run: npx --yes serverless-objects@0.13.4 build --strict services/${{ matrix.service }}

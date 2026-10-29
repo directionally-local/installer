@@ -1,0 +1,18 @@
+# A self-hosted name service: `sobjects deploy services/name`, then `sobjects up`.
+# Copy to sobjects.toml and edit. Never put credentials here: the Worker reads them from
+# `env`, and the deploy wrapper generates a git-ignored wrangler.local.jsonc for them.
+
+[celld]
+bucket = "s3://my-bucket/directionally-local-name"
+listen = "127.0.0.1:8080"
+
+[ingress]
+listen = "0.0.0.0:443"
+redirect_http = "0.0.0.0:80"
+
+[ingress.acme]
+email = "ops@example.com"
+agree_to_terms = true
+
+[[ingress.routes]]
+hostname = "names.example.com"
