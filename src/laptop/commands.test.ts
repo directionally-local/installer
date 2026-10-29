@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { cancel, connect, DEFAULT_MODEL, laptopHome, pickModel, pull, readAutopilotModel, run, runs, servers, use, watch, type LaptopIO } from "./commands.js";
+import { cancel, connect, DEFAULT_MODEL, failureHint, failureReason, laptopHome, pickModel, pull, readAutopilotModel, run, runs, servers, use, watch, wrap, type LaptopIO } from "./commands.js";
 import { fakeTunnels } from "../test-support/fake-tunnel.js";
 import { loadRemotes, loadRemotesFile, saveRemote, type RemoteServer } from "./config.js";
 import { createOpener } from "./tunnel.js";
@@ -22,6 +22,8 @@ class FakeServer {
   readonly cancelled: string[] = [];
   /** The run fails with this reason instead of completing. */
   failWith: string | undefined;
+  /** Which field the failed event carries the reason in. */
+  failKey: "error" | "reason" = "error";
   private conversation: Record<string, unknown> | undefined;
   private server: Server | undefined;
   url = "";
@@ -82,7 +84,7 @@ class FakeServer {
       const events = [
         [2, "tool.activity", { tool: "shell", activity: "started", input: "npm test" }],
         [3, "assistant.delta", { text: "Fixed the flaky test." }],
-        [4, this.failWith ? "failed" : "completed", this.failWith ? { error: this.failWith } : {}],
+        [4, this.failWith ? "failed" : "completed", this.failWith ? { [this.failKey]: this.failWith } : {}],
       ] as const;
       for (const [id, type, data] of events) if (id > after) res.write(`id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
       return;
@@ -192,7 +194,7 @@ describe("dl on a laptop", () => {
     fake.failWith = "HTTP 403: model not priced: openai/gpt-6-luna — a spend cap applies, so the gateway can only forward models with a known price (add it via HOTCELL_MODEL_PRICES)";
     const io = capture();
     assert.equal(await run({ task: "fix it", cwd: dir, repository: "me/app", autopilotModel: noAutopilotModel }, io), 1);
-    assert.match(io.text(), /✗ 3f2a9c1e failed\n  This model isn't in your server's price list yet\. Run dl setup to refresh it, or pick another model with -m\./);
+    assert.match(io.text(), /✗ 3f2a9c1e failed\n {4}HTTP 403: model not priced[\s\S]*\n {2}This model isn't in your server's price list yet\. Run dl setup to refresh it, or pick another model with -m\./);
     const replay = capture();
     assert.equal(await watch({ id: "3f2a9c1e" }, replay), 1);
     assert.match(replay.text(), /isn't in your server's price list yet/);
@@ -349,6 +351,49 @@ describe("dl on a laptop", () => {
     assert.match(home.text(), /Coding agents that run on this computer or your own server/);
     assert.match(home.text(), /Model +test\/model +dl model\n/);
     assert.match(home.text(), /Runs on +○ box http:\/\/127\.0\.0\.1:\d+, ● this-computer this computer +dl servers · dl use NAME/);
+  });
+
+  it("shows why a task failed, in dl run, dl watch and dl runs", { timeout: 30_000 }, async () => {
+    await saveRemote(place("box", fake.url));
+    const dir = await checkout();
+    fake.failKey = "reason";
+    fake.failWith = "kimiflare: context window exceeded (~104,215 tokens needed, 103,424 available of 128,000)";
+    const io = capture();
+    assert.equal(await run({ task: "fix it", cwd: dir, repository: "me/app", autopilotModel: noAutopilotModel }, io), 1);
+    assert.match(io.text(), /✗ 3f2a9c1e failed\n {4}kimiflare: context window exceeded/);
+    assert.match(io.text(), /pick a model with a bigger window: dl model/);
+
+    const replay = capture();
+    assert.equal(await watch({ id: "3f2a9c1e" }, replay), 1);
+    assert.match(replay.text(), /✗ 3f2a9c1e failed\n {4}kimiflare: context window exceeded/);
+
+    const list = capture();
+    await runs({}, list);
+    assert.match(list.text(), /✗ 3f2a9c1e {2}failed +me\/app[\s\S]*\n {6}kimiflare: context window exceeded/);
+  });
+
+  it("reads a failure reason from the final event, and hints at the ones it knows", () => {
+    assert.equal(failureReason(undefined), undefined);
+    assert.equal(failureReason({ id: 1, type: "failed", data: {} }), undefined);
+    assert.equal(failureReason({ id: 1, type: "failed", data: { reason: "  boom  " } }), "boom");
+    assert.equal(failureReason({ id: 1, type: "failed", data: { error: "boom" } }), "boom");
+    assert.equal(failureReason({ id: 1, type: "failed", data: { message: "boom" } }), "boom");
+    assert.equal(failureReason({ id: 1, type: "failed", data: { reason: 42 } }), undefined);
+
+    assert.equal(failureHint("context window exceeded (~104,215 tokens needed)"), "pick a model with a bigger window: dl model");
+    assert.equal(failureHint("HTTP 403: model not priced: openai/gpt-6-luna"), "pick another model: dl model");
+    assert.equal(failureHint("git_push_failed: remote rejected"), "check the GitHub token: dl keys github");
+    assert.equal(failureHint("429 rate limit"), "wait a moment, or check the OpenRouter key: dl keys openrouter");
+    assert.equal(failureHint("Docker went away"), undefined);
+  });
+
+  it("bounds a long reason to three lines", () => {
+    assert.deepEqual(wrap("short reason", 100, 3), ["short reason"]);
+    const long = Array.from({ length: 60 }, (_, index) => `word${index}`).join(" ");
+    const lines = wrap(long, 40, 3);
+    assert.equal(lines.length, 3);
+    assert.ok(lines.every((line) => line.length <= 40), lines.join("|"));
+    assert.match(lines[2]!, /…$/);
   });
 
   it("dl use with nothing set up points at dl setup", async () => {
