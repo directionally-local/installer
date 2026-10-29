@@ -17,6 +17,16 @@ export interface RemoteConversation {
   branch?: string | null;
   pullRequestNumber?: number;
   pullRequestURL?: string;
+  /**
+   * What a sidebar needs (autopilot#1046). Servers that predate it send only `status`, so
+   * every field here is optional and `dl sessions` maps `status` itself when they're absent.
+   */
+  state?: string;
+  title?: string;
+  costUsd?: number;
+  lastActivityAt?: string;
+  waitingFor?: { tool?: string; summary?: string };
+  lastError?: string;
 }
 
 export interface RemoteEvent {

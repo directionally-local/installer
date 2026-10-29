@@ -40,7 +40,7 @@ export interface LaptopIO {
   color?: boolean;
 }
 
-const processIO: LaptopIO = {
+export const processIO: LaptopIO = {
   out: (text) => process.stdout.write(text),
   err: (text) => process.stderr.write(text),
   color: process.stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== "dumb",
@@ -474,7 +474,7 @@ export function pickModel(models: string[], requested: string | undefined, prefe
 
 
 /** Where a place is, as people know it: this computer, its URL, or the SSH destination its tunnel goes to. */
-function where(remote: RemoteServer): string {
+export function where(remote: RemoteServer): string {
   if (remote.ssh) return `ssh ${remote.ssh.target}${remote.ssh.port ? `:${remote.ssh.port}` : ""}`;
   return remote.name === PAIRED_NAME ? "this computer" : remote.url;
 }

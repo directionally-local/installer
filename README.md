@@ -69,6 +69,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl connect URL` | Connect to a server someone else set up; approve the code it shows. |
 | `dl run "TASK"` | Run a task, from inside a GitHub repository. Ctrl-C stops watching, not the task. |
 | `dl runs` | Your tasks and their pull requests. `--json` for scripts. |
+| `dl sessions` | Every conversation on every place, with its state, age, cost and pull request. `--json` for scripts; `--server NAME` for one place; `--all` includes finished ones older than a day. |
 | `dl watch ID` / `dl cancel ID` | Follow a task, or stop one. |
 | `dl pull ID` | Check out a task's branch here. |
 | `dl preview ID` | Deploy a task's Workers branch on the server with Serverless Objects and open it here, over the SSH tunnel. |

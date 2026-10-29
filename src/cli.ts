@@ -5,6 +5,7 @@ import { doctor, formatChecks } from "./doctor.js";
 import { serverKeysCommand } from "./keys.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
 import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, use, watch } from "./laptop/commands.js";
+import { sessions } from "./laptop/sessions.js";
 import { loadRemotes } from "./laptop/config.js";
 import { keys } from "./laptop/keys.js";
 import { model } from "./laptop/settings.js";
@@ -37,6 +38,8 @@ On your laptop:
   dl run "TASK"           run a task, from inside a GitHub repository
                           (your uncommitted changes go along; Ctrl-C stops watching, not the task)
   dl runs                 your tasks and their pull requests
+  dl sessions             every conversation on every place, with its state
+                          (--json · --server NAME · --all: include finished ones)
   dl watch ID             follow a task      dl cancel ID   stop one
   dl pull ID              check out a task's branch here
   dl preview ID           deploy a task's Workers branch on the server and open it here
@@ -115,6 +118,7 @@ export async function main(
         repo: { type: "string" },
         detach: { type: "boolean" },
         json: { type: "boolean" },
+        all: { type: "boolean" },
         access: { type: "string" },
         "answers-stdin": { type: "boolean" },
         events: { type: "string" },
@@ -331,6 +335,13 @@ export async function main(
         }
         return await previewsCommand(system, io.out, colors);
       }
+      case "sessions":
+        await sessions({
+          json: Boolean(values.json),
+          all: Boolean(values.all),
+          ...(values.server ? { server: values.server } : {}),
+        }, laptopIO);
+        return 0;
       case "servers":
         return await servers(parsed.positionals.slice(1), laptopIO);
       case "use":
