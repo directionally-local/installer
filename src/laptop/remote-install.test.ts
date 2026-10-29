@@ -54,13 +54,24 @@ describe("installing over SSH", () => {
     assert.deepEqual(uis.flatMap((ui) => ui.events), [
       "line done Checked this machine | Ubuntu 24.04 · 4 CPU · 7.5 GB · 70 GB free",
       "line done OpenRouter key | stored in Hotcell",
-      "plan docker,image",
+      "plan docker,image,access",
       "start docker",
       "done docker | 27.3.1",
       "start image",
       "done image | built",
+      "start access",
+      "done access | private · reached over SSH",
       "warn Swap is off",
     ], "the server's title and ready screen are left out");
+  });
+
+  it("replays the server's last step as Starting the server, private over SSH", async () => {
+    const server = new FakeSshServer();
+    server.installed = true;
+    let out = "";
+    await installOnServer(box, root, server.exec, {}, () => new PlainUi((text) => { out += text; }));
+    assert.match(out, /\.\. Starting the server\nok Starting the server: private · reached over SSH\n/);
+    assert.ok(!out.includes("127.0.0.1"), "no loopback address on the laptop");
   });
 
   it("shows the failed step and the server's error", async () => {

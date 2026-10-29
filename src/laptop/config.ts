@@ -65,6 +65,22 @@ export async function removeRemote(name: string, path = remotesPath()): Promise<
   return true;
 }
 
+/**
+ * Renames a remote in place. Everything else in the file is kept as it was, and the top-level
+ * `default` and `lastUsed` pointers follow the entry to its new name.
+ */
+export async function renameRemote(from: string, to: string, path = remotesPath()): Promise<void> {
+  if (!REMOTE_NAME_RE.test(to)) throw new Error(`"${to}" can't be a server name: use lowercase letters, digits, and dashes (up to 40), starting with a letter or digit`);
+  const remotes = await loadRemotes(path);
+  if (!remotes.some((entry) => entry.name === from)) throw new Error(`No server named "${from}". Connected: ${remotes.map((entry) => entry.name).join(", ") || "none"}`);
+  if (from === to) return;
+  if (remotes.some((entry) => entry.name === to)) throw new Error(`There's already a server named "${to}"`);
+  const file = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown> & { remotes: Array<Record<string, unknown>> };
+  file.remotes = file.remotes.map((entry) => entry && entry.name === from ? { ...entry, name: to } : entry);
+  for (const pointer of ["default", "lastUsed"]) if (file[pointer] === from) file[pointer] = to;
+  await writePrivateJson(file, path);
+}
+
 /** The named remote, or the only one when no name is given. */
 export async function resolveRemote(name: string | undefined, path = remotesPath()): Promise<RemoteServer> {
   const remotes = await loadRemotes(path);
@@ -106,6 +122,14 @@ async function writeRemotes(remotes: RemoteServer[], path: string): Promise<void
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${process.pid}.tmp`;
   await writeFile(temp, `${JSON.stringify({ version: 1, remotes } satisfies RemotesFile, null, 2)}\n`, { mode: 0o600 });
+  await chmod(temp, 0o600);
+  await rename(temp, path);
+}
+
+async function writePrivateJson(value: unknown, path: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temp = `${path}.${process.pid}.tmp`;
+  await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await chmod(temp, 0o600);
   await rename(temp, path);
 }

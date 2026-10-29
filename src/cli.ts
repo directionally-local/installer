@@ -98,6 +98,7 @@ export async function main(
         "answers-stdin": { type: "boolean" },
         events: { type: "string" },
         needs: { type: "boolean" },
+        identity: { type: "string" },
       },
     });
   } catch (error) {
@@ -218,7 +219,7 @@ export async function main(
         return 0;
       }
       case "setup":
-        return await setup({ io: laptopIO, terminal, localSetup: (input) => setUpOnThisComputer(input) });
+        return await setup({ io: laptopIO, terminal, localSetup: (input) => setUpOnThisComputer(input), ...(values.identity ? { identityFile: values.identity } : {}) });
       case "connect": {
         const url = parsed.positionals[1];
         if (!url) {

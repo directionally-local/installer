@@ -14,9 +14,13 @@ export interface SshCall {
  */
 export class FakeSshServer {
   readonly calls: SshCall[] = [];
-  /** Keys the server accepts; undefined means any (the agent's default key works). */
+  /**
+   * Private keys (the -i path) the server accepts. Undefined means any, including ssh's
+   * defaults; a list means only those keys, so a connection without -i is refused.
+   */
   acceptedKeys: string[] | undefined;
-  probe = "0\nroot\nubuntu 24.04\naarch64\nroot\n";
+  /** id -u, id -un, OS, CPU, root/sudo/nosudo, then `hostname -s`. */
+  probe = "0\nroot\nubuntu 24.04\naarch64\nroot\nubuntu-4gb-nbg1-1\n";
   newHost = true;
   installed = false;
   keys = new Set<string>();
@@ -33,14 +37,13 @@ export class FakeSshServer {
       err(stderr);
       return { code, stdout, stderr };
     };
+    // As with real ssh, the host key is saved on the first connection, even one whose key is refused.
+    const warning = this.newHost ? "Warning: Permanently added '203.0.113.10' (ED25519) to the list of known hosts.\n" : "";
+    this.newHost = false;
     if (this.acceptedKeys && !(access.identityFile && this.acceptedKeys.includes(access.identityFile))) {
-      return result(255, "", `${access.target}: Permission denied (publickey).\n`);
+      return result(255, "", `${warning}${access.target}: Permission denied (publickey).\n`);
     }
-    if (command.startsWith("id -u;")) {
-      const warning = this.newHost ? "Warning: Permanently added '203.0.113.10' (ED25519) to the list of known hosts.\n" : "";
-      this.newHost = false;
-      return result(0, this.probe, warning);
-    }
+    if (command.startsWith("id -u;")) return result(0, this.probe, warning);
     if (command.includes("dl-install.sh")) {
       if (this.bootstrapFails) return result(1, ".. Installing Node.js\nE: Unable to locate package nodejs\n", "directionallylocal: Installing Node.js failed\n");
       this.installed = true;
@@ -59,7 +62,7 @@ export class FakeSshServer {
         { event: "title", text: "Directionally Local" },
         { event: "line", status: "done", label: "Checked this machine", detail: "Ubuntu 24.04 · 4 CPU · 7.5 GB · 70 GB free" },
         { event: "answered", label: "OpenRouter key", detail: "stored in Hotcell" },
-        { event: "plan", steps: [{ id: "docker", label: "Setting up Docker" }, { id: "image", label: "Building the sandbox image" }] },
+        { event: "plan", steps: [{ id: "docker", label: "Setting up Docker" }, { id: "image", label: "Building the sandbox image" }, { id: "access", label: "Starting the server" }] },
         { event: "start", id: "docker" },
         { event: "done", id: "docker", detail: "27.3.1" },
         { event: "start", id: "image" },
@@ -70,6 +73,8 @@ export class FakeSshServer {
       }
       events.push(
         { event: "done", id: "image", detail: "built" },
+        { event: "start", id: "access" },
+        { event: "done", id: "access", detail: "private · reached over SSH" },
         { event: "warn", text: "Swap is off" },
         // As in SSH mode: no estimate here, so the laptop works it out from the machine check.
         { event: "ready", headline: "Ready", items: [{ label: "On your laptop, from inside a GitHub repository", value: 'dl run "fix the flaky checkout test"' }] },
