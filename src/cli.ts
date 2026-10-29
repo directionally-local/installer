@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { doctor, formatChecks } from "./doctor.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
-import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, watch } from "./laptop/commands.js";
+import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, use, watch } from "./laptop/commands.js";
 import { loadRemotes } from "./laptop/config.js";
 import { setup } from "./laptop/setup.js";
 import { localCommand } from "./local/cli.js";
@@ -15,21 +15,22 @@ import { uninstall } from "./uninstall.js";
 import { JsonUi, PlainUi, TerminalUi, palette, type Ui } from "./ui.js";
 import { needs, parseAccessMode, parseProvidedAnswers, up } from "./up.js";
 
-const HELP = `Directionally Local: background coding agents on your own server.
-Send a task from your laptop; it runs in its own sandbox and comes back as a pull request.
+const HELP = `Directionally Local: coding agents that run on this computer or on your own server.
+Send a task; it runs in its own sandbox and comes back as a pull request.
 (dl is short for directionallylocal; both work.)
 
 On your laptop:
-  dl                      set up where agents run (the first time; afterwards, an overview)
-  dl setup                set up, or repair, a server over SSH (safe to re-run)
+  dl                      set up the first time; afterwards, an overview
+  dl setup                set up or repair where your agents run (safe to re-run)
   dl connect URL          connect to a server someone else set up (approve the code it shows)
-  dl run "TASK"           run a task on the server, from inside a GitHub repository
+  dl run "TASK"           run a task, from inside a GitHub repository
                           (your uncommitted changes go along; Ctrl-C stops watching, not the task)
   dl runs                 your tasks and their pull requests
   dl watch ID             follow a task      dl cancel ID   stop one
   dl pull ID              check out a task's branch here
-  dl servers              connected servers (dl servers remove NAME)
-  run options: --server NAME, -m MODEL, --repo OWNER/NAME, --detach
+  dl servers              where agents run (dl servers remove NAME)
+  dl use [NAME]           where tasks go without --server (no NAME: show it)
+  run options: --server NAME, -m/--model MODEL, --repo OWNER/NAME, --detach
   dl local status         agents running on this computer: running?, where, how many fit
   dl local uninstall [--purge]   stop and remove them (--purge also deletes keys and data)
 
@@ -260,6 +261,8 @@ export async function main(
       }
       case "servers":
         return await servers(parsed.positionals.slice(1), laptopIO);
+      case "use":
+        return await use(parsed.positionals.slice(1), laptopIO);
       case "runs":
         // On a server, its runs; on a laptop, the tasks it sent.
         if (!(await readState(system))) {
@@ -312,10 +315,10 @@ export async function main(
 const NOT_A_SERVER = (c: ReturnType<typeof palette>) => `
   ${c.bold("Directionally Local")}  ${c.dim("isn't set up on this machine.")}
 
-  Background coding agents on your own server: send a task from your laptop,
+  Coding agents that run on this computer or on your own server: send a task,
   get a pull request back.
 
-  ${c.dim("Set it up from your laptop (asks a few questions):")}
+  ${c.dim("Set it up here, or on a server over SSH (asks a few questions):")}
      dl setup
 
   ${c.dim("Or on a server (as root, on Ubuntu or Debian):")}
