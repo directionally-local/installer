@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { homedir, hostname } from "node:os";
+import { hostname } from "node:os";
 import { promisify } from "node:util";
 import { isModelNotPriced } from "../model-prices.js";
 import { palette } from "../ui.js";
@@ -10,12 +9,14 @@ import {
   defaultRemoteName, loadRemotes, loadRemotesFile, normalizeServerUrl, recordLastUsed, REMOTE_NAME_RE, removeRemote, renameRemote, resolveRemote, resolveTarget,
   saveRemote, setDefaultRemote, type RemoteServer, type TargetReason,
 } from "./config.js";
-import { autopilotConfigPath } from "./credentials.js";
 import { PAIRED_NAME } from "../local/layout.js";
 import { detectGitHubRepository, snapshotWorkingTree } from "./git.js";
+import { DEFAULT_MODEL, laptopModel } from "./settings.js";
 import { sshCommandLine } from "./ssh.js";
 import { openBrowser } from "./open-browser.js";
 import { withConnections, type Connections, type RemoteOpener } from "./tunnel.js";
+
+export { DEFAULT_MODEL, readAutopilotModel } from "./settings.js";
 
 /**
  * `dl` on a laptop: send tasks to where agents run (this computer, or your own server),
@@ -30,7 +31,6 @@ const execFileAsync = promisify(execFile);
 const RUN_END_EVENTS = new Set(["completed", "failed", "cancelled", "interrupted"]);
 
 /** The model a task gets when neither -m nor the laptop's Autopilot picks one the server offers. */
-export const DEFAULT_MODEL = "moonshotai/kimi-k2.6";
 
 export interface LaptopIO {
   out: (text: string) => void;
@@ -92,11 +92,11 @@ export async function run(input: {
   detach?: boolean;
   signal?: AbortSignal;
   open?: RemoteOpener;
-  /** The laptop's Autopilot default model; reads Autopilot's config unless replaced (tests). */
+  /** This laptop's default model (dl model, else Autopilot's); read from their configs unless replaced (tests). */
   autopilotModel?: () => Promise<string | undefined>;
 }, io = processIO): Promise<number> {
   const { remote, reason } = await resolveTarget(input.server);
-  const preferred = input.preferredModel ?? await (input.autopilotModel ?? (() => readAutopilotModel()))();
+  const preferred = input.preferredModel ?? await (input.autopilotModel ?? laptopModel)();
   return withConnections(input.open, async (connections) => runOn(await connections.client(remote), remote, reason, { ...input, ...(preferred ? { preferredModel: preferred } : {}) }, io));
 }
 
@@ -294,7 +294,7 @@ export async function renameServer(args: string[], io = processIO, path?: string
 }
 
 /** `dl` on a laptop: what this is, which servers it's connected to, what to type next. */
-export async function laptopHome(io = processIO, open?: RemoteOpener): Promise<boolean> {
+export async function laptopHome(io = processIO, open?: RemoteOpener, model: () => Promise<string | undefined> = laptopModel): Promise<boolean> {
   const c = palette(io.color === true);
   const remotes = await loadRemotes();
   if (remotes.length === 0) return false;
@@ -307,11 +307,12 @@ export async function laptopHome(io = processIO, open?: RemoteOpener): Promise<b
       total += list?.length ?? 0;
     }
   });
-  const current = await defaultName();
+  const [current, chosen] = await Promise.all([defaultName(), model()]);
   io.out(`\n  ${c.bold("Directionally Local")}  ${c.dim("on this laptop")}\n\n`);
   io.out("  Coding agents that run on this computer or your own server: send a task, get a pull request back.\n\n");
   io.out(`  ${c.dim("Runs on".padEnd(11))}${remotes.map((remote) => `${mark(remote, current, c)} ${remote.name} ${c.dim(where(remote))}`).join(", ")}   ${c.dim(remotes.length > 1 ? "dl servers · dl use NAME" : "dl servers")}\n`);
-  io.out(`  ${c.dim("Tasks".padEnd(11))}${running} running · ${total} in all   ${c.dim("dl runs")}\n\n`);
+  io.out(`  ${c.dim("Tasks".padEnd(11))}${running} running · ${total} in all   ${c.dim("dl runs")}\n`);
+  io.out(`  ${c.dim("Model".padEnd(11))}${chosen ?? DEFAULT_MODEL}   ${c.dim("dl model")}\n\n`);
   io.out(`  ${c.dim("Start a session: cd into a GitHub repository, then type")}  ${c.bold("dl")}\n`);
   io.out(`  ${c.dim("Or hand off a one-off task:")}  ${c.bold('dl run "fix the flaky checkout test"')}\n\n`);
   return true;
@@ -429,7 +430,7 @@ async function findRun(id: string, server: string | undefined, connections: Conn
 }
 
 /**
- * The task's model: -m/--model; else the laptop's Autopilot default, if the server offers it;
+ * The task's model: -m/--model; else the laptop's default (dl model, else Autopilot's), if the server offers it;
  * else DEFAULT_MODEL, if offered. Never just the first in the server's list (that's the
  * whole OpenRouter catalog, in no useful order).
  */
@@ -442,32 +443,10 @@ export function pickModel(models: string[], requested: string | undefined, prefe
   if (preferred && models.includes(preferred)) return preferred;
   if (models.includes(DEFAULT_MODEL)) return DEFAULT_MODEL;
   if (models.length === 0) throw new Error("The server offers no models; check its OpenRouter key (on the server: dl doctor)");
-  const tried = preferred && preferred !== DEFAULT_MODEL ? `your Autopilot model (${preferred}) or ${DEFAULT_MODEL}` : DEFAULT_MODEL;
+  const tried = preferred && preferred !== DEFAULT_MODEL ? `your model (${preferred}) or ${DEFAULT_MODEL}` : DEFAULT_MODEL;
   throw new Error(`The server doesn't offer ${tried}. ${how}`);
 }
 
-/**
- * The laptop's Autopilot default model: KIMI_MODEL (Autopilot's own override) or the
- * `model` in its config. undefined when neither is set or the config can't be read.
- */
-export async function readAutopilotModel(sources: {
-  env?: NodeJS.ProcessEnv;
-  home?: string;
-  readFile?: (path: string) => Promise<string | undefined>;
-} = {}): Promise<string | undefined> {
-  const env = sources.env ?? process.env;
-  const fromEnv = env.KIMI_MODEL?.trim();
-  if (fromEnv) return fromEnv;
-  const read = sources.readFile ?? ((path: string) => readFile(path, "utf8").catch(() => undefined));
-  const raw = await read(autopilotConfigPath(env, sources.home ?? homedir()));
-  if (!raw) return undefined;
-  try {
-    const model = (JSON.parse(raw) as { model?: unknown }).model;
-    return typeof model === "string" && model.trim() ? model.trim() : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 /** Where a place is, as people know it: this computer, its URL, or the SSH destination its tunnel goes to. */
 function where(remote: RemoteServer): string {

@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { palette } from "../ui.js";
 import { RemoteApiError } from "./client.js";
-import { describeError, pickModel, readAutopilotModel, type LaptopIO } from "./commands.js";
+import { describeError, pickModel, type LaptopIO } from "./commands.js";
+import { laptopModel } from "./settings.js";
 import { recordLastUsed, resolveTarget } from "./config.js";
 import { detectGitHubRepository, snapshotWorkingTree } from "./git.js";
 import { findSession, forgetSession, rememberSession, sessionsPath, type SessionKey } from "./session-store.js";
@@ -51,7 +52,7 @@ export interface SessionInput {
   /** `dl new`: forget this repository's conversation and start another. */
   fresh?: boolean;
   open?: RemoteOpener;
-  /** The laptop's Autopilot default model; reads Autopilot's config unless replaced (tests). */
+  /** This laptop's default model (dl model, else Autopilot's); read from their configs unless replaced (tests). */
   autopilotModel?: () => Promise<string | undefined>;
   /** Finds Autopilot; the one installed with dl, else one on PATH, unless replaced (tests). */
   autopilot?: () => Promise<AutopilotCommand | undefined>;
@@ -162,7 +163,7 @@ export async function projectSession(input: SessionInput, io: LaptopIO): Promise
           const [workspaces, models, preferred] = await step(Promise.all([
             client.workspaces(),
             client.models(),
-            input.model ? Promise.resolve(undefined) : (input.autopilotModel ?? (() => readAutopilotModel()))(),
+            input.model ? Promise.resolve(undefined) : (input.autopilotModel ?? laptopModel)(),
           ]));
           const workspace = workspaces[0];
           if (!workspace) throw new Error(`${remote.name} has no workspace this laptop can use`);

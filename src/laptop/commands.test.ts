@@ -160,7 +160,7 @@ describe("dl on a laptop", () => {
     assert.match(String(fake.created[0]?.patch), /\+local edit/);
     assert.equal(fake.created[0]?.model, DEFAULT_MODEL, "not the first in the catalog");
     const text = runIO.text();
-    assert.match(text, /Sending to box: me\/app at [0-9a-f]{7} \+ 1 local change {2}moonshotai\/kimi-k2\.6\n/);
+    assert.match(text, /Sending to box: me\/app at [0-9a-f]{7} \+ 1 local change {2}deepseek\/deepseek-v4\.1-flash-1017\n/);
     assert.match(text, /✓ Started 3f2a9c1e on box/);
     assert.match(text, /› shell npm test/);
     assert.match(text, /Fixed the flaky test\./);
@@ -264,7 +264,7 @@ describe("dl on a laptop", () => {
     assert.match(io.text(), /Nothing set up yet\. {2}dl setup {2}or, for a server someone else set up: dl connect https:\/\/your-server/);
   });
 
-  it("picks the model: -m, else the laptop's Autopilot model, else kimi-k2.6, never the first in the catalog", { timeout: 30_000 }, async () => {
+  it("picks the model: -m, else the laptop's model, else DeepSeek Flash, never the first in the catalog", { timeout: 30_000 }, async () => {
     await saveRemote(place("box", fake.url));
     const dir = await checkout();
     const sent = async (input: { model?: string; autopilotModel?: () => Promise<string | undefined> }) => {
@@ -280,7 +280,7 @@ describe("dl on a laptop", () => {
     assert.equal(await sent({}), DEFAULT_MODEL);
     await assert.rejects(() => sent({ model: "someone/not-offered" }), /doesn't offer someone\/not-offered\. Pick one: dl run -m <model> "task" {2}\(model IDs: https:\/\/openrouter\.ai\/models\)/);
     fake.models = ["01-ai/yi-large", "test/model"];
-    await assert.rejects(() => sent({ autopilotModel: async () => "someone/not-offered" }), /doesn't offer your Autopilot model \(someone\/not-offered\) or moonshotai\/kimi-k2\.6\. Pick one: dl run -m <model>/);
+    await assert.rejects(() => sent({ autopilotModel: async () => "someone/not-offered" }), /doesn't offer your model \(someone\/not-offered\) or deepseek\/deepseek-v4\.1-flash-1017\. Pick one: dl run -m <model>/);
   });
 
   it("chooses the model in order, and explains how to pick when none fits", () => {
@@ -289,8 +289,8 @@ describe("dl on a laptop", () => {
     assert.equal(pickModel(catalog, undefined, "openai/gpt-5"), "openai/gpt-5");
     assert.equal(pickModel(catalog, undefined, "kimi-k2.6"), DEFAULT_MODEL, "a Requesty-style ID the server doesn't offer");
     assert.equal(pickModel(catalog, undefined, undefined), DEFAULT_MODEL);
-    assert.throws(() => pickModel(["01-ai/yi-large"], undefined, undefined), /doesn't offer moonshotai\/kimi-k2\.6\. Pick one: dl run -m <model> "task" {2}\(model IDs: https:\/\/openrouter\.ai\/models\)/);
-    assert.throws(() => pickModel(["01-ai/yi-large"], undefined, DEFAULT_MODEL), /doesn't offer moonshotai\/kimi-k2\.6\. Pick one/);
+    assert.throws(() => pickModel(["01-ai/yi-large"], undefined, undefined), /doesn't offer deepseek\/deepseek-v4\.1-flash-1017\. Pick one: dl run -m <model> "task" {2}\(model IDs: https:\/\/openrouter\.ai\/models\)/);
+    assert.throws(() => pickModel(["01-ai/yi-large"], undefined, DEFAULT_MODEL), /doesn't offer deepseek\/deepseek-v4\.1-flash-1017\. Pick one/);
     assert.throws(() => pickModel([], undefined, undefined), /offers no models/);
   });
 
@@ -345,8 +345,9 @@ describe("dl on a laptop", () => {
     assert.match(named.text(), /Sending to box: /);
 
     const home = capture();
-    assert.equal(await laptopHome(home), true);
+    assert.equal(await laptopHome(home, undefined, async () => "test/model"), true);
     assert.match(home.text(), /Coding agents that run on this computer or your own server/);
+    assert.match(home.text(), /Model +test\/model +dl model\n/);
     assert.match(home.text(), /Runs on +○ box http:\/\/127\.0\.0\.1:\d+, ● this-computer this computer +dl servers · dl use NAME/);
   });
 
