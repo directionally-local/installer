@@ -3,10 +3,10 @@ import { access as fileAccess, readdir, readFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { TtyPrompter, type Prompter } from "../prompt.js";
+import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
 import { palette, PlainUi, TerminalUi, type Ui } from "../ui.js";
 import type { LaptopIO } from "./commands.js";
-import { loadRemotes, normalizeServerUrl, REMOTE_NAME_RE, remotesPath, saveRemote, type RemoteServer, type SshAccess } from "./config.js";
+import { loadRemotes, loadRemotesFile, normalizeServerUrl, REMOTE_NAME_RE, remotesPath, saveRemote, setDefaultRemote, type RemoteServer, type SshAccess } from "./config.js";
 import { confirm, gatherKeys, type KeySources } from "./credentials.js";
 import { bootstrap, INSTALL_URL, installOnServer, pairLaptop, serverNeeds, type UiFactory } from "./remote-install.js";
 import { checkServer, describeHost, discoverKeys, hostOf, parseSshConfig, parseTarget, realSshExec, SshAuthError, type ServerFacts, type SshExec, type SshHost } from "./ssh.js";
@@ -20,8 +20,8 @@ import { openRemote, withConnections, type RemoteOpener } from "./tunnel.js";
  * `dl run` and friends reach it through an SSH tunnel. Nothing is exposed on the server.
  */
 
-/** "On this computer": sets everything up locally and returns the server to save. */
-export type LocalSetup = (input: { ui: Ui; prompter: Prompter; answers: { openrouterKey: string; githubToken: string } }) => Promise<RemoteServer>;
+/** "On this computer": sets everything up locally and returns the server to save, and how many agents fit. */
+export type LocalSetup = (input: { ui: Ui; prompter: Prompter; answers: { openrouterKey: string; githubToken: string } }) => Promise<{ remote: RemoteServer; capacity?: number }>;
 
 export interface SetupDeps {
   /** A fresh Ui per section (TerminalUi on a terminal, PlainUi otherwise). */
@@ -45,13 +45,16 @@ export interface SetupDeps {
 
 const RUN_EXAMPLE = 'dl run "fix the flaky checkout test"';
 
+const PLACES: SelectOption[] = [
+  { value: "local", label: "On this computer", detail: "start now · nothing to rent · pauses when this computer sleeps" },
+  { value: "server", label: "On my own server", detail: "keeps going when your laptop is closed · needs SSH access" },
+];
+
 export async function setupWizard(deps: SetupDeps): Promise<RemoteServer | undefined> {
   const c = palette(deps.color);
   deps.write(`\n  ${c.bold("Directionally Local")}\n  Background coding agents. Where should they run?\n\n`);
-  deps.write(`  ${c.cyan("1")}  ${"On this computer".padEnd(22)} ${c.dim("start now · nothing to rent · pauses when this computer sleeps")}\n`);
-  deps.write(`  ${c.cyan("2")}  ${"On my own server".padEnd(22)} ${c.dim("keeps going when your laptop is closed · needs SSH access")}\n\n`);
   const ui = deps.newUi();
-  let where = await pick(ui, deps.prompter, "Where", "1 or 2 · Enter for 1", { "1": "local", "2": "server" } as const);
+  let where = (await deps.prompter.select(ui.prompt("Where"), PLACES, 0)).value as "local" | "server";
 
   ui.answered("Where", where === "local" ? "On this computer" : "On my own server");
   if (where === "local" && !deps.localSetup) {
@@ -66,11 +69,14 @@ export async function setupWizard(deps: SetupDeps): Promise<RemoteServer | undef
 
   if (where === "local") {
     const keysUi = deps.newUi();
-    const answers = await gatherKeys(["github", "openrouter"], { ui: keysUi, prompter: deps.prompter, sources: deps.sources });
+    const answers = await gatherKeys(["github", "openrouter"], { ui: keysUi, prompter: deps.prompter, sources: deps.sources, place: "this computer" });
     keysUi.finish();
-    const remote = await deps.localSetup!({ ui: deps.newUi(), prompter: deps.prompter, answers: { openrouterKey: answers.openrouterKey!, githubToken: answers.githubToken! } });
-    await saveRemote(remote, deps.remotesFile ?? remotesPath());
-    finishScreen(deps.newUi(), undefined);
+    const { remote, capacity } = await deps.localSetup!({ ui: deps.newUi(), prompter: deps.prompter, answers: { openrouterKey: answers.openrouterKey!, githubToken: answers.githubToken! } });
+    const remotesFile = deps.remotesFile ?? remotesPath();
+    const isNew = !(await loadRemotes(remotesFile)).some((entry) => entry.name === remote.name);
+    await saveRemote(remote, remotesFile);
+    if (isNew) await chooseDefault(deps, remote, remotesFile);
+    finishScreen(deps.newUi(), capacity);
     return remote;
   }
   return setUpServer(deps);
@@ -100,7 +106,8 @@ async function setUpServer(deps: SetupDeps): Promise<RemoteServer> {
   // 4. A credential for this laptop, checked through the tunnel every command will use. Each
   // `dl pair` makes a new credential on the server, so a re-run keeps the saved one if it works.
   const remotesFile = deps.remotesFile ?? remotesPath();
-  const saved = (await loadRemotes(remotesFile)).find((entry) => sameServer(entry, access));
+  const known = await loadRemotes(remotesFile);
+  const saved = known.find((entry) => sameServer(entry, access));
   let remote: RemoteServer | undefined;
   if (saved && await stillWorks({ ...saved, ssh: access }, deps.open)) remote = { ...saved, ssh: access };
   if (!remote) {
@@ -128,25 +135,25 @@ async function setUpServer(deps: SetupDeps): Promise<RemoteServer> {
   await saveRemote(remote, remotesFile);
   connectedUi.line("done", "This laptop", `connected as ${remote.name}`);
   connectedUi.finish();
+  if (!known.some((entry) => entry.name === paired.name)) await chooseDefault(deps, remote, remotesFile);
   finishScreen(deps.newUi(), capacity);
   return remote;
 }
 
 async function chooseServer(deps: SetupDeps, hosts: SshHost[]): Promise<{ access: SshAccess; display: string; alias?: string }> {
-  const c = palette(deps.color);
   const ui = deps.newUi();
-  if (hosts.length > 0) {
-    deps.write(`\n  ${c.dim("Your servers in ~/.ssh/config:")}\n`);
-    hosts.forEach((host, index) => deps.write(`  ${c.cyan(String(index + 1))}  ${host.alias.padEnd(22)} ${c.dim(describeHost(host))}\n`));
-    deps.write(`  ${c.cyan(String(hosts.length + 1))}  Another server\n\n`);
-  } else {
-    deps.write("\n");
-  }
-  const hint = hosts.length > 0 ? `1-${hosts.length + 1}, or user@host[:port]` : "user@host[:port], e.g. root@203.0.113.10";
+  deps.write("\n");
+  const example = "user@host[:port], e.g. root@203.0.113.10";
+  const options: SelectOption[] = [
+    ...hosts.map((host, index) => ({ value: String(index), label: host.alias, detail: describeHost(host) })),
+    { value: "another", label: "Another server", input: { prompt: ui.prompt("Server address", example), placeholder: example } },
+  ];
   for (let attempt = 1; ; attempt++) {
-    let answer = (await deps.prompter.text(ui.prompt("Server", hint))).trim();
-    const index = /^\d+$/.test(answer) ? Number(answer) - 1 : -1;
-    const host = hosts[index];
+    // Without saved hosts, a one-item list would only be in the way: just ask for the address.
+    const picked = hosts.length > 0
+      ? await deps.prompter.select(ui.prompt("Server"), options, 0)
+      : { value: "another", text: (await deps.prompter.text(ui.prompt("Server", example))).trim() };
+    const host = picked.value === "another" ? undefined : hosts[Number(picked.value)];
     if (host) {
       ui.answered("SSH", host.alias);
       return {
@@ -155,18 +162,42 @@ async function chooseServer(deps: SetupDeps, hosts: SshHost[]): Promise<{ access
         display: `${host.user ? `${host.user}@` : ""}${host.hostName ?? host.alias}${host.port && host.port !== 22 ? `:${host.port}` : ""}`,
       };
     }
-    if (index === hosts.length && hosts.length > 0) {
-      ui.answered("SSH", "another server");
-      answer = (await deps.prompter.text(ui.prompt("Server address", "user@host[:port], e.g. root@203.0.113.10"))).trim();
-    }
     try {
-      const access = parseTarget(answer);
+      const access = parseTarget(picked.text ?? "");
       ui.answered("SSH", access.target);
       return { access, display: `${access.target}${access.port ? `:${access.port}` : ""}` };
     } catch (error) {
       if (attempt >= 3) throw error;
       ui.rejected(`${(error as Error).message}. Try again.`);
     }
+  }
+}
+
+/**
+ * With two or more places set up, where `dl run` sends tasks unless told otherwise. Asked
+ * only when setup adds a place, with the new one preselected; the first place becomes the
+ * default by itself (saveRemote).
+ */
+async function chooseDefault(deps: SetupDeps, added: RemoteServer, remotesFile: string): Promise<void> {
+  const { remotes } = await loadRemotesFile(remotesFile);
+  if (remotes.length < 2) return;
+  const ui = deps.newUi();
+  deps.write("\n");
+  const options = remotes.map((remote) => ({ value: remote.name, label: remote.name, detail: describePlace(remote) }));
+  const initial = Math.max(0, remotes.findIndex((remote) => remote.name === added.name));
+  const { value } = await deps.prompter.select(ui.prompt("Where should tasks go by default?"), options, initial);
+  await setDefaultRemote(value, remotesFile);
+  ui.answered("Default", value);
+  ui.finish();
+}
+
+function describePlace(remote: RemoteServer): string {
+  if (remote.ssh) return `server · ${remote.ssh.target}${remote.ssh.port ? `:${remote.ssh.port}` : ""}`;
+  try {
+    const host = new URL(remote.url).hostname;
+    return host === "127.0.0.1" || host === "localhost" ? "this computer" : `server · ${host}`;
+  } catch {
+    return remote.url;
   }
 }
 
@@ -282,24 +313,13 @@ export function serverLabel(text: string): string | undefined {
 
 function finishScreen(ui: Ui, capacity: number | undefined): void {
   ui.ready(capacity ? `Ready · fits ~${capacity} agents at once (estimate)` : "Ready", [
-    { label: "From any GitHub repository", value: RUN_EXAMPLE },
-    { label: "See progress, then check out the result", value: "dl runs\ndl pull ID" },
-  ]);
+    { label: "Start a session: cd into a GitHub repository, then type", value: "dl" },
+    { label: "Or hand off a one-off task", value: RUN_EXAMPLE },
+  ], { footer: "dl status shows where agents run and what they're doing." });
 }
 
 function laptopName(name: string): string {
   return name.replace(/\.local$/, "").replace(/[^\p{L}\p{N} ._'()@-]/gu, "-").slice(0, 40) || "laptop";
-}
-
-async function pick<T extends string>(ui: Ui, prompter: Prompter, label: string, hint: string, choices: Record<string, T>): Promise<T> {
-  const values = Object.values(choices);
-  for (let attempt = 1; ; attempt++) {
-    const answer = (await prompter.text(ui.prompt(label, hint))).trim();
-    const choice = answer === "" ? values[0] : choices[answer];
-    if (choice) return choice;
-    if (attempt >= 3) throw new Error(`Pick one of ${Object.keys(choices).join(", ")}`);
-    ui.rejected(`Type ${Object.keys(choices).join(" or ")}.`);
-  }
 }
 
 /** `dl setup` with the real terminal, ssh, gh, and filesystem. */
@@ -314,25 +334,32 @@ export async function setup(options: { io: LaptopIO; terminal: boolean; localSet
     identityFile = resolve(options.identityFile.replace(/^~(?=$|\/)/, home).replace(/\.pub$/, ""));
     await fileAccess(identityFile).catch(() => { throw new Error(`No SSH key at ${options.identityFile} (--identity takes the private key, e.g. ~/.ssh/id_ed25519)`); });
   }
-  await setupWizard({
-    newUi: () => terminal ? new TerminalUi(io.out, undefined, color) : new PlainUi(io.out),
-    prompter: new TtyPrompter(),
-    write: io.out,
-    color,
-    ssh: realSshExec,
-    open: openRemote,
-    sources: {
-      env: process.env,
-      home,
-      readFile: (path) => readFile(path, "utf8").catch(() => undefined),
-      listDir: (path) => readdir(path).catch(() => []),
-      gh: () => execFileAsync("gh", ["auth", "token"], { timeout: 5000 }).then(({ stdout }) => stdout.trim() || undefined, () => undefined),
-      fetch: globalThis.fetch,
-    },
-    hostname: hostname(),
-    installUrl: process.env.DL_INSTALL_URL || INSTALL_URL,
-    ...(options.localSetup ? { localSetup: options.localSetup } : {}),
-    ...(identityFile ? { identityFile } : {}),
-  });
+  try {
+    await setupWizard({
+      newUi: () => terminal ? new TerminalUi(io.out, undefined, color) : new PlainUi(io.out),
+      prompter: new TtyPrompter({ color }),
+      write: io.out,
+      color,
+      ssh: realSshExec,
+      open: openRemote,
+      sources: {
+        env: process.env,
+        home,
+        readFile: (path) => readFile(path, "utf8").catch(() => undefined),
+        listDir: (path) => readdir(path).catch(() => []),
+        gh: () => execFileAsync("gh", ["auth", "token"], { timeout: 5000 }).then(({ stdout }) => stdout.trim() || undefined, () => undefined),
+        fetch: globalThis.fetch,
+      },
+      hostname: hostname(),
+      installUrl: process.env.DL_INSTALL_URL || INSTALL_URL,
+      ...(options.localSetup ? { localSetup: options.localSetup } : {}),
+      ...(identityFile ? { identityFile } : {}),
+    });
+  } catch (error) {
+    if (!(error instanceof PromptCancelled)) throw error;
+    // Esc / Ctrl-C at a question: the terminal is restored; say so quietly and stop.
+    io.out(`  ${palette(color).dim("Cancelled. Run")} dl setup ${palette(color).dim("when you're ready.")}\n\n`);
+    return 130;
+  }
   return 0;
 }

@@ -32,13 +32,13 @@ function options(system: FakeComputer, extra: Partial<LocalOptions> = {}): Local
 }
 
 async function setUp(system: FakeComputer, extra: Partial<LocalOptions> = {}, ui = new RecordingUi()) {
-  const remote = await setUpOnThisComputer({
+  const { remote, capacity } = await setUpOnThisComputer({
     ui,
     prompter: new ScriptedPrompter({}),
     answers: { openrouterKey: OPENROUTER_KEY, githubToken: GITHUB_TOKEN },
     ...options(system, extra),
   });
-  return { remote, ui };
+  return { remote, capacity, ui };
 }
 
 const env = (system: FakeComputer, name: string) => parseLocalEnvFile(system.files.get(`${ROOT}/config/${name}`)?.content);
@@ -114,12 +114,13 @@ describe("on this computer: checks", () => {
 describe("on this computer: setup", () => {
   it("installs into the home directory, keeps secrets out of argv and logs, and pairs", async () => {
     const system = new FakeComputer();
-    const { remote, ui } = await setUp(system);
+    const { remote, capacity, ui } = await setUp(system);
+    assert.equal(capacity, 6, "how many fit goes to the wizard's Ready line");
 
     // Progress: the five steps, then the sleep note once.
     assert.deepEqual(ui.events.filter((event) => event.startsWith("done")).map((event) => event.split(" ")[1]), ["check", "software", "image", "services", "connect"]);
     const connected = ui.events.find((event) => event.startsWith("done connect"))!;
-    assert.match(connected, /127\.0\.0\.1:4096 · fits ~6 at once · tasks pause while this computer sleeps/);
+    assert.equal(connected, "done connect | this computer · tasks pause while it sleeps", "no loopback address on screen");
     assert.match(ui.events.find((event) => event.startsWith("done check"))!, /macOS 15\.1 · Docker Desktop 29\.5\.2 · Node 24\.22\.1 · 120 GB free/);
 
     // Release layout: a versioned release and a current link, all under ~/.directionallylocal.
