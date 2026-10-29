@@ -27,9 +27,10 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit && tsc -p site/tsconfig.json",
-    "test": "tsx --test \"src/**/*.test.ts\" \"site/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit && tsc -p site/tsconfig.json && tsc -p services/tsconfig.json",
+    "test": "tsx --test \"src/**/*.test.ts\" \"site/**/*.test.ts\" \"services/**/*.test.ts\"",
     "sync:site-script": "node site/generate-install-script.mjs",
+    "check:portable": "node scripts/check-portable-apis.mjs services/name services/shared",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {

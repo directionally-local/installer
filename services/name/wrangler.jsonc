@@ -1,0 +1,24 @@
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "directionallylocal-name",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "vars": {
+    "ZONE": "directionallylocal.run",
+    "DNS_PROVIDER": "cloudflare"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "NAME_OBJECT", "class_name": "NameObject" },
+      { "name": "INDEX_OBJECT", "class_name": "IndexObject" },
+      { "name": "RATE_LIMITER", "class_name": "RateLimiterObject" },
+      { "name": "AUDIT", "class_name": "AuditObject" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["NameObject", "IndexObject", "RateLimiterObject", "AuditObject"]
+    }
+  ]
+}
