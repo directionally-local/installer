@@ -9,6 +9,7 @@ import { loadRemotes } from "./laptop/config.js";
 import { keys } from "./laptop/keys.js";
 import { model } from "./laptop/settings.js";
 import { projectSession } from "./laptop/session.js";
+import { preview as laptopPreview } from "./laptop/preview.js";
 import { setup } from "./laptop/setup.js";
 import { realSshExec } from "./laptop/ssh.js";
 import { update } from "./laptop/update.js";
@@ -19,6 +20,7 @@ import { readState } from "./state.js";
 import { DryRunSystem, RealSystem, type System } from "./system.js";
 import { uninstall } from "./uninstall.js";
 import { JsonUi, PlainUi, TerminalUi, palette, type Ui } from "./ui.js";
+import { previewCommand, previewsCommand } from "./preview.js";
 import { needs, parseAccessMode, parseProvidedAnswers, up } from "./up.js";
 
 const HELP = `Directionally Local: coding agents that run on this computer or on your own server.
@@ -37,6 +39,7 @@ On your laptop:
   dl runs                 your tasks and their pull requests
   dl watch ID             follow a task      dl cancel ID   stop one
   dl pull ID              check out a task's branch here
+  dl preview ID           deploy a task's Workers branch on the server and open it here
   dl servers              where agents run (dl servers remove NAME · dl servers rename OLD NEW)
   dl use [NAME]           where tasks go without --server (no NAME: show it)
   dl keys [openrouter|github]   which keys are set, or replace one (--server NAME)
@@ -54,6 +57,8 @@ On the server:
   dl connect-laptop CODE  approve the code a laptop shows
   dl laptops              connected laptops (dl laptops remove NAME to disconnect one)
   dl runs                 tasks running or done, with their pull requests
+  dl preview ID [--remove]   deploy a task's branch with Serverless Objects, or stop it
+  dl previews             live previews: task, port, branch
   dl logs [hotcell|autopilot] [-f]   the services' logs
   dl doctor               check every part, with a fix for each problem
   dl keys [set openrouter|github]   which keys are set, or replace one (hidden input)
@@ -297,6 +302,34 @@ export async function main(
         if (code !== undefined) return code;
         io.err(`  dl new starts a fresh conversation from inside a GitHub repository (with something set up: dl setup).\n`);
         return 1;
+      }
+      case "preview": {
+        const id = parsed.positionals[1];
+        if (!id) {
+          io.err(`  Usage: dl preview ID   ${colors.dim("(from dl runs)")}\n`);
+          return 2;
+        }
+        // On a server, deploy it; on a laptop, ask the server to and tunnel to the result.
+        if (await readState(system)) {
+          if (!isRoot()) {
+            io.err(`  Run it as root: sudo dl preview ${id}\n`);
+            return 1;
+          }
+          return await previewCommand(system, parsed.positionals.slice(1), { json: Boolean(values.json) }, io.out, colors);
+        }
+        return await laptopPreview({ id, ...(values.server ? { server: values.server } : {}) }, {}, laptopIO);
+      }
+      case "previews": {
+        const state = await readState(system);
+        if (!state) {
+          io.out(NOT_A_SERVER(colors));
+          return 1;
+        }
+        if (!isRoot()) {
+          io.err("  Run it as root: sudo dl previews\n");
+          return 1;
+        }
+        return await previewsCommand(system, io.out, colors);
       }
       case "servers":
         return await servers(parsed.positionals.slice(1), laptopIO);

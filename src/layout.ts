@@ -18,6 +18,9 @@ export const PATHS = {
   autopilotHome: "/var/lib/autopilot",
   workspace: "/var/lib/autopilot/workspaces/default",
   units: "/etc/systemd/system",
+  /** One checkout and one Serverless Objects node per preview (docs/plans/preview-deploys.md). */
+  previews: "/var/lib/directionallylocal/previews",
+  previewsState: "/var/lib/directionallylocal/previews.json",
 } as const;
 
 /** Lets Ubuntu's unattended-upgrades install Node.js fixes from NodeSource, like its own packages. */

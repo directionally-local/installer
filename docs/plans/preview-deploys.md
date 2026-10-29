@@ -1,6 +1,7 @@
 # Preview deploys: run an agent's Workers PR on your own server
 
-Status: design. Nothing in this document is built yet.
+Status: Phase 1's `dl preview` and `dl previews` are built (`src/preview.ts`, `src/laptop/preview.ts`).
+Still to come: the optional Serverless Objects component in `dl setup`, and the Autopilot run step.
 
 Part of [directionally-local/installer#28](https://github.com/directionally-local/installer/issues/28).
 
