@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { main } from "../cli.js";
+import { PATHS } from "../layout.js";
 import { fakeTunnels, type FakeTunnel } from "../test-support/fake-tunnel.js";
 import { DEFAULT_MODEL, type LaptopIO } from "./commands.js";
 import { saveRemote, type RemoteServer } from "./config.js";
@@ -412,9 +413,12 @@ describe("dl routing for projects", () => {
       const io = { out: (chunk: string) => { text += chunk; }, err: (chunk: string) => { text += chunk; } };
       assert.equal(await main(["new"], io, { terminal: true }), 1);
       assert.match(text, /dl new starts a fresh conversation from inside a GitHub repository/);
-      text = "";
-      assert.equal(await main([], io, { terminal: true }), 0);
-      assert.match(text, /on this laptop/, "bare dl outside a repository: the overview");
+      // On an installed server, bare dl shows the server's overview instead.
+      if (!existsSync(PATHS.state)) {
+        text = "";
+        assert.equal(await main([], io, { terminal: true }), 0);
+        assert.match(text, /on this laptop/, "bare dl outside a repository: the overview");
+      }
     } finally {
       process.chdir(cwd);
     }

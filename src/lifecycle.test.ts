@@ -182,9 +182,12 @@ describe("cli", () => {
     assert.doesNotMatch(out, /background coding agents on your own server/i);
     assert.equal(await main(["launch"], io), 2);
     assert.match(err, /Unknown command "launch"/);
-    out = "";
-    assert.equal(await main([], io), 0, "bare dl explains itself, even off a server");
-    assert.match(out, /isn't set up on this machine[\s\S]*run on this computer or on your own server[\s\S]*curl -fsSL https:\/\/directionallylocal\.run \| sh/);
+    // On an installed server, bare dl shows the server's overview instead.
+    if (!existsSync(PATHS.state)) {
+      out = "";
+      assert.equal(await main([], io), 0, "bare dl explains itself, even off a server");
+      assert.match(out, /isn't set up on this machine[\s\S]*run on this computer or on your own server[\s\S]*curl -fsSL https:\/\/directionallylocal\.run \| sh/);
+    }
     out = "";
     assert.equal(await main(["use"], io), 0);
     assert.match(out, /Nothing set up yet\. {2}dl setup/);
