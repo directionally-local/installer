@@ -94,7 +94,7 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
     { id: "software", label: "Installing Hotcell + Autopilot" },
     { id: "image", label: "Building the sandbox image" },
     { id: "services", label: "Starting services" },
-    { id: "access", label: access === "tailscale" ? "Opening private access" : "Starting the API" },
+    { id: "access", label: access === "tailscale" ? "Opening private access" : "Starting the server" },
   ]);
   const step = async <T>(id: string, work: () => Promise<{ value: T; detail?: string }>): Promise<T> => {
     ui.start(id);
@@ -194,7 +194,9 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
     // Without a token the Aster API answers 401: the server is up and refusing strangers.
     await waitUntil(system, sleep, "Autopilot", async () =>
       (await system.probe("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", `http://127.0.0.1:${AUTOPILOT_PORT}/api/v1/health`])).stdout.trim() === "401");
-    return { value: address, detail: address.replace(/^https?:\/\//, "") };
+    // The API only listens on this machine: say who can reach it rather than a loopback address.
+    const reach = access === "tailscale" ? address.replace(/^https?:\/\//, "") : access === "ssh" ? "private · reached over SSH" : "private · this machine only";
+    return { value: address, detail: reach };
   });
 
   const now = (options.now ?? (() => new Date()))().toISOString();

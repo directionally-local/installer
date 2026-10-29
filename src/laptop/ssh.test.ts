@@ -70,7 +70,9 @@ describe("checking the server", () => {
     const calls: Array<{ target: string; command: string }> = [];
     const facts = await checkServer({ target: "box" }, fakeSsh({ stdout: "0\nroot\nubuntu 24.04\naarch64\nroot\n", stderr: "Warning: Permanently added '203.0.113.10' (ED25519) to the list of known hosts.\n" }, calls), "box");
     assert.deepEqual(facts, { user: "root", root: true, sudo: false, os: "Ubuntu 24.04", arch: "arm64", newHostKey: true });
-    assert.match(calls[0]!.command, /id -u; .*\/etc\/os-release.*uname -m/);
+    assert.match(calls[0]!.command, /id -u; .*\/etc\/os-release.*uname -m.*hostname -s/);
+    const named = await checkServer({ target: "root@203.0.113.10" }, fakeSsh({ stdout: "0\nroot\nubuntu 24.04\nx86_64\nroot\nubuntu-4gb-nbg1-1\n" }), "root@203.0.113.10");
+    assert.equal(named.hostname, "ubuntu-4gb-nbg1-1");
   });
 
   it("accepts passwordless sudo and refuses a user without it", async () => {
@@ -92,6 +94,13 @@ describe("checking the server", () => {
     await assert.rejects(
       () => checkServer({ target: "root@h" }, fakeSsh({ stdout: "0\nroot\nfedora 40\nx86_64\nroot\n" }), "root@h"),
       /runs fedora 40/,
+    );
+  });
+
+  it("remembers a host key saved on a refused connection", async () => {
+    await assert.rejects(
+      () => checkServer({ target: "root@h" }, fakeSsh({ code: 255, stderr: "Warning: Permanently added 'h' (ED25519) to the list of known hosts.\nroot@h: Permission denied (publickey).\n" }), "root@h"),
+      (error: unknown) => error instanceof SshAuthError && error.newHostKey && /Permission denied \(publickey\)/.test(error.message),
     );
   });
 

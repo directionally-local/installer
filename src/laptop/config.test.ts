@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  defaultRemoteName, loadRemotes, loadRemotesFile, normalizeServerUrl, recordLastUsed, removeRemote, resolveRemote, resolveTarget, saveRemote,
+  defaultRemoteName, loadRemotes, loadRemotesFile, normalizeServerUrl, recordLastUsed, removeRemote, renameRemote, resolveRemote, resolveTarget, saveRemote,
   setDefaultRemote, type RemoteServer,
 } from "./config.js";
 
@@ -112,5 +112,33 @@ describe("remote server config", () => {
     await writeFile(stale, JSON.stringify({ version: 1, remotes: [remote("acme"), remote("home")], default: "gone", lastUsed: "home" }));
     assert.deepEqual(await loadRemotesFile(stale), { remotes: [remote("acme"), remote("home")], lastUsed: "home" });
     assert.equal((await resolveRemote(undefined, stale)).name, "home");
+  });
+});
+
+describe("renaming a server", () => {
+  it("renames in place, moves the default and last-used pointers, and refuses bad or taken names", async () => {
+    const root = await mkdtemp(join(tmpdir(), "autopilot-remotes-"));
+    roots.push(root);
+    const path = join(root, "remotes.json");
+    await saveRemote(remote("91-107-187-162"), path);
+    await saveRemote(remote("home"), path);
+    // Fields this version doesn't write itself are kept as they are.
+    const file = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+    await writeFile(path, JSON.stringify({ ...file, default: "91-107-187-162", lastUsed: "91-107-187-162", extra: 1 }));
+
+    await renameRemote("91-107-187-162", "hetzner", path);
+    const after = JSON.parse(await readFile(path, "utf8")) as { remotes: RemoteServer[]; default: string; lastUsed: string; extra: number; version: number };
+    assert.deepEqual(after.remotes.map((entry) => entry.name), ["hetzner", "home"], "same place in the list");
+    assert.equal(after.remotes[0]!.token, "aster_91-107-187-162", "only the name changes");
+    // Like every other write to this file, rename keeps the known fields (unknown ones aren't carried).
+    assert.deepEqual([after.version, after.default, after.lastUsed], [1, "hetzner", "hetzner"]);
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+
+    await renameRemote("home", "office", path);
+    assert.equal((JSON.parse(await readFile(path, "utf8")) as { default: string }).default, "hetzner", "pointers to other servers stay");
+    await assert.rejects(() => renameRemote("office", "hetzner", path), /already a server named "hetzner"/);
+    await assert.rejects(() => renameRemote("office", "Bad Name", path), /"Bad Name" can't be a server name/);
+    await assert.rejects(() => renameRemote("nope", "x", path), /No server named "nope"\. Connected: hetzner, office/);
+    await renameRemote("office", "office", path);
   });
 });

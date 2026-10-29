@@ -177,11 +177,13 @@ export interface ServerFacts {
   arch: string;
   /** ssh had never seen this host and saved its key (accept-new). */
   newHostKey: boolean;
+  /** The server's own short hostname (`hostname -s`), when it has one. */
+  hostname?: string;
 }
 
-/** The server refused our keys; the wizard offers others from ~/.ssh. */
+/** The server refused our keys; the wizard tries the others in ~/.ssh. */
 export class SshAuthError extends Error {
-  constructor(readonly access: SshAccess, detail: string) {
+  constructor(readonly access: SshAccess, detail: string, readonly newHostKey = false) {
     super(`The server didn't accept this computer's SSH key (${detail}).`);
     this.name = "SshAuthError";
   }
@@ -189,9 +191,11 @@ export class SshAuthError extends Error {
 
 const SUPPORTED_OS = new Set(["ubuntu 22.04", "ubuntu 24.04", "debian 12"]);
 
-// One round trip: who we are, the OS, the CPU, and whether we can become root without a password.
+// One round trip: who we are, the OS, the CPU, whether we can become root without a password,
+// and the server's own name (what the laptop calls it unless ~/.ssh/config already names it).
 const PROBE = 'id -u; id -un; . /etc/os-release; echo "$ID $VERSION_ID"; uname -m; ' +
-  'if [ "$(id -u)" = 0 ]; then echo root; elif sudo -n true 2>/dev/null; then echo sudo; else echo nosudo; fi';
+  'if [ "$(id -u)" = 0 ]; then echo root; elif sudo -n true 2>/dev/null; then echo sudo; else echo nosudo; fi; ' +
+  'hostname -s 2>/dev/null || cat /etc/hostname 2>/dev/null';
 
 /** Connects once and checks the server can take an install: a supported OS, and root or passwordless sudo. */
 export async function checkServer(access: SshAccess, ssh: SshExec, display: string): Promise<ServerFacts> {
@@ -200,14 +204,14 @@ export async function checkServer(access: SshAccess, ssh: SshExec, display: stri
   if (result.code === 255 || result.stdout.trim() === "") {
     const detail = lastLine(result.stderr) || `ssh exited with ${result.code}`;
     if (/Permission denied|Too many authentication failures|no mutual signature|Authentication failed/i.test(result.stderr)) {
-      throw new SshAuthError(access, detail);
+      throw new SshAuthError(access, detail, newHostKey);
     }
     if (/Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/i.test(result.stderr)) {
       throw new Error(`${display}'s SSH host key changed since this computer last connected, so it stopped (that can mean someone is in the middle). If you rebuilt the server, remove the old key with: ssh-keygen -R ${hostOf(access.target)}`);
     }
     throw new Error(`Couldn't reach ${display} over SSH: ${detail}\n  Check that this works: ${sshCommandLine(access)}`);
   }
-  const [uid, user, osLine, arch, privilege] = result.stdout.trim().split("\n").map((line) => line.trim());
+  const [uid, user, osLine, arch, privilege, name] = result.stdout.trim().split("\n").map((line) => line.trim());
   const os = formatOs(osLine ?? "");
   const facts: ServerFacts = {
     user: user || "?",
@@ -216,6 +220,7 @@ export async function checkServer(access: SshAccess, ssh: SshExec, display: stri
     os,
     arch: arch === "aarch64" ? "arm64" : arch || "?",
     newHostKey,
+    ...(name ? { hostname: name } : {}),
   };
   if (!facts.root && !facts.sudo) {
     throw new Error([

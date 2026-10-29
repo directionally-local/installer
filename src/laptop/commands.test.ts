@@ -217,6 +217,24 @@ describe("dl on a laptop", () => {
     await assert.rejects(() => cancel({ id: "3f2a9c1e", open }, capture()), /No task 3f2a9c1e on any connected server\nbox: Couldn't open an SSH tunnel to box[\s\S]*Operation timed out/);
   });
 
+  it("renames a server with dl servers rename", async () => {
+    await saveRemote({
+      name: "91-107-187-162", url: "http://127.0.0.1:4096", token: "t", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T00:00:00.000Z", ssh: { target: "root@91.107.187.162" },
+    });
+    const io = capture();
+    assert.equal(await servers(["rename", "91-107-187-162", "hetzner"], io), 0);
+    assert.match(io.text(), /✓ Renamed 91-107-187-162 to hetzner/);
+    assert.deepEqual((await loadRemotes()).map((remote) => [remote.name, remote.ssh?.target]), [["hetzner", "root@91.107.187.162"]]);
+
+    const bad = capture();
+    assert.equal(await servers(["rename", "hetzner", "My Box"], bad), 1);
+    assert.match(bad.text(), /✗ "My Box" can't be a server name/);
+    assert.equal(await servers(["rename", "nope", "x"], bad), 1);
+    assert.match(bad.text(), /No server named "nope"\. Connected: hetzner\./);
+    assert.equal(await servers(["rename", "hetzner"], bad), 2);
+    assert.match(bad.text(), /Usage: dl servers rename OLD NEW/);
+  });
+
   it("guides a laptop that isn't connected yet", async () => {
     const io = capture();
     await assert.rejects(() => runs({}, io), /Nothing is set up yet\. Run: dl setup {2}\(or, for a server someone else set up: dl connect/);

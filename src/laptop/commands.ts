@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { palette } from "../ui.js";
 import { RemoteApiError, RemoteClient, TERMINAL_STATUSES, type RemoteConversation, type RemoteEvent } from "./client.js";
 import {
-  defaultRemoteName, loadRemotes, loadRemotesFile, normalizeServerUrl, recordLastUsed, REMOTE_NAME_RE, removeRemote, resolveRemote, resolveTarget,
+  defaultRemoteName, loadRemotes, loadRemotesFile, normalizeServerUrl, recordLastUsed, REMOTE_NAME_RE, removeRemote, renameRemote, resolveRemote, resolveTarget,
   saveRemote, setDefaultRemote, type RemoteServer, type TargetReason,
 } from "./config.js";
 import { autopilotConfigPath } from "./credentials.js";
@@ -212,9 +212,10 @@ export async function pull(input: { id: string; server?: string; cwd: string; op
   io.out(`  ${c.green("✓")} On ${c.bold(branch)}${found.pullRequestURL ? `  ${c.dim(found.pullRequestURL)}` : ""}\n`);
 }
 
-/** `dl servers [remove NAME]`: the servers this laptop is connected to. */
+/** `dl servers [remove NAME | rename OLD NEW]`: the servers this laptop is connected to. */
 export async function servers(args: string[], io = processIO): Promise<number> {
   const c = palette(io.color === true);
+  if (args[0] === "rename") return renameServer(args.slice(1), io);
   if (args[0] === "remove") {
     const name = args[1] ?? "";
     const removed = (await loadRemotes()).find((remote) => remote.name === name);
@@ -271,6 +272,24 @@ async function defaultName(): Promise<string | undefined> {
 
 function mark(remote: RemoteServer, current: string | undefined, c: ReturnType<typeof palette>): string {
   return remote.name === current ? c.green("●") : c.dim("○");
+}
+
+/** `dl servers rename OLD NEW`: only this laptop's name for it; the server doesn't change. */
+export async function renameServer(args: string[], io = processIO, path?: string): Promise<number> {
+  const c = palette(io.color === true);
+  const [from, to] = args;
+  if (!from || !to || args.length > 2) {
+    io.err(`  Usage: dl servers rename OLD NEW   ${c.dim("(names: lowercase letters, digits, and dashes)")}\n`);
+    return 2;
+  }
+  try {
+    await renameRemote(from, to, path);
+  } catch (error) {
+    io.err(`  ${c.red("✗")} ${(error as Error).message}.\n`.replace(/\.\.\n$/, ".\n"));
+    return 1;
+  }
+  io.out(`  ${c.green("✓")} Renamed ${from} to ${c.bold(to)}  ${c.dim(`dl run --server ${to} …`)}\n`);
+  return 0;
 }
 
 /** `dl` on a laptop: what this is, which servers it's connected to, what to type next. */

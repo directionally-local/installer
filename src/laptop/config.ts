@@ -107,6 +107,28 @@ export async function removeRemote(name: string, path = remotesPath()): Promise<
   return true;
 }
 
+/**
+ * `dl servers rename OLD NEW`: renames a place in this laptop's list (the server itself doesn't
+ * change). The `default` and `lastUsed` pointers follow the entry to its new name.
+ */
+export async function renameRemote(from: string, to: string, path = remotesPath()): Promise<void> {
+  if (!REMOTE_NAME_RE.test(to)) throw new Error(`"${to}" can't be a server name: use lowercase letters, digits, and dashes (up to 40), starting with a letter or digit`);
+  const file = await loadRemotesFile(path);
+  if (!file.remotes.some((entry) => entry.name === from)) {
+    throw new Error(`No server named "${from}". Connected: ${file.remotes.map((entry) => entry.name).join(", ") || "none"}`);
+  }
+  if (from === to) return;
+  if (file.remotes.some((entry) => entry.name === to)) throw new Error(`There's already a server named "${to}"`);
+  const follow = (name: string | undefined) => (name === from ? to : name);
+  const defaultName = follow(file.default);
+  const lastUsed = follow(file.lastUsed);
+  await writeRemotes({
+    remotes: file.remotes.map((entry) => (entry.name === from ? { ...entry, name: to } : entry)),
+    ...(defaultName ? { default: defaultName } : {}),
+    ...(lastUsed ? { lastUsed } : {}),
+  }, path);
+}
+
 /** `dl use NAME`: where commands go when none is named. */
 export async function setDefaultRemote(name: string, path = remotesPath()): Promise<RemoteServer> {
   const file = await loadRemotesFile(path);
