@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.0](https://github.com/directionally-local/installer/compare/v0.7.0...v0.8.0) (2026-10-29)
+
+
+### Features
+
+* dl preview, Phase 1 of preview deploys ([14a5f21](https://github.com/directionally-local/installer/commit/14a5f21a50b4df306d86bf8a8ad4c11a431c5606))
+* dl preview, Phase 1 of preview deploys ([60f150b](https://github.com/directionally-local/installer/commit/60f150b515da702b98b1a78b3fae86eacd39a1af)), closes [#28](https://github.com/directionally-local/installer/issues/28)
+
 ## [0.7.0](https://github.com/directionally-local/installer/compare/v0.6.0...v0.7.0) (2026-10-29)
 
 
