@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/directionally-local/installer/compare/v0.8.2...v0.9.0) (2026-10-30)
+
+
+### Features
+
+* hand provider and model choice to Autopilot and open a session after setup ([#55](https://github.com/directionally-local/installer/issues/55)) ([65b9238](https://github.com/directionally-local/installer/commit/65b9238fb8c8dcb27e607697fa1cd748bc0cfcb9))
+
 ## [0.8.2](https://github.com/directionally-local/installer/compare/v0.8.1...v0.8.2) (2026-10-29)
 
 
