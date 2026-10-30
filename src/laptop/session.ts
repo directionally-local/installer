@@ -3,13 +3,18 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
+import { configureThisComputer, localProviderReady } from "../local/keys.js";
+import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
 import { palette } from "../ui.js";
 import { findAutopilot, supportsAttachRemote, type AutopilotCommand } from "./autopilot.js";
-import { RemoteApiError } from "./client.js";
+import { RemoteApiError, type RemoteClient } from "./client.js";
 import { describeError, pickModel, type LaptopIO } from "./commands.js";
-import { laptopModel } from "./settings.js";
-import { recordLastUsed, resolveTarget } from "./config.js";
-import { detectGitHubRepository, snapshotWorkingTree } from "./git.js";
+import { runAutopilotConnect } from "./connect.js";
+import { ensurePlaceProvider, type PlaceProviderDeps } from "./place-provider.js";
+import { placeModel } from "./settings.js";
+import { recordLastUsed, resolveTarget, type RemoteServer } from "./config.js";
+import { detectGitHubRepository, snapshotWorkingTree, type WorkingTreeSnapshot } from "./git.js";
+import { describeSecretLocation, findLikelyProviderSecret, type SecretMatch } from "./secrets.js";
 import { findSession, forgetSession, rememberSession, sessionsPath, type SessionKey } from "./session-store.js";
 import { openRemoteForSession, withConnections, type RemoteOpener } from "./tunnel.js";
 
@@ -48,9 +53,15 @@ export interface SessionInput {
   model?: string;
   /** `dl new`: forget this directory's conversation and start another. */
   fresh?: boolean;
+  /** `dl --no-local-changes`: start from the base commit and send no patch. */
+  noLocalChanges?: boolean;
+  /** Asks what to do when the local changes hold a key; the terminal's own unless replaced (tests). */
+  prompter?: Prompter;
   open?: RemoteOpener;
-  /** This laptop's default model for the place (dl model, else Autopilot's); read from their configs unless replaced (tests). */
-  autopilotModel?: (place: string) => Promise<string | undefined>;
+  /** The model saved for the place with `dl model`; read from dl's config unless replaced (tests). */
+  placeModel?: (place: string) => Promise<string | undefined>;
+  /** Checks the place has a provider, and sets one up if not; the real one unless replaced (tests). */
+  ensureProvider?: (remote: RemoteServer, client: RemoteClient) => Promise<boolean>;
   /** Finds Autopilot; the one installed with dl, else one on PATH, unless replaced (tests). */
   autopilot?: () => Promise<AutopilotCommand | undefined>;
   /** Whether that Autopilot has `attach-remote`. */
@@ -162,6 +173,8 @@ async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO
   try {
     return await withConnections(input.open ?? openRemoteForSession, async (connections) => {
       const client = await step(connections.client(remote));
+      // A place with no provider can't serve a turn: set one up before opening anything.
+      if (!(await step((input.ensureProvider ?? ((target, api) => ensurePlaceProvider(target, api, placeProviderDeps(io))))(remote, client)))) return undefined;
       let remembered = input.fresh ? undefined : await findSession(key, file);
       if (remembered) {
         const alive = await step(client.getConversation(remembered.conversationId).then(
@@ -190,17 +203,25 @@ async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO
           let snapshot;
           if (plan.kind === "code") {
             try {
-              snapshot = await step(snapshotWorkingTree(plan.root));
+              snapshot = await step(snapshotWorkingTree(plan.root, { localChanges: input.noLocalChanges !== true }));
             } catch (error) {
               if (error instanceof Interrupted) throw error;
               note(`${describeError(error)}.`.replace(/\.\.$/, "."));
               return undefined;
             }
+            // A key-shaped change is refused by the server anyway; ask here, before any network
+            // call, so the answer names the file and offers a way forward.
+            const secret = snapshot.patch ? findLikelyProviderSecret(snapshot.patch) : undefined;
+            if (secret) {
+              const start = await step(askAboutLocalSecret(secret, snapshot, input, io));
+              if (!start) return 130;
+              snapshot = { ...snapshot, patch: "", files: [] };
+            }
           }
           const [workspaces, catalog, preferred] = await step(Promise.all([
             client.workspaces(),
             client.catalog(),
-            input.model ? Promise.resolve(undefined) : (input.autopilotModel ?? laptopModel)(remote.name),
+            input.model ? Promise.resolve(undefined) : (input.placeModel ?? placeModel)(remote.name),
           ]));
           const workspace = workspaces[0];
           if (!workspace) throw new Error(`${remote.name} has no workspace this laptop can use`);
@@ -250,6 +271,11 @@ async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO
         await save().catch(() => {});
         if (outcome instanceof Error) return missing();
         if (outcome.code === 2) return missing();
+        // attach-remote's own code for "the patch holds a key": it already said where.
+        if (outcome.code === 3) {
+          note(`Start without your local changes: dl --no-local-changes`);
+          return 1;
+        }
         if (outcome.code !== 0) return 1;
         await recordLastUsed(remote.name).catch(() => undefined);
         io.err(`\n  It keeps running on ${c.bold(remote.name)}. Type ${c.bold("dl")} here to come back, or ${c.bold("dl runs")}.\n\n`);
@@ -265,6 +291,45 @@ async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO
   } finally {
     for (const [name, handler] of handlers) signals.off(name, handler);
   }
+}
+
+/**
+ * The local changes hold something key-shaped. Says where (never what), then offers the two
+ * ways forward: start from the base commit without them (the default), or stop. Returns
+ * whether to start.
+ */
+async function askAboutLocalSecret(match: SecretMatch, snapshot: WorkingTreeSnapshot, input: SessionInput, io: LaptopIO): Promise<boolean> {
+  const c = palette(io.color === true);
+  io.err(
+    `\n  ${c.yellow("!")} Your local changes include something that looks like an API key:\n`
+    + `    ${describeSecretLocation(match)}\n`
+    + `  Agents get a copy of your changes, and keys never leave this computer.\n\n`,
+  );
+  const options: SelectOption[] = [
+    { value: "base", label: `Start from ${snapshot.baseCommit.slice(0, 7)} without my local changes` },
+    { value: "cancel", label: "Cancel" },
+  ];
+  const prompter = input.prompter ?? new TtyPrompter({ color: io.color === true });
+  try {
+    const { value } = await prompter.select(`  ${c.bold("How should this session start?")}`, options, 0);
+    return value === "base";
+  } catch (error) {
+    if (error instanceof PromptCancelled) return false;
+    throw error;
+  }
+}
+
+/** The real provider check: Autopilot's picker, then the key into this computer's Hotcell. */
+function placeProviderDeps(io: LaptopIO): PlaceProviderDeps {
+  return {
+    connect: (options) => runAutopilotConnect(options),
+    local: {
+      ready: () => localProviderReady(),
+      configure: (answers) => configureThisComputer(answers),
+    },
+    write: io.err,
+    color: io.color === true,
+  };
 }
 
 /** What `attach-remote --state-file` wrote, once the conversation exists. */

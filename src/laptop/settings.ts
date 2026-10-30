@@ -86,6 +86,15 @@ export async function laptopModel(place?: string): Promise<string | undefined> {
 }
 
 /**
+ * The model saved for one place with `dl model`, and nothing else. A session asks for this
+ * rather than laptopModel: Autopilot's own default is a laptop-wide choice that the place
+ * may not serve, and a place with no model of its own should use the server's defaultModel.
+ */
+export async function placeModel(place: string, path?: string): Promise<string | undefined> {
+  return (await loadSettings(path)).placeModels?.[place];
+}
+
+/**
  * The laptop's Autopilot default model: KIMI_MODEL (Autopilot's own override) or the
  * `model` in its config. undefined when neither is set or the config can't be read.
  */

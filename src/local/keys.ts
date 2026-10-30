@@ -101,6 +101,23 @@ export async function listLocalKeys(options: LocalKeyOptions = {}): Promise<KeyL
   return [listing, await githubListing(token, options.fetchImpl)];
 }
 
+/**
+ * Whether this computer's provider has an active route in Hotcell, i.e. a key it can serve
+ * from. undefined when this computer isn't set up here (nothing to check). A place with no
+ * active route answers /models from the default catalog and fails every turn.
+ */
+export async function localProviderReady(options: LocalOptions = {}): Promise<boolean | undefined> {
+  let ctx: Installed;
+  try {
+    ctx = await installed(options);
+  } catch {
+    return undefined;
+  }
+  const provider = providerFromAsterConfig(await ctx.system.readFile(ctx.paths.asterConfig));
+  const routes = await localHotcellRoutes(ctx.system, ctx.node, ctx.paths);
+  return routes.some((route) => route.provider === provider.id && route.active);
+}
+
 /** The provider this computer uses, as aster.json names it (OpenRouter when it names none). */
 export async function localProvider(options: LocalOptions = {}): Promise<{ id: string; model?: string }> {
   const { system, paths } = await installed(options);

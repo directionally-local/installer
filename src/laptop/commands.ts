@@ -93,6 +93,8 @@ export async function run(input: {
   preferredModel?: string;
   repository?: string;
   detach?: boolean;
+  /** `dl --no-local-changes`: start from the base commit and send no patch. */
+  noLocalChanges?: boolean;
   signal?: AbortSignal;
   open?: RemoteOpener;
   /** This laptop's default model for the place (dl model, else Autopilot's); read from their configs unless replaced (tests). */
@@ -106,7 +108,7 @@ export async function run(input: {
 async function runOn(client: RemoteClient, remote: RemoteServer, reason: TargetReason, input: Parameters<typeof run>[0], io: LaptopIO): Promise<number> {
   const c = palette(io.color === true);
   const repository = input.repository ?? await detectGitHubRepository(input.cwd);
-  const snapshot = await snapshotWorkingTree(input.cwd);
+  const snapshot = await snapshotWorkingTree(input.cwd, { localChanges: input.noLocalChanges !== true });
   const [workspaces, catalog] = await Promise.all([client.workspaces(), client.catalog()]);
   const workspace = workspaces[0];
   if (!workspace) throw new Error(`${remote.name} has no workspace this laptop can use`);

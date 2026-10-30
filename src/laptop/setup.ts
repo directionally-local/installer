@@ -98,11 +98,14 @@ export async function setupWizard(deps: SetupDeps): Promise<RemoteServer | undef
     const { remote, capacity, needs } = await deps.localSetup!({ ui: deps.newUi(), prompter: deps.prompter });
     const remotesFile = deps.remotesFile ?? remotesPath();
     const isNew = !(await loadRemotes(remotesFile)).some((entry) => entry.name === remote.name);
-    await saveRemote(remote, remotesFile);
     await gatherAndStore(deps, needs, remote.name, "this computer", async (answers) => {
       if (!deps.localConfigure) throw new Error("This build can't store keys on this computer.");
       await deps.localConfigure(answers);
     });
+    // Saved only once the keys are stored, as the server path does: a run killed at the
+    // picker leaves no place behind, so `dl` again resumes at the picker instead of
+    // opening a session on a place that has no provider and can't serve a turn.
+    await saveRemote(remote, remotesFile);
     await offerThisComputer(deps, remote, remotesFile, isNew);
     await ready(deps, remote, capacity);
     return remote;

@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { main } from "../cli.js";
 import { PATHS } from "../layout.js";
+import { ScriptedPrompter } from "../prompt.js";
 import { fakeTunnels, type FakeTunnel } from "../test-support/fake-tunnel.js";
 import { DEFAULT_MODEL, type LaptopIO } from "./commands.js";
 import { saveRemote, type RemoteServer } from "./config.js";
@@ -174,7 +175,7 @@ function session(input: Partial<SessionInput> & { cwd: string }, io: LaptopIO, o
   return open({
     autopilot: async () => AUTOPILOT,
     probe: async () => true,
-    autopilotModel: async () => undefined,
+    placeModel: async () => undefined,
     spawn: autopilot.spawn,
     signals: new EventEmitter(),
     ...input,
@@ -227,6 +228,73 @@ describe("dl inside a project", () => {
     assert.equal(reconnect.includes("--patch-file"), false);
     assert.match(again.text(), /Connecting to dl-test · me\/app … {2}\(7c1d2e3f\)/);
     assert.equal((await loadSessions(file)).length, 1);
+  });
+
+  it("checks the place has a provider before opening anything", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    const asked: string[] = [];
+    const io = capture();
+    assert.equal(await session({ cwd: dir, ensureProvider: async (remote) => { asked.push(remote.name); return false; } }, io), undefined);
+    assert.deepEqual(asked, ["dl-test"]);
+    assert.equal(autopilot.launches.length, 0, "no session before the provider is set up");
+    assert.equal(io.text(), "", "the check says its own line; nothing else is printed");
+  });
+
+  it("uses the server's default model when the place has none saved", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    api.models = ["01-ai/yi-large", "moonshotai/kimi-k2.6"];
+    api.provider = { id: "openrouter", name: "OpenRouter" };
+    api.defaultModel = "moonshotai/kimi-k2.6";
+    const dir = await checkout();
+    assert.equal(await session({ cwd: dir }, capture()), 0);
+    assert.equal(flag(autopilot.launches[0]!.args, "--model"), "moonshotai/kimi-k2.6", "the server's default, not a hard-coded id");
+  });
+
+  it("asks before sending local changes that look like a key, and starts from the base commit", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    await writeFile(join(dir, "connect.test.ts"), 'const apiKey = "sk-deepseek-1234567890abcdefghij";\n');
+    const prompter = new ScriptedPrompter({ "How should this session start?": "" });
+    const io = capture();
+    assert.equal(await session({ cwd: dir, prompter }, io), 0);
+    assert.match(io.text(), /! Your local changes include something that looks like an API key:\n {4}connect\.test\.ts:1\n/);
+    assert.match(io.text(), /Agents get a copy of your changes, and keys never leave this computer\./);
+    assert.ok(prompter.asked.some((question) => question.includes("How should this session start?")), prompter.asked.join("\n"));
+    const args = autopilot.launches[0]!.args;
+    assert.equal(args.includes("--patch-file"), false, "no patch is sent");
+    assert.equal(flag(args, "--base-commit"), git(dir, "rev-parse", "HEAD"));
+    assert.match(io.text(), /new conversation from [0-9a-f]{7}, /, "the detail says no local changes");
+  });
+
+  it("Cancel at that question opens nothing", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    await writeFile(join(dir, "connect.test.ts"), 'const apiKey = "sk-deepseek-1234567890abcdefghij";\n');
+    const prompter = new ScriptedPrompter({ "How should this session start?": "cancel" });
+    assert.equal(await session({ cwd: dir, prompter }, capture()), 130);
+    assert.equal(autopilot.launches.length, 0, "no session");
+  });
+
+  it("dl --no-local-changes sends no patch and asks nothing", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    await writeFile(join(dir, "connect.test.ts"), 'const apiKey = "sk-deepseek-1234567890abcdefghij";\n');
+    const prompter = new ScriptedPrompter({});
+    const io = capture();
+    assert.equal(await session({ cwd: dir, noLocalChanges: true, prompter }, io), 0);
+    assert.deepEqual(prompter.asked, [], "nothing to ask");
+    assert.equal(autopilot.launches[0]!.args.includes("--patch-file"), false);
+    assert.doesNotMatch(io.text(), /looks like an API key/);
+  });
+
+  it("says how to start without local changes when attach-remote refuses the patch", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    autopilot.code = 3;
+    const io = capture();
+    assert.equal(await session({ cwd: dir }, io), 1);
+    assert.match(io.text(), /Start without your local changes: dl --no-local-changes/);
   });
 
   it("keeps one conversation per place and per checkout", { timeout: 30_000 }, async () => {

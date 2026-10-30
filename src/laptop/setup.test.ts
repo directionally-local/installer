@@ -308,6 +308,24 @@ describe("dl setup on a laptop", () => {
     assert.deepEqual(again.sessions, [local]);
   });
 
+  it("a run killed at the picker saves no place, so dl asks again instead of opening a session", async () => {
+    const local: RemoteServer = { name: "this-computer", url: "http://127.0.0.1:4096", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" };
+    const killed = deps(new FakeSshServer(), { Where: "1" }, {
+      ...fakeLocal(local),
+      connect: async () => { throw new PromptCancelled(); },
+    });
+    await assert.rejects(() => setupWizard(killed.deps), PromptCancelled);
+    assert.deepEqual(await loadRemotes(join(root, "remotes.json")), [], "no place saved before the keys are stored");
+    assert.deepEqual(killed.sessions, [], "no session before the picker");
+
+    // Run again: the picker is shown again, and only then does a session open.
+    const again = deps(new FakeSshServer(), { Where: "1", "GitHub CLI": "" }, fakeLocal(local));
+    await setupWizard(again.deps);
+    assert.deepEqual(again.connects, [{}], "the picker is shown again");
+    assert.deepEqual(again.sessions, [local]);
+    assert.deepEqual(await loadRemotes(join(root, "remotes.json")), [local]);
+  });
+
   it("without a session to open (no terminal), ends on the Ready line and what to type", async () => {
     const local: RemoteServer = { name: "this-computer", url: "http://127.0.0.1:4096", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" };
     const run = deps(new FakeSshServer(), { Where: "1" }, { ...fakeLocal(local, []), openSession: undefined });
