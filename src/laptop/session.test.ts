@@ -71,6 +71,8 @@ interface Launch {
   env: NodeJS.ProcessEnv;
   patch?: string;
   patchMode?: number;
+  /** Set when the fake refused a flag combination, as the real attach-remote does. */
+  refused?: string;
   /** Whether every tunnel was still open when Autopilot started. */
   tunnelsOpen?: boolean;
 }
@@ -102,6 +104,13 @@ class FakeAutopilot {
     this.children.push(child);
     void (async () => {
       const flag = (name: string) => args[args.indexOf(name) + 1];
+      // Like the real attach-remote (checkFlags): reconnecting refuses every creation flag, exit 2.
+      const creation = ["--workspace", "--kind", "--repo", "--model", "--base-commit", "--patch-file"].filter((name) => args.includes(name));
+      if (args.includes("--conversation") && creation.length > 0) {
+        launch.refused = `--conversation with ${creation.join(", ")}`;
+        setImmediate(() => child.emit("exit", 2, null));
+        return;
+      }
       const patchFile = args.includes("--patch-file") ? flag("--patch-file") : undefined;
       if (patchFile) {
         launch.patch = await readFile(patchFile, "utf8");
@@ -422,7 +431,8 @@ describe("dl inside a project", () => {
     const again = capture();
     assert.equal(await session({ cwd: plain }, again), 0);
     assert.equal(flag(autopilot.launches[1]!.args, "--conversation"), CHAT_ID);
-    assert.equal(flag(autopilot.launches[1]!.args, "--kind"), "chat");
+    assert.equal(autopilot.launches[1]!.args.includes("--kind"), false, "reopening passes no creation flags, which attach-remote refuses");
+    assert.equal(autopilot.launches[1]!.refused, undefined);
     assert.match(again.text(), /Connecting to dl-test · chat … {2}\(c0ffee00\)/);
     const other = join(root, "other");
     await mkdir(other);

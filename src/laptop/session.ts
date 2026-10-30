@@ -194,7 +194,7 @@ async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO
       const scratch = await mkdtemp(join(tmpdir(), "dl-session-"));
       try {
         const stateFile = join(scratch, "state.json");
-        const args = ["attach-remote", ...(plan.kind === "chat" ? ["--kind", "chat"] : []), "--state-file", stateFile, "--title", `${remote.name} · ${subject}`];
+        const args = ["attach-remote", "--state-file", stateFile, "--title", `${remote.name} · ${subject}`];
         let detail: string;
         if (remembered) {
           args.push("--conversation", remembered.conversationId);
@@ -226,7 +226,8 @@ async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO
           const workspace = workspaces[0];
           if (!workspace) throw new Error(`${remote.name} has no workspace this laptop can use`);
           const model = pickModel(catalog, input.model, preferred);
-          args.push("--workspace", workspace.id, "--model", model);
+          // Creation flags only: attach-remote refuses them next to --conversation.
+          args.push(...(plan.kind === "chat" ? ["--kind", "chat"] : []), "--workspace", workspace.id, "--model", model);
           if (snapshot) {
             args.push("--repo", plan.repository!, "--base-commit", snapshot.baseCommit);
             if (snapshot.patch) {
