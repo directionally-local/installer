@@ -7,7 +7,8 @@ import { readFileSync } from "node:fs";
  * drift. `dl update` brings a place back to it.
  *
  * For testing unpublished builds, DL_AUTOPILOT_SPEC and DL_HOTCELL_SPEC name an npm spec
- * or a path to a .tgz to install instead of `autopilot-ai@<version>` / `hotcell@<version>`.
+ * or a path to a .tgz (several, separated by spaces, when a package needs sibling tarballs)
+ * to install instead of `autopilot-ai@<version>` / `hotcell@<version>`.
  */
 
 interface Manifest {

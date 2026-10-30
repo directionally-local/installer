@@ -187,7 +187,7 @@ export async function setUpOnThisComputer(input: SetupInput): Promise<LocalSetup
     const releaseDir = join(paths.releases, name);
     if (specs.dev || !(await system.exists(join(releaseDir, "node_modules", "autopilot-ai", "package.json")) && await system.exists(join(releaseDir, "node_modules", "hotcell", "package.json")))) {
       await system.mkdir(releaseDir, { mode: 0o700 });
-      await system.run("npm", ["install", "--prefix", releaseDir, "--no-audit", "--no-fund", "--omit=dev", specs.autopilot, specs.hotcell], { inherit: true });
+      await system.run("npm", ["install", "--prefix", releaseDir, "--no-audit", "--no-fund", "--omit=dev", ...specs.autopilot.split(/\s+/), ...specs.hotcell.split(/\s+/)], { inherit: true });
     }
     await system.run("ln", ["-sfn", releaseDir, paths.current]);
     const autopilot = specs.dev ? installedVersion(await system.readFile(join(releaseDir, "node_modules", "autopilot-ai", "package.json")), specs.autopilotLabel) : specs.autopilotLabel;
