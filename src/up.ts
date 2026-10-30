@@ -103,7 +103,7 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
   ui.plan([
     ...(access === "tailscale" ? [{ id: "tailnet", label: "Joining your tailnet" }] : []),
     { id: "docker", label: "Setting up Docker" },
-    { id: "software", label: "Installing Hotcell + Autopilot" },
+    { id: "software", label: "Installing Hotcell (sandbox SDK) + Autopilot (harness)" },
     { id: "image", label: "Building the sandbox image" },
     { id: "services", label: "Starting services" },
     { id: "access", label: access === "tailscale" ? "Opening private access" : "Starting the server" },

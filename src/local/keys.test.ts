@@ -116,7 +116,7 @@ describe("dl provider on this computer", () => {
     const system = await installed();
     const listing = await listLocalKeys(options(system, { fetchImpl: fetchOk }));
     assert.deepEqual(listing, [
-      { key: "provider", set: true, detail: "openrouter · sk-or…aa" },
+      { key: "provider", set: true, detail: "openrouter" },
       { key: "github", set: true, detail: "signed in as ada" },
     ]);
     assert.ok(!JSON.stringify(listing).includes(OLD_OPENROUTER) && !JSON.stringify(listing).includes(OLD_GITHUB));

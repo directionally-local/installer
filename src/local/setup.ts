@@ -140,7 +140,7 @@ export async function setUpOnThisComputer(input: SetupInput): Promise<LocalSetup
 
   ui.plan([
     { id: "check", label: "Checking this computer" },
-    { id: "software", label: "Installing Hotcell + Autopilot" },
+    { id: "software", label: "Installing Hotcell (sandbox SDK) + Autopilot (harness)" },
     { id: "image", label: "Building the sandbox image" },
     { id: "services", label: "Starting services" },
     { id: "connect", label: "Connecting" },

@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
+import { readFileSync } from "node:fs";
 import { readKeyLine, serverKeysCommand, type ServerKeysDeps } from "./keys.js";
 import { parseHotcellRoutes } from "./provider.js";
 import { PATHS, parseEnvFile } from "./layout.js";
@@ -159,11 +160,11 @@ describe("dl keys on a server", () => {
     const system = await installed();
     const json = await run(system, [], { json: true });
     assert.deepEqual(JSON.parse(json.out), { keys: [
-      { key: "provider", set: true, detail: "openrouter · sk-or…aa" },
+      { key: "provider", set: true, detail: "openrouter" },
       { key: "github", set: true, detail: "signed in as octo" },
     ] });
     const human = await run(system, ["ls"], {});
-    assert.match(human.out, /✓ Provider {4}openrouter · sk-or…aa/);
+    assert.match(human.out, /✓ Provider {4}openrouter\b/);
     assert.match(human.out, /✓ GitHub {6}signed in as octo/);
     assert.match(human.out, /Replace one: sudo dl keys set openrouter/);
     for (const text of [json.out, human.out]) {
@@ -210,5 +211,15 @@ describe("reading the key", () => {
     assert.deepEqual(parseHotcellRoutes("openrouter  ••••  file\n"), [{ provider: "openrouter", active: true, mask: "••••" }]);
     assert.deepEqual(parseHotcellRoutes(`openrouter  ${OLD_OPENROUTER}  file\n`), [{ provider: "openrouter", active: true }]);
     assert.deepEqual(parseHotcellRoutes("no provider keys yet — add one:  hotcell keys add openrouter\n"), []);
+  });
+
+  it("reads the routes real Hotcell prints, keyed by `name` (a guessed `provider` field once hid every route)", () => {
+    const real = readFileSync(new URL("./test-support/hotcell-0.1.38-keys-ls.json", import.meta.url), "utf8");
+    assert.deepEqual(parseHotcellRoutes(real), [
+      { provider: "openrouter", active: true },
+      { provider: "deepseek", active: false },
+      { provider: "github", active: false },
+      { provider: "ollama", active: false },
+    ]);
   });
 });

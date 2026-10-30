@@ -1,0 +1,67 @@
+{
+  "routes": [
+    {
+      "name": "openrouter",
+      "builtin": true,
+      "keyless": false,
+      "keyOptional": false,
+      "nonLlm": false,
+      "hasKey": true,
+      "active": true,
+      "label": "OpenRouter",
+      "baseUrl": "https://openrouter.ai/api",
+      "sdkBasePath": "/v1",
+      "authHeader": "authorization",
+      "formatTemplate": "Bearer {key}",
+      "keySource": "file",
+      "gatewayPath": "/openrouter/v1"
+    },
+    {
+      "name": "deepseek",
+      "builtin": true,
+      "keyless": false,
+      "keyOptional": false,
+      "nonLlm": false,
+      "hasKey": false,
+      "active": false,
+      "label": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com",
+      "authHeader": "authorization",
+      "formatTemplate": "Bearer {key}",
+      "inactiveReason": "no key",
+      "gatewayPath": "/deepseek"
+    },
+    {
+      "name": "github",
+      "builtin": true,
+      "keyless": false,
+      "keyOptional": false,
+      "nonLlm": true,
+      "hasKey": false,
+      "active": false,
+      "label": "GitHub API",
+      "baseUrl": "https://api.github.com",
+      "authHeader": "authorization",
+      "formatTemplate": "Bearer {key}",
+      "inactiveReason": "no key",
+      "gatewayPath": "/github"
+    },
+    {
+      "name": "ollama",
+      "builtin": true,
+      "keyless": false,
+      "keyOptional": true,
+      "nonLlm": false,
+      "hasKey": false,
+      "active": false,
+      "label": "Ollama (local)",
+      "baseUrl": "http://127.0.0.1:11434",
+      "sdkBasePath": "/v1",
+      "authHeader": "authorization",
+      "formatTemplate": "Bearer {key}",
+      "inactiveReason": "not enabled; hotcell keys add ollama",
+      "gatewayPath": "/ollama/v1"
+    }
+  ],
+  "injected": []
+}
