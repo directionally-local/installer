@@ -8,6 +8,7 @@ import { Readable } from "node:stream";
 import { main, readAnswers } from "./cli.js";
 import { agentCapacity, parseDfFreeGb, parseInterfaceIp, parseMemTotalMb, parseOsRelease } from "./detect.js";
 import { doctor, formatChecks } from "./doctor.js";
+import { pinnedAutopilotVersion } from "./versions.js";
 import { PATHS, autopilotUnit, envFile, hotcellUnit, parseEnvFile } from "./layout.js";
 import { saveRemote } from "./laptop/config.js";
 import { ScriptedPrompter } from "./prompt.js";
@@ -107,7 +108,7 @@ describe("uninstall", () => {
     await uninstall(system, { purge: true });
     for (const path of [PATHS.state, PATHS.githubEnv, PATHS.hotcellEnv, PATHS.asterConfig]) assert.equal(system.files.has(path), false, path);
     assert.ok(system.ran.includes("userdel autopilot") && system.ran.includes("userdel hotcell"));
-    assert.ok(system.ran.includes("docker image rm directionallylocal-cell:2.2.0"));
+    assert.ok(system.ran.includes(`docker image rm directionallylocal-cell:${pinnedAutopilotVersion()}`));
   });
 });
 
@@ -175,7 +176,9 @@ describe("cli", () => {
     assert.equal(await main(["--help"], io), 0);
     assert.match(out, /dl up \[--dry-run\]/);
     assert.match(out, /^Directionally Local: coding agents that run on this computer or on your own server\./);
-    assert.match(out, /dl +set up the first time; afterwards, an overview\n +dl setup +set up or repair where your agents run/);
+    assert.match(out, /dl +the first time: set up where agents run, pick a provider and model\n[\s\S]*dl setup +set up or repair where your agents run/);
+    assert.match(out, /dl provider +the provider and GitHub token on each place \(dl keys is the same\)/);
+    assert.match(out, /--autopilot-version <x\.y\.z> +default: the version this dl ships with \(\d+\.\d+\.\d+\)/);
     assert.match(out, /dl use \[NAME\] +where tasks go without --server/);
     assert.match(out, /-m\/--model MODEL/);
     assert.match(out, /dl local status[\s\S]*dl local uninstall[\s\S]*On the server:/);
@@ -190,7 +193,7 @@ describe("cli", () => {
     }
     out = "";
     assert.equal(await main(["use"], io), 0);
-    assert.match(out, /Nothing set up yet\. {2}dl setup/);
+    assert.match(out, /Nothing set up yet\. {2}dl/);
     out = "";
     assert.equal(await main(["--version"], io), 0);
     assert.match(out, /^\d+\.\d+\.\d+\n$/);
@@ -221,7 +224,7 @@ describe("cli", () => {
     out = "";
     assert.equal(await main(["status"], io), 0);
     assert.match(out, /Directionally Local {2}on this laptop[\s\S]*Runs on +● box/);
-    assert.match(await (async () => { out = ""; await main(["--help"], io); return out; })(), /dl status +where your agents run and what they're doing/);
+    assert.match(await (async () => { out = ""; await main(["--help"], io); return out; })(), /dl status +where your agents run, their provider, model and versions, and what they're doing/);
   });
 
   it("dl pair off a server says it isn't installed", { skip: existsSync(PATHS.state) && "this machine is a server" }, async () => {

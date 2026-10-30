@@ -12,10 +12,12 @@ import {
   compareVersions,
   latestVersions,
   outdatedServers,
+  placeVersions,
   serverVersions,
   update,
   type UpdateIO,
 } from "./update.js";
+import { pinnedAutopilotVersion } from "../versions.js";
 
 const roots: string[] = [];
 const previous = process.env.AUTOPILOT_REMOTES_FILE;
@@ -39,6 +41,10 @@ function fakeSsh(options: { state?: string; upCode?: number; upLines?: string[] 
   const exec: SshExec = async (_access, command, opts) => {
     commands.push(command);
     if (command.includes("id -u")) return { code: 0, stdout: "0\nroot\nubuntu 24.04\nx86_64\nroot\nbox\n", stderr: "" };
+    if (command.includes("dl-install.sh")) {
+      for (const line of [".. Installing dl", "ok Installing dl: 0.9.0"]) opts?.onStdoutLine?.(line);
+      return { code: 0, stdout: "", stderr: "" };
+    }
     if (command.startsWith("cat /etc/directionallylocal/state.json")) {
       return { code: 0, stdout: options.state ?? STATE, stderr: "" };
     }
@@ -88,6 +94,7 @@ function deps(overrides: Partial<Parameters<typeof update>[1]> = {}) {
       io,
       interactive: false,
       sleep: async () => {},
+      latestDl: async () => undefined,
       ...overrides,
     } as Parameters<typeof update>[1],
   };
@@ -159,6 +166,34 @@ describe("dl update", () => {
     assert.match(io.text(), /✓ box is up to date/);
     const up = ssh.commands.find((command) => command.includes("dl up"));
     assert.equal(up, "dl up --answers-stdin --events json", "no --access: the server keeps the way it is reached");
+    const bootstrap = ssh.commands.findIndex((command) => command.includes("dl-install.sh"));
+    assert.ok(bootstrap >= 0 && bootstrap < ssh.commands.indexOf(up!), "the server's dl first: it pins the Autopilot it installs");
+    assert.match(io.text(), /ok Installing dl: 0\.9\.0/);
+  });
+
+  it("updates this computer by running its setup again, and says when the laptop's own dl is behind", async () => {
+    await saveRemote(server("this-computer", false));
+    let ran = 0;
+    const { io, deps: base } = deps({
+      running: async () => 0,
+      local: async () => { ran++; return { autopilot: pinnedAutopilotVersion(), hotcell: "0.1.30" }; },
+      latestDl: async () => "99.0.0",
+    });
+    assert.equal(await update(["this-computer"], base), 0);
+    assert.equal(ran, 1);
+    assert.match(io.text(), /Updating this-computer[\s\S]*✓ this-computer is up to date {2}Autopilot \d+\.\d+\.\d+ · Hotcell 0\.1\.30/);
+    assert.match(io.text(), /dl 99\.0\.0 is out \(this is \d+\.\d+\.\d+\): npm install -g directionallylocal/);
+
+    // A place left on another Autopilot than the one this dl bundles: say so, with the one command that fixes it.
+    const drift = deps({ running: async () => 0, local: async () => ({ autopilot: "2.7.0", hotcell: "0.1.30" }) });
+    assert.equal(await update(["this-computer"], drift.deps), 0);
+    assert.match(drift.io.text(), /! this-computer runs Autopilot 2\.7\.0; this laptop's dl bundles \d+\.\d+\.\d+\. Match them: npm install -g directionallylocal/);
+  });
+
+  it("knows each place's Autopilot version, for dl status", async () => {
+    const remotes = [server("box"), server("this-computer", false), { ...server("acme", false), url: "https://acme.example.com" }];
+    const versions = await placeVersions(remotes, { ssh: fakeSsh().exec, local: async () => "3.0.1" });
+    assert.deepEqual([...versions], [["box", "2.7.0"], ["this-computer", "3.0.1"]], "a server connected with dl connect can't be asked");
   });
 
   it("waits for running tasks when nobody can answer", async () => {
@@ -201,11 +236,11 @@ describe("dl update", () => {
     assert.ok(ssh.commands.some((command) => command.includes("dl up")));
   });
 
-  it("refuses a server this laptop didn't set up over SSH", async () => {
+  it("refuses a server this laptop didn't set up", async () => {
     await saveRemote(server("box", false));
     const { io, deps: base } = deps();
     assert.equal(await update([], base), 1);
-    assert.match(io.text(), /box wasn't set up over SSH, so this laptop can't update it\.\n {2}On the server: sudo dl up/);
+    assert.match(io.text(), /box wasn't set up by this laptop, so it can't update it\.\n {2}On the server: sudo dl up/);
   });
 
   it("reports a failed update with the server's last lines", async () => {

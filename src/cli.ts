@@ -6,15 +6,16 @@ import { serverKeysCommand } from "./keys.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
 import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, use, watch } from "./laptop/commands.js";
 import { loadRemotes } from "./laptop/config.js";
-import { keys } from "./laptop/keys.js";
+import { provider as providerCommand } from "./laptop/provider.js";
 import { model } from "./laptop/settings.js";
-import { projectSession } from "./laptop/session.js";
+import { openSession, projectSession } from "./laptop/session.js";
 import { preview as laptopPreview } from "./laptop/preview.js";
 import { setup } from "./laptop/setup.js";
 import { realSshExec } from "./laptop/ssh.js";
 import { update } from "./laptop/update.js";
 import { localCommand } from "./local/cli.js";
-import { setUpOnThisComputer } from "./local/setup.js";
+import { localStatus, setUpOnThisComputer } from "./local/setup.js";
+import { pinnedAutopilotVersion } from "./versions.js";
 import { TtyPrompter } from "./prompt.js";
 import { readState } from "./state.js";
 import { DryRunSystem, RealSystem, type System } from "./system.js";
@@ -23,16 +24,19 @@ import { JsonUi, PlainUi, TerminalUi, palette, type Ui } from "./ui.js";
 import { previewCommand, previewsCommand } from "./preview.js";
 import { needs, parseAccessMode, parseProvidedAnswers, up } from "./up.js";
 
-const HELP = `Directionally Local: coding agents that run on this computer or on your own server.
+const HELP = () => `Directionally Local: coding agents that run on this computer or on your own server.
 Send a task; it runs in its own sandbox and comes back as a pull request.
 (dl is short for directionallylocal; both work.)
 
 On your laptop:
-  dl                      set up the first time; afterwards, an overview
-  dl setup                set up or repair where your agents run (safe to re-run)
+  dl                      the first time: set up where agents run, pick a provider and model
+                          in Autopilot's list, then talk to an agent. Afterwards: a session.
   dl  (in a GitHub repo)  talk to the repository's agent; it keeps running when you leave
-  dl new                  in a GitHub repo: start a fresh conversation for it
-  dl status               where your agents run and what they're doing (works anywhere)
+                          (--no-local-changes: start from the pushed commit, send no patch)
+  dl  (anywhere else)     a chat with an agent on your default place, resumed per directory
+  dl setup                set up or repair where your agents run (safe to re-run)
+  dl new                  start a fresh conversation here (the old one keeps running)
+  dl status               where your agents run, their provider, model and versions, and what they're doing
   dl connect URL          connect to a server someone else set up (approve the code it shows)
   dl run "TASK"           run a task, from inside a GitHub repository
                           (your uncommitted changes go along; Ctrl-C stops watching, not the task)
@@ -42,9 +46,11 @@ On your laptop:
   dl preview ID           deploy a task's Workers branch on the server and open it here
   dl servers              where agents run (dl servers remove NAME · dl servers rename OLD NEW)
   dl use [NAME]           where tasks go without --server (no NAME: show it)
-  dl keys [openrouter|github]   which keys are set, or replace one (--server NAME)
-  dl model [ID]           the model for tasks and sessions (no ID: pick from a list)
-  dl update [NAME]        update a server's Autopilot, Hotcell and sandbox image
+  dl provider             the provider and GitHub token on each place (dl keys is the same)
+  dl provider set         pick another provider, key and model in Autopilot's list (--server NAME)
+  dl provider github      replace the GitHub token
+  dl model [ID]           the model for tasks and sessions on a place (no ID: Autopilot's list)
+  dl update [NAME]        update a place's Autopilot, Hotcell and sandbox image to the versions dl pins
                           (--wait: wait for running tasks instead of asking)
   run options: --server NAME, -m/--model MODEL, --repo OWNER/NAME, --detach
   dl local status         agents running on this computer: running?, where, how many fit
@@ -61,16 +67,19 @@ On the server:
   dl previews             live previews: task, port, branch
   dl logs [hotcell|autopilot] [-f]   the services' logs
   dl doctor               check every part, with a fix for each problem
-  dl keys [set openrouter|github]   which keys are set, or replace one (hidden input)
+  dl keys [set <provider>|github]   which keys are set, or replace one (hidden input)
+                          <provider>: openrouter, deepseek, openai, ollama, … (--base-url URL for a custom one)
   dl uninstall [--purge]  remove everything (--purge also removes config and data)
 
 up options:
-  --autopilot-version <x.y.z>   default: latest on npm
+  --autopilot-version <x.y.z>   default: the version this dl ships with (${pinnedAutopilotVersion()})
   --hotcell-version <x.y.z>     default: latest on npm
 
 Unattended installs answer the questions with environment variables:
   DL_TAILSCALE_AUTH_KEY   Tailscale auth key (tskey-…), unless this machine is already on a tailnet
-  DL_OPENROUTER_API_KEY   model key, stored in Hotcell only
+  DL_PROVIDER             model provider id (deepseek, openai, ollama, …; default openrouter)
+  DL_PROVIDER_API_KEY     its key, stored in Hotcell only (DL_OPENROUTER_API_KEY: the OpenRouter shorthand)
+  DL_PROVIDER_BASE_URL    its address, for a provider Hotcell has no built-in route for
   DL_GITHUB_TOKEN         GitHub token for cloning, pushing, and opening PRs
 
 Advanced:
@@ -83,7 +92,7 @@ Used by the laptop's setup (over SSH, as root):
                               install with the keys as one JSON object on stdin; progress as JSON lines
   dl up --needs [--access ssh]   which keys dl up would still need, as JSON; changes nothing
   dl pair --name NAME --json     a credential for that laptop, as JSON
-  dl keys set openrouter|github --stdin --json   replace a key read from stdin
+  dl keys set <provider>|github --stdin --json   replace a key read from stdin
 `;
 
 export async function main(
@@ -122,10 +131,14 @@ export async function main(
         identity: { type: "string" },
         stdin: { type: "boolean" },
         wait: { type: "boolean" },
+        "base-url": { type: "string" },
+        "auth-header": { type: "string" },
+        "auth-format": { type: "string" },
+        "no-local-changes": { type: "boolean" },
       },
     });
   } catch (error) {
-    io.err(`${(error as Error).message}\n\n${HELP}`);
+    io.err(`${(error as Error).message}\n\n${HELP()}`);
     return 2;
   }
   const [command] = parsed.positionals;
@@ -135,11 +148,11 @@ export async function main(
     return 0;
   }
   if (values.help || command === "help") {
-    io.out(HELP);
+    io.out(HELP());
     return 0;
   }
   if (values.events !== undefined && values.events !== "json") {
-    io.err(`--events takes json (got "${values.events}").\n\n${HELP}`);
+    io.err(`--events takes json (got "${values.events}").\n\n${HELP()}`);
     return 2;
   }
   let access;
@@ -222,16 +235,17 @@ export async function main(
         const state = await readState(system);
         if (!state) {
           if (values.brief) return 0;
-          // Inside a GitHub repository, that repository's conversation; elsewhere, the laptop's home.
+          // Bare dl with a place set up: a session here (the repository's inside a GitHub
+          // repository, a chat anywhere else). `dl status` is the overview.
           if (!command && terminal && (await loadRemotes()).length > 0) {
-            const code = await projectSession({ cwd: process.cwd(), ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}) }, laptopIO);
+            const code = await openSession({ cwd: process.cwd(), ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}), ...(values["no-local-changes"] ? { noLocalChanges: true } : {}) }, laptopIO);
             if (code !== undefined) return code;
           }
-          // A laptop connected to servers gets its own home (`dl status` shows it from anywhere);
+          // A laptop connected to places gets its own overview (`dl status` shows it from anywhere);
           // otherwise, what this is and how to start.
-          if ((!command || command === "status") && await laptopHome(laptopIO, undefined, undefined, { ssh: realSshExec })) return 0;
+          if ((!command || command === "status") && await laptopHome(laptopIO, undefined, undefined, { ssh: realSshExec, local: localAutopilotVersion })) return 0;
           // A laptop with nothing set up yet: the wizard (it needs someone to answer it).
-          if (!command && terminal && !isRoot() && (await loadRemotes()).length === 0) return await setup({ io: laptopIO, terminal, localSetup: (input) => setUpOnThisComputer(input) });
+          if (!command && terminal && !isRoot() && (await loadRemotes()).length === 0) return await setup({ io: laptopIO, terminal });
           io.out(NOT_A_SERVER(colors));
           return command ? 1 : 0;
         }
@@ -248,7 +262,7 @@ export async function main(
         return 0;
       }
       case "setup":
-        return await setup({ io: laptopIO, terminal, localSetup: (input) => setUpOnThisComputer(input), ...(values.identity ? { identityFile: values.identity } : {}) });
+        return await setup({ io: laptopIO, terminal, ...(values.identity ? { identityFile: values.identity } : {}) });
       case "update":
         return await update(parsed.positionals.slice(1), {
           ssh: realSshExec,
@@ -257,6 +271,12 @@ export async function main(
           io: laptopIO,
           interactive: terminal,
           wait: Boolean(values.wait),
+          local: async (updateUi) => {
+            const { remote: _remote, ...rest } = await setUpOnThisComputer({ ui: updateUi, prompter: new TtyPrompter() });
+            void rest;
+            const status = await localStatus();
+            return status.state ? { autopilot: status.state.autopilotVersion, hotcell: status.state.hotcellVersion } : undefined;
+          },
         });
       case "connect": {
         const url = parsed.positionals[1];
@@ -278,6 +298,7 @@ export async function main(
           cwd: process.cwd(),
           signal,
           detach: Boolean(values.detach),
+          ...(values["no-local-changes"] ? { noLocalChanges: true } : {}),
           ...(values.server ? { server: values.server } : {}),
           ...(values.model ? { model: values.model } : {}),
           ...(values.repo ? { repository: values.repo } : {}),
@@ -298,9 +319,13 @@ export async function main(
         return 0;
       }
       case "new": {
-        const code = await projectSession({ cwd: process.cwd(), fresh: true, ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}) }, laptopIO);
+        if ((await loadRemotes()).length === 0) {
+          io.err(`  dl new starts a fresh conversation once something is set up: dl\n`);
+          return 1;
+        }
+        const code = await openSession({ cwd: process.cwd(), fresh: true, ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}), ...(values["no-local-changes"] ? { noLocalChanges: true } : {}) }, laptopIO);
         if (code !== undefined) return code;
-        io.err(`  dl new starts a fresh conversation from inside a GitHub repository (with something set up: dl setup).\n`);
+        io.err(`  dl new starts a fresh conversation on a place; pick one with --server NAME.\n`);
         return 1;
       }
       case "preview": {
@@ -336,7 +361,7 @@ export async function main(
       case "use":
         return await use(parsed.positionals.slice(1), laptopIO);
       case "model":
-        return await model(parsed.positionals.slice(1), { io: laptopIO, terminal });
+        return await model(parsed.positionals.slice(1), { io: laptopIO, terminal, ...(values.server ? { server: values.server } : {}) });
       case "runs":
         // On a server, its runs; on a laptop, the tasks it sent.
         if (!(await readState(system))) {
@@ -362,14 +387,21 @@ export async function main(
         if (command === "runs") return await serverRunsCommand(system, io.out, colors);
         return await logsCommand(system, [...rest, ...(values.follow ? ["-f"] : [])]);
       }
+      case "provider":
       case "keys": {
-        // On a server, its own keys (as root); on a laptop, the keys where its agents run.
-        if (!(await readState(system))) return await keys(parsed.positionals.slice(1), { ...(values.server ? { server: values.server } : {}), io: laptopIO, terminal });
+        // On a server, its own keys (as root); on a laptop, the provider and keys where its agents run.
+        if (!(await readState(system))) return await providerCommand(parsed.positionals.slice(1), { ...(values.server ? { server: values.server } : {}), io: laptopIO, terminal });
         if (!isRoot()) {
           io.err(`  Run it as root: sudo dl ${parsed.positionals.join(" ")}\n`);
           return 1;
         }
-        return await serverKeysCommand(system, parsed.positionals.slice(1), { json: Boolean(values.json), stdin: Boolean(values.stdin) }, {
+        return await serverKeysCommand(system, parsed.positionals.slice(1), {
+          json: Boolean(values.json),
+          stdin: Boolean(values.stdin),
+          ...(values["base-url"] ? { baseUrl: values["base-url"] } : {}),
+          ...(values["auth-header"] ? { authHeader: values["auth-header"] } : {}),
+          ...(values["auth-format"] ? { authFormat: values["auth-format"] } : {}),
+        }, {
           out: io.out, err: io.err, colors, stdin: options.stdin ?? process.stdin, prompter: new TtyPrompter(),
         });
       }
@@ -379,7 +411,7 @@ export async function main(
         await uninstall(system, { purge: Boolean(values.purge) });
         return 0;
       default:
-        io.err(`Unknown command "${command}".\n\n${HELP}`);
+        io.err(`Unknown command "${command}".\n\n${HELP()}`);
         return 2;
     }
   } catch (error) {
@@ -453,6 +485,15 @@ async function interruptible<T>(work: (signal: AbortSignal) => Promise<T>): Prom
 
 function isRoot(): boolean {
   return process.getuid?.() === 0;
+}
+
+/** The Autopilot version "this computer" runs, for `dl status`; undefined when it isn't set up here. */
+async function localAutopilotVersion(): Promise<string | undefined> {
+  try {
+    return (await localStatus()).state?.autopilotVersion;
+  } catch {
+    return undefined;
+  }
 }
 
 /** From package.json, which sits one level above both src/ and dist/. */

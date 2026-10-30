@@ -4,7 +4,7 @@ import { hostname } from "node:os";
 import { promisify } from "node:util";
 import { isModelNotPriced } from "../model-prices.js";
 import { palette } from "../ui.js";
-import { RemoteApiError, RemoteClient, TERMINAL_STATUSES, type RemoteConversation, type RemoteEvent } from "./client.js";
+import { RemoteApiError, RemoteClient, TERMINAL_STATUSES, type ModelCatalog, type RemoteConversation, type RemoteEvent } from "./client.js";
 import {
   defaultRemoteName, loadRemotes, loadRemotesFile, normalizeServerUrl, recordLastUsed, REMOTE_NAME_RE, removeRemote, renameRemote, resolveRemote, resolveTarget,
   saveRemote, setDefaultRemote, type RemoteServer, type TargetReason,
@@ -15,8 +15,9 @@ import { DEFAULT_MODEL, laptopModel } from "./settings.js";
 import { sshCommandLine } from "./ssh.js";
 import { openBrowser } from "./open-browser.js";
 import { withConnections, type Connections, type RemoteOpener } from "./tunnel.js";
-import { outdatedServers, type LatestVersions } from "./update.js";
+import { outdatedServers, placeVersions, type LatestVersions } from "./update.js";
 import type { SshExec } from "./ssh.js";
+import { pinnedAutopilotVersion } from "../versions.js";
 
 export { DEFAULT_MODEL, readAutopilotModel } from "./settings.js";
 
@@ -92,24 +93,26 @@ export async function run(input: {
   preferredModel?: string;
   repository?: string;
   detach?: boolean;
+  /** `dl --no-local-changes`: start from the base commit and send no patch. */
+  noLocalChanges?: boolean;
   signal?: AbortSignal;
   open?: RemoteOpener;
-  /** This laptop's default model (dl model, else Autopilot's); read from their configs unless replaced (tests). */
-  autopilotModel?: () => Promise<string | undefined>;
+  /** This laptop's default model for the place (dl model, else Autopilot's); read from their configs unless replaced (tests). */
+  autopilotModel?: (place: string) => Promise<string | undefined>;
 }, io = processIO): Promise<number> {
   const { remote, reason } = await resolveTarget(input.server);
-  const preferred = input.preferredModel ?? await (input.autopilotModel ?? laptopModel)();
+  const preferred = input.preferredModel ?? await (input.autopilotModel ?? laptopModel)(remote.name);
   return withConnections(input.open, async (connections) => runOn(await connections.client(remote), remote, reason, { ...input, ...(preferred ? { preferredModel: preferred } : {}) }, io));
 }
 
 async function runOn(client: RemoteClient, remote: RemoteServer, reason: TargetReason, input: Parameters<typeof run>[0], io: LaptopIO): Promise<number> {
   const c = palette(io.color === true);
   const repository = input.repository ?? await detectGitHubRepository(input.cwd);
-  const snapshot = await snapshotWorkingTree(input.cwd);
-  const [workspaces, models] = await Promise.all([client.workspaces(), client.models()]);
+  const snapshot = await snapshotWorkingTree(input.cwd, { localChanges: input.noLocalChanges !== true });
+  const [workspaces, catalog] = await Promise.all([client.workspaces(), client.catalog()]);
   const workspace = workspaces[0];
   if (!workspace) throw new Error(`${remote.name} has no workspace this laptop can use`);
-  const model = pickModel(models, input.model, input.preferredModel);
+  const model = pickModel(catalog, input.model, input.preferredModel);
 
   const changes = snapshot.files.length ? ` + ${snapshot.files.length} local change${snapshot.files.length === 1 ? "" : "s"}` : "";
   const why = reason === "default" || reason === "last used" ? ` ${c.dim(`(${reason})`)}` : "";
@@ -138,7 +141,7 @@ async function runOn(client: RemoteClient, remote: RemoteServer, reason: TargetR
 /** `dl runs`: tasks on every connected server, newest first. */
 export async function runs(input: { server?: string; json?: boolean; open?: RemoteOpener }, io = processIO): Promise<void> {
   const remotes = input.server ? [await resolveRemote(input.server)] : await loadRemotes();
-  if (remotes.length === 0) throw new Error("Nothing is set up yet. Run: dl setup  (or, for a server someone else set up: dl connect https://your-server)");
+  if (remotes.length === 0) throw new Error("Nothing is set up yet. Run: dl  (or, for a server someone else set up: dl connect https://your-server)");
   return withConnections(input.open, (connections) => listRuns(remotes, connections, input.json === true, io));
 }
 
@@ -298,38 +301,56 @@ export async function renameServer(args: string[], io = processIO, path?: string
   return 0;
 }
 
-/** `dl` on a laptop: what this is, which servers it's connected to, what to type next. */
+/** `dl status` on a laptop: what this is, which places it's connected to, what to type next. */
 export async function laptopHome(
   io = processIO,
   open?: RemoteOpener,
-  model: () => Promise<string | undefined> = laptopModel,
-  versions?: { ssh: SshExec; latest?: () => Promise<LatestVersions | undefined> },
+  model: (place: string) => Promise<string | undefined> = laptopModel,
+  versions?: { ssh: SshExec; latest?: () => Promise<LatestVersions | undefined>; laptop?: string; local?: () => Promise<string | undefined> },
 ): Promise<boolean> {
   const c = palette(io.color === true);
   const remotes = await loadRemotes();
   if (remotes.length === 0) return false;
   let running = 0;
   let total = 0;
+  const providers = new Map<string, { provider?: string; model?: string }>();
   await withConnections(open, async (connections) => {
     for (const remote of remotes) {
-      const list = await connections.client(remote).then((client) => client.listConversations()).catch(() => undefined);
+      const client = await connections.client(remote).catch(() => undefined);
+      const list = await client?.listConversations().catch(() => undefined);
       running += list?.filter((entry) => entry.activeRunId !== null).length ?? 0;
       total += list?.length ?? 0;
+      const catalog = await client?.catalog().catch(() => undefined);
+      providers.set(remote.name, { ...(catalog?.provider ? { provider: catalog.provider.name } : {}), ...(catalog?.defaultModel ? { model: catalog.defaultModel } : {}) });
     }
   });
-  const [current, chosen, outdated] = await Promise.all([
+  const [current, outdated, installed] = await Promise.all([
     defaultName(),
-    model(),
     versions ? outdatedServers(remotes, versions).catch(() => []) : Promise.resolve([]),
+    versions ? placeVersions(remotes, versions).catch(() => new Map<string, string>()) : Promise.resolve(new Map<string, string>()),
   ]);
+  const models = new Map(await Promise.all(remotes.map(async (remote) => [remote.name, await model(remote.name)] as const)));
   io.out(`\n  ${c.bold("Directionally Local")}  ${c.dim("on this laptop")}\n\n`);
   io.out("  Coding agents that run on this computer or your own server: send a task, get a pull request back.\n\n");
   io.out(`  ${c.dim("Runs on".padEnd(11))}${remotes.map((remote) => `${mark(remote, current, c)} ${remote.name} ${c.dim(where(remote))}`).join(", ")}   ${c.dim(remotes.length > 1 ? "dl servers · dl use NAME" : "dl servers")}\n`);
   io.out(`  ${c.dim("Tasks".padEnd(11))}${running} running · ${total} in all   ${c.dim("dl runs")}\n`);
-  io.out(`  ${c.dim("Model".padEnd(11))}${chosen ?? DEFAULT_MODEL}   ${c.dim("dl model")}\n`);
+  for (const remote of remotes) {
+    const info = providers.get(remote.name) ?? {};
+    const chosen = models.get(remote.name) ?? info.model ?? DEFAULT_MODEL;
+    const prefix = remotes.length > 1 ? `${remote.name} · ` : "";
+    const first = remotes.indexOf(remote) === 0;
+    io.out(`  ${c.dim((first ? "Model" : "").padEnd(11))}${prefix}${info.provider ? `${info.provider} · ` : ""}${chosen}${first ? `   ${c.dim("dl model · dl provider")}` : ""}\n`);
+  }
+  const laptop = versions?.laptop ?? pinnedAutopilotVersion();
+  const places = remotes.map((remote) => `${remote.name} ${installed.get(remote.name) ?? "?"}`).join(" · ");
+  io.out(`  ${c.dim("Autopilot".padEnd(11))}${laptop} here · ${places}\n`);
+  for (const remote of remotes) {
+    const version = installed.get(remote.name);
+    if (version && version !== laptop) io.out(`  ${c.yellow("!")} ${remote.name} runs Autopilot ${version}, this laptop ${laptop}   ${c.dim(`dl update ${remote.name}`)}\n`);
+  }
   for (const entry of outdated) io.out(`  ${c.yellow("!")} ${entry.name} is behind: ${entry.notice}   ${c.dim(`dl update ${entry.name}`)}\n`);
   io.out("\n");
-  io.out(`  ${c.dim("Start a session: cd into a GitHub repository, then type")}  ${c.bold("dl")}\n`);
+  io.out(`  ${c.dim("Talk to an agent: type")}  ${c.bold("dl")}  ${c.dim("(inside a GitHub repository, it works on that repository; elsewhere, a chat)")}\n`);
   io.out(`  ${c.dim("Or hand off a one-off task:")}  ${c.bold('dl run "fix the flaky checkout test"')}\n\n`);
   return true;
 }
@@ -455,19 +476,22 @@ async function findRun(id: string, server: string | undefined, connections: Conn
 }
 
 /**
- * The task's model: -m/--model; else the laptop's default (dl model, else Autopilot's), if the server offers it;
- * else DEFAULT_MODEL, if offered. Never just the first in the server's list (that's the
- * whole OpenRouter catalog, in no useful order).
+ * The task's model: -m/--model; else the laptop's model for the place (dl model, else
+ * Autopilot's), if the place offers it; else the place's own default (the one chosen in
+ * Autopilot's picker); else DEFAULT_MODEL, if offered. Never just the first in the list
+ * (that's a whole catalog, in no useful order).
  */
-export function pickModel(models: string[], requested: string | undefined, preferred: string | undefined): string {
-  const how = `Pick one: dl run -m <model> "task"  (model IDs: https://openrouter.ai/models)`;
+export function pickModel(catalog: ModelCatalog | string[], requested: string | undefined, preferred: string | undefined): string {
+  const { models, defaultModel, provider } = Array.isArray(catalog) ? { models: catalog, defaultModel: undefined, provider: undefined } : catalog;
+  const how = `Pick one: dl run -m <model> "task"  (or dl model, for ${provider?.name ?? "the provider"}'s list)`;
   if (requested) {
     if (!models.includes(requested)) throw new Error(`The server doesn't offer ${requested}. ${how}`);
     return requested;
   }
   if (preferred && models.includes(preferred)) return preferred;
+  if (defaultModel && models.includes(defaultModel)) return defaultModel;
   if (models.includes(DEFAULT_MODEL)) return DEFAULT_MODEL;
-  if (models.length === 0) throw new Error("The server offers no models; check its OpenRouter key (on the server: dl doctor)");
+  if (models.length === 0) throw new Error(`The server offers no models; check its ${provider?.name ?? "provider"} key (dl provider)`);
   const tried = preferred && preferred !== DEFAULT_MODEL ? `your model (${preferred}) or ${DEFAULT_MODEL}` : DEFAULT_MODEL;
   throw new Error(`The server doesn't offer ${tried}. ${how}`);
 }
@@ -509,8 +533,8 @@ export function failureHint(reason: string): string | undefined {
   const text = reason.toLowerCase();
   if (/context window|token limit|too many tokens|maximum context/.test(text)) return "pick a model with a bigger window: dl model";
   if (/not priced|no such model|model not found|not offered|unknown model/.test(text)) return "pick another model: dl model";
-  if (/rate limit|429|quota/.test(text)) return "wait a moment, or check the OpenRouter key: dl keys openrouter";
-  if (/git_push_failed|push failed|permission denied|bad credentials|401/.test(text)) return "check the GitHub token: dl keys github";
+  if (/rate limit|429|quota/.test(text)) return "wait a moment, or check the provider's key: dl provider";
+  if (/git_push_failed|push failed|permission denied|bad credentials|401/.test(text)) return "check the GitHub token: dl provider github";
   if (/out of memory|oom|killed/.test(text)) return "the sandbox ran out of memory; try a smaller task";
   return undefined;
 }

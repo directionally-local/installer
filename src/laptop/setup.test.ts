@@ -6,26 +6,23 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { FakeSshServer } from "../test-support/fake-ssh.js";
 import { fakeTunnels } from "../test-support/fake-tunnel.js";
-import { ScriptedPrompter, type SelectOption, type SelectResult } from "../prompt.js";
+import { ScriptedPrompter } from "../prompt.js";
 import { RecordingUi } from "../ui.js";
 import { loadRemotes, loadRemotesFile, saveRemote, type RemoteServer } from "./config.js";
+import { ConnectCancelled } from "./connect.js";
+import { PromptCancelled } from "../prompt.js";
+import type { ConnectResult } from "../provider.js";
+import type { ServerAnswers } from "./remote-install.js";
 import { loadSettings } from "./settings.js";
 import { serverLabel, setupWizard, type LocalSetup, type SetupDeps } from "./setup.js";
-import { withCatalog } from "../test-support/fake-catalog.js";
 import { createOpener } from "./tunnel.js";
 
 const GH = `gho_${"a".repeat(36)}`;
-const OR = "sk-or-v1-fromautopilot0000";
 const TOKEN = `aster_laptop_token_${"0".repeat(34)}`;
-
-/** A ScriptedPrompter that also keeps each list it was shown. */
-class RecordingSelect extends ScriptedPrompter {
-  readonly selects: Array<{ question: string; options: SelectOption[]; initial: number }> = [];
-  override async select(question: string, options: SelectOption[], initial = 0): Promise<SelectResult> {
-    this.selects.push({ question, options, initial });
-    return super.select(question, options, initial);
-  }
-}
+/** What Autopilot's picker chose, as `autopilot connect --state-file` writes it. */
+const DEEPSEEK: ConnectResult = { provider: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com", apiKey: "sk-deepseek-secretsecret", apiKeyEnv: "DEEPSEEK_API_KEY", keyRequired: true, model: "deepseek-v4-pro" };
+const OLLAMA: ConnectResult = { provider: "ollama", name: "Ollama", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null, apiKeyEnv: null, keyRequired: false, model: "qwen3:32b" };
+const WIRE_DEEPSEEK = { id: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: DEEPSEEK.apiKey, apiKeyEnv: "DEEPSEEK_API_KEY" };
 
 let root: string;
 let api: Server;
@@ -55,9 +52,11 @@ afterEach(async () => {
 
 function deps(server: FakeSshServer, answers: Record<string, string>, extra: Partial<SetupDeps> = {}) {
   const ui = new RecordingUi();
-  const prompter = new ScriptedPrompter({ Model: "", ...answers });
+  const prompter = new ScriptedPrompter({ "Use your GitHub CLI login": "", ...answers });
   let text = "";
   const tunnels = fakeTunnels(apiPort, { delayMs: 5 });
+  const connects: Array<{ modelOnly?: boolean }> = [];
+  const sessions: RemoteServer[] = [];
   const value: SetupDeps = {
     newUi: () => ui,
     prompter,
@@ -70,7 +69,6 @@ function deps(server: FakeSshServer, answers: Record<string, string>, extra: Par
       home: "/home/me",
       readFile: async (path) => {
         if (path === "/home/me/.ssh/config") return "Host box\n  HostName 203.0.113.10\n  User root\n\nHost *\n  ServerAliveInterval 30\n";
-        if (path === "/home/me/.config/kimiflare/config.json") return JSON.stringify({ openrouterApiKey: OR });
         return undefined;
       },
       listDir: async () => ["config", "id_ed25519", "id_ed25519.pub", "work", "work.pub"],
@@ -80,18 +78,28 @@ function deps(server: FakeSshServer, answers: Record<string, string>, extra: Par
     hostname: "sinas-mbp.local",
     remotesFile: join(root, "remotes.json"),
     settingsFile: join(root, "config.json"),
+    connect: async (options) => { connects.push(options); return DEEPSEEK; },
+    openSession: async (remote) => { sessions.push(remote); return 0; },
     // The same on every machine the tests run on (Windows has its own test).
     platform: "linux",
     now: () => new Date("2026-10-28T09:00:00.000Z"),
     ...extra,
   };
-  return { deps: value, ui, prompter, text: () => text, tunnels };
+  return { deps: value, ui, prompter, text: () => text, tunnels, connects, sessions };
+}
+
+/** "On this computer" as the wizard sees it: installs (recording what it was given), then stores what the wizard gathered. */
+function fakeLocal(remote: RemoteServer, needs: Array<"provider" | "github"> = ["provider", "github"]) {
+  const installs: Array<Parameters<LocalSetup>[0]["answers"]> = [];
+  const configured: ServerAnswers[] = [];
+  const localSetup: LocalSetup = async ({ answers }) => { installs.push(answers); return { remote, capacity: 4, needs }; };
+  return { installs, configured, localSetup, localConfigure: async (answers: ServerAnswers) => { configured.push(answers); } };
 }
 
 describe("dl setup on a laptop", () => {
-  it("sets up a server from ~/.ssh/config with the laptop's keys, then asks nothing the second time", async () => {
+  it("sets up a server from ~/.ssh/config, hands provider and model to Autopilot's picker, then opens a session; the second time asks nothing", async () => {
     const server = new FakeSshServer();
-    const first = deps(server, { Where: "2", Server: "1", "Use your GitHub CLI login (sinameraji)? It stays on your server.": "", "Use the OpenRouter key from Autopilot?": "" });
+    const first = deps(server, { Where: "2", Server: "1", "Use your GitHub CLI login (sinameraji)? It stays on your server.": "" });
     const remote = await setupWizard(first.deps);
 
     assert.match(first.text(), /Directionally Local\n  Background coding agents\. Where should they run\?/);
@@ -103,21 +111,28 @@ describe("dl setup on a laptop", () => {
     assert.ok(events.includes("done Installing dl | 0.2.0"));
     assert.ok(events.includes("done image | built"));
     assert.ok(events.includes("done access | private · reached over SSH"));
+    // Install first, then Autopilot's own picker (one line of its outcome), then GitHub, then one quiet store.
+    assert.deepEqual(first.connects, [{}], "the whole picker: provider, key and model");
+    const provider = events.indexOf("line done Provider | DeepSeek · deepseek-v4-pro · key stays on your server");
+    assert.ok(provider > events.indexOf("done access | private · reached over SSH"), events.join("\n"));
+    assert.ok(events.indexOf("answered GitHub | signed in as sinameraji · from the GitHub CLI") > provider);
+    assert.ok(events.includes("done keys | DeepSeek · GitHub"));
     assert.ok(events.includes("line done This laptop | connected as box"));
-    assert.ok(events.includes("questions 2 keys, kept on your server only; then it sets itself up."));
-    assert.deepEqual(events.slice(events.indexOf("ready Ready · fits ~6 agents at once (estimate)")), [
-      "ready Ready · fits ~6 agents at once (estimate)",
-      "item Start a session: cd into a GitHub repository, then type | dl",
-      'item Or hand off a one-off task | dl run "fix the flaky checkout test"',
-      "footer dl status shows where agents run and what they're doing.",
-    ]);
-    assert.ok(!first.prompter.asked.some((question) => question.includes("by default")), "the first place becomes the default without asking");
+    assert.ok(!events.some((event) => event.startsWith("ready") || event.startsWith("item") || event.includes("Model")), "no Ready screen and no model list of dl's own");
+    assert.match(first.text(), /\n {2}✓ Ready · fits ~6 agents at once\n$/, "one line, then the session");
+    assert.deepEqual(first.sessions, [remote], "a session opens right away, on the new place");
+    assert.deepEqual(first.prompter.asked, ["Where", "Server", "Use your GitHub CLI login (sinameraji)? It stays on your server."]);
 
-    // The keys went to the server on stdin, never in a command line.
-    const install = server.calls.find((call) => call.command.includes("--answers-stdin"))!;
-    assert.deepEqual(JSON.parse(install.input!), { githubToken: GH, openrouterKey: OR });
-    for (const call of server.calls) assert.ok(!call.command.includes(GH) && !call.command.includes(OR));
+    // The server was installed without keys, then got them in a second pass, on stdin; never in a command line.
+    const passes = server.calls.filter((call) => call.command.includes("--answers-stdin"));
+    assert.equal(passes.length, 2);
+    assert.deepEqual(JSON.parse(passes[0]!.input!), {});
+    assert.deepEqual(JSON.parse(passes[1]!.input!), { provider: WIRE_DEEPSEEK, githubToken: GH });
+    assert.ok(server.calls.findIndex((call) => call.command.includes("--needs")) > server.calls.indexOf(passes[0]!), "asked what it lacks once installed");
+    for (const call of server.calls) assert.ok(!call.command.includes(GH) && !call.command.includes(DEEPSEEK.apiKey!));
     assert.deepEqual(server.paired, ["sinas-mbp (dl)"]);
+    // The model is dl's to remember, per place.
+    assert.deepEqual((await loadSettings(join(root, "config.json"))).placeModels, { box: "deepseek-v4-pro" });
 
     const expected: RemoteServer = {
       name: "box", url: "http://127.0.0.1:4096", token: TOKEN, credentialId: "cred-1", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z", ssh: { target: "box" },
@@ -129,34 +144,43 @@ describe("dl setup on a laptop", () => {
     const again = deps(server, { Where: "2", Server: "1" });
     await setupWizard(again.deps);
     assert.deepEqual(again.prompter.asked, ["Where", "Server"], "no key or model questions the second time");
-    assert.ok(again.ui.events.includes("line done Keys | already on the server"));
+    assert.deepEqual(again.connects, [], "Autopilot's picker isn't run again either");
+    assert.ok(again.ui.events.includes("line done Keys | already on your server"));
+    assert.equal(server.calls.filter((call) => call.command.includes("--answers-stdin")).length, 3, "one repair pass, no key pass");
     assert.deepEqual(server.paired, ["sinas-mbp (dl)"], "the saved credential still works, so no second pairing");
     assert.equal((await loadRemotes(join(root, "remotes.json"))).length, 1);
+    assert.deepEqual(again.sessions.map((entry) => entry.name), ["box"], "and a session opens again");
   });
 
-  it("asks for the model once, with Autopilot's preselected and OpenRouter's prices shown", async () => {
+  it("stores a keyless provider without a key, and asks only for what the server lacks", async () => {
     const server = new FakeSshServer();
-    const run = deps(server, { Where: "2", Server: "1", "Use your GitHub CLI": "", "Use the OpenRouter key": "" });
-    const prompter = new RecordingSelect({ Model: "", Where: "2", Server: "1", "Use your GitHub CLI": "", "Use the OpenRouter key": "" });
-    run.deps.prompter = prompter;
-    const { readFile } = run.deps.sources;
-    run.deps.sources = {
-      ...run.deps.sources,
-      readFile: async (path) => path === "/home/me/.config/kimiflare/config.json" ? JSON.stringify({ openrouterApiKey: OR, model: "moonshotai/kimi-k2.6" }) : readFile(path),
-      fetch: withCatalog(run.deps.sources.fetch!),
-    };
+    server.installed = true;
+    server.keys.add("github");
+    const run = deps(server, { Where: "2", Server: "1" }, { connect: async () => OLLAMA });
     await setupWizard(run.deps);
-    const shown = prompter.selects.find((entry) => entry.question === "Model")!;
-    assert.equal(shown.options[shown.initial]!.value, "moonshotai/kimi-k2.6");
-    assert.match(shown.options[shown.initial]!.detail ?? "", /\$0\.6 in \/ \$2\.5 out per M tokens/);
-    assert.ok(run.ui.events.includes("answered Model | moonshotai/kimi-k2.6  (change it any time: dl model)"));
-    assert.equal((await loadSettings(join(root, "config.json"))).model, "moonshotai/kimi-k2.6");
+    assert.deepEqual(run.prompter.asked, ["Where", "Server"], "GitHub is already there");
+    assert.deepEqual(server.answers.at(-1), { provider: { id: "ollama", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null, apiKeyEnv: null } });
+    assert.ok(run.ui.events.includes("line done Provider | Ollama · qwen3:32b · key stays on your server"));
+    assert.ok(run.ui.events.includes("done keys | Ollama"));
+    assert.deepEqual((await loadSettings(join(root, "config.json"))).placeModels, { box: "qwen3:32b" });
+  });
+
+  it("stops quietly when Autopilot's picker is cancelled; the install stays and the next run picks up there", async () => {
+    const server = new FakeSshServer();
+    const run = deps(server, { Where: "2", Server: "1" }, { connect: async () => { throw new ConnectCancelled(); } });
+    await assert.rejects(() => setupWizard(run.deps), PromptCancelled);
+    assert.ok(server.installed, "the server is installed");
+    assert.equal(server.calls.filter((call) => call.command.includes("--answers-stdin")).length, 1, "no key pass");
+    assert.deepEqual(run.sessions, []);
+    const again = deps(server, { Where: "2", Server: "1" });
+    await setupWizard(again.deps);
+    assert.deepEqual(again.connects, [{}], "asked again, since the server still lacks it");
   });
 
   it("tries the keys in ~/.ssh without asking when the server refuses the default ones", async () => {
     const server = new FakeSshServer();
     server.acceptedKeys = ["/home/me/.ssh/work"];
-    const run = deps(server, { Where: "2", "Server address": "admin@198.51.100.7:2222", Server: "2", "Use your GitHub CLI": "y", "Use the OpenRouter key": "y" });
+    const run = deps(server, { Where: "2", "Server address": "admin@198.51.100.7:2222", Server: "2", "Use your GitHub CLI": "y" });
     server.probe = "1000\nadmin\ndebian 12\nx86_64\nsudo\n";
     const remote = await setupWizard(run.deps);
     const events = run.ui.events;
@@ -183,10 +207,11 @@ describe("dl setup on a laptop", () => {
     await saveRemote(other, remotesFile);
     const server = new FakeSshServer();
     server.probe = "0\nroot\nubuntu 24.04\naarch64\nroot\nUbuntu-4GB-nbg1-1\n";
-    const run = deps(server, { Where: "2", "Server address": "root@91.107.187.162", Server: "2", "GitHub CLI": "y", "OpenRouter key": "y" });
+    const run = deps(server, { Where: "2", "Server address": "root@91.107.187.162", Server: "2", "GitHub CLI": "y" });
     const remote = await setupWizard(run.deps);
     assert.equal(remote?.name, "ubuntu-4gb-nbg1-1-2");
     assert.ok(run.ui.events.includes("line done This laptop | connected as ubuntu-4gb-nbg1-1-2"));
+    assert.deepEqual((await loadSettings(join(root, "config.json"))).placeModels, { "ubuntu-4gb-nbg1-1-2": "deepseek-v4-pro" }, "the model follows the place to its final name");
 
     assert.equal(serverLabel("Web_01.prod"), "web-01-prod");
     assert.equal(serverLabel("localhost"), undefined);
@@ -197,7 +222,7 @@ describe("dl setup on a laptop", () => {
   it("uses only the key named with --identity", async () => {
     const server = new FakeSshServer();
     server.acceptedKeys = ["/home/me/keys/hetzner"];
-    const run = deps(server, { Where: "2", Server: "root@203.0.113.10", "GitHub CLI": "y", "OpenRouter key": "y" }, { identityFile: "/home/me/keys/hetzner" });
+    const run = deps(server, { Where: "2", Server: "root@203.0.113.10", "GitHub CLI": "y" }, { identityFile: "/home/me/keys/hetzner" });
     const remote = await setupWizard(run.deps);
     assert.equal(server.calls.filter((call) => call.command.startsWith("id -u")).length, 1);
     assert.ok(run.ui.events.includes("done ssh | root@203.0.113.10 with ~/keys/hetzner · Ubuntu 24.04 · arm64"));
@@ -255,35 +280,70 @@ describe("dl setup on a laptop", () => {
     assert.equal(server.calls.length, 0);
   });
 
-  it("hands on-this-computer to localSetup with the keys, and saves what it returns", async () => {
+  it("installs on this computer first, then stores what Autopilot's picker and the GitHub CLI gave, and opens a session", async () => {
     const local: RemoteServer = { name: "this-computer", url: "http://127.0.0.1:4096", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" };
-    let received: Parameters<LocalSetup>[0]["answers"] | undefined;
-    const run = deps(new FakeSshServer(), { Where: "1", "GitHub CLI": "", "Autopilot": "" }, {
-      localSetup: async ({ answers }) => { received = answers; return { remote: local, capacity: 4 }; },
-    });
+    const fake = fakeLocal(local);
+    const run = deps(new FakeSshServer(), { Where: "1", "GitHub CLI": "" }, fake);
     assert.deepEqual(await setupWizard(run.deps), local);
-    assert.deepEqual(received, { githubToken: GH, openrouterKey: OR });
+    assert.deepEqual(fake.installs, [undefined], "installed without keys");
+    assert.deepEqual(fake.configured, [{ provider: { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com", apiKey: DEEPSEEK.apiKey, apiKeyEnv: "DEEPSEEK_API_KEY" }, githubToken: GH }]);
     assert.deepEqual(await loadRemotes(join(root, "remotes.json")), [local]);
     const events = run.ui.events;
-    assert.ok(events.includes("questions 2 keys, kept on this computer only; then it sets itself up."), events.join("\n"));
+    assert.ok(events.includes("line done Provider | DeepSeek · deepseek-v4-pro · key stays on this computer"), events.join("\n"));
     assert.ok(run.prompter.asked.includes("Use your GitHub CLI login (sinameraji)? It stays on this computer."), run.prompter.asked.join("\n"));
-    assert.ok(run.prompter.asked.includes("Use the OpenRouter key from Autopilot? It stays on this computer."));
+    assert.ok(events.includes("plan keys") && events.includes("done keys | DeepSeek · GitHub"));
     assert.ok(!events.some((event) => event.includes("your server")), "nothing says 'server' for this computer");
-    assert.ok(events.includes("ready Ready · fits ~4 agents at once (estimate)"));
+    assert.match(run.text(), /✓ Ready · fits ~4 agents at once\n$/);
+    assert.deepEqual(run.sessions, [local]);
+    assert.deepEqual((await loadSettings(join(root, "config.json"))).placeModels, { "this-computer": "deepseek-v4-pro" });
     assert.ok(!run.prompter.asked.some((question) => question.includes("by default")), "one place: no default question");
+
+    // Set up already: nothing to gather, no picker, straight to the session.
+    const done = fakeLocal(local, []);
+    const again = deps(new FakeSshServer(), { Where: "1" }, done);
+    await setupWizard(again.deps);
+    assert.deepEqual(again.connects, []);
+    assert.deepEqual(done.configured, []);
+    assert.ok(again.ui.events.includes("line done Keys | already on this computer"));
+    assert.deepEqual(again.sessions, [local]);
+  });
+
+  it("a run killed at the picker saves no place, so dl asks again instead of opening a session", async () => {
+    const local: RemoteServer = { name: "this-computer", url: "http://127.0.0.1:4096", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" };
+    const killed = deps(new FakeSshServer(), { Where: "1" }, {
+      ...fakeLocal(local),
+      connect: async () => { throw new PromptCancelled(); },
+    });
+    await assert.rejects(() => setupWizard(killed.deps), PromptCancelled);
+    assert.deepEqual(await loadRemotes(join(root, "remotes.json")), [], "no place saved before the keys are stored");
+    assert.deepEqual(killed.sessions, [], "no session before the picker");
+
+    // Run again: the picker is shown again, and only then does a session open.
+    const again = deps(new FakeSshServer(), { Where: "1", "GitHub CLI": "" }, fakeLocal(local));
+    await setupWizard(again.deps);
+    assert.deepEqual(again.connects, [{}], "the picker is shown again");
+    assert.deepEqual(again.sessions, [local]);
+    assert.deepEqual(await loadRemotes(join(root, "remotes.json")), [local]);
+  });
+
+  it("without a session to open (no terminal), ends on the Ready line and what to type", async () => {
+    const local: RemoteServer = { name: "this-computer", url: "http://127.0.0.1:4096", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" };
+    const run = deps(new FakeSshServer(), { Where: "1" }, { ...fakeLocal(local, []), openSession: undefined });
+    await setupWizard(run.deps);
+    assert.match(run.text(), /✓ Ready · fits ~4 agents at once\n {2}Type dl to talk to an agent; dl status shows where they run\.\n\n$/);
   });
 
   describe("this computer after a server", () => {
     const local: RemoteServer = { name: "this-computer", url: "http://127.0.0.1:4096", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" };
     const QUESTION = "Make this computer the default? Tasks and sessions go to box now";
-    const KEYS = { Where: "1", "GitHub CLI": "", "Autopilot": "" };
+    const KEYS = { Where: "1", "GitHub CLI": "" };
     const localRun = (server: FakeSshServer, answers: Record<string, string>, extra: Partial<SetupDeps> = {}) =>
-      deps(server, { ...KEYS, ...answers }, { localSetup: async () => ({ remote: local, capacity: 4 }), ...extra });
+      deps(server, { ...KEYS, ...answers }, { ...fakeLocal(local), ...extra });
 
     /** A server set up first: it becomes the default by itself. */
     async function serverFirst(): Promise<FakeSshServer> {
       const server = new FakeSshServer();
-      await setupWizard(deps(server, { Where: "2", Server: "1", "GitHub CLI": "", "Autopilot": "" }).deps);
+      await setupWizard(deps(server, { Where: "2", Server: "1", "GitHub CLI": "" }).deps);
       assert.equal((await loadRemotesFile(join(root, "remotes.json"))).default, "box");
       return server;
     }
@@ -341,7 +401,7 @@ describe("dl setup on a laptop", () => {
   it("on Windows doesn't offer this computer: says why, then sets up a server", async () => {
     const server = new FakeSshServer();
     let called = false;
-    const run = deps(server, { Server: "1", "GitHub CLI": "", "Autopilot": "" }, {
+    const run = deps(server, { Server: "1", "GitHub CLI": "" }, {
       platform: "win32",
       localSetup: async () => { called = true; throw new Error("not on Windows"); },
     });

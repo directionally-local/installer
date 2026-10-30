@@ -2,7 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { FakeSshServer } from "../test-support/fake-ssh.js";
 import { PlainUi, RecordingUi } from "../ui.js";
-import { bootstrap, bootstrapCommand, BootstrapRenderer, EventReplayer, installOnServer, pairLaptop, serverNeeds } from "./remote-install.js";
+import { applyOnServer, bootstrap, bootstrapCommand, BootstrapRenderer, EventReplayer, installOnServer, pairLaptop, serverNeeds, wireAnswers } from "./remote-install.js";
+import { openrouterAnswer } from "../provider.js";
 import type { ServerFacts } from "./ssh.js";
 
 const root: ServerFacts = { user: "root", root: true, sudo: false, os: "Ubuntu 24.04", arch: "arm64", newHostKey: false };
@@ -40,20 +41,26 @@ describe("installing over SSH", () => {
     const server = new FakeSshServer();
     server.installed = true;
     server.keys.add("github");
-    assert.deepEqual(await serverNeeds(box, sudoer, server.exec), ["openrouter"]);
+    assert.deepEqual(await serverNeeds(box, sudoer, server.exec), ["provider"]);
     assert.equal(server.calls[0]!.command, "sudo -n dl up --needs --access ssh");
+    server.oldProviderDl = true;
+    assert.deepEqual(await serverNeeds(box, sudoer, server.exec), ["provider"], "an older server's \"openrouter\" is the same need");
+    server.oldProviderDl = false;
 
     const uis: RecordingUi[] = [];
     const key = "sk-or-v1-secretsecretsecret";
-    const result = await installOnServer(box, root, server.exec, { openrouterKey: key }, () => { const ui = new RecordingUi(); uis.push(ui); return ui; });
+    const result = await installOnServer(box, root, server.exec, { provider: openrouterAnswer(key) }, () => { const ui = new RecordingUi(); uis.push(ui); return ui; });
     assert.deepEqual(result, { capacity: 6 }, "4 CPU and 7.5 GB fit ~6, as dl up estimates");
     const call = server.calls.at(-1)!;
     assert.equal(call.command, "dl up --access ssh --answers-stdin --events json");
-    assert.equal(call.input, `${JSON.stringify({ openrouterKey: key })}\n`);
+    // The provider block, plus the shorthand an older server understands (it ignores the block).
+    assert.deepEqual(JSON.parse(call.input!), { provider: { id: "openrouter", baseUrl: "https://openrouter.ai/api/v1", apiKey: key, apiKeyEnv: "OPENROUTER_API_KEY" }, openrouterKey: key });
+    assert.deepEqual(wireAnswers({ provider: { id: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "k", apiKeyEnv: "DEEPSEEK_API_KEY" } }), { provider: { id: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "k", apiKeyEnv: "DEEPSEEK_API_KEY" } }, "no shorthand for other providers");
+    assert.deepEqual(wireAnswers({}), {});
     for (const entry of server.calls) assert.ok(!entry.command.includes(key), "keys never go in the command line");
     assert.deepEqual(uis.flatMap((ui) => ui.events), [
       "line done Checked this machine | Ubuntu 24.04 · 4 CPU · 7.5 GB · 70 GB free",
-      "line done OpenRouter key | stored in Hotcell",
+      "line done Provider key | kept in Hotcell · from your laptop",
       "plan docker,image,access",
       "start docker",
       "done docker | 27.3.1",
@@ -63,6 +70,16 @@ describe("installing over SSH", () => {
       "done access | private · reached over SSH",
       "warn Swap is off",
     ], "the server's title and ready screen are left out");
+  });
+
+  it("stores keys on an installed server quietly, surfacing only a failure", async () => {
+    const server = new FakeSshServer();
+    server.installed = true;
+    await applyOnServer(box, root, server.exec, { githubToken: "ghp_x" });
+    assert.deepEqual(server.answers.at(-1), { githubToken: "ghp_x" });
+    assert.ok(server.keys.has("github"));
+    server.installFails = true;
+    await assert.rejects(() => applyOnServer(box, root, server.exec, { githubToken: "ghp_x" }), /Storing the keys on the server failed: Building the sandbox image failed/);
   });
 
   it("replays the server's last step as Starting the server, private over SSH", async () => {

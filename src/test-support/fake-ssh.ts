@@ -35,9 +35,15 @@ export class FakeSshServer {
   rejectKey: string | undefined;
   /** What `dl keys --json` reports. */
   listing: unknown[] = [
-    { key: "openrouter", set: true, detail: "sk-or…aa" },
+    { key: "provider", set: true, detail: "openrouter · sk-or…aa" },
     { key: "github", set: true, detail: "signed in as sinameraji" },
   ];
+  /** The provider block the last `--answers-stdin` carried, as the server parsed it. */
+  provider: Record<string, unknown> | undefined;
+  /** Every `--answers-stdin` object, in order. */
+  answers: Array<Record<string, unknown>> = [];
+  /** The server's dl predates providers: it knows `openrouterKey` and says "openrouter" in --needs. */
+  oldProviderDl = false;
 
   readonly exec: SshExec = async (access, command, options: SshExecOptions = {}) => {
     this.calls.push({ access: { ...access }, command, ...(options.input !== undefined ? { input: options.input } : {}) });
@@ -62,17 +68,24 @@ export class FakeSshServer {
     }
     if (!this.installed) return result(127, "", "sh: 1: dl: not found\n");
     if (command.includes("dl up --needs")) {
-      const needs = ["openrouter", "github"].filter((need) => !this.keys.has(need));
+      const needs = [this.oldProviderDl ? "openrouter" : "provider", "github"].filter((need) => !this.keys.has(need === "openrouter" ? "provider" : need));
       return result(0, `${JSON.stringify({ needs })}\n`);
     }
     if (command.includes("--answers-stdin")) {
-      const answers = JSON.parse(options.input ?? "{}") as { openrouterKey?: string; githubToken?: string };
-      if (answers.openrouterKey) this.keys.add("openrouter");
+      const answers = JSON.parse(options.input ?? "{}") as { openrouterKey?: string; githubToken?: string; provider?: Record<string, unknown> };
+      this.answers.push(answers);
+      if (answers.provider && !this.oldProviderDl) {
+        this.provider = answers.provider;
+        this.keys.add("provider");
+      } else if (answers.openrouterKey) {
+        this.provider = { id: "openrouter", apiKey: answers.openrouterKey };
+        this.keys.add("provider");
+      }
       if (answers.githubToken) this.keys.add("github");
       const events: unknown[] = [
         { event: "title", text: "Directionally Local" },
         { event: "line", status: "done", label: "Checked this machine", detail: "Ubuntu 24.04 · 4 CPU · 7.5 GB · 70 GB free" },
-        { event: "answered", label: "OpenRouter key", detail: "stored in Hotcell" },
+        ...(this.provider ? [{ event: "line", status: "done", label: "Provider key", detail: "kept in Hotcell · from your laptop" }] : [{ event: "line", status: "info", label: "Provider key", detail: "not set yet" }]),
         { event: "plan", steps: [{ id: "docker", label: "Setting up Docker" }, { id: "image", label: "Building the sandbox image" }, { id: "access", label: "Starting the server" }] },
         { event: "start", id: "docker" },
         { event: "done", id: "docker", detail: "27.3.1" },

@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
-import { hotcellKeyListed, readKeyLine, serverKeysCommand, type ServerKeysDeps } from "./keys.js";
+import { readKeyLine, serverKeysCommand, type ServerKeysDeps } from "./keys.js";
+import { parseHotcellRoutes } from "./provider.js";
 import { PATHS, parseEnvFile } from "./layout.js";
 import { ScriptedPrompter } from "./prompt.js";
 import { FakeSystem } from "./test-support/fake-system.js";
@@ -31,7 +32,7 @@ async function installed(): Promise<FakeSystem> {
   return system;
 }
 
-function run(system: FakeSystem, args: string[], flags: { json?: boolean; stdin?: boolean }, input: { stdin?: string; extra?: Partial<ServerKeysDeps> } = {}) {
+function run(system: FakeSystem, args: string[], flags: { json?: boolean; stdin?: boolean; baseUrl?: string; authHeader?: string; authFormat?: string }, input: { stdin?: string; extra?: Partial<ServerKeysDeps> } = {}) {
   let out = "";
   let err = "";
   const done = serverKeysCommand(system, args, flags, {
@@ -56,20 +57,47 @@ function assertNowhere(system: FakeSystem, value: string, ...texts: string[]) {
 }
 
 describe("dl keys on a server", () => {
-  it("replaces the OpenRouter key in Hotcell's keystore over stdin, restarts Hotcell, and prints one JSON line", async () => {
+  it("replaces the provider's key in Hotcell's keystore over stdin, restarts Hotcell and Autopilot, and prints one JSON line", async () => {
     const system = await installed();
     const { code, out, err } = await run(system, ["set", "openrouter"], { json: true, stdin: true }, { stdin: `${NEW_OPENROUTER}\n` });
 
     assert.equal(code, 0, err);
-    assert.equal(out, `${JSON.stringify({ ok: true, key: "openrouter", detail: "replaced in Hotcell; Hotcell restarted" })}\n`);
+    assert.equal(out, `${JSON.stringify({ ok: true, key: "openrouter", detail: "openrouter in Hotcell; Hotcell and Autopilot restarted" })}\n`);
     assert.equal(system.hotcellKeyValues.get("openrouter"), NEW_OPENROUTER);
     const add = system.commands.find((entry) => entry.command === "runuser" && entry.args.includes("add"));
     assert.deepEqual(add?.args, ["-u", "hotcell", "--", "env", "HOTCELL_HOME=/var/lib/hotcell", "HOTCELL_KEYSTORE=file", "/usr/bin/node", "/opt/directionallylocal/current/node_modules/hotcell/dist/index.js", "keys", "add", "openrouter", "--stdin"]);
     assert.equal(add?.input, NEW_OPENROUTER, "the key goes on stdin, as dl up does");
     assert.ok(system.ran.indexOf("systemctl restart hotcell.service") > system.ran.findIndex((line) => line.includes("keys add")), "restarted after storing");
-    assert.ok(!system.ran.includes("systemctl restart autopilot.service"), "Autopilot keeps running");
+    assert.ok(system.ran.includes("systemctl restart autopilot.service"), "Autopilot reads aster.json at startup");
     assert.equal(parseEnvFile(system.files.get(PATHS.githubEnv)?.content).GITHUB_TOKEN, OLD_GITHUB, "the GitHub token is untouched");
     assertNowhere(system, NEW_OPENROUTER, out, err);
+  });
+
+  it("takes any provider id Hotcell has a route for, a keyless one without a key, and a custom one with --base-url", async () => {
+    const system = await installed();
+    const deepseek = await run(system, ["set", "deepseek"], { json: true, stdin: true }, { stdin: "sk-deepseek-1234567890\n" });
+    assert.equal(deepseek.code, 0, deepseek.err);
+    assert.deepEqual(JSON.parse(deepseek.out), { ok: true, key: "deepseek", detail: "deepseek in Hotcell; Hotcell and Autopilot restarted" });
+    assert.equal(system.hotcellKeyValues.get("deepseek"), "sk-deepseek-1234567890");
+    const aster = () => JSON.parse(system.files.get(PATHS.asterConfig)!.content) as { provider: { id: string; baseUrl: string; apiKeyEnv: string }; models: string };
+    assert.deepEqual(aster(), { ...aster(), provider: { id: "deepseek", baseUrl: "https://api.deepseek.com", apiKeyEnv: "DEEPSEEK_API_KEY" }, models: "catalog" });
+    assertNowhere(system, "sk-deepseek-1234567890", deepseek.out, deepseek.err);
+
+    const ollama = await run(system, ["set", "ollama"], { json: true });
+    assert.equal(ollama.code, 0, ollama.err);
+    const add = system.commands.filter((entry) => entry.command === "runuser" && entry.args.includes("add")).at(-1)!;
+    assert.deepEqual(add.args.slice(-3), ["keys", "add", "ollama"], "no --stdin: nothing to read");
+    assert.equal(add.input, undefined);
+    assert.equal(aster().provider.id, "ollama");
+
+    const unknown = await run(system, ["set", "myproxy"], { json: true, stdin: true }, { stdin: "k-1234567890\n" });
+    assert.equal(unknown.code, 1);
+    assert.match(JSON.parse(unknown.out).error, /add --base-url URL/);
+    const custom = await run(system, ["set", "myproxy"], { json: true, stdin: true, baseUrl: "https://llm.example.com/v1", authHeader: "x-api-key", authFormat: "{key}" }, { stdin: "k-1234567890\n" });
+    assert.equal(custom.code, 0, custom.err);
+    const route = system.commands.filter((entry) => entry.command === "runuser" && entry.args.includes("add")).at(-1)!;
+    assert.deepEqual(route.args.slice(route.args.indexOf("keys")), ["keys", "add", "myproxy", "--stdin", "--base-url", "https://llm.example.com/v1", "--auth-header", "x-api-key", "--auth-format", "{key}"]);
+    assert.deepEqual(aster().provider, { id: "myproxy", baseUrl: "https://llm.example.com/v1", apiKeyEnv: "MYPROXY_API_KEY" });
   });
 
   it("replaces the GitHub token in github.env (0640 root:autopilot) and restarts Autopilot", async () => {
@@ -93,7 +121,7 @@ describe("dl keys on a server", () => {
     const prompter = new ScriptedPrompter({ "OpenRouter key (hidden)": NEW_OPENROUTER });
     const { code, out } = await run(system, ["openrouter"], {}, { extra: { prompter } });
     assert.equal(code, 0);
-    assert.equal(out, "  ✓ OpenRouter key replaced  replaced in Hotcell; Hotcell restarted\n");
+    assert.equal(out, "  ✓ OpenRouter key replaced  openrouter in Hotcell; Hotcell and Autopilot restarted\n");
     assert.equal(system.hotcellKeyValues.get("openrouter"), NEW_OPENROUTER);
   });
 
@@ -131,11 +159,11 @@ describe("dl keys on a server", () => {
     const system = await installed();
     const json = await run(system, [], { json: true });
     assert.deepEqual(JSON.parse(json.out), { keys: [
-      { key: "openrouter", set: true, detail: "sk-or…aa" },
+      { key: "provider", set: true, detail: "openrouter · sk-or…aa" },
       { key: "github", set: true, detail: "signed in as octo" },
     ] });
     const human = await run(system, ["ls"], {});
-    assert.match(human.out, /✓ OpenRouter  sk-or…aa/);
+    assert.match(human.out, /✓ Provider {4}openrouter · sk-or…aa/);
     assert.match(human.out, /✓ GitHub {6}signed in as octo/);
     assert.match(human.out, /Replace one: sudo dl keys set openrouter/);
     for (const text of [json.out, human.out]) {
@@ -147,16 +175,20 @@ describe("dl keys on a server", () => {
     system.hotcellKeys.clear();
     const missing = await run(system, [], { json: true }, { extra: { fetchImpl: fetchRejects } });
     assert.deepEqual(JSON.parse(missing.out).keys, [
-      { key: "openrouter", set: false },
+      { key: "provider", set: false },
       { key: "github", set: true, problem: "GitHub rejected that token." },
     ]);
+    // A route Hotcell has turned off doesn't count either.
+    system.hotcellKeys.add("openrouter");
+    system.hotcellInactive.add("openrouter");
+    assert.deepEqual(JSON.parse((await run(system, [], { json: true })).out).keys[0], { key: "provider", set: false, detail: "openrouter", problem: "openrouter's route is off in Hotcell" });
   });
 
   it("explains its usage for anything else", async () => {
     const system = await installed();
-    const { code, err } = await run(system, ["set", "tailscale"], {});
+    const { code, err } = await run(system, ["set", "Not A Provider"], {});
     assert.equal(code, 2);
-    assert.match(err, /dl keys set openrouter\|github/);
+    assert.match(err, /dl keys set <provider>\|github/);
   });
 });
 
@@ -168,10 +200,15 @@ describe("reading the key", () => {
     await assert.rejects(() => readKeyLine(tty), /from a pipe, not a terminal/);
   });
 
-  it("finds a provider's mask in Hotcell's listing, and never shows a column that could be a key", () => {
-    assert.deepEqual(hotcellKeyListed("\x1b[2mPROVIDER\x1b[0m  KEY  SOURCE\nopenrouter  sk-or…aa  \x1b[2mfile\x1b[0m\n", "openrouter"), { set: true, detail: "sk-or…aa" });
-    assert.deepEqual(hotcellKeyListed("openrouter  ••••  file\n", "openrouter"), { set: true, detail: "••••" });
-    assert.deepEqual(hotcellKeyListed(`openrouter  ${OLD_OPENROUTER}  file\n`, "openrouter"), { set: true });
-    assert.deepEqual(hotcellKeyListed("no provider keys yet — add one:  hotcell keys add openrouter\n", "openrouter"), { set: false });
+  it("reads Hotcell's routes from --json, or from the plain listing of an older Hotcell, never a column that could be a key", () => {
+    assert.deepEqual(parseHotcellRoutes('{"routes":[{"provider":"deepseek","active":true,"mask":"sk-de…00"},{"provider":"openrouter","active":false}]}\n'), [
+      { provider: "deepseek", active: true, mask: "sk-de…00" },
+      { provider: "openrouter", active: false },
+    ]);
+    assert.deepEqual(parseHotcellRoutes('[{"provider":"ollama"}]'), [{ provider: "ollama", active: true }]);
+    assert.deepEqual(parseHotcellRoutes("\x1b[2mPROVIDER\x1b[0m  KEY  SOURCE\nopenrouter  sk-or…aa  \x1b[2mfile\x1b[0m\n"), [{ provider: "openrouter", active: true, mask: "sk-or…aa" }]);
+    assert.deepEqual(parseHotcellRoutes("openrouter  ••••  file\n"), [{ provider: "openrouter", active: true, mask: "••••" }]);
+    assert.deepEqual(parseHotcellRoutes(`openrouter  ${OLD_OPENROUTER}  file\n`), [{ provider: "openrouter", active: true }]);
+    assert.deepEqual(parseHotcellRoutes("no provider keys yet — add one:  hotcell keys add openrouter\n"), []);
   });
 });

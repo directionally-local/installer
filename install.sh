@@ -7,7 +7,8 @@
 # `dl up`, which asks how to reach this server and for the model
 # key, and sets up Hotcell + Autopilot as services. Safe to run again.
 #
-# Unattended: export DL_TAILSCALE_AUTH_KEY, DL_OPENROUTER_API_KEY and DL_GITHUB_TOKEN first.
+# Unattended: export DL_TAILSCALE_AUTH_KEY, DL_PROVIDER + DL_PROVIDER_API_KEY (or DL_OPENROUTER_API_KEY)
+# and DL_GITHUB_TOKEN first.
 # Install only (the laptop's setup, which then runs `dl up` itself over SSH): DL_INSTALL_ONLY=1.
 # Pin a version: DL_VERSION=0.1.0. Install from a local tarball: DL_PACKAGE=/path/to.tgz.
 set -eu

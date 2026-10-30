@@ -9,20 +9,25 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { main } from "../cli.js";
 import { PATHS } from "../layout.js";
+import { ScriptedPrompter } from "../prompt.js";
 import { fakeTunnels, type FakeTunnel } from "../test-support/fake-tunnel.js";
 import { DEFAULT_MODEL, type LaptopIO } from "./commands.js";
 import { saveRemote, type RemoteServer } from "./config.js";
-import { autopilotOnPath, bundledAutopilot, projectSession, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput } from "./session.js";
+import { autopilotOnPath, bundledAutopilot, openSession, planSession, projectSession, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput } from "./session.js";
 import { loadSessions, rememberSession } from "./session-store.js";
 import { createOpener, type RemoteOpener } from "./tunnel.js";
 
 const TOKEN = "aster_laptop_token_0000000000000000000000000000000000";
 const NEW_ID = "7c1d2e3f-0000-4000-8000-000000000000";
 const OLD_ID = "3f2a9c1e-0000-4000-8000-000000000000";
+const CHAT_ID = "c0ffee00-0000-4000-8000-000000000000";
 
 /** The parts of the API a session asks for: workspaces, models, and one conversation. */
 class FakeApi {
   models = ["01-ai/yi-large", DEFAULT_MODEL];
+  /** A newer server also says which provider the catalog comes from, and its default model. */
+  provider: { id: string; name: string } | undefined;
+  defaultModel: string | undefined;
   /** Conversation ID -> status; missing means 404. */
   readonly conversations = new Map<string, string>();
   readonly requests: string[] = [];
@@ -51,11 +56,11 @@ class FakeApi {
     this.requests.push(`${req.method} ${path}`);
     if (req.headers.authorization !== `Bearer ${TOKEN}`) return send(401, { error: { code: "invalid_credential", message: "no" } });
     if (path === "/api/v1/workspaces") return send(200, { workspaces: [{ id: "default", displayName: "Default" }] });
-    if (path === "/api/v1/models") return send(200, { models: this.models });
+    if (path === "/api/v1/models") return send(200, { models: this.models, ...(this.provider ? { provider: this.provider } : {}), ...(this.defaultModel ? { defaultModel: this.defaultModel } : {}) });
     if (path === "/api/v1/conversations") return send(200, { conversations: [] });
     const id = decodeURIComponent(path.replace(/^\/api\/v1\/conversations\//, ""));
     const status = this.conversations.get(id);
-    if (status) return send(200, { conversationId: id, workspaceId: "default", model: DEFAULT_MODEL, status, activeRunId: null, lastEventId: 1, createdAt: "", updatedAt: "", kind: "code", repository: "me/app" });
+    if (status) return send(200, { conversationId: id, workspaceId: "default", model: DEFAULT_MODEL, status, activeRunId: null, lastEventId: 1, createdAt: "", updatedAt: "", kind: id.startsWith("c") ? "chat" : "code", ...(id.startsWith("c") ? {} : { repository: "me/app" }) });
     send(404, { error: { code: "not_found", message: "No such conversation" } });
   }
 }
@@ -102,9 +107,10 @@ class FakeAutopilot {
         launch.patch = await readFile(patchFile, "utf8");
         launch.patchMode = (await stat(patchFile)).mode & 0o777;
       }
-      const id = args.includes("--conversation") ? flag("--conversation")! : NEW_ID;
+      const chat = args.includes("--kind") && flag("--kind") === "chat";
+      const id = args.includes("--conversation") ? flag("--conversation")! : chat ? CHAT_ID : NEW_ID;
       this.api.conversations.set(id, "ready");
-      await writeFile(flag("--state-file")!, JSON.stringify({ conversationId: id, branch: `aster/${id.slice(0, 8)}`, repository: flag("--repo") ?? "me/app" }));
+      await writeFile(flag("--state-file")!, JSON.stringify(chat ? { conversationId: id } : { conversationId: id, branch: `aster/${id.slice(0, 8)}`, repository: flag("--repo") ?? "me/app" }));
       if (!this.hold) child.emit("exit", this.code, null);
     })();
     return child;
@@ -165,11 +171,11 @@ async function checkout(name = "checkout"): Promise<string> {
   return dir;
 }
 
-function session(input: Partial<SessionInput> & { cwd: string }, io: LaptopIO): Promise<number | undefined> {
-  return projectSession({
+function session(input: Partial<SessionInput> & { cwd: string }, io: LaptopIO, open: typeof openSession | typeof projectSession = openSession): Promise<number | undefined> {
+  return open({
     autopilot: async () => AUTOPILOT,
     probe: async () => true,
-    autopilotModel: async () => undefined,
+    placeModel: async () => undefined,
     spawn: autopilot.spawn,
     signals: new EventEmitter(),
     ...input,
@@ -222,6 +228,73 @@ describe("dl inside a project", () => {
     assert.equal(reconnect.includes("--patch-file"), false);
     assert.match(again.text(), /Connecting to dl-test · me\/app … {2}\(7c1d2e3f\)/);
     assert.equal((await loadSessions(file)).length, 1);
+  });
+
+  it("checks the place has a provider before opening anything", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    const asked: string[] = [];
+    const io = capture();
+    assert.equal(await session({ cwd: dir, ensureProvider: async (remote) => { asked.push(remote.name); return false; } }, io), undefined);
+    assert.deepEqual(asked, ["dl-test"]);
+    assert.equal(autopilot.launches.length, 0, "no session before the provider is set up");
+    assert.equal(io.text(), "", "the check says its own line; nothing else is printed");
+  });
+
+  it("uses the server's default model when the place has none saved", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    api.models = ["01-ai/yi-large", "moonshotai/kimi-k2.6"];
+    api.provider = { id: "openrouter", name: "OpenRouter" };
+    api.defaultModel = "moonshotai/kimi-k2.6";
+    const dir = await checkout();
+    assert.equal(await session({ cwd: dir }, capture()), 0);
+    assert.equal(flag(autopilot.launches[0]!.args, "--model"), "moonshotai/kimi-k2.6", "the server's default, not a hard-coded id");
+  });
+
+  it("asks before sending local changes that look like a key, and starts from the base commit", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    await writeFile(join(dir, "connect.test.ts"), 'const apiKey = "sk-deepseek-1234567890abcdefghij";\n');
+    const prompter = new ScriptedPrompter({ "How should this session start?": "" });
+    const io = capture();
+    assert.equal(await session({ cwd: dir, prompter }, io), 0);
+    assert.match(io.text(), /! Your local changes include something that looks like an API key:\n {4}connect\.test\.ts:1\n/);
+    assert.match(io.text(), /Agents get a copy of your changes, and keys never leave this computer\./);
+    assert.ok(prompter.asked.some((question) => question.includes("How should this session start?")), prompter.asked.join("\n"));
+    const args = autopilot.launches[0]!.args;
+    assert.equal(args.includes("--patch-file"), false, "no patch is sent");
+    assert.equal(flag(args, "--base-commit"), git(dir, "rev-parse", "HEAD"));
+    assert.match(io.text(), /new conversation from [0-9a-f]{7}, /, "the detail says no local changes");
+  });
+
+  it("Cancel at that question opens nothing", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    await writeFile(join(dir, "connect.test.ts"), 'const apiKey = "sk-deepseek-1234567890abcdefghij";\n');
+    const prompter = new ScriptedPrompter({ "How should this session start?": "cancel" });
+    assert.equal(await session({ cwd: dir, prompter }, capture()), 130);
+    assert.equal(autopilot.launches.length, 0, "no session");
+  });
+
+  it("dl --no-local-changes sends no patch and asks nothing", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    await writeFile(join(dir, "connect.test.ts"), 'const apiKey = "sk-deepseek-1234567890abcdefghij";\n');
+    const prompter = new ScriptedPrompter({});
+    const io = capture();
+    assert.equal(await session({ cwd: dir, noLocalChanges: true, prompter }, io), 0);
+    assert.deepEqual(prompter.asked, [], "nothing to ask");
+    assert.equal(autopilot.launches[0]!.args.includes("--patch-file"), false);
+    assert.doesNotMatch(io.text(), /looks like an API key/);
+  });
+
+  it("says how to start without local changes when attach-remote refuses the patch", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    autopilot.code = 3;
+    const io = capture();
+    assert.equal(await session({ cwd: dir }, io), 1);
+    assert.match(io.text(), /Start without your local changes: dl --no-local-changes/);
   });
 
   it("keeps one conversation per place and per checkout", { timeout: 30_000 }, async () => {
@@ -325,28 +398,76 @@ describe("dl inside a project", () => {
     assert.equal(autopilot.launches.length, 0);
   });
 
-  it("shows the overview instead outside a GitHub project, saying why when it's a repository", { timeout: 30_000 }, async () => {
+  it("opens a chat outside a repository, remembered per directory, with the place's default model", { timeout: 30_000 }, async () => {
     await saveRemote(place("dl-test", api.url));
+    api.models = ["deepseek-v4-pro", "deepseek-v4-flash"];
+    api.provider = { id: "deepseek", name: "DeepSeek" };
+    api.defaultModel = "deepseek-v4-pro";
     const plain = join(root, "plain");
     await mkdir(plain);
-    const quiet = capture();
-    assert.equal(await session({ cwd: plain }, quiet), undefined);
-    assert.equal(quiet.text(), "", "not a repository: just the overview");
+    const first = capture();
+    assert.equal(await session({ cwd: plain }, first), 0);
+    const args = autopilot.launches[0]!.args.slice(1);
+    assert.equal(args[0], "attach-remote");
+    assert.equal(flag(args, "--kind"), "chat");
+    assert.equal(flag(args, "--workspace"), "default");
+    assert.equal(flag(args, "--model"), "deepseek-v4-pro", "the model chosen in Autopilot's picker, as the place reports it");
+    assert.equal(flag(args, "--title"), "dl-test · chat");
+    assert.ok(!args.includes("--repo") && !args.includes("--base-commit") && !args.includes("--patch-file"), "no repository, no snapshot");
+    assert.match(first.text(), /· Connecting to dl-test · chat … {2}\(new chat, deepseek-v4-pro\)\n/);
+    assert.match(first.text(), /It keeps running on dl-test\. Type dl here to come back/);
+    assert.deepEqual((await loadSessions()).map(({ updatedAt: _, ...entry }) => entry), [{ place: "dl-test", root: await realpath(plain), kind: "chat", conversationId: CHAT_ID }]);
 
+    // dl again in the same directory resumes it; another directory gets its own.
+    const again = capture();
+    assert.equal(await session({ cwd: plain }, again), 0);
+    assert.equal(flag(autopilot.launches[1]!.args, "--conversation"), CHAT_ID);
+    assert.equal(flag(autopilot.launches[1]!.args, "--kind"), "chat");
+    assert.match(again.text(), /Connecting to dl-test · chat … {2}\(c0ffee00\)/);
+    const other = join(root, "other");
+    await mkdir(other);
+    assert.equal(await session({ cwd: other }, capture()), 0);
+    assert.equal(flag(autopilot.launches[2]!.args, "--conversation"), undefined);
+    assert.equal((await loadSessions()).length, 2);
+
+    // dl new: a fresh chat here.
+    assert.equal(await session({ cwd: plain, fresh: true }, capture()), 0);
+    assert.equal(flag(autopilot.launches[3]!.args, "--conversation"), undefined);
+    assert.equal((await loadSessions()).length, 2);
+  });
+
+  it("opens a chat in a repository that can't have a code session, saying why in one line", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
     const elsewhere = join(root, "gitlab");
     git(root, "init", "--quiet", elsewhere);
     git(elsewhere, "remote", "add", "origin", "https://gitlab.com/me/app.git");
     const io = capture();
-    assert.equal(await session({ cwd: elsewhere }, io), undefined);
-    assert.match(io.text(), /! gitlab's origin isn't on GitHub, so there's no agent conversation to open here\./);
+    assert.equal(await session({ cwd: elsewhere }, io), 0);
+    assert.match(io.text(), /! gitlab's origin isn't on GitHub, so this is a chat, not a session on its code\.\n\n {2}· Connecting to dl-test · chat …/);
+    assert.equal(flag(autopilot.launches[0]!.args, "--kind"), "chat");
+    assert.deepEqual(await planSession(elsewhere), { kind: "chat", root: await realpath(elsewhere), note: "gitlab's origin isn't on GitHub, so this is a chat, not a session on its code." });
 
+    const noRemote = join(root, "loose");
+    git(root, "init", "--quiet", noRemote);
+    assert.match((await planSession(noRemote)).note ?? "", /loose has no origin remote, so this is a chat/);
+
+    // A GitHub repository with nothing pushed yet can't start a code session: the note, and no chat in its place.
     const fresh = join(root, "fresh");
     git(root, "init", "--quiet", fresh);
     git(fresh, "remote", "add", "origin", "https://github.com/me/fresh.git");
     const empty = capture();
     assert.equal(await session({ cwd: fresh }, empty), undefined);
     assert.match(empty.text(), /! This repository has no commits yet; push a first commit before running remotely\./);
-    assert.equal(autopilot.launches.length, 0);
+    assert.equal(autopilot.launches.length, 1);
+
+    // projectSession (dl new's older contract) still opens code sessions only, with the same note.
+    const quiet = capture();
+    assert.equal(await session({ cwd: elsewhere }, quiet, projectSession), undefined);
+    assert.match(quiet.text(), /! gitlab's origin isn't on GitHub/);
+    const plain = join(root, "plain");
+    await mkdir(plain);
+    assert.equal(await session({ cwd: plain }, capture(), projectSession), undefined);
+    assert.deepEqual(await planSession(plain), { kind: "chat", root: await realpath(plain) });
   });
 
   it("says to pick a place when several are set up and none is the default", async () => {
@@ -409,8 +530,7 @@ describe("finding Autopilot", () => {
 });
 
 describe("dl routing for projects", () => {
-  it("dl new outside a repository says where it works", async () => {
-    await saveRemote(place("dl-test", api.url));
+  it("dl new with nothing set up says what to do; dl status is the overview", async () => {
     const cwd = process.cwd();
     const plain = join(root, "plain");
     await mkdir(plain);
@@ -419,12 +539,14 @@ describe("dl routing for projects", () => {
       let text = "";
       const io = { out: (chunk: string) => { text += chunk; }, err: (chunk: string) => { text += chunk; } };
       assert.equal(await main(["new"], io, { terminal: true }), 1);
-      assert.match(text, /dl new starts a fresh conversation from inside a GitHub repository/);
-      // On an installed server, bare dl shows the server's overview instead.
+      assert.match(text, /dl new starts a fresh conversation once something is set up: dl/);
+      // On an installed server, dl status shows the server's overview instead.
       if (!existsSync(PATHS.state)) {
+        await saveRemote(place("dl-test", api.url));
         text = "";
-        assert.equal(await main([], io, { terminal: true }), 0);
-        assert.match(text, /on this laptop/, "bare dl outside a repository: the overview");
+        assert.equal(await main(["status"], io, { terminal: true }), 0);
+        assert.match(text, /on this laptop/, "dl status: the overview, anywhere");
+        assert.match(text.replace(/\x1b\[[0-9;]*m/g, ""), /Talk to an agent: type {2}dl/);
       }
     } finally {
       process.chdir(cwd);

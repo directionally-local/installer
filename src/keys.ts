@@ -1,23 +1,36 @@
 /**
- * `dl keys` on a server: replace the OpenRouter key or the GitHub token where `dl up`
+ * `dl keys` on a server: replace the model provider's key or the GitHub token where `dl up`
  * stored them, restart the one service that reads it, and show which keys are set (never
  * their values). Keys come in on stdin (or hidden input on the server's own terminal),
  * never argv, so they stay out of `ps`, shell history, and logs.
  *
- *   OpenRouter  Hotcell's file keystore, as the hotcell user   → restart hotcell.service
- *   GitHub      /etc/autopilot/github.env (0640 root:autopilot) → restart autopilot.service
+ *   provider  Hotcell's file keystore, as the hotcell user, + aster.json  → restart hotcell.service (+ autopilot.service)
+ *   GitHub    /etc/autopilot/github.env (0640 root:autopilot)              → restart autopilot.service
  *
- * The laptop's `dl keys` runs `dl keys set <which> --stdin --json` here over SSH.
+ * `dl keys set <provider-id>` takes any provider Hotcell has a route for (deepseek, openai,
+ * ollama, …); a custom one needs `--base-url`. The laptop's `dl provider` sends a whole
+ * provider block through `dl up --answers-stdin` instead, since it carries what Autopilot's picker chose.
  */
-import { AUTOPILOT_PORT, HOTCELL_PORT, PATHS, SERVICES, USERS, githubEnv, hotcellBin, parseEnvFile } from "./layout.js";
+import { AUTOPILOT_PORT, HOTCELL_PORT, PATHS, SERVICES, USERS, asterConfigDefaults, githubEnv, hotcellBin, parseEnvFile } from "./layout.js";
 import type { Prompter } from "./prompt.js";
+import {
+  asterConfigWithProvider, hotcellKeysAddArgs, isKeyless, KNOWN_PROVIDERS, PROVIDER_ID_RE, parseProviderAnswer, providerConfig,
+  providerFromAsterConfig, type ProviderAnswer,
+} from "./provider.js";
 import type { System } from "./system.js";
 import type { palette } from "./ui.js";
-import { asHotcell, validateGitHubToken, validateOpenRouterKey, waitUntil, type Checked } from "./up.js";
+import { asHotcell, hotcellRoutes, validateGitHubToken, validateProviderKey, waitUntil, type Checked } from "./up.js";
 
-export type KeyName = "openrouter" | "github";
-export const KEY_NAMES: readonly KeyName[] = ["openrouter", "github"];
-export const KEY_LABELS: Record<KeyName, string> = { openrouter: "OpenRouter", github: "GitHub" };
+/** "github", or a provider id ("openrouter", "deepseek", …). */
+export type KeyName = string;
+export const GITHUB: KeyName = "github";
+/** The row names of `dl keys`: the model provider (whichever it is) and GitHub. */
+export type KeyRow = "provider" | "github";
+
+export function keyLabel(which: KeyName): string {
+  if (which === GITHUB) return "GitHub";
+  return KNOWN_PROVIDERS[which]?.name ?? which;
+}
 
 /** What `dl keys set … --json` prints: one line. */
 export interface KeyResult {
@@ -28,9 +41,9 @@ export interface KeyResult {
 
 /** One row of `dl keys`: whether it's set, and something to recognise it by (never the value). */
 export interface KeyListing {
-  key: KeyName;
+  key: KeyRow;
   set: boolean;
-  /** OpenRouter: Hotcell's mask (sk-or…ab). GitHub: "signed in as LOGIN" when GitHub answered. */
+  /** provider: its id and Hotcell's mask (deepseek · sk-…ab). GitHub: "signed in as LOGIN" when GitHub answered. */
   detail?: string;
   /** The stored key doesn't work (e.g. GitHub rejected the token). */
   problem?: string;
@@ -38,18 +51,20 @@ export interface KeyListing {
 
 type Colors = ReturnType<typeof palette>;
 
+/** "github", or a provider id; undefined for anything else. */
 export function parseKeyName(value: string | undefined): KeyName | undefined {
-  return KEY_NAMES.find((name) => name === value?.trim().toLowerCase());
+  const name = value?.trim().toLowerCase();
+  if (!name) return undefined;
+  if (name === GITHUB) return GITHUB;
+  return PROVIDER_ID_RE.test(name) ? name : undefined;
 }
 
 /** Format first, then (with `fetchImpl`) the service itself; offline isn't fatal. */
 export async function checkKey(which: KeyName, value: string, fetchImpl: typeof fetch | undefined): Promise<Checked> {
-  if (!value) return { problem: "No key was given." };
-  if (which === "openrouter") {
-    const problem = await validateOpenRouterKey(value, fetchImpl);
-    return problem ? { problem } : {};
-  }
-  return validateGitHubToken(value, fetchImpl);
+  if (which === GITHUB) return value ? validateGitHubToken(value, fetchImpl) : { problem: "No key was given." };
+  if (!value && !isKeyless({ id: which, apiKey: null })) return { problem: "No key was given." };
+  const checked = await validateProviderKey({ id: which, apiKey: value || null }, value, fetchImpl);
+  return checked.problem ? { problem: checked.problem } : {};
 }
 
 /** The key wasn't accepted; nothing was stored or restarted. */
@@ -64,6 +79,10 @@ export interface ServerKeyOptions {
   /** Checks the key with OpenRouter / GitHub first; undefined checks only its format. */
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  /** A custom provider's address (`--base-url`), and its auth shape when unusual. */
+  baseUrl?: string;
+  authHeader?: string;
+  authFormat?: string;
 }
 
 /** Stores the key exactly where `dl up` does, then restarts the service that reads it and waits for it. */
@@ -73,14 +92,16 @@ export async function setServerKey(system: System, which: KeyName, value: string
   const checked = await checkKey(which, key, options.fetchImpl);
   if (checked.problem) throw new KeyRejectedError(checked.problem);
 
-  if (which === "openrouter") {
-    if (!(await system.exists(hotcellBin()))) throw new Error("Hotcell isn't installed here; run dl up first.");
-    // Over stdin into Hotcell's keystore: never in argv, env files, or Autopilot's config. It replaces the old one.
-    await asHotcell(system, ["keys", "add", "openrouter", "--stdin"], { input: key, describe: "hotcell keys add openrouter --stdin (as hotcell)" });
-    // Hotcell reads its keystore at startup.
-    await system.run("systemctl", ["restart", SERVICES.hotcell]);
-    await waitUntil(system, sleep, "Hotcell", () => hotcellAnswers(system));
-    return { ok: true, key: which, detail: "replaced in Hotcell; Hotcell restarted" };
+  if (which !== GITHUB) {
+    if (!KNOWN_PROVIDERS[which] && !options.baseUrl) throw new KeyRejectedError(`dl doesn't know where ${which} lives; add --base-url URL (and --auth-header / --auth-format if it isn't Bearer).`);
+    const provider = parseProviderAnswer({
+      id: which,
+      ...(key ? { apiKey: key } : {}),
+      ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+      ...(options.authHeader ? { authHeader: options.authHeader } : {}),
+      ...(options.authFormat ? { authFormat: options.authFormat } : {}),
+    });
+    return setServerProvider(system, provider, sleep);
   }
 
   await system.mkdir(PATHS.autopilotEtc, { mode: 0o750, owner: `root:${USERS.autopilot}` });
@@ -91,17 +112,32 @@ export async function setServerKey(system: System, which: KeyName, value: string
   return { ok: true, key: which, detail: `${checked.detail ? `${checked.detail}; ` : ""}Autopilot restarted` };
 }
 
+/**
+ * The provider's key into Hotcell's keystore (over stdin), the provider into aster.json, and
+ * both services restarted: Hotcell reads its keystore and Autopilot its config at startup.
+ */
+export async function setServerProvider(system: System, provider: ProviderAnswer, sleep: (ms: number) => Promise<void>): Promise<KeyResult> {
+  if (!(await system.exists(hotcellBin()))) throw new Error("Hotcell isn't installed here; run dl up first.");
+  const args = hotcellKeysAddArgs(provider);
+  await asHotcell(system, args, { ...(provider.apiKey ? { input: provider.apiKey } : {}), describe: `hotcell ${args.join(" ")} (as hotcell)` });
+  await system.mkdir(PATHS.autopilotEtc, { mode: 0o750, owner: `root:${USERS.autopilot}` });
+  await system.writeFile(PATHS.asterConfig, asterConfigWithProvider(await system.readFile(PATHS.asterConfig), providerConfig(provider), asterConfigDefaults()), { mode: 0o640, owner: `root:${USERS.autopilot}` });
+  await system.run("systemctl", ["restart", SERVICES.hotcell]);
+  await waitUntil(system, sleep, "Hotcell", () => hotcellAnswers(system));
+  await system.run("systemctl", ["restart", SERVICES.autopilot]);
+  await waitUntil(system, sleep, "Autopilot", () => autopilotAnswers(system));
+  return { ok: true, key: provider.id, detail: `${provider.id} in Hotcell; Hotcell and Autopilot restarted` };
+}
+
 /** Which keys this server has. Reads and probes only; the GitHub login is a quick, optional API call. */
 export async function listServerKeys(system: System, options: { fetchImpl?: typeof fetch } = {}): Promise<KeyListing[]> {
-  let openrouter: KeyListing = { key: "openrouter", set: false };
-  if (await system.exists(hotcellBin())) {
-    const listed = await system.probe("runuser", [
-      "-u", USERS.hotcell, "--", "env", `HOTCELL_HOME=${PATHS.hotcellHome}`, "HOTCELL_KEYSTORE=file", "NO_COLOR=1", "/usr/bin/node", hotcellBin(), "keys", "ls",
-    ]);
-    if (listed.code === 0) openrouter = { key: "openrouter", ...hotcellKeyListed(listed.stdout, "openrouter") };
-  }
+  const provider = providerFromAsterConfig(await system.readFile(PATHS.asterConfig));
+  const route = (await hotcellRoutes(system)).find((entry) => entry.provider === provider.id);
+  const listing: KeyListing = route?.active
+    ? { key: "provider", set: true, detail: route.mask ? `${provider.id} · ${route.mask}` : provider.id }
+    : { key: "provider", set: false, ...(route ? { detail: provider.id, problem: `${provider.id}'s route is off in Hotcell` } : {}) };
   const token = parseEnvFile(await system.readFile(PATHS.githubEnv)).GITHUB_TOKEN;
-  return [openrouter, await githubListing(token, options.fetchImpl)];
+  return [listing, await githubListing(token, options.fetchImpl)];
 }
 
 /**
@@ -128,15 +164,15 @@ export async function githubListing(token: string | undefined, fetchImpl: typeof
 }
 
 /** `dl keys` as text: one line per key, values never shown. */
-export function formatKeyListing(listing: KeyListing[], c: Colors, where: string, replaceWith: (key: KeyName) => string): string {
+export function formatKeyListing(listing: KeyListing[], c: Colors, where: string, replaceWith: (key: KeyRow) => string): string {
   const rows = listing.map((entry) => {
-    const label = KEY_LABELS[entry.key].padEnd(12);
-    if (!entry.set) return `  ${c.red("✗")} ${label}${c.dim("not set")}   ${replaceWith(entry.key)}\n`;
+    const label = (entry.key === "github" ? "GitHub" : "Provider").padEnd(12);
+    if (!entry.set) return `  ${c.red("✗")} ${label}${entry.problem ?? c.dim("not set")}   ${replaceWith(entry.key)}\n`;
     if (entry.problem) return `  ${c.red("✗")} ${label}${entry.problem}   ${c.dim("replace it:")} ${replaceWith(entry.key)}\n`;
     return `  ${c.green("✓")} ${label}${c.dim(entry.detail ?? "set")}\n`;
   });
   const hint = listing.every((entry) => entry.set && !entry.problem)
-    ? `\n  ${c.dim("Replace one:")} ${replaceWith("openrouter")}   ${c.dim("or")}   ${replaceWith("github")}\n`
+    ? `\n  ${c.dim("Replace one:")} ${replaceWith("provider")}   ${c.dim("or")}   ${replaceWith("github")}\n`
     : "";
   return `\n  ${c.bold("Keys")} ${c.dim(where)}\n\n${rows.join("")}${hint}\n`;
 }
@@ -172,14 +208,21 @@ export interface ServerKeysDeps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-const SERVER_USAGE = "  Usage: dl keys                          which keys are set\n"
-  + "         dl keys set openrouter|github    replace one (hidden input; --stdin reads it from a pipe)\n";
+const SERVER_USAGE = "  Usage: dl keys                                which keys are set\n"
+  + "         dl keys set <provider>|github          replace one (hidden input; --stdin reads it from a pipe)\n"
+  + "                 <provider>: openrouter, deepseek, openai, ollama, … (any Autopilot provider id)\n"
+  + "                 a custom one: dl keys set NAME --base-url URL [--auth-header H --auth-format F]\n";
 
 /**
- * `dl keys [ls]`, `dl keys set <openrouter|github> [--stdin] [--json]`, and `dl keys
- * <openrouter|github>` (the same as `set`), as root on a server.
+ * `dl keys [ls]`, `dl keys set <provider|github> [--stdin] [--json]`, and `dl keys
+ * <provider|github>` (the same as `set`), as root on a server.
  */
-export async function serverKeysCommand(system: System, args: string[], flags: { json?: boolean; stdin?: boolean }, deps: ServerKeysDeps): Promise<number> {
+export async function serverKeysCommand(
+  system: System,
+  args: string[],
+  flags: { json?: boolean; stdin?: boolean; baseUrl?: string; authHeader?: string; authFormat?: string },
+  deps: ServerKeysDeps,
+): Promise<number> {
   const c = deps.colors;
   const env = deps.env ?? process.env;
   const fetchImpl = env.DL_SKIP_CREDENTIAL_CHECK === "1" ? undefined : deps.fetchImpl ?? fetch;
@@ -187,7 +230,10 @@ export async function serverKeysCommand(system: System, args: string[], flags: {
   if (first === undefined || first === "ls" || first === "list") {
     const listing = await listServerKeys(system, { fetchImpl });
     if (flags.json) deps.out(`${JSON.stringify({ keys: listing })}\n`);
-    else deps.out(formatKeyListing(listing, c, "on this server", (key) => `sudo dl keys set ${key}`));
+    else {
+      const providerId = providerFromAsterConfig(await system.readFile(PATHS.asterConfig)).id;
+      deps.out(formatKeyListing(listing, c, "on this server", (key) => `sudo dl keys set ${key === "provider" ? providerId : key}`));
+    }
     return 0;
   }
   const which = parseKeyName(first === "set" ? second : first);
@@ -195,14 +241,23 @@ export async function serverKeysCommand(system: System, args: string[], flags: {
     deps.err(SERVER_USAGE);
     return 2;
   }
+  const noun = which === GITHUB ? "token" : "key";
   try {
     let value: string;
-    if (flags.stdin) value = await readKeyLine(deps.stdin);
-    else if (!flags.json) value = await deps.prompter.secret(`  ${KEY_LABELS[which]} ${which === "github" ? "token" : "key"} (hidden): `);
+    const keyless = which !== GITHUB && isKeyless({ id: which, apiKey: null });
+    if (keyless) value = "";
+    else if (flags.stdin) value = await readKeyLine(deps.stdin);
+    else if (!flags.json) value = await deps.prompter.secret(`  ${keyLabel(which)} ${noun} (hidden): `);
     else throw new Error("--json needs the key on stdin: dl keys set KEY --stdin --json");
-    const result = await setServerKey(system, which, value, { fetchImpl, ...(deps.sleep ? { sleep: deps.sleep } : {}) });
+    const result = await setServerKey(system, which, value, {
+      fetchImpl,
+      ...(deps.sleep ? { sleep: deps.sleep } : {}),
+      ...(flags.baseUrl ? { baseUrl: flags.baseUrl } : {}),
+      ...(flags.authHeader ? { authHeader: flags.authHeader } : {}),
+      ...(flags.authFormat ? { authFormat: flags.authFormat } : {}),
+    });
     if (flags.json) deps.out(`${JSON.stringify(result)}\n`);
-    else deps.out(`  ${c.green("✓")} ${KEY_LABELS[which]} ${which === "github" ? "token" : "key"} replaced  ${c.dim(result.detail)}\n`);
+    else deps.out(`  ${c.green("✓")} ${keyLabel(which)} ${noun} replaced  ${c.dim(result.detail)}\n`);
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

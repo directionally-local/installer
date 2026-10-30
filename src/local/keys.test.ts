@@ -2,7 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ScriptedPrompter } from "../prompt.js";
 import { RecordingUi } from "../ui.js";
-import { listLocalKeys, setLocalKey, type LocalKeyOptions } from "./keys.js";
+import { configureThisComputer, listLocalKeys, setLocalKey, type LocalKeyOptions } from "./keys.js";
+import { openrouterAnswer } from "../provider.js";
 import { parseLocalEnvFile } from "./layout.js";
 import { setUpOnThisComputer } from "./setup.js";
 import { FakeComputer } from "./test-support/fake-computer.js";
@@ -32,7 +33,7 @@ function options(system: FakeComputer, extra: Partial<LocalKeyOptions> = {}): Lo
 }
 
 async function installed(system = new FakeComputer(), extra: Partial<LocalKeyOptions> = {}): Promise<FakeComputer> {
-  await setUpOnThisComputer({ ui: new RecordingUi(), prompter: new ScriptedPrompter({}), answers: { openrouterKey: OLD_OPENROUTER, githubToken: OLD_GITHUB }, ...options(system, { fetchImpl: withCatalog(fetchOk), ...extra }) });
+  await setUpOnThisComputer({ ui: new RecordingUi(), prompter: new ScriptedPrompter({}), answers: { provider: openrouterAnswer(OLD_OPENROUTER), githubToken: OLD_GITHUB }, ...options(system, { fetchImpl: withCatalog(fetchOk), ...extra }) });
   system.commands.length = 0;
   system.restarted.length = 0;
   return system;
@@ -43,20 +44,32 @@ function assertNotInArgv(system: FakeComputer, value: string) {
   assert.ok(!system.logs.some((line) => line.includes(value)), "never in logs");
 }
 
-describe("dl keys on this computer", () => {
-  it("replaces the OpenRouter key in Hotcell's file keystore and restarts its LaunchAgent", async () => {
+describe("dl provider on this computer", () => {
+  it("replaces the provider's key in Hotcell's file keystore and the provider in aster.json, restarting both LaunchAgents", async () => {
     const system = await installed();
     const result = await setLocalKey("openrouter", NEW_OPENROUTER, options(system, { fetchImpl: fetchOk }));
 
-    assert.deepEqual(result, { ok: true, key: "openrouter", detail: "replaced in Hotcell; Hotcell restarted" });
+    assert.deepEqual(result, { ok: true, key: "openrouter", detail: "openrouter in Hotcell; Hotcell and Autopilot restarted" });
     assert.equal(system.hotcellKeys.get("openrouter"), NEW_OPENROUTER);
     const add = system.commands.find((entry) => entry.args.includes("add"));
     assert.equal(add?.input, NEW_OPENROUTER);
     assert.equal(add?.env?.HOTCELL_KEYSTORE, "file", "the 0600 file, never the login Keychain");
     assert.equal(add?.env?.HOTCELL_HOME, "/Users/ada/.directionallylocal/hotcell");
     assert.ok(system.ran.includes("launchctl kickstart -k gui/501/com.directionallylocal.hotcell"));
-    assert.deepEqual(system.restarted, ["com.directionallylocal.hotcell"], "only Hotcell restarts");
+    assert.deepEqual(system.restarted, ["com.directionallylocal.hotcell", "com.directionallylocal.autopilot"], "Hotcell reads its keystore, Autopilot its config, at startup");
     assertNotInArgv(system, NEW_OPENROUTER);
+
+    // What setup gathered after the services started: a provider from Autopilot's picker, and the token, in one pass.
+    system.restarted.length = 0;
+    await configureThisComputer({ provider: { id: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "sk-deepseek-1234567890", apiKeyEnv: "DEEPSEEK_API_KEY" }, githubToken: NEW_GITHUB }, options(system));
+    assert.equal(system.hotcellKeys.get("deepseek"), "sk-deepseek-1234567890");
+    const aster = JSON.parse(system.files.get("/Users/ada/.directionallylocal/config/aster.json")!.content) as { provider: unknown; models: string; workspaces: unknown[] };
+    assert.deepEqual(aster.provider, { id: "deepseek", baseUrl: "https://api.deepseek.com", apiKeyEnv: "DEEPSEEK_API_KEY" });
+    assert.equal(aster.models, "catalog");
+    assert.equal(aster.workspaces.length, 1, "the workspace list is kept");
+    assert.equal(parseLocalEnvFile(system.files.get("/Users/ada/.directionallylocal/config/github.env")?.content).GITHUB_TOKEN, NEW_GITHUB);
+    assert.deepEqual(system.restarted, ["com.directionallylocal.hotcell", "com.directionallylocal.autopilot"], "each service once");
+    assertNotInArgv(system, "sk-deepseek-1234567890");
   });
 
   it("replaces the GitHub token in the 0600 github.env and restarts Autopilot", async () => {
@@ -103,7 +116,7 @@ describe("dl keys on this computer", () => {
     const system = await installed();
     const listing = await listLocalKeys(options(system, { fetchImpl: fetchOk }));
     assert.deepEqual(listing, [
-      { key: "openrouter", set: true, detail: "sk-or…aa" },
+      { key: "provider", set: true, detail: "openrouter · sk-or…aa" },
       { key: "github", set: true, detail: "signed in as ada" },
     ]);
     assert.ok(!JSON.stringify(listing).includes(OLD_OPENROUTER) && !JSON.stringify(listing).includes(OLD_GITHUB));

@@ -5,6 +5,7 @@
  */
 
 import { join } from "node:path";
+import type { ProviderConfig } from "../provider.js";
 
 export type LocalPlatform = "darwin" | "linux";
 
@@ -162,15 +163,22 @@ export function localAutopilotEnv(input: { paths: LocalPaths; hotcellApiKey: str
   });
 }
 
+/** With no token yet, the file exists (Autopilot starts with --env-file) but sets nothing. */
 export function localGithubEnv(token: string): string {
-  return localEnvFile("GitHub credential for cloning, pushing, and opening PRs (never sent to sandboxes)", { GITHUB_TOKEN: token });
+  return localEnvFile("GitHub credential for cloning, pushing, and opening PRs (never sent to sandboxes)", token ? { GITHUB_TOKEN: token } : {});
 }
 
-export function localAsterConfig(paths: LocalPaths): string {
+/** Aster's server config. Without a provider block Autopilot assumes OpenRouter. */
+export function localAsterConfig(paths: LocalPaths, provider?: ProviderConfig): string {
   return `${JSON.stringify({
-    models: "openrouter",
+    ...(provider ? { provider, models: "catalog" } : { models: "openrouter" }),
     workspaces: [{ id: "default", displayName: "Default workspace", rootPath: paths.workspace }],
   }, null, 2)}\n`;
+}
+
+/** The fields aster.json starts from when the provider is set into a missing or damaged file. */
+export function localAsterDefaults(paths: LocalPaths): Record<string, unknown> {
+  return JSON.parse(localAsterConfig(paths)) as Record<string, unknown>;
 }
 
 /** Non-secret environment set by the service manager itself: `--env-file` never overrides it. */

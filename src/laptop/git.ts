@@ -42,8 +42,9 @@ export async function detectGitHubRepository(cwd: string, remote = "origin"): Pr
  * The local work a remote run should start from. The base is the merge-base of HEAD
  * with its upstream (or origin's default branch), so it exists on GitHub; the patch
  * carries everything newer, built in a throwaway index so the user's index is untouched.
+ * `localChanges: false` (`dl --no-local-changes`) keeps the base and sends no patch.
  */
-export async function snapshotWorkingTree(cwd: string): Promise<WorkingTreeSnapshot> {
+export async function snapshotWorkingTree(cwd: string, options: { localChanges?: boolean } = {}): Promise<WorkingTreeSnapshot> {
   const root = await git(cwd, ["rev-parse", "--show-toplevel"]).catch(() => {
     throw new Error("Not inside a git repository");
   });
@@ -54,6 +55,7 @@ export async function snapshotWorkingTree(cwd: string): Promise<WorkingTreeSnaps
   const baseCommit = await git(root, ["merge-base", "HEAD", baseRef]).catch(() => {
     throw new Error(`HEAD shares no history with ${baseRef}`);
   });
+  if (options.localChanges === false) return { baseCommit, baseRef, patch: "", files: [] };
 
   const scratch = await mkdtemp(join(tmpdir(), "autopilot-snapshot-"));
   try {

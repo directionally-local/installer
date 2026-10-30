@@ -8,9 +8,14 @@ import { launchAgentPlist, localEnvFile, localPaths, parseLocalEnvFile, serviceS
 import { localStatus, setUpOnThisComputer, uninstallFromThisComputer, type LocalOptions } from "./setup.js";
 import { FakeComputer } from "./test-support/fake-computer.js";
 import { withCatalog } from "../test-support/fake-catalog.js";
+import { openrouterAnswer, type ProviderAnswer } from "../provider.js";
+import { pinnedAutopilotVersion } from "../versions.js";
 
 const OPENROUTER_KEY = `sk-or-v1-${"a".repeat(40)}`;
+const OPENROUTER = openrouterAnswer(OPENROUTER_KEY);
+const DEEPSEEK: ProviderAnswer = { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com", apiKey: "sk-deepseek-0000000000", apiKeyEnv: "DEEPSEEK_API_KEY" };
 const GITHUB_TOKEN = `github_pat_${"b".repeat(40)}`;
+const AUTOPILOT = pinnedAutopilotVersion();
 const HOME = "/Users/ada";
 const ROOT = `${HOME}/.directionallylocal`;
 const CELLAR_NODE = "/opt/homebrew/Cellar/node/24.22.1/bin/node";
@@ -33,14 +38,15 @@ function options(system: FakeComputer, extra: Partial<LocalOptions> = {}): Local
   };
 }
 
-async function setUp(system: FakeComputer, extra: Partial<LocalOptions> = {}, ui = new RecordingUi()) {
-  const { remote, capacity } = await setUpOnThisComputer({
+/** `answers: null` installs without any keys, as the wizard does before Autopilot's picker. */
+async function setUp(system: FakeComputer, extra: Partial<LocalOptions> = {}, ui = new RecordingUi(), answers: { provider?: ProviderAnswer; githubToken?: string } | null = { provider: OPENROUTER, githubToken: GITHUB_TOKEN }) {
+  const { remote, capacity, needs } = await setUpOnThisComputer({
     ui,
     prompter: new ScriptedPrompter({}),
-    answers: { openrouterKey: OPENROUTER_KEY, githubToken: GITHUB_TOKEN },
+    ...(answers ? { answers } : {}),
     ...options(system, extra),
   });
-  return { remote, capacity, ui };
+  return { remote, capacity, needs, ui };
 }
 
 /** Only OpenRouter's model list is fetched during setup. */
@@ -132,8 +138,9 @@ describe("on this computer: checks", () => {
 describe("on this computer: setup", () => {
   it("installs into the home directory, keeps secrets out of argv and logs, and pairs", async () => {
     const system = new FakeComputer();
-    const { remote, capacity, ui } = await setUp(system);
+    const { remote, capacity, needs, ui } = await setUp(system);
     assert.equal(capacity, 6, "how many fit goes to the wizard's Ready line");
+    assert.deepEqual(needs, [], "given both keys, nothing is left to ask");
 
     // Progress: the five steps, then the sleep note once.
     assert.deepEqual(ui.events.filter((event) => event.startsWith("done")).map((event) => event.split(" ")[1]), ["check", "software", "image", "services", "connect"]);
@@ -142,14 +149,16 @@ describe("on this computer: setup", () => {
     assert.match(ui.events.find((event) => event.startsWith("done check"))!, /macOS 15\.1 · Docker Desktop 29\.5\.2 · Node 24\.22\.1 · 120 GB free/);
 
     // Release layout: a versioned release and a current link, all under ~/.directionallylocal.
-    const release = `${ROOT}/releases/autopilot-2.6.1_hotcell-0.1.30`;
-    assert.ok(system.ran.includes(`npm install --prefix ${release} --no-audit --no-fund --omit=dev autopilot-ai@2.6.1 hotcell@0.1.30`));
+    // Autopilot is the version this dl pins (the laptop's session client), Hotcell npm's latest.
+    const release = `${ROOT}/releases/autopilot-${AUTOPILOT}_hotcell-0.1.30`;
+    assert.ok(system.ran.includes(`npm install --prefix ${release} --no-audit --no-fund --omit=dev autopilot-ai@${AUTOPILOT} hotcell@0.1.30`), system.ran.join("\n"));
+    assert.ok(!system.probes.some(({ command, args }) => command === "npm" && args.join(" ") === "view autopilot-ai version"), "never npm's latest Autopilot");
     assert.ok(system.ran.includes(`ln -sfn ${release} ${ROOT}/current`));
     for (const dir of [ROOT, `${ROOT}/config`, `${ROOT}/logs`, `${ROOT}/hotcell`, `${ROOT}/autopilot`]) assert.equal(system.dirs.get(dir), 0o700, dir);
     assert.ok(!system.ran.some((command) => /^(sudo|runuser) /.test(command)), "nothing runs as root");
 
     // The image: Node 24 + Autopilot, fresh base layers, through Docker Desktop's socket.
-    assert.ok(system.images.has("directionallylocal-cell:2.6.1"));
+    assert.ok(system.images.has(`directionallylocal-cell:${AUTOPILOT}`));
     const build = system.commands.find(({ args }) => args[0] === "build")!;
     assert.ok(build.args.includes("--pull"));
     assert.equal(build.env?.DOCKER_HOST, `unix://${HOME}/.docker/run/docker.sock`);
@@ -184,13 +193,14 @@ describe("on this computer: setup", () => {
     assert.equal(autopilot.AUTOPILOT_HOTCELL_ENDPOINT, "http://127.0.0.1:4750");
     assert.equal(autopilot.AUTOPILOT_PUBLIC_URL, "http://127.0.0.1:4096");
     assert.equal(autopilot.AUTOPILOT_ASTER_MEMORY, "off");
-    assert.equal(autopilot.AUTOPILOT_HOTCELL_IMAGE, "directionallylocal-cell:2.6.1");
+    assert.equal(autopilot.AUTOPILOT_HOTCELL_IMAGE, `directionallylocal-cell:${AUTOPILOT}`);
     assert.equal(autopilot.AUTOPILOT_ASTER_GITHUB_PROXY_LISTEN, "127.0.0.1:4760");
     assert.equal(autopilot.AUTOPILOT_ASTER_GITHUB_PROXY_URL, "http://host.docker.internal:4760");
     assert.equal(autopilot.GITHUB_TOKEN, undefined);
     assert.equal(autopilot.OPENROUTER_API_KEY, undefined);
-    const aster = JSON.parse(system.files.get(`${ROOT}/config/aster.json`)!.content) as { models: string; workspaces: Array<{ id: string; rootPath: string }> };
-    assert.equal(aster.models, "openrouter");
+    const aster = JSON.parse(system.files.get(`${ROOT}/config/aster.json`)!.content) as { models: string; provider: unknown; workspaces: Array<{ id: string; rootPath: string }> };
+    assert.equal(aster.models, "catalog");
+    assert.deepEqual(aster.provider, { id: "openrouter", baseUrl: "https://openrouter.ai/api/v1", apiKeyEnv: "OPENROUTER_API_KEY" });
     assert.deepEqual(aster.workspaces.map((workspace) => [workspace.id, workspace.rootPath]), [["default", `${ROOT}/autopilot/workspaces/default`]]);
     assert.ok(system.dirs.has(`${ROOT}/autopilot/workspaces/default/.git`), "the default workspace is a git repository");
 
@@ -219,6 +229,53 @@ describe("on this computer: setup", () => {
     assert.equal(state.kind, "this-computer");
     assert.equal(state.url, "http://127.0.0.1:4096");
     assert.equal(system.files.get(`${ROOT}/state.json`)!.mode, 0o600);
+  });
+
+  it("installs without keys and reports what the wizard still has to gather", async () => {
+    const system = new FakeComputer();
+    const { needs, ui } = await setUp(system, {}, new RecordingUi(), null);
+    assert.deepEqual(needs, ["provider", "github"]);
+    assert.ok(ui.events.includes("done connect | this computer · tasks pause while it sleeps"), "set up all the same");
+    assert.equal(system.hotcellKeys.size, 0);
+    const github = system.files.get(`${ROOT}/config/github.env`)!;
+    assert.equal(github.mode, 0o600);
+    assert.equal(parseLocalEnvFile(github.content).GITHUB_TOKEN, undefined, "exists (Autopilot starts with --env-file) but holds no token yet");
+    const aster = JSON.parse(system.files.get(`${ROOT}/config/aster.json`)!.content) as { models: string; provider: unknown };
+    assert.equal(aster.models, "openrouter");
+    assert.equal(aster.provider, undefined, "the default until Autopilot's picker names one");
+    assert.ok(system.running.has("com.directionallylocal.autopilot"));
+
+    // A later run with the keys stores them and reports nothing missing; a keyless provider stores no key, a custom one its address.
+    const again = await setUp(system, {}, new RecordingUi(), { provider: DEEPSEEK, githubToken: GITHUB_TOKEN });
+    assert.deepEqual(again.needs, []);
+    const add = system.commands.find(({ args }) => args.includes("keys") && args.includes("add"))!;
+    assert.deepEqual(add.args.slice(1), ["keys", "add", "deepseek", "--stdin"]);
+    assert.equal(add.input, DEEPSEEK.apiKey);
+    assert.deepEqual((JSON.parse(system.files.get(`${ROOT}/config/aster.json`)!.content) as { provider: unknown }).provider, { id: "deepseek", baseUrl: "https://api.deepseek.com", apiKeyEnv: "DEEPSEEK_API_KEY" });
+    const ollama = await setUp(system, {}, new RecordingUi(), { provider: { id: "ollama", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null, apiKeyEnv: "OLLAMA_API_KEY" } });
+    assert.deepEqual(ollama.needs, []);
+    const keyless = system.commands.filter(({ args }) => args.includes("keys") && args.includes("add")).at(-1)!;
+    assert.deepEqual(keyless.args.slice(1), ["keys", "add", "ollama"]);
+    assert.equal(keyless.input, undefined);
+    await setUp(system, {}, new RecordingUi(), { provider: { id: "myproxy", baseUrl: "https://llm.example.com/v1", apiKey: "k-1234567890", apiKeyEnv: "MYPROXY_API_KEY" } });
+    const custom = system.commands.filter(({ args }) => args.includes("keys") && args.includes("add")).at(-1)!;
+    assert.deepEqual(custom.args.slice(1), ["keys", "add", "myproxy", "--stdin", "--base-url", "https://llm.example.com/v1"]);
+    assert.equal(system.hotcellRouteUrls.get("myproxy"), "https://llm.example.com/v1");
+  });
+
+  it("installs unpublished builds named by DL_AUTOPILOT_SPEC and DL_HOTCELL_SPEC", async () => {
+    const system = new FakeComputer();
+    const env = { DL_AUTOPILOT_SPEC: "/Users/ada/autopilot-ai-dev.tgz", DL_HOTCELL_SPEC: "/Users/ada/hotcell-dev.tgz" };
+    const { ui } = await setUp(system, { env });
+    assert.ok(system.ran.includes(`npm install --prefix ${ROOT}/releases/autopilot-dev_hotcell-dev --no-audit --no-fund --omit=dev /Users/ada/autopilot-ai-dev.tgz /Users/ada/hotcell-dev.tgz`), system.ran.join("\n"));
+    assert.ok(system.ran.some((command) => command.startsWith("npm pack /Users/ada/autopilot-ai-dev.tgz ")), "the sandbox image is built from the same build");
+    assert.ok(system.images.has("directionallylocal-cell:dev"));
+    assert.ok(ui.events.includes("done software | Autopilot 9.9.9-dev.autopilot-ai · Hotcell 9.9.9-dev.hotcell"), ui.events.join("\n"));
+    const state = JSON.parse(system.files.get(`${ROOT}/state.json`)!.content) as { autopilotVersion: string };
+    assert.equal(state.autopilotVersion, "9.9.9-dev.autopilot-ai");
+    const before = system.ran.filter((command) => command.startsWith("npm install")).length;
+    await setUp(system, { env });
+    assert.equal(system.ran.filter((command) => command.startsWith("npm install")).length, before + 1, "a dev build may have changed: installed again");
   });
 
   it("re-runs as a repair: nothing reinstalled, same secrets and ports, one credential", async () => {
@@ -348,7 +405,7 @@ describe("on this computer: status and uninstall", () => {
     assert.equal(status.capacity, 6);
     const text = formatLocalStatus(status, palette(false), HOME);
     assert.match(text, /on this computer {2}running/);
-    assert.match(text, /Autopilot +running \(pid 4242\) · http:\/\/127\.0\.0\.1:4096 · 2\.6\.1/);
+    assert.match(text, new RegExp(`Autopilot +running \\(pid 4242\\) · http://127\\.0\\.0\\.1:4096 · ${AUTOPILOT.replace(/\./g, "\\.")}`));
     assert.match(text, /~6 agents at once/);
     assert.match(text, /~\/\.directionallylocal\/logs/);
     assert.match(text, /tasks pause while this computer sleeps/);
@@ -379,12 +436,13 @@ describe("on this computer: status and uninstall", () => {
     assert.equal(await system.exists(`${ROOT}/current`), false);
     assert.deepEqual(system.containers.map((entry) => entry.id), ["theirs"], "a user's own Hotcell sandboxes stay");
     assert.ok(system.files.has(`${ROOT}/config/github.env`), "keys and config are kept without --purge");
-    assert.ok(system.images.has("directionallylocal-cell:2.6.1"));
+    assert.ok(system.images.has(`directionallylocal-cell:${AUTOPILOT}`));
     assert.deepEqual(forgotten, ["this-computer"]);
     assert.equal((await localStatus(options(system))).installed, false);
 
-    // Setting up again asks nothing it already has, and installs the software again.
-    await setUpOnThisComputer({ ui: new RecordingUi(), prompter: new ScriptedPrompter({}), answers: { openrouterKey: "", githubToken: "" }, ...options(system) });
+    // Setting up again needs nothing it already has, and installs the software again.
+    const again = await setUpOnThisComputer({ ui: new RecordingUi(), prompter: new ScriptedPrompter({}), ...options(system) });
+    assert.deepEqual(again.needs, []);
     assert.ok(system.running.has("com.directionallylocal.autopilot"));
   });
 
@@ -394,9 +452,7 @@ describe("on this computer: status and uninstall", () => {
     await uninstallFromThisComputer({ ui: new RecordingUi(), purge: true, ...options(system), forgetRemote: async () => true });
     assert.equal(await system.exists(ROOT), false);
     assert.equal(system.images.size, 0);
-    await assert.rejects(
-      () => setUpOnThisComputer({ ui: new RecordingUi(), prompter: new ScriptedPrompter({}), answers: { openrouterKey: "", githubToken: "" }, ...options(system) }),
-      /OpenRouter key is needed/,
-    );
+    const fresh = await setUpOnThisComputer({ ui: new RecordingUi(), prompter: new ScriptedPrompter({}), ...options(system) });
+    assert.deepEqual(fresh.needs, ["provider", "github"], "the keys went with --purge");
   });
 });

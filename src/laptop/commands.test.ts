@@ -261,7 +261,7 @@ describe("dl on a laptop", () => {
 
   it("guides a laptop that isn't connected yet", async () => {
     const io = capture();
-    await assert.rejects(() => runs({}, io), /Nothing is set up yet\. Run: dl setup {2}\(or, for a server someone else set up: dl connect/);
+    await assert.rejects(() => runs({}, io), /Nothing is set up yet\. Run: dl {2}\(or, for a server someone else set up: dl connect/);
     assert.equal(await servers([], io), 0);
     assert.match(io.text(), /Nothing set up yet\. {2}dl setup {2}or, for a server someone else set up: dl connect https:\/\/your-server/);
   });
@@ -280,7 +280,7 @@ describe("dl on a laptop", () => {
     assert.equal(await sent({ autopilotModel: async () => "test/model" }), "test/model");
     assert.equal(await sent({ autopilotModel: async () => "someone/not-offered" }), DEFAULT_MODEL);
     assert.equal(await sent({}), DEFAULT_MODEL);
-    await assert.rejects(() => sent({ model: "someone/not-offered" }), /doesn't offer someone\/not-offered\. Pick one: dl run -m <model> "task" {2}\(model IDs: https:\/\/openrouter\.ai\/models\)/);
+    await assert.rejects(() => sent({ model: "someone/not-offered" }), /doesn't offer someone\/not-offered\. Pick one: dl run -m <model> "task" {2}\(or dl model, for the provider's list\)/);
     fake.models = ["01-ai/yi-large", "test/model"];
     await assert.rejects(() => sent({ autopilotModel: async () => "someone/not-offered" }), /doesn't offer your model \(someone\/not-offered\) or deepseek\/deepseek-v4\.1-flash-1017\. Pick one: dl run -m <model>/);
   });
@@ -291,7 +291,14 @@ describe("dl on a laptop", () => {
     assert.equal(pickModel(catalog, undefined, "openai/gpt-5"), "openai/gpt-5");
     assert.equal(pickModel(catalog, undefined, "kimi-k2.6"), DEFAULT_MODEL, "a Requesty-style ID the server doesn't offer");
     assert.equal(pickModel(catalog, undefined, undefined), DEFAULT_MODEL);
-    assert.throws(() => pickModel(["01-ai/yi-large"], undefined, undefined), /doesn't offer deepseek\/deepseek-v4\.1-flash-1017\. Pick one: dl run -m <model> "task" {2}\(model IDs: https:\/\/openrouter\.ai\/models\)/);
+    // A newer place names its provider's default (the one chosen in Autopilot's picker): it wins over dl's last resort.
+    const deepseek = { models: ["deepseek-v4-flash", "deepseek-v4-pro"], provider: { id: "deepseek", name: "DeepSeek" }, defaultModel: "deepseek-v4-pro" };
+    assert.equal(pickModel(deepseek, undefined, undefined), "deepseek-v4-pro");
+    assert.equal(pickModel(deepseek, undefined, "deepseek-v4-flash"), "deepseek-v4-flash", "the laptop's own choice first");
+    assert.equal(pickModel(deepseek, undefined, "someone/not-offered"), "deepseek-v4-pro");
+    assert.throws(() => pickModel({ ...deepseek, models: [] }, undefined, undefined), /offers no models; check its DeepSeek key \(dl provider\)/);
+    assert.throws(() => pickModel(deepseek, "gpt-6", undefined), /doesn't offer gpt-6\. Pick one: dl run -m <model> "task" {2}\(or dl model, for DeepSeek's list\)/);
+    assert.throws(() => pickModel(["01-ai/yi-large"], undefined, undefined), /doesn't offer deepseek\/deepseek-v4\.1-flash-1017\. Pick one: dl run -m <model> "task" {2}\(or dl model, for the provider's list\)/);
     assert.throws(() => pickModel(["01-ai/yi-large"], undefined, DEFAULT_MODEL), /doesn't offer deepseek\/deepseek-v4\.1-flash-1017\. Pick one/);
     assert.throws(() => pickModel([], undefined, undefined), /offers no models/);
   });
@@ -347,10 +354,12 @@ describe("dl on a laptop", () => {
     assert.match(named.text(), /Sending to box: /);
 
     const home = capture();
-    assert.equal(await laptopHome(home, undefined, async () => "test/model"), true);
+    assert.equal(await laptopHome(home, undefined, async (name) => name === "box" ? "test/model" : undefined, { ssh: async () => ({ code: 1, stdout: "", stderr: "" }), laptop: "3.0.2", local: async () => "3.0.1" }), true);
     assert.match(home.text(), /Coding agents that run on this computer or your own server/);
-    assert.match(home.text(), /Model +test\/model +dl model\n/);
+    assert.match(home.text(), /Model +box · test\/model +dl model · dl provider\n +this-computer · deepseek\/deepseek-v4\.1-flash-1017\n/, "each place's model");
     assert.match(home.text(), /Runs on +○ box http:\/\/127\.0\.0\.1:\d+, ● this-computer this computer +dl servers · dl use NAME/);
+    assert.match(home.text(), /Autopilot +3\.0\.2 here · box \? · this-computer 3\.0\.1\n +! this-computer runs Autopilot 3\.0\.1, this laptop 3\.0\.2 +dl update this-computer/, "the laptop's version next to each place's");
+    assert.match(home.text(), /Talk to an agent: type {2}dl/);
   });
 
   it("shows why a task failed, in dl run, dl watch and dl runs", { timeout: 30_000 }, async () => {
@@ -382,8 +391,8 @@ describe("dl on a laptop", () => {
 
     assert.equal(failureHint("context window exceeded (~104,215 tokens needed)"), "pick a model with a bigger window: dl model");
     assert.equal(failureHint("HTTP 403: model not priced: openai/gpt-6-luna"), "pick another model: dl model");
-    assert.equal(failureHint("git_push_failed: remote rejected"), "check the GitHub token: dl keys github");
-    assert.equal(failureHint("429 rate limit"), "wait a moment, or check the OpenRouter key: dl keys openrouter");
+    assert.equal(failureHint("git_push_failed: remote rejected"), "check the GitHub token: dl provider github");
+    assert.equal(failureHint("429 rate limit"), "wait a moment, or check the provider's key: dl provider");
     assert.equal(failureHint("Docker went away"), undefined);
   });
 
