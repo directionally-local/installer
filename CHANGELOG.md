@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.3](https://github.com/directionally-local/installer/compare/v0.9.2...v0.9.3) (2026-10-30)
+
+
+### Bug Fixes
+
+* **deps:** ship autopilot-ai 3.1.0 so new installs use autopilot folders ([#65](https://github.com/directionally-local/installer/issues/65)) ([99a8067](https://github.com/directionally-local/installer/commit/99a8067842de6b886ce2ad55a30343110fb7ea7f))
+* **deps:** ship autopilot-ai 3.1.1 ([c1abc15](https://github.com/directionally-local/installer/commit/c1abc15872abac8988b914d96266c0c27cb7b739))
+* **deps:** ship autopilot-ai 3.1.1 ([c3571ee](https://github.com/directionally-local/installer/commit/c3571eebed405092d286de308c0184544e71251c))
+
 ## [0.9.2](https://github.com/directionally-local/installer/compare/v0.9.1...v0.9.2) (2026-10-30)
 
 
