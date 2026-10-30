@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.4](https://github.com/directionally-local/installer/compare/v0.9.3...v0.9.4) (2026-10-30)
+
+
+### Bug Fixes
+
+* **session:** reopen a saved chat without creation flags ([#68](https://github.com/directionally-local/installer/issues/68)) ([3cc2f2f](https://github.com/directionally-local/installer/commit/3cc2f2f30d06cfab6ddd88769ce1b19e2d8badee))
+
 ## [0.9.3](https://github.com/directionally-local/installer/compare/v0.9.2...v0.9.3) (2026-10-30)
 
 

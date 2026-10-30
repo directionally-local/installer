@@ -1,6 +1,6 @@
 {
   "name": "directionallylocal",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Directionally Local: background coding agents on your own server. One-line server install, and the dl command for your server and laptop.",
   "license": "Apache-2.0",
   "homepage": "https://directionallylocal.com",
