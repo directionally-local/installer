@@ -1,0 +1,25 @@
+# Keep dl on the latest Autopilot without manual pin bumps. Merged automatically
+# once CI passes (see .github/workflows/deps-automerge.yml); the `fix(deps)`
+# commit then makes release-please cut a release.
+#
+# dl pins autopilot-ai exactly (no range) on purpose: the session client dl
+# ships and the server it talks to must not drift. That also means nothing
+# bumps it unless this file exists — which is why the pin sat on 3.0.2 while
+# 3.0.3 had the `connect --state-file` flag the setup needs.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: daily
+    allow:
+      - dependency-name: autopilot-ai
+    # Raise the pin itself, not just the lockfile.
+    versioning-strategy: increase
+    groups:
+      own-packages:
+        patterns: ["autopilot-ai"]
+    commit-message:
+      prefix: fix(deps)
+    labels: [dependencies]
+    open-pull-requests-limit: 2
