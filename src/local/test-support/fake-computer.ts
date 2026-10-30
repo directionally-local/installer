@@ -33,6 +33,8 @@ export class FakeComputer implements System {
   readonly busy = new Set<number>();
   readonly credentials: Array<{ id: string; name: string; status: string; token: string; expiresAt: number }> = [];
   hotcellKeys = new Map<string, string>();
+  /** A custom provider's address, from `--base-url`. */
+  hotcellRouteUrls = new Map<string, string>();
   docker = true;
   /** Docker Desktop is installed as an app (it may be stopped). */
   dockerApp = true;
@@ -136,15 +138,20 @@ export class FakeComputer implements System {
     }
     if (command.endsWith("/node") && args[0]?.endsWith("hotcell/dist/index.js")) {
       if (args[1] === "keys" && args[2] === "add") {
+        // A keyless provider (ollama) comes without --stdin and stores an empty key.
         this.hotcellKeys.set(args[3]!, options.input ?? "");
+        if (args.includes("--base-url")) this.hotcellRouteUrls.set(args[3]!, args[args.indexOf("--base-url") + 1]!);
         const home = options.env?.HOTCELL_HOME ?? "";
         this.files.set(`${home}/keys.json`, { content: "{}", mode: 0o600 });
         return ok("stored\n");
       }
       if (args[1] === "keys" && args[2] === "ls") {
-        if (!this.files.has(`${options.env?.HOTCELL_HOME ?? ""}/keys.json`)) return ok("");
-        // Like Hotcell's own listing: a header, then each provider with its masked value.
+        if (!this.files.has(`${options.env?.HOTCELL_HOME ?? ""}/keys.json`)) return ok(args.includes("--json") ? '{"routes":[]}\n' : "");
+        // Like Hotcell's own listing: a header, then each provider with its masked value; `--json` lists routes.
         const mask = (value: string) => value.length <= 8 ? "•".repeat(Math.max(4, value.length)) : `${value.slice(0, 5)}…${value.slice(-2)}`;
+        if (args.includes("--json")) {
+          return ok(`${JSON.stringify({ routes: [...this.hotcellKeys].map(([key, value]) => ({ provider: key, active: true, ...(value ? { mask: mask(value) } : {}) })) })}\n`);
+        }
         return ok(`PROVIDER  KEY           SOURCE\n${[...this.hotcellKeys].map(([key, value]) => `${key.padEnd(8)}  ${mask(value).padEnd(12)}  file\n`).join("")}`);
       }
       return ok();
@@ -221,7 +228,12 @@ export class FakeComputer implements System {
       case "npm":
         if (args[0] === "view") return ok(args[1] === "hotcell" ? "0.1.30\n" : "2.6.1\n");
         if (args[0] === "install" && args[1] === "--prefix") {
-          for (const pkg of ["autopilot-ai", "hotcell"]) this.files.set(`${args[2]}/node_modules/${pkg}/package.json`, { content: "{}", mode: 0o644 });
+          // Each installed package reports the version its spec named (a tarball or path: a dev build).
+          for (const pkg of ["autopilot-ai", "hotcell"]) {
+            const spec = args.find((arg) => arg.startsWith(`${pkg}@`));
+            const version = spec ? spec.slice(pkg.length + 1) : `9.9.9-dev.${pkg}`;
+            this.files.set(`${args[2]}/node_modules/${pkg}/package.json`, { content: JSON.stringify({ name: pkg, version }), mode: 0o644 });
+          }
           this.files.set(`${args[2]}/node_modules/hotcell/dist/index.js`, { content: "", mode: 0o755 });
           this.dirs.set(args[2]!, 0o700);
         }

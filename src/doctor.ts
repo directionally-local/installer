@@ -2,7 +2,9 @@ import { detectHost, MIN_DISK_GB } from "./detect.js";
 import { nodeAdvisory } from "./node-advisory.js";
 import { AUTOPILOT_PORT, AUTO_UPGRADES, HOTCELL_PORT, NODE_AUTO_UPDATES, PATHS, SERVICES, parseEnvFile } from "./layout.js";
 import { fileMtime, modelPricesHealth } from "./model-prices.js";
+import { providerFromAsterConfig } from "./provider.js";
 import { describeAccess, readState } from "./state.js";
+import { hotcellRoutes } from "./up.js";
 import { palette } from "./ui.js";
 import type { System } from "./system.js";
 
@@ -59,9 +61,15 @@ export async function doctor(system: System, now = new Date()): Promise<Check[]>
   const hotcell = await system.probe("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", `http://127.0.0.1:${HOTCELL_PORT}/`]);
   add({ name: "sandboxes API", ok: /^\d{3}$/.test(hotcell.stdout.trim()) && hotcell.stdout.trim() !== "000", detail: `HTTP ${hotcell.stdout.trim() || "none"}`, fix: "dl up" });
 
-  const keys = await system.probe("runuser", ["-u", "hotcell", "--", "env", `HOTCELL_HOME=${PATHS.hotcellHome}`, "HOTCELL_KEYSTORE=file", "/usr/bin/node", `${PATHS.current}/node_modules/hotcell/dist/index.js`, "keys", "ls"]);
-  const hasModelKey = keys.code === 0 && /^\s*openrouter\b/m.test(keys.stdout);
-  add({ name: "model key", ok: hasModelKey, detail: hasModelKey ? "OpenRouter key in Hotcell" : "no OpenRouter key in Hotcell", fix: "sudo dl up (asks for it)" });
+  // The provider aster.json names must have an active route in Hotcell (`hotcell keys ls --json`).
+  const provider = providerFromAsterConfig(await system.readFile(PATHS.asterConfig));
+  const route = (await hotcellRoutes(system)).find((entry) => entry.provider === provider.id);
+  add({
+    name: "model key",
+    ok: route?.active === true,
+    detail: route?.active ? `${provider.id} route active in Hotcell` : route ? `${provider.id} route is off in Hotcell` : `no ${provider.id} key in Hotcell`,
+    fix: `sudo dl keys set ${provider.id}`,
+  });
 
   const prices = modelPricesHealth(await system.readFile(PATHS.modelPrices), await fileMtime(system, PATHS.modelPrices), now, "dl up");
   add({ name: "model prices", ok: prices.ok, ...(prices.warn ? { warn: true } : {}), detail: prices.detail, fix: "sudo dl up (downloads them from openrouter.ai)" });

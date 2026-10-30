@@ -35,8 +35,12 @@ export class FakeSystem implements System {
   tailscaleUp: boolean;
   ufwActive = false;
   hotcellKeys = new Set<string>();
-  /** What `hotcell keys add … --stdin` stored, by provider. */
+  /** What `hotcell keys add … --stdin` stored, by provider (keyless providers have no entry). */
   hotcellKeyValues = new Map<string, string>();
+  /** A custom provider's address, from `--base-url`. */
+  hotcellRouteUrls = new Map<string, string>();
+  /** Routes `hotcell keys ls --json` reports as inactive. */
+  hotcellInactive = new Set<string>();
   memoryKb = 8 * 1024 * 1024;
   nodeVersion = "24.22.1";
   /** What Autopilot's server CLI reports (aster token list / runs / pair list). */
@@ -139,7 +143,12 @@ export class FakeSystem implements System {
       case "npm":
         if (args[0] === "view") return ok(args[1] === "hotcell" ? "0.1.26\n" : "2.2.0\n");
         if (args[0] === "install" && args[1] === "--prefix") {
-          for (const pkg of ["autopilot-ai", "hotcell"]) this.files.set(`${args[2]}/node_modules/${pkg}/package.json`, { content: "{}", mode: 0o644 });
+          // Each installed package reports the version its spec named (a tarball or path: a dev build).
+          for (const pkg of ["autopilot-ai", "hotcell"]) {
+            const spec = args.find((arg) => arg.startsWith(`${pkg}@`));
+            const version = spec ? spec.slice(pkg.length + 1) : `9.9.9-dev.${pkg}`;
+            this.files.set(`${args[2]}/node_modules/${pkg}/package.json`, { content: JSON.stringify({ name: pkg, version }), mode: 0o644 });
+          }
           this.files.set(`${args[2]}/node_modules/hotcell/dist/index.js`, { content: "", mode: 0o755 });
         }
         return ok();
@@ -152,11 +161,16 @@ export class FakeSystem implements System {
           const provider = args[args.indexOf("add") + 1]!;
           this.hotcellKeys.add(provider);
           if (options.input !== undefined) this.hotcellKeyValues.set(provider, options.input);
+          else this.hotcellKeyValues.delete(provider);
+          if (args.includes("--base-url")) this.hotcellRouteUrls.set(provider, args[args.indexOf("--base-url") + 1]!);
           return ok(`✓ stored ${provider}   · ~/.hotcell/keys.json (chmod 600)\n`);
         }
         if (args.includes("keys") && args.includes("ls")) {
-          // Like Hotcell's own listing: a header, then each provider with its masked value.
-          const mask = (value: string) => value.length <= 8 ? "•".repeat(Math.max(4, value.length)) : `${value.slice(0, 5)}…${value.slice(-2)}`;
+          // Like Hotcell's own listing: a header, then each provider with its masked value; `--json` lists routes.
+          const mask = (value: string | undefined) => value === undefined ? "" : value.length <= 8 ? "•".repeat(Math.max(4, value.length)) : `${value.slice(0, 5)}…${value.slice(-2)}`;
+          if (args.includes("--json")) {
+            return ok(`${JSON.stringify({ routes: [...this.hotcellKeys].map((key) => ({ provider: key, active: !this.hotcellInactive.has(key), ...(this.hotcellKeyValues.has(key) ? { mask: mask(this.hotcellKeyValues.get(key)) } : {}) })) })}\n`);
+          }
           if (this.hotcellKeys.size === 0) return ok("no provider keys yet — add one:  hotcell keys add openrouter\n");
           return ok(`PROVIDER  KEY           SOURCE\n${[...this.hotcellKeys].map((key) => `${key.padEnd(8)}  ${mask(this.hotcellKeyValues.get(key) ?? "sk-or-v1-unknown00").padEnd(12)}  file\n`).join("")}`);
         }

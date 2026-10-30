@@ -3,27 +3,35 @@ import { access as fileAccess, readdir, readFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { configureThisComputer } from "../local/keys.js";
+import { setUpOnThisComputer, type LocalAnswers, type LocalNeed } from "../local/setup.js";
+import { localUnsupported } from "../local/check.js";
 import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
+import { describeProvider, providerAnswer, type ConnectResult, type ProviderAnswer } from "../provider.js";
 import { palette, PlainUi, TerminalUi, type Ui } from "../ui.js";
 import type { LaptopIO } from "./commands.js";
-import { localUnsupported } from "../local/check.js";
 import { loadRemotes, loadRemotesFile, normalizeServerUrl, REMOTE_NAME_RE, remotesPath, resolveTarget, saveRemote, setDefaultRemote, type RemoteServer, type SshAccess } from "./config.js";
-import { confirm, gatherKeys, type KeySources } from "./credentials.js";
-import { bootstrap, INSTALL_URL, installOnServer, pairLaptop, serverNeeds, type UiFactory } from "./remote-install.js";
+import { ConnectCancelled, runAutopilotConnect } from "./connect.js";
+import { confirm, githubToken, type KeyPlace, type KeySources, type Need } from "./credentials.js";
+import { applyOnServer, bootstrap, INSTALL_URL, installOnServer, pairLaptop, serverNeeds, type ServerAnswers, type UiFactory } from "./remote-install.js";
+import { openSession } from "./session.js";
+import { loadSettings, saveModel, saveSettings } from "./settings.js";
 import { checkServer, describeHost, discoverKeys, hostOf, parseSshConfig, parseTarget, realSshExec, SshAuthError, type ServerFacts, type SshExec, type SshHost } from "./ssh.js";
-import { askModel, DEFAULT_MODEL, loadSettings, modelPrices, readAutopilotModel, saveModel, saveSettings } from "./settings.js";
 import { openRemote, withConnections, type RemoteOpener } from "./tunnel.js";
 
 /**
- * `dl` / `dl setup` on a laptop: the whole product starts here. It asks where agents
- * should run, then either hands off to "on this computer" (built separately and injected
- * as `localSetup`) or sets up the user's own server over SSH: checks it, installs there,
- * reuses the keys this laptop already has, pairs this laptop, and saves the server so
- * `dl run` and friends reach it through an SSH tunnel. Nothing is exposed on the server.
+ * `dl` the first time (and `dl setup`): the installer of the stack, and nothing more. It asks
+ * where agents should run, installs Hotcell + Autopilot there (this computer, or the user's
+ * own server over SSH), hands the provider and model choice to Autopilot's own picker, pushes
+ * the key to the place, takes the GitHub token, and opens a session right away. Nothing is
+ * exposed on a server: `dl` reaches it through an SSH tunnel.
  */
 
-/** "On this computer": sets everything up locally and returns the server to save, and how many agents fit. */
-export type LocalSetup = (input: { ui: Ui; prompter: Prompter; answers: { openrouterKey: string; githubToken: string } }) => Promise<{ remote: RemoteServer; capacity?: number }>;
+/** "On this computer": installs everything locally; returns the server to save, how many agents fit, and what's still missing. */
+export type LocalSetup = (input: { ui: Ui; prompter: Prompter; answers?: LocalAnswers }) => Promise<{ remote: RemoteServer; capacity?: number; needs: LocalNeed[] }>;
+
+/** "On this computer": stores the provider's key (and aster.json) and the GitHub token, restarting what reads them. */
+export type LocalConfigure = (answers: { provider?: ProviderAnswer; githubToken?: string }) => Promise<void>;
 
 export interface SetupDeps {
   /** A fresh Ui per section (TerminalUi on a terminal, PlainUi otherwise). */
@@ -38,10 +46,15 @@ export interface SetupDeps {
   /** This laptop's name, for the credential the server issues it. */
   hostname: string;
   remotesFile?: string;
-  /** dl's own settings (the default model); ~/.config/directionallylocal/config.json unless replaced. */
+  /** dl's own settings (each place's model); ~/.config/directionallylocal/config.json unless replaced. */
   settingsFile?: string;
   installUrl?: string;
   localSetup?: LocalSetup;
+  localConfigure?: LocalConfigure;
+  /** Autopilot's provider + model picker (`autopilot connect`); the real one unless replaced. */
+  connect?: (options: { modelOnly?: boolean }) => Promise<ConnectResult>;
+  /** Opens the session the user lands in once a place is ready; nothing after the Ready line otherwise. */
+  openSession?: (remote: RemoteServer) => Promise<number | undefined>;
   /** `dl setup --identity FILE`: the private key to use, instead of trying the ones in ~/.ssh. */
   identityFile?: string;
   /** Someone is at a terminal to answer a question setup could skip; true unless told otherwise. */
@@ -50,8 +63,6 @@ export interface SetupDeps {
   platform?: NodeJS.Platform;
   now?: () => Date;
 }
-
-const RUN_EXAMPLE = 'dl run "fix the flaky checkout test"';
 
 const PLACES: SelectOption[] = [
   { value: "local", label: "On this computer", detail: "start now · nothing to rent · pauses when this computer sleeps" },
@@ -75,7 +86,7 @@ export async function setupWizard(deps: SetupDeps): Promise<RemoteServer | undef
   if (where === "local" && !deps.localSetup) {
     ui.line("info", "On this computer", "coming soon");
     if (!(await confirm(ui, deps.prompter, "Set up on your own server instead?"))) {
-      deps.write(`\n  ${c.dim("Nothing changed. Run")} dl setup ${c.dim("when you're ready.")}\n\n`);
+      deps.write(`\n  ${c.dim("Nothing changed. Run")} dl ${c.dim("when you're ready.")}\n\n`);
       return undefined;
     }
     ui.answered("Where", "On my own server");
@@ -83,16 +94,17 @@ export async function setupWizard(deps: SetupDeps): Promise<RemoteServer | undef
   }
 
   if (where === "local") {
-    const keysUi = deps.newUi();
-    const answers = await gatherKeys(["github", "openrouter"], { ui: keysUi, prompter: deps.prompter, sources: deps.sources, place: "this computer" });
-    keysUi.finish();
-    const { remote, capacity } = await deps.localSetup!({ ui: deps.newUi(), prompter: deps.prompter, answers: { openrouterKey: answers.openrouterKey!, githubToken: answers.githubToken! } });
+    // Install first; the keys come after, from Autopilot's own picker and the GitHub CLI.
+    const { remote, capacity, needs } = await deps.localSetup!({ ui: deps.newUi(), prompter: deps.prompter });
     const remotesFile = deps.remotesFile ?? remotesPath();
     const isNew = !(await loadRemotes(remotesFile)).some((entry) => entry.name === remote.name);
     await saveRemote(remote, remotesFile);
+    await gatherAndStore(deps, needs, remote.name, "this computer", async (answers) => {
+      if (!deps.localConfigure) throw new Error("This build can't store keys on this computer.");
+      await deps.localConfigure(answers);
+    });
     await offerThisComputer(deps, remote, remotesFile, isNew);
-    await chooseModel(deps);
-    finishScreen(deps.newUi(), capacity);
+    await ready(deps, remote, capacity);
     return remote;
   }
   return setUpServer(deps);
@@ -107,17 +119,16 @@ async function setUpServer(deps: SetupDeps): Promise<RemoteServer> {
   const chosen = await chooseServer(deps, hosts);
   const { access, facts } = await reachServer(deps, sshDir, deps.identityFile ? { ...chosen.access, identityFile: deps.identityFile } : chosen.access, chosen.display);
 
-  // 2. Install dl there, then ask only for the keys it still lacks.
+  // 2. Install dl there, then everything else; its checklist replayed here.
   await bootstrap(access, facts, deps.ssh, deps.newUi(), deps.installUrl);
+  const { capacity } = await installOnServer(access, facts, deps.ssh, {}, deps.newUi);
+
+  // 3. The keys it still lacks: the provider from Autopilot's picker, the GitHub token; stored in one quiet pass.
   const needs = await serverNeeds(access, facts, deps.ssh);
   if (needs.includes("tailscale")) throw new Error("The server asked for Tailscale, but this setup reaches it over SSH; update dl on the server and run dl setup again.");
-  const keysUi = deps.newUi();
-  const answers = await gatherKeys(needs, { ui: keysUi, prompter: deps.prompter, sources: deps.sources });
-  if (needs.length === 0) keysUi.line("done", "Keys", "already on the server");
-  keysUi.finish();
-
-  // 3. The install itself, its checklist replayed here.
-  const { capacity } = await installOnServer(access, facts, deps.ssh, answers, deps.newUi);
+  // The model is kept under the name the server will most likely get (adoptModel moves it if that differs).
+  const provisional = chosen.alias ?? facts.hostname ?? access.target;
+  await gatherAndStore(deps, needs, provisional, "your server", (answers) => applyOnServer(access, facts, deps.ssh, answers));
 
   // 4. A credential for this laptop, checked through the tunnel every command will use. Each
   // `dl pair` makes a new credential on the server, so a re-run keeps the saved one if it works.
@@ -149,12 +160,66 @@ async function setUpServer(deps: SetupDeps): Promise<RemoteServer> {
     }
   });
   await saveRemote(remote, remotesFile);
+  // The model was kept under the server's name before it was known for sure; move it along.
+  await adoptModel(deps, provisional, remote.name);
   connectedUi.line("done", "This laptop", `connected as ${remote.name}`);
   connectedUi.finish();
   if (!known.some((entry) => entry.name === paired.name)) await chooseDefault(deps, remote, remotesFile);
-  await chooseModel(deps);
-  finishScreen(deps.newUi(), capacity);
+  await ready(deps, remote, capacity);
   return remote;
+}
+
+/**
+ * What the place still lacks, gathered and stored in one pass: the provider, key and model
+ * from Autopilot's own picker (it runs in this terminal and configures the user's `autopilot`
+ * too), then the GitHub token. The model stays here, as the place's; the key goes to the place.
+ */
+async function gatherAndStore(deps: SetupDeps, needs: readonly Need[], placeName: string, place: KeyPlace, store: (answers: ServerAnswers) => Promise<void>): Promise<void> {
+  const ui = deps.newUi();
+  const wanted = needs.filter((need) => need === "provider" || need === "github");
+  if (wanted.length === 0) {
+    ui.line("done", "Keys", `already on ${place}`);
+    ui.finish();
+    return;
+  }
+  const answers: ServerAnswers = {};
+  if (wanted.includes("provider")) {
+    deps.write("\n");
+    let chosen: ConnectResult;
+    try {
+      chosen = await (deps.connect ?? ((options) => runAutopilotConnect(options)))({});
+    } catch (error) {
+      if (error instanceof ConnectCancelled) throw new PromptCancelled();
+      throw error;
+    }
+    answers.provider = providerAnswer(chosen);
+    await saveModel(chosen.model, deps.settingsFile, placeName);
+    ui.line("done", "Provider", `${describeProvider({ id: chosen.provider, name: chosen.name }, chosen.model)} · key stays on ${place}`);
+  }
+  if (wanted.includes("github")) {
+    answers.githubToken = await githubToken({ ui, prompter: deps.prompter, sources: deps.sources, place });
+  }
+  ui.plan([{ id: "keys", label: `Storing keys on ${place}` }]);
+  ui.start("keys");
+  try {
+    await store(answers);
+  } catch (error) {
+    ui.fail("keys", error instanceof Error ? error.message.split("\n")[0]! : String(error));
+    ui.finish();
+    throw error;
+  }
+  ui.done("keys", [answers.provider ? describeProvider({ id: answers.provider.id, ...(answers.provider.name ? { name: answers.provider.name } : {}) }) : undefined, answers.githubToken ? "GitHub" : undefined].filter(Boolean).join(" · "));
+  ui.finish();
+}
+
+/** A model saved under a provisional place name follows the place to its final name. */
+async function adoptModel(deps: SetupDeps, provisional: string | undefined, name: string): Promise<void> {
+  if (!provisional || provisional === name) return;
+  const settings = await loadSettings(deps.settingsFile);
+  const model = settings.placeModels?.[provisional];
+  if (!model) return;
+  const { [provisional]: _moved, ...rest } = settings.placeModels ?? {};
+  await saveSettings({ placeModels: { ...rest, [name]: model } }, deps.settingsFile);
 }
 
 async function chooseServer(deps: SetupDeps, hosts: SshHost[]): Promise<{ access: SshAccess; display: string; alias?: string }> {
@@ -234,21 +299,6 @@ async function offerThisComputer(deps: SetupDeps, local: RemoteServer, remotesFi
     }
   }
   ui.line("info", "Default", current ? `still ${current} · ${hint} to run here instead` : `none yet · ${hint} to run here`);
-  ui.finish();
-}
-
-/**
- * Which model tasks and sessions use, asked once: setup skips it when dl already has one
- * (dl model changes it). Autopilot's own default is preselected for people who have one.
- */
-async function chooseModel(deps: SetupDeps): Promise<void> {
-  if ((await loadSettings(deps.settingsFile)).model) return;
-  const [current, prices] = await Promise.all([readAutopilotModel(deps.sources), deps.sources.fetch ? modelPrices(deps.sources.fetch) : undefined]);
-  const ui = deps.newUi();
-  deps.write("\n");
-  const model = await askModel(deps.prompter, ui, current ?? DEFAULT_MODEL, prices);
-  await saveModel(model, deps.settingsFile);
-  ui.answered("Model", `${model}  (change it any time: dl model)`);
   ui.finish();
 }
 
@@ -372,19 +422,20 @@ export function serverLabel(text: string): string | undefined {
   return REMOTE_NAME_RE.test(label) && label !== "localhost" ? label : undefined;
 }
 
-function finishScreen(ui: Ui, capacity: number | undefined): void {
-  ui.ready(capacity ? `Ready · fits ~${capacity} agents at once (estimate)` : "Ready", [
-    { label: "Start a session: cd into a GitHub repository, then type", value: "dl" },
-    { label: "Or hand off a one-off task", value: RUN_EXAMPLE },
-  ], { footer: "dl status shows where agents run and what they're doing." });
+/** One line, then the session: the place explains itself from here on (dl status has the rest). */
+async function ready(deps: SetupDeps, remote: RemoteServer, capacity: number | undefined): Promise<void> {
+  const c = palette(deps.color);
+  deps.write(`\n  ${c.green("✓")} ${c.bold("Ready")}${capacity ? ` · fits ~${capacity} agents at once` : ""}\n`);
+  if (deps.openSession) await deps.openSession(remote);
+  else deps.write(`  ${c.dim("Type")} dl ${c.dim("to talk to an agent; dl status shows where they run.")}\n\n`);
 }
 
 function laptopName(name: string): string {
   return name.replace(/\.local$/, "").replace(/[^\p{L}\p{N} ._'()@-]/gu, "-").slice(0, 40) || "laptop";
 }
 
-/** `dl setup` with the real terminal, ssh, gh, and filesystem. */
-export async function setup(options: { io: LaptopIO; terminal: boolean; localSetup?: LocalSetup; identityFile?: string }): Promise<number> {
+/** `dl setup` with the real terminal, ssh, gh, Autopilot, and filesystem. */
+export async function setup(options: { io: LaptopIO; terminal: boolean; localSetup?: LocalSetup; localConfigure?: LocalConfigure; identityFile?: string; cwd?: string }): Promise<number> {
   const { io, terminal } = options;
   const color = io.color === true;
   const execFileAsync = promisify(execFile);
@@ -395,6 +446,7 @@ export async function setup(options: { io: LaptopIO; terminal: boolean; localSet
     identityFile = resolve(options.identityFile.replace(/^~(?=$|\/)/, home).replace(/\.pub$/, ""));
     await fileAccess(identityFile).catch(() => { throw new Error(`No SSH key at ${options.identityFile} (--identity takes the private key, e.g. ~/.ssh/id_ed25519)`); });
   }
+  let sessionCode: number | undefined;
   try {
     await setupWizard({
       newUi: () => terminal ? new TerminalUi(io.out, undefined, color) : new PlainUi(io.out),
@@ -413,15 +465,18 @@ export async function setup(options: { io: LaptopIO; terminal: boolean; localSet
       },
       hostname: hostname(),
       installUrl: process.env.DL_INSTALL_URL || INSTALL_URL,
-      ...(options.localSetup ? { localSetup: options.localSetup } : {}),
+      localSetup: options.localSetup ?? ((input) => setUpOnThisComputer(input)),
+      localConfigure: options.localConfigure ?? ((answers) => configureThisComputer(answers)),
       ...(identityFile ? { identityFile } : {}),
       interactive: terminal && process.stdin.isTTY === true,
+      // The session needs the terminal; without one the Ready line says what to type.
+      ...(terminal ? { openSession: async () => { sessionCode = await openSession({ cwd: options.cwd ?? process.cwd() }, io); return sessionCode; } } : {}),
     });
   } catch (error) {
     if (!(error instanceof PromptCancelled)) throw error;
     // Esc / Ctrl-C at a question: the terminal is restored; say so quietly and stop.
-    io.out(`  ${palette(color).dim("Cancelled. Run")} dl setup ${palette(color).dim("when you're ready.")}\n\n`);
+    io.out(`  ${palette(color).dim("Cancelled. Run")} dl ${palette(color).dim("when you're ready; it picks up where it stopped.")}\n\n`);
     return 130;
   }
-  return 0;
+  return sessionCode ?? 0;
 }

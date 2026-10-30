@@ -3,7 +3,7 @@ import { hostname } from "node:os";
 import { agentCapacity, detectHost, preflightProblems, type HostFacts } from "./detect.js";
 import {
   AUTOPILOT_PORT, CELL_MEMORY_MB, GITHUB_PROXY_PORT, HOTCELL_EGRESS_PORT, HOTCELL_PORT, PATHS, SERVICES, USERS,
-  AUTO_UPGRADES, NODE_AUTO_UPDATES, asterConfig, autoUpgrades, autopilotBin, autopilotEnv, autopilotUnit,
+  AUTO_UPGRADES, NODE_AUTO_UPDATES, asterConfig, asterConfigDefaults, autoUpgrades, autopilotBin, autopilotEnv, autopilotUnit,
   MOTD_SCRIPT, cellDockerfile, cellImage, githubEnv, hotcellBin, hotcellEnv, hotcellUnit, metadataBlockUnit, motdScript, nodeAutoUpdates, parseEnvFile,
 } from "./layout.js";
 import type { Prompter } from "./prompt.js";
@@ -12,14 +12,21 @@ import type { System } from "./system.js";
 import { PlainUi, type SummaryItem, type Ui } from "./ui.js";
 import { ownerLink } from "./server-api.js";
 import { refreshModelPrices } from "./model-prices.js";
+import {
+  asterConfigWithProvider, describeProvider, hotcellKeysAddArgs, isKeyless, KNOWN_PROVIDERS, OPENROUTER, openrouterAnswer, parseHotcellRoutes,
+  parseProviderAnswer, providerConfig, providerFromAsterConfig, type ProviderAnswer,
+} from "./provider.js";
+import { installedVersion, packageSpecs, pinnedAutopilotVersion } from "./versions.js";
 
 export interface UpOptions {
   prompter: Prompter;
   /** Where progress shows; a plain line per event when omitted. */
   ui?: Ui;
   /**
-   * Answers for unattended installs: DL_TAILSCALE_AUTH_KEY, DL_OPENROUTER_API_KEY, DL_GITHUB_TOKEN.
+   * Answers for unattended installs: DL_TAILSCALE_AUTH_KEY, DL_PROVIDER + DL_PROVIDER_API_KEY
+   * (+ DL_PROVIDER_BASE_URL for a custom one; DL_OPENROUTER_API_KEY is the OpenRouter shorthand), DL_GITHUB_TOKEN.
    * DL_ACCESS=loopback skips Tailscale (SSH tunnel access); DL_SKIP_CREDENTIAL_CHECK=1 skips online validation.
+   * DL_AUTOPILOT_SPEC / DL_HOTCELL_SPEC install an npm spec or .tgz instead of the pinned versions (development).
    */
   env?: NodeJS.ProcessEnv;
   /** How the server is reached (`--access`); overrides DL_ACCESS and what an earlier `up` chose. */
@@ -29,6 +36,7 @@ export interface UpOptions {
    * and nothing is asked: a required answer that's missing is a failure.
    */
   answers?: ProvidedAnswers;
+  /** `--autopilot-version`; the version dl ships with otherwise, so laptop and server match. */
   autopilotVersion?: string;
   hotcellVersion?: string;
   /** Validates the model key and GitHub token before anything is stored. */
@@ -46,19 +54,22 @@ export interface UpResult {
 
 interface Answers {
   tailscaleAuthKey: string | undefined;
-  openRouterKey: string | undefined;
+  provider: ProviderAnswer | undefined;
   githubToken: string | undefined;
 }
 
-/** What the laptop sends on stdin: `{"openrouterKey"?, "githubToken"?, "tailscaleAuthKey"?}`. */
+/**
+ * What the laptop sends on stdin: `{"provider"?: {id, baseUrl, apiKey, apiKeyEnv, …}, "githubToken"?,
+ * "tailscaleAuthKey"?}`. An older laptop's `"openrouterKey"` is taken as the OpenRouter provider.
+ */
 export interface ProvidedAnswers {
-  openrouterKey?: string;
+  provider?: ProviderAnswer;
   githubToken?: string;
   tailscaleAuthKey?: string;
 }
 
-/** An answer `up` can't go on without, as `dl up --needs` names it. */
-export type Need = "tailscale" | "openrouter" | "github";
+/** An answer `up` still lacks, as `dl up --needs` names it. */
+export type Need = "tailscale" | "provider" | "github";
 
 /** A validation outcome: a problem to show, or a detail to confirm the answer with. */
 export interface Checked { problem?: string; detail?: string }
@@ -133,33 +144,36 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
     return { value: ip, detail };
   });
 
-  const { autopilotVersion, hotcellVersion, release } = await step("software", async () => {
+  const { autopilotVersion, hotcellVersion, release, specs } = await step("software", async () => {
     await ensureAutomaticUpdates(system, ui);
     await ensureUser(system, USERS.hotcell, PATHS.hotcellHome, ["docker"]);
     await ensureUser(system, USERS.autopilot, PATHS.autopilotHome, []);
-    const autopilot = options.autopilotVersion ?? await latestVersion(system, "autopilot-ai");
-    const hotcell = options.hotcellVersion ?? await latestVersion(system, "hotcell");
-    const name = `autopilot-${autopilot}_hotcell-${hotcell}`;
+    // The same Autopilot the laptop's dl bundles; Hotcell's newest.
+    const specs = packageSpecs({ autopilot: options.autopilotVersion ?? pinnedAutopilotVersion(), hotcell: options.hotcellVersion ?? await latestVersion(system, "hotcell") }, env);
+    const name = `autopilot-${specs.autopilotLabel}_hotcell-${specs.hotcellLabel}`;
     const releaseDir = `${PATHS.releases}/${name}`;
-    if (!(await system.exists(`${releaseDir}/node_modules/autopilot-ai/package.json`) && await system.exists(`${releaseDir}/node_modules/hotcell/package.json`))) {
+    if (specs.dev || !(await system.exists(`${releaseDir}/node_modules/autopilot-ai/package.json`) && await system.exists(`${releaseDir}/node_modules/hotcell/package.json`))) {
       await system.mkdir(releaseDir, { mode: 0o755 });
-      await system.run("npm", ["install", "--prefix", releaseDir, "--no-audit", "--no-fund", "--omit=dev", `autopilot-ai@${autopilot}`, `hotcell@${hotcell}`], { inherit: true });
+      await system.run("npm", ["install", "--prefix", releaseDir, "--no-audit", "--no-fund", "--omit=dev", specs.autopilot, specs.hotcell], { inherit: true });
     }
     await system.run("ln", ["-sfn", releaseDir, PATHS.current]);
+    const autopilot = specs.dev ? installedVersion(await system.readFile(`${releaseDir}/node_modules/autopilot-ai/package.json`), specs.autopilotLabel) : specs.autopilotLabel;
+    const hotcell = specs.dev ? installedVersion(await system.readFile(`${releaseDir}/node_modules/hotcell/package.json`), specs.hotcellLabel) : specs.hotcellLabel;
     // Store the keys as soon as their homes exist, so a later failure never asks again.
-    if (answers.openRouterKey) {
+    if (answers.provider) {
       // Into Hotcell's keystore over stdin: never in argv, env files, or Autopilot's config.
-      await asHotcell(system, ["keys", "add", "openrouter", "--stdin"], { input: answers.openRouterKey, describe: "hotcell keys add openrouter --stdin (as hotcell)" });
+      const args = hotcellKeysAddArgs(answers.provider);
+      await asHotcell(system, args, { ...(answers.provider.apiKey ? { input: answers.provider.apiKey } : {}), describe: `hotcell ${args.join(" ")} (as hotcell)` });
     }
     await system.mkdir(PATHS.autopilotEtc, { mode: 0o750, owner: `root:${USERS.autopilot}` });
     if (answers.githubToken) {
       await system.writeFile(PATHS.githubEnv, githubEnv(answers.githubToken), { mode: 0o640, owner: `root:${USERS.autopilot}`, secret: true });
     }
-    return { value: { autopilotVersion: autopilot, hotcellVersion: hotcell, release: name }, detail: `Autopilot ${autopilot} · Hotcell ${hotcell}` };
+    return { value: { autopilotVersion: autopilot, hotcellVersion: hotcell, release: name, specs }, detail: `Autopilot ${autopilot} · Hotcell ${hotcell}` };
   });
 
-  const image = cellImage(autopilotVersion);
-  await step("image", async () => ({ value: undefined, detail: await ensureCellImage(system, image, autopilotVersion) ? "already built" : `Node 24 · Autopilot ${autopilotVersion}` }));
+  const image = cellImage(specs.autopilotLabel);
+  await step("image", async () => ({ value: undefined, detail: await ensureCellImage(system, image, specs) ? "already built" : `Node 24 · Autopilot ${autopilotVersion}` }));
 
   const hotcellApiKey = await step("services", async () => {
     const hotcellValues = parseEnvFile(await system.readFile(PATHS.hotcellEnv));
@@ -174,7 +188,11 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
       retry: "dl up",
     });
     await system.writeFile(PATHS.hotcellEnv, hotcellEnv({ apiKey, bridgeIp }), { mode: 0o640, owner: `root:${USERS.hotcell}`, secret: true });
-    if (!(await system.readFile(PATHS.asterConfig))) {
+    // The provider goes into aster.json next to the key; an install without one keeps the default (OpenRouter).
+    const existingAster = await system.readFile(PATHS.asterConfig);
+    if (answers.provider) {
+      await system.writeFile(PATHS.asterConfig, asterConfigWithProvider(existingAster, providerConfig(answers.provider), asterConfigDefaults()), { mode: 0o640, owner: `root:${USERS.autopilot}` });
+    } else if (!existingAster) {
       await system.writeFile(PATHS.asterConfig, asterConfig(), { mode: 0o640, owner: `root:${USERS.autopilot}` });
     }
     await ensureWorkspace(system);
@@ -284,18 +302,19 @@ function accessMode(flag: AccessMode | undefined, env: NodeJS.ProcessEnv, previo
 export async function needs(system: System, options: { access?: AccessMode; env?: NodeJS.ProcessEnv } = {}): Promise<Need[]> {
   const access = accessMode(options.access, options.env ?? process.env, await readState(system));
   const missing = await missingAnswers(system, await detectHost(system), access);
-  return (["tailscale", "openrouter", "github"] as const).filter((need) => missing[need]);
+  return (["tailscale", "provider", "github"] as const).filter((need) => missing[need]);
 }
 
 /**
- * Which answers this machine still lacks: the model key unless Hotcell has one, a GitHub
- * token unless its env file has one, a Tailscale key only for Tailscale access off a tailnet.
+ * Which answers this machine still lacks: a model provider unless Hotcell has an active route
+ * for the one aster.json names, a GitHub token unless its env file has one, a Tailscale key
+ * only for Tailscale access off a tailnet.
  */
 async function missingAnswers(system: System, facts: HostFacts, access: AccessMode): Promise<Record<Need, boolean>> {
   const tailscaleRunning = access !== "tailscale" || (facts.tailscale && await tailscaleIsUp(system));
   return {
     tailscale: !tailscaleRunning,
-    openrouter: !(await hotcellHasKey(system, "openrouter")),
+    provider: !(await hotcellHasKey(system, providerFromAsterConfig(await system.readFile(PATHS.asterConfig)).id)),
     github: !parseEnvFile(await system.readFile(PATHS.githubEnv)).GITHUB_TOKEN,
   };
 }
@@ -303,7 +322,9 @@ async function missingAnswers(system: System, facts: HostFacts, access: AccessMo
 /** Answers given up front, and where they came from (shown next to each, never the value). */
 interface Given {
   tailscaleAuthKey: string | undefined;
-  openRouterKey: string | undefined;
+  provider: ProviderAnswer | undefined;
+  /** DL_PROVIDER without a key: the provider to ask a key for. */
+  providerId: string | undefined;
   githubToken: string | undefined;
   /** Said next to an accepted answer, e.g. "from the environment". */
   source: string;
@@ -313,31 +334,55 @@ interface Given {
 
 function given(env: NodeJS.ProcessEnv, provided: ProvidedAnswers | undefined): Given {
   if (provided) {
-    return { tailscaleAuthKey: provided.tailscaleAuthKey, openRouterKey: provided.openrouterKey, githubToken: provided.githubToken, source: "from your laptop", final: true };
+    return { tailscaleAuthKey: provided.tailscaleAuthKey, provider: provided.provider, providerId: undefined, githubToken: provided.githubToken, source: "from your laptop", final: true };
   }
-  return { tailscaleAuthKey: env.DL_TAILSCALE_AUTH_KEY, openRouterKey: env.DL_OPENROUTER_API_KEY, githubToken: env.DL_GITHUB_TOKEN, source: "from the environment", final: false };
+  return { tailscaleAuthKey: env.DL_TAILSCALE_AUTH_KEY, ...providerFromEnv(env), githubToken: env.DL_GITHUB_TOKEN, source: "from the environment", final: false };
+}
+
+/**
+ * DL_PROVIDER + DL_PROVIDER_API_KEY (+ DL_PROVIDER_BASE_URL for one Hotcell has no route for),
+ * or the OpenRouter shorthand DL_OPENROUTER_API_KEY.
+ */
+export function providerFromEnv(env: NodeJS.ProcessEnv): { provider: ProviderAnswer | undefined; providerId: string | undefined } {
+  const id = env.DL_PROVIDER?.trim().toLowerCase();
+  const key = env.DL_PROVIDER_API_KEY?.trim();
+  const baseUrl = env.DL_PROVIDER_BASE_URL?.trim();
+  if (id) {
+    // Without an address for a provider Hotcell has no route for, or a key for one that needs it, there's nothing to store yet.
+    if (!KNOWN_PROVIDERS[id] && !baseUrl) return { provider: undefined, providerId: id };
+    if (!key && !isKeyless({ id, apiKey: null })) return { provider: undefined, providerId: id };
+    return { provider: parseProviderAnswer({ id, ...(key ? { apiKey: key } : {}), ...(baseUrl ? { baseUrl } : {}) }), providerId: id };
+  }
+  const openrouter = env.DL_OPENROUTER_API_KEY?.trim();
+  return { provider: openrouter ? openrouterAnswer(openrouter) : undefined, providerId: undefined };
 }
 
 /**
  * The answers from `--answers-stdin`. Parse errors never quote the input: it holds keys.
- * Unknown fields are ignored, so a newer laptop can send more than this server knows.
+ * Unknown fields are ignored, so a newer laptop can send more than this server knows; an
+ * older laptop's `openrouterKey` becomes the OpenRouter provider.
  */
 export function parseProvidedAnswers(text: string): ProvidedAnswers {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error("The answers on stdin aren't valid JSON; expected one object like {\"openrouterKey\": \"sk-or-…\"}.");
+    throw new Error("The answers on stdin aren't valid JSON; expected one object like {\"provider\": {\"id\": \"deepseek\", \"apiKey\": \"…\"}}.");
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("The answers on stdin must be one JSON object.");
   const record = parsed as Record<string, unknown>;
   const answers: ProvidedAnswers = {};
+  const strings: Partial<Record<"openrouterKey" | "githubToken" | "tailscaleAuthKey", string>> = {};
   for (const key of ["openrouterKey", "githubToken", "tailscaleAuthKey"] as const) {
     const value = record[key];
     if (value === undefined || value === null) continue;
     if (typeof value !== "string") throw new Error(`The answer "${key}" on stdin must be a string.`);
-    answers[key] = value;
+    strings[key] = value;
   }
+  if (strings.githubToken !== undefined) answers.githubToken = strings.githubToken;
+  if (strings.tailscaleAuthKey !== undefined) answers.tailscaleAuthKey = strings.tailscaleAuthKey;
+  if (record.provider !== undefined && record.provider !== null) answers.provider = parseProviderAnswer(record.provider);
+  else if (strings.openrouterKey) answers.provider = openrouterAnswer(strings.openrouterKey);
   return answers;
 }
 
@@ -354,18 +399,20 @@ async function collectAnswers(
   if (system.dryRun) {
     return {
       tailscaleAuthKey: missing.tailscale ? "<asked>" : undefined,
-      openRouterKey: missing.openrouter ? "<asked>" : undefined,
+      provider: missing.provider ? openrouterAnswer("<asked>") : undefined,
       githubToken: missing.github ? "<asked>" : undefined,
     };
   }
   const typed = provided.final ? 0 : [
     missing.tailscale && !provided.tailscaleAuthKey,
-    missing.openrouter && !provided.openRouterKey,
+    missing.provider && !provided.provider,
     missing.github && !provided.githubToken,
   ].filter(Boolean).length;
   if (typed > 0) ui.questions(`${typed === 1 ? "One key" : `${typed} keys`}, then it runs on its own. Typing is hidden.`);
-  // With final answers there's no one to ask: a missing one fails before anything changes.
+  // With final answers there's no one to ask. The laptop installs first and sends the keys in a
+  // second pass (after Autopilot's own provider picker), so a missing key isn't a failure there.
   const asking = (ask: () => Promise<string>) => provided.final ? undefined : ask;
+  const optional = provided.final;
 
   const tailscaleAuthKey = !missing.tailscale ? undefined : await askValidated(ui,
     provided.tailscaleAuthKey,
@@ -374,27 +421,51 @@ async function collectAnswers(
     asking(() => prompter.secret(ui.prompt("Tailscale auth key", "login.tailscale.com/admin/settings/keys"))),
     async (value) => /^tskey-[A-Za-z0-9-]+$/.test(value) ? {} : { problem: "That doesn't look like a Tailscale auth key (tskey-…)." },
   );
-  const openRouterKey = !missing.openrouter ? undefined : await askValidated(ui,
-    provided.openRouterKey,
-    provided.source,
-    "OpenRouter API key",
-    asking(() => prompter.secret(ui.prompt("OpenRouter API key", "stays in Hotcell; sandboxes and laptops never see it"))),
-    async (value) => ({ ...await validateOpenRouterKey(value, fetchImpl).then((problem) => problem ? { problem } : { detail: "kept in Hotcell" }) }),
-  );
+  // A given provider always replaces the stored one (the laptop's `dl provider`); otherwise only a missing one is asked for.
+  let provider: ProviderAnswer | undefined;
+  if (provided.provider || missing.provider) {
+    // On the server's own terminal only a key is typed: OpenRouter's, or DL_PROVIDER's.
+    const asked = provided.providerId && KNOWN_PROVIDERS[provided.providerId] ? { id: provided.providerId, ...KNOWN_PROVIDERS[provided.providerId]! } : { id: OPENROUTER.id, ...KNOWN_PROVIDERS[OPENROUTER.id]! };
+    const label = `${provided.provider ? describeProvider({ id: provided.provider.id, ...(provided.provider.name ? { name: provided.provider.name } : {}) }) : asked.name} API key`;
+    const key = await askValidated(ui,
+      provided.provider ? provided.provider.apiKey ?? "(none)" : undefined,
+      provided.source,
+      label,
+      asking(() => prompter.secret(ui.prompt(label, "stays in Hotcell; sandboxes and laptops never see it"))),
+      async (value) => validateProviderKey(provided.provider ?? { ...asked, apiKey: value }, value, fetchImpl),
+      optional,
+    );
+    if (key !== undefined) provider = provided.provider ?? parseProviderAnswer({ id: asked.id, apiKey: key });
+  }
   const githubToken = !missing.github ? undefined : await askValidated(ui,
     provided.githubToken,
     provided.source,
     "GitHub token",
     asking(() => prompter.secret(ui.prompt("GitHub token", "fine-grained · Contents + Pull requests read/write"))),
     (value) => validateGitHubToken(value, fetchImpl),
+    optional,
   );
-  return { tailscaleAuthKey, openRouterKey, githubToken };
+  return { tailscaleAuthKey, provider, githubToken };
+}
+
+/** OpenRouter keys have a shape and an endpoint to check; other providers' keys are taken as given, keyless ones need none. */
+export async function validateProviderKey(provider: Pick<ProviderAnswer, "id" | "apiKey">, key: string, fetchImpl: typeof fetch | undefined): Promise<Checked> {
+  if (provider.id === OPENROUTER.id) {
+    const problem = await validateOpenRouterKey(key, fetchImpl);
+    return problem ? { problem } : { detail: "kept in Hotcell" };
+  }
+  if (isKeyless(provider)) return { detail: "no key needed" };
+  if (!key.trim() || key === "(none)") return { problem: `A key for ${provider.id} is required.` };
+  return { detail: "kept in Hotcell" };
 }
 
 /**
  * Takes a given answer as-is (failing fast if invalid) or asks up to three times. Without a
- * way to ask (answers from the laptop), a missing answer is a failure.
+ * way to ask (answers from the laptop), a missing answer is noted and left for the laptop's
+ * second pass when `optional`, and a failure otherwise.
  */
+async function askValidated(ui: Ui, fromEnv: string | undefined, source: string, label: string, ask: (() => Promise<string>) | undefined, validate: (value: string) => Promise<Checked>): Promise<string>;
+async function askValidated(ui: Ui, fromEnv: string | undefined, source: string, label: string, ask: (() => Promise<string>) | undefined, validate: (value: string) => Promise<Checked>, optional: boolean): Promise<string | undefined>;
 async function askValidated(
   ui: Ui,
   fromEnv: string | undefined,
@@ -402,7 +473,8 @@ async function askValidated(
   label: string,
   ask: (() => Promise<string>) | undefined,
   validate: (value: string) => Promise<Checked>,
-): Promise<string> {
+  optional = false,
+): Promise<string | undefined> {
   if (fromEnv) {
     const { problem, detail } = await validate(fromEnv.trim());
     if (problem) throw new Error(problem);
@@ -410,6 +482,10 @@ async function askValidated(
     return fromEnv.trim();
   }
   if (!ask) {
+    if (optional) {
+      ui.line("info", label, "not set yet");
+      return undefined;
+    }
     ui.line("failed", label, "not given");
     throw new Error(`This server needs ${/^[AEIOU]/.test(label) ? "an" : "a"} ${label} and none was given ${source.replace(/^from/, "by")}.`);
   }
@@ -513,12 +589,18 @@ export function asHotcell(system: System, args: string[], options: { input?: str
   ], options);
 }
 
-async function hotcellHasKey(system: System, provider: string): Promise<boolean> {
-  if (!(await system.exists(hotcellBin()))) return false;
+/** Hotcell's routes, from `hotcell keys ls --json` (as the hotcell user); empty when Hotcell isn't installed. */
+export async function hotcellRoutes(system: System): Promise<import("./provider.js").HotcellRoute[]> {
+  if (!(await system.exists(hotcellBin()))) return [];
   const result = await system.probe("runuser", [
-    "-u", USERS.hotcell, "--", "env", `HOTCELL_HOME=${PATHS.hotcellHome}`, "HOTCELL_KEYSTORE=file", "/usr/bin/node", hotcellBin(), "keys", "ls",
+    "-u", USERS.hotcell, "--", "env", `HOTCELL_HOME=${PATHS.hotcellHome}`, "HOTCELL_KEYSTORE=file", "NO_COLOR=1", "/usr/bin/node", hotcellBin(), "keys", "ls", "--json",
   ]);
-  return result.code === 0 && new RegExp(`^\\s*${provider}\\b`, "m").test(result.stdout);
+  return result.code === 0 ? parseHotcellRoutes(result.stdout) : [];
+}
+
+/** Whether Hotcell has an active route for the provider. */
+export async function hotcellHasKey(system: System, provider: string): Promise<boolean> {
+  return (await hotcellRoutes(system)).some((route) => route.provider === provider && route.active);
 }
 
 /** The default workspace: an empty Git repository Aster requires as a root. */
@@ -532,12 +614,12 @@ async function ensureWorkspace(system: System): Promise<void> {
   await git(["-c", "user.name=Autopilot", "-c", "user.email=autopilot@localhost", "commit", "--quiet", "-m", "Initialize workspace"]);
 }
 
-/** Builds the sandbox image unless it exists; returns whether it already did. */
-async function ensureCellImage(system: System, image: string, autopilotVersion: string): Promise<boolean> {
-  if ((await system.probe("docker", ["image", "inspect", image])).code === 0) return true;
+/** Builds the sandbox image unless it exists (a dev spec is always rebuilt); returns whether it already did. */
+async function ensureCellImage(system: System, image: string, specs: { autopilot: string; dev: boolean }): Promise<boolean> {
+  if (!specs.dev && (await system.probe("docker", ["image", "inspect", image])).code === 0) return true;
   const dir = system.dryRun ? "/tmp/directionallylocal-image" : (await system.run("mktemp", ["-d"])).stdout.trim();
   try {
-    await system.run("npm", ["pack", `autopilot-ai@${autopilotVersion}`, "--pack-destination", dir, "--silent"]);
+    await system.run("npm", ["pack", specs.autopilot, "--pack-destination", dir, "--silent"]);
     await system.run("sh", ["-c", `mv ${dir}/autopilot-ai-*.tgz ${dir}/autopilot.tgz`]);
     await system.writeFile(`${dir}/Dockerfile`, cellDockerfile());
     await system.run("docker", ["build", "--pull", "-q", "-t", image, dir], { inherit: true });

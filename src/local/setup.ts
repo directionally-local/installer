@@ -4,7 +4,7 @@
  * ~/.directionallylocal (0700 dirs, 0600 secrets), and the services are LaunchAgents on
  * macOS or systemd user units on Linux. Safe to re-run: it repairs and keeps secrets.
  *
- * The OpenRouter key goes to Hotcell's keystore over stdin, as a 0600 file under
+ * The provider's key goes to Hotcell's keystore over stdin, as a 0600 file under
  * HOTCELL_HOME (HOTCELL_KEYSTORE=file), not the login Keychain:
  *   - Hotcell's Keychain backend writes through `security add-generic-password -w KEY`,
  *     which puts the key in a process argument list; the file path keeps it on stdin only.
@@ -31,11 +31,13 @@ import { RealSystem, type System } from "../system.js";
 import type { Ui } from "../ui.js";
 import { checkComputer, computerProblems, localCapacity, localUnsupported, servicePath, supportedPlatform, type ComputerFacts } from "./check.js";
 import {
-  LOCAL_SERVICES, PAIRED_NAME, PREFERRED_PORTS, autopilotXdg, localAsterConfig, localAutopilotBin, localAutopilotEnv,
+  LOCAL_SERVICES, PAIRED_NAME, PREFERRED_PORTS, autopilotXdg, localAsterConfig, localAsterDefaults, localAutopilotBin, localAutopilotEnv,
   localGithubEnv, localHotcellBin, localHotcellEnv, localPaths, parseLocalEnvFile, serviceSpecs,
   type LocalPaths, type LocalPlatform, type LocalPorts, type Networking,
 } from "./layout.js";
 import { fileMtime, modelPricesHealth, refreshModelPrices, type ModelPricesHealth } from "../model-prices.js";
+import { asterConfigWithProvider, hotcellKeysAddArgs, parseHotcellRoutes, providerConfig, providerFromAsterConfig, type HotcellRoute, type ProviderAnswer } from "../provider.js";
+import { installedVersion, packageSpecs, pinnedAutopilotVersion } from "../versions.js";
 import { httpStatus, portFree } from "./probes.js";
 import { installService, removeServices, serviceState, stopService, userId, type ServiceManager, type ServiceState } from "./services.js";
 import { readLocalState, writeLocalState, type LocalState } from "./state.js";
@@ -50,6 +52,7 @@ export interface LocalOptions {
   execPath?: string;
   nodeVersion?: string;
   hostname?: string;
+  /** The version dl ships with unless told otherwise, so the laptop's session client matches. */
   autopilotVersion?: string;
   hotcellVersion?: string;
   sleep?: (ms: number) => Promise<void>;
@@ -58,11 +61,20 @@ export interface LocalOptions {
   fetchImpl?: typeof fetch;
 }
 
+/** What the wizard already has for this computer; whatever's missing is reported back as a need. */
+export interface LocalAnswers {
+  provider?: ProviderAnswer;
+  githubToken?: string;
+}
+
+/** What setting up here still lacks: a model provider (Autopilot's picker), a GitHub token. */
+export type LocalNeed = "provider" | "github";
+
 export interface SetupInput extends LocalOptions {
   ui: Ui;
   /** Kept for the wizard's call shape; setup asks nothing (it's given the keys). */
   prompter: Prompter;
-  answers: { openrouterKey: string; githubToken: string };
+  answers?: LocalAnswers;
 }
 
 const SETUP_LOG = "setup.log";
@@ -114,6 +126,8 @@ export async function checkThisComputer(options: LocalOptions = {}): Promise<{ f
 export interface LocalSetupResult {
   remote: RemoteServer;
   capacity: number;
+  /** Keys this computer doesn't have yet; the wizard gathers them next and stores them (configureThisComputer). */
+  needs: LocalNeed[];
 }
 
 export async function setUpOnThisComputer(input: SetupInput): Promise<LocalSetupResult> {
@@ -162,45 +176,38 @@ export async function setUpOnThisComputer(input: SetupInput): Promise<LocalSetup
   const node = facts.node.path;
   const manager: ServiceManager = { platform, paths, uid, sleep: ctx.sleep };
 
-  const { autopilotVersion, hotcellVersion, release } = await step("software", async () => {
+  const answers = input.answers ?? {};
+  const { autopilotVersion, hotcellVersion, release, specs } = await step("software", async () => {
     for (const dir of [paths.root, paths.config, paths.logs, paths.releases, paths.hotcellHome, paths.autopilotHome]) {
       await system.mkdir(dir, { mode: 0o700 });
     }
-    const autopilot = input.autopilotVersion ?? await latestVersion(system, "autopilot-ai");
-    const hotcell = input.hotcellVersion ?? await latestVersion(system, "hotcell");
-    const name = `autopilot-${autopilot}_hotcell-${hotcell}`;
+    // The same Autopilot the laptop's dl bundles; Hotcell's newest.
+    const specs = packageSpecs({ autopilot: input.autopilotVersion ?? pinnedAutopilotVersion(), hotcell: input.hotcellVersion ?? await latestVersion(system, "hotcell") }, input.env ?? process.env);
+    const name = `autopilot-${specs.autopilotLabel}_hotcell-${specs.hotcellLabel}`;
     const releaseDir = join(paths.releases, name);
-    if (!(await system.exists(join(releaseDir, "node_modules", "autopilot-ai", "package.json")) && await system.exists(join(releaseDir, "node_modules", "hotcell", "package.json")))) {
+    if (specs.dev || !(await system.exists(join(releaseDir, "node_modules", "autopilot-ai", "package.json")) && await system.exists(join(releaseDir, "node_modules", "hotcell", "package.json")))) {
       await system.mkdir(releaseDir, { mode: 0o700 });
-      await system.run("npm", ["install", "--prefix", releaseDir, "--no-audit", "--no-fund", "--omit=dev", `autopilot-ai@${autopilot}`, `hotcell@${hotcell}`], { inherit: true });
+      await system.run("npm", ["install", "--prefix", releaseDir, "--no-audit", "--no-fund", "--omit=dev", specs.autopilot, specs.hotcell], { inherit: true });
     }
     await system.run("ln", ["-sfn", releaseDir, paths.current]);
+    const autopilot = specs.dev ? installedVersion(await system.readFile(join(releaseDir, "node_modules", "autopilot-ai", "package.json")), specs.autopilotLabel) : specs.autopilotLabel;
+    const hotcell = specs.dev ? installedVersion(await system.readFile(join(releaseDir, "node_modules", "hotcell", "package.json")), specs.hotcellLabel) : specs.hotcellLabel;
 
-    // Secrets first, so a later failure never needs them again.
-    const openrouterKey = input.answers.openrouterKey.trim();
-    if (openrouterKey) {
-      await system.run(node, [localHotcellBin(paths), "keys", "add", "openrouter", "--stdin"], {
-        input: openrouterKey,
-        env: hotcellCliEnv(paths),
-        describe: "hotcell keys add openrouter --stdin",
-      });
-    } else if (!(await hotcellHasKey(system, node, paths, "openrouter"))) {
-      throw new Error("An OpenRouter key is needed; none is stored on this computer yet.");
-    }
-    const githubToken = input.answers.githubToken.trim();
-    if (githubToken) {
-      await system.writeFile(paths.githubEnv, localGithubEnv(githubToken), { mode: 0o600, secret: true });
-    } else if (!parseLocalEnvFile(await system.readFile(paths.githubEnv)).GITHUB_TOKEN) {
-      throw new Error("A GitHub token is needed; none is stored on this computer yet.");
-    }
-    return { value: { autopilotVersion: autopilot, hotcellVersion: hotcell, release: name }, detail: `Autopilot ${autopilot} · Hotcell ${hotcell}` };
+    // Secrets first, so a later failure never needs them again. Whatever the wizard doesn't have
+    // yet is stored after the services run (configureThisComputer), so nothing is required here.
+    if (answers.provider) await storeProviderKey(system, node, paths, answers.provider);
+    const githubToken = answers.githubToken?.trim();
+    if (githubToken) await system.writeFile(paths.githubEnv, localGithubEnv(githubToken), { mode: 0o600, secret: true });
+    // Autopilot starts with --env-file=github.env, so the file must exist even before there's a token.
+    else if (!(await system.exists(paths.githubEnv))) await system.writeFile(paths.githubEnv, localGithubEnv(""), { mode: 0o600, secret: true });
+    return { value: { autopilotVersion: autopilot, hotcellVersion: hotcell, release: name, specs }, detail: `Autopilot ${autopilot} · Hotcell ${hotcell}` };
   });
 
-  const image = cellImage(autopilotVersion);
+  const image = cellImage(specs.autopilotLabel);
   const dockerEnv = { DOCKER_HOST: docker.host };
   const dockerCli = facts.dockerCli!;
   await step("image", async () => {
-    const built = await ensureCellImage(system, dockerCli, dockerEnv, image, autopilotVersion);
+    const built = await ensureCellImage(system, dockerCli, dockerEnv, image, specs);
     return { value: undefined, detail: built ? "already built" : `Node 24 · Autopilot ${autopilotVersion}` };
   });
 
@@ -221,7 +228,10 @@ export async function setUpOnThisComputer(input: SetupInput): Promise<LocalSetup
       retry: "dl setup",
     });
     await system.writeFile(paths.hotcellEnv, localHotcellEnv({ paths, apiKey, ports, net }), { mode: 0o600, secret: true });
-    if (!(await system.readFile(paths.asterConfig))) await system.writeFile(paths.asterConfig, localAsterConfig(paths), { mode: 0o600 });
+    // The provider goes into aster.json next to the key; without one yet, the default (OpenRouter) until the wizard sets it.
+    const existingAster = await system.readFile(paths.asterConfig);
+    if (answers.provider) await system.writeFile(paths.asterConfig, asterConfigWithProvider(existingAster, providerConfig(answers.provider), localAsterDefaults(paths)), { mode: 0o600 });
+    else if (!existingAster) await system.writeFile(paths.asterConfig, localAsterConfig(paths), { mode: 0o600 });
     await ensureWorkspace(system, paths);
     await system.writeFile(paths.autopilotEnv, localAutopilotEnv({ paths, hotcellApiKey: apiKey, image, ports, net }), { mode: 0o600, secret: true });
 
@@ -282,7 +292,27 @@ export async function setUpOnThisComputer(input: SetupInput): Promise<LocalSetup
       addedAt: at,
     };
     // The address is an implementation detail here; how many fit goes on the wizard's Ready line.
-    return { value: { remote, capacity: localCapacity(docker) }, detail: "this computer · tasks pause while it sleeps" };
+    return { value: { remote, capacity: localCapacity(docker), needs: await localNeeds(system, node, paths) }, detail: "this computer · tasks pause while it sleeps" };
+  });
+}
+
+/** What this computer still lacks: an active Hotcell route for aster.json's provider, a GitHub token. */
+export async function localNeeds(system: System, node: string, paths: LocalPaths): Promise<LocalNeed[]> {
+  const provider = providerFromAsterConfig(await system.readFile(paths.asterConfig));
+  const routes = await localHotcellRoutes(system, node, paths);
+  const needs: LocalNeed[] = [];
+  if (!routes.some((route) => route.provider === provider.id && route.active)) needs.push("provider");
+  if (!parseLocalEnvFile(await system.readFile(paths.githubEnv)).GITHUB_TOKEN) needs.push("github");
+  return needs;
+}
+
+/** The provider's key into Hotcell's keystore, over stdin (a custom provider also names its address). */
+export async function storeProviderKey(system: System, node: string, paths: LocalPaths, provider: ProviderAnswer): Promise<void> {
+  const args = hotcellKeysAddArgs(provider);
+  await system.run(node, [localHotcellBin(paths), ...args], {
+    ...(provider.apiKey ? { input: provider.apiKey } : {}),
+    env: hotcellCliEnv(paths),
+    describe: `hotcell ${args.join(" ")}`,
   });
 }
 
@@ -421,10 +451,11 @@ export function hotcellCliEnv(paths: LocalPaths): Record<string, string> {
   return { HOME: paths.hotcellHome, HOTCELL_HOME: paths.hotcellHome, HOTCELL_KEYSTORE: "file" };
 }
 
-async function hotcellHasKey(system: System, node: string, paths: LocalPaths, provider: string): Promise<boolean> {
-  if (!(await system.exists(localHotcellBin(paths)))) return false;
-  const result = await system.probe(node, [localHotcellBin(paths), "keys", "ls"], { env: hotcellCliEnv(paths) });
-  return result.code === 0 && new RegExp(`^\\s*${provider}\\b`, "m").test(result.stdout);
+/** Hotcell's routes on this computer (`hotcell keys ls --json`); none when it isn't installed. */
+export async function localHotcellRoutes(system: System, node: string, paths: LocalPaths): Promise<HotcellRoute[]> {
+  if (!(await system.exists(localHotcellBin(paths)))) return [];
+  const result = await system.probe(node, [localHotcellBin(paths), "keys", "ls", "--json"], { env: { ...hotcellCliEnv(paths), NO_COLOR: "1" } });
+  return result.code === 0 ? parseHotcellRoutes(result.stdout) : [];
 }
 
 /** Autopilot's own CLI against the service's config and database (never its secrets). */
@@ -449,12 +480,12 @@ async function latestVersion(system: System, pkg: string): Promise<string> {
   return version;
 }
 
-/** Builds the sandbox image unless it exists; returns whether it already did. */
-async function ensureCellImage(system: System, cli: string, env: Record<string, string>, image: string, autopilotVersion: string): Promise<boolean> {
-  if ((await system.probe(cli, ["image", "inspect", image], { env })).code === 0) return true;
+/** Builds the sandbox image unless it exists (a dev spec is always rebuilt); returns whether it already did. */
+async function ensureCellImage(system: System, cli: string, env: Record<string, string>, image: string, specs: { autopilot: string; dev: boolean }): Promise<boolean> {
+  if (!specs.dev && (await system.probe(cli, ["image", "inspect", image], { env })).code === 0) return true;
   const dir = (await system.run("mktemp", ["-d"])).stdout.trim();
   try {
-    await system.run("npm", ["pack", `autopilot-ai@${autopilotVersion}`, "--pack-destination", dir, "--silent"]);
+    await system.run("npm", ["pack", specs.autopilot, "--pack-destination", dir, "--silent"]);
     await system.run("sh", ["-c", 'mv "$1"/autopilot-ai-*.tgz "$1"/autopilot.tgz', "sh", dir]);
     await system.writeFile(join(dir, "Dockerfile"), cellDockerfile());
     await system.run(cli, ["build", "--pull", "-q", "-t", image, dir], { inherit: true, env });

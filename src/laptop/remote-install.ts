@@ -1,7 +1,8 @@
 import { agentCapacity } from "../detect.js";
 import { CELL_MEMORY_MB } from "../layout.js";
-import type { Ui } from "../ui.js";
-import type { Answers, Need } from "./credentials.js";
+import { OPENROUTER, type ProviderAnswer } from "../provider.js";
+import { PlainUi, type Ui } from "../ui.js";
+import type { Need } from "./credentials.js";
 import { shellQuote, type ServerFacts, type SshExec } from "./ssh.js";
 import type { SshAccess } from "./config.js";
 
@@ -9,11 +10,18 @@ import type { SshAccess } from "./config.js";
  * Installing on the user's server from the laptop, over SSH, through the server-side
  * commands' machine-readable modes:
  *   1. bootstrap   install.sh with DL_INSTALL_ONLY=1 (plain `.. step` / `ok step: detail` lines)
- *   2. needs       `dl up --needs --access ssh` (one JSON line: which keys it still lacks)
- *   3. install     `dl up --access ssh --answers-stdin --events json` (keys on stdin, NDJSON out)
- *   4. pair        `dl pair --name … --json` (a credential for this laptop)
+ *   2. install     `dl up --access ssh --answers-stdin --events json` with `{}` (NDJSON out): everything but the keys
+ *   3. needs       `dl up --needs --access ssh` (one JSON line: which keys it still lacks)
+ *   4. keys        the same `dl up --answers-stdin`, now with the provider Autopilot's picker chose and the GitHub token
+ *   5. pair        `dl pair --name … --json` (a credential for this laptop)
  * The server's checklist is replayed into the laptop's own Ui, so it animates here.
  */
+
+/** What the laptop sends a server on stdin: the provider block, the GitHub token, or both (nothing for a plain repair). */
+export interface ServerAnswers {
+  provider?: ProviderAnswer;
+  githubToken?: string;
+}
 
 export const INSTALL_URL = "https://directionallylocal.run";
 
@@ -120,7 +128,8 @@ export async function serverNeeds(access: SshAccess, facts: ServerFacts, ssh: Ss
   if (result.code !== 0 || !parsed || !Array.isArray(parsed.needs)) {
     throw new Error(`Couldn't ask the server what it needs: ${lastLine(result.stderr) || lastLine(result.stdout) || `exit ${result.code}`}`);
   }
-  return parsed.needs.filter((need): need is Need => need === "openrouter" || need === "github" || need === "tailscale");
+  // An older server says "openrouter" where a newer one says "provider": the same question here.
+  return [...new Set(parsed.needs.map((need) => (need === "openrouter" ? "provider" : need)))].filter((need): need is Need => need === "provider" || need === "github" || need === "tailscale");
 }
 
 /**
@@ -236,12 +245,25 @@ function capacityFrom(event: Record<string, unknown>): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
-/** Runs the install, keys on stdin as one JSON object. Resolves with the capacity estimate, if given. */
-export async function installOnServer(access: SshAccess, facts: ServerFacts, ssh: SshExec, answers: Answers, newUi: UiFactory): Promise<{ capacity?: number }> {
+/**
+ * The answers as the wire carries them. An older server knows only `openrouterKey`, so an
+ * OpenRouter provider is sent both ways; it ignores the field it doesn't know.
+ */
+export function wireAnswers(answers: ServerAnswers): Record<string, unknown> {
+  const { provider, githubToken } = answers;
+  return {
+    ...(provider ? { provider: { id: provider.id, baseUrl: provider.baseUrl, apiKey: provider.apiKey, apiKeyEnv: provider.apiKeyEnv, ...(provider.authHeader ? { authHeader: provider.authHeader } : {}), ...(provider.authFormat ? { authFormat: provider.authFormat } : {}) } } : {}),
+    ...(provider?.id === OPENROUTER.id && provider.apiKey ? { openrouterKey: provider.apiKey } : {}),
+    ...(githubToken ? { githubToken } : {}),
+  };
+}
+
+/** Runs the install, answers on stdin as one JSON object. Resolves with the capacity estimate, if given. */
+export async function installOnServer(access: SshAccess, facts: ServerFacts, ssh: SshExec, answers: ServerAnswers, newUi: UiFactory): Promise<{ capacity?: number }> {
   const replay = new EventReplayer(newUi);
   const stderr: string[] = [];
   const result = await ssh(access, `${sudo(facts)}dl up --access ssh --answers-stdin --events json`, {
-    input: `${JSON.stringify(answers)}\n`,
+    input: `${JSON.stringify(wireAnswers(answers))}\n`,
     onStdoutLine: (line) => replay.line(line),
     onStderrLine: (line) => { if (line.trim()) stderr.push(line); },
   });
@@ -251,6 +273,24 @@ export async function installOnServer(access: SshAccess, facts: ServerFacts, ssh
     throw new Error(`Setting up the server failed: ${replay.error ?? `dl up exited with ${result.code}`}${tail ? `\n${tail}` : ""}\n  Fix it and run dl setup again; it picks up where it stopped.`);
   }
   return replay.capacity === undefined ? {} : { capacity: replay.capacity };
+}
+
+/**
+ * Stores the keys on an installed server: the same `dl up --answers-stdin`, whose checklist
+ * (a quick repair pass that restarts the services) stays off the screen; only an error shows.
+ */
+export async function applyOnServer(access: SshAccess, facts: ServerFacts, ssh: SshExec, answers: ServerAnswers): Promise<void> {
+  const replay = new EventReplayer(() => new PlainUi(() => {}));
+  const stderr: string[] = [];
+  const result = await ssh(access, `${sudo(facts)}dl up --access ssh --answers-stdin --events json`, {
+    input: `${JSON.stringify(wireAnswers(answers))}\n`,
+    onStdoutLine: (line) => replay.line(line),
+    onStderrLine: (line) => { if (line.trim()) stderr.push(line); },
+  });
+  if (result.code !== 0 || replay.error) {
+    const tail = [...replay.tail(), ...stderr.slice(-15)].map((line) => `    ${line}`).join("\n");
+    throw new Error(`Storing the keys on the server failed: ${replay.error ?? `dl up exited with ${result.code}`}${tail ? `\n${tail}` : ""}`);
+  }
 }
 
 export interface Pairing {

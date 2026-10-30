@@ -54,6 +54,13 @@ export class RemoteApiError extends Error {
 
 type FetchLike = typeof fetch;
 
+/** `GET /api/v1/models`: the catalog, and on newer servers the provider behind it. */
+export interface ModelCatalog {
+  models: string[];
+  provider?: { id: string; name: string };
+  defaultModel?: string;
+}
+
 export class RemoteClient {
   constructor(
     readonly baseUrl: string,
@@ -96,7 +103,20 @@ export class RemoteClient {
   }
 
   async models(): Promise<string[]> {
-    return (await this.request<{ models: string[] }>("GET", "/models")).models;
+    return (await this.catalog()).models;
+  }
+
+  /** The models the place offers, with (on newer servers) which provider they come from and its default model. */
+  async catalog(): Promise<ModelCatalog> {
+    const body = await this.request<{ models: string[]; provider?: { id?: unknown; name?: unknown }; defaultModel?: unknown }>("GET", "/models");
+    const provider = body.provider && typeof body.provider.id === "string"
+      ? { id: body.provider.id, name: typeof body.provider.name === "string" ? body.provider.name : body.provider.id }
+      : undefined;
+    return {
+      models: Array.isArray(body.models) ? body.models.filter((model): model is string => typeof model === "string") : [],
+      ...(provider ? { provider } : {}),
+      ...(typeof body.defaultModel === "string" && body.defaultModel ? { defaultModel: body.defaultModel } : {}),
+    };
   }
 
   createCodeConversation(input: {

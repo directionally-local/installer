@@ -3,18 +3,21 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 /**
- * Which conversation `dl` reopens in a project: one per place + repository + local checkout,
- * so two clones of the same repository (or the same one on two places) each keep their own.
- * Only IDs live here (no tokens), but it's private like the rest of the laptop's config.
+ * Which conversation `dl` reopens here: one per place + repository + local checkout for a
+ * project (so two clones of the same repository, or the same one on two places, each keep
+ * their own), and one per place + directory for a chat outside a project. Only IDs live
+ * here (no tokens), but it's private like the rest of the laptop's config.
  */
 
 export interface SessionKey {
   /** The place's name, as in `dl servers`. */
   place: string;
-  /** owner/name on GitHub. */
-  repository: string;
-  /** The checkout's top-level directory on this laptop. */
+  /** A code session's owner/name on GitHub; a chat has none. */
+  repository?: string;
+  /** The checkout's top-level directory on this laptop, or the directory a chat was started in. */
   root: string;
+  /** A chat outside a project; absent means a code session. */
+  kind?: "chat";
 }
 
 export interface SessionEntry extends SessionKey {
@@ -71,7 +74,7 @@ export async function forgetSession(key: SessionKey, path = sessionsPath()): Pro
 }
 
 function sameKey(a: SessionKey, b: SessionKey): boolean {
-  return a.place === b.place && a.repository === b.repository && a.root === b.root;
+  return a.place === b.place && (a.repository ?? "") === (b.repository ?? "") && a.root === b.root && (a.kind ?? "code") === (b.kind ?? "code");
 }
 
 async function writeSessions(sessions: SessionEntry[], path: string): Promise<void> {
@@ -86,6 +89,8 @@ async function writeSessions(sessions: SessionEntry[], path: string): Promise<vo
 function isEntry(value: unknown): value is SessionEntry {
   if (!value || typeof value !== "object") return false;
   const entry = value as Record<string, unknown>;
-  return ["place", "repository", "root", "conversationId", "updatedAt"].every((key) => typeof entry[key] === "string") &&
+  return ["place", "root", "conversationId", "updatedAt"].every((key) => typeof entry[key] === "string") &&
+    (entry.repository === undefined || typeof entry.repository === "string") &&
+    (entry.kind === undefined || entry.kind === "chat") &&
     (entry.branch === undefined || typeof entry.branch === "string");
 }

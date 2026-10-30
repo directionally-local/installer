@@ -1,11 +1,10 @@
 import { execFile, spawn } from "node:child_process";
-import { constants, existsSync, readFileSync } from "node:fs";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, delimiter, dirname, join, resolve as resolvePath } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { palette } from "../ui.js";
+import { findAutopilot, supportsAttachRemote, type AutopilotCommand } from "./autopilot.js";
 import { RemoteApiError } from "./client.js";
 import { describeError, pickModel, type LaptopIO } from "./commands.js";
 import { laptopModel } from "./settings.js";
@@ -14,21 +13,19 @@ import { detectGitHubRepository, snapshotWorkingTree } from "./git.js";
 import { findSession, forgetSession, rememberSession, sessionsPath, type SessionKey } from "./session-store.js";
 import { openRemoteForSession, withConnections, type RemoteOpener } from "./tunnel.js";
 
+export { autopilotOnPath, bundledAutopilot, findAutopilot, supportsAttachRemote, type AutopilotCommand } from "./autopilot.js";
+
 /**
- * `dl` inside a project: Autopilot's own interactive screen, attached to this repository's
- * conversation on the place agents run (`autopilot attach-remote`). The first time it starts
- * one from this checkout (base commit + uncommitted changes, as `dl run` sends them); after
- * that it reopens the same one. dl only finds the conversation, holds the SSH tunnel open,
- * and gets out of the way: Autopilot owns the terminal until the user detaches.
+ * `dl` anywhere: Autopilot's own interactive screen, attached to a conversation on the place
+ * agents run (`autopilot attach-remote`). Inside a GitHub repository that's the repository's
+ * code conversation, started the first time from this checkout (base commit + uncommitted
+ * changes, as `dl run` sends them) and reopened after that. Anywhere else it's a chat on the
+ * place, remembered per directory so `dl` again resumes it. dl only finds the conversation,
+ * holds the SSH tunnel open, and gets out of the way: Autopilot owns the terminal until the
+ * user detaches.
  */
 
 const execFileAsync = promisify(execFile);
-
-/** How to start Autopilot: `command ...args attach-remote …`. */
-export interface AutopilotCommand {
-  command: string;
-  args: string[];
-}
 
 /** The parts of a child process a session needs; tests pass a fake. */
 export interface SessionChild {
@@ -49,11 +46,11 @@ export interface SessionInput {
   cwd: string;
   server?: string;
   model?: string;
-  /** `dl new`: forget this repository's conversation and start another. */
+  /** `dl new`: forget this directory's conversation and start another. */
   fresh?: boolean;
   open?: RemoteOpener;
-  /** This laptop's default model (dl model, else Autopilot's); read from their configs unless replaced (tests). */
-  autopilotModel?: () => Promise<string | undefined>;
+  /** This laptop's default model for the place (dl model, else Autopilot's); read from their configs unless replaced (tests). */
+  autopilotModel?: (place: string) => Promise<string | undefined>;
   /** Finds Autopilot; the one installed with dl, else one on PATH, unless replaced (tests). */
   autopilot?: () => Promise<AutopilotCommand | undefined>;
   /** Whether that Autopilot has `attach-remote`. */
@@ -71,23 +68,58 @@ const UPDATE = "npm install -g directionallylocal";
 
 class Interrupted extends Error {}
 
+/** What kind of conversation this directory gets, and why when it isn't the repository's. */
+export interface SessionPlan {
+  kind: "code" | "chat";
+  /** The checkout's top level (code), or the directory itself (chat). */
+  root: string;
+  /** owner/name on GitHub (code). */
+  repository?: string;
+  /** One line said before a chat opens in a repository that can't have a code session. */
+  note?: string;
+}
+
 /**
- * Opens the session, or returns undefined when this isn't a project dl can open one for
- * (not a Git repository, origin not on GitHub, nothing pushed yet, or no place to pick),
- * after a one-line note for the last three, so the caller shows the overview instead.
+ * Inside a GitHub repository with something pushed: its code session. Anywhere else a chat,
+ * with one line saying why when the directory is a repository (origin elsewhere, nothing pushed yet).
+ */
+export async function planSession(cwd: string): Promise<SessionPlan> {
+  const root = await gitRoot(cwd);
+  const here = await realpath(cwd).catch(() => cwd);
+  if (!root) return { kind: "chat", root: here };
+  try {
+    const repository = await detectGitHubRepository(root);
+    return { kind: "code", root, repository };
+  } catch (error) {
+    const message = describeError(error);
+    const why = /no "origin" git remote/.test(message) ? `${basename(root)} has no origin remote` : `${basename(root)}'s origin isn't on GitHub`;
+    return { kind: "chat", root: here, note: `${why}, so this is a chat, not a session on its code.` };
+  }
+}
+
+/**
+ * Opens the session for this directory (code or chat), or returns undefined when there's no
+ * place to open it on (nothing set up, or several and no default), after a one-line note, so
+ * the caller shows what to do instead.
+ */
+export async function openSession(input: SessionInput, io: LaptopIO): Promise<number | undefined> {
+  return startSession(await planSession(input.cwd), input, io);
+}
+
+/**
+ * The repository's code session, or undefined (after a one-line note) when this directory
+ * can't have one: kept for `dl new`, which only makes sense where a conversation belongs.
  */
 export async function projectSession(input: SessionInput, io: LaptopIO): Promise<number | undefined> {
+  const plan = await planSession(input.cwd);
+  if (plan.kind === "code") return startSession(plan, input, io);
+  if (plan.note) io.err(`  ${palette(io.color === true).yellow("!")} ${plan.note}\n`);
+  return undefined;
+}
+
+async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO): Promise<number | undefined> {
   const c = palette(io.color === true);
   const note = (text: string) => io.err(`  ${c.yellow("!")} ${text}\n`);
-  const root = await gitRoot(input.cwd);
-  if (!root) return undefined;
-  let repository: string;
-  try {
-    repository = await detectGitHubRepository(root);
-  } catch {
-    note(`${basename(root)}'s origin isn't on GitHub, so there's no agent conversation to open here.`);
-    return undefined;
-  }
   let target;
   try {
     target = await resolveTarget(input.server);
@@ -97,7 +129,10 @@ export async function projectSession(input: SessionInput, io: LaptopIO): Promise
     return undefined;
   }
   const { remote, reason } = target;
-  const key: SessionKey = { place: remote.name, repository, root };
+  const key: SessionKey = plan.kind === "code"
+    ? { place: remote.name, repository: plan.repository!, root: plan.root }
+    : { place: remote.name, root: plan.root, kind: "chat" };
+  const subject = plan.kind === "code" ? plan.repository! : "chat";
   const file = input.sessionsFile ?? sessionsPath();
   const autopilot = await (input.autopilot ?? findAutopilot)();
   // Asked while the tunnel opens; it only matters right before launching.
@@ -138,7 +173,7 @@ export async function projectSession(input: SessionInput, io: LaptopIO): Promise
         ));
         if (!alive) {
           await forgetSession(key, file);
-          note(`The last conversation for ${repository} on ${remote.name} is gone; starting a new one.`);
+          note(`The last ${plan.kind === "code" ? `conversation for ${subject}` : "chat"} on ${remote.name} is gone; starting a new one.`);
           remembered = undefined;
         }
       }
@@ -146,45 +181,53 @@ export async function projectSession(input: SessionInput, io: LaptopIO): Promise
       const scratch = await mkdtemp(join(tmpdir(), "dl-session-"));
       try {
         const stateFile = join(scratch, "state.json");
-        const args = ["attach-remote", "--state-file", stateFile, "--title", `${remote.name} · ${repository}`];
+        const args = ["attach-remote", ...(plan.kind === "chat" ? ["--kind", "chat"] : []), "--state-file", stateFile, "--title", `${remote.name} · ${subject}`];
         let detail: string;
         if (remembered) {
           args.push("--conversation", remembered.conversationId);
           detail = remembered.conversationId.slice(0, 8);
         } else {
           let snapshot;
-          try {
-            snapshot = await step(snapshotWorkingTree(root));
-          } catch (error) {
-            if (error instanceof Interrupted) throw error;
-            note(`${describeError(error)}.`.replace(/\.\.$/, "."));
-            return undefined;
+          if (plan.kind === "code") {
+            try {
+              snapshot = await step(snapshotWorkingTree(plan.root));
+            } catch (error) {
+              if (error instanceof Interrupted) throw error;
+              note(`${describeError(error)}.`.replace(/\.\.$/, "."));
+              return undefined;
+            }
           }
-          const [workspaces, models, preferred] = await step(Promise.all([
+          const [workspaces, catalog, preferred] = await step(Promise.all([
             client.workspaces(),
-            client.models(),
-            input.model ? Promise.resolve(undefined) : (input.autopilotModel ?? laptopModel)(),
+            client.catalog(),
+            input.model ? Promise.resolve(undefined) : (input.autopilotModel ?? laptopModel)(remote.name),
           ]));
           const workspace = workspaces[0];
           if (!workspace) throw new Error(`${remote.name} has no workspace this laptop can use`);
-          const model = pickModel(models, input.model, preferred);
-          args.push("--workspace", workspace.id, "--repo", repository, "--model", model, "--base-commit", snapshot.baseCommit);
-          if (snapshot.patch) {
-            const patchFile = join(scratch, "changes.patch");
-            await writeFile(patchFile, snapshot.patch, { mode: 0o600 });
-            args.push("--patch-file", patchFile);
+          const model = pickModel(catalog, input.model, preferred);
+          args.push("--workspace", workspace.id, "--model", model);
+          if (snapshot) {
+            args.push("--repo", plan.repository!, "--base-commit", snapshot.baseCommit);
+            if (snapshot.patch) {
+              const patchFile = join(scratch, "changes.patch");
+              await writeFile(patchFile, snapshot.patch, { mode: 0o600 });
+              args.push("--patch-file", patchFile);
+            }
+            const changes = snapshot.files.length ? ` + ${snapshot.files.length} local change${snapshot.files.length === 1 ? "" : "s"}` : "";
+            detail = `new conversation from ${snapshot.baseCommit.slice(0, 7)}${changes}, ${model}`;
+          } else {
+            detail = `new chat, ${model}`;
           }
-          const changes = snapshot.files.length ? ` + ${snapshot.files.length} local change${snapshot.files.length === 1 ? "" : "s"}` : "";
-          detail = `new conversation from ${snapshot.baseCommit.slice(0, 7)}${changes}, ${model}`;
         }
         if (!autopilot || !(await step(ready))) return missing();
         // `dl new`: the old conversation keeps running on the place (dl runs lists it).
         if (input.fresh) await forgetSession(key, file);
 
+        if (plan.note) note(plan.note);
         // The place is on the Connecting line already; with more than one set up, also why this
         // one and how to pick another, as `dl run` does (a place named with --server needs neither).
         const chosen = reason === "default" || reason === "last used";
-        io.err(`\n  ${c.cyan("·")} Connecting to ${c.bold(remote.name)}${chosen ? ` ${c.dim(`(${reason})`)}` : ""} · ${repository} …  ${c.dim(`(${detail})`)}\n`);
+        io.err(`\n  ${c.cyan("·")} Connecting to ${c.bold(remote.name)}${chosen ? ` ${c.dim(`(${reason})`)}` : ""} · ${subject} …  ${c.dim(`(${detail})`)}\n`);
         if (chosen) io.err(`    ${c.dim("dl use NAME to change where dl runs")}\n`);
         // The token goes in the environment only: argv is visible to every user on the machine.
         const env = { ...process.env, AUTOPILOT_REMOTE_URL: client.baseUrl, AUTOPILOT_REMOTE_TOKEN: remote.token };
@@ -243,68 +286,5 @@ async function gitRoot(cwd: string): Promise<string | undefined> {
     return stdout.trim() || undefined;
   } catch {
     return undefined;
-  }
-}
-
-/** The Autopilot installed with dl (run with this Node), else an `autopilot` on PATH. */
-export async function findAutopilot(): Promise<AutopilotCommand | undefined> {
-  const bundled = bundledAutopilot();
-  if (bundled) return { command: process.execPath, args: [bundled] };
-  const onPath = await autopilotOnPath();
-  return onPath ? { command: onPath, args: [] } : undefined;
-}
-
-/**
- * autopilot-ai's bin script, found from where Node resolves the package for dl. Its exports
- * don't include package.json, so the entry point is resolved and its package root found above it.
- */
-export function bundledAutopilot(resolve: (specifier: string) => string = (specifier) => import.meta.resolve(specifier)): string | undefined {
-  for (const specifier of ["autopilot-ai/package.json", "autopilot-ai"]) {
-    let dir: string;
-    try {
-      dir = dirname(fileURLToPath(resolve(specifier)));
-    } catch {
-      continue;
-    }
-    for (;;) {
-      const manifest = join(dir, "package.json");
-      if (existsSync(manifest)) {
-        try {
-          const pkg = JSON.parse(readFileSync(manifest, "utf8")) as { name?: unknown; bin?: unknown };
-          if (pkg.name === "autopilot-ai") {
-            const bin = typeof pkg.bin === "string" ? pkg.bin : (pkg.bin as Record<string, unknown> | undefined)?.autopilot;
-            const path = typeof bin === "string" ? resolvePath(dir, bin) : undefined;
-            return path && existsSync(path) ? path : undefined;
-          }
-        } catch {
-          // not a readable manifest; keep looking up
-        }
-      }
-      const parent = dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-  }
-  return undefined;
-}
-
-export async function autopilotOnPath(env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
-  for (const dir of (env.PATH ?? "").split(delimiter).filter(Boolean)) {
-    const candidate = join(dir, "autopilot");
-    if (await access(candidate, constants.X_OK).then(() => true, () => false)) return candidate;
-  }
-  return undefined;
-}
-
-/** An Autopilot that knows `attach-remote` lists its options (an older one prints its general help). */
-export async function supportsAttachRemote(autopilot: AutopilotCommand): Promise<boolean> {
-  try {
-    const { stdout, stderr } = await execFileAsync(autopilot.command, [...autopilot.args, "attach-remote", "--help"], {
-      timeout: 30_000,
-      env: { ...process.env, NO_COLOR: "1" },
-    });
-    return `${stdout}${stderr}`.includes("--state-file");
-  } catch {
-    return false;
   }
 }

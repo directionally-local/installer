@@ -1,18 +1,20 @@
 /**
- * `dl keys` for "on this computer": the same as on a server, in the user's home. The
- * OpenRouter key goes to Hotcell's 0600 file keystore over stdin (HOTCELL_KEYSTORE=file,
- * see setup.ts for why not the Keychain), the GitHub token to the 0600 github.env, and
- * the service that reads it (a LaunchAgent or a systemd user unit) restarts.
+ * `dl provider` / `dl keys` for "on this computer": the same as on a server, in the user's
+ * home. The provider's key goes to Hotcell's 0600 file keystore over stdin
+ * (HOTCELL_KEYSTORE=file, see setup.ts for why not the Keychain) and the provider into
+ * aster.json; the GitHub token goes to the 0600 github.env; and the service that reads each
+ * (a LaunchAgent or a systemd user unit) restarts.
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { checkKey, githubListing, hotcellKeyListed, KeyRejectedError, type KeyListing, type KeyName, type KeyResult } from "../keys.js";
+import { checkKey, GITHUB, githubListing, KeyRejectedError, type KeyListing, type KeyName, type KeyResult } from "../keys.js";
+import { asterConfigWithProvider, KNOWN_PROVIDERS, parseProviderAnswer, providerConfig, providerFromAsterConfig, type ProviderAnswer } from "../provider.js";
 import { RealSystem, type System } from "../system.js";
 import { localUnsupported, supportedPlatform } from "./check.js";
-import { LOCAL_SERVICES, localGithubEnv, localHotcellBin, localPaths, parseLocalEnvFile, serviceFile, type LocalPaths, type LocalPlatform, type LocalService } from "./layout.js";
+import { LOCAL_SERVICES, localAsterDefaults, localGithubEnv, localPaths, parseLocalEnvFile, serviceFile, type LocalPaths, type LocalPlatform, type LocalService } from "./layout.js";
 import { httpStatus } from "./probes.js";
 import { userId } from "./services.js";
-import { hotcellCliEnv, type LocalOptions } from "./setup.js";
+import { localHotcellRoutes, storeProviderKey, type LocalOptions } from "./setup.js";
 import { readLocalState, type LocalState } from "./state.js";
 
 export interface LocalKeyOptions extends LocalOptions {
@@ -55,38 +57,54 @@ export async function setLocalKey(which: KeyName, value: string, options: LocalK
   const key = value.trim();
   const checked = await checkKey(which, key, options.fetchImpl);
   if (checked.problem) throw new KeyRejectedError(checked.problem);
+  if (which !== GITHUB) {
+    if (!KNOWN_PROVIDERS[which]) throw new KeyRejectedError(`dl doesn't know where ${which} lives; pick it in Autopilot's list instead: dl provider set`);
+    await configureThisComputer({ provider: parseProviderAnswer({ id: which, ...(key ? { apiKey: key } : {}) }) }, options);
+    return { ok: true, key: which, detail: `${which} in Hotcell; Hotcell and Autopilot restarted` };
+  }
+  await configureThisComputer({ githubToken: key }, options);
+  return { ok: true, key: which, detail: `${checked.detail ? `${checked.detail}; ` : ""}Autopilot restarted` };
+}
+
+/**
+ * Stores what the wizard gathered after the services started: the provider's key into
+ * Hotcell and the provider into aster.json, the GitHub token into github.env; then restarts
+ * what reads each (Hotcell for the key, Autopilot for both files) and waits for them.
+ */
+export async function configureThisComputer(answers: { provider?: ProviderAnswer; githubToken?: string }, options: LocalOptions = {}): Promise<void> {
   const ctx = await installed(options);
   const { system, paths, state, node } = ctx;
   const uid = await userId(system);
-
-  if (which === "openrouter") {
-    await system.run(node, [localHotcellBin(paths), "keys", "add", "openrouter", "--stdin"], {
-      input: key,
-      env: hotcellCliEnv(paths),
-      describe: "hotcell keys add openrouter --stdin",
-    });
+  if (answers.provider) {
+    await storeProviderKey(system, node, paths, answers.provider);
+    await system.writeFile(paths.asterConfig, asterConfigWithProvider(await system.readFile(paths.asterConfig), providerConfig(answers.provider), localAsterDefaults(paths)), { mode: 0o600 });
     await restartService(ctx, uid, "hotcell");
     await waitUntil(ctx, "Hotcell", async () => await httpStatus(system, node, `http://127.0.0.1:${state.ports.hotcell}/`) > 0);
-    return { ok: true, key: which, detail: "replaced in Hotcell; Hotcell restarted" };
   }
-
-  await system.writeFile(paths.githubEnv, localGithubEnv(key), { mode: 0o600, secret: true });
-  await restartService(ctx, uid, "autopilot");
-  // Without a token the Aster API answers 401: up, and refusing strangers.
-  await waitUntil(ctx, "Autopilot", async () => await httpStatus(system, node, `${state.url}/api/v1/health`) === 401);
-  return { ok: true, key: which, detail: `${checked.detail ? `${checked.detail}; ` : ""}Autopilot restarted` };
+  if (answers.githubToken !== undefined) await system.writeFile(paths.githubEnv, localGithubEnv(answers.githubToken.trim()), { mode: 0o600, secret: true });
+  if (answers.provider || answers.githubToken !== undefined) {
+    await restartService(ctx, uid, "autopilot");
+    // Without a token the Aster API answers 401: up, and refusing strangers.
+    await waitUntil(ctx, "Autopilot", async () => await httpStatus(system, node, `${state.url}/api/v1/health`) === 401);
+  }
 }
 
 /** Which keys this computer's install has; never their values. */
 export async function listLocalKeys(options: LocalKeyOptions = {}): Promise<KeyListing[]> {
   const { system, paths, node } = await installed(options);
-  let openrouter: KeyListing = { key: "openrouter", set: false };
-  if (await system.exists(localHotcellBin(paths))) {
-    const listed = await system.probe(node, [localHotcellBin(paths), "keys", "ls"], { env: { ...hotcellCliEnv(paths), NO_COLOR: "1" } });
-    if (listed.code === 0) openrouter = { key: "openrouter", ...hotcellKeyListed(listed.stdout, "openrouter") };
-  }
+  const provider = providerFromAsterConfig(await system.readFile(paths.asterConfig));
+  const route = (await localHotcellRoutes(system, node, paths)).find((entry) => entry.provider === provider.id);
+  const listing: KeyListing = route?.active
+    ? { key: "provider", set: true, detail: route.mask ? `${provider.id} · ${route.mask}` : provider.id }
+    : { key: "provider", set: false, ...(route ? { detail: provider.id, problem: `${provider.id}'s route is off in Hotcell` } : {}) };
   const token = parseLocalEnvFile(await system.readFile(paths.githubEnv)).GITHUB_TOKEN;
-  return [openrouter, await githubListing(token, options.fetchImpl)];
+  return [listing, await githubListing(token, options.fetchImpl)];
+}
+
+/** The provider this computer uses, as aster.json names it (OpenRouter when it names none). */
+export async function localProvider(options: LocalOptions = {}): Promise<{ id: string; model?: string }> {
+  const { system, paths } = await installed(options);
+  return { id: providerFromAsterConfig(await system.readFile(paths.asterConfig)).id };
 }
 
 /**

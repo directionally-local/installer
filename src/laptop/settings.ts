@@ -1,37 +1,31 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { fetchModelPrices, type ModelPriceTable } from "../model-prices.js";
-import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
-import { palette, PlainUi, TerminalUi, type Ui } from "../ui.js";
+import type { ConnectResult } from "../provider.js";
+import { palette } from "../ui.js";
 import type { LaptopIO } from "./commands.js";
+import { ConnectCancelled, runAutopilotConnect } from "./connect.js";
+import { resolveTarget } from "./config.js";
 import { autopilotConfigPath } from "./credentials.js";
 
 /**
- * dl's own settings on this laptop (~/.config/directionallylocal/config.json). Today only
- * the model tasks and sessions use when none is named with -m. It's dl's, so people who
- * never installed Autopilot can set it; Autopilot's own default is still honoured when
- * dl has none.
+ * dl's own settings on this laptop (~/.config/directionallylocal/config.json): the model
+ * tasks and sessions use when none is named with -m, per place (each place has its own
+ * provider, so its own model). Models are never picked here: `dl model` runs Autopilot's own
+ * picker (`autopilot connect --model-only`) and keeps what it chose.
  */
 
-/** What tasks and sessions use when neither -m, dl model nor Autopilot names a model. */
+/** The last resort when neither -m, a saved model, the place's default nor Autopilot names one; used only if the place offers it. */
 export const DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash-1017";
 
 export interface Settings {
+  /** The model last chosen, for places without one of their own. */
   model?: string;
+  /** Each place's model, by its name in `dl servers`. */
+  placeModels?: Record<string, string>;
   /** Setup asked once whether this computer should be the default place; it doesn't ask again. */
   askedLocalDefault?: boolean;
 }
-
-/** The suggestions setup and `dl model` offer first; any OpenRouter ID works too. */
-export const SUGGESTED_MODELS: Array<{ id: string; note: string }> = [
-  { id: "deepseek/deepseek-v4.1-flash-1017", note: "fast and cheap" },
-  { id: "moonshotai/kimi-k2.6", note: "strong at agentic coding" },
-  { id: "anthropic/claude-sonnet-5.5", note: "stronger, pricier" },
-  { id: "openai/gpt-6.1-sol", note: "stronger, pricier" },
-];
-
-export const OPENROUTER_ID_EXAMPLE = "provider/model, e.g. z-ai/glm-5";
 
 export function settingsPath(env: NodeJS.ProcessEnv = process.env): string {
   const configHome = env.XDG_CONFIG_HOME?.trim() || join(homedir(), ".config");
@@ -47,9 +41,13 @@ export async function loadSettings(path = settingsPath()): Promise<Settings> {
     throw error;
   }
   try {
-    const parsed = JSON.parse(raw) as { model?: unknown; askedLocalDefault?: unknown };
+    const parsed = JSON.parse(raw) as { model?: unknown; placeModels?: unknown; askedLocalDefault?: unknown };
+    const placeModels = typeof parsed.placeModels === "object" && parsed.placeModels !== null && !Array.isArray(parsed.placeModels)
+      ? Object.fromEntries(Object.entries(parsed.placeModels as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim() !== ""))
+      : {};
     return {
       ...(typeof parsed.model === "string" && parsed.model.trim() ? { model: parsed.model.trim() } : {}),
+      ...(Object.keys(placeModels).length > 0 ? { placeModels } : {}),
       ...(parsed.askedLocalDefault === true ? { askedLocalDefault: true } : {}),
     };
   } catch {
@@ -58,8 +56,10 @@ export async function loadSettings(path = settingsPath()): Promise<Settings> {
   }
 }
 
-export async function saveModel(model: string, path = settingsPath()): Promise<void> {
-  await saveSettings({ model }, path);
+/** Keeps the model as the place's (when named) and as the laptop's last choice. */
+export async function saveModel(model: string, path = settingsPath(), place?: string): Promise<void> {
+  const settings = await loadSettings(path);
+  await saveSettings({ model, ...(place ? { placeModels: { ...settings.placeModels, [place]: model } } : {}) }, path);
 }
 
 /** Merges into dl's settings, keeping what's already there. */
@@ -71,17 +71,18 @@ export async function saveSettings(changes: Settings, path = settingsPath()): Pr
   await rename(temp, path);
 }
 
-/** The model to use when none is named: dl's setting, else Autopilot's default, with where it came from. */
-export async function preferredModel(autopilotModel: () => Promise<string | undefined>, path?: string): Promise<{ model: string; source: "dl" | "autopilot" } | undefined> {
-  const { model } = await loadSettings(path);
+/** The model to use when none is named: the place's, else dl's last choice, else Autopilot's default, with where it came from. */
+export async function preferredModel(autopilotModel: () => Promise<string | undefined>, path?: string, place?: string): Promise<{ model: string; source: "dl" | "autopilot" } | undefined> {
+  const settings = await loadSettings(path);
+  const model = (place ? settings.placeModels?.[place] : undefined) ?? settings.model;
   if (model) return { model, source: "dl" };
   const fromAutopilot = await autopilotModel();
   return fromAutopilot ? { model: fromAutopilot, source: "autopilot" } : undefined;
 }
 
-/** This laptop's default model: the one set with `dl model`, else Autopilot's. */
-export async function laptopModel(): Promise<string | undefined> {
-  return (await preferredModel(() => readAutopilotModel()))?.model;
+/** This laptop's default model for a place: the one set with `dl model`, else Autopilot's. */
+export async function laptopModel(place?: string): Promise<string | undefined> {
+  return (await preferredModel(() => readAutopilotModel(), undefined, place))?.model;
 }
 
 /**
@@ -107,118 +108,73 @@ export async function readAutopilotModel(sources: {
   }
 }
 
-/** OpenRouter's prices, or undefined when they can't be fetched: the list then just has no prices. */
-export async function modelPrices(fetchImpl: typeof fetch = fetch): Promise<ModelPriceTable | undefined> {
-  return fetchModelPrices(fetchImpl).then(({ table }) => table, () => undefined);
-}
-
-/**
- * The picker's options: the suggestions (with prices when known, and the current model
- * added if it isn't one), then "Another model", which takes a typed ID.
- */
-export function modelOptions(current: string | undefined, prices: ModelPriceTable | undefined, anotherPrompt: string): SelectOption[] {
-  const known = prices ? SUGGESTED_MODELS.filter((entry) => entry.id.toLowerCase() in prices) : SUGGESTED_MODELS;
-  const entries = current && !known.some((entry) => entry.id === current) ? [{ id: current, note: "your current model" }, ...known] : known;
-  return [
-    ...entries.map((entry) => ({ value: entry.id, label: entry.id, detail: [entry.note, priceLabel(prices?.[entry.id.toLowerCase()])].filter(Boolean).join(" · ") })),
-    { value: "another", label: "Another model", detail: "any OpenRouter model ID", input: { prompt: anotherPrompt, placeholder: OPENROUTER_ID_EXAMPLE } },
-  ];
-}
-
-function priceLabel(price: { inputPerMTok: number; outputPerMTok: number } | undefined): string {
-  if (!price) return "";
-  if (price.inputPerMTok === 0 && price.outputPerMTok === 0) return "free";
-  return `$${price.inputPerMTok} in / $${price.outputPerMTok} out per M tokens`;
-}
-
-/** A typed model ID, or why it isn't one. Checked against OpenRouter's catalog when it's known. */
-export function checkModelId(text: string, prices: ModelPriceTable | undefined): { ok: true; model: string } | { ok: false; message: string } {
-  const model = text.trim();
-  if (!/^[a-z0-9][\w.-]*\/[\w.:-]+$/i.test(model)) return { ok: false, message: `"${model}" isn't an OpenRouter model ID (${OPENROUTER_ID_EXAMPLE})` };
-  if (prices && !(model.toLowerCase() in prices)) return { ok: false, message: `OpenRouter has no model ${model} (see https://openrouter.ai/models)` };
-  return { ok: true, model };
-}
-
-/** The arrow-key list of models, with `current` preselected; a typed ID gets 3 tries. */
-export async function askModel(prompter: Prompter, ui: Ui, current: string, prices: ModelPriceTable | undefined): Promise<string> {
-  const options = modelOptions(current, prices, ui.prompt("Model ID", OPENROUTER_ID_EXAMPLE));
-  const initial = Math.max(0, options.findIndex((option) => option.value === current));
-  for (let attempt = 1; ; attempt++) {
-    const picked = await prompter.select(ui.prompt("Model", "used for tasks and sessions"), options, initial);
-    if (picked.value !== "another") return picked.value;
-    const checked = checkModelId(picked.text ?? "", prices);
-    if (checked.ok) return checked.model;
-    if (attempt >= 3) throw new Error(checked.message);
-    ui.rejected(`${checked.message}. Try again.`);
-  }
-}
-
 export interface ModelCommandDeps {
-  newUi: () => Ui;
-  prompter: Prompter;
   write: (text: string) => void;
   color: boolean;
-  /** Whether there's a terminal to show the list on. */
+  /** Whether there's a terminal for Autopilot's picker. */
   interactive: boolean;
-  fetch: typeof fetch;
+  /** Autopilot's model picker (`autopilot connect --model-only`); the real one unless replaced. */
+  connect?: (options: { modelOnly: true }) => Promise<ConnectResult>;
   autopilotModel: () => Promise<string | undefined>;
+  /** The place the model is for (`--server NAME`, else the default one). */
+  server?: string;
   settingsFile?: string;
+  remotesFile?: string;
 }
 
 /**
- * `dl model [ID]`: the model `dl run` and new sessions use when -m doesn't name one. With an
- * ID, sets it; without, picks from a list on a terminal, or says which it is otherwise.
+ * `dl model [ID]`: the model `dl run` and new sessions use on a place when -m doesn't name
+ * one. With an ID, sets it; without, Autopilot's own picker on a terminal, or says which it is otherwise.
  */
 export async function modelCommand(args: string[], deps: ModelCommandDeps): Promise<number> {
   const c = palette(deps.color);
-  const current = await preferredModel(deps.autopilotModel, deps.settingsFile);
-  const model = current?.model ?? DEFAULT_MODEL;
-  const from = current?.source === "dl" ? "set with dl model" : current?.source === "autopilot" ? "Autopilot's default" : "dl's default";
   if (args.length > 1) {
-    deps.write(`\n  ${c.red("✗")} dl model takes one model ID, e.g. dl model ${DEFAULT_MODEL}\n\n`);
+    deps.write(`\n  ${c.red("✗")} dl model takes one model ID, e.g. dl model deepseek-v4-pro\n\n`);
     return 2;
   }
+  let place: string | undefined;
+  try {
+    place = (await resolveTarget(deps.server, deps.remotesFile)).remote.name;
+  } catch (error) {
+    if (deps.server !== undefined) throw error;
+    // No place yet: the model is kept as the laptop's default and applies to the first place set up.
+  }
+  const current = await preferredModel(deps.autopilotModel, deps.settingsFile, place);
+  const from = current?.source === "dl" ? "set with dl model" : current?.source === "autopilot" ? "Autopilot's default" : "dl's default";
+  const where = place ? ` ${c.dim(`on ${place}`)}` : "";
   if (args.length === 0 && !deps.interactive) {
-    deps.write(`\n  ${c.bold("Model")}  ${model}  ${c.dim(`(${from})`)}\n  ${c.dim("Change it:")} dl model <id>  ${c.dim("(model IDs: https://openrouter.ai/models)")}\n\n`);
+    deps.write(`\n  ${c.bold("Model")}${where}  ${current?.model ?? DEFAULT_MODEL}  ${c.dim(`(${from})`)}\n  ${c.dim("Change it:")} dl model <id>  ${c.dim("(or dl model on a terminal, for the list)")}\n\n`);
     return 0;
   }
-  const prices = await modelPrices(deps.fetch);
   let chosen: string;
   if (args[0] !== undefined) {
-    const checked = checkModelId(args[0], prices);
-    if (!checked.ok) {
-      deps.write(`\n  ${c.red("✗")} ${checked.message}\n\n`);
+    chosen = args[0].trim();
+    if (!chosen || /\s/.test(chosen)) {
+      deps.write(`\n  ${c.red("✗")} "${args[0]}" isn't a model ID.\n\n`);
       return 1;
     }
-    chosen = checked.model;
   } else {
-    const ui = deps.newUi();
-    deps.write("\n");
     try {
-      chosen = await askModel(deps.prompter, ui, model, prices);
+      chosen = (await (deps.connect ?? ((options) => runAutopilotConnect(options)))({ modelOnly: true })).model;
     } catch (error) {
-      if (!(error instanceof PromptCancelled)) throw error;
-      deps.write(`  ${c.dim(`Unchanged: ${model}`)}\n\n`);
+      if (!(error instanceof ConnectCancelled)) throw error;
+      deps.write(`  ${c.dim(`Unchanged: ${current?.model ?? DEFAULT_MODEL}`)}\n\n`);
       return 130;
     }
-    ui.finish();
   }
-  await saveModel(chosen, deps.settingsFile);
-  deps.write(`\n  ${c.green("✓")} ${c.bold("Model")}  ${chosen}\n  ${c.dim("Used by dl run and new sessions. A running session keeps its model; switch it there with")} /model\n\n`);
+  await saveModel(chosen, deps.settingsFile, place);
+  deps.write(`\n  ${c.green("✓")} ${c.bold("Model")}${where}  ${chosen}\n  ${c.dim("Used by dl run and new sessions. A running session keeps its model; switch it there with")} /model\n\n`);
   return 0;
 }
 
-/** `dl model` with the real terminal and network. */
-export async function model(args: string[], options: { io: LaptopIO; terminal: boolean }): Promise<number> {
+/** `dl model` with the real terminal and Autopilot. */
+export async function model(args: string[], options: { io: LaptopIO; terminal: boolean; server?: string }): Promise<number> {
   const { io, terminal } = options;
-  const color = io.color === true;
   return modelCommand(args, {
-    newUi: () => terminal ? new TerminalUi(io.out, undefined, color) : new PlainUi(io.out),
-    prompter: new TtyPrompter({ color }),
     write: io.out,
-    color,
+    color: io.color === true,
     interactive: terminal,
-    fetch: globalThis.fetch,
     autopilotModel: () => readAutopilotModel(),
+    ...(options.server ? { server: options.server } : {}),
   });
 }

@@ -1,4 +1,5 @@
 /** Where everything lives on the server, and the files the installer writes there. */
+import type { ProviderConfig } from "./provider.js";
 
 export const PATHS = {
   root: "/opt/directionallylocal",
@@ -121,11 +122,17 @@ export function githubEnv(token: string): string {
   return envFile("GitHub credential for cloning, pushing, and opening PRs (never sent to sandboxes)", { GITHUB_TOKEN: token });
 }
 
-export function asterConfig(): string {
+/** Aster's server config. Without a provider block Autopilot assumes OpenRouter. */
+export function asterConfig(provider?: ProviderConfig): string {
   return `${JSON.stringify({
-    models: "openrouter",
+    ...(provider ? { provider, models: "catalog" } : { models: "openrouter" }),
     workspaces: [{ id: "default", displayName: "Default workspace", rootPath: PATHS.workspace }],
   }, null, 2)}\n`;
+}
+
+/** The fields aster.json starts from when the provider is set into a missing or damaged file. */
+export function asterConfigDefaults(): Record<string, unknown> {
+  return JSON.parse(asterConfig()) as Record<string, unknown>;
 }
 
 export function hotcellUnit(): string {
