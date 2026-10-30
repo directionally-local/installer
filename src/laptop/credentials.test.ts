@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ScriptedPrompter } from "../prompt.js";
 import { RecordingUi } from "../ui.js";
-import { autopilotConfigPath, githubToken, type KeySources } from "./credentials.js";
+import { autopilotConfigPaths, githubToken, type KeySources } from "./credentials.js";
 
 const GH = `gho_${"a".repeat(36)}`;
 const PAT = `github_pat_${"b".repeat(40)}`;
@@ -36,7 +36,7 @@ describe("the GitHub token from this laptop", () => {
     assert.equal(prompter.asked.length, 1);
     assert.deepEqual(ui.events, ["answered GitHub | signed in as sinameraji · from the GitHub CLI"]);
     assert.deepEqual(src.fetched, ["https://api.github.com/user"]);
-    assert.equal(autopilotConfigPath({}, "/home/me"), "/home/me/.config/kimiflare/config.json");
+    assert.deepEqual(autopilotConfigPaths({}, "/home/me"), ["/home/me/.config/autopilot/config.json", "/home/me/.config/kimiflare/config.json"]);
   });
 
   it("asks (hidden) when the offer is declined, and says why in one line when gh isn't signed in", async () => {
