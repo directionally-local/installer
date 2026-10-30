@@ -24,9 +24,13 @@ export interface KeySources {
   fetch?: typeof fetch;
 }
 
-/** Autopilot's config, where `autopilot` keeps its default model. */
-export function autopilotConfigPath(env: NodeJS.ProcessEnv, home: string): string {
-  return join(env.XDG_CONFIG_HOME?.trim() || join(home, ".config"), "kimiflare", "config.json");
+/**
+ * Where `autopilot` keeps its config (and default model), newest first: `autopilot/`, then the
+ * `kimiflare/` folder older Autopilot versions used.
+ */
+export function autopilotConfigPaths(env: NodeJS.ProcessEnv, home: string): string[] {
+  const configHome = env.XDG_CONFIG_HOME?.trim() || join(home, ".config");
+  return [join(configHome, "autopilot", "config.json"), join(configHome, "kimiflare", "config.json")];
 }
 
 export async function validateGitHubToken(token: string, fetchImpl: typeof fetch | undefined): Promise<{ problem?: string; login?: string }> {

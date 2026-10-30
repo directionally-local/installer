@@ -320,6 +320,17 @@ describe("dl on a laptop", () => {
     assert.equal(await read({ XDG_CONFIG_HOME: "/missing" }), undefined);
   });
 
+  it("reads Autopilot's config from autopilot/ first, falling back to the kimiflare/ folder older versions used", async () => {
+    const files: Record<string, string> = {
+      "/both/autopilot/config.json": JSON.stringify({ model: "new/model" }),
+      "/both/kimiflare/config.json": JSON.stringify({ model: "old/model" }),
+      "/new/autopilot/config.json": JSON.stringify({ model: "new/model" }),
+    };
+    const read = (xdg: string) => readAutopilotModel({ env: { XDG_CONFIG_HOME: xdg }, home: "/home/me", readFile: async (path) => files[path] });
+    assert.equal(await read("/both"), "new/model");
+    assert.equal(await read("/new"), "new/model");
+  });
+
   it("sends tasks to the default when several places are set up, and dl use changes it", { timeout: 30_000 }, async () => {
     await saveRemote(place("box", fake.url));
     await saveRemote(place("this-computer", fake.url));

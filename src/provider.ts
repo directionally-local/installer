@@ -246,8 +246,9 @@ export interface HotcellRoute {
 }
 
 /**
- * Routes from `hotcell keys ls --json` ({"routes":[{provider, active, …}]} or a bare array),
- * falling back to the plain listing (`provider  mask  source` rows) of an older Hotcell.
+ * Routes from `hotcell keys ls --json`. Hotcell 0.1.38+ prints {"routes":[{name, active, hasKey, …}]}
+ * (the route's id is `name`); `provider`/`id` and a bare array are accepted too. Falls back to
+ * the plain listing (`provider  mask  source` rows) of an older Hotcell.
  */
 export function parseHotcellRoutes(stdout: string): HotcellRoute[] {
   const plain = stdout.replace(/\x1b\[[0-9;]*m/g, "").trim();
@@ -257,7 +258,7 @@ export function parseHotcellRoutes(stdout: string): HotcellRoute[] {
     return list.flatMap((entry) => {
       if (typeof entry !== "object" || entry === null) return [];
       const record = entry as Record<string, unknown>;
-      const provider = typeof record.provider === "string" ? record.provider : typeof record.id === "string" ? record.id : undefined;
+      const provider = ["name", "provider", "id"].map((key) => record[key]).find((value): value is string => typeof value === "string" && value.length > 0);
       if (!provider) return [];
       const mask = ["mask", "key", "masked"].map((key) => record[key]).find((value) => typeof value === "string" && value.length <= 12) as string | undefined;
       return [{ provider, active: record.active !== false, ...(mask ? { mask } : {}) }];

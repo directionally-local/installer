@@ -6,7 +6,7 @@ import { palette } from "../ui.js";
 import type { LaptopIO } from "./commands.js";
 import { ConnectCancelled, runAutopilotConnect } from "./connect.js";
 import { resolveTarget } from "./config.js";
-import { autopilotConfigPath } from "./credentials.js";
+import { autopilotConfigPaths } from "./credentials.js";
 
 /**
  * dl's own settings on this laptop (~/.config/directionallylocal/config.json): the model
@@ -107,7 +107,11 @@ export async function readAutopilotModel(sources: {
   const fromEnv = env.KIMI_MODEL?.trim();
   if (fromEnv) return fromEnv;
   const read = sources.readFile ?? ((path: string) => readFile(path, "utf8").catch(() => undefined));
-  const raw = await read(autopilotConfigPath(env, sources.home ?? homedir()));
+  let raw: string | undefined;
+  for (const path of autopilotConfigPaths(env, sources.home ?? homedir())) {
+    raw = await read(path);
+    if (raw) break;
+  }
   if (!raw) return undefined;
   try {
     const model = (JSON.parse(raw) as { model?: unknown }).model;

@@ -333,7 +333,7 @@ describe("the laptop's setup over SSH", () => {
     assert.ok(second.events().some((event) => event.event === "line" && event.label === "DeepSeek API key" && event.detail === "kept in Hotcell · from your laptop"));
     assert.deepEqual(await needs(system, { access: "ssh" }), []);
     assert.ok(!second.out().includes(DEEPSEEK.apiKey!));
-    assert.deepEqual(await hotcellRoutes(system), [{ provider: "deepseek", active: true, mask: "sk-de…00" }]);
+    assert.deepEqual(await hotcellRoutes(system), [{ provider: "deepseek", active: true }]);
 
     // The provider can be replaced later the same way; a keyless one stores no key; a custom one its address.
     await (await laptopUp(system, { provider: { id: "ollama", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null, apiKeyEnv: "OLLAMA_API_KEY" } })).result;

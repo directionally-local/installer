@@ -169,7 +169,8 @@ export class FakeSystem implements System {
           // Like Hotcell's own listing: a header, then each provider with its masked value; `--json` lists routes.
           const mask = (value: string | undefined) => value === undefined ? "" : value.length <= 8 ? "•".repeat(Math.max(4, value.length)) : `${value.slice(0, 5)}…${value.slice(-2)}`;
           if (args.includes("--json")) {
-            return ok(`${JSON.stringify({ routes: [...this.hotcellKeys].map((key) => ({ provider: key, active: !this.hotcellInactive.has(key), ...(this.hotcellKeyValues.has(key) ? { mask: mask(this.hotcellKeyValues.get(key)) } : {}) })) })}\n`);
+            // Hotcell's real shape (see test-support/hotcell-0.1.38-keys-ls.json): `name`, not `provider`, and no masked value.
+            return ok(`${JSON.stringify({ routes: [...this.hotcellKeys].map((key) => ({ name: key, builtin: true, hasKey: true, active: !this.hotcellInactive.has(key), keySource: "file", ...(this.hotcellInactive.has(key) ? { inactiveReason: "no key" } : {}) })), injected: [] })}\n`);
           }
           if (this.hotcellKeys.size === 0) return ok("no provider keys yet — add one:  hotcell keys add openrouter\n");
           return ok(`PROVIDER  KEY           SOURCE\n${[...this.hotcellKeys].map((key) => `${key.padEnd(8)}  ${mask(this.hotcellKeyValues.get(key) ?? "sk-or-v1-unknown00").padEnd(12)}  file\n`).join("")}`);

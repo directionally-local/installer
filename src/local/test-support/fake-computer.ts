@@ -150,7 +150,8 @@ export class FakeComputer implements System {
         // Like Hotcell's own listing: a header, then each provider with its masked value; `--json` lists routes.
         const mask = (value: string) => value.length <= 8 ? "•".repeat(Math.max(4, value.length)) : `${value.slice(0, 5)}…${value.slice(-2)}`;
         if (args.includes("--json")) {
-          return ok(`${JSON.stringify({ routes: [...this.hotcellKeys].map(([key, value]) => ({ provider: key, active: true, ...(value ? { mask: mask(value) } : {}) })) })}\n`);
+          // Hotcell's real shape (see test-support/hotcell-0.1.38-keys-ls.json): `name`, not `provider`, and no masked value.
+          return ok(`${JSON.stringify({ routes: [...this.hotcellKeys].map(([key]) => ({ name: key, builtin: true, hasKey: true, active: true, keySource: "file" })), injected: [] })}\n`);
         }
         return ok(`PROVIDER  KEY           SOURCE\n${[...this.hotcellKeys].map(([key, value]) => `${key.padEnd(8)}  ${mask(value).padEnd(12)}  file\n`).join("")}`);
       }
