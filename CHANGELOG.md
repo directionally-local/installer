@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.1](https://github.com/directionally-local/installer/compare/v0.9.0...v0.9.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **deps:** ship autopilot-ai 3.0.3 so setup opens Autopilot's provider picker ([d3d867e](https://github.com/directionally-local/installer/commit/d3d867eaff81c57279bc06dd8f9dfae20324c6db))
+* **deps:** ship autopilot-ai 3.0.3 so setup opens Autopilot's provider picker ([8953f47](https://github.com/directionally-local/installer/commit/8953f47b2e9eec3a1890258f6e84b34db0c92630))
+
 ## [0.9.0](https://github.com/directionally-local/installer/compare/v0.8.2...v0.9.0) (2026-10-30)
 
 
