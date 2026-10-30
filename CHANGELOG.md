@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.2](https://github.com/directionally-local/installer/compare/v0.9.1...v0.9.2) (2026-10-30)
+
+
+### Bug Fixes
+
+* **deps:** ship autopilot-ai 3.0.4 ([#64](https://github.com/directionally-local/installer/issues/64)) ([2c939a5](https://github.com/directionally-local/installer/commit/2c939a5db6351a0863fba5a9e63ef84d208a58f3))
+* read Autopilot's config from autopilot/ before the old kimiflare/ folder ([2eca447](https://github.com/directionally-local/installer/commit/2eca447418e659dd60dc16cc1e612c889de65577))
+* read Hotcell's routes by name, so a configured provider is seen ([996d5c4](https://github.com/directionally-local/installer/commit/996d5c40f5d3b2110104b95090e065943fa8e8c7))
+* read Hotcell's routes by name, so a configured provider is seen ([ffacae3](https://github.com/directionally-local/installer/commit/ffacae3a91ea9b8104278d4b251bffb02fea0354))
+
 ## [0.9.1](https://github.com/directionally-local/installer/compare/v0.9.0...v0.9.1) (2026-10-30)
 
 
