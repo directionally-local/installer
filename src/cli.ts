@@ -8,7 +8,7 @@ import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, u
 import { loadRemotes } from "./laptop/config.js";
 import { provider as providerCommand } from "./laptop/provider.js";
 import { model } from "./laptop/settings.js";
-import { openSession } from "./laptop/session.js";
+import { openSession, type SessionInput } from "./laptop/session.js";
 import { preview as laptopPreview } from "./laptop/preview.js";
 import { setup } from "./laptop/setup.js";
 import { realSshExec } from "./laptop/ssh.js";
@@ -31,22 +31,27 @@ Send a task; it runs in its own sandbox and comes back as a pull request.
 On your laptop:
   dl                      the first time: set up where agents run, pick a provider and model
                           in Autopilot's list, then talk to an agent. Afterwards: a new session.
-  dl  (in a GitHub repo)  talk to the repository's agent; it keeps running when you leave
-                          (--no-local-changes: start from the pushed commit, send no patch)
-  dl  (anywhere else)     a chat with an agent on your default place
-  dl -c, --continue       reopen the latest session started from this folder on this place
+  dl  (on this computer)  plain autopilot in this folder, any folder: every Autopilot feature,
+                          your own Autopilot config; the agent edits this folder and stops
+                          when the terminal closes (dl -- ARGS passes ARGS to autopilot)
+  dl  (on a server)       talk to an agent on the server; it keeps running when you leave.
+                          In a GitHub repo, the repository's agent (--no-local-changes: start
+                          from the pushed commit, send no patch); anywhere else, a chat
+  dl -c, --continue       this computer: autopilot -c; a server: reopen the latest session
+                          started from this folder there
   dl setup                set up or repair where your agents run (safe to re-run)
-  dl new                  the same as bare dl (a new conversation; the old one keeps running)
+  dl new                  the same as bare dl (a new session)
   dl status               where your agents run, their provider, model and versions, and what they're doing
   dl connect URL          connect to a server someone else set up (approve the code it shows)
-  dl run "TASK"           run a task, from inside a GitHub repository
+  dl run "TASK"           run a task in a sandbox, in the background, from inside a GitHub
+                          repository; it ends in a pull request
                           (your uncommitted changes go along; Ctrl-C stops watching, not the task)
   dl runs                 your tasks and their pull requests
   dl watch ID             follow a task      dl cancel ID   stop one
   dl pull ID              check out a task's branch here
   dl preview ID           deploy a task's Workers branch on the server and open it here
   dl servers              where agents run (dl servers remove NAME · dl servers rename OLD NEW)
-  dl use [NAME]           where tasks go without --server (no NAME: show it)
+  dl use [NAME]           where tasks and bare dl go without --server (no NAME: show it)
   dl provider             the provider and GitHub token on each place (dl keys is the same)
   dl provider set         pick another provider, key and model in Autopilot's list (--server NAME)
   dl provider github      replace the GitHub token
@@ -104,6 +109,10 @@ export async function main(
   },
   options: { terminal?: boolean; stdin?: NodeJS.ReadableStream & { isTTY?: boolean } } = {},
 ): Promise<number> {
+  // Everything after `--` belongs to Autopilot (bare dl on this computer): `dl -- --session ID`.
+  const split = splitPassthrough(argv);
+  const passthrough = split.passthrough;
+  argv = split.argv;
   let parsed;
   try {
     parsed = parseArgs({
@@ -237,11 +246,11 @@ export async function main(
         const state = await readState(system);
         if (!state) {
           if (values.brief) return 0;
-          // Bare dl with a place set up: a new session here (the repository's inside a GitHub
-          // repository, a chat anywhere else); `dl -c` reopens the latest one. `dl status` is
-          // the overview.
+          // Bare dl with a place set up: a new session here. On this computer that's plain
+          // `autopilot` in this folder (`dl -c` is `autopilot -c`); on a server, the repository's
+          // conversation or a chat (`dl -c` reopens the latest). `dl status` is the overview.
           if (!command && terminal && (await loadRemotes()).length > 0) {
-            const code = await openSession({ cwd: process.cwd(), ...(values.continue ? { continue: true } : {}), ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}), ...(values["no-local-changes"] ? { noLocalChanges: true } : {}) }, laptopIO);
+            const code = await openSession(sessionInput(values, passthrough, { continue: values.continue === true }), laptopIO);
             if (code !== undefined) return code;
           }
           // A laptop connected to places gets its own overview (`dl status` shows it from anywhere);
@@ -291,7 +300,7 @@ export async function main(
         return 0;
       }
       case "run": {
-        const task = parsed.positionals.slice(1).join(" ").trim();
+        const task = [...parsed.positionals.slice(1), ...passthrough].join(" ").trim();
         if (!task) {
           io.err(`  Usage: dl run "fix the flaky checkout test"   ${colors.dim("(from inside a GitHub repository)")}\n`);
           return 2;
@@ -324,12 +333,12 @@ export async function main(
       case "new": {
         // An alias of bare dl for a release: a new conversation, the old one keeps running.
         if ((await loadRemotes()).length === 0) {
-          io.err(`  dl new starts a new conversation once something is set up: dl\n`);
+          io.err(`  dl new starts a new session once something is set up: dl\n`);
           return 1;
         }
-        const code = await openSession({ cwd: process.cwd(), ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}), ...(values["no-local-changes"] ? { noLocalChanges: true } : {}) }, laptopIO);
+        const code = await openSession(sessionInput(values, passthrough, { continue: false }), laptopIO);
         if (code !== undefined) return code;
-        io.err(`  dl new starts a new conversation on a place; pick one with --server NAME.\n`);
+        io.err(`  dl new starts a new session on a place; pick one with --server NAME.\n`);
         return 1;
       }
       case "preview": {
@@ -514,4 +523,26 @@ async function logTail(path: string, c: ReturnType<typeof palette>): Promise<str
   const lines = text.trimEnd().split("\n").filter((line) => line.trim() && !line.startsWith("#")).slice(-15);
   if (lines.length === 0) return "";
   return `\n  ${c.dim(`Last lines of ${path}:`)}\n${lines.map((line) => `    ${c.dim(line.slice(0, 200))}`).join("\n")}\n\n  Fix it and run ${c.bold("dl up")} again; it picks up where it stopped.\n`;
+}
+
+/** What bare dl (and dl new) hand to openSession: the flags it understands, and what came after `--`. */
+function sessionInput(
+  values: { server?: string | undefined; model?: string | undefined; "no-local-changes"?: boolean | undefined },
+  passthrough: string[],
+  options: { continue: boolean },
+): SessionInput {
+  return {
+    cwd: process.cwd(),
+    ...(options.continue ? { continue: true } : {}),
+    ...(values.server ? { server: values.server } : {}),
+    ...(values.model ? { model: values.model } : {}),
+    ...(values["no-local-changes"] ? { noLocalChanges: true } : {}),
+    ...(passthrough.length ? { args: passthrough } : {}),
+  };
+}
+
+/** dl's own arguments, and everything after the first `--` (for Autopilot). */
+export function splitPassthrough(argv: string[]): { argv: string[]; passthrough: string[] } {
+  const dashes = argv.indexOf("--");
+  return dashes === -1 ? { argv, passthrough: [] } : { argv: argv.slice(0, dashes), passthrough: argv.slice(dashes + 1) };
 }

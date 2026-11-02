@@ -3,16 +3,14 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
-import { configureThisComputer, localProviderReady } from "../local/keys.js";
+import { PAIRED_NAME } from "../local/layout.js";
 import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
 import { palette } from "../ui.js";
 import { findAutopilot, supportsAttachRemote, type AutopilotCommand } from "./autopilot.js";
 import { RemoteApiError, type RemoteClient, type RemoteConversation } from "./client.js";
 import { describeError, pickModel, type LaptopIO } from "./commands.js";
-import { runAutopilotConnect } from "./connect.js";
-import { ensurePlaceProvider, type PlaceProviderDeps } from "./place-provider.js";
 import { placeModel } from "./settings.js";
-import { recordLastUsed, resolveTarget, type RemoteServer } from "./config.js";
+import { recordLastUsed, resolveTarget, type RemoteServer, type TargetReason } from "./config.js";
 import { detectGitHubRepository, snapshotWorkingTree, type WorkingTreeSnapshot } from "./git.js";
 import { describeSecretLocation, findLikelyProviderSecret, type SecretMatch } from "./secrets.js";
 import { forgetSession, latestSession, rememberSession, sessionsFor, sessionsPath, type SessionKey } from "./session-store.js";
@@ -21,13 +19,19 @@ import { openRemoteForSession, withConnections, type RemoteOpener } from "./tunn
 export { autopilotOnPath, bundledAutopilot, findAutopilot, supportsAttachRemote, type AutopilotCommand } from "./autopilot.js";
 
 /**
- * `dl` anywhere: Autopilot's own interactive screen, attached to a conversation on the place
- * agents run (`autopilot attach-remote`). Every `dl` starts a new conversation: inside a GitHub
- * repository that's the repository's code conversation (base commit + uncommitted changes, as
- * `dl run` sends them); anywhere else it's a chat on the place. `dl -c` reopens the latest one
- * started from this folder on this place, like `autopilot -c`. dl only finds the conversation,
- * holds the SSH tunnel open, and gets out of the way: Autopilot owns the terminal until the
- * user detaches.
+ * Bare `dl`: an interactive Autopilot session. Where it runs depends on the place:
+ *
+ * - **This computer**: plain `autopilot` in this folder, with the terminal attached, exactly as
+ *   if the person had typed it. A new session every time; `dl -c` is `autopilot -c`. It uses the
+ *   person's own Autopilot config (the provider `autopilot connect` set up), works in any folder,
+ *   and sends nothing anywhere. The agent edits the folder directly and stops when the terminal
+ *   closes; `dl run` stays the sandboxed, background path.
+ * - **A server**: Autopilot's interactive screen attached to a conversation on the server
+ *   (`autopilot attach-remote`), which keeps running after the terminal closes. Every `dl`
+ *   starts a new conversation: inside a GitHub repository that's the repository's code
+ *   conversation (base commit + uncommitted changes, as `dl run` sends them); anywhere else a
+ *   chat. `dl -c` reopens the latest one started from this folder on this server. dl only finds
+ *   the conversation, holds the SSH tunnel open, and gets out of the way.
  */
 
 const execFileAsync = promisify(execFile);
@@ -39,7 +43,7 @@ export interface SessionChild {
   on(event: "error", listener: (error: Error) => void): unknown;
 }
 
-export type SessionSpawner = (command: string, args: string[], env: NodeJS.ProcessEnv) => SessionChild;
+export type SessionSpawner = (command: string, args: string[], env: NodeJS.ProcessEnv, options?: { cwd?: string }) => SessionChild;
 
 /** Where SIGINT/SIGTERM/SIGHUP arrive; `process` unless a test replaces it. */
 export interface SignalSource {
@@ -51,8 +55,10 @@ export interface SessionInput {
   cwd: string;
   server?: string;
   model?: string;
-  /** `dl -c`: reopen the latest conversation started from this folder on this place. */
+  /** `dl -c`: on this computer `autopilot -c`; on a server, reopen the latest conversation started from this folder there. */
   continue?: boolean;
+  /** What came after `--`: passed to plain Autopilot as is (this computer only). */
+  args?: string[];
   /** `dl --no-local-changes`: start from the base commit and send no patch. */
   noLocalChanges?: boolean;
   /** Asks what to do when the local changes hold a key; the terminal's own unless replaced (tests). */
@@ -60,8 +66,6 @@ export interface SessionInput {
   open?: RemoteOpener;
   /** The model saved for the place with `dl model`; read from dl's config unless replaced (tests). */
   placeModel?: (place: string) => Promise<string | undefined>;
-  /** Checks the place has a provider, and sets one up if not; the real one unless replaced (tests). */
-  ensureProvider?: (remote: RemoteServer, client: RemoteClient) => Promise<boolean>;
   /** Finds Autopilot; the one installed with dl, else one on PATH, unless replaced (tests). */
   autopilot?: () => Promise<AutopilotCommand | undefined>;
   /** Whether that Autopilot has `attach-remote`. */
@@ -71,7 +75,7 @@ export interface SessionInput {
   sessionsFile?: string;
 }
 
-const realSpawn: SessionSpawner = (command, args, env) => spawn(command, args, { stdio: "inherit", env });
+const realSpawn: SessionSpawner = (command, args, env, options = {}) => spawn(command, args, { stdio: "inherit", env, ...(options.cwd ? { cwd: options.cwd } : {}) });
 
 const FORWARDED: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
 
@@ -109,25 +113,74 @@ export async function planSession(cwd: string): Promise<SessionPlan> {
 }
 
 /**
- * Opens the session for this directory (code or chat), or returns undefined when there's no
- * place to open it on (nothing set up, or several and no default), after a one-line note, so
- * the caller shows what to do instead.
+ * Opens a session here: plain Autopilot when the place is this computer, else a conversation on
+ * the server (code or chat). Returns undefined when there's no place to open it on (nothing set
+ * up, or several and no default), after a one-line note, so the caller shows what to do instead.
+ * `--server NAME` picks the place; without it, the default place decides.
  */
 export async function openSession(input: SessionInput, io: LaptopIO): Promise<number | undefined> {
-  return startSession(await planSession(input.cwd), input, io);
-}
-
-async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO): Promise<number | undefined> {
   const c = palette(io.color === true);
-  const note = (text: string) => io.err(`  ${c.yellow("!")} ${text}\n`);
   let target;
   try {
     target = await resolveTarget(input.server);
   } catch (error) {
     if (input.server !== undefined) throw error;
-    note(describeError(error));
+    io.err(`  ${c.yellow("!")} ${describeError(error)}\n`);
     return undefined;
   }
+  if (target.remote.name === PAIRED_NAME) return runPlainAutopilot(input, io);
+  return startSession(await planSession(input.cwd), target, input, io);
+}
+
+/**
+ * This computer: `autopilot [-c] [-m MODEL] [ARGS…]` in the folder, with the terminal attached
+ * and the person's own environment (so their own Autopilot config and provider). Ctrl-C belongs
+ * to Autopilot; SIGTERM and SIGHUP are passed on. Returns Autopilot's exit code.
+ */
+async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<number> {
+  const c = palette(io.color === true);
+  const autopilot = await (input.autopilot ?? findAutopilot)();
+  if (!autopilot) {
+    io.err(`  ${c.red("✗")} The Autopilot that comes with dl isn't installed. Update: ${c.bold(UPDATE)}\n`);
+    return 1;
+  }
+  const args = [
+    ...autopilot.args,
+    ...(input.continue ? ["-c"] : []),
+    ...(input.model ? ["-m", input.model] : []),
+    ...(input.args ?? []),
+  ];
+  const signals = input.signals ?? process;
+  let child: SessionChild | undefined;
+  // Autopilot gets Ctrl-C from the terminal itself; dl must not die of it underneath.
+  const handlers = FORWARDED.map((name) => {
+    const handler = () => {
+      if (child && name !== "SIGINT") child.kill(name);
+    };
+    signals.on(name, handler);
+    return [name, handler] as const;
+  });
+  try {
+    const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | Error>((resolve) => {
+      const started = (input.spawn ?? realSpawn)(autopilot.command, args, { ...process.env }, { cwd: input.cwd });
+      child = started;
+      started.on("exit", (code, signal) => resolve({ code, signal }));
+      started.on("error", (error) => resolve(error));
+    });
+    if (outcome instanceof Error) {
+      io.err(`  ${c.red("✗")} Couldn't start Autopilot: ${outcome.message}. Update: ${c.bold(UPDATE)}\n`);
+      return 1;
+    }
+    if (outcome.code !== null) return outcome.code;
+    return outcome.signal === "SIGINT" ? 130 : outcome.signal === "SIGHUP" ? 129 : outcome.signal === "SIGTERM" ? 143 : 1;
+  } finally {
+    for (const [name, handler] of handlers) signals.off(name, handler);
+  }
+}
+
+async function startSession(plan: SessionPlan, target: { remote: RemoteServer; reason: TargetReason }, input: SessionInput, io: LaptopIO): Promise<number | undefined> {
+  const c = palette(io.color === true);
+  const note = (text: string) => io.err(`  ${c.yellow("!")} ${text}\n`);
   const { remote, reason } = target;
   const key: SessionKey = plan.kind === "code"
     ? { place: remote.name, repository: plan.repository!, root: plan.root }
@@ -162,8 +215,6 @@ async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO
   try {
     return await withConnections(input.open ?? openRemoteForSession, async (connections) => {
       const client = await step(connections.client(remote));
-      // A place with no provider can't serve a turn: set one up before opening anything.
-      if (!(await step((input.ensureProvider ?? ((target, api) => ensurePlaceProvider(target, api, placeProviderDeps(io))))(remote, client)))) return undefined;
       // Bare `dl` always starts a new conversation; `dl -c` reopens the latest here.
       let remembered = input.continue ? await latestSession(key, file) : undefined;
       if (input.continue && !remembered) note("No earlier session here; starting a new one.");
@@ -310,19 +361,6 @@ async function askAboutLocalSecret(match: SecretMatch, snapshot: WorkingTreeSnap
     if (error instanceof PromptCancelled) return false;
     throw error;
   }
-}
-
-/** The real provider check: Autopilot's picker, then the key into this computer's Hotcell. */
-function placeProviderDeps(io: LaptopIO): PlaceProviderDeps {
-  return {
-    connect: (options) => runAutopilotConnect(options),
-    local: {
-      ready: () => localProviderReady(),
-      configure: (answers) => configureThisComputer(answers),
-    },
-    write: io.err,
-    color: io.color === true,
-  };
 }
 
 /** Whether a remembered conversation still exists on the place. */
