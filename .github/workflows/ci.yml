@@ -39,7 +39,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        service: [name]
+        service: [name, free]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

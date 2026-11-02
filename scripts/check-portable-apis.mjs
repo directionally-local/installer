@@ -65,6 +65,8 @@ console.log(`Portable: ${roots.join(", ")}`);
 async function sourceFiles(root) {
   const entries = await readdir(root, { recursive: true, withFileTypes: true });
   return entries
+    // Tests and their helpers run under Node, never in the Worker, so they are out of scope.
     .filter((entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts"))
+    .filter((entry) => !relative(root, entry.parentPath).split(/[\\/]/).includes("test"))
     .map((entry) => relative(process.cwd(), join(entry.parentPath, entry.name)));
 }
