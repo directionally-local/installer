@@ -1,0 +1,81 @@
+import { parseUsage, type Usage } from "./quota.js";
+
+/**
+ * Passes an OpenRouter server-sent-event stream through unchanged while reading the `usage`
+ * object it sends in its last chunk. `onEnd` runs exactly once, before the stream closes, when
+ * the upstream ends, fails, or the client goes away, so the reservation is always settled
+ * while the request is still alive, with no work deferred past the response. The content is never kept: only the
+ * usage counts leave this function.
+ */
+
+export interface StreamOutcome {
+  usage: Usage | undefined;
+  /** The stream carried an `error` object, failed, or was cancelled before it finished. */
+  errored: boolean;
+}
+
+const MAX_LINE_BUFFER = 4 * 1024 * 1024;
+
+export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: StreamOutcome) => Promise<void>): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let usage: Usage | undefined;
+  let errored = false;
+  let ended = false;
+
+  const scan = (final: boolean) => {
+    const lines = buffer.split("\n");
+    buffer = final ? "" : (lines.pop() ?? "");
+    if (buffer.length > MAX_LINE_BUFFER) buffer = "";
+    for (const raw of lines) {
+      const line = raw.trimEnd();
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      try {
+        const parsed = JSON.parse(data) as { usage?: unknown; error?: unknown };
+        const found = parseUsage(parsed.usage);
+        if (found) usage = found;
+        if (parsed.error) errored = true;
+      } catch {
+        // A partial or non-JSON data line carries no usage.
+      }
+    }
+  };
+
+  const finish = async () => {
+    if (ended) return;
+    ended = true;
+    await onEnd({ usage, errored });
+  };
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      let result: ReadableStreamReadResult<Uint8Array>;
+      try {
+        result = await reader.read();
+      } catch (error) {
+        errored = true;
+        await finish();
+        controller.error(error);
+        return;
+      }
+      if (result.done) {
+        buffer += decoder.decode();
+        scan(true);
+        await finish();
+        controller.close();
+        return;
+      }
+      controller.enqueue(result.value);
+      buffer += decoder.decode(result.value, { stream: true });
+      scan(false);
+    },
+    async cancel(reason) {
+      errored = true;
+      await finish();
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
+}
