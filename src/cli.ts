@@ -15,7 +15,7 @@ import { realSshExec } from "./laptop/ssh.js";
 import { update } from "./laptop/update.js";
 import { localCommand } from "./local/cli.js";
 import { localStatus, setUpOnThisComputer } from "./local/setup.js";
-import { pinnedAutopilotVersion } from "./versions.js";
+import { pinnedAutopilotVersion, pinnedHotcellVersion } from "./versions.js";
 import { TtyPrompter } from "./prompt.js";
 import { readState } from "./state.js";
 import { DryRunSystem, RealSystem, type System } from "./system.js";
@@ -73,7 +73,7 @@ On the server:
 
 up options:
   --autopilot-version <x.y.z>   default: the version this dl ships with (${pinnedAutopilotVersion()})
-  --hotcell-version <x.y.z>     default: latest on npm
+  --hotcell-version <x.y.z>     default: the version this dl ships with (${pinnedHotcellVersion()})
 
 Unattended installs answer the questions with environment variables:
   DL_TAILSCALE_AUTH_KEY   Tailscale auth key (tskey-…), unless this machine is already on a tailnet
@@ -243,7 +243,7 @@ export async function main(
           }
           // A laptop connected to places gets its own overview (`dl status` shows it from anywhere);
           // otherwise, what this is and how to start.
-          if ((!command || command === "status") && await laptopHome(laptopIO, undefined, undefined, { ssh: realSshExec, local: localAutopilotVersion })) return 0;
+          if ((!command || command === "status") && await laptopHome(laptopIO, undefined, undefined, { ssh: realSshExec, local: localVersions })) return 0;
           // A laptop with nothing set up yet: the wizard (it needs someone to answer it).
           if (!command && terminal && !isRoot() && (await loadRemotes()).length === 0) return await setup({ io: laptopIO, terminal });
           io.out(NOT_A_SERVER(colors));
@@ -487,10 +487,11 @@ function isRoot(): boolean {
   return process.getuid?.() === 0;
 }
 
-/** The Autopilot version "this computer" runs, for `dl status`; undefined when it isn't set up here. */
-async function localAutopilotVersion(): Promise<string | undefined> {
+/** The Autopilot and Hotcell versions "this computer" runs, for `dl status`; undefined when it isn't set up here. */
+async function localVersions(): Promise<{ autopilot: string; hotcell: string } | undefined> {
   try {
-    return (await localStatus()).state?.autopilotVersion;
+    const state = (await localStatus()).state;
+    return state ? { autopilot: state.autopilotVersion, hotcell: state.hotcellVersion } : undefined;
   } catch {
     return undefined;
   }

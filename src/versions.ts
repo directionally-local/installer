@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 
 /**
- * One Autopilot version everywhere. The laptop's session client is the autopilot-ai dl
- * bundles (package.json pins it exactly), and every place dl sets up (this computer, a
- * server, the sandbox image) installs that same version, so the client and server never
- * drift. `dl update` brings a place back to it.
+ * One Autopilot version and one Hotcell version everywhere. The laptop's session client is
+ * the autopilot-ai dl bundles (package.json pins it exactly), and every place dl sets up
+ * (this computer, a server, the sandbox image) installs that same version, so the client and
+ * server never drift. Hotcell is pinned the same way: two people installing the same dl get
+ * the same sandboxes, and a broken Hotcell release can't reach anyone without a dl release.
+ * `dl update` brings a place back to both pins.
  *
  * For testing unpublished builds, DL_AUTOPILOT_SPEC and DL_HOTCELL_SPEC name an npm spec
  * or a path to a .tgz (several, separated by spaces, when a package needs sibling tarballs)
@@ -23,13 +25,25 @@ function readManifest(): Manifest {
   return manifest;
 }
 
-/** The exact autopilot-ai version dl ships with and installs on places. */
-export function pinnedAutopilotVersion(deps: Record<string, string> | undefined = readManifest().dependencies): string {
-  const pinned = deps?.["autopilot-ai"]?.trim();
-  if (!pinned || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(pinned)) {
-    throw new Error(`package.json must pin autopilot-ai to an exact version (got ${JSON.stringify(pinned)})`);
+const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+
+/** The exact version package.json pins `name` to; a range would let places drift. */
+function pinnedVersion(name: string, deps: Record<string, string> | undefined): string {
+  const pinned = deps?.[name]?.trim();
+  if (!pinned || !EXACT_VERSION.test(pinned)) {
+    throw new Error(`package.json must pin ${name} to an exact version (got ${JSON.stringify(pinned)})`);
   }
   return pinned;
+}
+
+/** The exact autopilot-ai version dl ships with and installs on places. */
+export function pinnedAutopilotVersion(deps: Record<string, string> | undefined = readManifest().dependencies): string {
+  return pinnedVersion("autopilot-ai", deps);
+}
+
+/** The exact hotcell version dl ships with and installs on places. */
+export function pinnedHotcellVersion(deps: Record<string, string> | undefined = readManifest().dependencies): string {
+  return pinnedVersion("hotcell", deps);
 }
 
 /** dl's own version, for `dl --version` and the update hint. */
@@ -58,6 +72,11 @@ export function packageSpecs(versions: { autopilot: string; hotcell: string }, e
     hotcellLabel: hotcellOverride ? "dev" : versions.hotcell,
     dev: Boolean(autopilotOverride || hotcellOverride),
   };
+}
+
+/** A place's version next to the pin: `0.1.38`, or `0.1.30 → 0.1.38` when it's behind. */
+export function versionAgainstPin(installed: string, pinned: string): string {
+  return installed === pinned ? installed : `${installed} → ${pinned}`;
 }
 
 /** The version an installed package reports, for the state file when a dev spec was installed. */

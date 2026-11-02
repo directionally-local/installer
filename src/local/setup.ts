@@ -37,7 +37,7 @@ import {
 } from "./layout.js";
 import { fileMtime, modelPricesHealth, refreshModelPrices, type ModelPricesHealth } from "../model-prices.js";
 import { asterConfigWithProvider, hotcellKeysAddArgs, parseHotcellRoutes, providerConfig, providerFromAsterConfig, type HotcellRoute, type ProviderAnswer } from "../provider.js";
-import { installedVersion, packageSpecs, pinnedAutopilotVersion } from "../versions.js";
+import { installedVersion, packageSpecs, pinnedAutopilotVersion, pinnedHotcellVersion } from "../versions.js";
 import { httpStatus, portFree } from "./probes.js";
 import { installService, removeServices, serviceState, stopService, userId, type ServiceManager, type ServiceState } from "./services.js";
 import { readLocalState, writeLocalState, type LocalState } from "./state.js";
@@ -181,8 +181,8 @@ export async function setUpOnThisComputer(input: SetupInput): Promise<LocalSetup
     for (const dir of [paths.root, paths.config, paths.logs, paths.releases, paths.hotcellHome, paths.autopilotHome]) {
       await system.mkdir(dir, { mode: 0o700 });
     }
-    // The same Autopilot the laptop's dl bundles; Hotcell's newest.
-    const specs = packageSpecs({ autopilot: input.autopilotVersion ?? pinnedAutopilotVersion(), hotcell: input.hotcellVersion ?? await latestVersion(system, "hotcell") }, input.env ?? process.env);
+    // The same Autopilot and Hotcell the laptop's dl bundles: never npm's latest.
+    const specs = packageSpecs({ autopilot: input.autopilotVersion ?? pinnedAutopilotVersion(), hotcell: input.hotcellVersion ?? pinnedHotcellVersion() }, input.env ?? process.env);
     const name = `autopilot-${specs.autopilotLabel}_hotcell-${specs.hotcellLabel}`;
     const releaseDir = join(paths.releases, name);
     if (specs.dev || !(await system.exists(join(releaseDir, "node_modules", "autopilot-ai", "package.json")) && await system.exists(join(releaseDir, "node_modules", "hotcell", "package.json")))) {
@@ -471,13 +471,6 @@ function autopilotCli(system: System, node: string, paths: LocalPaths, args: str
     describe: `autopilot ${args.join(" ")}`,
     ...(secretOutput ? { secretOutput: true } : {}),
   });
-}
-
-async function latestVersion(system: System, pkg: string): Promise<string> {
-  const result = await system.probe("npm", ["view", pkg, "version"]);
-  const version = result.stdout.trim();
-  if (result.code !== 0 || !/^\d+\.\d+\.\d+/.test(version)) throw new Error(`Couldn't look up the latest ${pkg} on npm${result.stderr ? `: ${result.stderr.trim()}` : ""}`);
-  return version;
 }
 
 /** Builds the sandbox image unless it exists (a dev spec is always rebuilt); returns whether it already did. */

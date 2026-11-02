@@ -6,6 +6,7 @@ import type { System } from "./system.js";
 import { palette } from "./ui.js";
 import { readPreviews } from "./preview.js";
 import { nextSteps } from "./up.js";
+import { pinnedAutopilotVersion, pinnedHotcellVersion, versionAgainstPin } from "./versions.js";
 
 type Write = (text: string) => void;
 type Colors = ReturnType<typeof palette>;
@@ -40,6 +41,9 @@ export async function serverHome(system: System, state: InstallState, write: Wri
   write(row("Laptops", laptops === undefined ? c.dim("unknown (run dl up to update)") : laptops.length === 0 ? "none connected yet" : `${laptops.length} connected · ${laptops.map((laptop) => laptop.name).join(", ")}`, "dl laptops"));
   write(row("Runs", runs === undefined ? c.dim("unknown (run dl up to update)") : `${running} running · ${doneThisWeek} this week`, "dl runs"));
   write(row("Capacity", `~${agentCapacity(facts, CELL_MEMORY_MB)} agents at once (estimate)`));
+  const pinned = { autopilot: pinnedAutopilotVersion(), hotcell: pinnedHotcellVersion() };
+  const behind = state.autopilotVersion !== pinned.autopilot || state.hotcellVersion !== pinned.hotcell;
+  write(row("Versions", `Autopilot ${state.autopilotVersion} · Hotcell ${versionAgainstPin(state.hotcellVersion, pinned.hotcell)}`, behind ? "sudo dl up" : ""));
   if (previews.previews.length > 0) {
     write(row("Previews", `${previews.previews.length} live · ${previews.previews.map((preview) => preview.id).join(", ")}`, "dl previews"));
   }

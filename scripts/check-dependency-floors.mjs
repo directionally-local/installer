@@ -3,11 +3,11 @@
  * Fails when a dependency on one of our own packages has a floor below the
  * latest published version.
  *
- * Why: dl pins autopilot-ai exactly, and autopilot pins camouflage-tui and
- * @hotcell/sdk by range. A range like `^2.10.1` still *allows* 2.10.2, which
- * predates a fix we depend on, and a lockfile can hold it. Dependabot moves
- * these within a day; this check makes the drift visible the moment it exists,
- * instead of at the next first run that fails.
+ * Why: dl pins autopilot-ai and hotcell exactly, and autopilot pins
+ * camouflage-tui and @hotcell/sdk by range. A range like `^2.10.1` still
+ * *allows* 2.10.2, which predates a fix we depend on, and a lockfile can hold
+ * it. Dependabot moves these within a day; this check makes the drift visible
+ * the moment it exists, instead of at the next first run that fails.
  *
  * Usage: node scripts/check-dependency-floors.mjs [--json]
  * Exit: 0 all floors current (or the registry couldn't be reached), 1 stale.
@@ -18,7 +18,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Our own packages, per repo. A dependency not listed here is ignored. */
-const OWN_PACKAGES = ["autopilot-ai"];
+const OWN_PACKAGES = ["autopilot-ai", "hotcell"];
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));

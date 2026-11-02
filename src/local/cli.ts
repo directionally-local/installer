@@ -1,6 +1,7 @@
 /** `dl local status` and `dl local uninstall [--purge]`: agents running on this computer. */
 import { homedir } from "node:os";
 import type { palette, Ui } from "../ui.js";
+import { pinnedHotcellVersion, versionAgainstPin } from "../versions.js";
 import { localStatus, uninstallFromThisComputer, type LocalOptions, type LocalStatus } from "./setup.js";
 
 type Colors = ReturnType<typeof palette>;
@@ -45,11 +46,13 @@ export function formatLocalStatus(status: LocalStatus, c: Colors, home: string):
   const describe = (entry: LocalStatus["services"]["hotcell"]) =>
     entry.running ? `running${entry.pid ? ` (pid ${entry.pid})` : ""}` : entry.installed ? "stopped" : "not installed";
   const healthy = services.hotcell.running && services.autopilot.running && status.answering && status.dockerRunning && status.modelPrices.ok;
+  const hotcellPin = pinnedHotcellVersion();
   return [
     `\n  ${c.bold("Directionally Local")}  ${c.dim("on this computer")}  ${healthy ? c.green("running") : c.red("needs attention")}\n\n`,
     line(status.dockerRunning, "Docker", status.dockerRunning ? state.dockerRuntime : `${state.dockerRuntime} isn't running; start it`),
-    line(services.hotcell.running, "Hotcell", `${describe(services.hotcell)} · 127.0.0.1:${state.ports.hotcell} · ${state.hotcellVersion}`),
+    line(services.hotcell.running, "Hotcell", `${describe(services.hotcell)} · 127.0.0.1:${state.ports.hotcell} · ${versionAgainstPin(state.hotcellVersion, hotcellPin)}`),
     line(services.autopilot.running && status.answering, "Autopilot", `${describe(services.autopilot)}${status.answering ? "" : ", not answering"} · ${state.url} · ${state.autopilotVersion}`),
+    ...(state.hotcellVersion === hotcellPin ? [] : [`  ${c.yellow("!")} ${"Hotcell".padEnd(12)}${c.dim(`this dl pins ${hotcellPin}; dl update brings it there`)}\n`]),
     status.modelPrices.warn
       ? `  ${c.yellow("!")} ${"Prices".padEnd(12)}${c.dim(status.modelPrices.detail)}\n`
       : line(status.modelPrices.ok, "Prices", status.modelPrices.detail),

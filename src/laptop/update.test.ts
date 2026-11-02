@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -10,14 +10,14 @@ import type { SshExec } from "./ssh.js";
 import {
   behindNotice,
   compareVersions,
-  latestVersions,
   outdatedServers,
+  pinnedVersions,
   placeVersions,
   serverVersions,
   update,
   type UpdateIO,
 } from "./update.js";
-import { pinnedAutopilotVersion } from "../versions.js";
+import { pinnedAutopilotVersion, pinnedHotcellVersion } from "../versions.js";
 
 const roots: string[] = [];
 const previous = process.env.AUTOPILOT_REMOTES_FILE;
@@ -124,33 +124,16 @@ describe("versions", () => {
     assert.equal(await serverVersions({ target: "root@box" }, missing.exec), undefined);
   });
 
-  it("looks up npm at most once a day, and keeps the last answer when offline", async () => {
-    const cacheFile = join(roots[0]!, "versions.json");
-    let calls = 0;
-    const npm = async (pkg: string) => { calls++; return pkg === "autopilot-ai" ? "2.7.2" : "1.4.1"; };
-    const day = 24 * 60 * 60 * 1000;
-
-    const first = await latestVersions({ cacheFile, npm, now: () => 1_000 });
-    assert.deepEqual(first, { autopilot: "2.7.2", hotcell: "1.4.1", checkedAt: 1_000 });
-    assert.equal(calls, 2);
-    assert.match(await readFile(cacheFile, "utf8"), /2\.7\.2/);
-
-    const cached = await latestVersions({ cacheFile, npm, now: () => 1_000 + day - 1 });
-    assert.equal(cached?.autopilot, "2.7.2");
-    assert.equal(calls, 2, "no second lookup within a day");
-
-    await latestVersions({ cacheFile, npm, now: () => 1_000 + day });
-    assert.equal(calls, 4, "a new lookup after a day");
-
-    const offline = await latestVersions({ cacheFile, npm: async () => undefined, now: () => 1_000 + 3 * day });
-    assert.equal(offline?.autopilot, "2.7.2", "offline keeps the last answer");
+  it("compares a place against the pins, not npm's latest", () => {
+    assert.deepEqual(pinnedVersions(), { autopilot: pinnedAutopilotVersion(), hotcell: pinnedHotcellVersion() });
+    assert.equal(behindNotice({ autopilot: pinnedAutopilotVersion(), hotcell: "0.1.30" }, pinnedVersions()), `Hotcell 0.1.30 → ${pinnedHotcellVersion()}`);
   });
 
   it("lists the servers that are behind", async () => {
     const { exec } = fakeSsh();
     const outdated = await outdatedServers([server("box"), server("laptop", false)], {
       ssh: exec,
-      latest: async () => ({ autopilot: "2.7.2", hotcell: "1.4.0", checkedAt: 0 }),
+      latest: async () => ({ autopilot: "2.7.2", hotcell: "1.4.0" }),
     });
     assert.deepEqual(outdated, [{ name: "box", notice: "Autopilot 2.7.0 → 2.7.2" }]);
   });
@@ -190,10 +173,10 @@ describe("dl update", () => {
     assert.match(drift.io.text(), /! this-computer runs Autopilot 2\.7\.0; this laptop's dl bundles \d+\.\d+\.\d+\. Match them: npm install -g directionallylocal/);
   });
 
-  it("knows each place's Autopilot version, for dl status", async () => {
+  it("knows each place's Autopilot and Hotcell versions, for dl status", async () => {
     const remotes = [server("box"), server("this-computer", false), { ...server("acme", false), url: "https://acme.example.com" }];
-    const versions = await placeVersions(remotes, { ssh: fakeSsh().exec, local: async () => "3.0.1" });
-    assert.deepEqual([...versions], [["box", "2.7.0"], ["this-computer", "3.0.1"]], "a server connected with dl connect can't be asked");
+    const versions = await placeVersions(remotes, { ssh: fakeSsh().exec, local: async () => ({ autopilot: "3.0.1", hotcell: "0.1.30" }) });
+    assert.deepEqual([...versions], [["box", { autopilot: "2.7.0", hotcell: "1.4.0" }], ["this-computer", { autopilot: "3.0.1", hotcell: "0.1.30" }]], "a server connected with dl connect can't be asked");
   });
 
   it("waits for running tasks when nobody can answer", async () => {

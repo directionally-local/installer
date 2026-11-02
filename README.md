@@ -65,18 +65,18 @@ dl new                              # a fresh conversation here (the old one kee
 dl run "fix the flaky checkout test"  # one-off task; your uncommitted changes go along
 dl runs                             # tasks and their pull requests
 dl pull <id>                        # check one out here
-dl status                           # where agents run, their provider, model and Autopilot version, what they're doing
+dl status                           # where agents run, their provider, model and versions, what they're doing
 ```
 
 In a git repository whose origin isn't on GitHub, `dl` says so in one line and opens a chat instead.
 
-`dl status` says when a place runs another Autopilot than this laptop's `dl` bundles, and once a day when a server is behind npm: `! box is behind: Hotcell 1.4.0 → 1.4.1   dl update box`.
+`dl status` says when a place runs another Autopilot or Hotcell than this laptop's `dl` pins: `! box runs Hotcell 0.1.30, this dl pins 0.1.38   dl update box`.
 
 The "fits ~N agents" figure is a conservative estimate: memory left after the host's own share (at least 1.5 GB or 15%), divided by 1 GB per sandbox, capped at two per CPU. Measured numbers will replace it.
 
-### One Autopilot version
+### One Autopilot and one Hotcell version
 
-`dl` bundles `autopilot-ai` at an exact version (its session client) and installs that same version on every place it sets up, including the sandbox image, so the client and the server never drift. `dl update NAME` brings a place back to it: a server gets its `dl` refreshed first (the install script) and then `dl up`; this computer re-runs its setup. When the laptop's own `dl` is behind npm, `dl update` says so with the one command that fixes it.
+`dl` bundles `autopilot-ai` at an exact version (its session client) and pins `hotcell` exactly too, and installs those same versions on every place it sets up, including the sandbox image, so the client and the server never drift and two people installing the same `dl` get the same sandboxes. `dl update NAME` brings a place back to both pins: a server gets its `dl` refreshed first (the install script) and then `dl up`; this computer re-runs its setup. When the laptop's own `dl` is behind npm, `dl update` says so with the one command that fixes it.
 
 ## Commands
 
@@ -89,7 +89,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl` | The first time: set up where agents run, pick a provider and model in Autopilot's list, then talk to an agent. Afterwards: inside a GitHub repository, that repository's agent session; anywhere else, a chat on your default place, resumed per directory. |
 | `dl setup` | Set up or repair where your agents run. Safe to re-run. `--identity FILE` names the SSH key to use. |
 | `dl new` | Start a fresh conversation here; the old one keeps running. |
-| `dl status` | Where your agents run, their provider, model and Autopilot version (next to this laptop's), and what they're doing. Works anywhere. |
+| `dl status` | Where your agents run, their provider, model and Autopilot and Hotcell versions (next to this laptop's pins), and what they're doing. Works anywhere. |
 | `dl connect URL` | Connect to a server someone else set up; approve the code it shows. |
 | `dl run "TASK"` | Run a task, from inside a GitHub repository. Ctrl-C stops watching, not the task. |
 | `dl runs` | Your tasks and their pull requests. `--json` for scripts. |
@@ -168,7 +168,7 @@ npm run build
 npm run sync:site-script   # after editing install.sh
 ```
 
-To test the whole flow with unpublished builds of Autopilot or Hotcell, set `DL_AUTOPILOT_SPEC` and/or `DL_HOTCELL_SPEC` to an npm spec or a path to a `.tgz` (`npm pack` in their checkouts). Local setup, `dl up` on a server and the sandbox image build then install those instead of `autopilot-ai@<pinned version>` / `hotcell@<latest>`; the release is named `dev` and is reinstalled and rebuilt on every run, since a dev build may have changed. The versions the builds report end up in the state file.
+To test the whole flow with unpublished builds of Autopilot or Hotcell, set `DL_AUTOPILOT_SPEC` and/or `DL_HOTCELL_SPEC` to an npm spec or a path to a `.tgz` (`npm pack` in their checkouts). Local setup, `dl up` on a server and the sandbox image build then install those instead of `autopilot-ai@<pinned version>` / `hotcell@<pinned version>`; the release is named `dev` and is reinstalled and rebuilt on every run, since a dev build may have changed. The versions the builds report end up in the state file.
 
 ```sh
 DL_AUTOPILOT_SPEC=~/autopilot/autopilot-ai-3.1.0.tgz DL_HOTCELL_SPEC=~/hotcell/hotcell-1.5.0.tgz dl

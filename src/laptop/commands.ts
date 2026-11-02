@@ -15,9 +15,9 @@ import { DEFAULT_MODEL, laptopModel } from "./settings.js";
 import { sshCommandLine } from "./ssh.js";
 import { openBrowser } from "./open-browser.js";
 import { withConnections, type Connections, type RemoteOpener } from "./tunnel.js";
-import { outdatedServers, placeVersions, type LatestVersions } from "./update.js";
+import { outdatedServers, placeVersions, type ServerVersions } from "./update.js";
 import type { SshExec } from "./ssh.js";
-import { pinnedAutopilotVersion } from "../versions.js";
+import { pinnedAutopilotVersion, pinnedHotcellVersion } from "../versions.js";
 
 export { DEFAULT_MODEL, readAutopilotModel } from "./settings.js";
 
@@ -306,7 +306,7 @@ export async function laptopHome(
   io = processIO,
   open?: RemoteOpener,
   model: (place: string) => Promise<string | undefined> = laptopModel,
-  versions?: { ssh: SshExec; latest?: () => Promise<LatestVersions | undefined>; laptop?: string; local?: () => Promise<string | undefined> },
+  versions?: { ssh: SshExec; latest?: () => Promise<ServerVersions | undefined>; laptop?: string; hotcell?: string; local?: () => Promise<ServerVersions | undefined> },
 ): Promise<boolean> {
   const c = palette(io.color === true);
   const remotes = await loadRemotes();
@@ -327,7 +327,7 @@ export async function laptopHome(
   const [current, outdated, installed] = await Promise.all([
     defaultName(),
     versions ? outdatedServers(remotes, versions).catch(() => []) : Promise.resolve([]),
-    versions ? placeVersions(remotes, versions).catch(() => new Map<string, string>()) : Promise.resolve(new Map<string, string>()),
+    versions ? placeVersions(remotes, versions).catch(() => new Map<string, ServerVersions>()) : Promise.resolve(new Map<string, ServerVersions>()),
   ]);
   const models = new Map(await Promise.all(remotes.map(async (remote) => [remote.name, await model(remote.name)] as const)));
   io.out(`\n  ${c.bold("Directionally Local")}  ${c.dim("on this laptop")}\n\n`);
@@ -342,11 +342,15 @@ export async function laptopHome(
     io.out(`  ${c.dim((first ? "Model" : "").padEnd(11))}${prefix}${info.provider ? `${info.provider} · ` : ""}${chosen}${first ? `   ${c.dim("dl model · dl provider")}` : ""}\n`);
   }
   const laptop = versions?.laptop ?? pinnedAutopilotVersion();
-  const places = remotes.map((remote) => `${remote.name} ${installed.get(remote.name) ?? "?"}`).join(" · ");
-  io.out(`  ${c.dim("Autopilot".padEnd(11))}${laptop} here · ${places}\n`);
+  const laptopHotcell = versions?.hotcell ?? pinnedHotcellVersion();
+  const places = (pick: (versions: ServerVersions) => string) =>
+    remotes.map((remote) => `${remote.name} ${installed.has(remote.name) ? pick(installed.get(remote.name)!) : "?"}`).join(" · ");
+  io.out(`  ${c.dim("Autopilot".padEnd(11))}${laptop} here · ${places((entry) => entry.autopilot)}\n`);
+  io.out(`  ${c.dim("Hotcell".padEnd(11))}${laptopHotcell} here · ${places((entry) => entry.hotcell)}\n`);
   for (const remote of remotes) {
     const version = installed.get(remote.name);
-    if (version && version !== laptop) io.out(`  ${c.yellow("!")} ${remote.name} runs Autopilot ${version}, this laptop ${laptop}   ${c.dim(`dl update ${remote.name}`)}\n`);
+    if (version && version.autopilot !== laptop) io.out(`  ${c.yellow("!")} ${remote.name} runs Autopilot ${version.autopilot}, this laptop ${laptop}   ${c.dim(`dl update ${remote.name}`)}\n`);
+    if (version && version.hotcell !== laptopHotcell) io.out(`  ${c.yellow("!")} ${remote.name} runs Hotcell ${version.hotcell}, this dl pins ${laptopHotcell}   ${c.dim(`dl update ${remote.name}`)}\n`);
   }
   for (const entry of outdated) io.out(`  ${c.yellow("!")} ${entry.name} is behind: ${entry.notice}   ${c.dim(`dl update ${entry.name}`)}\n`);
   io.out("\n");

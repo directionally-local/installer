@@ -9,13 +9,14 @@ import { localStatus, setUpOnThisComputer, uninstallFromThisComputer, type Local
 import { FakeComputer } from "./test-support/fake-computer.js";
 import { withCatalog } from "../test-support/fake-catalog.js";
 import { openrouterAnswer, type ProviderAnswer } from "../provider.js";
-import { pinnedAutopilotVersion } from "../versions.js";
+import { pinnedAutopilotVersion, pinnedHotcellVersion } from "../versions.js";
 
 const OPENROUTER_KEY = `sk-or-v1-${"a".repeat(40)}`;
 const OPENROUTER = openrouterAnswer(OPENROUTER_KEY);
 const DEEPSEEK: ProviderAnswer = { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com", apiKey: "sk-deepseek-0000000000", apiKeyEnv: "DEEPSEEK_API_KEY" };
 const GITHUB_TOKEN = `github_pat_${"b".repeat(40)}`;
 const AUTOPILOT = pinnedAutopilotVersion();
+const HOTCELL = pinnedHotcellVersion();
 const HOME = "/Users/ada";
 const ROOT = `${HOME}/.directionallylocal`;
 const CELLAR_NODE = "/opt/homebrew/Cellar/node/24.22.1/bin/node";
@@ -149,10 +150,10 @@ describe("on this computer: setup", () => {
     assert.match(ui.events.find((event) => event.startsWith("done check"))!, /macOS 15\.1 · Docker Desktop 29\.5\.2 · Node 24\.22\.1 · 120 GB free/);
 
     // Release layout: a versioned release and a current link, all under ~/.directionallylocal.
-    // Autopilot is the version this dl pins (the laptop's session client), Hotcell npm's latest.
-    const release = `${ROOT}/releases/autopilot-${AUTOPILOT}_hotcell-0.1.30`;
-    assert.ok(system.ran.includes(`npm install --prefix ${release} --no-audit --no-fund --omit=dev autopilot-ai@${AUTOPILOT} hotcell@0.1.30`), system.ran.join("\n"));
-    assert.ok(!system.probes.some(({ command, args }) => command === "npm" && args.join(" ") === "view autopilot-ai version"), "never npm's latest Autopilot");
+    // Autopilot and Hotcell are the versions this dl pins (the laptop's session client, the sandboxes).
+    const release = `${ROOT}/releases/autopilot-${AUTOPILOT}_hotcell-${HOTCELL}`;
+    assert.ok(system.ran.includes(`npm install --prefix ${release} --no-audit --no-fund --omit=dev autopilot-ai@${AUTOPILOT} hotcell@${HOTCELL}`), system.ran.join("\n"));
+    assert.ok(!system.probes.some(({ command, args }) => command === "npm" && args[0] === "view"), "never npm's latest, for either package");
     assert.ok(system.ran.includes(`ln -sfn ${release} ${ROOT}/current`));
     for (const dir of [ROOT, `${ROOT}/config`, `${ROOT}/logs`, `${ROOT}/hotcell`, `${ROOT}/autopilot`]) assert.equal(system.dirs.get(dir), 0o700, dir);
     assert.ok(!system.ran.some((command) => /^(sudo|runuser) /.test(command)), "nothing runs as root");
@@ -406,6 +407,7 @@ describe("on this computer: status and uninstall", () => {
     const text = formatLocalStatus(status, palette(false), HOME);
     assert.match(text, /on this computer {2}running/);
     assert.match(text, new RegExp(`Autopilot +running \\(pid 4242\\) · http://127\\.0\\.0\\.1:4096 · ${AUTOPILOT.replace(/\./g, "\\.")}`));
+    assert.match(text, new RegExp(`Hotcell +running \\(pid \\d+\\) · 127\\.0\\.0\\.1:4750 · ${HOTCELL.replace(/\./g, "\\.")}`), "the Hotcell version, next to the pin");
     assert.match(text, /~6 agents at once/);
     assert.match(text, /~\/\.directionallylocal\/logs/);
     assert.match(text, /tasks pause while this computer sleeps/);
@@ -422,6 +424,15 @@ describe("on this computer: status and uninstall", () => {
 
     system.running.delete("com.directionallylocal.autopilot");
     assert.match(formatLocalStatus(await localStatus(options(system)), palette(false), HOME), /needs attention[\s\S]*Autopilot +stopped, not answering/);
+
+    // A place left on another Hotcell than the pin says so, and names the one command that fixes it.
+    system.running.add("com.directionallylocal.autopilot");
+    const stateFile = `${ROOT}/state.json`;
+    const state = JSON.parse(system.files.get(stateFile)!.content) as Record<string, unknown>;
+    system.files.set(stateFile, { ...system.files.get(stateFile)!, content: JSON.stringify({ ...state, hotcellVersion: "0.1.30" }) });
+    const drift = formatLocalStatus(await localStatus(options(system)), palette(false), HOME);
+    assert.match(drift, new RegExp(`Hotcell +running \\(pid \\d+\\) · 127\\.0\\.0\\.1:4750 · 0\\.1\\.30 → ${HOTCELL.replace(/\./g, "\\.")}`));
+    assert.match(drift, new RegExp(`! Hotcell +this dl pins ${HOTCELL.replace(/\./g, "\\.")}; dl update brings it there`));
   });
 
   it("removes services and software but keeps keys and data, and only Autopilot's sandboxes", async () => {

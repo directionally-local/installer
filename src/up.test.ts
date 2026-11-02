@@ -8,12 +8,13 @@ import { JsonUi } from "./ui.js";
 import { hotcellRoutes, needs, parseAccessMode, parseProvidedAnswers, providerFromEnv, up, validateGitHubToken, validateOpenRouterKey } from "./up.js";
 import { withCatalog } from "./test-support/fake-catalog.js";
 import { openrouterAnswer, type ProviderAnswer } from "./provider.js";
-import { pinnedAutopilotVersion } from "./versions.js";
+import { pinnedAutopilotVersion, pinnedHotcellVersion } from "./versions.js";
 
 const OPENROUTER_KEY = `sk-or-v1-${"a".repeat(40)}`;
 const OPENROUTER: ProviderAnswer = openrouterAnswer(OPENROUTER_KEY);
 const DEEPSEEK: ProviderAnswer = { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com", apiKey: "sk-deepseek-0000000000", apiKeyEnv: "DEEPSEEK_API_KEY" };
 const AUTOPILOT = pinnedAutopilotVersion();
+const HOTCELL = pinnedHotcellVersion();
 const GITHUB_TOKEN = `github_pat_${"b".repeat(40)}`;
 const TAILSCALE_KEY = "tskey-auth-kAbC123-XyZ";
 
@@ -77,9 +78,9 @@ describe("directionallylocal up", () => {
     // Docker, accounts, software, image, services, access.
     assert.ok(system.ran.some((command) => command.includes("get.docker.com")));
     assert.ok(system.users.has("hotcell") && system.users.has("autopilot"));
-    // Autopilot is the version this dl pins (never npm's latest), Hotcell npm's latest.
-    assert.ok(system.ran.includes(`npm install --prefix /opt/directionallylocal/releases/autopilot-${AUTOPILOT}_hotcell-0.1.26 --no-audit --no-fund --omit=dev autopilot-ai@${AUTOPILOT} hotcell@0.1.26`), system.ran.join("\n"));
-    assert.ok(!system.ran.includes("npm view autopilot-ai version"));
+    // Autopilot and Hotcell are the versions this dl pins (never npm's latest).
+    assert.ok(system.ran.includes(`npm install --prefix /opt/directionallylocal/releases/autopilot-${AUTOPILOT}_hotcell-${HOTCELL} --no-audit --no-fund --omit=dev autopilot-ai@${AUTOPILOT} hotcell@${HOTCELL}`), system.ran.join("\n"));
+    assert.ok(!system.ran.some((command) => command.startsWith("npm view")), "never npm's latest, for either package");
     assert.ok(system.images.has(`directionallylocal-cell:${AUTOPILOT}`));
     assert.ok(system.ran.some((command) => command.startsWith("docker build --pull ")), "fresh base layers, never a stale cached Node");
     for (const unit of ["directionallylocal-metadata-block.service", "hotcell.service", "autopilot.service"]) assert.ok(system.enabled.has(unit), unit);
@@ -111,8 +112,9 @@ describe("directionallylocal up", () => {
     assert.ok(keyIndex < hotcellRestart);
 
     const state = await readState(system);
-    assert.equal(state?.release, `autopilot-${AUTOPILOT}_hotcell-0.1.26`);
+    assert.equal(state?.release, `autopilot-${AUTOPILOT}_hotcell-${HOTCELL}`);
     assert.equal(state?.autopilotVersion, AUTOPILOT);
+    assert.equal(state?.hotcellVersion, HOTCELL);
     assert.deepEqual(state?.access, { mode: "tailscale", url: "https://box.tail1234.ts.net" });
     // The OpenRouter key typed at the server's own terminal is the OpenRouter provider, named in aster.json.
     assert.deepEqual(JSON.parse(system.files.get(PATHS.asterConfig)!.content).provider, { id: "openrouter", baseUrl: "https://openrouter.ai/api/v1", apiKeyEnv: "OPENROUTER_API_KEY" });
