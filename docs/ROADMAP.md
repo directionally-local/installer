@@ -14,7 +14,7 @@ Everything here serves the phase 0 gate: two weeks of daily use. Work top to bot
 
 1. **Ship the free managed tier to the first testers.** Sign in with GitHub, get free DeepSeek V4.1 Flash tokens, no API key. Testers are already waiting for it, and "do you also provide the inference?" is the first question they ask. [installer#78](https://github.com/directionally-local/installer/issues/78), [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102)
 2. **Autopilot reports its state to herdr.** Early users already run herdr to manage many agents; this makes Autopilot fit their setup today. [autopilot#1103](https://github.com/directionally-local/autopilot/issues/1103)
-3. **Decide how dl behaves on a laptop.** The evidence now leans to plain Autopilot: testers run eight agents on 8 GB laptops, and a Docker sandbox per session doesn't fit there. Sandboxes belong on servers. [installer#72](https://github.com/directionally-local/installer/issues/72)
+3. **Build the laptop mode that was decided: plain Autopilot.** Bare `dl` runs `autopilot` in the terminal; `dl run` keeps the sandbox. [installer#72](https://github.com/directionally-local/installer/issues/72), [decision](decisions/laptop-mode.md)
 4. **Stay light: eight sessions on an 8 GB laptop.** Measure eight working Autopilot sessions on a small machine and keep each one's memory within budget. *No issue yet.*
 5. **Every `dl` starts a new session,** with `dl -c` to continue. [installer#71](https://github.com/directionally-local/installer/issues/71)
 6. **Session titles and state, then `/resume` and `/clear` in remote sessions.** #1046 first, since `/resume` needs titles to list. [autopilot#1046](https://github.com/directionally-local/autopilot/issues/1046), [autopilot#1092](https://github.com/directionally-local/autopilot/issues/1092)
@@ -71,7 +71,7 @@ People sign in with GitHub and get free tokens instead of bringing an API key. U
 
 **This week, cheaply:** Autopilot reports its state through herdr's protocol ([autopilot#1103](https://github.com/directionally-local/autopilot/issues/1103)), so people who already use herdr see Autopilot correctly today.
 
-**Depends on decision 1:** if dl on a laptop runs plain Autopilot, those sessions aren't in a server, so the multiplexer can't list them. Either plain Autopilot publishes its events on a local socket the multiplexer reads, or terminal panes come earlier. Decide this with [installer#72](https://github.com/directionally-local/installer/issues/72).
+**Decided with [installer#72](https://github.com/directionally-local/installer/issues/72):** dl on a laptop runs plain Autopilot, so those sessions aren't in a server and the multiplexer can't list them. Either plain Autopilot publishes its events on a local socket the multiplexer reads, or terminal panes come earlier. [decision](decisions/laptop-mode.md)
 
 ## Release plan
 
@@ -82,7 +82,7 @@ Each repository's release bot picks the number from commit types: a feature bump
 | Version | Phase | Contents |
 | --- | --- | --- |
 | 0.9.4 (now) | 0 | Autopilot's provider picker, any provider, picker shown once, chats reopen, Autopilot 3.1 pinned |
-| 0.10 | 0 | Every `dl` a new session, `dl -c` to continue, laptop mode as decided · installer#71, #72 |
+| 0.10 | 0 | Every `dl` a new session, `dl -c` to continue; on a laptop bare `dl` runs plain Autopilot · installer#71, #72 |
 | 0.11 | lane | Setup offers the free tier first: sign in with GitHub, no key needed; default model becomes the plain `deepseek-v4.1-flash` · installer#78 |
 | 0.12 | 0 | Hotcell pinned exactly · reboot-required warning · version-skew warning · installer#73, autopilot#1041 |
 | 0.13 | 1 | Fixes from the fresh-VM test · installer#47 |
@@ -179,7 +179,7 @@ You use dl as your daily coding agent, and a stranger can install it from the we
 | Done | Any provider, chosen in Autopilot's own picker | hotcell#63, autopilot#1056, #1057, installer#55 |
 | Done | Setup ends in a session, picker shows once, chats reopen; role labels on the install step | installer#62, #68 |
 | Done | No `kimiflare` folders for new users; old installs moved once | autopilot#1081, installer#65 |
-| Decision | On a laptop, does dl run plain Autopilot or the sandboxed remote mode? | installer#72 |
+| Decided | On a laptop, dl runs plain Autopilot; servers keep the sandboxed remote mode | installer#72, [decision](decisions/laptop-mode.md) |
 | Filed | Every `dl` starts a new session; `dl -c` continues | installer#71 |
 | Filed | Remote sessions match plain Autopilot: `/resume`, `/clear` | autopilot#1092 |
 | Filed | Your own messages appear when you reopen a session | autopilot#1093 |
@@ -291,7 +291,7 @@ These never block a phase.
 
 ## Decisions owed
 
-1. **On a laptop, does dl run plain Autopilot or the sandboxed remote mode?** Blocks phases 0 and 2: plain Autopilot means the multiplexer needs another way to see laptop sessions. [installer#72](https://github.com/directionally-local/installer/issues/72)
+1. ~~**On a laptop, does dl run plain Autopilot or the sandboxed remote mode?**~~ **Decided:** plain Autopilot on laptops, the sandboxed remote mode on servers. The multiplexer still needs another way to see laptop sessions. [installer#72](https://github.com/directionally-local/installer/issues/72), [decision](decisions/laptop-mode.md)
 2. **Whose identity goes on an agent's pull request on a shared server?** Blocks phase 4. [autopilot#1098](https://github.com/directionally-local/autopilot/issues/1098)
 3. **How does a teammate reach a shared server?** SSH, the team's Tailscale, or a public address. Blocks phase 4.
 4. **Who pays, and who gets stopped?** One company key with per-person limits, or everyone's own key. Blocks phase 4.
@@ -305,7 +305,7 @@ Read on 2 November 2026 across autopilot, hotcell, installer, serverless-objects
 
 | Verdict | Issue | Title | Where it fits | Why |
 | --- | --- | --- | --- | --- |
-| Core now | [autopilot#1041](https://github.com/directionally-local/autopilot/issues/1041) | dl: one Autopilot on the laptop, kept current by dl update | Phase 0 | Exact pin already shipped in dl 0.9.x. The version-skew check is left, and it may be moot if laptop dl runs plain Autopilot. |
+| Core now | [autopilot#1041](https://github.com/directionally-local/autopilot/issues/1041) | dl: one Autopilot on the laptop, kept current by dl update | Phase 0 | Exact pin already shipped in dl 0.9.x. The version-skew check is left, and it matters less now that laptop dl runs plain Autopilot. |
 | Core now | [autopilot#1043](https://github.com/directionally-local/autopilot/issues/1043) | dl server: retry a cell turn once on a transient failure | Phase 1 | Unattended server work dies on a provider blip without it. |
 | Core now | [autopilot#1046](https://github.com/directionally-local/autopilot/issues/1046) | dl server: conversation summaries carry what a sidebar needs | Phase 0, pulled forward | Written for the deck, but /resume needs the same per-session title, state and cost to list sessions. |
 | Core now | [autopilot#1049](https://github.com/directionally-local/autopilot/issues/1049) | dl server: build a conversation's PR title and body from its commits and final summary | Phase 0 | Every agent PR is titled with the raw prompt. Seen in your own dogfood PRs. |
