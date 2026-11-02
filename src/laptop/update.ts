@@ -1,12 +1,9 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { PAIRED_NAME } from "../local/layout.js";
 import type { Prompter } from "../prompt.js";
 import { palette, type Ui } from "../ui.js";
-import { dlVersion, pinnedAutopilotVersion } from "../versions.js";
+import { dlVersion, pinnedAutopilotVersion, pinnedHotcellVersion } from "../versions.js";
 import { resolveRemote, type RemoteServer, type SshAccess } from "./config.js";
 import { bootstrap, EventReplayer, INSTALL_URL, type UiFactory } from "./remote-install.js";
 import { checkServer, type ServerFacts, type SshExec } from "./ssh.js";
@@ -33,13 +30,7 @@ export interface ServerVersions {
   hotcell: string;
 }
 
-export interface LatestVersions extends ServerVersions {
-  /** Unix milliseconds of the npm lookup. */
-  checkedAt: number;
-}
-
 const execFileAsync = promisify(execFile);
-const DAY_MS = 24 * 60 * 60 * 1000;
 const STATE_FILE = "/etc/directionallylocal/state.json";
 
 /** Non-root users run the server commands with sudo; checkServer made sure it needs no password. */
@@ -61,16 +52,16 @@ export async function serverVersions(access: SshAccess, ssh: SshExec): Promise<S
   }
 }
 
-/** Each place's installed Autopilot version, by name: servers from their state file, this computer from `local`. */
+/** Each place's installed versions, by name: servers from their state file, this computer from `local`. */
 export async function placeVersions(
   remotes: RemoteServer[],
-  deps: { ssh: SshExec; local?: () => Promise<string | undefined> },
-): Promise<Map<string, string>> {
-  const versions = new Map<string, string>();
+  deps: { ssh: SshExec; local?: () => Promise<ServerVersions | undefined> },
+): Promise<Map<string, ServerVersions>> {
+  const versions = new Map<string, ServerVersions>();
   for (const remote of remotes) {
     if (remote.ssh) {
       const server = await serverVersions(remote.ssh, deps.ssh);
-      if (server) versions.set(remote.name, server.autopilot);
+      if (server) versions.set(remote.name, server);
     } else if (remote.name === PAIRED_NAME && deps.local) {
       const version = await deps.local().catch(() => undefined);
       if (version) versions.set(remote.name, version);
@@ -99,9 +90,13 @@ export function behindNotice(server: ServerVersions, latest: ServerVersions): st
   return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
-export function versionsCachePath(env: NodeJS.ProcessEnv = process.env): string {
-  const cacheHome = env.XDG_CACHE_HOME?.trim() || join(homedir(), ".cache");
-  return join(cacheHome, "directionallylocal", "versions.json");
+/**
+ * The versions dl pins: what every place should run. `dl update` brings a place to these, so
+ * "behind" means behind the pin, not behind npm — a newer Hotcell on npm reaches places only
+ * through a dl release.
+ */
+export function pinnedVersions(): ServerVersions {
+  return { autopilot: pinnedAutopilotVersion(), hotcell: pinnedHotcellVersion() };
 }
 
 async function npmVersion(pkg: string): Promise<string | undefined> {
@@ -111,52 +106,6 @@ async function npmVersion(pkg: string): Promise<string | undefined> {
     return /^\d+\.\d+\.\d+/.test(version) ? version : undefined;
   } catch {
     return undefined;
-  }
-}
-
-/**
- * npm's newest Autopilot and Hotcell, looked up at most once a day. Offline keeps the last
- * answer rather than pretending the server is current.
- */
-export async function latestVersions(options: {
-  cacheFile?: string;
-  npm?: (pkg: string) => Promise<string | undefined>;
-  now?: () => number;
-  maxAgeMs?: number;
-} = {}): Promise<LatestVersions | undefined> {
-  const path = options.cacheFile ?? versionsCachePath();
-  const now = (options.now ?? Date.now)();
-  const maxAge = options.maxAgeMs ?? DAY_MS;
-  const cached = await readCache(path);
-  if (cached && now - cached.checkedAt < maxAge) return cached;
-
-  const npm = options.npm ?? npmVersion;
-  const [autopilot, hotcell] = await Promise.all([npm("autopilot-ai"), npm("hotcell")]);
-  if (!autopilot || !hotcell) return cached;
-  const fresh: LatestVersions = { autopilot, hotcell, checkedAt: now };
-  await writeCache(path, fresh);
-  return fresh;
-}
-
-async function readCache(path: string): Promise<LatestVersions | undefined> {
-  try {
-    const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<LatestVersions>;
-    return typeof parsed.autopilot === "string" && typeof parsed.hotcell === "string" && typeof parsed.checkedAt === "number"
-      ? { autopilot: parsed.autopilot, hotcell: parsed.hotcell, checkedAt: parsed.checkedAt }
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-async function writeCache(path: string, versions: LatestVersions): Promise<void> {
-  try {
-    await mkdir(dirname(path), { recursive: true });
-    const temp = `${path}.${process.pid}.tmp`;
-    await writeFile(temp, `${JSON.stringify(versions, null, 2)}\n`, { mode: 0o644 });
-    await rename(temp, path);
-  } catch {
-    // A cache that can't be written only costs another lookup next time.
   }
 }
 
@@ -172,12 +121,12 @@ export async function runningTasks(remote: RemoteServer, open?: RemoteOpener): P
   }
 }
 
-/** Servers that are behind npm, for `dl status`. One SSH round trip each, and a cached lookup. */
+/** Servers that are behind the pins, for `dl status`. One SSH round trip each. */
 export async function outdatedServers(
   remotes: RemoteServer[],
-  deps: { ssh: SshExec; latest?: () => Promise<LatestVersions | undefined> },
+  deps: { ssh: SshExec; latest?: () => Promise<ServerVersions | undefined> },
 ): Promise<Array<{ name: string; notice: string }>> {
-  const latest = await (deps.latest ?? (() => latestVersions()))();
+  const latest = await (deps.latest ?? (() => Promise.resolve(pinnedVersions())))();
   if (!latest) return [];
   const outdated: Array<{ name: string; notice: string }> = [];
   for (const remote of remotes) {

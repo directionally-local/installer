@@ -16,7 +16,7 @@ import {
   asterConfigWithProvider, describeProvider, hotcellKeysAddArgs, isKeyless, KNOWN_PROVIDERS, OPENROUTER, openrouterAnswer, parseHotcellRoutes,
   parseProviderAnswer, providerConfig, providerFromAsterConfig, type ProviderAnswer,
 } from "./provider.js";
-import { installedVersion, packageSpecs, pinnedAutopilotVersion } from "./versions.js";
+import { installedVersion, packageSpecs, pinnedAutopilotVersion, pinnedHotcellVersion } from "./versions.js";
 
 export interface UpOptions {
   prompter: Prompter;
@@ -148,8 +148,8 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
     await ensureAutomaticUpdates(system, ui);
     await ensureUser(system, USERS.hotcell, PATHS.hotcellHome, ["docker"]);
     await ensureUser(system, USERS.autopilot, PATHS.autopilotHome, []);
-    // The same Autopilot the laptop's dl bundles; Hotcell's newest.
-    const specs = packageSpecs({ autopilot: options.autopilotVersion ?? pinnedAutopilotVersion(), hotcell: options.hotcellVersion ?? await latestVersion(system, "hotcell") }, env);
+    // The same Autopilot and Hotcell the laptop's dl bundles: never npm's latest.
+    const specs = packageSpecs({ autopilot: options.autopilotVersion ?? pinnedAutopilotVersion(), hotcell: options.hotcellVersion ?? pinnedHotcellVersion() }, env);
     const name = `autopilot-${specs.autopilotLabel}_hotcell-${specs.hotcellLabel}`;
     const releaseDir = `${PATHS.releases}/${name}`;
     if (specs.dev || !(await system.exists(`${releaseDir}/node_modules/autopilot-ai/package.json`) && await system.exists(`${releaseDir}/node_modules/hotcell/package.json`))) {
@@ -573,13 +573,6 @@ async function ensureUser(system: System, name: string, home: string, groups: st
   }
   for (const group of groups) await system.run("usermod", ["-aG", group, name]);
   await system.mkdir(home, { mode: 0o750, owner: `${name}:${name}` });
-}
-
-async function latestVersion(system: System, pkg: string): Promise<string> {
-  const result = await system.probe("npm", ["view", pkg, "version"]);
-  const version = result.stdout.trim();
-  if (result.code !== 0 || !/^\d+\.\d+\.\d+/.test(version)) throw new Error(`Couldn't look up the latest ${pkg} on npm${result.stderr ? `: ${result.stderr.trim()}` : ""}`);
-  return version;
 }
 
 export function asHotcell(system: System, args: string[], options: { input?: string; describe?: string } = {}) {

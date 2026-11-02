@@ -365,11 +365,14 @@ describe("dl on a laptop", () => {
     assert.match(named.text(), /Sending to box: /);
 
     const home = capture();
-    assert.equal(await laptopHome(home, undefined, async (name) => name === "box" ? "test/model" : undefined, { ssh: async () => ({ code: 1, stdout: "", stderr: "" }), laptop: "3.0.2", local: async () => "3.0.1" }), true);
+    assert.equal(await laptopHome(home, undefined, async (name) => name === "box" ? "test/model" : undefined, { ssh: async () => ({ code: 1, stdout: "", stderr: "" }), laptop: "3.0.2", hotcell: "0.1.38", local: async () => ({ autopilot: "3.0.1", hotcell: "0.1.30" }) }), true);
     assert.match(home.text(), /Coding agents that run on this computer or your own server/);
     assert.match(home.text(), /Model +box · test\/model +dl model · dl provider\n +this-computer · deepseek\/deepseek-v4\.1-flash-1017\n/, "each place's model");
     assert.match(home.text(), /Runs on +○ box http:\/\/127\.0\.0\.1:\d+, ● this-computer this computer +dl servers · dl use NAME/);
-    assert.match(home.text(), /Autopilot +3\.0\.2 here · box \? · this-computer 3\.0\.1\n +! this-computer runs Autopilot 3\.0\.1, this laptop 3\.0\.2 +dl update this-computer/, "the laptop's version next to each place's");
+    assert.match(home.text(), /Autopilot +3\.0\.2 here · box \? · this-computer 3\.0\.1\n/, "the laptop's version next to each place's");
+    assert.match(home.text(), /Hotcell +0\.1\.38 here · box \? · this-computer 0\.1\.30\n/, "the pinned Hotcell next to each place's");
+    assert.match(home.text(), /! this-computer runs Autopilot 3\.0\.1, this laptop 3\.0\.2 +dl update this-computer/);
+    assert.match(home.text(), /! this-computer runs Hotcell 0\.1\.30, this dl pins 0\.1\.38 +dl update this-computer/);
     assert.match(home.text(), /Talk to an agent: type {2}dl/);
   });
 
