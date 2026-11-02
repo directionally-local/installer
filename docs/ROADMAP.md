@@ -10,18 +10,20 @@ Issues carry a `phase-0` to `phase-5` label in `autopilot` and `installer`; `dec
 
 ## Next up, in order
 
-Everything here serves the phase 0 gate: two weeks of daily use. Work top to bottom; item 2 is a separate lane, and items 4 to 6 can run in parallel with 3.
+Everything here serves the phase 0 gate: two weeks of daily use. Work top to bottom; items 1 and 2 can run alongside everything after them.
 
-1. **Decide how dl behaves on a laptop.** Plain Autopilot, or the sandboxed remote mode. It decides what item 2 builds. [installer#72](https://github.com/directionally-local/installer/issues/72)
-2. **Start the free managed tier, in parallel.** Sign in with GitHub, get free DeepSeek V4.1 Flash tokens, no API key. Its own lane below. [installer#78](https://github.com/directionally-local/installer/issues/78), [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102)
-3. **Every `dl` starts a new session,** with `dl -c` to continue. [installer#71](https://github.com/directionally-local/installer/issues/71)
-4. **Session titles and state, then `/resume` and `/clear` in remote sessions.** #1046 first, since `/resume` needs titles to list. [autopilot#1046](https://github.com/directionally-local/autopilot/issues/1046), [autopilot#1092](https://github.com/directionally-local/autopilot/issues/1092)
-5. **Your own messages in a reopened session.** Without them a resumed session shows answers with no questions. [autopilot#1093](https://github.com/directionally-local/autopilot/issues/1093)
-6. **Pull requests titled from commits.** [autopilot#1049](https://github.com/directionally-local/autopilot/issues/1049)
-7. **Pin Hotcell, decide the release-PR floors check, fix the flaky test.** [installer#73](https://github.com/directionally-local/installer/issues/73), [installer#74](https://github.com/directionally-local/installer/issues/74), [autopilot#1091](https://github.com/directionally-local/autopilot/issues/1091)
-8. **Warn when a server needs a reboot for a security update.** `dl doctor` and `dl status` read `/var/run/reboot-required`. Ubuntu installs kernel fixes automatically, but they only apply after a reboot nobody is told about. *No issue yet.*
-9. **Run the fresh-VM test early.** Phase 1's gate, but running it now on a cheap server shows what phase 1 has to fix. [installer#47](https://github.com/directionally-local/installer/issues/47)
-10. **Then stop building and use it.** Daily, as a new user would, until the two weeks pass. What breaks becomes the next list.
+1. **Ship the free managed tier to the first testers.** Sign in with GitHub, get free DeepSeek V4.1 Flash tokens, no API key. Testers are already waiting for it, and "do you also provide the inference?" is the first question they ask. [installer#78](https://github.com/directionally-local/installer/issues/78), [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102)
+2. **Autopilot reports its state to herdr.** Early users already run herdr to manage many agents; this makes Autopilot fit their setup today. [autopilot#1103](https://github.com/directionally-local/autopilot/issues/1103)
+3. **Decide how dl behaves on a laptop.** The evidence now leans to plain Autopilot: testers run eight agents on 8 GB laptops, and a Docker sandbox per session doesn't fit there. Sandboxes belong on servers. [installer#72](https://github.com/directionally-local/installer/issues/72)
+4. **Stay light: eight sessions on an 8 GB laptop.** Measure eight working Autopilot sessions on a small machine and keep each one's memory within budget. *No issue yet.*
+5. **Every `dl` starts a new session,** with `dl -c` to continue. [installer#71](https://github.com/directionally-local/installer/issues/71)
+6. **Session titles and state, then `/resume` and `/clear` in remote sessions.** #1046 first, since `/resume` needs titles to list. [autopilot#1046](https://github.com/directionally-local/autopilot/issues/1046), [autopilot#1092](https://github.com/directionally-local/autopilot/issues/1092)
+7. **Your own messages in a reopened session.** Without them a resumed session shows answers with no questions. [autopilot#1093](https://github.com/directionally-local/autopilot/issues/1093)
+8. **Pull requests titled from commits.** [autopilot#1049](https://github.com/directionally-local/autopilot/issues/1049)
+9. **Pin Hotcell, decide the release-PR floors check, fix the flaky test.** [installer#73](https://github.com/directionally-local/installer/issues/73), [installer#74](https://github.com/directionally-local/installer/issues/74), [autopilot#1091](https://github.com/directionally-local/autopilot/issues/1091)
+10. **Warn when a server needs a reboot for a security update.** `dl doctor` and `dl status` read `/var/run/reboot-required`. Ubuntu installs kernel fixes automatically, but they only apply after a reboot nobody is told about. *No issue yet.*
+11. **Run the fresh-VM test early.** Phase 1's gate, but running it now on a cheap server shows what phase 1 has to fix. [installer#47](https://github.com/directionally-local/installer/issues/47)
+12. **Then stop building and use it.** Daily, as a new user would, until the two weeks pass. What breaks becomes the next list.
 
 ## Parallel lane: the free managed tier
 
