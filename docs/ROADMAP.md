@@ -4,6 +4,8 @@ Coding agents on your own hardware, in five phases. Each phase ends at a gate yo
 
 Last updated 2 November 2026. On npm today: dl 0.9.4, Autopilot 3.1.2, Hotcell 0.1.38, camouflage-tui 2.11.0, Serverless Objects 0.13.6.
 
+Scope: the Directionally Local repositories (installer, autopilot, hotcell, serverless-objects, pr-deck), camouflage, and the Aster apps.
+
 Issues carry a `phase-0` to `phase-3` label in `autopilot` and `installer`; `decision` marks a choice the owner has to make before building.
 
 ## Next up, in order
@@ -216,8 +218,6 @@ These never block a phase.
 
 - **Harness quality:** per-model profiles (autopilot#999); memory on by default, cheaper, deduplicated, measured (autopilot#1073–1078); turn-engine refactor (autopilot#951); long commands to the background (autopilot#1101); renderer health (camouflage#131, #133, #134); finish the rename (autopilot#911).
 - **Serverless Objects:** beta (serverless-objects#114, #115, #130, #132, #133), then Autopilot runs on it (autopilot#1003). M4 parked.
-- **Honesty and marketing:** the website's Teams tier promises SSO, audit logs and a fleet that don't exist yet; the benchmarks page is out of date (hotcell#65); model comparisons from traces (autopilot#952).
-- **Research:** the Directionally Local coding model; the hardware box.
 
 ## Decisions owed
 
@@ -226,12 +226,11 @@ These never block a phase.
 3. **How does a teammate reach a shared server?** SSH, the team's Tailscale, or a public address. Blocks phase 2.
 4. **Who pays, and who gets stopped?** One company key with per-person limits, or everyone's own key. Blocks phase 2.
 5. **What happens when a server is full?** Queue, per-person share, or a second server.
-6. **Should the website keep promising Teams features that don't exist?** Now.
-7. **Should the floors check block release PRs?** [installer#74](https://github.com/directionally-local/installer/issues/74)
+6. **Should the floors check block release PRs?** [installer#74](https://github.com/directionally-local/installer/issues/74)
 
 ## Every open issue, placed on the roadmap
 
-Read on 2 November 2026 across autopilot, hotcell, installer, serverless-objects and camouflage. Private repositories are left out.
+Read on 2 November 2026 across autopilot, hotcell, installer, serverless-objects, camouflage and aster-ios. pr-deck has no open issues.
 
 | Verdict | Issue | Title | Where it fits | Why |
 | --- | --- | --- | --- | --- |
@@ -256,6 +255,7 @@ Read on 2 November 2026 across autopilot, hotcell, installer, serverless-objects
 | Roadmap, later | [installer#51](https://github.com/directionally-local/installer/issues/51) | dl agent list\|prompt\|read\|wait: script your agents | Phase 3 | Scripting surface for agents; the agent team builds on it. |
 | Roadmap, later | [installer#54](https://github.com/directionally-local/installer/issues/54) | dl deck: open the deck across every place | Phase 3 | Retitled to `dl deck`; bare `dl` now opens a new session. |
 | Roadmap, later | [serverless-objects#137](https://github.com/directionally-local/serverless-objects/issues/137) | dl supervisor as a durable app: alarms, budgets, restart-safe | Phase 3 | Supervisor as a durable app; the supervisor job works for now. |
+| Roadmap, later | [aster-ios#6](https://github.com/sinameraji/aster-ios/issues/6) | Design and ship cross-chat memory for Autopilot sandboxes | Phase 4 / harness | Cross-chat memory in sandboxes; tie to the memory rollout. |
 | Supporting | [autopilot#1042](https://github.com/directionally-local/autopilot/issues/1042) | Windows: verify the TUI on a real console (cmd, PowerShell, Windows Terminal) | Platform | Windows TUI check. dl itself doesn't support Windows. |
 | Supporting | [autopilot#1073](https://github.com/directionally-local/autopilot/issues/1073) | [memory] Move extraction to compaction/session-end and add a memoryExtraction policy | Harness quality | Memory cost and noise. |
 | Supporting | [autopilot#1074](https://github.com/directionally-local/autopilot/issues/1074) | [memory] Content-addressed dedup and lifecycle rules | Harness quality | Memory dedup. |
