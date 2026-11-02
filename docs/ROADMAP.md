@@ -152,6 +152,8 @@ Nothing further is planned; Hotcell's roadmap follows what Autopilot needs.
 | Mac 0.1 | 3 | One session end to end; unreleased today |
 | Mac 0.2 | 3 | Parallel sessions with a sidebar |
 
+**Naming:** "dl server" is the part of Autopilot (`autopilot serve`) that runs agent sessions in sandboxes for dl; the code still calls it Aster. "Aster" in this document means only the Mac and iPhone apps.
+
 ## Principles
 
 - **dl installs, Autopilot is the product.** dl sets up Hotcell and Autopilot and then gets out of the way. Provider, model and sessions are Autopilot's job.
@@ -302,16 +304,16 @@ Read on 2 November 2026 across autopilot, hotcell, installer, serverless-objects
 | Verdict | Issue | Title | Where it fits | Why |
 | --- | --- | --- | --- | --- |
 | Core now | [autopilot#1041](https://github.com/directionally-local/autopilot/issues/1041) | dl: one Autopilot on the laptop, kept current by dl update | Phase 0 | Exact pin already shipped in dl 0.9.x. The version-skew check is left, and it may be moot if laptop dl runs plain Autopilot. |
-| Core now | [autopilot#1043](https://github.com/directionally-local/autopilot/issues/1043) | aster: retry a cell turn once on a transient failure | Phase 1 | Unattended server work dies on a provider blip without it. |
-| Core now | [autopilot#1046](https://github.com/directionally-local/autopilot/issues/1046) | aster: conversation summaries carry what a sidebar needs | Phase 0, pulled forward | Written for the deck, but /resume needs the same per-session title, state and cost to list sessions. |
-| Core now | [autopilot#1049](https://github.com/directionally-local/autopilot/issues/1049) | aster: build a conversation's PR title and body from its commits and final summary | Phase 0 | Every agent PR is titled with the raw prompt. Seen in your own dogfood PRs. |
+| Core now | [autopilot#1043](https://github.com/directionally-local/autopilot/issues/1043) | dl server: retry a cell turn once on a transient failure | Phase 1 | Unattended server work dies on a provider blip without it. |
+| Core now | [autopilot#1046](https://github.com/directionally-local/autopilot/issues/1046) | dl server: conversation summaries carry what a sidebar needs | Phase 0, pulled forward | Written for the deck, but /resume needs the same per-session title, state and cost to list sessions. |
+| Core now | [autopilot#1049](https://github.com/directionally-local/autopilot/issues/1049) | dl server: build a conversation's PR title and body from its commits and final summary | Phase 0 | Every agent PR is titled with the raw prompt. Seen in your own dogfood PRs. |
 | Core now | [installer#47](https://github.com/directionally-local/installer/issues/47) | Fresh-VM acceptance test: three parallel dl run tasks each open a PR | Phase 1 gate | The acceptance test for a solo server. Never run. |
 | Roadmap, later | [autopilot#1020](https://github.com/directionally-local/autopilot/issues/1020) | Agent team: scouts, dispatcher, reviewer and merge policy (design) | Phase 5, after reliability | Agent team. Its own text says reliability comes first. |
 | Roadmap, later | [autopilot#1048](https://github.com/directionally-local/autopilot/issues/1048) | attach-remote --all: drive the camouflage deck from every conversation on a place | Phase 2 | The deck's data feed. |
 | Roadmap, later | [autopilot#1051](https://github.com/directionally-local/autopilot/issues/1051) | Subagents that write: cell-isolated workers returning reviewed patches (design) | Phase 5 | Writing subagents: design. |
 | Roadmap, later | [autopilot#1052](https://github.com/directionally-local/autopilot/issues/1052) | subagent edit mode: worker profile and patch artifact from the cell | Phase 5 | Writing subagents, part 1. |
 | Roadmap, later | [autopilot#1053](https://github.com/directionally-local/autopilot/issues/1053) | subagent edit mode: coordinator apply, review and conflict handling | Phase 5 | Writing subagents, part 2. |
-| Roadmap, later | [autopilot#1054](https://github.com/directionally-local/autopilot/issues/1054) | subagent edit mode: TUI, SDK and Aster surfaces | Phase 5 | Writing subagents, part 3. |
+| Roadmap, later | [autopilot#1054](https://github.com/directionally-local/autopilot/issues/1054) | subagent edit mode: TUI, SDK and dl server surfaces | Phase 5 | Writing subagents, part 3. |
 | Roadmap, later | [autopilot#1055](https://github.com/directionally-local/autopilot/issues/1055) | subagent edit mode: acceptance scenarios | Phase 5 | Writing subagents: acceptance. |
 | Roadmap, later | [camouflage#146](https://github.com/sinameraji/camouflage/issues/146) | protocol: per-session status and multi-session streams | Phase 2 | Deck protocol; first deck task. |
 | Roadmap, later | [camouflage#147](https://github.com/sinameraji/camouflage/issues/147) | notifications when an unfocused session needs you | Phase 2 | Deck notifications. |
@@ -337,7 +339,7 @@ Read on 2 November 2026 across autopilot, hotcell, installer, serverless-objects
 | Supporting | [camouflage#133](https://github.com/sinameraji/camouflage/issues/133) | Use recorded real host sessions as the primary regression suite, plus fuzzing | Renderer health | Use recorded sessions as tests. |
 | Supporting | [camouflage#134](https://github.com/sinameraji/camouflage/issues/134) | Freeze and remove the full-screen TUI; rebuild replay on the inline renderer | Renderer health | Delete the old full-screen renderer. |
 | Supporting | [installer#70](https://github.com/directionally-local/installer/issues/70) | A dependency floor is below the latest release | Housekeeping | Opened by the daily bot; closes when Dependabot bumps the pin to 3.1.2. |
-| Platform track | [autopilot#1003](https://github.com/directionally-local/autopilot/issues/1003) | Run Aster's runs on Serverless Objects run objects (after SO milestone M3) | Serverless Objects track | Runs on Serverless Objects. Only after its beta. |
+| Platform track | [autopilot#1003](https://github.com/directionally-local/autopilot/issues/1003) | Run the dl server's runs on Serverless Objects run objects (after SO milestone M3) | Serverless Objects track | Runs on Serverless Objects. Only after its beta. |
 | Platform track | [serverless-objects#114](https://github.com/directionally-local/serverless-objects/issues/114) | Run the 14-day fault-injection soak before beta | SO beta (M3) | 14-day soak. |
 | Platform track | [serverless-objects#115](https://github.com/directionally-local/serverless-objects/issues/115) | Repeat conformance on Linux before making platform claims | SO beta (M3) | Linux conformance. |
 | Platform track | [serverless-objects#130](https://github.com/directionally-local/serverless-objects/issues/130) | Conformance: PartyServer | SO beta (M3) | PartyServer. |
