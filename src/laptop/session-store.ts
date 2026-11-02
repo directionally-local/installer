@@ -3,10 +3,12 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 /**
- * Which conversation `dl` reopens here: one per place + repository + local checkout for a
- * project (so two clones of the same repository, or the same one on two places, each keep
- * their own), and one per place + directory for a chat outside a project. Only IDs live
- * here (no tokens), but it's private like the rest of the laptop's config.
+ * The conversations `dl` has started from a folder: a history per place + repository + local
+ * checkout for a project (so two clones of the same repository, or the same one on two places,
+ * each keep their own), and one per place + directory for a chat outside a project. Bare `dl`
+ * always starts a new one; `dl -c` reopens the latest here, and the rest are only asked about
+ * so dl can say when an earlier one is still live. Only IDs live here (no tokens), but it's
+ * private like the rest of the laptop's config.
  */
 
 export interface SessionKey {
@@ -31,6 +33,9 @@ interface SessionsFile {
   sessions: SessionEntry[];
 }
 
+/** How many conversations a folder keeps per place; older ones are only ever reopened by hand. */
+const KEEP_PER_KEY = 20;
+
 export function sessionsPath(env: NodeJS.ProcessEnv = process.env): string {
   const configHome = env.XDG_CONFIG_HOME?.trim() || join(homedir(), ".config");
   return join(configHome, "directionallylocal", "sessions.json");
@@ -53,24 +58,54 @@ export async function loadSessions(path = sessionsPath()): Promise<SessionEntry[
   }
 }
 
-export async function findSession(key: SessionKey, path = sessionsPath()): Promise<SessionEntry | undefined> {
-  return (await loadSessions(path)).find((entry) => sameKey(entry, key));
+/** Every conversation started from this folder on this place, newest first. */
+export async function sessionsFor(key: SessionKey, path = sessionsPath()): Promise<SessionEntry[]> {
+  return (await loadSessions(path))
+    .filter((entry) => sameKey(entry, key))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-/** Remembers (or replaces) the conversation for this place + repository + checkout. */
+/** The conversation `dl -c` reopens: the latest one started from this folder on this place. */
+export async function latestSession(key: SessionKey, path = sessionsPath()): Promise<SessionEntry | undefined> {
+  return (await sessionsFor(key, path))[0];
+}
+
+/** Remembers a conversation (or moves it back to the front of the history). */
 export async function rememberSession(entry: Omit<SessionEntry, "updatedAt">, path = sessionsPath()): Promise<void> {
-  const kept = (await loadSessions(path)).filter((existing) => !sameKey(existing, entry));
-  kept.push({ ...entry, updatedAt: new Date().toISOString() });
-  await writeSessions(kept, path);
+  const kept = (await loadSessions(path)).filter((existing) => existing.conversationId !== entry.conversationId);
+  // Strictly newer than anything kept, so "latest" never depends on two saves landing in the
+  // same millisecond.
+  const newest = kept.reduce((latest, existing) => Math.max(latest, Date.parse(existing.updatedAt) || 0), 0);
+  const updatedAt = new Date(Math.max(Date.now(), newest + 1)).toISOString();
+  kept.push({ ...entry, updatedAt });
+  await writeSessions(trim(kept), path);
 }
 
-/** Forgets this key's conversation (it keeps running on the place); true when there was one. */
-export async function forgetSession(key: SessionKey, path = sessionsPath()): Promise<boolean> {
+/** Forgets a conversation (it keeps running on the place); true when it was remembered. */
+export async function forgetSession(conversationId: string, path = sessionsPath()): Promise<boolean> {
   const sessions = await loadSessions(path);
-  const kept = sessions.filter((entry) => !sameKey(entry, key));
+  const kept = sessions.filter((entry) => entry.conversationId !== conversationId);
   if (kept.length === sessions.length) return false;
   await writeSessions(kept, path);
   return true;
+}
+
+/** Keeps the newest KEEP_PER_KEY conversations for each folder + place. */
+function trim(sessions: SessionEntry[]): SessionEntry[] {
+  const counts = new Map<string, number>();
+  const kept: SessionEntry[] = [];
+  for (const entry of [...sessions].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
+    const key = keyId(entry);
+    const count = counts.get(key) ?? 0;
+    if (count >= KEEP_PER_KEY) continue;
+    counts.set(key, count + 1);
+    kept.push(entry);
+  }
+  return kept;
+}
+
+function keyId(key: SessionKey): string {
+  return [key.place, key.repository ?? "", key.root, key.kind ?? "code"].join("\u0000");
 }
 
 function sameKey(a: SessionKey, b: SessionKey): boolean {

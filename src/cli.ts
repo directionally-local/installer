@@ -8,7 +8,7 @@ import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, u
 import { loadRemotes } from "./laptop/config.js";
 import { provider as providerCommand } from "./laptop/provider.js";
 import { model } from "./laptop/settings.js";
-import { openSession, projectSession } from "./laptop/session.js";
+import { openSession } from "./laptop/session.js";
 import { preview as laptopPreview } from "./laptop/preview.js";
 import { setup } from "./laptop/setup.js";
 import { realSshExec } from "./laptop/ssh.js";
@@ -30,12 +30,13 @@ Send a task; it runs in its own sandbox and comes back as a pull request.
 
 On your laptop:
   dl                      the first time: set up where agents run, pick a provider and model
-                          in Autopilot's list, then talk to an agent. Afterwards: a session.
+                          in Autopilot's list, then talk to an agent. Afterwards: a new session.
   dl  (in a GitHub repo)  talk to the repository's agent; it keeps running when you leave
                           (--no-local-changes: start from the pushed commit, send no patch)
-  dl  (anywhere else)     a chat with an agent on your default place, resumed per directory
+  dl  (anywhere else)     a chat with an agent on your default place
+  dl -c, --continue       reopen the latest session started from this folder on this place
   dl setup                set up or repair where your agents run (safe to re-run)
-  dl new                  start a fresh conversation here (the old one keeps running)
+  dl new                  the same as bare dl (a new conversation; the old one keeps running)
   dl status               where your agents run, their provider, model and versions, and what they're doing
   dl connect URL          connect to a server someone else set up (approve the code it shows)
   dl run "TASK"           run a task, from inside a GitHub repository
@@ -135,6 +136,7 @@ export async function main(
         "auth-header": { type: "string" },
         "auth-format": { type: "string" },
         "no-local-changes": { type: "boolean" },
+        continue: { type: "boolean", short: "c" },
       },
     });
   } catch (error) {
@@ -235,10 +237,11 @@ export async function main(
         const state = await readState(system);
         if (!state) {
           if (values.brief) return 0;
-          // Bare dl with a place set up: a session here (the repository's inside a GitHub
-          // repository, a chat anywhere else). `dl status` is the overview.
+          // Bare dl with a place set up: a new session here (the repository's inside a GitHub
+          // repository, a chat anywhere else); `dl -c` reopens the latest one. `dl status` is
+          // the overview.
           if (!command && terminal && (await loadRemotes()).length > 0) {
-            const code = await openSession({ cwd: process.cwd(), ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}), ...(values["no-local-changes"] ? { noLocalChanges: true } : {}) }, laptopIO);
+            const code = await openSession({ cwd: process.cwd(), ...(values.continue ? { continue: true } : {}), ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}), ...(values["no-local-changes"] ? { noLocalChanges: true } : {}) }, laptopIO);
             if (code !== undefined) return code;
           }
           // A laptop connected to places gets its own overview (`dl status` shows it from anywhere);
@@ -319,13 +322,14 @@ export async function main(
         return 0;
       }
       case "new": {
+        // An alias of bare dl for a release: a new conversation, the old one keeps running.
         if ((await loadRemotes()).length === 0) {
-          io.err(`  dl new starts a fresh conversation once something is set up: dl\n`);
+          io.err(`  dl new starts a new conversation once something is set up: dl\n`);
           return 1;
         }
-        const code = await openSession({ cwd: process.cwd(), fresh: true, ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}), ...(values["no-local-changes"] ? { noLocalChanges: true } : {}) }, laptopIO);
+        const code = await openSession({ cwd: process.cwd(), ...(values.server ? { server: values.server } : {}), ...(values.model ? { model: values.model } : {}), ...(values["no-local-changes"] ? { noLocalChanges: true } : {}) }, laptopIO);
         if (code !== undefined) return code;
-        io.err(`  dl new starts a fresh conversation on a place; pick one with --server NAME.\n`);
+        io.err(`  dl new starts a new conversation on a place; pick one with --server NAME.\n`);
         return 1;
       }
       case "preview": {
