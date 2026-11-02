@@ -102,3 +102,21 @@ export function withinClockSkew(timestamp: number, now: number, skewSeconds = 30
 export function newNonce(bytes = 16): string {
   return base64urlEncode(crypto.getRandomValues(new Uint8Array(bytes)));
 }
+
+/**
+ * Compares two strings in time that depends only on their lengths, not on where they first
+ * differ. Use it for every secret comparison that isn't already a hash lookup.
+ */
+export function timingSafeEqual(a: string, b: string): boolean {
+  const left = new TextEncoder().encode(a);
+  const right = new TextEncoder().encode(b);
+  const length = Math.max(left.length, right.length);
+  let difference = left.length ^ right.length;
+  for (let index = 0; index < length; index++) difference |= (left[index] ?? 0) ^ (right[index] ?? 0);
+  return difference === 0;
+}
+
+/** A random base64url secret: 32 bytes (256 bits) by default. */
+export function randomToken(bytes = 32): string {
+  return base64urlEncode(crypto.getRandomValues(new Uint8Array(bytes)));
+}
