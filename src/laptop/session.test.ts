@@ -13,14 +13,17 @@ import { ScriptedPrompter } from "../prompt.js";
 import { fakeTunnels, type FakeTunnel } from "../test-support/fake-tunnel.js";
 import { DEFAULT_MODEL, type LaptopIO } from "./commands.js";
 import { saveRemote, type RemoteServer } from "./config.js";
-import { autopilotOnPath, bundledAutopilot, openSession, planSession, projectSession, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput } from "./session.js";
+import { autopilotOnPath, bundledAutopilot, openSession, planSession, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput } from "./session.js";
 import { loadSessions, rememberSession } from "./session-store.js";
 import { createOpener, type RemoteOpener } from "./tunnel.js";
 
 const TOKEN = "aster_laptop_token_0000000000000000000000000000000000";
 const NEW_ID = "7c1d2e3f-0000-4000-8000-000000000000";
+const NEW_ID_1 = "7c1d2e3f-0000-4000-8000-000000000001";
 const OLD_ID = "3f2a9c1e-0000-4000-8000-000000000000";
+const OTHER_ID = "9a8b7c6d-0000-4000-8000-000000000000";
 const CHAT_ID = "c0ffee00-0000-4000-8000-000000000000";
+const CHAT_ID_1 = "c0ffee00-0000-4000-8000-000000000001";
 
 /** The parts of the API a session asks for: workspaces, models, and one conversation. */
 class FakeApi {
@@ -30,6 +33,8 @@ class FakeApi {
   defaultModel: string | undefined;
   /** Conversation ID -> status; missing means 404. */
   readonly conversations = new Map<string, string>();
+  /** Conversation ID -> the run it's working on, for the ones that are live. */
+  readonly activeRuns = new Map<string, string>();
   readonly requests: string[] = [];
   private server: Server | undefined;
   url = "";
@@ -60,7 +65,7 @@ class FakeApi {
     if (path === "/api/v1/conversations") return send(200, { conversations: [] });
     const id = decodeURIComponent(path.replace(/^\/api\/v1\/conversations\//, ""));
     const status = this.conversations.get(id);
-    if (status) return send(200, { conversationId: id, workspaceId: "default", model: DEFAULT_MODEL, status, activeRunId: null, lastEventId: 1, createdAt: "", updatedAt: "", kind: id.startsWith("c") ? "chat" : "code", ...(id.startsWith("c") ? {} : { repository: "me/app" }) });
+    if (status) return send(200, { conversationId: id, workspaceId: "default", model: DEFAULT_MODEL, status, activeRunId: this.activeRuns.get(id) ?? null, lastEventId: 1, createdAt: "", updatedAt: "", kind: id.startsWith("c") ? "chat" : "code", ...(id.startsWith("c") ? {} : { repository: "me/app" }) });
     send(404, { error: { code: "not_found", message: "No such conversation" } });
   }
 }
@@ -87,8 +92,17 @@ class FakeAutopilot {
   code = 0;
   hold = false;
   tunnels: FakeTunnel[] = [];
+  private codeCount = 0;
+  private chatCount = 0;
 
   constructor(private readonly api: FakeApi) {}
+
+  /** A new conversation's id: the first is the one tests name, later ones count up. */
+  private nextId(chat: boolean): string {
+    const count = chat ? this.chatCount++ : this.codeCount++;
+    const base = chat ? CHAT_ID : NEW_ID;
+    return count === 0 ? base : `${base.slice(0, -1)}${count}`;
+  }
 
   readonly spawn = (command: string, args: string[], env: NodeJS.ProcessEnv): SessionChild => {
     const launch: Launch = { command, args, env, tunnelsOpen: this.tunnels.every((tunnel) => !tunnel.killed) };
@@ -117,7 +131,7 @@ class FakeAutopilot {
         launch.patchMode = (await stat(patchFile)).mode & 0o777;
       }
       const chat = args.includes("--kind") && flag("--kind") === "chat";
-      const id = args.includes("--conversation") ? flag("--conversation")! : chat ? CHAT_ID : NEW_ID;
+      const id = args.includes("--conversation") ? flag("--conversation")! : this.nextId(chat);
       this.api.conversations.set(id, "ready");
       await writeFile(flag("--state-file")!, JSON.stringify(chat ? { conversationId: id } : { conversationId: id, branch: `aster/${id.slice(0, 8)}`, repository: flag("--repo") ?? "me/app" }));
       if (!this.hold) child.emit("exit", this.code, null);
@@ -180,8 +194,8 @@ async function checkout(name = "checkout"): Promise<string> {
   return dir;
 }
 
-function session(input: Partial<SessionInput> & { cwd: string }, io: LaptopIO, open: typeof openSession | typeof projectSession = openSession): Promise<number | undefined> {
-  return open({
+function session(input: Partial<SessionInput> & { cwd: string }, io: LaptopIO): Promise<number | undefined> {
+  return openSession({
     autopilot: async () => AUTOPILOT,
     probe: async () => true,
     placeModel: async () => undefined,
@@ -194,7 +208,7 @@ function session(input: Partial<SessionInput> & { cwd: string }, io: LaptopIO, o
 const flag = (args: string[], name: string) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
 
 describe("dl inside a project", () => {
-  it("creates a conversation from this checkout the first time, then reconnects to it", { timeout: 30_000 }, async () => {
+  it("starts a new conversation every time, and dl -c reopens the latest", { timeout: 30_000 }, async () => {
     await saveRemote(place("dl-test", api.url));
     const dir = await checkout();
     await writeFile(join(dir, "README.md"), "hello\nlocal edit\n");
@@ -220,7 +234,7 @@ describe("dl inside a project", () => {
     assert.equal(launch.env.AUTOPILOT_REMOTE_TOKEN, TOKEN);
     assert.ok(!launch.args.some((arg) => arg.includes(TOKEN)), "the token is never in argv");
     assert.match(first.text(), /· Connecting to dl-test · me\/app … {2}\(new conversation from [0-9a-f]{7} \+ 1 local change, deepseek\/deepseek-v4\.1-flash-1017\)\n/);
-    assert.match(first.text(), /It keeps running on dl-test\. Type dl here to come back, or dl runs\.\n/);
+    assert.match(first.text(), /It keeps running on dl-test\. Type dl -c here to come back, or dl runs\.\n/);
 
     const file = join(root, "config", "directionallylocal", "sessions.json");
     assert.equal((await stat(file)).mode & 0o777, 0o600);
@@ -229,14 +243,24 @@ describe("dl inside a project", () => {
       { place: "dl-test", repository: "me/app", root: dir, conversationId: NEW_ID, branch: "aster/7c1d2e3f" },
     ]);
 
+    // Bare dl again: another conversation, not the first one.
     const again = capture();
     assert.equal(await session({ cwd: join(dir) }, again), 0);
-    const reconnect = autopilot.launches[1]!.args.slice(1);
-    assert.equal(flag(reconnect, "--conversation"), NEW_ID);
+    const second = autopilot.launches[1]!.args.slice(1);
+    assert.equal(second.includes("--conversation"), false);
+    assert.equal(flag(second, "--repo"), "me/app");
+    assert.match(again.text(), /new conversation from/);
+    assert.deepEqual((await loadSessions(file)).map((entry) => entry.conversationId).sort(), [NEW_ID, NEW_ID_1].sort());
+
+    // dl -c: the latest one started from this checkout.
+    const resumed = capture();
+    assert.equal(await session({ cwd: join(dir), continue: true }, resumed), 0);
+    const reconnect = autopilot.launches[2]!.args.slice(1);
+    assert.equal(flag(reconnect, "--conversation"), NEW_ID_1);
     assert.equal(reconnect.includes("--workspace"), false);
     assert.equal(reconnect.includes("--patch-file"), false);
-    assert.match(again.text(), /Connecting to dl-test · me\/app … {2}\(7c1d2e3f\)/);
-    assert.equal((await loadSessions(file)).length, 1);
+    assert.match(resumed.text(), /Connecting to dl-test · me\/app … {2}\(7c1d2e3f\)/);
+    assert.equal((await loadSessions(file)).length, 2);
   });
 
   it("checks the place has a provider before opening anything", { timeout: 30_000 }, async () => {
@@ -306,30 +330,41 @@ describe("dl inside a project", () => {
     assert.match(io.text(), /Start without your local changes: dl --no-local-changes/);
   });
 
-  it("keeps one conversation per place and per checkout", { timeout: 30_000 }, async () => {
+  it("dl -c picks the latest conversation for this folder and place", { timeout: 30_000 }, async () => {
     await saveRemote(place("dl-test", api.url));
     await saveRemote(place("other", api.url));
     const dir = await checkout();
     const clone = await checkout("second");
     await rememberSession({ place: "dl-test", repository: "me/app", root: dir, conversationId: OLD_ID });
-    api.conversations.set(OLD_ID, "completed");
+    await rememberSession({ place: "dl-test", repository: "me/app", root: dir, conversationId: NEW_ID });
+    await rememberSession({ place: "other", repository: "me/app", root: dir, conversationId: OTHER_ID });
+    for (const id of [OLD_ID, NEW_ID, OTHER_ID]) api.conversations.set(id, "completed");
+
     const byDefault = capture();
-    assert.equal(await session({ cwd: clone }, byDefault), 0);
-    assert.equal(flag(autopilot.launches[0]!.args, "--conversation"), undefined, "another checkout starts its own");
+    assert.equal(await session({ cwd: dir, continue: true }, byDefault), 0);
+    assert.equal(flag(autopilot.launches[0]!.args, "--conversation"), NEW_ID, "the latest here on the default place");
     // Two places: the line says why this one, and how to pick the other (once, not a second "on dl-test").
     assert.match(byDefault.text(), /· Connecting to dl-test \(default\) · me\/app … .*\n {4}dl use NAME to change where dl runs\n/);
     assert.equal(byDefault.text().match(/dl-test/g)?.length, 2, "the place is named on the Connecting line and the goodbye line only");
+
     const named = capture();
-    assert.equal(await session({ cwd: dir, server: "other" }, named), 0);
-    assert.equal(flag(autopilot.launches[1]!.args, "--conversation"), undefined, "another place starts its own");
+    assert.equal(await session({ cwd: dir, server: "other", continue: true }, named), 0);
+    assert.equal(flag(autopilot.launches[1]!.args, "--conversation"), OTHER_ID, "another place keeps its own");
     assert.match(named.text(), /· Connecting to other · me\/app/);
     assert.doesNotMatch(named.text(), /dl use NAME/, "a place named with --server needs no hint");
+
+    // Another checkout has no earlier session here: -c starts a new one.
+    const elsewhere = capture();
+    assert.equal(await session({ cwd: clone, continue: true }, elsewhere), 0);
+    assert.equal(flag(autopilot.launches[2]!.args, "--conversation"), undefined);
+    assert.match(elsewhere.text(), /! No earlier session here; starting a new one\./);
+
+    // Bare dl here starts another, not the latest.
     assert.equal(await session({ cwd: dir }, capture()), 0);
-    assert.equal(flag(autopilot.launches[2]!.args, "--conversation"), OLD_ID, "the default place reopens it");
-    assert.equal((await loadSessions()).length, 3);
+    assert.equal(flag(autopilot.launches[3]!.args, "--conversation"), undefined);
   });
 
-  it("starts a new conversation when the remembered one is gone", { timeout: 30_000 }, async () => {
+  it("dl -c starts a new conversation when the remembered one is gone", { timeout: 30_000 }, async () => {
     await saveRemote(place("dl-test", api.url));
     const dir = await checkout();
     for (const status of [undefined, "destroyed"]) {
@@ -337,23 +372,66 @@ describe("dl inside a project", () => {
       api.conversations.delete(OLD_ID);
       if (status) api.conversations.set(OLD_ID, status);
       const io = capture();
-      assert.equal(await session({ cwd: dir }, io), 0);
+      assert.equal(await session({ cwd: dir, continue: true }, io), 0);
       assert.match(io.text(), /! The last conversation for me\/app on dl-test is gone; starting a new one\./);
       assert.equal(flag(autopilot.launches.at(-1)!.args, "--conversation"), undefined);
       assert.equal(flag(autopilot.launches.at(-1)!.args, "--repo"), "me/app");
-      assert.deepEqual((await loadSessions()).map((entry) => entry.conversationId), [NEW_ID]);
+      assert.ok(!(await loadSessions()).some((entry) => entry.conversationId === OLD_ID), "the gone one is forgotten");
     }
   });
 
-  it("dl new starts a fresh conversation and forgets the remembered one", { timeout: 30_000 }, async () => {
+  it("dl new is an alias of bare dl: a new conversation, the old one stays in the history", { timeout: 30_000 }, async () => {
     await saveRemote(place("dl-test", api.url));
     const dir = await checkout();
     await rememberSession({ place: "dl-test", repository: "me/app", root: dir, conversationId: OLD_ID });
     api.conversations.set(OLD_ID, "ready");
-    assert.equal(await session({ cwd: dir, fresh: true }, capture()), 0);
+    assert.equal(await session({ cwd: dir }, capture()), 0);
     assert.equal(flag(autopilot.launches[0]!.args, "--conversation"), undefined);
-    assert.ok(!api.requests.includes(`GET /api/v1/conversations/${OLD_ID}`), "doesn't even ask about the old one");
-    assert.deepEqual((await loadSessions()).map((entry) => entry.conversationId), [NEW_ID]);
+    assert.deepEqual((await loadSessions()).map((entry) => entry.conversationId).sort(), [NEW_ID, OLD_ID].sort());
+  });
+
+  it("says in one line when an earlier session here is still live", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    const clone = await checkout("second");
+    await rememberSession({ place: "dl-test", repository: "me/app", root: dir, conversationId: OLD_ID });
+    api.conversations.set(OLD_ID, "running");
+    api.activeRuns.set(OLD_ID, "run-1");
+
+    const working = capture();
+    assert.equal(await session({ cwd: dir }, working), 0);
+    assert.match(working.text(), / {2}1 earlier session here is still working · dl -c to rejoin\n/);
+    assert.equal(working.text().match(/earlier session/g)?.length, 1, "one line, nothing else");
+
+    // Waiting for the person reads differently.
+    api.conversations.set(OLD_ID, "waiting_approval");
+    api.activeRuns.delete(OLD_ID);
+    const waiting = capture();
+    assert.equal(await session({ cwd: dir }, waiting), 0);
+    assert.match(waiting.text(), /1 earlier session here is waiting for you · dl -c to rejoin/);
+
+    // Two live ones: plural.
+    api.conversations.set(NEW_ID, "running");
+    api.activeRuns.set(NEW_ID, "run-2");
+    const both = capture();
+    assert.equal(await session({ cwd: dir }, both), 0);
+    assert.match(both.text(), /2 earlier sessions here are still working · dl -c to rejoin/);
+
+    // Nothing live: no line.
+    for (const id of [OLD_ID, NEW_ID]) {
+      api.conversations.set(id, "completed");
+      api.activeRuns.delete(id);
+    }
+    const quiet = capture();
+    assert.equal(await session({ cwd: dir }, quiet), 0);
+    assert.doesNotMatch(quiet.text(), /earlier session/);
+
+    // Another checkout has no earlier session here, so nothing to say.
+    api.conversations.set(OLD_ID, "running");
+    api.activeRuns.set(OLD_ID, "run-1");
+    const elsewhere = capture();
+    assert.equal(await session({ cwd: clone }, elsewhere), 0);
+    assert.doesNotMatch(elsewhere.text(), /earlier session/);
   });
 
   it("holds the SSH tunnel open for the whole session and closes it when Autopilot exits", { timeout: 30_000 }, async () => {
@@ -407,7 +485,7 @@ describe("dl inside a project", () => {
     assert.equal(autopilot.launches.length, 0);
   });
 
-  it("opens a chat outside a repository, remembered per directory, with the place's default model", { timeout: 30_000 }, async () => {
+  it("opens a new chat outside a repository every time, with the place's default model", { timeout: 30_000 }, async () => {
     await saveRemote(place("dl-test", api.url));
     api.models = ["deepseek-v4-pro", "deepseek-v4-flash"];
     api.provider = { id: "deepseek", name: "DeepSeek" };
@@ -424,26 +502,35 @@ describe("dl inside a project", () => {
     assert.equal(flag(args, "--title"), "dl-test · chat");
     assert.ok(!args.includes("--repo") && !args.includes("--base-commit") && !args.includes("--patch-file"), "no repository, no snapshot");
     assert.match(first.text(), /· Connecting to dl-test · chat … {2}\(new chat, deepseek-v4-pro\)\n/);
-    assert.match(first.text(), /It keeps running on dl-test\. Type dl here to come back/);
+    assert.match(first.text(), /It keeps running on dl-test\. Type dl -c here to come back/);
     assert.deepEqual((await loadSessions()).map(({ updatedAt: _, ...entry }) => entry), [{ place: "dl-test", root: await realpath(plain), kind: "chat", conversationId: CHAT_ID }]);
 
-    // dl again in the same directory resumes it; another directory gets its own.
+    // Bare dl again in the same directory: another chat, not the first one.
     const again = capture();
     assert.equal(await session({ cwd: plain }, again), 0);
-    assert.equal(flag(autopilot.launches[1]!.args, "--conversation"), CHAT_ID);
-    assert.equal(autopilot.launches[1]!.args.includes("--kind"), false, "reopening passes no creation flags, which attach-remote refuses");
-    assert.equal(autopilot.launches[1]!.refused, undefined);
-    assert.match(again.text(), /Connecting to dl-test · chat … {2}\(c0ffee00\)/);
+    assert.equal(flag(autopilot.launches[1]!.args, "--conversation"), undefined);
+    assert.equal(flag(autopilot.launches[1]!.args, "--kind"), "chat");
+    assert.match(again.text(), /new chat, deepseek-v4-pro/);
+
+    // dl -c: the latest chat here, with no creation flags (attach-remote refuses them).
+    const resumed = capture();
+    assert.equal(await session({ cwd: plain, continue: true }, resumed), 0);
+    assert.equal(flag(autopilot.launches[2]!.args, "--conversation"), CHAT_ID_1);
+    assert.equal(autopilot.launches[2]!.args.includes("--kind"), false, "reopening passes no creation flags, which attach-remote refuses");
+    assert.equal(autopilot.launches[2]!.refused, undefined);
+    assert.match(resumed.text(), /Connecting to dl-test · chat … {2}\(c0ffee00\)/);
+
+    // Another directory gets its own.
     const other = join(root, "other");
     await mkdir(other);
     assert.equal(await session({ cwd: other }, capture()), 0);
-    assert.equal(flag(autopilot.launches[2]!.args, "--conversation"), undefined);
-    assert.equal((await loadSessions()).length, 2);
-
-    // dl new: a fresh chat here.
-    assert.equal(await session({ cwd: plain, fresh: true }, capture()), 0);
     assert.equal(flag(autopilot.launches[3]!.args, "--conversation"), undefined);
-    assert.equal((await loadSessions()).length, 2);
+    assert.equal((await loadSessions()).length, 3);
+
+    // dl new: the same as bare dl.
+    assert.equal(await session({ cwd: plain }, capture()), 0);
+    assert.equal(flag(autopilot.launches[4]!.args, "--conversation"), undefined);
+    assert.equal((await loadSessions()).length, 4);
   });
 
   it("opens a chat in a repository that can't have a code session, saying why in one line", { timeout: 30_000 }, async () => {
@@ -469,15 +556,6 @@ describe("dl inside a project", () => {
     assert.equal(await session({ cwd: fresh }, empty), undefined);
     assert.match(empty.text(), /! This repository has no commits yet; push a first commit before running remotely\./);
     assert.equal(autopilot.launches.length, 1);
-
-    // projectSession (dl new's older contract) still opens code sessions only, with the same note.
-    const quiet = capture();
-    assert.equal(await session({ cwd: elsewhere }, quiet, projectSession), undefined);
-    assert.match(quiet.text(), /! gitlab's origin isn't on GitHub/);
-    const plain = join(root, "plain");
-    await mkdir(plain);
-    assert.equal(await session({ cwd: plain }, capture(), projectSession), undefined);
-    assert.deepEqual(await planSession(plain), { kind: "chat", root: await realpath(plain) });
   });
 
   it("says to pick a place when several are set up and none is the default", async () => {
@@ -549,7 +627,7 @@ describe("dl routing for projects", () => {
       let text = "";
       const io = { out: (chunk: string) => { text += chunk; }, err: (chunk: string) => { text += chunk; } };
       assert.equal(await main(["new"], io, { terminal: true }), 1);
-      assert.match(text, /dl new starts a fresh conversation once something is set up: dl/);
+      assert.match(text, /dl new starts a new conversation once something is set up: dl/);
       // On an installed server, dl status shows the server's overview instead.
       if (!existsSync(PATHS.state)) {
         await saveRemote(place("dl-test", api.url));

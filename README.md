@@ -59,16 +59,19 @@ Agents push branches and open pull requests through GitHub, so each place needs 
 
 ### Then a session
 
-Setup ends with one line, `✓ Ready · fits ~6 agents at once`, and opens a session on the new place at once: inside a GitHub repository, that repository's code session; anywhere else, a chat. From then on bare `dl` does the same anywhere:
+Setup ends with one line, `✓ Ready · fits ~6 agents at once`, and opens a session on the new place at once: inside a GitHub repository, that repository's code session; anywhere else, a chat. From then on bare `dl` does the same anywhere, and every `dl` starts a new conversation:
 
 ```sh
-dl                                  # in a GitHub repository: its agent, reopened each time; elsewhere: a chat, resumed per directory
-dl new                              # a fresh conversation here (the old one keeps running)
+dl                                  # in a GitHub repository: its agent; elsewhere: a chat. A new conversation each time
+dl -c                               # reopen the latest conversation started from this folder on this place
+dl new                              # the same as bare dl (kept as an alias for a release)
 dl run "fix the flaky checkout test"  # one-off task; your uncommitted changes go along
 dl runs                             # tasks and their pull requests
 dl pull <id>                        # check one out here
 dl status                           # where agents run, their provider, model and versions, what they're doing
 ```
+
+When an earlier session from this folder is still working or waiting for you, `dl` says so in one line before connecting (`1 earlier session here is still working · dl -c to rejoin`). Going back to an older one is Autopilot's job: `/resume` inside a session.
 
 In a git repository whose origin isn't on GitHub, `dl` says so in one line and opens a chat instead.
 
@@ -88,9 +91,10 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 
 | Command | What it does |
 | --- | --- |
-| `dl` | The first time: set up where agents run, pick a provider and model in Autopilot's list, then talk to an agent. Afterwards: inside a GitHub repository, that repository's agent session; anywhere else, a chat on your default place, resumed per directory. |
+| `dl` | The first time: set up where agents run, pick a provider and model in Autopilot's list, then talk to an agent. Afterwards: inside a GitHub repository, that repository's agent session; anywhere else, a chat on your default place. Every `dl` starts a new conversation. |
+| `dl -c`, `dl --continue` | Reopen the latest conversation started from this folder on this place. |
 | `dl setup` | Set up or repair where your agents run. Safe to re-run. `--identity FILE` names the SSH key to use. |
-| `dl new` | Start a fresh conversation here; the old one keeps running. |
+| `dl new` | The same as bare `dl`: a new conversation here; the old one keeps running. Kept as an alias for a release. |
 | `dl status` | Where your agents run, their provider, model and Autopilot and Hotcell versions (next to this laptop's pins), and what they're doing. Works anywhere. |
 | `dl connect URL` | Connect to a server someone else set up; approve the code it shows. |
 | `dl run "TASK"` | Run a task, from inside a GitHub repository. Ctrl-C stops watching, not the task. |

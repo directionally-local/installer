@@ -7,7 +7,7 @@ import { configureThisComputer, localProviderReady } from "../local/keys.js";
 import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
 import { palette } from "../ui.js";
 import { findAutopilot, supportsAttachRemote, type AutopilotCommand } from "./autopilot.js";
-import { RemoteApiError, type RemoteClient } from "./client.js";
+import { RemoteApiError, type RemoteClient, type RemoteConversation } from "./client.js";
 import { describeError, pickModel, type LaptopIO } from "./commands.js";
 import { runAutopilotConnect } from "./connect.js";
 import { ensurePlaceProvider, type PlaceProviderDeps } from "./place-provider.js";
@@ -15,17 +15,17 @@ import { placeModel } from "./settings.js";
 import { recordLastUsed, resolveTarget, type RemoteServer } from "./config.js";
 import { detectGitHubRepository, snapshotWorkingTree, type WorkingTreeSnapshot } from "./git.js";
 import { describeSecretLocation, findLikelyProviderSecret, type SecretMatch } from "./secrets.js";
-import { findSession, forgetSession, rememberSession, sessionsPath, type SessionKey } from "./session-store.js";
+import { forgetSession, latestSession, rememberSession, sessionsFor, sessionsPath, type SessionKey } from "./session-store.js";
 import { openRemoteForSession, withConnections, type RemoteOpener } from "./tunnel.js";
 
 export { autopilotOnPath, bundledAutopilot, findAutopilot, supportsAttachRemote, type AutopilotCommand } from "./autopilot.js";
 
 /**
  * `dl` anywhere: Autopilot's own interactive screen, attached to a conversation on the place
- * agents run (`autopilot attach-remote`). Inside a GitHub repository that's the repository's
- * code conversation, started the first time from this checkout (base commit + uncommitted
- * changes, as `dl run` sends them) and reopened after that. Anywhere else it's a chat on the
- * place, remembered per directory so `dl` again resumes it. dl only finds the conversation,
+ * agents run (`autopilot attach-remote`). Every `dl` starts a new conversation: inside a GitHub
+ * repository that's the repository's code conversation (base commit + uncommitted changes, as
+ * `dl run` sends them); anywhere else it's a chat on the place. `dl -c` reopens the latest one
+ * started from this folder on this place, like `autopilot -c`. dl only finds the conversation,
  * holds the SSH tunnel open, and gets out of the way: Autopilot owns the terminal until the
  * user detaches.
  */
@@ -51,8 +51,8 @@ export interface SessionInput {
   cwd: string;
   server?: string;
   model?: string;
-  /** `dl new`: forget this directory's conversation and start another. */
-  fresh?: boolean;
+  /** `dl -c`: reopen the latest conversation started from this folder on this place. */
+  continue?: boolean;
   /** `dl --no-local-changes`: start from the base commit and send no patch. */
   noLocalChanges?: boolean;
   /** Asks what to do when the local changes hold a key; the terminal's own unless replaced (tests). */
@@ -117,17 +117,6 @@ export async function openSession(input: SessionInput, io: LaptopIO): Promise<nu
   return startSession(await planSession(input.cwd), input, io);
 }
 
-/**
- * The repository's code session, or undefined (after a one-line note) when this directory
- * can't have one: kept for `dl new`, which only makes sense where a conversation belongs.
- */
-export async function projectSession(input: SessionInput, io: LaptopIO): Promise<number | undefined> {
-  const plan = await planSession(input.cwd);
-  if (plan.kind === "code") return startSession(plan, input, io);
-  if (plan.note) io.err(`  ${palette(io.color === true).yellow("!")} ${plan.note}\n`);
-  return undefined;
-}
-
 async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO): Promise<number | undefined> {
   const c = palette(io.color === true);
   const note = (text: string) => io.err(`  ${c.yellow("!")} ${text}\n`);
@@ -175,21 +164,20 @@ async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO
       const client = await step(connections.client(remote));
       // A place with no provider can't serve a turn: set one up before opening anything.
       if (!(await step((input.ensureProvider ?? ((target, api) => ensurePlaceProvider(target, api, placeProviderDeps(io))))(remote, client)))) return undefined;
-      let remembered = input.fresh ? undefined : await findSession(key, file);
+      // Bare `dl` always starts a new conversation; `dl -c` reopens the latest here.
+      let remembered = input.continue ? await latestSession(key, file) : undefined;
+      if (input.continue && !remembered) note("No earlier session here; starting a new one.");
       if (remembered) {
-        const alive = await step(client.getConversation(remembered.conversationId).then(
-          (conversation) => conversation.status !== "destroyed",
-          (error: unknown) => {
-            if (error instanceof RemoteApiError && (error.status === 404 || error.status === 410)) return false;
-            throw error;
-          },
-        ));
+        const alive = await step(conversationAlive(client, remembered.conversationId));
         if (!alive) {
-          await forgetSession(key, file);
+          await forgetSession(remembered.conversationId, file);
           note(`The last ${plan.kind === "code" ? `conversation for ${subject}` : "chat"} on ${remote.name} is gone; starting a new one.`);
           remembered = undefined;
         }
       }
+      // Starting a new one: say when an earlier session here is still live, so nobody thinks
+      // they left it running by accident. Nothing else.
+      const earlier = remembered ? [] : await step(liveEarlierSessions(key, client, file));
 
       const scratch = await mkdtemp(join(tmpdir(), "dl-session-"));
       try {
@@ -242,10 +230,14 @@ async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO
           }
         }
         if (!autopilot || !(await step(ready))) return missing();
-        // `dl new`: the old conversation keeps running on the place (dl runs lists it).
-        if (input.fresh) await forgetSession(key, file);
 
         if (plan.note) note(plan.note);
+        if (earlier.length > 0) {
+          const count = earlier.length;
+          const waiting = earlier.every((conversation) => conversation.status === "waiting_approval");
+          io.err(`  ${c.dim(`${count} earlier session${count === 1 ? "" : "s"} here ${count === 1 ? "is" : "are"} ${waiting ? "waiting for you" : "still working"} · dl -c to rejoin`)}`);
+          io.err("\n");
+        }
         // The place is on the Connecting line already; with more than one set up, also why this
         // one and how to pick another, as `dl run` does (a place named with --server needs neither).
         const chosen = reason === "default" || reason === "last used";
@@ -279,7 +271,7 @@ async function startSession(plan: SessionPlan, input: SessionInput, io: LaptopIO
         }
         if (outcome.code !== 0) return 1;
         await recordLastUsed(remote.name).catch(() => undefined);
-        io.err(`\n  It keeps running on ${c.bold(remote.name)}. Type ${c.bold("dl")} here to come back, or ${c.bold("dl runs")}.\n\n`);
+        io.err(`\n  It keeps running on ${c.bold(remote.name)}. Type ${c.bold("dl -c")} here to come back, or ${c.bold("dl runs")}.\n\n`);
         return 0;
       } finally {
         await rm(scratch, { recursive: true, force: true });
@@ -331,6 +323,43 @@ function placeProviderDeps(io: LaptopIO): PlaceProviderDeps {
     write: io.err,
     color: io.color === true,
   };
+}
+
+/** Whether a remembered conversation still exists on the place. */
+async function conversationAlive(client: RemoteClient, conversationId: string): Promise<boolean> {
+  try {
+    return (await client.getConversation(conversationId)).status !== "destroyed";
+  } catch (error) {
+    if (error instanceof RemoteApiError && (error.status === 404 || error.status === 410)) return false;
+    throw error;
+  }
+}
+
+/**
+ * The conversations started from this folder on this place that are still working or waiting
+ * for the person. Ones the place no longer has are forgotten on the way.
+ */
+async function liveEarlierSessions(key: SessionKey, client: RemoteClient, file: string): Promise<RemoteConversation[]> {
+  const entries = await sessionsFor(key, file);
+  if (entries.length === 0) return [];
+  const found = await Promise.all(entries.map(async (entry) => {
+    try {
+      return { entry, conversation: await client.getConversation(entry.conversationId) };
+    } catch (error) {
+      if (error instanceof RemoteApiError && (error.status === 404 || error.status === 410)) return { entry, gone: true as const };
+      throw error;
+    }
+  }));
+  const live: RemoteConversation[] = [];
+  for (const result of found) {
+    if ("gone" in result || result.conversation.status === "destroyed") {
+      await forgetSession(result.entry.conversationId, file);
+      continue;
+    }
+    const { conversation } = result;
+    if (conversation.activeRunId !== null || conversation.status === "waiting_approval") live.push(conversation);
+  }
+  return live;
 }
 
 /** What `attach-remote --state-file` wrote, once the conversation exists. */
