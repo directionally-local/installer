@@ -1,0 +1,33 @@
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "directionallylocal-free",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "vars": {
+    "WEEKLY_TOKENS": "50000000",
+    "MAX_ACTIVE_USERS": "50",
+    "GLOBAL_WEEKLY_USD_CAP": "250",
+    "GLOBAL_TOTAL_USD_CAP": "1000",
+    "PER_PERSON_WEEKLY_USD_CAP": "5",
+    "MIN_GITHUB_ACCOUNT_AGE_DAYS": "30",
+    "COUNT_CACHED_TOKENS": "true",
+    "PAUSED": "false"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "AUTH", "class_name": "AuthObject" },
+      { "name": "DIRECTORY", "class_name": "DirectoryObject" },
+      { "name": "ACCOUNT", "class_name": "AccountObject" },
+      { "name": "RATE_LIMITER", "class_name": "RateLimiterObject" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AuthObject", "DirectoryObject", "AccountObject", "RateLimiterObject"]
+    }
+  ],
+  "routes": [{ "pattern": "free.directionallylocal.com", "custom_domain": true }],
+  "workers_dev": false,
+  "observability": { "enabled": true }
+}
