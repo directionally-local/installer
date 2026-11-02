@@ -354,7 +354,9 @@ export async function laptopHome(
   }
   for (const entry of outdated) io.out(`  ${c.yellow("!")} ${entry.name} is behind: ${entry.notice}   ${c.dim(`dl update ${entry.name}`)}\n`);
   io.out("\n");
-  io.out(`  ${c.dim("Talk to an agent: type")}  ${c.bold("dl")}  ${c.dim("(inside a GitHub repository, it works on that repository; elsewhere, a chat)")}\n`);
+  // Bare dl goes where the default place is: plain Autopilot here, or a session on a server.
+  const here = current === PAIRED_NAME;
+  io.out(`  ${c.dim("Talk to an agent: type")}  ${c.bold("dl")}  ${c.dim(here ? "(Autopilot, in the folder you're in)" : "(inside a GitHub repository, it works on that repository; elsewhere, a chat)")}\n`);
   io.out(`  ${c.dim("Or hand off a one-off task:")}  ${c.bold('dl run "fix the flaky checkout test"')}\n\n`);
   return true;
 }

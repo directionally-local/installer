@@ -373,7 +373,7 @@ describe("dl on a laptop", () => {
     assert.match(home.text(), /Hotcell +0\.1\.38 here · box \? · this-computer 0\.1\.30\n/, "the pinned Hotcell next to each place's");
     assert.match(home.text(), /! this-computer runs Autopilot 3\.0\.1, this laptop 3\.0\.2 +dl update this-computer/);
     assert.match(home.text(), /! this-computer runs Hotcell 0\.1\.30, this dl pins 0\.1\.38 +dl update this-computer/);
-    assert.match(home.text(), /Talk to an agent: type {2}dl/);
+    assert.match(home.text(), /Talk to an agent: type {2}dl {2}\(Autopilot, in the folder you're in\)/, "this computer is the default: plain Autopilot");
   });
 
   it("shows why a task failed, in dl run, dl watch and dl runs", { timeout: 30_000 }, async () => {

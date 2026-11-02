@@ -40,13 +40,12 @@ Then it installs Hotcell and Autopilot on the place, builds the sandbox image an
 
   ✓ Ready · fits ~6 agents at once
 
-  · Connecting to this-computer · chat …  (new chat, deepseek-v4-pro)
-  [Autopilot's session]
+  [Autopilot, in the folder you ran dl from]
 ```
 
 ### The provider and model
 
-The provider and model are Autopilot's choice to make, so `dl` hands over to Autopilot's own picker (`autopilot connect`): any of its providers (OpenRouter, DeepSeek, OpenAI, Anthropic, Moonshot, Z.ai, Ollama, LM Studio, a custom OpenAI-compatible endpoint, …), its key, and its model. The same choice configures your own `autopilot` command. `dl` keeps the model as that place's model (`dl run` and sessions use it unless `-m` names another) and pushes the key to the place:
+The provider and model are Autopilot's choice to make, so `dl` hands over to Autopilot's own picker (`autopilot connect`): any of its providers (OpenRouter, DeepSeek, OpenAI, Anthropic, Moonshot, Z.ai, Ollama, LM Studio, a custom OpenAI-compatible endpoint, …), its key, and its model. The same choice configures your own `autopilot` command. `dl` keeps the model as that place's model (`dl run` and sessions on a server use it unless `-m` names another; on this computer bare `dl` is that same `autopilot`, so it uses what you picked there) and pushes the key to the place:
 
 - **On this computer,** into Hotcell's keystore (a 0600 file under `~/.directionallylocal/hotcell`, not the login Keychain).
 - **On a server,** over the same SSH channel the install used, into Hotcell's keystore there.
@@ -59,21 +58,25 @@ Agents push branches and open pull requests through GitHub, so each place needs 
 
 ### Then a session
 
-Setup ends with one line, `✓ Ready · fits ~6 agents at once`, and opens a session on the new place at once: inside a GitHub repository, that repository's code session; anywhere else, a chat. From then on bare `dl` does the same anywhere, and every `dl` starts a new conversation:
+Setup ends with one line, `✓ Ready · fits ~6 agents at once`, and opens a session at once. What bare `dl` opens from then on depends on where your agents run (the default place, `dl use`; `--server NAME` picks another):
+
+**On this computer, `dl` is plain Autopilot.** It starts `autopilot` in the terminal, in the folder you ran it from, exactly as if you had typed `autopilot`: every Autopilot feature works (`/resume`, `/clear`, `!` shell commands, MCP servers), with your own Autopilot config and the provider `autopilot connect` set up. Any folder works, git or not, and nothing is sent anywhere: the agent edits the folder directly and stops when the terminal closes. Every `dl` is a new session; `dl -c` is `autopilot -c`, and anything after `--` goes to Autopilot as is (`dl -- --session ID`).
+
+**On a server, `dl` is a session that keeps running.** Autopilot's screen attaches to a conversation on the server (`autopilot attach-remote`) that carries on after you close the terminal. Inside a GitHub repository it's that repository's code session (your uncommitted changes go along; `--no-local-changes` sends none); anywhere else, a chat. Every `dl` starts a new conversation; `dl -c` reopens the latest one started from this folder on that server. When an earlier one from this folder is still working or waiting for you, `dl` says so in one line before connecting (`1 earlier session here is still working · dl -c to rejoin`). In a git repository whose origin isn't on GitHub, it says so in one line and opens a chat instead.
+
+**Either way, `dl run "task"` is the background, sandboxed path.** It sends the task to the place, where it runs in a Hotcell sandbox, keeps going after the terminal closes, and ends in a pull request.
 
 ```sh
-dl                                  # in a GitHub repository: its agent; elsewhere: a chat. A new conversation each time
-dl -c                               # reopen the latest conversation started from this folder on this place
+dl                                  # this computer: autopilot here. A server: its session (repository or chat)
+dl -c                               # this computer: autopilot -c. A server: the latest session from this folder
+dl -- --session <id>                # this computer: pass flags through to autopilot
+dl --server box                     # a session on the server named box, whatever the default
 dl new                              # the same as bare dl (kept as an alias for a release)
-dl run "fix the flaky checkout test"  # one-off task; your uncommitted changes go along
+dl run "fix the flaky checkout test"  # background task in a sandbox; your uncommitted changes go along
 dl runs                             # tasks and their pull requests
 dl pull <id>                        # check one out here
 dl status                           # where agents run, their provider, model and versions, what they're doing
 ```
-
-When an earlier session from this folder is still working or waiting for you, `dl` says so in one line before connecting (`1 earlier session here is still working · dl -c to rejoin`). Going back to an older one is Autopilot's job: `/resume` inside a session.
-
-In a git repository whose origin isn't on GitHub, `dl` says so in one line and opens a chat instead.
 
 `dl status` says when a place runs another Autopilot or Hotcell than this laptop's `dl` pins: `! box runs Hotcell 0.1.30, this dl pins 0.1.38   dl update box`.
 
@@ -91,19 +94,19 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 
 | Command | What it does |
 | --- | --- |
-| `dl` | The first time: set up where agents run, pick a provider and model in Autopilot's list, then talk to an agent. Afterwards: inside a GitHub repository, that repository's agent session; anywhere else, a chat on your default place. Every `dl` starts a new conversation. |
-| `dl -c`, `dl --continue` | Reopen the latest conversation started from this folder on this place. |
+| `dl` | The first time: set up where agents run, pick a provider and model in Autopilot's list, then talk to an agent. Afterwards, a new session each time. On this computer: plain `autopilot` in this folder, any folder, with your own Autopilot config (`dl -- ARGS` passes ARGS to it). On a server: inside a GitHub repository, that repository's agent session; anywhere else, a chat; it keeps running when you leave. |
+| `dl -c`, `dl --continue` | On this computer, `autopilot -c`. On a server, reopen the latest conversation started from this folder there. |
 | `dl setup` | Set up or repair where your agents run. Safe to re-run. `--identity FILE` names the SSH key to use. |
-| `dl new` | The same as bare `dl`: a new conversation here; the old one keeps running. Kept as an alias for a release. |
+| `dl new` | The same as bare `dl`: a new session here. Kept as an alias for a release. |
 | `dl status` | Where your agents run, their provider, model and Autopilot and Hotcell versions (next to this laptop's pins), and what they're doing. Works anywhere. |
 | `dl connect URL` | Connect to a server someone else set up; approve the code it shows. |
-| `dl run "TASK"` | Run a task, from inside a GitHub repository. Ctrl-C stops watching, not the task. |
+| `dl run "TASK"` | Run a task in a sandbox on the place, in the background, from inside a GitHub repository; it ends in a pull request. Ctrl-C stops watching, not the task. |
 | `dl runs` | Your tasks and their pull requests. `--json` for scripts. |
 | `dl watch ID` / `dl cancel ID` | Follow a task, or stop one. |
 | `dl pull ID` | Check out a task's branch here. |
 | `dl preview ID` | Deploy a task's Workers branch on the server with Serverless Objects and open it here, over the SSH tunnel. |
 | `dl servers` | Where agents run. `dl servers rename OLD NEW`, `dl servers remove NAME`. |
-| `dl use [NAME]` | Where tasks go without `--server`. With no name, shows it. |
+| `dl use [NAME]` | Where tasks and bare `dl` go without `--server`. With no name, shows it. |
 | `dl provider` | The provider and GitHub token on each place. `dl provider set` picks another provider, key and model in Autopilot's list; `dl provider github` replaces the GitHub token. `--server NAME` picks the place. `dl keys` is the same command. |
 | `dl model [ID]` | The model for tasks and sessions on a place. With no ID, Autopilot's own model picker. |
 | `dl update [NAME]` | Update a place's Autopilot, Hotcell and sandbox image to the versions `dl` pins. A server over SSH (its `dl` first), this computer in place. `--wait` waits for running tasks instead of asking; with no terminal it waits anyway. |

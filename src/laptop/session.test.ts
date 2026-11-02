@@ -7,13 +7,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { main } from "../cli.js";
+import { main, splitPassthrough } from "../cli.js";
 import { PATHS } from "../layout.js";
+import { PAIRED_NAME } from "../local/layout.js";
 import { ScriptedPrompter } from "../prompt.js";
 import { fakeTunnels, type FakeTunnel } from "../test-support/fake-tunnel.js";
 import { DEFAULT_MODEL, type LaptopIO } from "./commands.js";
 import { saveRemote, type RemoteServer } from "./config.js";
-import { autopilotOnPath, bundledAutopilot, openSession, planSession, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput } from "./session.js";
+import { autopilotOnPath, bundledAutopilot, openSession, planSession, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput, type SessionSpawner } from "./session.js";
 import { loadSessions, rememberSession } from "./session-store.js";
 import { createOpener, type RemoteOpener } from "./tunnel.js";
 
@@ -261,17 +262,6 @@ describe("dl inside a project", () => {
     assert.equal(reconnect.includes("--patch-file"), false);
     assert.match(resumed.text(), /Connecting to dl-test · me\/app … {2}\(7c1d2e3f\)/);
     assert.equal((await loadSessions(file)).length, 2);
-  });
-
-  it("checks the place has a provider before opening anything", { timeout: 30_000 }, async () => {
-    await saveRemote(place("dl-test", api.url));
-    const dir = await checkout();
-    const asked: string[] = [];
-    const io = capture();
-    assert.equal(await session({ cwd: dir, ensureProvider: async (remote) => { asked.push(remote.name); return false; } }, io), undefined);
-    assert.deepEqual(asked, ["dl-test"]);
-    assert.equal(autopilot.launches.length, 0, "no session before the provider is set up");
-    assert.equal(io.text(), "", "the check says its own line; nothing else is printed");
   });
 
   it("uses the server's default model when the place has none saved", { timeout: 30_000 }, async () => {
@@ -591,6 +581,148 @@ describe("dl inside a project", () => {
   });
 });
 
+/** A stand-in for plain `autopilot`: records how it was started and exits with `code` (unless held). */
+class FakePlainAutopilot {
+  readonly launches: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv; cwd: string | undefined }> = [];
+  readonly children: Array<EventEmitter & SessionChild & { signals: string[] }> = [];
+  code: number | null = 0;
+  hold = false;
+  readonly spawn: SessionSpawner = (command, args, env, options = {}) => {
+    this.launches.push({ command, args, env, cwd: options.cwd });
+    const child = Object.assign(new EventEmitter(), {
+      signals: [] as string[],
+      kill(signal?: NodeJS.Signals) {
+        child.signals.push(signal ?? "SIGTERM");
+        setImmediate(() => child.emit("exit", null, signal ?? "SIGTERM"));
+        return true;
+      },
+    });
+    this.children.push(child);
+    if (!this.hold) setImmediate(() => child.emit("exit", this.code, null));
+    return child;
+  };
+}
+
+describe("dl on this computer", () => {
+  let plain: FakePlainAutopilot;
+  beforeEach(() => { plain = new FakePlainAutopilot(); });
+  const local = (input: Partial<SessionInput> & { cwd: string }, io: LaptopIO) => session({ spawn: plain.spawn, ...input }, io);
+
+  it("starts plain autopilot in this folder, a new session every time, with nothing sent anywhere", async () => {
+    await saveRemote(place(PAIRED_NAME, api.url));
+    const dir = await checkout();
+    await writeFile(join(dir, "README.md"), "hello\nlocal edit\n");
+    const io = capture();
+    assert.equal(await local({ cwd: dir }, io), 0);
+    assert.equal(await local({ cwd: dir }, io), 0);
+    assert.equal(plain.launches.length, 2);
+    for (const launch of plain.launches) {
+      assert.equal(launch.command, AUTOPILOT.command);
+      assert.deepEqual(launch.args, AUTOPILOT.args, "just `autopilot`: no attach-remote, no flags");
+      assert.equal(launch.cwd, dir);
+      assert.equal(launch.env.AUTOPILOT_REMOTE_URL, undefined);
+      assert.equal(launch.env.AUTOPILOT_REMOTE_TOKEN, undefined);
+    }
+    assert.equal(io.text(), "", "dl gets out of the way: Autopilot owns the terminal");
+    assert.deepEqual(api.requests, [], "the local server isn't asked anything");
+    assert.equal(autopilot.launches.length, 0);
+    assert.deepEqual(await loadSessions(), [], "nothing remembered: going back is Autopilot's /resume and -c");
+  });
+
+  it("works in a folder that isn't a git repository, or whose origin isn't on GitHub", async () => {
+    await saveRemote(place(PAIRED_NAME, api.url));
+    const loose = join(root, "loose");
+    await mkdir(loose);
+    const gitlab = join(root, "gitlab");
+    git(root, "init", "--quiet", gitlab);
+    git(gitlab, "remote", "add", "origin", "https://gitlab.com/me/app.git");
+    const fresh = join(root, "fresh");
+    git(root, "init", "--quiet", fresh);
+    git(fresh, "remote", "add", "origin", "https://github.com/me/fresh.git");
+    for (const dir of [loose, gitlab, fresh]) {
+      const io = capture();
+      assert.equal(await local({ cwd: dir }, io), 0, dir);
+      assert.equal(plain.launches.at(-1)!.cwd, dir);
+      assert.equal(io.text(), "", "no chat note, no push-first note");
+    }
+  });
+
+  it("dl -c is autopilot -c; -m and what came after -- pass through", async () => {
+    await saveRemote(place(PAIRED_NAME, api.url));
+    const dir = join(root, "plain");
+    await mkdir(dir);
+    assert.equal(await local({ cwd: dir, continue: true }, capture()), 0);
+    assert.deepEqual(plain.launches[0]!.args, [...AUTOPILOT.args, "-c"]);
+    assert.equal(await local({ cwd: dir, model: "deepseek-v4-pro", args: ["--session", "abc", "fix it"] }, capture()), 0);
+    assert.deepEqual(plain.launches[1]!.args, [...AUTOPILOT.args, "-m", "deepseek-v4-pro", "--session", "abc", "fix it"]);
+    assert.equal(await local({ cwd: dir, continue: true, args: ["--verbose"] }, capture()), 0);
+    assert.deepEqual(plain.launches[2]!.args, [...AUTOPILOT.args, "-c", "--verbose"]);
+  });
+
+  it("returns Autopilot's exit code, and says how to update when it's missing", async () => {
+    await saveRemote(place(PAIRED_NAME, api.url));
+    const dir = join(root, "plain");
+    await mkdir(dir);
+    plain.code = 7;
+    assert.equal(await local({ cwd: dir }, capture()), 7);
+    const missing = capture();
+    assert.equal(await local({ cwd: dir, autopilot: async () => undefined }, missing), 1);
+    assert.match(missing.text(), /✗ The Autopilot that comes with dl isn't installed\. Update: npm install -g directionallylocal/);
+  });
+
+  it("leaves Ctrl-C to Autopilot and passes SIGTERM and SIGHUP on", async () => {
+    await saveRemote(place(PAIRED_NAME, api.url));
+    const dir = join(root, "plain");
+    await mkdir(dir);
+    const signals = new EventEmitter();
+    plain.hold = true;
+    const running = local({ cwd: dir, signals }, capture());
+    while (plain.children.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    const child = plain.children[0]!;
+    signals.emit("SIGINT");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(child.signals, [], "Autopilot gets Ctrl-C from the terminal itself");
+    signals.emit("SIGHUP");
+    assert.equal(await running, 129);
+    assert.deepEqual(child.signals, ["SIGHUP"]);
+    for (const name of ["SIGINT", "SIGTERM", "SIGHUP"]) assert.equal(signals.listenerCount(name), 0, `${name} handler removed`);
+  });
+
+  it("with a server too, the default place decides, and --server forces the server", { timeout: 30_000 }, async () => {
+    await saveRemote(place(PAIRED_NAME, api.url));
+    await saveRemote(place("box", api.url));
+    const dir = await checkout();
+    // This computer is the default (the first one set up): plain autopilot.
+    assert.equal(await local({ cwd: dir }, capture()), 0);
+    assert.equal(plain.launches.length, 1);
+    // --server box: attach-remote on the server, unchanged.
+    const named = capture();
+    assert.equal(await session({ cwd: dir, server: "box" }, named), 0);
+    assert.equal(autopilot.launches.length, 1);
+    assert.equal(autopilot.launches[0]!.args[1], "attach-remote");
+    assert.equal(flag(autopilot.launches[0]!.args, "--repo"), "me/app");
+    assert.match(named.text(), /· Connecting to box · me\/app/);
+    // The server as the default: bare dl goes there.
+    const file = JSON.parse(await readFile(process.env.AUTOPILOT_REMOTES_FILE!, "utf8")) as Record<string, unknown>;
+    await writeFile(process.env.AUTOPILOT_REMOTES_FILE!, JSON.stringify({ ...file, default: "box" }));
+    assert.equal(await session({ cwd: dir }, capture()), 0);
+    assert.equal(autopilot.launches.length, 2);
+    assert.equal(plain.launches.length, 1, "not plain autopilot");
+    assert.equal(autopilot.launches[1]!.args[1], "attach-remote");
+    // ...and --server this-computer brings it back here.
+    assert.equal(await local({ cwd: dir, server: PAIRED_NAME }, capture()), 0);
+    assert.deepEqual(plain.launches.at(-1)!.args, AUTOPILOT.args);
+  });
+});
+
+describe("arguments after --", () => {
+  it("are split off before dl reads its own flags", () => {
+    assert.deepEqual(splitPassthrough(["-c"]), { argv: ["-c"], passthrough: [] });
+    assert.deepEqual(splitPassthrough(["-c", "--", "--session", "abc"]), { argv: ["-c"], passthrough: ["--session", "abc"] });
+    assert.deepEqual(splitPassthrough(["--", "-m", "x", "--", "y"]), { argv: [], passthrough: ["-m", "x", "--", "y"] });
+  });
+});
+
 describe("finding Autopilot", () => {
   it("uses the autopilot-ai installed with dl, else one on PATH", async () => {
     assert.match(bundledAutopilot() ?? "", /node_modules[\\/]autopilot-ai[\\/]bin[\\/]autopilot\.mjs$/);
@@ -627,7 +759,7 @@ describe("dl routing for projects", () => {
       let text = "";
       const io = { out: (chunk: string) => { text += chunk; }, err: (chunk: string) => { text += chunk; } };
       assert.equal(await main(["new"], io, { terminal: true }), 1);
-      assert.match(text, /dl new starts a new conversation once something is set up: dl/);
+      assert.match(text, /dl new starts a new session once something is set up: dl/);
       // On an installed server, dl status shows the server's overview instead.
       if (!existsSync(PATHS.state)) {
         await saveRemote(place("dl-test", api.url));
