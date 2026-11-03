@@ -30,7 +30,7 @@ Then it installs Hotcell and Autopilot on the place, builds the sandbox image, s
 
 ```
   ✓ Checking this computer   macOS 15.1 · Docker Desktop 29.5.2 · Node 24.22.1 · 120 GB free
-  ✓ Installing Hotcell (sandbox SDK) + Autopilot (harness)   Autopilot 3.1.2 · Hotcell 0.1.38
+  ✓ Installing Hotcell (sandbox SDK) + Autopilot (harness)   Autopilot 3.2.0 · Hotcell 0.1.38
   ✓ Building the sandbox image   Node 24 · Autopilot 3.1.2
   ✓ Starting services     start at login · logs in ~/.directionallylocal/logs
   ✓ Connecting            this computer · tasks pause while it sleeps
