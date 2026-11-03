@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.10.0](https://github.com/directionally-local/installer/compare/v0.9.4...v0.10.0) (2026-11-03)
+
+
+### Features
+
+* **free:** cached tokens at real cost, sign-out that revokes, server keys ([#95](https://github.com/directionally-local/installer/issues/95)) ([096dbfe](https://github.com/directionally-local/installer/commit/096dbfe859196ffca4e5aeac5bb31adc4e8a9c9c))
+* **free:** free managed tier service MVP ([#84](https://github.com/directionally-local/installer/issues/84)) ([1e2f1f6](https://github.com/directionally-local/installer/commit/1e2f1f61c2a566278c49a7390e6d42a83ff414a3))
+* **free:** open admission, distinct refusals, runtime limits, pause wording ([#91](https://github.com/directionally-local/installer/issues/91)) ([f944453](https://github.com/directionally-local/installer/commit/f944453a1590e0a3c78595575079e01d41e26af0))
+* **free:** route to the cheapest full-precision host that doesn't collect prompts ([#96](https://github.com/directionally-local/installer/issues/96)) ([27e80cf](https://github.com/directionally-local/installer/commit/27e80cf74d17ef8b6bc26eb077eb7c3838732580))
+* **install:** laptops in install.sh, and the laptop's dl version on servers ([#93](https://github.com/directionally-local/installer/issues/93)) ([a216370](https://github.com/directionally-local/installer/commit/a2163709e1c2f021c517e671b569531f3155b062))
+* **laptop:** first run with nothing to set up ([#90](https://github.com/directionally-local/installer/issues/90)) ([4c0eff7](https://github.com/directionally-local/installer/commit/4c0eff7517f8f74d8763f9049ce5578e4e3d3c8d))
+* on a laptop, dl runs plain Autopilot ([#83](https://github.com/directionally-local/installer/issues/83)) ([1f09cbf](https://github.com/directionally-local/installer/commit/1f09cbff0b3b16e6d078860f595dd8d50f38e1a9)), closes [#72](https://github.com/directionally-local/installer/issues/72)
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.2.0 ([#97](https://github.com/directionally-local/installer/issues/97)) ([9db816e](https://github.com/directionally-local/installer/commit/9db816ebc5b7c07c9c63f8f6a3271a1ed2276b8a))
+* **deps:** pin Hotcell exactly, like Autopilot ([#79](https://github.com/directionally-local/installer/issues/79)) ([901bf61](https://github.com/directionally-local/installer/commit/901bf61fa57f1d062ca0311ad888b084745ec1f1))
+
 ## [0.9.4](https://github.com/directionally-local/installer/compare/v0.9.3...v0.9.4) (2026-10-30)
 
 
