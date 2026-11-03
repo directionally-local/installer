@@ -130,7 +130,7 @@ export interface Service {
   env: Record<string, unknown>;
   clock: { now: number };
   handler: { fetch(request: Request, env: never): Promise<Response> };
-  calls: { openRouter: Array<{ body: Record<string, unknown>; headers: Record<string, string> }> };
+  calls: { openRouter: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>; githubTokens: Array<{ code: string; redirect_uri?: string }> };
   setOpenRouter(handler: OpenRouterHandler): void;
   request(method: string, path: string, options?: { body?: unknown; token?: string; headers?: Record<string, string>; form?: Record<string, string>; ip?: string }): Promise<Response>;
   signIn(user: GitHubUserFixture, options?: { invite?: string; deviceId?: string }): Promise<Tokens>;
@@ -200,13 +200,14 @@ export async function createService(vars: Record<string, string> = {}): Promise<
     ...namespaces,
   };
   const clock = { now: NOW };
-  const calls: Service["calls"] = { openRouter: [] };
+  const calls: Service["calls"] = { openRouter: [], githubTokens: [] };
   let openRouter: OpenRouterHandler = () => completion(usage(100, 10));
 
   const fetcher = async (input: string, init: RequestInit = {}): Promise<Response> => {
     const url = String(input);
     if (url === "https://github.com/login/oauth/access_token") {
-      const body = JSON.parse(String(init.body)) as { code: string; client_secret: string };
+      const body = JSON.parse(String(init.body)) as { code: string; client_secret: string; redirect_uri?: string };
+      calls.githubTokens.push({ code: body.code, ...(body.redirect_uri !== undefined ? { redirect_uri: body.redirect_uri } : {}) });
       if (body.client_secret !== "gh-secret" || body.code === "bad") return Response.json({ error: "bad_verification_code" });
       return Response.json({ access_token: `token-for-${body.code}`, token_type: "bearer" });
     }

@@ -16,13 +16,17 @@ function directoryEntry(service: Service): { state: { db: DatabaseSync }; object
 }
 
 /** The browser sign-in for the dashboard, up to the page after GitHub. */
-async function browserSignIn(service: Service, user: { id: number; login: string }): Promise<{ response: Response; cookie: string | undefined; location: string }> {
+async function browserSignIn(
+  service: Service,
+  user: { id: number; login: string },
+  callbackPath = "/device/callback",
+): Promise<{ response: Response; cookie: string | undefined; location: string }> {
   const start = await service.request("GET", "/admin/signin");
   assert.equal(start.status, 302);
   const location = start.headers.get("location")!;
   const state = new URL(location).searchParams.get("state")!;
   const oauthCookie = start.headers.get("set-cookie")!.split(";")[0]!;
-  const response = await service.request("GET", `/device/callback/admin?code=${encodeURIComponent(JSON.stringify(user))}&state=${encodeURIComponent(state)}`, {
+  const response = await service.request("GET", `${callbackPath}?code=${encodeURIComponent(JSON.stringify(user))}&state=${encodeURIComponent(state)}`, {
     headers: { cookie: oauthCookie },
   });
   const session = response.headers
@@ -52,7 +56,7 @@ async function csv(service: Service, cookie: string, table: string, query = ""):
 }
 
 describe("admin dashboard sign-in", () => {
-  it("signs an admin in through GitHub with a subpath of the registered callback", async () => {
+  it("signs an admin in through GitHub with exactly the registered callback", async () => {
     const service = await createService();
     const signedOut = await service.request("GET", "/admin");
     assert.equal(signedOut.status, 401);
@@ -61,7 +65,8 @@ describe("admin dashboard sign-in", () => {
     const { response, cookie, location } = await browserSignIn(service, { id: ADMIN_ID, login: "owner" });
     const authorize = new URL(location);
     assert.equal(authorize.origin + authorize.pathname, "https://github.com/login/oauth/authorize");
-    assert.equal(authorize.searchParams.get("redirect_uri"), "https://free.test/device/callback/admin");
+    assert.equal(authorize.searchParams.get("redirect_uri"), "https://free.test/device/callback");
+    assert.equal(service.calls.githubTokens.at(-1)?.redirect_uri, "https://free.test/device/callback");
     assert.equal(response.status, 200);
     assert.match(await response.text(), /http-equiv="refresh" content="0;url=\/admin"/);
     const setCookies = response.headers.getSetCookie();
@@ -89,16 +94,34 @@ describe("admin dashboard sign-in", () => {
     const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
     const oauthCookie = start.headers.get("set-cookie")!.split(";")[0]!;
     const code = encodeURIComponent(JSON.stringify({ id: ADMIN_ID, login: "owner" }));
-    const otherBrowser = await service.request("GET", `/device/callback/admin?code=${code}&state=${state}`, { headers: { cookie: "__Host-dl_admin_oauth=someone-else" } });
+    const otherBrowser = await service.request("GET", `/device/callback?code=${code}&state=${state}`, { headers: { cookie: "__Host-dl_admin_oauth=someone-else" } });
     assert.equal(otherBrowser.status, 400);
     // The failed attempt used the state up.
-    const retried = await service.request("GET", `/device/callback/admin?code=${code}&state=${state}`, { headers: { cookie: oauthCookie } });
+    const retried = await service.request("GET", `/device/callback?code=${code}&state=${state}`, { headers: { cookie: oauthCookie } });
     assert.equal(retried.status, 400);
-    // A device sign-in can't finish an admin sign-in, or the other way round.
-    const fresh = await service.request("GET", "/admin/signin");
-    const freshState = new URL(fresh.headers.get("location")!).searchParams.get("state")!;
-    const freshCookie = fresh.headers.get("set-cookie")!.split(";")[0]!.replace("__Host-dl_admin_oauth=", "__Host-dl_oauth=");
-    assert.equal((await service.request("GET", `/device/callback?code=${code}&state=${freshState}`, { headers: { cookie: freshCookie } })).status, 400);
+    assert.equal(service.calls.githubTokens.length, 0);
+  });
+
+  it("can't replay an admin sign-in", async () => {
+    const service = await createService();
+    const start = await service.request("GET", "/admin/signin");
+    const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+    const cookie = start.headers.get("set-cookie")!.split(";")[0]!;
+    const path = `/device/callback?code=${encodeURIComponent(JSON.stringify({ id: ADMIN_ID, login: "owner" }))}&state=${state}`;
+    const first = await service.request("GET", path, { headers: { cookie } });
+    assert.equal(first.status, 200);
+    assert.ok(first.headers.getSetCookie().some((value) => value.startsWith("__Host-dl_admin=")));
+    const replay = await service.request("GET", path, { headers: { cookie } });
+    assert.equal(replay.status, 400);
+    assert.ok(!replay.headers.getSetCookie().some((value) => value.startsWith("__Host-dl_admin=")));
+  });
+
+  it("still finishes sign-ins at the old /device/callback/admin path", async () => {
+    const service = await createService();
+    const { response, cookie } = await browserSignIn(service, { id: ADMIN_ID, login: "owner" }, "/device/callback/admin");
+    assert.equal(response.status, 200);
+    assert.ok(cookie);
+    assert.equal(service.calls.githubTokens.at(-1)?.redirect_uri, "https://free.test/device/callback/admin");
   });
 
   it("keeps the session cookie and bearer tokens apart, and expires the session", async () => {
