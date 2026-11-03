@@ -5,8 +5,9 @@
 #
 # On a laptop (macOS or Linux, as yourself): installs dl into ~/.directionallylocal with no
 # sudo, and Node.js there too when this one is missing or too old, puts dl on your PATH for
-# new shells, and starts dl in the folder you ran it from. Nothing else is set up until you
-# ask for background tasks (dl run, dl setup).
+# new shells (and links it into ~/.local/bin or ~/bin when one is already on this shell's
+# PATH, so dl works in this terminal too), and starts dl in the folder you ran it from.
+# Nothing else is set up until you ask for background tasks (dl run, dl setup).
 #
 # On a server (Linux as root, or `| sudo sh`): installs Node.js 24 if needed and the
 # directionallylocal CLI (also `dl`), then runs `dl up`, which asks how to reach this server
@@ -49,7 +50,9 @@ step_done() {
 
 # Quiet steps: output goes to a log that's shown only if the step fails.
 LOG=$(mktemp)
-trap 'rm -f "$LOG"' EXIT
+# NPM_CACHE: the laptop install's own npm cache, removed when it's done (see laptop_main).
+NPM_CACHE=""
+trap 'rm -f "$LOG"; if [ -n "$NPM_CACHE" ]; then rm -rf "$NPM_CACHE"; fi' EXIT
 # Runs a command as root, through sudo when needed (keeping DL_* answers in the environment).
 as_root() {
   if [ "$(id -u)" -eq 0 ]; then
@@ -154,26 +157,79 @@ install_own_node() {
     fail "the Node.js download didn't match its checksum; try again"
   fi
   dir="${file%.tar.gz}"
-  rm -rf "${DL_HOME:?}/$dir"
-  quietly "unpacking Node.js" tar -xzf "$download" -C "$DL_HOME"
+  # Unpacked aside, then moved into place as $DL_HOME/node itself: one copy of Node, with no
+  # versioned directory (or link to one) beside it.
+  staging="$DL_HOME/node.unpacking"
+  rm -rf "$staging"
+  mkdir -p "$staging"
+  quietly "unpacking Node.js" tar -xzf "$download" -C "$staging"
   rm -f "$download"
-  ln -sfn "$DL_HOME/$dir" "$DL_HOME/node"
-  # Earlier downloads, now that the link points at this one.
+  [ -x "$staging/$dir/bin/node" ] || fail "the Node.js download has no $dir/bin/node"
+  # What dl never uses: the C headers for building native addons (node-gyp downloads its own
+  # when it needs them; 67 MB) and the docs.
+  rm -rf "$staging/$dir/include" "$staging/$dir/share/doc" "$staging/$dir/share/man" "$staging/$dir/CHANGELOG.md" "$staging/$dir/README.md"
+  # The one before: a directory, or (from earlier versions of this script) a link to a
+  # node-v* directory beside it. A dl still running keeps its open files.
+  rm -rf "${DL_HOME:?}/node"
+  mv "$staging/$dir" "$DL_HOME/node"
+  rm -rf "$staging"
   for old in "$DL_HOME"/node-v*; do
-    if [ -d "$old" ] && [ "$old" != "$DL_HOME/$dir" ]; then rm -rf "$old"; fi
+    if [ -e "$old" ]; then rm -rf "$old"; fi
   done
   node_is_patched "$DL_HOME/node/bin/node" || fail "the Node.js from nodejs.org ($("$DL_HOME/node/bin/node" -v 2>/dev/null || echo '?')) is missing the CVE-2026-111497 fix"
   step_done "Installed Node.js" "$("$DL_HOME/node/bin/node" -v) · in $DL_HOME/node"
 }
 
+# The startup file of the user's shell ($1: darwin or linux).
+shell_rc() {
+  case $(basename "${SHELL:-sh}") in
+    zsh) echo "${ZDOTDIR:-$HOME}/.zshrc" ;;
+    bash) if [ "$1" = darwin ]; then echo "$HOME/.bash_profile"; else echo "$HOME/.bashrc"; fi ;;
+    fish) echo "$HOME/.config/fish/conf.d/directionallylocal.fish" ;;
+    *) echo "$HOME/.profile" ;;
+  esac
+}
+
+# A path as the person would type it, with ~ for the home directory.
+tilde() {
+  case $1 in
+    "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+on_path() {
+  case ":$PATH:" in *":$1:"*) return 0 ;; esac
+  return 1
+}
+
+# A piped install can't change the PATH of the shell it was started from, so the line
+# add_to_path writes only reaches new shells. For dl to work in this terminal as well, link it
+# into a directory of the user's own that this shell already has on PATH: ~/.local/bin (which
+# Ubuntu's ~/.profile adds when it exists) or ~/bin. Never replaces a dl that isn't ours.
+link_on_path() {
+  for linkdir in "$HOME/.local/bin" "$HOME/bin"; do
+    on_path "$linkdir" && [ -d "$linkdir" ] && [ -w "$linkdir" ] || continue
+    linked=""
+    for name in dl directionallylocal; do
+      if [ -e "$linkdir/$name" ] || [ -L "$linkdir/$name" ]; then
+        [ "$(readlink "$linkdir/$name" 2>/dev/null)" = "$DL_HOME/bin/$name" ] || continue
+      fi
+      ln -sfn "$DL_HOME/bin/$name" "$linkdir/$name"
+      if [ "$name" = dl ]; then linked=1; fi
+    done
+    if [ -n "$linked" ]; then
+      step "Linking dl into $(tilde "$linkdir")"
+      step_done "Linked dl into $(tilde "$linkdir")" "works in this terminal too"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # The line that puts $DL_HOME/bin on PATH, in the startup file of the user's shell.
 add_to_path() {
-  case $(basename "${SHELL:-sh}") in
-    zsh) rc="${ZDOTDIR:-$HOME}/.zshrc" ;;
-    bash) if [ "$1" = darwin ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi ;;
-    fish) rc="$HOME/.config/fish/conf.d/directionallylocal.fish" ;;
-    *) rc="$HOME/.profile" ;;
-  esac
+  rc=$(shell_rc "$1")
   if [ -f "$rc" ] && grep -qF "$DL_HOME/bin" "$rc"; then
     return 0
   fi
@@ -224,7 +280,13 @@ laptop_main() {
 
   package="${DL_PACKAGE:-directionallylocal@${DL_VERSION:-latest}}"
   step "Installing dl"
-  quietly "installing $package" env PATH="$node_dir:$PATH" "$npm" install -g --prefix "$DL_HOME/dl" --no-audit --no-fund --loglevel=error "$package"
+  # npm's download cache, and the Node.js headers node-gyp fetches to build a native module,
+  # go in a folder of their own that's removed afterwards: dl's packages are installed once,
+  # and kept in ~/.npm and ~/.cache/node-gyp they'd take another 190 MB.
+  NPM_CACHE="$DL_HOME/npm-cache"
+  rm -rf "$NPM_CACHE"
+  quietly "installing $package" env PATH="$node_dir:$PATH" npm_config_devdir="$NPM_CACHE/node-gyp" "$npm" install -g --prefix "$DL_HOME/dl" --cache "$NPM_CACHE" --no-audit --no-fund --loglevel=error "$package"
+  rm -rf "$NPM_CACHE"
   entry="$DL_HOME/dl/lib/node_modules/directionallylocal/bin/directionallylocal.mjs"
   [ -f "$entry" ] || fail "npm installed $package, but $entry is missing"
   # $PATH and $@ in the wrappers are theirs to expand when dl runs.
@@ -242,23 +304,47 @@ laptop_main() {
   if [ "${DL_NO_MODIFY_PATH:-}" != "1" ]; then
     add_to_path "$os"
   fi
+  # Whether typing dl in this terminal finds it; when it doesn't, the one line that fixes it.
+  fix=""
+  if ! on_path "$DL_HOME/bin" && ! link_on_path; then
+    if [ "${DL_NO_MODIFY_PATH:-}" = "1" ]; then
+      fix="export PATH=\"$DL_HOME/bin:\$PATH\""
+    else
+      rc=$(shell_rc "$os")
+      # sh and dash have no `source`.
+      case $rc in */.profile) fix=". $(tilde "$rc")" ;; *) fix="source $(tilde "$rc")" ;; esac
+    fi
+  fi
   if [ "$os" = linux ]; then
     say "  For a server instead, run it as root: curl -fsSL https://directionallylocal.run | sudo sh"
   fi
-  case ":$PATH:" in
-    *":$DL_HOME/bin:"*) ;;
-    *) say "  Open a new terminal tab if dl isn't found." ;;
-  esac
+  if [ -n "$fix" ]; then
+    say ""
+    if [ "${DL_NO_MODIFY_PATH:-}" = "1" ]; then
+      remind "dl isn't on your PATH. To use it, run: $fix"
+    else
+      remind "Next time, open a new terminal or run: $fix"
+    fi
+  fi
 
   # Interactive: go straight into dl in this folder (plain Autopilot the first time).
   # (DL_TTY stands in for the terminal in tests.)
   tty="${DL_TTY:-/dev/tty}"
   if [ "${DL_NO_START:-}" != "1" ] && (exec <"$tty") 2>/dev/null; then
     say ""
-    "$DL_HOME/bin/dl" <"$tty"
-    return
+    code=0
+    "$DL_HOME/bin/dl" <"$tty" || code=$?
+    # Back at the shell this script was piped from, where dl isn't on PATH yet: say so now,
+    # when it's needed, as the lines above have scrolled away.
+    if [ -n "$fix" ]; then remind "To use dl in this terminal, run: $fix"; fi
+    return "$code"
   fi
-  say "  Then type: dl"
+  if [ -n "$fix" ]; then say "  Then run: $fix && dl"; else say "  Then type: dl"; fi
+}
+
+# A line the person needs to act on: bold, so it stands out from the steps above.
+remind() {
+  if [ -n "$FANCY" ]; then printf '  \033[1m%s\033[0m\n' "$*"; else say "  $*"; fi
 }
 
 # Wrapped in a function so a truncated download never runs half a script.
