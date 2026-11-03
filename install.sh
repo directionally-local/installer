@@ -146,7 +146,7 @@ install_own_node() {
   want="-$1-$2.tar.gz"
   file=$(printf '%s\n' "$sums" | awk -v want="$want" 'substr($2, length($2) - length(want) + 1) == want { print $2; exit }')
   expected=$(printf '%s\n' "$sums" | awk -v file="$file" '$2 == file { print $1; exit }')
-  [ -n "$file" ] && [ -n "$expected" ] || fail "nodejs.org has no Node.js 24 for $1-$2"
+  if [ -z "$file" ] || [ -z "$expected" ]; then fail "nodejs.org has no Node.js 24 for $1-$2"; fi
   download="$DL_HOME/$file.download"
   quietly "downloading $file" curl -fsSL "$base/$file" -o "$download"
   if [ "$(sha256_of "$download")" != "$expected" ]; then
