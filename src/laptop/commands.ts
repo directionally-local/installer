@@ -361,6 +361,43 @@ export async function laptopHome(
   return true;
 }
 
+/** What `dl status` shows on a laptop with no places: what's installed, and how to start. */
+export interface ReadyHere {
+  /** dl's own version. */
+  dl: string;
+  /** The Autopilot plain `dl` runs; undefined when none is installed. */
+  autopilot?: string;
+  /** Whether that Autopilot is the one installed with dl (else one on PATH). */
+  bundled?: boolean;
+  /** Where dl is installed, as the person would type it (~ for the home directory). */
+  installedIn: string;
+}
+
+/**
+ * `dl status` on a laptop where nothing else is set up: plain `dl` works already (it runs
+ * Autopilot in the folder you're in), so say that, what's installed where, and what's next.
+ */
+export function laptopReady(info: ReadyHere, io: LaptopIO = processIO): void {
+  const c = palette(io.color === true);
+  const row = (label: string, text: string) => io.out(`  ${c.dim(label.padEnd(11))}${text}\n`);
+  io.out(`\n  ${c.bold("Directionally Local")}  ${c.dim("on this laptop")}\n\n`);
+  row("dl", `${info.dl} ${c.dim(`· installed in ${info.installedIn}`)}`);
+  row("Autopilot", info.autopilot
+    ? `${info.autopilot} ${c.dim(info.bundled === false ? "· the one on your PATH" : "· comes with dl")}`
+    : `${c.yellow("not installed")}   ${c.dim("npm install -g directionallylocal")}`);
+  io.out("\n");
+  io.out(`  ${c.dim("Start, in a project folder:")}\n`);
+  io.out(`     ${c.bold("dl")}          ${c.dim("a new session with Autopilot in that folder")}\n`);
+  io.out(`     ${c.bold("dl -c")}       ${c.dim("continue the last session there")}\n\n`);
+  io.out(`  ${c.dim("Next steps")}\n`);
+  io.out(`     ${c.bold('dl run "fix the flaky checkout test"')}   ${c.dim("a background task that ends in a pull request")}\n`);
+  io.out(`     ${c.bold("dl setup")}    ${c.dim("set up where background tasks run: your own server, or this computer")}\n\n`);
+  io.out(`  ${c.dim("A server of your own (as root, on Ubuntu or Debian):")}\n`);
+  io.out(`     curl -fsSL https://directionallylocal.run | sudo sh\n`);
+  io.out(`  ${c.dim("Already have one? Connect this laptop to it:")}\n`);
+  io.out(`     dl connect https://your-server\n\n`);
+}
+
 async function follow(
   client: RemoteClient,
   remote: RemoteServer,

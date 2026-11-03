@@ -810,6 +810,8 @@ describe("dl the first time on a laptop", () => {
     assert.equal(plain.launches.length, 1);
     assert.deepEqual(plain.launches[0]!.args, AUTOPILOT.args, "just `autopilot`: its own first run picks the provider");
     assert.equal(plain.launches[0]!.cwd, dir);
+    assert.equal(plain.launches[0]!.env.AUTOPILOT_LAUNCHED_BY, "dl", "Autopilot knows dl started it, so its exit hint says dl -c");
+    assert.equal(plain.launches[0]!.env.PATH, process.env.PATH, "the rest of the environment is the person's own");
     assert.deepEqual(setups, [], "no setup wizard: no place, no Docker, no sandbox image, no services");
     assert.deepEqual(prompter.asked, [], "nothing asked: no place, no provider picker, no GitHub token");
     assert.equal(io.text(), "", "dl gets out of the way");
@@ -834,10 +836,10 @@ describe("dl the first time on a laptop", () => {
   });
 
   it("as root, or without a terminal, says what this is instead", async () => {
-    for (const options of [{ root: true }, { terminal: false }]) {
+    for (const [options, says] of [[{ root: true }, /isn't set up on this machine/], [{ terminal: false }, /on this laptop[\s\S]*dl -c {7}continue the last session there/]] as const) {
       const io = capture();
       assert.equal(await main([], io, laptop(undefined, options)), 0);
-      assert.match(io.text(), /isn't set up on this machine/);
+      assert.match(io.text(), says);
       assert.equal(plain.launches.length, 0);
       assert.deepEqual(setups, []);
     }

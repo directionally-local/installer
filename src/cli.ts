@@ -1,10 +1,15 @@
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { parseArgs } from "node:util";
+import { homedir } from "node:os";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs, promisify } from "node:util";
 import { doctor, formatChecks } from "./doctor.js";
 import { serverKeysCommand } from "./keys.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
-import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, use, watch } from "./laptop/commands.js";
+import { cancel, connect, describeError, laptopHome, laptopReady, pull, run, runs, servers, use, watch, type ReadyHere } from "./laptop/commands.js";
+import { autopilotOnPath, bundledAutopilotVersion } from "./laptop/autopilot.js";
 import { loadRemotes } from "./laptop/config.js";
 import { provider as providerCommand } from "./laptop/provider.js";
 import { model } from "./laptop/settings.js";
@@ -24,6 +29,8 @@ import { uninstall } from "./uninstall.js";
 import { JsonUi, PlainUi, TerminalUi, palette, type Ui } from "./ui.js";
 import { previewCommand, previewsCommand } from "./preview.js";
 import { needs, parseAccessMode, parseProvidedAnswers, up } from "./up.js";
+
+const execFileAsync = promisify(execFile);
 
 const HELP = () => `Directionally Local: coding agents that run on this computer or on your own server.
 Send a task; it runs in its own sandbox and comes back as a pull request.
@@ -289,6 +296,13 @@ export async function main(
           // A laptop connected to places gets its own overview (`dl status` shows it from anywhere);
           // otherwise, what this is and how to start.
           if ((!command || command === "status") && await laptopHome(laptopIO, undefined, undefined, { ssh: realSshExec, local: localVersions })) return 0;
+          // A laptop with no places is still set up: plain dl runs Autopilot here. Say what's
+          // installed and how to start. (Root on a machine without a server install gets the
+          // server's instructions instead, as the install script draws the same line.)
+          if ((!command || command === "status") && !isRoot()) {
+            laptopReady(await readyHere(), laptopIO);
+            return 0;
+          }
           io.out(NOT_A_SERVER(colors));
           return command ? 1 : 0;
         }
@@ -494,7 +508,7 @@ const NOT_A_SERVER = (c: ReturnType<typeof palette>) => `
      dl run "fix the flaky checkout test"      ${c.dim("or")}  dl setup
 
   ${c.dim("Or on a server (as root, on Ubuntu or Debian):")}
-     curl -fsSL https://directionallylocal.run | sh
+     curl -fsSL https://directionallylocal.run | sudo sh
 
   ${c.dim("Already have one? Connect this laptop to it:")}
      dl connect https://your-server
@@ -550,6 +564,25 @@ async function localVersions(): Promise<{ autopilot: string; hotcell: string } |
   } catch {
     return undefined;
   }
+}
+
+/**
+ * What `dl status` reports on a laptop with no places: dl's version and where it's installed
+ * (the install script's ~/.directionallylocal, else the package's own directory), and the
+ * Autopilot plain dl runs.
+ */
+async function readyHere(): Promise<ReadyHere> {
+  const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
+  const home = homedir();
+  const installed = root.match(/^(.*)\/dl\/lib\/node_modules\/directionallylocal$/)?.[1] ?? root;
+  const installedIn = home && (installed === home || installed.startsWith(`${home}/`)) ? `~${installed.slice(home.length)}` : installed;
+  const bundled = bundledAutopilotVersion();
+  if (bundled) return { dl: packageVersion(), autopilot: bundled, bundled: true, installedIn };
+  const onPath = await autopilotOnPath();
+  const version = onPath
+    ? await execFileAsync(onPath, ["--version"], { timeout: 5_000 }).then(({ stdout }) => stdout.match(/\d+\.\d+\.\d+\S*/)?.[0]).catch(() => undefined)
+    : undefined;
+  return { dl: packageVersion(), ...(onPath ? { autopilot: version ?? "installed", bundled: false } : {}), installedIn };
 }
 
 /** From package.json, which sits one level above both src/ and dist/. */

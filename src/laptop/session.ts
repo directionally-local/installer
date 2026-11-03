@@ -181,7 +181,9 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
   });
   try {
     const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | Error>((resolve) => {
-      const started = (input.spawn ?? realSpawn)(autopilot.command, args, { ...process.env }, { cwd: input.cwd });
+      // AUTOPILOT_LAUNCHED_BY tells Autopilot dl started it, so its own hints (the exit line's
+      // "continue with") name dl's commands and the product, not `autopilot resume ID`.
+      const started = (input.spawn ?? realSpawn)(autopilot.command, args, { ...process.env, AUTOPILOT_LAUNCHED_BY: "dl" }, { cwd: input.cwd });
       child = started;
       started.on("exit", (code, signal) => resolve({ code, signal }));
       started.on("error", (error) => resolve(error));
