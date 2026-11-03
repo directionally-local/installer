@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.11.0](https://github.com/directionally-local/installer/compare/v0.10.1...v0.11.0) (2026-11-03)
+
+
+### Features
+
+* dl --from-claude-code and an opt-in Claude Code limit hook ([93d1af8](https://github.com/directionally-local/installer/commit/93d1af87d5813f4b2c286bec98af2ea473a6bdb1))
+* **free:** admin dashboard for weekly actives, retention, cost and limits ([c5bc449](https://github.com/directionally-local/installer/commit/c5bc4496fd2bbc9d169d5f70eab88dc3158617b1))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.5.0 ([104bac9](https://github.com/directionally-local/installer/commit/104bac904f6505ebd7d0effa81631d0d8be0bc5a))
+* **free:** admin sign-in uses the registered OAuth callback ([7ee6bff](https://github.com/directionally-local/installer/commit/7ee6bffdebe3b25b0fd27e7e2a42bd67a11d7590))
+* **laptop:** clearer dl run question, never downgrade a server, install-aware update hints ([379271f](https://github.com/directionally-local/installer/commit/379271fc85ac2d8b37463b9f4897416dabcbf440))
+
 ## [0.10.1](https://github.com/directionally-local/installer/compare/v0.10.0...v0.10.1) (2026-11-03)
 
 
