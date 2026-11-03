@@ -1,5 +1,5 @@
 import type { DurableObjectNamespace } from "cloudflare:workers";
-import { sha256Hex } from "../../shared/src/auth.js";
+import { randomToken, sha256Hex } from "../../shared/src/auth.js";
 import { githubAuthorizeUrl, githubUserFromCode, type Fetch } from "../../shared/src/github.js";
 import { hmacKey, signJwt, verifyJwt } from "../../shared/src/jwt.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
@@ -9,6 +9,7 @@ import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig } from "./config.js";
 import type { DirectoryObject, RequestRecord } from "./directory-object.js";
 import { apiError, json } from "./errors.js";
+import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, type SpendView } from "./dashboard-page.js";
 import { cleanBatch } from "./events.js";
 import {
   DEVICE_TAKEN_MESSAGE,
@@ -59,12 +60,20 @@ const REVOKED_SESSION_TTL_MS = (ACCESS_TTL_S + 120) * 1000;
 const ISSUER = "directionallylocal-free";
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const OAUTH_COOKIE = "__Host-dl_oauth";
+/** The admin dashboard's browser session (see `adminWeb`). */
+const ADMIN_COOKIE = "__Host-dl_admin";
+/** Binds an admin GitHub round trip to the browser that started it. */
+const ADMIN_OAUTH_COOKIE = "__Host-dl_admin_oauth";
+const ADMIN_SESSION_TTL_S = 3600;
+/** A subpath of the OAuth app's registered callback (/device/callback), which GitHub accepts as a redirect_uri. */
+const ADMIN_CALLBACK_PATH = "/device/callback/admin";
 
 const perMinute = (n: number): Limit => ({ capacity: n, perHour: n * 60 });
 const LIMITS = {
   apiPerson: perMinute(60),
   apiIp: perMinute(60),
   deviceCodeIp: { capacity: 10, perHour: 10 },
+  adminSignInIp: { capacity: 10, perHour: 10 },
   pollIp: perMinute(120),
   refreshIp: { capacity: 60, perHour: 60 },
   inviteAttemptIp: { capacity: 10, perHour: 10 },
@@ -160,6 +169,9 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/device/deny") return deviceDeny(c);
   if (method === "POST" && path === "/device/invite") return deviceInvite(c);
   if (method === "POST" && path === "/device/no-invite") return deviceNoInvite(c);
+  if (method === "GET" && path === ADMIN_CALLBACK_PATH) return adminCallback(c);
+
+  if (path === "/admin" || path === "/admin/signin" || path === "/admin/signout" || path.startsWith("/admin/dashboard/")) return adminWeb(c, path, method);
 
   const adminPath = path.startsWith("/v1/admin/") ? path.slice(3) : path;
   if (adminPath.startsWith("/admin/")) return admin(c, adminPath.slice("/admin/".length), method);
@@ -940,6 +952,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
         now,
       });
       if (!allowance) return apiError(404, "not_found", "No such person.");
+      await directory(c).recordGrant({ githubId, tokensPerWeek: tokensPerWeek as number | null | undefined, usdPerWeek: usdPerWeek as number | null | undefined });
       return json({ githubId, allowance: allowanceView(allowance) });
     }
   }
@@ -983,4 +996,165 @@ async function adminMetrics(c: Ctx): Promise<Response> {
   if (to - from > 366 * DAY_MS) return apiError(400, "invalid_request", "The range can't be longer than 366 days.");
   const metrics = await directory(c).metrics({ from, to, now });
   return json({ ...metrics, generatedAt: new Date(now).toISOString(), today: isoDay(now) });
+}
+
+// ─── Admin dashboard (browser) ──────────────────────────────────────────────
+//
+// GET /admin is a server-rendered page; GET /admin/dashboard/<table>.csv downloads one table.
+// Both take an admin's browser session or, for scripts, an admin access token as the bearer.
+//
+// Browser sign-in is the OAuth web flow against the same GitHub app, with a redirect_uri of
+// /device/callback/admin: GitHub accepts any subpath of the registered callback, so the app's
+// settings don't change. GET /admin/signin stores a one-time `state` (hashed, 10 minutes) and
+// sets a SameSite=Lax cookie binding it to this browser; the callback must bring both back.
+// Only a GitHub id in ADMIN_GITHUB_IDS gets a session: a signed token (typ "admin", 1 hour,
+// with a session id) in an HttpOnly, Secure, SameSite=Strict, __Host- cookie. It can't be used
+// as a bearer token, and a bearer token can't be used as it. Every request checks the id is
+// still an admin and the session wasn't signed out. Pages only read, cross-site requests carry
+// no Strict cookie, and sign-out (the one POST) also requires a same-origin request.
+
+function adminCookie(value: string, maxAge: number): string {
+  return `${ADMIN_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
+}
+
+const CLEAR_ADMIN_OAUTH = `${ADMIN_OAUTH_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+
+interface AdminSession extends Identity {
+  sid: string;
+  exp: number;
+}
+
+/** The admin behind the session cookie, or undefined (no cookie, bad, expired, signed out, or no longer an admin). */
+async function adminSession(c: Ctx): Promise<AdminSession | undefined> {
+  const token = readCookie(c.request, ADMIN_COOKIE);
+  if (!token) return undefined;
+  const claims = await verifyJwt(token, await signingKey(c.config), Math.floor(c.now() / 1000), 0);
+  if (!claims || claims.typ !== "admin" || claims.iss !== ISSUER || typeof claims.login !== "string" || typeof claims.sid !== "string") return undefined;
+  const githubId = Number(claims.sub);
+  if (!Number.isSafeInteger(githubId) || !c.config.adminGithubIds.has(githubId)) return undefined;
+  if (!(await account(c, githubId).sessionAllowed(claims.sid, claims.iat))) return undefined;
+  return { githubId, login: claims.login, sid: claims.sid, exp: claims.exp };
+}
+
+/** Whether a state-changing browser request came from this site's own page. */
+function sameOrigin(c: Ctx): boolean {
+  const origin = c.request.headers.get("origin");
+  if (origin !== null) return origin === new URL(c.base).origin || origin === c.url.origin;
+  return c.request.headers.get("sec-fetch-site") === "same-origin";
+}
+
+async function adminWeb(c: Ctx, path: string, method: string): Promise<Response> {
+  if (path === "/admin/signin" && method === "GET") return adminSignIn(c);
+  if (path === "/admin/signout" && method === "POST") return adminSignOut(c);
+  const csv = /^\/admin\/dashboard\/([a-z-]+)\.csv$/.exec(path)?.[1];
+  if (method !== "GET" || (path !== "/admin" && (csv === undefined || !isCsvTable(csv)))) {
+    return apiError(404, "not_found", `${method} ${c.url.pathname} isn't a route.`);
+  }
+
+  let identity: Identity;
+  let viaCookie = false;
+  if (c.request.headers.has("authorization")) {
+    const caller = await authenticate(c);
+    if (caller instanceof Response) return caller;
+    if (!c.config.adminGithubIds.has(caller.githubId)) return apiError(403, "forbidden", "Admins only.");
+    identity = caller;
+  } else {
+    const session = await adminSession(c);
+    if (!session) {
+      return csv === undefined
+        ? signInPage(undefined, 401)
+        : apiError(401, "invalid_token", "Sign in at /admin first, or send an admin access token as the bearer.");
+    }
+    identity = session;
+    viaCookie = true;
+  }
+  const retry = await limited(c, `admin:gh:${identity.githubId}`, LIMITS.apiPerson);
+  if (retry !== undefined) return rateLimited(retry);
+
+  const now = c.now();
+  const { config, paused } = await runtime(c);
+  const weekParam = c.url.searchParams.get("week");
+  const topWeek = weekParam && /^\d{4}-\d{2}-\d{2}$/.test(weekParam) ? Date.parse(`${weekParam}T00:00:00Z`) : Number.NaN;
+  const [data, spend] = await Promise.all([
+    directory(c).dashboard({
+      now,
+      adminIds: [...c.config.adminGithubIds],
+      limits: { weeklyTokens: config.weeklyTokens, weeklyUsd: config.perPersonWeeklyUsdCap ?? null },
+      ...(Number.isFinite(topWeek) ? { topWeek } : {}),
+    }),
+    directory(c).spend(now),
+  ]);
+  const view: SpendView = {
+    weekUsd: spend.spentUsd,
+    totalUsd: spend.totalSpentUsd,
+    adminWeekUsd: spend.adminSpentUsd,
+    adminTotalUsd: spend.adminTotalSpentUsd,
+    weeklyCapUsd: config.globalWeeklyUsdCap ?? null,
+    totalCapUsd: config.globalTotalUsdCap ?? null,
+    resetsAt: spend.resetsAt,
+    paused,
+    pausedByEnv: c.config.paused,
+    openAdmission: config.openAdmission,
+    maxActiveUsers: config.maxActiveUsers,
+    weeklyTokens: config.weeklyTokens,
+    perPersonWeeklyUsd: config.perPersonWeeklyUsdCap ?? null,
+  };
+  if (csv !== undefined && isCsvTable(csv)) return dashboardCsv(csv, data, view);
+  return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie });
+}
+
+async function adminSignIn(c: Ctx): Promise<Response> {
+  const retry = await limited(c, `admin-signin:ip:${c.ip}`, LIMITS.adminSignInIp);
+  if (retry !== undefined) return signInPage(`Too many sign-in attempts. Try again in ${Math.ceil(retry / 60)} minutes.`, 429);
+  const begun = await auth(c).beginAdminOAuth(c.now());
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: githubAuthorizeUrl({ clientId: c.config.githubClientId }, `${c.base}${ADMIN_CALLBACK_PATH}`, begun.state),
+      "set-cookie": `${ADMIN_OAUTH_COOKIE}=${begun.browser}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
+
+async function adminCallback(c: Ctx): Promise<Response> {
+  const state = c.url.searchParams.get("state");
+  const browser = readCookie(c.request, ADMIN_OAUTH_COOKIE);
+  const clear = { "set-cookie": CLEAR_ADMIN_OAUTH };
+  if (!state || !browser || !(await auth(c).claimAdminOAuthState(state, browser, c.now()))) {
+    return deniedPage("Sign-in expired", "This sign-in link is invalid, used or expired. Start again.", 400, clear);
+  }
+  if (c.url.searchParams.get("error")) return deniedPage("Sign-in cancelled", "GitHub sign-in was cancelled.", 400, clear);
+  const code = c.url.searchParams.get("code");
+  const user = code
+    ? await githubUserFromCode(
+        { clientId: c.config.githubClientId, clientSecret: c.config.githubClientSecret },
+        code,
+        `${c.base}${ADMIN_CALLBACK_PATH}`,
+        c.fetch,
+        "directionallylocal-free",
+      )
+    : undefined;
+  if (!user) return deniedPage("GitHub sign-in failed", "GitHub didn't confirm who you are. Try again.", 502, clear);
+  if (!c.config.adminGithubIds.has(user.id)) return deniedPage("Admins only", `${user.login} isn't an admin of the free tier.`, 403, clear);
+
+  const iat = Math.floor(c.now() / 1000);
+  const token = await signJwt(
+    { iss: ISSUER, typ: "admin", sub: String(user.id), login: user.login, sid: `admin_${randomToken(16)}`, iat, exp: iat + ADMIN_SESSION_TTL_S },
+    await signingKey(c.config),
+  );
+  const response = signedInPage(user.login, clear);
+  response.headers.append("set-cookie", adminCookie(token, ADMIN_SESSION_TTL_S));
+  return response;
+}
+
+async function adminSignOut(c: Ctx): Promise<Response> {
+  if (!sameOrigin(c)) return deniedPage("Not signed out", "Sign out from the dashboard itself.", 403);
+  const session = await adminSession(c);
+  if (session) {
+    // Remembered until the token would have expired anyway.
+    await account(c, session.githubId).revokeSessions({ sids: [session.sid], until: (session.exp + 60) * 1000, now: c.now() });
+  }
+  return new Response(null, { status: 303, headers: { location: "/admin", "set-cookie": adminCookie("", 0), "cache-control": "no-store" } });
 }

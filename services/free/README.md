@@ -132,3 +132,31 @@ OpenRouter's account privacy settings.
 
 A per-person grant (`POST /admin/people/:id/grant`) still wins over the weekly defaults. The kill
 switch is `POST /admin/pause` and `/admin/unpause`; `PAUSED=true` in env pauses as well.
+
+## Admin dashboard
+
+`GET /admin` is a server-rendered page for admins: weekly active developers (3+ days and any
+day, last 8 weeks), cohort retention (weeks 1, 2 and 4 after sign-up), cost per person per week
+(total, median, mean, and the top 10 of any week), who reached their token or dollar allowance
+this week and last (and on which day), and global spend against the effective caps with the
+pause and admission state. Each table has a CSV at `/admin/dashboard/<table>.csv`
+(`spend`, `weekly-active`, `retention`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`).
+
+- **Admins are left out of every number:** anyone in `ADMIN_GITHUB_IDS` and anyone admitted as
+  an admin.
+- **What it reads:** only `daily_activity`, a per-person per-day roll-up of request and event
+  counts, charged tokens and cost, plus GitHub logins, sign-up times, per-person grants and the
+  spend totals. No model, event type or properties, session ids, prompts or code. A test runs
+  the dashboard under an SQLite authorizer that allows only those columns.
+- **The roll-up** is kept up to date with each request and event, and built once from the
+  existing log the first time this version starts.
+- **Reached the allowance** means charged tokens at 99% of the token allowance (the last
+  request's reservation can't fit in the final 1%) or cost at the dollar allowance, using
+  today's allowances, including grants set with `POST /admin/people/:id/grant` from this version
+  on.
+- **Sign-in:** "Sign in with GitHub" on the page runs the OAuth web flow with
+  `redirect_uri=<PUBLIC_URL>/device/callback/admin`. GitHub accepts subpaths of the registered
+  callback, so the OAuth app needs no change. Only ids in `ADMIN_GITHUB_IDS` get a session: an
+  HttpOnly, Secure, SameSite=Strict `__Host-` cookie holding a signed one-hour token that can't
+  be used as an API bearer token. Sign-out ends it at once. Scripts can send an admin access
+  token as the bearer instead.
