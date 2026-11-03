@@ -16,6 +16,7 @@ import type { ServerAnswers } from "./remote-install.js";
 import { loadSettings } from "./settings.js";
 import { serverLabel, setupWizard, type LocalSetup, type SetupDeps } from "./setup.js";
 import { createOpener } from "./tunnel.js";
+import { dlVersion } from "../versions.js";
 
 const GH = `gho_${"a".repeat(36)}`;
 const TOKEN = `aster_laptop_token_${"0".repeat(34)}`;
@@ -195,7 +196,7 @@ describe("dl setup on a laptop", () => {
     assert.equal(remote?.name, "198-51-100-7", "no hostname from the server: its address");
     assert.ok(server.calls.slice(probes.length).every((call) => call.access.identityFile === "/home/me/.ssh/work"), "the working key is used from then on");
     const commands = server.calls.map((call) => call.command);
-    assert.ok(commands.some((command) => command.includes("sudo -n env DL_INSTALL_ONLY=1 sh /tmp/dl-install.sh")));
+    assert.ok(commands.some((command) => command.includes(`sudo -n env DL_INSTALL_ONLY=1 DL_VERSION=${dlVersion()} sh /tmp/dl-install.sh`)));
     assert.ok(commands.includes("sudo -n dl up --needs --access ssh"));
     assert.ok(commands.includes("sudo -n dl up --access ssh --answers-stdin --events json"));
     assert.ok(events.includes("done access | private · reached over SSH"));

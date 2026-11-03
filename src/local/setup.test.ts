@@ -466,4 +466,17 @@ describe("on this computer: status and uninstall", () => {
     const fresh = await setUpOnThisComputer({ ui: new RecordingUi(), prompter: new ScriptedPrompter({}), ...options(system) });
     assert.deepEqual(fresh.needs, ["provider", "github"], "the keys went with --purge");
   });
+
+  it("--purge keeps dl itself when the install script put it in the same folder", async () => {
+    const system = new FakeComputer();
+    await setUp(system);
+    await system.writeFile(`${ROOT}/dl/lib/node_modules/directionallylocal/package.json`, "{}");
+    await system.writeFile(`${ROOT}/bin/dl`, "#!/bin/sh\n");
+    await uninstallFromThisComputer({ ui: new RecordingUi(), purge: true, ...options(system), forgetRemote: async () => true });
+    assert.ok(await system.exists(`${ROOT}/bin/dl`), "dl stays");
+    assert.ok(await system.exists(`${ROOT}/dl/lib/node_modules/directionallylocal/package.json`));
+    for (const gone of ["config/github.env", "config", "hotcell", "autopilot", "logs", "releases", "state.json"]) assert.equal(await system.exists(`${ROOT}/${gone}`), false, gone);
+    const fresh = await setUpOnThisComputer({ ui: new RecordingUi(), prompter: new ScriptedPrompter({}), ...options(system) });
+    assert.deepEqual(fresh.needs, ["provider", "github"], "the keys went with --purge");
+  });
 });

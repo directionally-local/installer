@@ -84,7 +84,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 
 ### One Autopilot and one Hotcell version
 
-`dl` bundles `autopilot-ai` at an exact version (its session client) and pins `hotcell` exactly too, and installs those same versions on every place it sets up, including the sandbox image, so the client and the server never drift and two people installing the same `dl` get the same sandboxes. `dl update NAME` brings a place back to both pins: a server gets its `dl` refreshed first (the install script) and then `dl up`; this computer re-runs its setup. When the laptop's own `dl` is behind npm, `dl update` says so with the one command that fixes it.
+`dl` bundles `autopilot-ai` at an exact version (its session client) and pins `hotcell` exactly too, and installs those same versions on every place it sets up, including the sandbox image, so the client and the server never drift and two people installing the same `dl` get the same sandboxes. `dl update NAME` brings a place back to both pins: a server gets its `dl` refreshed first (the install script, at this laptop's own `dl` version, so both ends match) and then `dl up`; this computer re-runs its setup. Setting up a server installs this laptop's `dl` version there too, never npm's latest. When the laptop's own `dl` is behind npm, `dl update` says so with the one command that fixes it.
 
 ## Commands
 
@@ -140,15 +140,19 @@ Set the answers as environment variables: `DL_TAILSCALE_AUTH_KEY`, `DL_PROVIDER`
 
 The laptop's setup drives the server over SSH with `dl up --access ssh --answers-stdin --events json`, which takes the answers as one JSON object on stdin (`{"provider": {"id", "baseUrl", "apiKey", "apiKeyEnv", "authHeader"?, "authFormat"?}, "githubToken"}`; an older laptop's `"openrouterKey"` still works) and reports progress as JSON lines. It runs twice: once to install, with `{}`, and once with the keys, after Autopilot's picker. `dl up --needs` reports which answers it still lacks, without changing anything. The server writes the provider into Aster's `aster.json` as `"provider": {"id", "baseUrl", "apiKeyEnv"}` with `"models": "catalog"`.
 
-## The one-line server install
+## The one-line install
 
-The curl path is still there for a server you set up by hand, as root on Ubuntu or Debian:
+For a laptop or a server:
 
 ```sh
 curl -fsSL https://directionallylocal.run | sh
 ```
 
-It installs Node.js if needed, installs `directionallylocal`, and runs `dl up`. The laptop's setup uses the same script to bootstrap a server over SSH.
+**On a laptop** (macOS or Linux, as yourself), it installs `dl` into `~/.directionallylocal` with no sudo: it uses your Node.js when it's new enough (22.23.4+, 24.22.1+ or 26.12.1+), and otherwise downloads Node.js 24 from nodejs.org into the same folder, checked against its published SHA-256, for `dl` alone (your shell's `node` stays as it is). It adds `~/.directionallylocal/bin` to your PATH in your shell's startup file (`.zshrc`, `.bashrc` or `.bash_profile`, fish's `conf.d`, else `.profile`) and starts `dl` in the folder you ran it from. If `dl` isn't found afterwards, open a new terminal tab. `DL_NO_START=1` skips starting `dl`, `DL_NO_MODIFY_PATH=1` leaves your startup file alone, and `DL_HOME=DIR` installs somewhere else. `dl local uninstall --purge` keeps `dl` itself.
+
+**On a server** (Ubuntu or Debian, as root: `curl -fsSL https://directionallylocal.run | sudo sh`), it installs Node.js if needed, installs `directionallylocal` globally, and runs `dl up`. The laptop's setup uses the same script to bootstrap a server over SSH, with `DL_INSTALL_ONLY=1` and the laptop's own `dl` version in `DL_VERSION`.
+
+Which one it is: a server when it runs as root on Linux, when the laptop's setup runs it (`DL_INSTALL_ONLY=1`), or on a Linux machine `dl up` has already set up; anything else is a laptop. That's the line `dl` itself draws: on a machine with no server install, root gets the server's instructions and everyone else the laptop's. `DL_MODE=server` or `DL_MODE=laptop` overrides it.
 
 ## What it sets up on a server
 

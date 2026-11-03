@@ -378,6 +378,11 @@ export async function uninstallFromThisComputer(input: UninstallInput): Promise<
   if (input.purge) {
     await step("data", async () => {
       if (state?.image) await system.run(dockerCli, ["image", "rm", state.image], { allowFailure: true, ...dockerEnv });
+      // dl itself may live here too (the install script's bin/, node/ and dl/): keep it, delete the rest.
+      if (await system.exists(join(paths.root, "dl"))) {
+        for (const dir of [paths.config, paths.hotcellHome, paths.autopilotHome, paths.logs]) await system.remove(dir);
+        return `keys and data in ${tilde(paths.root, ctx.home)} deleted · dl itself kept`;
+      }
       await system.remove(paths.root);
       return `${tilde(paths.root, ctx.home)} deleted`;
     });
