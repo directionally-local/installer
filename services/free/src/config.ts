@@ -54,6 +54,12 @@ export const DEFAULTS = {
    * OpenRouter's cache-read price over its input price for deepseek/deepseek-v4.1-flash-1017,
    * from https://openrouter.ai/api/v1/models on 2026-11-03: input $0.30/M, cache read
    * $0.006/M (and $0.15/M vs $0.003/M in its off-peak windows), so 0.02 at every hour.
+   *
+   * These are list prices. The host a request lands on bills its own prices, and their ratio
+   * can be very different: one cheap host lists $0.035/M input and $0.006/M cache read (about
+   * 0.17). After a week of real traffic, recheck the weight against what was actually billed
+   * (`requests.cost_usd` against cached and uncached tokens), and change it with
+   * `POST /admin/config {"cachedTokenWeight": ...}` if needed.
    */
   cachedTokenWeight: 0.02,
 } as const;
