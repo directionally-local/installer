@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { PAIRED_NAME } from "../local/layout.js";
+import { updateCommand } from "../install-method.js";
 import { nodeAdvisory } from "../node-advisory.js";
 import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
 import { palette } from "../ui.js";
@@ -82,7 +83,6 @@ const realSpawn: SessionSpawner = (command, args, env, options = {}) => spawn(co
 
 const FORWARDED: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
 
-const UPDATE = "npm install -g directionallylocal";
 
 class Interrupted extends Error {}
 
@@ -160,7 +160,7 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
   const c = palette(io.color === true);
   const autopilot = await (input.autopilot ?? findAutopilot)();
   if (!autopilot) {
-    io.err(`  ${c.red("✗")} The Autopilot that comes with dl isn't installed. Update: ${c.bold(UPDATE)}\n`);
+    io.err(`  ${c.red("✗")} The Autopilot that comes with dl isn't installed. Update: ${c.bold(updateCommand())}\n`);
     return 1;
   }
   const args = [
@@ -189,7 +189,7 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
       started.on("error", (error) => resolve(error));
     });
     if (outcome instanceof Error) {
-      io.err(`  ${c.red("✗")} Couldn't start Autopilot: ${outcome.message}. Update: ${c.bold(UPDATE)}\n`);
+      io.err(`  ${c.red("✗")} Couldn't start Autopilot: ${outcome.message}. Update: ${c.bold(updateCommand())}\n`);
       return 1;
     }
     if (outcome.code !== null) return outcome.code;
@@ -212,7 +212,7 @@ async function startSession(plan: SessionPlan, target: { remote: RemoteServer; r
   // Asked while the tunnel opens; it only matters right before launching.
   const ready = autopilot ? (input.probe ?? supportsAttachRemote)(autopilot).catch(() => false) : Promise.resolve(false);
   const missing = () => {
-    io.err(`  ${c.red("✗")} The Autopilot that comes with dl ${autopilot ? "is too old to open a session" : "isn't installed"}. Update: ${c.bold(UPDATE)}\n`);
+    io.err(`  ${c.red("✗")} The Autopilot that comes with dl ${autopilot ? "is too old to open a session" : "isn't installed"}. Update: ${c.bold(updateCommand())}\n`);
     return 1;
   };
 

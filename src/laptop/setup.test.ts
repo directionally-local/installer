@@ -17,6 +17,7 @@ import { loadSettings } from "./settings.js";
 import { serverLabel, setupForTasks, setupWizard, type LocalSetup, type SetupDeps, type SetupOptions } from "./setup.js";
 import { createOpener } from "./tunnel.js";
 import { dlVersion } from "../versions.js";
+import { updateCommand } from "../install-method.js";
 
 const GH = `gho_${"a".repeat(36)}`;
 const TOKEN = `aster_laptop_token_${"0".repeat(34)}`;
@@ -83,6 +84,7 @@ function deps(server: FakeSshServer, answers: Record<string, string>, extra: Par
     openSession: async (remote) => { sessions.push(remote); return 0; },
     // The same on every machine the tests run on (Windows has its own test).
     platform: "linux",
+    registry: { has: async () => true, latest: async () => undefined },
     now: () => new Date("2026-10-28T09:00:00.000Z"),
     ...extra,
   };
@@ -164,6 +166,26 @@ describe("dl setup on a laptop", () => {
     assert.ok(run.ui.events.includes("line done Provider | Ollama · qwen3:32b · key stays on your server"));
     assert.ok(run.ui.events.includes("done keys | Ollama"));
     assert.deepEqual((await loadSettings(join(root, "config.json"))).placeModels, { box: "qwen3:32b" });
+  });
+
+  it("never installs an older dl over a server's newer one, and says to update this laptop", async () => {
+    const server = new FakeSshServer();
+    server.installed = true;
+    server.dlVersion = "99.0.0";
+    const run = deps(server, { Where: "2", Server: "1" });
+    assert.equal((await setupWizard(run.deps))?.name, "box", "setup goes on with the server's own dl");
+    assert.ok(!server.calls.some((call) => call.command.includes("dl-install.sh")));
+    assert.equal(server.dlVersion, "99.0.0");
+    const hint = updateCommand().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(run.text(), new RegExp(`! box runs dl 99\\.0\\.0, newer than this laptop's ${dlVersion().replace(/\./g, "\\.")}\\. Update this laptop: ${hint}\n`));
+  });
+
+  it("with an unpublished dl here, installs npm's latest on a server that has none", async () => {
+    const server = new FakeSshServer();
+    const run = deps(server, { Where: "2", Server: "1" }, { registry: { has: async () => false, latest: async () => "0.10.1" } });
+    await setupWizard(run.deps);
+    assert.ok(server.calls.some((call) => call.command.endsWith("DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh /tmp/dl-install.sh")));
+    assert.match(run.text(), new RegExp(`! This laptop's dl ${dlVersion().replace(/\./g, "\\.")} isn't on npm \\(a development build\\?\\), so box gets npm's latest dl \\(0\\.10\\.1\\) instead\\.`));
   });
 
   it("stops quietly when Autopilot's picker is cancelled; the install stays and the next run picks up there", async () => {
@@ -422,7 +444,7 @@ describe("dl setup on a laptop", () => {
       const run = deps(new FakeSshServer(), { "GitHub CLI": "" }, { ...fakeLocal(local), openSession: undefined, place: "local" });
       assert.deepEqual(await setupWizard(run.deps), local);
       assert.ok(!run.prompter.asked.some((question) => question.includes("Where")), run.prompter.asked.join("\n"));
-      assert.doesNotMatch(run.text(), /Where should they run/);
+      assert.doesNotMatch(run.text(), /Where should (they|background tasks) run/);
       assert.deepEqual(run.connects, [{}], "the provider for the sandboxes, from Autopilot's picker");
       assert.ok(run.prompter.asked.some((question) => question.includes("Use your GitHub CLI login")), "the GitHub token is asked here, where pull requests need it");
       assert.match(run.text(), /✓ Ready · fits ~4 agents at once\n$/, "the task follows; no 'Type dl' hint");
@@ -439,21 +461,27 @@ describe("dl setup on a laptop", () => {
       const setUp = async (options: SetupOptions) => { chosen.push(options); return 0; };
       let text = "";
       const io = { out: (chunk: string) => { text += chunk; }, err: (chunk: string) => { text += chunk; }, color: false };
-      const prompter = new ScriptedPrompter({ "Where should they run?": "Run them on this computer" });
+      const prompter = new ScriptedPrompter({ "Where should background tasks run?": "This computer" });
       assert.equal(await setupForTasks({ io, terminal: true, prompter, platform: "darwin", setUp }), 0);
       assert.equal(chosen[0]!.place, "local");
-      assert.match(text, /Background tasks keep going when this laptop sleeps\./);
+      assert.deepEqual(prompter.asked.map((question) => question.trim()), ["Where should background tasks run?"]);
+      assert.doesNotMatch(text, /Background tasks keep going/, "true only of a server, so it's said there");
 
-      const options: string[] = [];
-      const listing = { select: async (_question: string, list: Array<{ label: string; detail?: string }>) => { options.push(...list.map((option) => `${option.label}${option.detail ? ` (${option.detail})` : ""}`)); return { value: "server" }; } } as unknown as ScriptedPrompter;
-      assert.equal(await setupForTasks({ io, terminal: true, prompter: listing, platform: "darwin", setUp }), 0);
-      assert.deepEqual(options, ["Use my own server", "Run them on this computer (needs Docker Desktop or OrbStack)"]);
+      const asked: Array<{ question: string; options: string[] }> = [];
+      const listing = (platform: NodeJS.Platform) => ({ select: async (question: string, list: Array<{ label: string; detail?: string }>) => {
+        asked.push({ question: question.trim(), options: list.map((option) => `${option.label}${option.detail ? ` — ${option.detail}` : ""}`) });
+        return { value: "server" };
+      } }) as unknown as ScriptedPrompter;
+      assert.equal(await setupForTasks({ io, terminal: true, prompter: listing("darwin"), platform: "darwin", setUp }), 0);
+      assert.deepEqual(asked[0], { question: "Where should background tasks run?", options: ["My own server — keeps going when this laptop sleeps · needs SSH access", "This computer — needs Docker Desktop or OrbStack"] });
       assert.equal(chosen[1]!.place, "server");
+      assert.equal(await setupForTasks({ io, terminal: true, prompter: listing("linux"), platform: "linux", setUp }), 0);
+      assert.deepEqual(asked[1]!.options, ["My own server — keeps going when this laptop sleeps · needs SSH access", "This computer — needs Docker"]);
 
       const never = new ScriptedPrompter({});
       assert.equal(await setupForTasks({ io, terminal: true, prompter: never, platform: "win32", setUp }), 0);
       assert.deepEqual(never.asked, []);
-      assert.equal(chosen[2]!.place, "server");
+      assert.equal(chosen[3]!.place, "server");
     });
   });
 });

@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { main, splitPassthrough, type MainOptions } from "../cli.js";
 import { PATHS } from "../layout.js";
 import { PAIRED_NAME } from "../local/layout.js";
+import { updateCommand } from "../install-method.js";
 import { ScriptedPrompter } from "../prompt.js";
 import { fakeTunnels, type FakeTunnel } from "../test-support/fake-tunnel.js";
 import { DEFAULT_MODEL, type LaptopIO } from "./commands.js";
@@ -18,6 +19,9 @@ import type { SetupOptions } from "./setup.js";
 import { autopilotOnPath, bundledAutopilot, openSession, planSession, startHere, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput, type SessionSpawner } from "./session.js";
 import { loadSessions, rememberSession } from "./session-store.js";
 import { createOpener, type RemoteOpener } from "./tunnel.js";
+
+/** The update hint for how this dl is installed. */
+const UPDATE = updateCommand().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const TOKEN = "aster_laptop_token_0000000000000000000000000000000000";
 const NEW_ID = "7c1d2e3f-0000-4000-8000-000000000000";
@@ -566,15 +570,15 @@ describe("dl inside a project", () => {
     const dir = await checkout();
     const missing = capture();
     assert.equal(await session({ cwd: dir, autopilot: async () => undefined }, missing), 1);
-    assert.match(missing.text(), /✗ The Autopilot that comes with dl isn't installed\. Update: npm install -g directionallylocal/);
+    assert.match(missing.text(), new RegExp(`✗ The Autopilot that comes with dl isn't installed\\. Update: ${UPDATE}`));
     const old = capture();
     assert.equal(await session({ cwd: dir, probe: async () => false }, old), 1);
-    assert.match(old.text(), /✗ The Autopilot that comes with dl is too old to open a session\. Update: npm install -g directionallylocal/);
+    assert.match(old.text(), new RegExp(`✗ The Autopilot that comes with dl is too old to open a session\\. Update: ${UPDATE}`));
     assert.equal(autopilot.launches.length, 0);
     autopilot.code = 2;
     const unknown = capture();
     assert.equal(await session({ cwd: dir }, unknown), 1);
-    assert.match(unknown.text(), /too old to open a session\. Update: npm install -g directionallylocal/);
+    assert.match(unknown.text(), new RegExp(`too old to open a session\\. Update: ${UPDATE}`));
     const failed = capture();
     autopilot.code = 1;
     assert.equal(await session({ cwd: dir }, failed), 1);
@@ -668,7 +672,7 @@ describe("dl on this computer", () => {
     assert.equal(await local({ cwd: dir }, capture()), 7);
     const missing = capture();
     assert.equal(await local({ cwd: dir, autopilot: async () => undefined }, missing), 1);
-    assert.match(missing.text(), /✗ The Autopilot that comes with dl isn't installed\. Update: npm install -g directionallylocal/);
+    assert.match(missing.text(), new RegExp(`✗ The Autopilot that comes with dl isn't installed\\. Update: ${UPDATE}`));
   });
 
   it("leaves Ctrl-C to Autopilot and passes SIGTERM and SIGHUP on", async () => {
@@ -868,15 +872,15 @@ describe("dl the first time on a laptop", () => {
     const runs: Array<{ task: string; cwd: string }> = [];
     for (const [answer, expected] of [["2", "local"], ["1", "server"]] as const) {
       setups = [];
-      const prompter = new ScriptedPrompter({ "Where should they run?": answer });
+      const prompter = new ScriptedPrompter({ "Where should background tasks run?": answer });
       const io = capture();
       const code = await inside(dir, () => main(["run", "fix", "the", "test"], io, laptop(prompter, {
         setup: async (options) => { setups.push(options); await saveRemote(place(expected === "local" ? PAIRED_NAME : "box", api.url)); return 0; },
         run: async (input) => { runs.push({ task: input.task, cwd: input.cwd }); return 0; },
       })));
       assert.equal(code, 0);
-      assert.match(plainText(io.text()), /Background tasks keep going when this laptop sleeps\./);
-      assert.deepEqual(prompter.asked.map((question) => plainText(question).trim()), ["Where should they run?"]);
+      assert.doesNotMatch(plainText(io.text()), /Background tasks keep going/, "only the server option keeps going when the laptop sleeps");
+      assert.deepEqual(prompter.asked.map((question) => plainText(question).trim()), ["Where should background tasks run?"]);
       assert.equal(setups.length, 1);
       assert.equal(setups[0]!.place, expected, "straight into that setup, without asking where again");
       assert.equal(runs.at(-1)!.task, "fix the test");

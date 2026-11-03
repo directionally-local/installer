@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { FakeSshServer } from "../test-support/fake-ssh.js";
 import { PlainUi, RecordingUi } from "../ui.js";
-import { applyOnServer, bootstrap, bootstrapCommand, BootstrapRenderer, EventReplayer, installOnServer, pairLaptop, serverNeeds, wireAnswers } from "./remote-install.js";
+import { applyOnServer, bootstrap, bootstrapCommand, BootstrapRenderer, ensureServerDl, EventReplayer, installOnServer, pairLaptop, planServerDl, serverDlVersion, serverNeeds, wireAnswers, type DlRegistry } from "./remote-install.js";
 import { openrouterAnswer } from "../provider.js";
 import type { ServerFacts } from "./ssh.js";
 import { dlVersion } from "../versions.js";
@@ -25,6 +25,79 @@ describe("installing over SSH", () => {
     const server = new FakeSshServer();
     await bootstrap(box, root, server.exec, new RecordingUi(), undefined, "0.10.1");
     assert.match(server.calls[0]!.command, /DL_VERSION=0\.10\.1 sh/);
+  });
+
+  it("installs npm's latest only when told to, with no DL_VERSION", () => {
+    assert.equal(bootstrapCommand(root, undefined, null), "curl -fsSL 'https://directionallylocal.run' -o /tmp/dl-install.sh && DL_INSTALL_ONLY=1 sh /tmp/dl-install.sh");
+  });
+
+  it("reads the server's dl version, and nothing when it has no dl", async () => {
+    const server = new FakeSshServer();
+    assert.equal(await serverDlVersion(box, server.exec), undefined);
+    server.installed = true;
+    server.dlVersion = "0.10.1";
+    assert.equal(await serverDlVersion(box, server.exec), "0.10.1");
+    assert.equal(server.calls.at(-1)!.command, "command -v dl >/dev/null 2>&1 && dl --version");
+    server.dlVersion = "not a version";
+    assert.equal(await serverDlVersion(box, server.exec), undefined);
+  });
+
+  describe("never downgrading a server's dl", () => {
+    const published: DlRegistry = { has: async () => true, latest: async () => "0.10.1" };
+    const unpublished: DlRegistry = { has: async () => false, latest: async () => "0.10.1" };
+    const offline: DlRegistry = { has: async () => undefined, latest: async () => undefined };
+    const plan = (server: string | undefined, laptop: string, registry = published) => planServerDl({ name: "box", server, laptop, registry, update: "curl -fsSL https://directionallylocal.run | sh" });
+
+    it("leaves a newer server as it is and says how to update this laptop", async () => {
+      assert.deepEqual(await plan("0.11.0", "0.10.1"), { action: "keep", reason: "newer", message: "box runs dl 0.11.0, newer than this laptop's 0.10.1. Update this laptop: curl -fsSL https://directionallylocal.run | sh" });
+      assert.equal((await plan("0.10.10", "0.10.9")).action, "keep", "numeric, not lexicographic");
+      assert.equal((await plan("1.0.0", "1.0.0-rc.2")).action, "keep", "a release is newer than its pre-release");
+      assert.equal((await plan("1.0.0-rc.10", "1.0.0-rc.2")).action, "keep", "pre-release numbers compare as numbers");
+    });
+
+    it("does nothing when the versions are the same", async () => {
+      assert.deepEqual(await plan("0.10.1", "0.10.1"), { action: "keep", reason: "same" });
+      assert.deepEqual(await plan("0.10.1+build.5", "0.10.1"), { action: "keep", reason: "same" }, "build metadata doesn't count");
+    });
+
+    it("upgrades an older server, or one without dl, to this laptop's version", async () => {
+      assert.deepEqual(await plan("0.9.3", "0.10.1"), { action: "install", version: "0.10.1" });
+      assert.deepEqual(await plan("1.0.0-rc.1", "1.0.0"), { action: "install", version: "1.0.0" });
+      assert.deepEqual(await plan(undefined, "0.10.1"), { action: "install", version: "0.10.1" });
+      assert.deepEqual(await plan("0.9.3", "0.10.1", offline), { action: "install", version: "0.10.1" }, "npm unreachable: try this laptop's version, as before");
+    });
+
+    it("with a development build here, keeps the server's dl, or installs npm's latest on a server without one", async () => {
+      assert.deepEqual(await plan("0.10.1", "0.10.2-dev.0", unpublished), {
+        action: "keep",
+        reason: "unpublished",
+        message: "This laptop's dl 0.10.2-dev.0 isn't on npm (a development build?), so box keeps its dl 0.10.1.",
+      });
+      assert.deepEqual(await plan(undefined, "0.10.2-dev.0", unpublished), {
+        action: "install",
+        version: "0.10.1",
+        message: "This laptop's dl 0.10.2-dev.0 isn't on npm (a development build?), so box gets npm's latest dl (0.10.1) instead.",
+      });
+      assert.deepEqual(await plan(undefined, "0.10.2-dev.0", { has: async () => false, latest: async () => undefined }), {
+        action: "install",
+        version: null,
+        message: "This laptop's dl 0.10.2-dev.0 isn't on npm (a development build?), so box gets npm's latest dl instead.",
+      });
+      assert.deepEqual(await plan("0.11.0", "0.10.2-dev.0", unpublished), { action: "keep", reason: "newer", message: "box runs dl 0.11.0, newer than this laptop's 0.10.2-dev.0. Update this laptop: curl -fsSL https://directionallylocal.run | sh" }, "a newer server is left alone either way");
+    });
+
+    it("runs the install script only when the plan says so", async () => {
+      for (const [installed, expected] of [["0.11.0", false], ["0.10.1", false], ["0.9.0", true]] as const) {
+        const server = new FakeSshServer();
+        server.installed = true;
+        server.dlVersion = installed;
+        const said: string[] = [];
+        await ensureServerDl(box, root, server.exec, { name: "box", ui: () => new RecordingUi(), say: (line) => said.push(line), registry: published, laptop: "0.10.1" });
+        assert.equal(server.calls.some((call) => call.command.includes("dl-install.sh")), expected, installed);
+        assert.equal(server.dlVersion, expected ? "0.10.1" : installed);
+        assert.equal(said.length, installed === "0.11.0" ? 1 : 0);
+      }
+    });
   });
 
   it("turns install.sh's plain lines into checklist steps", async () => {

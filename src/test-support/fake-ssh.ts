@@ -27,6 +27,8 @@ export class FakeSshServer {
   installFails = false;
   bootstrapFails = false;
   paired: string[] = [];
+  /** What `dl --version` prints once dl is installed; install.sh sets it to the DL_VERSION it installed. */
+  dlVersion: string | undefined;
   /** The server's dl predates `dl keys`. */
   oldDl = false;
   /** Replaced keys, as the server got them on stdin. */
@@ -64,9 +66,11 @@ export class FakeSshServer {
     if (command.includes("dl-install.sh")) {
       if (this.bootstrapFails) return result(1, ".. Installing Node.js\nE: Unable to locate package nodejs\n", "directionallylocal: Installing Node.js failed\n");
       this.installed = true;
+      this.dlVersion = /DL_VERSION=(\S+)/.exec(command)?.[1] ?? "0.2.0";
       return result(0, `.. Installing Node.js\nok Installing Node.js: 24.11.0\n.. Installing dl\nok Installing dl: ${this.installed ? "0.2.0" : ""}\n`);
     }
     if (!this.installed) return result(127, "", "sh: 1: dl: not found\n");
+    if (command.includes("dl --version")) return this.dlVersion ? result(0, `${this.dlVersion}\n`) : result(1);
     if (command.includes("dl up --needs")) {
       const needs = [this.oldProviderDl ? "openrouter" : "provider", "github"].filter((need) => !this.keys.has(need === "openrouter" ? "provider" : need));
       return result(0, `${JSON.stringify({ needs })}\n`);
