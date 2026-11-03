@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -74,7 +74,7 @@ describe("install.sh", () => {
  * Node that is patched or not, npm installing a fake dl into --prefix, and curl serving a
  * Node.js download from `dist`. DL_TTY names a missing file, so there's no terminal to start dl in.
  */
-function laptopInstall(options: { os?: "Darwin" | "Linux"; uid?: number; nodePatched?: boolean; shell?: string; env?: Record<string, string>; dist?: (dir: string) => void; npmFails?: boolean; terminal?: boolean; extraPath?: string } = {}) {
+function laptopInstall(options: { os?: "Darwin" | "Linux"; uid?: number; nodePatched?: boolean; shell?: string; env?: Record<string, string>; dist?: (dir: string) => void; npmFails?: boolean; terminal?: boolean; extraPath?: string | ((home: string) => string); home?: (home: string) => void; dlExit?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dl-install-laptop-"));
   const bin = join(dir, "stubs");
   const home = join(dir, "home");
@@ -87,7 +87,7 @@ function laptopInstall(options: { os?: "Darwin" | "Linux"; uid?: number; nodePat
   stub("id", `echo ${options.uid ?? 501}`);
   stub("uname", `case "$1" in -m) echo arm64 ;; *) echo ${options.os ?? "Darwin"} ;; esac`);
   // A Node: -e is the CVE check; anything else runs dl's entry, which answers --version.
-  const node = (patched: boolean) => `case "$1" in -e) exit ${patched ? 0 : 1} ;; -v) echo v24.22.1 ;; *) [ "$2" = --version ] && echo 0.10.0 || echo "dl $* in $(pwd)" >> "${dir}/started.log" ;; esac`;
+  const node = (patched: boolean) => `case "$1" in -e) exit ${patched ? 0 : 1} ;; -v) echo v24.22.1 ;; *) [ "$2" = --version ] && echo 0.10.0 || { echo "dl $* in $(pwd)" >> "${dir}/started.log"; exit ${options.dlExit ?? 0}; } ;; esac`;
   stub("node", node(options.nodePatched ?? true));
   // npm: records its arguments and installs a dl entry point under --prefix.
   const npm = options.npmFails ? 'echo "npm ERR! 404"; exit 1' : `echo "$*" >> "${dir}/npm.log"
@@ -100,13 +100,15 @@ file="${dist}/$(basename "$url")"; [ -f "$file" ] || exit 22
 if [ -n "$out" ]; then cp "$file" "$out"; else cat "$file"; fi`);
   stub("sudo", `echo "sudo $*" >> "${dir}/sudo.log"; exit 1`);
   options.dist?.(dist);
+  options.home?.(home);
+  const extraPath = typeof options.extraPath === "function" ? options.extraPath(home) : options.extraPath;
   // An empty file stands in for the terminal: opening it works, as /dev/tty does at one.
   const tty = join(dir, "terminal");
   if (options.terminal) writeFileSync(tty, "");
   {
     const result = spawnSync("sh", [SCRIPT], {
       cwd: home,
-      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home, SHELL: options.shell ?? "/bin/zsh", DL_NODE_DIST: "https://nodejs.example/dist", DL_TTY: options.terminal ? tty : join(dir, "no-terminal"), DL_SERVER_STATE: join(dir, "no-server-state"), ...options.env, ...(options.extraPath ? { PATH: `${options.extraPath}:${bin}:/usr/bin:/bin` } : {}) },
+      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home, SHELL: options.shell ?? "/bin/zsh", DL_NODE_DIST: "https://nodejs.example/dist", DL_TTY: options.terminal ? tty : join(dir, "no-terminal"), DL_SERVER_STATE: join(dir, "no-server-state"), ...options.env, ...(extraPath ? { PATH: `${extraPath}:${bin}:/usr/bin:/bin` } : {}) },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -126,6 +128,11 @@ function nodeDist(dist: string, options: { corrupt?: boolean } = {}): void {
     chmodSync(join(build, name, "bin", file), 0o755);
   };
   write("node", 'case "$1" in -e) exit 0 ;; -v) echo v24.22.1 ;; *) echo 0.10.0 ;; esac');
+  // What dl never uses, which the install drops: C headers and docs.
+  mkdirSync(join(build, name, "include", "node"), { recursive: true });
+  writeFileSync(join(build, name, "include", "node", "node.h"), "");
+  writeFileSync(join(build, name, "CHANGELOG.md"), "");
+  writeFileSync(join(build, name, "LICENSE"), "");
   write("npm", `echo "own $*" >> "${dirname(dist)}/npm.log"
 prefix=""; while [ $# -gt 0 ]; do [ "$1" = --prefix ] && prefix=$2; shift; done
 mkdir -p "$prefix/lib/node_modules/directionallylocal/bin" && echo '// dl' > "$prefix/lib/node_modules/directionallylocal/bin/directionallylocal.mjs"`);
@@ -148,7 +155,8 @@ describe("install.sh on a laptop", () => {
     const result = run();
     assert.equal(result.status, 0, result.stderr);
     const root = join(result.home, ".directionallylocal");
-    assert.match(result.npm ?? "", new RegExp(`^install -g --prefix ${root}/dl --no-audit --no-fund --loglevel=error directionallylocal@latest$`, "m"));
+    assert.match(result.npm ?? "", new RegExp(`^install -g --prefix ${root}/dl --cache ${root}/npm-cache --no-audit --no-fund --loglevel=error directionallylocal@latest$`, "m"));
+    assert.ok(!existsSync(join(root, "npm-cache")), "npm's cache for the install is removed afterwards");
     assert.equal(result.sudo, undefined, "no sudo");
     assert.equal(result.curl, undefined, "no Node download");
     const wrapper = result.read(join(root, "bin", "dl"))!;
@@ -157,8 +165,8 @@ describe("install.sh on a laptop", () => {
     assert.ok(existsSync(join(root, "bin", "directionallylocal")));
     assert.equal(result.read(join(result.home, ".zshrc")), `\n# Directionally Local (dl)\nexport PATH="${root}/bin:$PATH"\n`);
     assert.match(result.stdout, /ok Installing dl: dl 0\.10\.0 · in .*\.directionallylocal\n\.\. Adding dl to your PATH\nok Adding dl to your PATH: in .*\/\.zshrc\n/);
-    assert.match(result.stdout, /Open a new terminal tab if dl isn't found\./);
-    assert.match(result.stdout, /Then type: dl\n$/, "no terminal: dl isn't started");
+    assert.match(result.stdout, /\n {2}Next time, open a new terminal or run: source ~\/\.zshrc\n/, "this shell's PATH can't change: the one line that fixes it");
+    assert.match(result.stdout, /Then run: source ~\/\.zshrc && dl\n$/, "no terminal: dl isn't started");
     assert.doesNotMatch(result.stdout, /sudo sh/, "the server hint is for Linux");
   });
 
@@ -183,7 +191,9 @@ describe("install.sh on a laptop", () => {
     const wrapper = result.read(join(root, "bin", "dl"))!;
     assert.match(wrapper, new RegExp(`export PATH="${root}/node/bin:\\$PATH"\nexec "${root}/node/bin/node" `), "its own Node, on PATH for dl only");
     assert.ok(existsSync(join(root, "node", "bin", "node")));
-    assert.ok(!existsSync(join(root, "node-v24.22.1-darwin-arm64.tar.gz.download")), "the download is removed");
+    assert.ok(!lstatSync(join(root, "node")).isSymbolicLink(), "one copy of Node, in node itself");
+    assert.deepEqual(readdirSync(root).sort(), ["bin", "dl", "node"], "no versioned Node directory, download or npm cache beside it");
+    assert.deepEqual(readdirSync(join(root, "node")).sort(), ["LICENSE", "bin"], "no C headers or docs");
     assert.match(result.read(join(result.home, ".bash_profile")) ?? "", /export PATH=".*\.directionallylocal\/bin:\$PATH"/, "bash on macOS reads .bash_profile");
   });
 
@@ -210,10 +220,11 @@ describe("install.sh on a laptop", () => {
     assert.equal(result.status, 0, result.stderr);
     assert.ok(!existsSync(join(result.home, ".zshrc")));
     assert.ok(existsSync(join(home, "dl-here", "bin", "dl")));
-    assert.match(result.stdout, /Open a new terminal tab if dl isn't found/, "not on PATH yet");
+    assert.match(result.stdout, new RegExp(`dl isn't on your PATH\\. To use it, run: export PATH="${home}/dl-here/bin:\\$PATH"\n`), "not on PATH yet, and no startup file says so");
     const onPath = run({ env: { DL_NO_MODIFY_PATH: "1", DL_HOME: join(home, "dl-there") }, extraPath: join(home, "dl-there", "bin") });
     assert.equal(onPath.status, 0, onPath.stderr);
-    assert.doesNotMatch(onPath.stdout, /Open a new terminal tab/);
+    assert.doesNotMatch(onPath.stdout, /new terminal|PATH|source/);
+    assert.match(onPath.stdout, /Then type: dl\n$/);
   });
 
   it("at a terminal, ends by starting dl in the folder it ran from", () => {
@@ -222,9 +233,67 @@ describe("install.sh on a laptop", () => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.read(join(result.dir, "started.log")) ?? "", new RegExp(`^dl .*directionallylocal\\.mjs in ${result.home}\n$`));
     assert.doesNotMatch(result.stdout, /Then type: dl/);
+    // Back at the shell it was piped from, whose PATH it couldn't change: the line that fixes it, last.
+    assert.match(result.stdout, /To use dl in this terminal, run: source ~\/\.zshrc\n$/);
     const skipped = laptopInstall({ terminal: true, env: { DL_NO_START: "1" } });
     cleanup.push(skipped.dir);
     assert.equal(skipped.read(join(skipped.dir, "started.log")), undefined);
+  });
+
+  it("links dl into ~/.local/bin when this shell has it on PATH, so dl works in the same terminal", () => {
+    const localBin = (home: string) => join(home, ".local", "bin");
+    const result = run({ os: "Linux", shell: "/bin/bash", terminal: true, home: (home) => mkdirSync(localBin(home), { recursive: true }), extraPath: localBin });
+    assert.equal(result.status, 0, result.stderr);
+    const root = join(result.home, ".directionallylocal");
+    assert.equal(readlinkSync(join(localBin(result.home), "dl")), join(root, "bin", "dl"));
+    assert.equal(readlinkSync(join(localBin(result.home), "directionallylocal")), join(root, "bin", "directionallylocal"));
+    assert.match(result.stdout, /ok Linking dl into ~\/\.local\/bin: works in this terminal too\n/);
+    assert.doesNotMatch(result.stdout, /source|new terminal/, "nothing to do");
+    assert.match(result.read(join(result.home, ".bashrc")) ?? "", /export PATH=".*\.directionallylocal\/bin:\$PATH"/, "new shells get it from .bashrc as before");
+
+    // Not on PATH (Ubuntu adds ~/.local/bin only when it exists at login): no link, the reminder instead.
+    const notOnPath = run({ os: "Linux", shell: "/bin/bash", terminal: true, home: (home) => mkdirSync(localBin(home), { recursive: true }) });
+    assert.equal(notOnPath.status, 0, notOnPath.stderr);
+    assert.ok(!existsSync(join(localBin(notOnPath.home), "dl")));
+    assert.match(notOnPath.stdout, /Next time, open a new terminal or run: source ~\/\.bashrc\n/);
+    assert.match(notOnPath.stdout, /To use dl in this terminal, run: source ~\/\.bashrc\n$/);
+
+    // Someone else's dl there stays; the reminder instead.
+    const taken = run({ os: "Linux", shell: "/bin/bash", home: (home) => { mkdirSync(localBin(home), { recursive: true }); writeFileSync(join(localBin(home), "dl"), "#!/bin/sh\n"); }, extraPath: localBin });
+    assert.equal(taken.status, 0, taken.stderr);
+    assert.equal(readFileSync(join(localBin(taken.home), "dl"), "utf8"), "#!/bin/sh\n");
+    assert.match(taken.stdout, /Then run: source ~\/\.bashrc && dl\n$/);
+  });
+
+  it("for sh, says . ~/.profile (sh has no source)", () => {
+    const result = run({ os: "Linux", shell: "/bin/sh" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Next time, open a new terminal or run: \. ~\/\.profile\n/);
+  });
+
+  it("passes on dl's exit code, after the reminder", () => {
+    const result = run({ terminal: true, dlExit: 3 });
+    assert.equal(result.status, 3);
+    assert.match(result.stdout, /To use dl in this terminal, run: source ~\/\.zshrc\n$/);
+  });
+
+  it("replaces an earlier install's Node link and versioned directory with one node directory", () => {
+    const result = run({
+      nodePatched: false,
+      dist: (dist) => nodeDist(dist),
+      home: (home) => {
+        // As earlier versions of this script left it, with a Node that's now too old.
+        const root = join(home, ".directionallylocal");
+        mkdirSync(join(root, "node-v24.10.0-darwin-arm64", "bin"), { recursive: true });
+        writeFileSync(join(root, "node-v24.10.0-darwin-arm64", "bin", "node"), "#!/bin/sh\nexit 1\n");
+        chmodSync(join(root, "node-v24.10.0-darwin-arm64", "bin", "node"), 0o755);
+        symlinkSync(join(root, "node-v24.10.0-darwin-arm64"), join(root, "node"));
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const root = join(result.home, ".directionallylocal");
+    assert.ok(!lstatSync(join(root, "node")).isSymbolicLink());
+    assert.deepEqual(readdirSync(root).sort(), ["bin", "dl", "node"]);
   });
 
   it("refuses root on macOS, and fails clearly when npm does", () => {
