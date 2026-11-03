@@ -36,6 +36,7 @@ describe("runtime settings (units)", () => {
       globalTotalUsdCap: 1000,
       maxActiveUsers: 50,
       openAdmission: false,
+      cachedTokenWeight: 0.02,
     });
   });
 

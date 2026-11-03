@@ -3,7 +3,7 @@ import { sha256Hex } from "../../shared/src/auth.js";
 import { githubAuthorizeUrl, githubUserFromCode, type Fetch } from "../../shared/src/github.js";
 import { hmacKey, signJwt, verifyJwt } from "../../shared/src/jwt.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
-import type { AccountObject, Allowance, Limits } from "./account-object.js";
+import { MAX_SERVER_KEYS, parseServerKey, type AccountObject, type Allowance, type Limits, type ServerKeyView } from "./account-object.js";
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig } from "./config.js";
@@ -31,11 +31,30 @@ import { DAY_MS, isoDay, weekEnd } from "./week.js";
  * The free managed tier's HTTP surface: device-flow sign-in with GitHub, the account and
  * OpenAI-compatible inference endpoints, usage events, and the admin API. Inference goes to
  * OpenRouter on the service's key; nothing else is called for tokens.
+ *
+ * Sign-out: `POST /v1/token/revoke` with the access token as the bearer and/or
+ * `{refresh_token}` ends that sign-in session: its refresh tokens are deleted and its access
+ * tokens stop working at once. Admins: `POST /admin/people/:id/revoke-tokens` ends every
+ * session and deletes every server key of one person.
+ *
+ * Server keys, for machines that run unattended (an access token lives an hour, and a server
+ * shouldn't hold a refresh token chain). All three need a signed-in access token:
+ *
+ *   POST   /v1/keys {name}  → 201 {id, name, key, createdAt, lastUsedAt: null}; `key` is shown only here
+ *   GET    /v1/keys         → {keys: [{id, name, createdAt, lastUsedAt}], max}
+ *   DELETE /v1/keys/:id     → {id, revoked: true}, or 404 key_not_found
+ *
+ * A key (`dlk_<githubId>_<id>_<secret>`) works as the bearer on /v1/chat/completions,
+ * /v1/models, /v1/me and /v1/events and charges the same account as its owner's sign-in.
+ * Only the secret's SHA-256 is stored. At most 5 keys per account (409 key_limit_reached);
+ * names are unique per account (409 key_name_taken). A bad or revoked key is 401 invalid_key.
  */
 
 export const VERSION = "0.1.0";
 export const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 export const ACCESS_TTL_S = 3600;
+/** How long a revoked session id is remembered: past any access token from it (TTL plus verify leeway). */
+const REVOKED_SESSION_TTL_MS = (ACCESS_TTL_S + 120) * 1000;
 const ISSUER = "directionallylocal-free";
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const OAUTH_COOKIE = "__Host-dl_oauth";
@@ -65,6 +84,7 @@ export interface Env {
   MIN_GITHUB_ACCOUNT_AGE_DAYS?: string;
   OPEN_ADMISSION?: string;
   COUNT_CACHED_TOKENS?: string;
+  CACHED_TOKEN_WEIGHT?: string;
   PAUSED?: string;
   PUBLIC_URL?: string;
   AUTH: DurableObjectNamespace<AuthObject>;
@@ -123,6 +143,8 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/v1/device/code") return deviceCode(c);
   if (method === "POST" && path === "/v1/device/token") return deviceToken(c);
   if (method === "POST" && path === "/v1/token/refresh") return refresh(c);
+  if (method === "POST" && path === "/v1/token/revoke") return revoke(c);
+  if (path === "/v1/keys" || path.startsWith("/v1/keys/")) return keys(c, path.slice("/v1/keys".length).replace(/^\//, ""), method);
   if (method === "GET" && path === "/v1/me") return me(c);
   if (method === "GET" && path === "/v1/models") return models(c);
   if (method === "POST" && path === "/v1/chat/completions") return chat(c);
@@ -183,26 +205,48 @@ function signingKey(config: FreeConfig): Promise<CryptoKey> {
   return key;
 }
 
-async function tokenResponse(c: Ctx, identity: Identity, refreshToken: string): Promise<Response> {
+/** `sid` is the refresh-token family: the sign-in session the access token belongs to. */
+async function tokenResponse(c: Ctx, identity: Identity, refreshToken: string, sid: string): Promise<Response> {
   const iat = Math.floor(c.now() / 1000);
   const accessToken = await signJwt(
-    { iss: ISSUER, typ: "access", sub: String(identity.githubId), login: identity.login, iat, exp: iat + ACCESS_TTL_S, jti: crypto.randomUUID() },
+    { iss: ISSUER, typ: "access", sub: String(identity.githubId), login: identity.login, sid, iat, exp: iat + ACCESS_TTL_S, jti: crypto.randomUUID() },
     await signingKey(c.config),
   );
   return json({ access_token: accessToken, refresh_token: refreshToken, token_type: "Bearer", expires_in: ACCESS_TTL_S });
 }
 
-/** The person behind a valid access token, or a 401. */
-async function authenticate(c: Ctx): Promise<Identity | Response> {
+/** Who is calling: from a sign-in session's access token, or from a server key. */
+interface Caller extends Identity {
+  via: "access" | "key";
+  /** The sign-in session, for access tokens issued since sessions were tracked. */
+  sid?: string;
+}
+
+/**
+ * The person behind a valid access token, or a 401. With `keys`, a server key is accepted
+ * too. An access token from a revoked session is refused like an expired one.
+ */
+async function authenticate(c: Ctx, options: { keys?: boolean } = {}): Promise<Caller | Response> {
   const header = c.request.headers.get("authorization") ?? "";
   const match = /^Bearer\s+(\S+)$/i.exec(header);
   const invalid = () => apiError(401, "invalid_token", "Sign in again: the access token is missing, invalid or expired.", {}, { "www-authenticate": 'Bearer error="invalid_token"' });
   if (!match) return invalid();
-  const claims = await verifyJwt(match[1]!, await signingKey(c.config), Math.floor(c.now() / 1000));
+  const bearer = match[1]!;
+  if (bearer.startsWith("dlk_")) {
+    const invalidKey = () =>
+      apiError(401, "invalid_key", "This server key is invalid or was revoked. Create a new one from a signed-in machine.", {}, { "www-authenticate": 'Bearer error="invalid_token"' });
+    const parsed = parseServerKey(bearer);
+    if (!options.keys || !parsed) return options.keys ? invalidKey() : invalid();
+    const owner = await account(c, parsed.githubId).verifyKey(parsed.id, parsed.secret, c.now());
+    return owner ? { ...owner, via: "key" } : invalidKey();
+  }
+  const claims = await verifyJwt(bearer, await signingKey(c.config), Math.floor(c.now() / 1000));
   if (!claims || claims.typ !== "access" || claims.iss !== ISSUER || typeof claims.login !== "string") return invalid();
   const githubId = Number(claims.sub);
   if (!Number.isSafeInteger(githubId) || githubId <= 0) return invalid();
-  return { githubId, login: claims.login };
+  const sid = typeof claims.sid === "string" ? claims.sid : undefined;
+  if (!(await account(c, githubId).sessionAllowed(sid, claims.iat))) return invalid();
+  return { githubId, login: claims.login, via: "access", ...(sid ? { sid } : {}) };
 }
 
 function account(c: Ctx, githubId: number) {
@@ -276,7 +320,7 @@ async function deviceToken(c: Ctx): Promise<Response> {
   const code = body?.device_code;
   if (typeof code !== "string" || !code) return apiError(400, "invalid_request", "Send {device_code}.");
   const result = await auth(c).poll(code, c.now());
-  if (result.status === "approved") return tokenResponse(c, result, result.refreshToken);
+  if (result.status === "approved") return tokenResponse(c, result, result.refreshToken, result.family);
   const reason = "reason" in result ? result.reason : undefined;
   // Each refusal has its own code; the message is the one the browser page showed.
   if ((result.status === "not_invited" || result.status === "denied") && isSignInRefusal(reason)) {
@@ -301,7 +345,92 @@ async function refresh(c: Ctx): Promise<Response> {
   if (typeof token !== "string" || !token) return invalid();
   const rotated = await auth(c).rotate(token, c.now());
   if (!rotated) return invalid();
-  return tokenResponse(c, rotated, rotated.refreshToken);
+  return tokenResponse(c, rotated, rotated.refreshToken, rotated.family);
+}
+
+/**
+ * Sign-out. Ends the caller's sign-in session: the access token's (when sent as the bearer)
+ * and the refresh token's (when sent in the body), which must be the same person's. Refresh
+ * then fails, and the session's access tokens stop working at once. Unknown refresh tokens are
+ * not an error (RFC 7009 §2.2), so a retried sign-out succeeds.
+ */
+async function revoke(c: Ctx): Promise<Response> {
+  const retry = await limited(c, `refresh:ip:${c.ip}`, LIMITS.refreshIp);
+  if (retry !== undefined) return rateLimited(retry);
+  const body = (await readJson(c)) ?? {};
+  const refreshToken = typeof body.refresh_token === "string" && body.refresh_token ? body.refresh_token : undefined;
+  let caller: Caller | undefined;
+  if (c.request.headers.has("authorization")) {
+    const authenticated = await authenticate(c);
+    if (authenticated instanceof Response) {
+      if (!refreshToken) return authenticated;
+    } else {
+      caller = authenticated;
+    }
+  }
+  if (!caller && !refreshToken) return apiError(400, "invalid_request", "Send the access token as the bearer, {refresh_token}, or both.");
+  const sessions = new Set<string>();
+  let githubId = caller?.githubId;
+  if (caller?.sid) sessions.add(caller.sid);
+  if (refreshToken) {
+    const found = await auth(c).familyOf(refreshToken);
+    if (found && (githubId === undefined || found.githubId === githubId)) {
+      sessions.add(found.family);
+      githubId = found.githubId;
+    }
+  }
+  const sids = [...sessions];
+  if (sids.length > 0 && githubId !== undefined) {
+    await auth(c).revokeFamilies(sids);
+    await account(c, githubId).revokeSessions({ sids, until: c.now() + REVOKED_SESSION_TTL_MS, now: c.now() });
+  }
+  return json({ revoked: true, sessions: sids.length });
+}
+
+// ─── Server keys ────────────────────────────────────────────────────────────
+
+const KEY_NAME = /^[\x20-\x7e]{1,64}$/;
+
+function keyView(key: ServerKeyView) {
+  return {
+    id: key.id,
+    name: key.name,
+    createdAt: new Date(key.createdAt).toISOString(),
+    lastUsedAt: key.lastUsedAt === null ? null : new Date(key.lastUsedAt).toISOString(),
+  };
+}
+
+/** POST/GET /v1/keys and DELETE /v1/keys/:id. Managing keys takes a signed-in access token, not a key. */
+async function keys(c: Ctx, rest: string, method: string): Promise<Response> {
+  const identity = await authenticate(c);
+  if (identity instanceof Response) return identity;
+  const guarded = await apiGuard(c, identity);
+  if (guarded) return guarded;
+  const person = account(c, identity.githubId);
+
+  if (rest === "" && method === "GET") return json({ keys: (await person.listKeys()).map(keyView), max: MAX_SERVER_KEYS });
+  if (rest === "" && method === "POST") {
+    const body = await readJson(c);
+    const name = typeof body?.name === "string" ? body.name.trim() : "";
+    if (!KEY_NAME.test(name)) return apiError(400, "invalid_request", "Send {name}: 1 to 64 printable characters, e.g. the server's hostname.");
+    const created = await person.createKey({ name, now: c.now() });
+    if (created.ok) return json({ ...keyView(created.view), key: created.key }, 201);
+    switch (created.code) {
+      case "key_limit_reached":
+        return apiError(409, "key_limit_reached", `This account already has ${MAX_SERVER_KEYS} server keys. Revoke one first.`, { max: MAX_SERVER_KEYS });
+      case "key_name_taken":
+        return apiError(409, "key_name_taken", "This account already has a server key with that name.");
+      case "suspended":
+        return apiError(403, "suspended", "This account is suspended from the free tier.");
+      case "not_invited":
+        return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
+    }
+  }
+  if (/^[a-z0-9]{12}$/.test(rest) && method === "DELETE") {
+    if (!(await person.revokeKey(rest))) return apiError(404, "key_not_found", "No server key with that id on this account.");
+    return json({ id: rest, revoked: true });
+  }
+  return apiError(404, "not_found", `${method} /v1/keys/${rest} isn't a route.`);
 }
 
 // ─── Sign-in: the browser side ──────────────────────────────────────────────
@@ -484,7 +613,7 @@ function allowanceView(allowance: Allowance) {
 }
 
 async function me(c: Ctx): Promise<Response> {
-  const identity = await authenticate(c);
+  const identity = await authenticate(c, { keys: true });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
@@ -500,7 +629,7 @@ async function me(c: Ctx): Promise<Response> {
 }
 
 async function models(c: Ctx): Promise<Response> {
-  const identity = await authenticate(c);
+  const identity = await authenticate(c, { keys: true });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
@@ -508,7 +637,7 @@ async function models(c: Ctx): Promise<Response> {
 }
 
 async function events(c: Ctx): Promise<Response> {
-  const identity = await authenticate(c);
+  const identity = await authenticate(c, { keys: true });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
@@ -528,7 +657,7 @@ function quotaHeaders(allowance: Allowance): Record<string, string> {
 }
 
 async function chat(c: Ctx): Promise<Response> {
-  const identity = await authenticate(c);
+  const identity = await authenticate(c, { keys: true });
   if (identity instanceof Response) {
     identity.headers.set("x-dl-quota-resets-at", new Date(weekEnd(c.now())).toISOString());
     return identity;
@@ -601,7 +730,7 @@ async function chat(c: Ctx): Promise<Response> {
 
   const started = c.now();
   const settle = async (usage: Usage | undefined, status: string, chargeNothing = false) => {
-    const charged = chargeNothing ? 0 : usage ? chargedTokens(usage, c.config.countCachedTokens) : undefined;
+    const charged = chargeNothing ? 0 : usage ? chargedTokens(usage, gate.config.cachedTokenWeight) : undefined;
     const cost = chargeNothing ? 0 : usage ? costOf(usage, 0) : undefined;
     const settled = await person.settle({ reservationId: reservation.reservationId, charged, costUsd: cost, limits, now: c.now() });
     const record: RequestRecord = {
@@ -757,13 +886,14 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
           admittedAt: new Date(person.admitted_at).toISOString(),
           admittedVia: person.admitted_via,
           allowance: allowanceView(allowance),
+          serverKeys: await account(c, person.github_id).keyCount(),
         };
       }),
     );
     return json({ people: rows });
   }
 
-  const match = /^people\/(\d+)(?:\/(suspend|unsuspend|grant))?$/.exec(rest);
+  const match = /^people\/(\d+)(?:\/(suspend|unsuspend|grant|revoke-tokens))?$/.exec(rest);
   if (match) {
     const githubId = Number(match[1]);
     const action = match[2];
@@ -771,7 +901,15 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       const detail = await directory(c).personDetail(githubId, now);
       if (!detail) return apiError(404, "not_found", "No such person.");
       const allowance = await account(c, githubId).allowance(now, limits);
-      return json({ ...detail, allowance: allowanceView(allowance) });
+      return json({ ...detail, allowance: allowanceView(allowance), serverKeys: await account(c, githubId).keyCount() });
+    }
+    if (action === "revoke-tokens" && method === "POST") {
+      // Ends every sign-in session and deletes every server key; the person can sign in again.
+      if (!(await directory(c).getPerson(githubId))) return apiError(404, "not_found", "No such person.");
+      const sessions = await auth(c).revokeAllFor(githubId);
+      await account(c, githubId).revokeSessions({ sids: sessions, until: now + REVOKED_SESSION_TTL_MS, notBefore: Math.floor(now / 1000), now });
+      const serverKeys = await account(c, githubId).revokeAllKeys();
+      return json({ githubId, sessions: sessions.length, serverKeys });
     }
     if ((action === "suspend" || action === "unsuspend") && method === "POST") {
       const status = action === "suspend" ? "suspended" : "active";
