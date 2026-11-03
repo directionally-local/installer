@@ -85,6 +85,7 @@ export interface Env {
   OPEN_ADMISSION?: string;
   COUNT_CACHED_TOKENS?: string;
   CACHED_TOKEN_WEIGHT?: string;
+  OPENROUTER_PROVIDER_ORDER?: string;
   PAUSED?: string;
   PUBLIC_URL?: string;
   AUTH: DurableObjectNamespace<AuthObject>;
@@ -718,10 +719,12 @@ async function chat(c: Ctx): Promise<Response> {
   const stream = body.stream === true;
   const upstreamBody: Record<string, unknown> = { ...body, max_tokens: reservation.maxTokens, usage: { include: true } };
   delete upstreamBody.max_completion_tokens;
-  // Never fall back to another model, and route on our terms: cheapest provider first, sticky per session.
+  // Never fall back to another model, and route on our terms: the configured hosts first (with
+  // fallbacks on, so their outage doesn't stop the free tier), else the cheapest; sticky per session.
   delete upstreamBody.models;
   delete upstreamBody.route;
-  upstreamBody.provider = { sort: "price" };
+  const order = c.config.openRouterProviderOrder;
+  upstreamBody.provider = order.length > 0 ? { order: [...order], allow_fallbacks: true } : { sort: "price" };
   upstreamBody.user = `dl-${(await sha256Hex(`free:${identity.githubId}`)).slice(0, 32)}`;
   const sessionId = c.request.headers.get("x-session-id") ?? (typeof body.session_id === "string" ? body.session_id : undefined);
   if (sessionId && /^[\x21-\x7e]{1,256}$/.test(sessionId)) upstreamBody.session_id = sessionId;

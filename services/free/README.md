@@ -74,6 +74,14 @@ The default weight of 0.02 is OpenRouter's cache-read price divided by its input
 `COUNT_CACHED_TOKENS=false` still works and means a weight of 0, unless `CACHED_TOKEN_WEIGHT`
 is set. The USD caps always use the real cost OpenRouter reports.
 
+## Which OpenRouter host serves requests
+
+`OPENROUTER_PROVIDER_ORDER` is a comma-separated list of OpenRouter provider slugs to try
+first. The default is `deepseek`, DeepSeek's own host. Fallbacks stay on, so an outage there
+moves requests to other hosts instead of failing them. An empty value (or `none`) means no
+preference: the cheapest host first (`provider.sort = "price"`). Hosts bill different prices
+for the same model, so check `requests.cost_usd` after a change.
+
 ## Sign-out and server keys
 
 - **Sign out:** `POST /v1/token/revoke`. Send the access token as the bearer, `{"refresh_token"}`

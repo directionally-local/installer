@@ -35,6 +35,12 @@ export interface FreeConfig {
    * an uncached one. The USD caps always use the real reported cost.
    */
   cachedTokenWeight: number;
+  /**
+   * OpenRouter hosts to try first, as provider slugs (OPENROUTER_PROVIDER_ORDER, comma-separated).
+   * Fallbacks stay on, so an outage at these hosts doesn't stop the free tier. Empty means no
+   * preference: the cheapest host first.
+   */
+  openRouterProviderOrder: readonly string[];
   /** The kill switch from `env`; the admin endpoint has its own, and either one pauses. */
   paused: boolean;
   /** The public origin for links, when the request's own origin isn't it (behind a proxy). */
@@ -62,6 +68,8 @@ export const DEFAULTS = {
    * `POST /admin/config {"cachedTokenWeight": ...}` if needed.
    */
   cachedTokenWeight: 0.02,
+  /** DeepSeek's own host on OpenRouter (its endpoint tag is `deepseek`). */
+  openRouterProviderOrder: ["deepseek"],
 } as const;
 
 export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
@@ -82,6 +90,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     openAdmission: flag(env.OPEN_ADMISSION, DEFAULTS.openAdmission, "OPEN_ADMISSION"),
     countCachedTokens: flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS"),
     cachedTokenWeight: cachedWeight(env),
+    openRouterProviderOrder: providerOrder(env.OPENROUTER_PROVIDER_ORDER),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
   };
@@ -124,6 +133,18 @@ function cachedWeight(env: Record<string, unknown>): number {
     return parsed;
   }
   return flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS") ? DEFAULTS.cachedTokenWeight : 0;
+}
+
+/** Unset means the default; empty (or "none") means no preference. */
+function providerOrder(value: unknown): readonly string[] {
+  if (value === undefined || value === null) return DEFAULTS.openRouterProviderOrder;
+  const raw = String(value).trim();
+  if (raw === "" || raw.toLowerCase() === "none") return [];
+  const slugs = raw.split(",").map((part) => part.trim()).filter(Boolean);
+  if (slugs.length > 10 || slugs.some((slug) => !/^[a-z0-9][a-z0-9._/-]{0,63}$/i.test(slug))) {
+    throw new ConfigError(`OPENROUTER_PROVIDER_ORDER must be up to 10 comma-separated provider slugs, e.g. "deepseek" (got "${raw}").`);
+  }
+  return slugs;
 }
 
 function flag(value: unknown, fallback: boolean, name: string): boolean {

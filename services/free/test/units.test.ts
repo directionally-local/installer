@@ -154,6 +154,16 @@ describe("config", () => {
     assert.throws(() => readFreeConfig({ ...BASE_ENV, OPENROUTER_API_KEY: "" }), /OPENROUTER_API_KEY/);
   });
 
+  it("reads the OpenRouter provider order", () => {
+    assert.deepEqual(readFreeConfig(BASE_ENV).openRouterProviderOrder, ["deepseek"]);
+    assert.deepEqual(readFreeConfig({ ...BASE_ENV, OPENROUTER_PROVIDER_ORDER: "" }).openRouterProviderOrder, []);
+    assert.deepEqual(readFreeConfig({ ...BASE_ENV, OPENROUTER_PROVIDER_ORDER: "none" }).openRouterProviderOrder, []);
+    assert.deepEqual(readFreeConfig({ ...BASE_ENV, OPENROUTER_PROVIDER_ORDER: " deepseek , morph/fp8 ," }).openRouterProviderOrder, ["deepseek", "morph/fp8"]);
+    for (const bad of ["deep seek", "a;b", Array.from({ length: 11 }, (_, i) => `p${i}`).join(",")]) {
+      assert.throws(() => readFreeConfig({ ...BASE_ENV, OPENROUTER_PROVIDER_ORDER: bad }), /OPENROUTER_PROVIDER_ORDER/);
+    }
+  });
+
   it("reads the cached-token weight, with COUNT_CACHED_TOKENS=false meaning 0", () => {
     assert.equal(readFreeConfig(BASE_ENV).cachedTokenWeight, 0.02);
     assert.equal(readFreeConfig({ ...BASE_ENV, COUNT_CACHED_TOKENS: "false" }).cachedTokenWeight, 0);

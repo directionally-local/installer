@@ -28,7 +28,7 @@ describe("chat completions", () => {
     assert.equal(call.headers.authorization, "Bearer sk-or-test");
     assert.equal(call.body.model, MODEL);
     assert.deepEqual(call.body.usage, { include: true });
-    assert.deepEqual(call.body.provider, { sort: "price" }, "our routing replaces the client's");
+    assert.deepEqual(call.body.provider, { order: ["deepseek"], allow_fallbacks: true }, "our routing replaces the client's: DeepSeek's host first");
     assert.equal(call.body.models, undefined, "no model fallback");
     assert.equal(call.body.session_id, "session-abc");
     assert.match(String(call.body.user), /^dl-[0-9a-f]{32}$/);
@@ -41,6 +41,20 @@ describe("chat completions", () => {
     assert.equal(allowance.spentUsdThisWeek, 0.0021, "the USD cap uses the real reported cost");
     assert.equal(response.headers.get("x-dl-tokens-remaining"), String(50_000_000 - 254));
     assert.equal(response.headers.get("x-dl-quota-resets-at"), "2026-11-09T00:00:00.000Z");
+  });
+
+  it("takes the OpenRouter host order from OPENROUTER_PROVIDER_ORDER, with fallbacks on; empty means cheapest first", async () => {
+    for (const [value, expected] of [
+      ["deepseek,morph", { order: ["deepseek", "morph"], allow_fallbacks: true }],
+      ["", { sort: "price" }],
+      ["none", { sort: "price" }],
+    ] as const) {
+      const { service, token } = await member({ OPENROUTER_PROVIDER_ORDER: value });
+      assert.equal((await chat(service, token)).status, 200);
+      assert.deepEqual(service.calls.openRouter.at(-1)!.body.provider, expected, JSON.stringify(value));
+    }
+    const broken = await createService({ OPENROUTER_PROVIDER_ORDER: "not a slug" });
+    assert.equal(await errorCode(await broken.request("POST", "/v1/device/code", { body: {} })), "misconfigured");
   });
 
   it("leaves cached tokens out when COUNT_CACHED_TOKENS is false", async () => {
