@@ -22,7 +22,7 @@ export type DeviceStatus = "pending" | "needs_invite" | "approved" | "denied" | 
 
 export type PollResult =
   | { status: "pending" | "slow_down" | "expired" | "denied" | "not_invited"; interval: number; reason?: string }
-  | { status: "approved"; githubId: number; login: string; refreshToken: string };
+  | { status: "approved"; githubId: number; login: string; refreshToken: string; family: string };
 
 export interface Identity {
   githubId: number;
@@ -84,6 +84,7 @@ const SCHEMA = [
      used_at    INTEGER
    )`,
   `CREATE INDEX IF NOT EXISTS refresh_family ON refresh_tokens (family)`,
+  `CREATE INDEX IF NOT EXISTS refresh_person ON refresh_tokens (github_id)`,
 ];
 
 export class AuthObject extends DurableObject {
@@ -213,8 +214,9 @@ export class AuthObject extends DurableObject {
     if (!row || row.status === "consumed") return { status: "expired", interval: POLL_INTERVAL_S };
     if (row.status === "approved" && row.github_id !== null && row.login !== null) {
       this.ctx.storage.sql.exec("UPDATE device_codes SET status = 'consumed', ticket_hash = NULL WHERE device_hash = ?", row.device_hash);
-      const refreshToken = await this.#issueRefresh({ githubId: row.github_id, login: row.login }, crypto.randomUUID(), now);
-      return { status: "approved", githubId: row.github_id, login: row.login, refreshToken };
+      const family = crypto.randomUUID();
+      const refreshToken = await this.#issueRefresh({ githubId: row.github_id, login: row.login }, family, now);
+      return { status: "approved", githubId: row.github_id, login: row.login, refreshToken, family };
     }
     if (row.expires_at <= now) return { status: "expired", interval: row.interval_s };
     if (row.status === "denied" || row.status === "not_invited") {
@@ -232,7 +234,7 @@ export class AuthObject extends DurableObject {
    * an already-rotated token after the grace window revokes the whole family, since one copy
    * of it is in the wrong hands.
    */
-  async rotate(refreshToken: string, now: number): Promise<(Identity & { refreshToken: string }) | undefined> {
+  async rotate(refreshToken: string, now: number): Promise<(Identity & { refreshToken: string; family: string }) | undefined> {
     const tokenHash = await sha256Hex(refreshToken);
     const row = this.ctx.storage.sql.exec<RefreshRow>("SELECT * FROM refresh_tokens WHERE token_hash = ?", tokenHash).toArray()[0];
     if (!row) return undefined;
@@ -246,7 +248,32 @@ export class AuthObject extends DurableObject {
     }
     this.ctx.storage.sql.exec("UPDATE refresh_tokens SET used_at = ? WHERE token_hash = ?", now, tokenHash);
     const next = await this.#issueRefresh({ githubId: row.github_id, login: row.login }, row.family, now);
-    return { githubId: row.github_id, login: row.login, refreshToken: next };
+    return { githubId: row.github_id, login: row.login, refreshToken: next, family: row.family };
+  }
+
+  /** The sign-in session (family) and person behind a refresh token, used or not. */
+  async familyOf(refreshToken: string): Promise<{ family: string; githubId: number } | undefined> {
+    const row = this.ctx.storage.sql.exec<RefreshRow>("SELECT * FROM refresh_tokens WHERE token_hash = ?", await sha256Hex(refreshToken)).toArray()[0];
+    return row ? { family: row.family, githubId: row.github_id } : undefined;
+  }
+
+  /** Deletes every refresh token of these families, so none of them can be refreshed again. */
+  async revokeFamilies(families: string[]): Promise<number> {
+    let deleted = 0;
+    for (const family of families) {
+      deleted += this.ctx.storage.sql.exec("DELETE FROM refresh_tokens WHERE family = ? RETURNING token_hash", family).toArray().length;
+    }
+    return deleted;
+  }
+
+  /** Deletes all of one person's refresh tokens; returns the families they belonged to. */
+  async revokeAllFor(githubId: number): Promise<string[]> {
+    const families = this.ctx.storage.sql
+      .exec<{ family: string }>("SELECT DISTINCT family FROM refresh_tokens WHERE github_id = ?", githubId)
+      .toArray()
+      .map((row) => row.family);
+    this.ctx.storage.sql.exec("DELETE FROM refresh_tokens WHERE github_id = ?", githubId);
+    return families;
   }
 
   async alarm(): Promise<void> {

@@ -75,10 +75,14 @@ export function parseUsage(value: unknown): Usage | undefined {
   };
 }
 
-/** Tokens charged against the allowance. Cached prompt tokens count unless configured off. */
-export function chargedTokens(usage: Usage, countCachedTokens: boolean): number {
-  const prompt = countCachedTokens ? usage.promptTokens : usage.promptTokens - usage.cachedTokens;
-  return prompt + usage.completionTokens;
+/**
+ * Tokens charged against the weekly allowance: uncached prompt tokens and completion tokens in
+ * full, cached prompt tokens at `cachedTokenWeight` (their price relative to uncached input),
+ * rounded up to a whole token.
+ */
+export function chargedTokens(usage: Usage, cachedTokenWeight: number): number {
+  const weight = Math.min(1, Math.max(0, cachedTokenWeight));
+  return usage.promptTokens - usage.cachedTokens + usage.completionTokens + Math.ceil(usage.cachedTokens * weight);
 }
 
 export function costOf(usage: Usage | undefined, fallbackTokens: number): number {

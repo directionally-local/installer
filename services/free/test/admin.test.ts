@@ -35,7 +35,7 @@ describe("admin endpoints", () => {
     assert.deepEqual(body.people.map((person) => person.login), ["owner", "alice"]);
     assert.equal(body.people[0]!.isAdmin, true);
     assert.match(body.people[1]!.admittedVia, /^invite:/);
-    assert.equal(body.people[1]!.allowance.usedThisWeek, 320);
+    assert.equal(body.people[1]!.allowance.usedThisWeek, 200 + 20 + 2);
     assert.equal(body.people[1]!.allowance.spentUsdThisWeek, 0.002);
   });
 

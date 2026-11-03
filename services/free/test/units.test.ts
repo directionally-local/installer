@@ -35,10 +35,14 @@ describe("usage", () => {
     assert.equal(parseUsage(null), undefined);
   });
 
-  it("charges cached tokens unless configured off", () => {
+  it("charges cached tokens at their weight, rounding up", () => {
     const usage = { promptTokens: 100, completionTokens: 5, cachedTokens: 90, costUsd: undefined };
-    assert.equal(chargedTokens(usage, true), 105);
-    assert.equal(chargedTokens(usage, false), 15);
+    assert.equal(chargedTokens(usage, 1), 105);
+    assert.equal(chargedTokens(usage, 0), 15);
+    assert.equal(chargedTokens(usage, 0.02), 10 + 5 + 2, "90 × 0.02 = 1.8, rounded up");
+    assert.equal(chargedTokens(usage, 0.5), 10 + 5 + 45);
+    assert.equal(chargedTokens({ ...usage, cachedTokens: 0 }, 0.02), 105);
+    assert.equal(chargedTokens(usage, 7), 105, "clamped to 1");
     assert.equal(costOf(usage, 0), 105 / 1_000_000);
   });
 
@@ -148,5 +152,14 @@ describe("config", () => {
     assert.throws(() => readFreeConfig({ ...BASE_ENV, ADMIN_GITHUB_IDS: "octocat" }), ConfigError);
     assert.throws(() => readFreeConfig({ ...BASE_ENV, PAUSED: "maybe" }), ConfigError);
     assert.throws(() => readFreeConfig({ ...BASE_ENV, OPENROUTER_API_KEY: "" }), /OPENROUTER_API_KEY/);
+  });
+
+  it("reads the cached-token weight, with COUNT_CACHED_TOKENS=false meaning 0", () => {
+    assert.equal(readFreeConfig(BASE_ENV).cachedTokenWeight, 0.02);
+    assert.equal(readFreeConfig({ ...BASE_ENV, COUNT_CACHED_TOKENS: "false" }).cachedTokenWeight, 0);
+    assert.equal(readFreeConfig({ ...BASE_ENV, COUNT_CACHED_TOKENS: "true" }).cachedTokenWeight, 0.02);
+    assert.equal(readFreeConfig({ ...BASE_ENV, CACHED_TOKEN_WEIGHT: "0.3" }).cachedTokenWeight, 0.3);
+    assert.equal(readFreeConfig({ ...BASE_ENV, CACHED_TOKEN_WEIGHT: "1", COUNT_CACHED_TOKENS: "false" }).cachedTokenWeight, 1);
+    for (const bad of ["-0.1", "1.5", "lots"]) assert.throws(() => readFreeConfig({ ...BASE_ENV, CACHED_TOKEN_WEIGHT: bad }), /CACHED_TOKEN_WEIGHT/);
   });
 });

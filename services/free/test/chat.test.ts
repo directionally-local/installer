@@ -34,12 +34,12 @@ describe("chat completions", () => {
     assert.match(String(call.body.user), /^dl-[0-9a-f]{32}$/);
     assert.equal(call.body.max_tokens, 500);
 
-    // Cached tokens count fully by default: 1200 + 34.
+    // Cached tokens count at their price relative to input (0.02): 200 + 34 + ceil(1000 × 0.02).
     const allowance = await me(service, token);
-    assert.equal(allowance.usedThisWeek, 1234);
-    assert.equal(allowance.remaining, 50_000_000 - 1234);
-    assert.equal(allowance.spentUsdThisWeek, 0.0021);
-    assert.equal(response.headers.get("x-dl-tokens-remaining"), String(50_000_000 - 1234));
+    assert.equal(allowance.usedThisWeek, 254);
+    assert.equal(allowance.remaining, 50_000_000 - 254);
+    assert.equal(allowance.spentUsdThisWeek, 0.0021, "the USD cap uses the real reported cost");
+    assert.equal(response.headers.get("x-dl-tokens-remaining"), String(50_000_000 - 254));
     assert.equal(response.headers.get("x-dl-quota-resets-at"), "2026-11-09T00:00:00.000Z");
   });
 
@@ -48,6 +48,34 @@ describe("chat completions", () => {
     service.setOpenRouter(() => completion(usage(1200, 34, 1000)));
     await chat(service, token);
     assert.equal((await me(service, token)).usedThisWeek, 234);
+  });
+
+  it("weights cached tokens by CACHED_TOKEN_WEIGHT, which wins over COUNT_CACHED_TOKENS", async () => {
+    for (const [vars, expected] of [
+      [{ CACHED_TOKEN_WEIGHT: "1" }, 1234],
+      [{ CACHED_TOKEN_WEIGHT: "0.5" }, 734],
+      [{ CACHED_TOKEN_WEIGHT: "0.1", COUNT_CACHED_TOKENS: "false" }, 334],
+      [{ COUNT_CACHED_TOKENS: "true" }, 254],
+    ] as const) {
+      const { service, token } = await member(vars);
+      service.setOpenRouter(() => completion(usage(1200, 34, 1000, 0.0021)));
+      await chat(service, token);
+      const allowance = await me(service, token);
+      assert.equal(allowance.usedThisWeek, expected, JSON.stringify(vars));
+      assert.equal(allowance.spentUsdThisWeek, 0.0021);
+    }
+  });
+
+  it("lets the admin change the cached-token weight at runtime", async () => {
+    const { service, token, adminToken } = await member();
+    service.setOpenRouter(() => completion(usage(1200, 34, 1000)));
+    assert.equal((await service.request("POST", "/admin/config", { token: adminToken, body: { cachedTokenWeight: 0.25 } })).status, 200);
+    await chat(service, token);
+    assert.equal((await me(service, token)).usedThisWeek, 484);
+    assert.equal((await service.request("POST", "/admin/config", { token: adminToken, body: { cachedTokenWeight: 1.5 } })).status, 400);
+    await service.request("POST", "/admin/config", { token: adminToken, body: { cachedTokenWeight: null } });
+    await chat(service, token);
+    assert.equal((await me(service, token)).usedThisWeek, 484 + 254);
   });
 
   it("reads usage from the last chunk of a stream", async () => {
@@ -70,7 +98,7 @@ describe("chat completions", () => {
     assert.match(text, /héllo/);
     assert.match(text, /\[DONE\]/);
     assert.equal(service.calls.openRouter[0]!.body.stream, true);
-    assert.equal((await me(service, token)).usedThisWeek, 950);
+    assert.equal((await me(service, token)).usedThisWeek, 100 + 50 + 16);
   });
 
   it("charges the whole reservation when a stream reports no usage", async () => {
