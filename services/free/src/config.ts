@@ -28,7 +28,13 @@ export interface FreeConfig {
    * invite code (still within `maxActiveUsers`). Off by default: invite-only for everyone.
    */
   openAdmission: boolean;
+  /** Kept for compatibility: false sets the cached-token weight to 0 unless CACHED_TOKEN_WEIGHT is set. */
   countCachedTokens: boolean;
+  /**
+   * How much one cached prompt token counts against the weekly token allowance, relative to
+   * an uncached one. The USD caps always use the real reported cost.
+   */
+  cachedTokenWeight: number;
   /** The kill switch from `env`; the admin endpoint has its own, and either one pauses. */
   paused: boolean;
   /** The public origin for links, when the request's own origin isn't it (behind a proxy). */
@@ -44,6 +50,18 @@ export const DEFAULTS = {
   perPersonWeeklyUsdCap: 5,
   minGithubAccountAgeDays: 30,
   openAdmission: false,
+  /**
+   * OpenRouter's cache-read price over its input price for deepseek/deepseek-v4.1-flash-1017,
+   * from https://openrouter.ai/api/v1/models on 2026-11-03: input $0.30/M, cache read
+   * $0.006/M (and $0.15/M vs $0.003/M in its off-peak windows), so 0.02 at every hour.
+   *
+   * These are list prices. The host a request lands on bills its own prices, and their ratio
+   * can be very different: one cheap host lists $0.035/M input and $0.006/M cache read (about
+   * 0.17). After a week of real traffic, recheck the weight against what was actually billed
+   * (`requests.cost_usd` against cached and uncached tokens), and change it with
+   * `POST /admin/config {"cachedTokenWeight": ...}` if needed.
+   */
+  cachedTokenWeight: 0.02,
 } as const;
 
 export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
@@ -63,6 +81,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     minGithubAccountAgeDays: whole(env.MIN_GITHUB_ACCOUNT_AGE_DAYS, DEFAULTS.minGithubAccountAgeDays, "MIN_GITHUB_ACCOUNT_AGE_DAYS"),
     openAdmission: flag(env.OPEN_ADMISSION, DEFAULTS.openAdmission, "OPEN_ADMISSION"),
     countCachedTokens: flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS"),
+    cachedTokenWeight: cachedWeight(env),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
   };
@@ -94,6 +113,17 @@ function usd(value: unknown, fallback: number, name: string): number | undefined
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) throw new ConfigError(`${name} must be a number of dollars or "none" (got "${raw}").`);
   return parsed;
+}
+
+/** CACHED_TOKEN_WEIGHT (0 to 1) when set; otherwise 0 when COUNT_CACHED_TOKENS is false, else the default. */
+function cachedWeight(env: Record<string, unknown>): number {
+  const raw = text(env.CACHED_TOKEN_WEIGHT);
+  if (raw !== undefined) {
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) throw new ConfigError(`CACHED_TOKEN_WEIGHT must be a number from 0 to 1 (got "${raw}").`);
+    return parsed;
+  }
+  return flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS") ? DEFAULTS.cachedTokenWeight : 0;
 }
 
 function flag(value: unknown, fallback: boolean, name: string): boolean {

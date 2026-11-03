@@ -24,6 +24,8 @@ export const RUNTIME_SETTINGS = {
   maxActiveUsers: { kind: "count", env: "MAX_ACTIVE_USERS" },
   /** Accounts old enough get in without an invite. */
   openAdmission: { kind: "flag", env: "OPEN_ADMISSION" },
+  /** Cached prompt tokens' weight against the token allowance, 0 to 1. */
+  cachedTokenWeight: { kind: "weight", env: "CACHED_TOKEN_WEIGHT" },
 } as const;
 
 export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;
@@ -59,6 +61,8 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= MAX_USD ? value : "invalid";
     case "flag":
       return typeof value === "boolean" ? value : "invalid";
+    case "weight":
+      return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : "invalid";
   }
 }
 
@@ -67,6 +71,7 @@ const RULES: Record<Kind, string> = {
   count: `a whole number, 0 to ${MAX_COUNT}`,
   usd: `a number of dollars, 0 to ${MAX_USD}, or "none" for no cap`,
   flag: "true or false",
+  weight: "a number from 0 to 1",
 };
 
 /**
