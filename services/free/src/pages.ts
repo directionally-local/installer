@@ -46,11 +46,18 @@ ${DISCLOSURE}`,
   );
 }
 
-export function invitePage(ticket: string, login: string, error?: string): Response {
+export const INVITE_ONLY_INTRO = "The free tier is invite-only for now: enter your invite code.";
+
+export function tooNewIntro(minAccountAgeDays: number): string {
+  return `This GitHub account is less than ${minAccountAgeDays} days old, so it needs an invite code for the free tier: enter your invite code.`;
+}
+
+/** The invite step. `intro` says why a code is needed (invite-only, or the account is too new). */
+export function invitePage(ticket: string, login: string, error?: string, intro: string = INVITE_ONLY_INTRO): Response {
   return shell(
     "Invite code",
     `${error ? `<p role="alert"><strong>${escapeHtml(error)}</strong></p>` : ""}
-<p>Signed in as <strong>${escapeHtml(login)}</strong>. The free tier is invite-only for now: enter your invite code.</p>
+<p>Signed in as <strong>${escapeHtml(login)}</strong>. ${escapeHtml(intro)}</p>
 <form method="post" action="/device/invite">
   <input type="hidden" name="ticket" value="${escapeHtml(ticket)}">
   <input name="invite_code" autocomplete="off" autocapitalize="characters" placeholder="DL-XXXX-XXXX" required>

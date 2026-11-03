@@ -10,9 +10,20 @@ import { ConfigError, readFreeConfig, type FreeConfig } from "./config.js";
 import type { DirectoryObject, RequestRecord } from "./directory-object.js";
 import { apiError, json } from "./errors.js";
 import { cleanBatch } from "./events.js";
-import { confirmPage, donePage, enterCodePage, invitePage } from "./pages.js";
+import {
+  DEVICE_TAKEN_MESSAGE,
+  INVALID_INVITE_MESSAGE,
+  isSignInRefusal,
+  PAUSED_MESSAGE,
+  signInRefusal,
+  TOTAL_BUDGET_MESSAGE,
+  weeklyBudgetMessage,
+  type SignInRefusal,
+} from "./messages.js";
+import { confirmPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, tooNewIntro } from "./pages.js";
 import { ALLOWED_MODELS, chargedTokens, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
+import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
 import { meterStream } from "./sse.js";
 import { DAY_MS, isoDay, weekEnd } from "./week.js";
 
@@ -52,6 +63,7 @@ export interface Env {
   GLOBAL_TOTAL_USD_CAP?: string;
   PER_PERSON_WEEKLY_USD_CAP?: string;
   MIN_GITHUB_ACCOUNT_AGE_DAYS?: string;
+  OPEN_ADMISSION?: string;
   COUNT_CACHED_TOKENS?: string;
   PAUSED?: string;
   PUBLIC_URL?: string;
@@ -72,7 +84,10 @@ interface Ctx {
   request: Request;
   url: URL;
   env: Env;
+  /** The config from `env` only; use `runtime(c)` for values the owner can override. */
   config: FreeConfig;
+  /** This request's runtime view, read once (see `runtime`). */
+  runtimeState?: Promise<Runtime>;
   now: () => number;
   fetch: Fetch;
   ip: string;
@@ -202,12 +217,28 @@ function auth(c: Ctx) {
   return c.env.AUTH.getByName("auth");
 }
 
+/** The config with the admin's runtime overrides applied, the kill switch, and non-admin spend. */
+interface Runtime {
+  config: FreeConfig;
+  paused: boolean;
+  weekUsd: number;
+  totalUsd: number;
+}
+
+/** Read once per request: an override changed mid-request applies from the next one. */
+function runtime(c: Ctx): Promise<Runtime> {
+  c.runtimeState ??= directory(c)
+    .gate(c.now())
+    .then((gate) => ({ config: applyOverrides(c.config, gate.overrides), paused: c.config.paused || gate.paused, weekUsd: gate.weekUsd, totalUsd: gate.totalUsd }));
+  return c.runtimeState;
+}
+
 async function isPaused(c: Ctx): Promise<boolean> {
-  return c.config.paused || (await directory(c).gate(c.now())).paused;
+  return c.config.paused || (await runtime(c)).paused;
 }
 
 function pausedError(headers: Record<string, string> = {}): Response {
-  return apiError(503, "service_paused", "The free tier is paused for now. Try again later.", { reason: "paused" }, headers);
+  return apiError(503, "service_paused", PAUSED_MESSAGE, { reason: "paused", pausedForEveryone: true, resetsAt: null }, headers);
 }
 
 // ─── Sign-in: the CLI side ──────────────────────────────────────────────────
@@ -238,11 +269,6 @@ const POLL_MESSAGES = {
   not_invited: ["not_invited", "This GitHub account isn't on the free tier yet: it needs an invite code, or the current cohort is full."],
 } as const;
 
-const DENY_MESSAGES: Record<string, string> = {
-  device_taken: "This device already has a free allowance under another GitHub account.",
-  account_too_new: "This GitHub account is too new for the free tier.",
-};
-
 async function deviceToken(c: Ctx): Promise<Response> {
   const retry = await limited(c, `poll:ip:${c.ip}`, LIMITS.pollIp);
   if (retry !== undefined) return rateLimited(retry);
@@ -251,8 +277,15 @@ async function deviceToken(c: Ctx): Promise<Response> {
   if (typeof code !== "string" || !code) return apiError(400, "invalid_request", "Send {device_code}.");
   const result = await auth(c).poll(code, c.now());
   if (result.status === "approved") return tokenResponse(c, result, result.refreshToken);
+  const reason = "reason" in result ? result.reason : undefined;
+  // Each refusal has its own code; the message is the one the browser page showed.
+  if ((result.status === "not_invited" || result.status === "denied") && isSignInRefusal(reason)) {
+    const { config } = await runtime(c);
+    return apiError(400, reason, signInRefusal(reason, config.minGithubAccountAgeDays).message, { reason });
+  }
+  if (result.status === "denied" && reason === "service_paused") return apiError(400, "service_paused", PAUSED_MESSAGE, { reason: "paused" });
   const [errorCode, message] = POLL_MESSAGES[result.status];
-  const detail = result.status === "denied" && "reason" in result && result.reason ? DENY_MESSAGES[result.reason] : undefined;
+  const detail = result.status === "denied" && reason === "device_taken" ? DEVICE_TAKEN_MESSAGE : undefined;
   return apiError(400, errorCode, detail ?? message, {
     ...(result.status === "slow_down" ? { interval: result.interval } : {}),
     ...("reason" in result && result.reason ? { reason: result.reason } : {}),
@@ -284,8 +317,12 @@ async function devicePage(c: Ctx): Promise<Response> {
 }
 
 async function deviceAuthorize(c: Ctx): Promise<Response> {
-  if (await isPaused(c)) return donePage("Paused", "The free tier is paused for now. Try again later.", 503);
   const userCode = normalizeUserCode(c.url.searchParams.get("user_code") ?? "");
+  if (await isPaused(c)) {
+    // Tell the waiting terminal too, instead of letting its code run out.
+    if (userCode) await auth(c).deny(userCode, c.now(), "service_paused");
+    return donePage("Paused", PAUSED_MESSAGE, 503);
+  }
   const begun = userCode ? await auth(c).beginOAuth(userCode, c.now()) : undefined;
   if (!begun) return enterCodePage("That code is unknown, used or expired. Start sign-in again in your terminal.");
   const location = githubAuthorizeUrl({ clientId: c.config.githubClientId }, `${c.base}/device/callback`, begun.state);
@@ -338,7 +375,8 @@ async function deviceCallback(c: Ctx): Promise<Response> {
 
 /**
  * Runs admission and records the outcome on the device code, then renders the page for it.
- * `inviteCode` is set on the invite step only.
+ * `inviteCode` is set on the invite step only. With open admission, an account old enough
+ * gets in without one (within the per-network sign-up limit and the cohort size).
  */
 async function admitAndFinish(
   c: Ctx,
@@ -350,6 +388,10 @@ async function admitAndFinish(
   ticket?: string,
 ): Promise<Response> {
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
+  const { config } = await runtime(c);
+  const signupKey = `signup:ip:${c.ip}`;
+  const openEligible = config.openAdmission && !accountTooNew && inviteCode === undefined;
+  const signupsLeft = openEligible ? (await c.env.RATE_LIMITER.getByName(signupKey).check(signupKey, LIMITS.signupIp, 1, c.now())).allowed : true;
   const result = await directory(c).admit({
     githubId: identity.githubId,
     login: identity.login,
@@ -357,29 +399,35 @@ async function admitAndFinish(
     inviteCode,
     clientDeviceId,
     accountTooNew,
-    maxActive: c.config.maxActiveUsers,
+    openAdmission: openEligible && signupsLeft,
+    maxActive: config.maxActiveUsers,
     now: c.now(),
   });
   if (result.ok) {
-    if (result.created && inviteCode !== undefined) await c.env.RATE_LIMITER.getByName(`signup:ip:${c.ip}`).spend(`signup:ip:${c.ip}`, LIMITS.signupIp, 1, c.now());
+    if (result.created && (result.via === "invite" || result.via === "open")) await c.env.RATE_LIMITER.getByName(signupKey).spend(signupKey, LIMITS.signupIp, 1, c.now());
     await account(c, identity.githubId).activate({ githubId: identity.githubId, login: identity.login, isAdmin, now: c.now() });
     await auth(c).decide(deviceRef, "approved", identity, c.now());
     return donePage("You're signed in", `Signed in as ${identity.login}. Return to your terminal; you can close this tab.`);
   }
+  const intro = accountTooNew ? tooNewIntro(config.minGithubAccountAgeDays) : INVITE_ONLY_INTRO;
+  const refuse = async (code: SignInRefusal, status: "not_invited" | "denied", httpStatus: number) => {
+    await auth(c).decide(deviceRef, status, identity, c.now(), code);
+    const { heading, message } = signInRefusal(code, config.minGithubAccountAgeDays);
+    return donePage(heading, message, httpStatus);
+  };
   switch (result.reason) {
     case "needs_invite": {
-      const issued = await auth(c).decide(deviceRef, "needs_invite", identity, c.now());
-      return invitePage(issued.ticket ?? "", identity.login);
+      if (openEligible && !signupsLeft) return refuse("too_many_signups", "denied", 429);
+      const issued = await auth(c).decide(deviceRef, "needs_invite", identity, c.now(), accountTooNew ? "account_too_new" : "invite_required");
+      return invitePage(issued.ticket ?? "", identity.login, undefined, intro);
     }
     case "invalid_invite":
-      return invitePage(ticket ?? "", identity.login, "That invite code isn't valid or was already used.");
+      return invitePage(ticket ?? "", identity.login, INVALID_INVITE_MESSAGE, intro);
     case "cohort_full":
-      await auth(c).decide(deviceRef, "not_invited", identity, c.now());
-      return donePage("The free tier is full", "Every place in the current cohort is taken. Your terminal will say so too.", 403);
+      return refuse("cohort_full", "not_invited", 403);
     case "device_taken":
-    case "account_too_new":
       await auth(c).decide(deviceRef, "denied", identity, c.now(), result.reason);
-      return donePage("Can't sign in", DENY_MESSAGES[result.reason]!, 403);
+      return donePage("Can't sign in", DEVICE_TAKEN_MESSAGE, 403);
   }
 }
 
@@ -392,9 +440,10 @@ async function deviceInvite(c: Ctx): Promise<Response> {
   if (retry !== undefined) return invitePage(ticket, found.login, `Too many attempts. Try again in ${Math.ceil(retry / 60)} minutes.`);
   const signups = await c.env.RATE_LIMITER.getByName(`signup:ip:${c.ip}`).check(`signup:ip:${c.ip}`, LIMITS.signupIp, 1, c.now());
   if (!signups.allowed) return invitePage(ticket, found.login, "Too many new accounts from this network today. Try again tomorrow.");
+  const tooNew = found.reason === "account_too_new";
   const inviteCode = (form.get("invite_code") ?? "").trim();
-  if (!inviteCode) return invitePage(ticket, found.login, "Enter an invite code.");
-  return admitAndFinish(c, found.deviceRef, found.clientDeviceId, found, inviteCode, false, ticket);
+  if (!inviteCode) return invitePage(ticket, found.login, "Enter an invite code.", tooNew ? tooNewIntro((await runtime(c)).config.minGithubAccountAgeDays) : INVITE_ONLY_INTRO);
+  return admitAndFinish(c, found.deviceRef, found.clientDeviceId, found, inviteCode, tooNew, ticket);
 }
 
 async function deviceNoInvite(c: Ctx): Promise<Response> {
@@ -402,8 +451,10 @@ async function deviceNoInvite(c: Ctx): Promise<Response> {
   const ticket = form.get("ticket") ?? "";
   const found = ticket ? await auth(c).ticket(ticket, c.now()) : undefined;
   if (!found) return donePage("Sign-in expired", "This step expired. Start sign-in again in your terminal.", 400);
-  await auth(c).decide(found.deviceRef, "not_invited", found, c.now());
-  return donePage("No invite yet", "The free tier is invite-only for now. Your terminal will say so too; you can close this tab.");
+  const code: SignInRefusal = found.reason === "account_too_new" ? "account_too_new" : "invite_required";
+  await auth(c).decide(found.deviceRef, "not_invited", found, c.now(), code);
+  const { heading, message } = signInRefusal(code, (await runtime(c)).config.minGithubAccountAgeDays);
+  return donePage(heading, message);
 }
 
 async function deviceDeny(c: Ctx): Promise<Response> {
@@ -437,7 +488,7 @@ async function me(c: Ctx): Promise<Response> {
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
-  const allowance = await account(c, identity.githubId).allowance(c.now(), limitsFor(c.config));
+  const allowance = await account(c, identity.githubId).allowance(c.now(), limitsFor((await runtime(c)).config));
   if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
   return json({
     login: identity.login,
@@ -463,7 +514,7 @@ async function events(c: Ctx): Promise<Response> {
   if (guarded) return guarded;
   const body = await readJson(c);
   if (!body || !Array.isArray(body.events)) return apiError(400, "invalid_request", "Send {events: [...]}, at most 100.");
-  const allowance = await account(c, identity.githubId).allowance(c.now(), limitsFor(c.config));
+  const allowance = await account(c, identity.githubId).allowance(c.now(), limitsFor((await runtime(c)).config));
   if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
   const cleaned = cleanBatch(body, c.now());
   const accepted = await directory(c).recordEvents(identity.githubId, cleaned, c.now());
@@ -482,12 +533,13 @@ async function chat(c: Ctx): Promise<Response> {
     identity.headers.set("x-dl-quota-resets-at", new Date(weekEnd(c.now())).toISOString());
     return identity;
   }
-  const limits = limitsFor(c.config);
   const person = account(c, identity.githubId);
-  const headers = async () => quotaHeaders(await person.allowance(c.now(), limits));
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
+  if (c.config.paused) return pausedError(quotaHeaders(await person.allowance(c.now(), limitsFor(c.config))));
+  const gate = await runtime(c);
+  const limits = limitsFor(gate.config);
+  const headers = async () => quotaHeaders(await person.allowance(c.now(), limits));
 
-  if (c.config.paused) return pausedError(await headers());
   const guarded = await apiGuard(c, identity, headers);
   if (guarded) return guarded;
 
@@ -506,16 +558,18 @@ async function chat(c: Ctx): Promise<Response> {
     return apiError(400, "model_not_allowed", `The free tier serves ${ALLOWED_MODELS.join(", ")} only.`, { allowed: [...ALLOWED_MODELS] }, await headers());
   }
 
-  const gate = await directory(c).gate(c.now());
   if (gate.paused) return pausedError(await headers());
   if (!isAdmin) {
-    const { globalTotalUsdCap: total, globalWeeklyUsdCap: weekly } = c.config;
+    // The global caps read as a pause for everyone, with when it ends; a person's own key still works.
+    const { globalTotalUsdCap: total, globalWeeklyUsdCap: weekly } = gate.config;
     if (total !== undefined && gate.totalUsd >= total) {
-      return apiError(503, "service_paused", "The free tier has ended: its total budget is used up. Thank you for trying it.", { reason: "ended" }, await headers());
+      return apiError(503, "global_total_budget_reached", TOTAL_BUDGET_MESSAGE, { reason: "total_budget", pausedForEveryone: true, resetsAt: null }, await headers());
     }
     if (weekly !== undefined && gate.weekUsd >= weekly) {
-      const resetsAt = new Date(weekEnd(c.now())).toISOString();
-      return apiError(503, "service_paused", `The free tier's budget for this week is used up. It resumes at ${resetsAt}.`, { reason: "weekly_budget", resetsAt }, await headers());
+      const resumes = weekEnd(c.now());
+      const resetsAt = new Date(resumes).toISOString();
+      const retryAfter = String(Math.max(1, Math.ceil((resumes - c.now()) / 1000)));
+      return apiError(503, "global_weekly_budget_reached", weeklyBudgetMessage(resetsAt), { reason: "weekly_budget", pausedForEveryone: true, resetsAt }, { ...(await headers()), "retry-after": retryAfter });
     }
   }
 
@@ -644,29 +698,41 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
   const retry = await limited(c, `admin:gh:${identity.githubId}`, LIMITS.apiPerson);
   if (retry !== undefined) return rateLimited(retry);
   const now = c.now();
-  const limits = limitsFor(c.config);
+  const { config, paused } = await runtime(c);
+  const limits = limitsFor(config);
+  const actor = { githubId: identity.githubId, login: identity.login, now };
 
   if (method === "GET" && rest === "metrics") return adminMetrics(c);
   if (method === "GET" && rest === "spend") {
     const spend = await directory(c).spend(now);
-    const gate = await directory(c).gate(now);
     return json({
       ...spend,
       weekStart: new Date(spend.weekStart).toISOString(),
       resetsAt: new Date(spend.resetsAt).toISOString(),
       caps: {
-        globalWeeklyUsd: c.config.globalWeeklyUsdCap ?? null,
-        globalTotalUsd: c.config.globalTotalUsdCap ?? null,
-        perPersonWeeklyUsd: c.config.perPersonWeeklyUsdCap ?? null,
-        weeklyTokens: c.config.weeklyTokens,
+        globalWeeklyUsd: config.globalWeeklyUsdCap ?? null,
+        globalTotalUsd: config.globalTotalUsdCap ?? null,
+        perPersonWeeklyUsd: config.perPersonWeeklyUsdCap ?? null,
+        weeklyTokens: config.weeklyTokens,
       },
-      paused: c.config.paused || gate.paused,
+      paused,
       pausedByEnv: c.config.paused,
     });
   }
   if (method === "POST" && (rest === "pause" || rest === "unpause")) {
-    await directory(c).setPaused(rest === "pause");
+    await directory(c).setPaused(rest === "pause", actor);
     return json({ paused: c.config.paused || rest === "pause", pausedByEnv: c.config.paused });
+  }
+  if (rest === "config") {
+    if (method === "POST") {
+      const body = await readJson(c);
+      if (!body) return apiError(400, "invalid_request", "Send a JSON object of settings, e.g. {\"weeklyTokens\": 60000000}.");
+      const parsed = parseSettingsUpdate(body);
+      if ("error" in parsed) return apiError(400, "invalid_request", parsed.error);
+      await directory(c).updateOverrides(parsed.changes, actor);
+      return adminConfigView(c);
+    }
+    if (method === "GET") return adminConfigView(c);
   }
   if (rest === "invites") {
     if (method === "GET") return json({ invites: await directory(c).listInvites() });
@@ -745,6 +811,19 @@ function nullableWhole(value: unknown): number | null | undefined | "invalid" {
 function nullableAmount(value: unknown): number | null | undefined | "invalid" {
   if (value === undefined || value === null) return value;
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : "invalid";
+}
+
+/** What GET/POST /admin/config return: effective values, env values, overrides and the change log. */
+async function adminConfigView(c: Ctx): Promise<Response> {
+  const gate = await directory(c).gate(c.now());
+  return json({
+    effective: settingsView(applyOverrides(c.config, gate.overrides)),
+    env: settingsView(c.config),
+    overrides: gate.overrides,
+    paused: c.config.paused || gate.paused,
+    pausedByEnv: c.config.paused,
+    log: await directory(c).configLog(),
+  });
 }
 
 async function adminMetrics(c: Ctx): Promise<Response> {
