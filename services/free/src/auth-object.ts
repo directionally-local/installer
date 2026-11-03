@@ -17,8 +17,11 @@ export const REFRESH_TTL_MS = 30 * 86_400_000;
 export const REFRESH_REUSE_GRACE_MS = 30_000;
 const OAUTH_STATE_TTL_MS = 600_000;
 const POLL_TOLERANCE_MS = 250;
-/** `oauth_states.device_hash` of an admin dashboard sign-in; never a SHA-256 hex, so never a device code. */
-const ADMIN_SIGN_IN = "admin-dashboard";
+/** Earlier admin rows carried this in `device_hash`; the purpose column replaced it. */
+const LEGACY_ADMIN_MARKER = "admin-dashboard";
+
+/** What a GitHub round trip is for: finishing a device code, or an admin dashboard sign-in. */
+export type OAuthPurpose = "device" | "admin";
 
 export type DeviceStatus = "pending" | "needs_invite" | "approved" | "denied" | "not_invited" | "consumed";
 
@@ -94,6 +97,7 @@ export class AuthObject extends DurableObject {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
+      this.#migrateOAuthPurpose();
     });
   }
 
@@ -157,9 +161,9 @@ export class AuthObject extends DurableObject {
   async claimOAuthState(state: string, browser: string, now: number): Promise<{ deviceRef: string; clientDeviceId: string | null } | undefined> {
     const stateHash = await sha256Hex(state);
     const row = this.ctx.storage.sql
-      .exec<{ device_hash: string; browser_hash: string; expires_at: number }>("SELECT * FROM oauth_states WHERE state_hash = ?", stateHash)
+      .exec<{ device_hash: string; browser_hash: string; expires_at: number; purpose: string }>("SELECT * FROM oauth_states WHERE state_hash = ?", stateHash)
       .toArray()[0];
-    if (!row) return undefined;
+    if (!row || row.purpose !== "device") return undefined;
     this.ctx.storage.sql.exec("DELETE FROM oauth_states WHERE state_hash = ?", stateHash);
     if (row.expires_at <= now) return undefined;
     if (!timingSafeEqual(await sha256Hex(browser), row.browser_hash)) return undefined;
@@ -170,30 +174,42 @@ export class AuthObject extends DurableObject {
 
   /**
    * Starts a GitHub round trip for the admin dashboard's browser sign-in. Same shape as
-   * `beginOAuth`, but bound to no device code: its row carries `ADMIN_SIGN_IN` instead, so a
-   * device callback can't consume it and this one can't consume a device state.
+   * `beginOAuth`, but bound to no device code and stored with purpose `admin`. Both flows come
+   * back to the one registered callback; the purpose tells them apart, and each claim accepts
+   * only its own purpose.
    */
   async beginAdminOAuth(now: number): Promise<{ state: string; browser: string }> {
     const state = randomToken();
     const browser = randomToken();
-    this.ctx.storage.sql.exec("DELETE FROM oauth_states WHERE device_hash = ? AND expires_at <= ?", ADMIN_SIGN_IN, now);
+    this.ctx.storage.sql.exec("DELETE FROM oauth_states WHERE purpose = 'admin' AND expires_at <= ?", now);
     this.ctx.storage.sql.exec(
-      "INSERT INTO oauth_states (state_hash, device_hash, browser_hash, expires_at) VALUES (?, ?, ?, ?)",
+      "INSERT INTO oauth_states (state_hash, device_hash, browser_hash, expires_at, purpose) VALUES (?, '', ?, ?, 'admin')",
       await sha256Hex(state),
-      ADMIN_SIGN_IN,
       await sha256Hex(browser),
       now + OAUTH_STATE_TTL_MS,
     );
     return { state, browser };
   }
 
+  /**
+   * Which flow a callback's `state` belongs to, without consuming it; undefined when unknown or
+   * expired. Only routes the callback: the claim that follows checks everything again.
+   */
+  async oauthPurpose(state: string, now: number): Promise<OAuthPurpose | undefined> {
+    const row = this.ctx.storage.sql
+      .exec<{ purpose: string; expires_at: number }>("SELECT purpose, expires_at FROM oauth_states WHERE state_hash = ?", await sha256Hex(state))
+      .toArray()[0];
+    if (!row || row.expires_at <= now) return undefined;
+    return row.purpose === "admin" ? "admin" : "device";
+  }
+
   /** Consumes an admin sign-in `state`: once, unexpired, and only with the browser cookie it was issued with. */
   async claimAdminOAuthState(state: string, browser: string, now: number): Promise<boolean> {
     const stateHash = await sha256Hex(state);
     const row = this.ctx.storage.sql
-      .exec<{ device_hash: string; browser_hash: string; expires_at: number }>("SELECT * FROM oauth_states WHERE state_hash = ?", stateHash)
+      .exec<{ purpose: string; browser_hash: string; expires_at: number }>("SELECT * FROM oauth_states WHERE state_hash = ?", stateHash)
       .toArray()[0];
-    if (!row || row.device_hash !== ADMIN_SIGN_IN) return false;
+    if (!row || row.purpose !== "admin") return false;
     this.ctx.storage.sql.exec("DELETE FROM oauth_states WHERE state_hash = ?", stateHash);
     if (row.expires_at <= now) return false;
     return timingSafeEqual(await sha256Hex(browser), row.browser_hash);
@@ -338,6 +354,17 @@ export class AuthObject extends DurableObject {
 
   #byHash(deviceHash: string): DeviceRow | undefined {
     return this.ctx.storage.sql.exec<DeviceRow>("SELECT * FROM device_codes WHERE device_hash = ?", deviceHash).toArray()[0];
+  }
+
+  /** Adds `oauth_states.purpose` to databases created before it existed. */
+  #migrateOAuthPurpose(): void {
+    const sql = this.ctx.storage.sql;
+    const columns = sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('oauth_states')").toArray();
+    if (columns.some((column) => column.name === "purpose")) return;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("ALTER TABLE oauth_states ADD COLUMN purpose TEXT NOT NULL DEFAULT 'device'");
+      sql.exec("UPDATE oauth_states SET purpose = 'admin' WHERE device_hash = ?", LEGACY_ADMIN_MARKER);
+    });
   }
 
   async #scheduleCleanup(now: number): Promise<void> {

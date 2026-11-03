@@ -154,9 +154,12 @@ pause and admission state. Each table has a CSV at `/admin/dashboard/<table>.csv
   request's reservation can't fit in the final 1%) or cost at the dollar allowance, using
   today's allowances, including grants set with `POST /admin/people/:id/grant` from this version
   on.
-- **Sign-in:** "Sign in with GitHub" on the page runs the OAuth web flow with
-  `redirect_uri=<PUBLIC_URL>/device/callback/admin`. GitHub accepts subpaths of the registered
-  callback, so the OAuth app needs no change. Only ids in `ADMIN_GITHUB_IDS` get a session: an
+- **Sign-in:** "Sign in with GitHub" on the page runs the OAuth web flow with exactly the
+  OAuth app's registered callback, `redirect_uri=<PUBLIC_URL>/device/callback`, so the app
+  needs no change (it matches redirect URIs exactly). Device sign-in comes back to the same
+  callback; the sign-in `state` is stored with its purpose (`admin` or `device`), which picks
+  the flow, and each flow refuses the other's state. The old `/device/callback/admin` path still
+  works for now as an alias. Only ids in `ADMIN_GITHUB_IDS` get a session: an
   HttpOnly, Secure, SameSite=Strict `__Host-` cookie holding a signed one-hour token that can't
   be used as an API bearer token. Sign-out ends it at once. Scripts can send an admin access
   token as the bearer instead.

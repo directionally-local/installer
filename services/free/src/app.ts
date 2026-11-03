@@ -65,8 +65,16 @@ const ADMIN_COOKIE = "__Host-dl_admin";
 /** Binds an admin GitHub round trip to the browser that started it. */
 const ADMIN_OAUTH_COOKIE = "__Host-dl_admin_oauth";
 const ADMIN_SESSION_TTL_S = 3600;
-/** A subpath of the OAuth app's registered callback (/device/callback), which GitHub accepts as a redirect_uri. */
-const ADMIN_CALLBACK_PATH = "/device/callback/admin";
+/**
+ * The OAuth app's one registered callback. GitHub matches redirect URIs exactly, so admin
+ * sign-in comes back here too; the stored state's purpose says which flow to finish.
+ */
+const CALLBACK_PATH = "/device/callback";
+/**
+ * Where admin sign-in used to come back to. Kept as an alias for a while: harmless if it was
+ * added to the OAuth app, and it finishes any sign-in started before the change.
+ */
+const LEGACY_ADMIN_CALLBACK_PATH = "/device/callback/admin";
 
 const perMinute = (n: number): Limit => ({ capacity: n, perHour: n * 60 });
 const LIMITS = {
@@ -165,11 +173,11 @@ async function route(c: Ctx): Promise<Response> {
 
   if (method === "GET" && path === "/device") return devicePage(c);
   if (method === "GET" && path === "/device/authorize") return deviceAuthorize(c);
-  if (method === "GET" && path === "/device/callback") return deviceCallback(c);
+  if (method === "GET" && path === CALLBACK_PATH) return oauthCallback(c);
   if (method === "POST" && path === "/device/deny") return deviceDeny(c);
   if (method === "POST" && path === "/device/invite") return deviceInvite(c);
   if (method === "POST" && path === "/device/no-invite") return deviceNoInvite(c);
-  if (method === "GET" && path === ADMIN_CALLBACK_PATH) return adminCallback(c);
+  if (method === "GET" && path === LEGACY_ADMIN_CALLBACK_PATH) return adminCallback(c, LEGACY_ADMIN_CALLBACK_PATH);
 
   if (path === "/admin" || path === "/admin/signin" || path === "/admin/signout" || path.startsWith("/admin/dashboard/")) return adminWeb(c, path, method);
 
@@ -488,6 +496,17 @@ function readCookie(request: Request, name: string): string | undefined {
     if (index > 0 && part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
   }
   return undefined;
+}
+
+/**
+ * The registered callback, shared by device sign-in and admin dashboard sign-in. The state's
+ * stored purpose picks the flow (an unknown state goes to the device flow, which refuses it);
+ * each flow then claims the state for its own purpose only, with its own browser cookie.
+ */
+async function oauthCallback(c: Ctx): Promise<Response> {
+  const state = c.url.searchParams.get("state");
+  const purpose = state ? await auth(c).oauthPurpose(state, c.now()) : undefined;
+  return purpose === "admin" ? adminCallback(c, CALLBACK_PATH) : deviceCallback(c);
 }
 
 async function deviceCallback(c: Ctx): Promise<Response> {
@@ -1003,10 +1022,12 @@ async function adminMetrics(c: Ctx): Promise<Response> {
 // GET /admin is a server-rendered page; GET /admin/dashboard/<table>.csv downloads one table.
 // Both take an admin's browser session or, for scripts, an admin access token as the bearer.
 //
-// Browser sign-in is the OAuth web flow against the same GitHub app, with a redirect_uri of
-// /device/callback/admin: GitHub accepts any subpath of the registered callback, so the app's
-// settings don't change. GET /admin/signin stores a one-time `state` (hashed, 10 minutes) and
-// sets a SameSite=Lax cookie binding it to this browser; the callback must bring both back.
+// Browser sign-in is the OAuth web flow against the same GitHub app, with exactly its
+// registered redirect_uri, /device/callback (the app matches redirect URIs exactly). GET
+// /admin/signin stores a one-time `state` (hashed, 10 minutes, purpose "admin") and sets a
+// SameSite=Lax cookie binding it to this browser. /device/callback finishes an admin sign-in
+// when the state's stored purpose is "admin", and the device flow otherwise; the callback must
+// bring back both the state and the cookie.
 // Only a GitHub id in ADMIN_GITHUB_IDS gets a session: a signed token (typ "admin", 1 hour,
 // with a session id) in an HttpOnly, Secure, SameSite=Strict, __Host- cookie. It can't be used
 // as a bearer token, and a bearer token can't be used as it. Every request checks the id is
@@ -1110,7 +1131,7 @@ async function adminSignIn(c: Ctx): Promise<Response> {
   return new Response(null, {
     status: 302,
     headers: {
-      location: githubAuthorizeUrl({ clientId: c.config.githubClientId }, `${c.base}${ADMIN_CALLBACK_PATH}`, begun.state),
+      location: githubAuthorizeUrl({ clientId: c.config.githubClientId }, `${c.base}${CALLBACK_PATH}`, begun.state),
       "set-cookie": `${ADMIN_OAUTH_COOKIE}=${begun.browser}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
@@ -1118,7 +1139,8 @@ async function adminSignIn(c: Ctx): Promise<Response> {
   });
 }
 
-async function adminCallback(c: Ctx): Promise<Response> {
+/** `callbackPath` is the path GitHub sent the browser back to; the code exchange must name the same redirect_uri. */
+async function adminCallback(c: Ctx, callbackPath: string): Promise<Response> {
   const state = c.url.searchParams.get("state");
   const browser = readCookie(c.request, ADMIN_OAUTH_COOKIE);
   const clear = { "set-cookie": CLEAR_ADMIN_OAUTH };
@@ -1131,7 +1153,7 @@ async function adminCallback(c: Ctx): Promise<Response> {
     ? await githubUserFromCode(
         { clientId: c.config.githubClientId, clientSecret: c.config.githubClientSecret },
         code,
-        `${c.base}${ADMIN_CALLBACK_PATH}`,
+        `${c.base}${callbackPath}`,
         c.fetch,
         "directionallylocal-free",
       )
