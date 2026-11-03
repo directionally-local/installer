@@ -234,10 +234,13 @@ describe("kill switch and global caps", () => {
     assert.equal((await chat(service, token)).status, 200);
     const stopped = await chat(service, token);
     assert.equal(stopped.status, 503);
-    const body = (await stopped.json()) as { error: { code: string; reason: string; resetsAt: string } };
-    assert.equal(body.error.code, "service_paused");
+    const body = (await stopped.json()) as { error: { code: string; reason: string; resetsAt: string; message: string; pausedForEveryone: boolean } };
+    assert.equal(body.error.code, "global_weekly_budget_reached");
     assert.equal(body.error.reason, "weekly_budget");
+    assert.equal(body.error.pausedForEveryone, true);
     assert.equal(body.error.resetsAt, "2026-11-09T00:00:00.000Z");
+    assert.equal(body.error.message, "Free tokens are paused for everyone until 2026-11-09T00:00:00.000Z: this week's free budget is used up. Your own key still works.");
+    assert.equal(stopped.headers.get("retry-after"), String((Date.parse("2026-11-09T00:00:00.000Z") - service.clock.now) / 1000));
     assert.equal((await chat(service, adminToken)).status, 200, "admins aren't stopped by the global caps");
 
     const spend = (await (await service.request("GET", "/admin/spend", { token: adminToken })).json()) as Record<string, number>;
@@ -257,9 +260,11 @@ describe("kill switch and global caps", () => {
     const fresh = (await service.signIn({ id: 100, login: "alice" })).access_token;
     const ended = await chat(service, fresh);
     assert.equal(ended.status, 503);
-    const body = (await ended.json()) as { error: { code: string; reason: string; message: string } };
-    assert.equal(body.error.code, "service_paused");
-    assert.equal(body.error.reason, "ended");
-    assert.match(body.error.message, /has ended/);
+    const body = (await ended.json()) as { error: { code: string; reason: string; message: string; resetsAt: string | null; pausedForEveryone: boolean } };
+    assert.equal(body.error.code, "global_total_budget_reached");
+    assert.equal(body.error.reason, "total_budget");
+    assert.equal(body.error.resetsAt, null);
+    assert.equal(body.error.pausedForEveryone, true);
+    assert.match(body.error.message, /^Free tokens are paused for everyone: .*total budget is used up\. Your own key still works\.$/);
   });
 });

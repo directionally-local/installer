@@ -192,19 +192,19 @@ export class AuthObject extends DurableObject {
     return ticket ? { ticket } : {};
   }
 
-  /** Cancels a pending code from the browser page. */
-  async deny(userCode: string, now: number): Promise<boolean> {
+  /** Cancels a pending code from the browser page; `reason` tells the terminal why. */
+  async deny(userCode: string, now: number, reason?: string): Promise<boolean> {
     const row = this.#byUserCode(userCode);
     if (!row || row.expires_at <= now || (row.status !== "pending" && row.status !== "needs_invite")) return false;
-    this.ctx.storage.sql.exec("UPDATE device_codes SET status = 'denied', ticket_hash = NULL WHERE device_hash = ?", row.device_hash);
+    this.ctx.storage.sql.exec("UPDATE device_codes SET status = 'denied', ticket_hash = NULL, reason = ? WHERE device_hash = ?", reason ?? null, row.device_hash);
     return true;
   }
 
-  /** The device and person behind an invite-step ticket. */
-  async ticket(ticket: string, now: number): Promise<(Identity & { deviceRef: string; clientDeviceId: string | null }) | undefined> {
+  /** The device and person behind an invite-step ticket, and why an invite was asked for. */
+  async ticket(ticket: string, now: number): Promise<(Identity & { deviceRef: string; clientDeviceId: string | null; reason: string | null }) | undefined> {
     const row = this.ctx.storage.sql.exec<DeviceRow>("SELECT * FROM device_codes WHERE ticket_hash = ?", await sha256Hex(ticket)).toArray()[0];
     if (!row || row.expires_at <= now || row.status !== "needs_invite" || row.github_id === null || row.login === null) return undefined;
-    return { deviceRef: row.device_hash, githubId: row.github_id, login: row.login, clientDeviceId: row.client_device_id };
+    return { deviceRef: row.device_hash, githubId: row.github_id, login: row.login, clientDeviceId: row.client_device_id, reason: row.reason };
   }
 
   /** The CLI's poll (RFC 8628 §3.4–3.5), including `slow_down`. Approved codes pay out once. */

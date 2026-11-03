@@ -2,6 +2,7 @@ import { DurableObject, type DurableObjectState } from "cloudflare:workers";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { CleanEvent } from "./events.js";
+import { readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 
 /**
@@ -18,8 +19,19 @@ import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
  */
 
 export type AdmitResult =
-  | { ok: true; created: boolean }
-  | { ok: false; reason: "needs_invite" | "invalid_invite" | "cohort_full" | "device_taken" | "account_too_new" };
+  | { ok: true; created: boolean; via: "existing" | "admin" | "open" | "invite" }
+  | { ok: false; reason: "needs_invite" | "invalid_invite" | "cohort_full" | "device_taken" };
+
+/** One logged change to a runtime setting or the kill switch. */
+export interface ConfigChange {
+  id: number;
+  key: string;
+  oldValue: unknown;
+  newValue: unknown;
+  changedBy: number;
+  changedByLogin: string;
+  changedAt: string;
+}
 
 export interface PersonRow {
   github_id: number;
@@ -90,6 +102,15 @@ const SCHEMA = [
      key   TEXT PRIMARY KEY,
      value TEXT NOT NULL
    )`,
+  `CREATE TABLE IF NOT EXISTS config_log (
+     id               INTEGER PRIMARY KEY AUTOINCREMENT,
+     key              TEXT NOT NULL,
+     old_value        TEXT,
+     new_value        TEXT,
+     changed_by       INTEGER NOT NULL,
+     changed_by_login TEXT NOT NULL,
+     changed_at       INTEGER NOT NULL
+   )`,
   `CREATE TABLE IF NOT EXISTS requests (
      id                INTEGER PRIMARY KEY AUTOINCREMENT,
      github_id         INTEGER NOT NULL,
@@ -140,9 +161,10 @@ export class DirectoryObject extends DurableObject {
   // ─── Admission ────────────────────────────────────────────────────────────
 
   /**
-   * Admits a GitHub account, atomically: existing people pass; admins pass; everyone else
-   * needs an unused invite code and room under `maxActive`. A device id already holding a
-   * grant for another account is refused (one grant per account and device).
+   * Admits a GitHub account (one person per numeric GitHub id), atomically: existing people
+   * pass; admins pass; everyone else needs room under `maxActive`, and then either open
+   * admission with an account old enough, or an unused invite code. A device id already
+   * holding a grant for another account is refused (one grant per account and device).
    */
   async admit(input: {
     githubId: number;
@@ -150,8 +172,10 @@ export class DirectoryObject extends DurableObject {
     isAdmin: boolean;
     inviteCode: string | undefined;
     clientDeviceId: string | null;
-    /** The GitHub account is younger than the minimum age; only blocks new people. */
+    /** The GitHub account is younger than the minimum age: it needs an invite even with open admission. */
     accountTooNew: boolean;
+    /** Admit accounts that aren't too new without an invite. */
+    openAdmission?: boolean;
     maxActive: number;
     now: number;
   }): Promise<AdmitResult> {
@@ -169,16 +193,20 @@ export class DirectoryObject extends DurableObject {
       if (existing) {
         sql.exec("UPDATE people SET login = ? WHERE github_id = ?", input.login, input.githubId);
         bindDevice();
-        return { ok: true, created: false };
+        return { ok: true, created: false, via: "existing" };
       }
       if (input.isAdmin) {
         sql.exec("INSERT INTO people (github_id, login, status, admitted_at, admitted_via) VALUES (?, ?, 'active', ?, 'admin')", input.githubId, input.login, input.now);
         bindDevice();
-        return { ok: true, created: true };
+        return { ok: true, created: true, via: "admin" };
       }
-      if (input.accountTooNew) return { ok: false, reason: "account_too_new" };
       const active = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM people WHERE status = 'active' AND admitted_via != 'admin'").toArray()[0]?.n ?? 0;
       if (active >= input.maxActive) return { ok: false, reason: "cohort_full" };
+      if (input.openAdmission && !input.accountTooNew) {
+        sql.exec("INSERT INTO people (github_id, login, status, admitted_at, admitted_via) VALUES (?, ?, 'active', ?, 'open')", input.githubId, input.login, input.now);
+        bindDevice();
+        return { ok: true, created: true, via: "open" };
+      }
       if (!inviteHash) return { ok: false, reason: "needs_invite" };
       const invite = sql.exec<{ id: number; used_by: number | null }>("SELECT id, used_by FROM invites WHERE code_hash = ?", inviteHash).toArray()[0];
       if (!invite || invite.used_by !== null) return { ok: false, reason: "invalid_invite" };
@@ -191,7 +219,7 @@ export class DirectoryObject extends DurableObject {
         `invite:${invite.id}`,
       );
       bindDevice();
-      return { ok: true, created: true };
+      return { ok: true, created: true, via: "invite" };
     });
   }
 
@@ -236,17 +264,89 @@ export class DirectoryObject extends DurableObject {
     return found;
   }
 
-  // ─── Kill switch and spend ───────────────────────────────────────────────
+  // ─── Kill switch, runtime settings and spend ─────────────────────────────
 
-  async setPaused(paused: boolean): Promise<void> {
-    this.ctx.storage.sql.exec("INSERT INTO settings (key, value) VALUES ('paused', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", paused ? "1" : "0");
+  async setPaused(paused: boolean, actor?: { githubId: number; login: string; now: number }): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      const before = this.#paused();
+      this.ctx.storage.sql.exec("INSERT INTO settings (key, value) VALUES ('paused', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", paused ? "1" : "0");
+      if (actor && before !== paused) this.#log("paused", before, paused, actor);
+    });
   }
 
-  /** What a request checks before forwarding: the admin kill switch and non-admin spend. */
-  async gate(now: number): Promise<{ paused: boolean; weekUsd: number; totalUsd: number }> {
-    const paused = this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM settings WHERE key = 'paused'").toArray()[0]?.value === "1";
+  /** The admin overrides of runtime settings (see runtime-config.ts). */
+  async overrides(): Promise<Overrides> {
+    return this.#overrides();
+  }
+
+  /**
+   * Applies validated changes to the overrides atomically and logs each one that changed
+   * something. Returns the overrides after the change.
+   */
+  async updateOverrides(changes: SettingChange[], actor: { githubId: number; login: string; now: number }): Promise<Overrides> {
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      for (const change of changes) {
+        const before = this.#overrides()[change.key];
+        if (change.value === undefined) {
+          if (before === undefined) continue;
+          sql.exec("DELETE FROM settings WHERE key = ?", `override:${change.key}`);
+        } else {
+          if (before === change.value) continue;
+          sql.exec(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            `override:${change.key}`,
+            JSON.stringify(change.value),
+          );
+        }
+        this.#log(change.key, before, change.value, actor);
+      }
+    });
+    return this.#overrides();
+  }
+
+  /** The most recent changes to runtime settings and the kill switch, newest first. */
+  async configLog(limit = 50): Promise<ConfigChange[]> {
+    type Row = { id: number; key: string; old_value: string | null; new_value: string | null; changed_by: number; changed_by_login: string; changed_at: number };
+    return this.ctx.storage.sql
+      .exec<Row>("SELECT * FROM config_log ORDER BY id DESC LIMIT ?", limit)
+      .toArray()
+      .map((row) => ({
+        id: row.id,
+        key: row.key,
+        oldValue: row.old_value === null ? "(env)" : (JSON.parse(row.old_value) as unknown),
+        newValue: row.new_value === null ? "(env)" : (JSON.parse(row.new_value) as unknown),
+        changedBy: row.changed_by,
+        changedByLogin: row.changed_by_login,
+        changedAt: new Date(row.changed_at).toISOString(),
+      }));
+  }
+
+  /** What a request checks before forwarding: the admin kill switch, the overrides and non-admin spend. */
+  async gate(now: number): Promise<{ paused: boolean; weekUsd: number; totalUsd: number; overrides: Overrides }> {
     const spend = await this.spend(now);
-    return { paused, weekUsd: spend.spentUsd, totalUsd: spend.totalSpentUsd };
+    return { paused: this.#paused(), weekUsd: spend.spentUsd, totalUsd: spend.totalSpentUsd, overrides: this.#overrides() };
+  }
+
+  #paused(): boolean {
+    return this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM settings WHERE key = 'paused'").toArray()[0]?.value === "1";
+  }
+
+  #overrides(): Overrides {
+    return readOverrides(this.ctx.storage.sql.exec<{ key: string; value: string }>("SELECT key, value FROM settings WHERE key LIKE 'override:%'").toArray());
+  }
+
+  /** `undefined` (no override, so env) is stored as NULL. */
+  #log(key: string, before: unknown, after: unknown, actor: { githubId: number; login: string; now: number }): void {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO config_log (key, old_value, new_value, changed_by, changed_by_login, changed_at) VALUES (?, ?, ?, ?, ?, ?)",
+      key,
+      before === undefined ? null : JSON.stringify(before),
+      after === undefined ? null : JSON.stringify(after),
+      actor.githubId,
+      actor.login,
+      actor.now,
+    );
   }
 
   async spend(now: number): Promise<SpendSummary> {

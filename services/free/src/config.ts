@@ -21,8 +21,13 @@ export interface FreeConfig {
   globalTotalUsdCap: number | undefined;
   /** A person's week ends at `weeklyTokens` or at this much real cost, whichever comes first. */
   perPersonWeeklyUsdCap: number | undefined;
-  /** GitHub accounts younger than this can't sign up. */
+  /** GitHub accounts younger than this need an invite code even when admission is open. */
   minGithubAccountAgeDays: number;
+  /**
+   * Open admission: GitHub accounts at least `minGithubAccountAgeDays` old get in without an
+   * invite code (still within `maxActiveUsers`). Off by default: invite-only for everyone.
+   */
+  openAdmission: boolean;
   countCachedTokens: boolean;
   /** The kill switch from `env`; the admin endpoint has its own, and either one pauses. */
   paused: boolean;
@@ -38,6 +43,7 @@ export const DEFAULTS = {
   globalTotalUsdCap: 1000,
   perPersonWeeklyUsdCap: 5,
   minGithubAccountAgeDays: 30,
+  openAdmission: false,
 } as const;
 
 export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
@@ -55,6 +61,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     globalTotalUsdCap: usd(env.GLOBAL_TOTAL_USD_CAP, DEFAULTS.globalTotalUsdCap, "GLOBAL_TOTAL_USD_CAP"),
     perPersonWeeklyUsdCap: usd(env.PER_PERSON_WEEKLY_USD_CAP, DEFAULTS.perPersonWeeklyUsdCap, "PER_PERSON_WEEKLY_USD_CAP"),
     minGithubAccountAgeDays: whole(env.MIN_GITHUB_ACCOUNT_AGE_DAYS, DEFAULTS.minGithubAccountAgeDays, "MIN_GITHUB_ACCOUNT_AGE_DAYS"),
+    openAdmission: flag(env.OPEN_ADMISSION, DEFAULTS.openAdmission, "OPEN_ADMISSION"),
     countCachedTokens: flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS"),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),

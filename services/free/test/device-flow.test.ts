@@ -150,12 +150,15 @@ describe("browser sign-in", () => {
     assert.match(await reused.text(), /already used/);
   });
 
-  it("reports not_invited when the person has no code", async () => {
+  it("reports invite_required when the person has no code, saying what the page said", async () => {
     const service = await createService();
     const flow = await startBrowserFlow(service.request, { id: 100, login: "alice" });
     const ticket = /name="ticket" value="([^"]+)"/.exec(flow.page)![1]!;
-    await service.request("POST", "/device/no-invite", { form: { ticket } });
-    assert.equal(await errorCode(await service.request("POST", "/v1/device/token", { body: { device_code: flow.deviceCode } })), "not_invited");
+    const page = await (await service.request("POST", "/device/no-invite", { form: { ticket } })).text();
+    const body = (await (await service.request("POST", "/v1/device/token", { body: { device_code: flow.deviceCode } })).json()) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, "invite_required");
+    assert.match(body.error.message, /invite-only/);
+    assert.ok(page.includes(body.error.message), "the page and the terminal say the same thing");
   });
 
   it("enforces MAX_ACTIVE_USERS, not counting admins", async () => {
@@ -166,20 +169,25 @@ describe("browser sign-in", () => {
     const flow = await startBrowserFlow(service.request, { id: 101, login: "bob" });
     assert.equal(flow.status, 403);
     assert.match(flow.page, /full/);
-    assert.equal(await errorCode(await service.request("POST", "/v1/device/token", { body: { device_code: flow.deviceCode } })), "not_invited");
+    const body = (await (await service.request("POST", "/v1/device/token", { body: { device_code: flow.deviceCode } })).json()) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, "cohort_full");
+    assert.ok(flow.page.includes(body.error.message));
     // People already in can still sign in on another machine.
     await service.signIn({ id: 100, login: "alice" });
   });
 
-  it("refuses GitHub accounts younger than MIN_GITHUB_ACCOUNT_AGE_DAYS", async () => {
-    const service = await createService();
+  it("asks GitHub accounts younger than MIN_GITHUB_ACCOUNT_AGE_DAYS for an invite, and reports account_too_new without one", async () => {
+    const service = await createService({ OPEN_ADMISSION: "true" });
     const flow = await startBrowserFlow(service.request, { id: 100, login: "fresh", createdAt: "2026-10-20T00:00:00Z" });
-    assert.equal(flow.status, 403);
+    assert.equal(flow.status, 200);
+    assert.match(flow.page, /less than 30 days old/);
+    const ticket = /name="ticket" value="([^"]+)"/.exec(flow.page)![1]!;
+    const page = await (await service.request("POST", "/device/no-invite", { form: { ticket } })).text();
     const response = await service.request("POST", "/v1/device/token", { body: { device_code: flow.deviceCode } });
     const body = (await response.json()) as { error: { code: string; reason: string; message: string } };
-    assert.equal(body.error.code, "access_denied");
-    assert.equal(body.error.reason, "account_too_new");
-    assert.match(body.error.message, /too new/);
+    assert.equal(body.error.code, "account_too_new");
+    assert.match(body.error.message, /less than 30 days old, so it needs an invite code/);
+    assert.ok(page.includes(body.error.message));
   });
 
   it("gives one grant per device", async () => {
@@ -196,5 +204,18 @@ describe("browser sign-in", () => {
   it("stops new sign-ins while paused", async () => {
     const service = await createService({ PAUSED: "true" });
     assert.equal(await errorCode(await service.request("POST", "/v1/device/code", { body: {} })), "service_paused");
+  });
+
+  it("tells a waiting terminal when the free tier was paused before the browser step", async () => {
+    const service = await createService();
+    const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    const issued = (await (await service.request("POST", "/v1/device/code", { body: {} })).json()) as { device_code: string; user_code: string };
+    await service.request("POST", "/admin/pause", { token: admin });
+    const page = await service.request("GET", `/device/authorize?user_code=${issued.user_code}`);
+    assert.equal(page.status, 503);
+    const html = await page.text();
+    const body = (await (await service.request("POST", "/v1/device/token", { body: { device_code: issued.device_code } })).json()) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, "service_paused");
+    assert.ok(html.includes(body.error.message.replace(/'/g, "&#39;")));
   });
 });
