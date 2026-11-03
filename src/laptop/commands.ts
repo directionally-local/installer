@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { promisify } from "node:util";
+import { updateCommand } from "../install-method.js";
 import { isModelNotPriced } from "../model-prices.js";
 import { palette } from "../ui.js";
 import { RemoteApiError, RemoteClient, TERMINAL_STATUSES, type ModelCatalog, type RemoteConversation, type RemoteEvent } from "./client.js";
@@ -384,7 +385,7 @@ export function laptopReady(info: ReadyHere, io: LaptopIO = processIO): void {
   row("dl", `${info.dl} ${c.dim(`· installed in ${info.installedIn}`)}`);
   row("Autopilot", info.autopilot
     ? `${info.autopilot} ${c.dim(info.bundled === false ? "· the one on your PATH" : "· comes with dl")}`
-    : `${c.yellow("not installed")}   ${c.dim("npm install -g directionallylocal")}`);
+    : `${c.yellow("not installed")}   ${c.dim(updateCommand())}`);
   io.out("\n");
   io.out(`  ${c.dim("Start, in a project folder:")}\n`);
   io.out(`     ${c.bold("dl")}          ${c.dim("a new session with Autopilot in that folder")}\n`);

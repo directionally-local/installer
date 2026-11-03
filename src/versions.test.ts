@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { installedVersion, packageSpecs, pinnedAutopilotVersion, pinnedHotcellVersion, versionAgainstPin } from "./versions.js";
+import { compareSemver, installedVersion, packageSpecs, pinnedAutopilotVersion, pinnedHotcellVersion, versionAgainstPin } from "./versions.js";
 
 describe("one Autopilot and one Hotcell version", () => {
   it("pins autopilot-ai and hotcell exactly in package.json, and those pins are what places install", () => {
@@ -35,5 +35,20 @@ describe("one Autopilot and one Hotcell version", () => {
   it("shows a place's version next to the pin", () => {
     assert.equal(versionAgainstPin("0.1.38", "0.1.38"), "0.1.38");
     assert.equal(versionAgainstPin("0.1.30", "0.1.38"), "0.1.30 → 0.1.38");
+  });
+});
+
+describe("semver order", () => {
+  it("orders versions as semver does", () => {
+    const ordered = ["0.9.9", "0.10.0-alpha", "0.10.0-alpha.1", "0.10.0-alpha.beta", "0.10.0-beta.2", "0.10.0-beta.11", "0.10.0-rc.1", "0.10.0", "0.10.1", "0.10.10", "1.0.0"];
+    for (let i = 0; i < ordered.length; i++) {
+      for (let j = 0; j < ordered.length; j++) {
+        assert.equal(compareSemver(ordered[i]!, ordered[j]!), Math.sign(i - j), `${ordered[i]} vs ${ordered[j]}`);
+      }
+    }
+    assert.equal(compareSemver("v0.10.1", "0.10.1"), 0);
+    assert.equal(compareSemver("0.10.1+build.7", "0.10.1"), 0, "build metadata is ignored");
+    assert.throws(() => compareSemver("0.10", "0.10.0"), /Not a version/);
+    assert.throws(() => compareSemver("latest", "0.10.0"), /Not a version/);
   });
 });

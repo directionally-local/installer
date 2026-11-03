@@ -89,3 +89,41 @@ export function installedVersion(manifestText: string | undefined, fallback: str
     return fallback;
   }
 }
+
+/**
+ * Semver precedence (semver.org §11): -1, 0 or 1. `1.0.0-rc.1` comes before `1.0.0`, numeric
+ * pre-release parts compare as numbers and before alphanumeric ones, and build metadata
+ * (`+…`) is ignored. A leading "v" is allowed. Throws on anything that isn't a version.
+ */
+export function compareSemver(a: string, b: string): number {
+  const left = parseSemver(a);
+  const right = parseSemver(b);
+  for (let index = 0; index < 3; index++) {
+    if (left.core[index]! !== right.core[index]!) return left.core[index]! < right.core[index]! ? -1 : 1;
+  }
+  // A version without a pre-release is newer than the same version with one.
+  if (left.pre.length === 0 && right.pre.length === 0) return 0;
+  if (left.pre.length === 0) return 1;
+  if (right.pre.length === 0) return -1;
+  for (let index = 0; index < Math.max(left.pre.length, right.pre.length); index++) {
+    const x = left.pre[index];
+    const y = right.pre[index];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    if (x === y) continue;
+    const xNumeric = /^\d+$/.test(x);
+    const yNumeric = /^\d+$/.test(y);
+    if (xNumeric && yNumeric) return BigInt(x) < BigInt(y) ? -1 : 1;
+    if (xNumeric !== yNumeric) return xNumeric ? -1 : 1;
+    return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+const SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$/;
+
+function parseSemver(version: string): { core: [bigint, bigint, bigint]; pre: string[] } {
+  const match = SEMVER.exec(version.trim());
+  if (!match) throw new Error(`Not a version: ${JSON.stringify(version)}`);
+  return { core: [BigInt(match[1]!), BigInt(match[2]!), BigInt(match[3]!)], pre: match[4] ? match[4].split(".") : [] };
+}

@@ -5,7 +5,8 @@ import type { Prompter } from "../prompt.js";
 import { palette, type Ui } from "../ui.js";
 import { dlVersion, pinnedAutopilotVersion, pinnedHotcellVersion } from "../versions.js";
 import { resolveRemote, type RemoteServer, type SshAccess } from "./config.js";
-import { bootstrap, EventReplayer, INSTALL_URL, type UiFactory } from "./remote-install.js";
+import { updateCommand } from "../install-method.js";
+import { ensureServerDl, EventReplayer, INSTALL_URL, type DlRegistry, type UiFactory } from "./remote-install.js";
 import { checkServer, type ServerFacts, type SshExec } from "./ssh.js";
 import { withConnections, type RemoteOpener } from "./tunnel.js";
 
@@ -158,6 +159,8 @@ export interface UpdateDeps {
   installUrl?: string;
   /** npm's newest dl, for the one-line hint when this laptop itself is behind; tests replace it. */
   latestDl?: () => Promise<string | undefined>;
+  /** npm's dl versions, to check this laptop's is published before installing it on the server; tests replace it. */
+  registry?: DlRegistry;
 }
 
 /** `dl update [NAME] [--wait]`: update a place without interrupting its tasks. */
@@ -184,8 +187,19 @@ export async function update(args: string[], deps: UpdateDeps): Promise<number> 
   const before = await serverVersions(remote.ssh, deps.ssh);
   deps.io.out(`\n  ${c.bold("Updating")} ${remote.name}${before ? c.dim(`  (Autopilot ${before.autopilot} · Hotcell ${before.hotcell})`) : ""}\n\n`);
   // The server's dl first, at this laptop's own version: it pins the Autopilot it installs, so
-  // the same dl on both ends means the same Autopilot as this laptop's session client.
-  await bootstrap(remote.ssh, facts, deps.ssh, deps.newUi(), deps.installUrl ?? INSTALL_URL);
+  // the same dl on both ends means the same Autopilot as this laptop's session client. A server
+  // with a newer dl is never downgraded: it's left as it is, and this laptop is the one to update.
+  const plan = await ensureServerDl(remote.ssh, facts, deps.ssh, {
+    name: remote.name,
+    ui: deps.newUi,
+    say: (line) => deps.io.out(`  ${c.yellow("!")} ${line}\n`),
+    installUrl: deps.installUrl ?? INSTALL_URL,
+    ...(deps.registry ? { registry: deps.registry } : {}),
+  });
+  if (plan.action === "keep" && plan.reason === "newer") {
+    deps.io.out(`  ${c.dim(`Left ${remote.name} as it is.`)}\n\n`);
+    return 0;
+  }
   const replay = new EventReplayer(deps.newUi);
   // No --access: the server keeps the way it's reached. `{}` means "no new answers", so a
   // missing key fails at once instead of waiting for a prompt nobody can see.
@@ -238,9 +252,9 @@ async function laptopHints(remote: RemoteServer, after: ServerVersions | undefin
   const latest = await (deps.latestDl ?? (() => npmVersion("directionallylocal")))().catch(() => undefined);
   const behind = latest !== undefined && compareVersions(dlVersion(), latest) < 0;
   if (after && after.autopilot !== here) {
-    deps.io.out(`  ${c.yellow("!")} ${remote.name} runs Autopilot ${after.autopilot}; this laptop's dl bundles ${here}. ${behind ? `Update dl here too:` : "Match them:"} ${c.bold("npm install -g directionallylocal")}\n`);
+    deps.io.out(`  ${c.yellow("!")} ${remote.name} runs Autopilot ${after.autopilot}; this laptop's dl bundles ${here}. ${behind ? `Update dl here too:` : "Match them:"} ${c.bold(updateCommand())}\n`);
   } else if (behind) {
-    deps.io.out(`  ${c.dim(`dl ${latest} is out (this is ${dlVersion()}):`)} ${c.bold("npm install -g directionallylocal")}\n`);
+    deps.io.out(`  ${c.dim(`dl ${latest} is out (this is ${dlVersion()}):`)} ${c.bold(updateCommand())}\n`);
   }
 }
 

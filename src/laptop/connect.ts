@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { updateCommand } from "../install-method.js";
 import { parseConnectState, type ConnectResult } from "../provider.js";
 import { findAutopilot, type AutopilotCommand } from "./autopilot.js";
 
@@ -35,7 +36,6 @@ export class ConnectCancelled extends Error {
   }
 }
 
-const UPDATE = "npm install -g directionallylocal";
 
 const realSpawn: ConnectSpawner = (command, args, env) => new Promise((resolve, reject) => {
   const child = spawn(command, args, { stdio: "inherit", env });
@@ -49,7 +49,7 @@ const realSpawn: ConnectSpawner = (command, args, env) => new Promise((resolve, 
  */
 export async function runAutopilotConnect(options: { modelOnly?: boolean } = {}, deps: ConnectDeps = {}): Promise<ConnectResult> {
   const autopilot = await (deps.autopilot ?? findAutopilot)();
-  if (!autopilot) throw new Error(`The Autopilot that comes with dl isn't installed. Update: ${UPDATE}`);
+  if (!autopilot) throw new Error(`The Autopilot that comes with dl isn't installed. Update: ${updateCommand()}`);
   // mkdtemp makes the directory 0700: the file inside is private even before Autopilot sets its mode.
   const dir = await mkdtemp(join(deps.tmp ?? tmpdir(), "dl-connect-"));
   try {
@@ -62,7 +62,7 @@ export async function runAutopilotConnect(options: { modelOnly?: boolean } = {},
       throw new Error(`Couldn't start Autopilot: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (code === 1) throw new ConnectCancelled();
-    if (code === 2) throw new Error(`The Autopilot that comes with dl is too old to pick a provider (no "connect" command). Update: ${UPDATE}`);
+    if (code === 2) throw new Error(`The Autopilot that comes with dl is too old to pick a provider (no "connect" command). Update: ${updateCommand()}`);
     if (code !== 0) throw new Error(`Autopilot's provider setup exited with ${code}.`);
     const text = await readFile(stateFile, "utf8").catch(() => undefined);
     if (!text) throw new Error("Autopilot finished but wrote no provider; run dl setup again.");

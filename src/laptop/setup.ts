@@ -13,7 +13,7 @@ import type { LaptopIO } from "./commands.js";
 import { loadRemotes, loadRemotesFile, normalizeServerUrl, REMOTE_NAME_RE, remotesPath, resolveTarget, saveRemote, setDefaultRemote, type RemoteServer, type SshAccess } from "./config.js";
 import { ConnectCancelled, runAutopilotConnect } from "./connect.js";
 import { confirm, githubToken, type KeyPlace, type KeySources, type Need } from "./credentials.js";
-import { applyOnServer, bootstrap, INSTALL_URL, installOnServer, pairLaptop, serverNeeds, type ServerAnswers, type UiFactory } from "./remote-install.js";
+import { applyOnServer, ensureServerDl, INSTALL_URL, installOnServer, pairLaptop, serverNeeds, type DlRegistry, type ServerAnswers, type UiFactory } from "./remote-install.js";
 import { openSession } from "./session.js";
 import { loadSettings, saveModel, saveSettings } from "./settings.js";
 import { checkServer, describeHost, discoverKeys, hostOf, parseSshConfig, parseTarget, realSshExec, SshAuthError, type ServerFacts, type SshExec, type SshHost } from "./ssh.js";
@@ -51,6 +51,8 @@ export interface SetupDeps {
   /** dl's own settings (each place's model); ~/.config/directionallylocal/config.json unless replaced. */
   settingsFile?: string;
   installUrl?: string;
+  /** npm's dl versions, to check this laptop's is published before installing it on a server; npm unless replaced. */
+  registry?: DlRegistry;
   localSetup?: LocalSetup;
   localConfigure?: LocalConfigure;
   /** Autopilot's provider + model picker (`autopilot connect`); the real one unless replaced. */
@@ -135,8 +137,15 @@ async function setUpServer(deps: SetupDeps): Promise<RemoteServer> {
   const chosen = await chooseServer(deps, hosts);
   const { access, facts } = await reachServer(deps, sshDir, deps.identityFile ? { ...chosen.access, identityFile: deps.identityFile } : chosen.access, chosen.display);
 
-  // 2. Install dl there, then everything else; its checklist replayed here.
-  await bootstrap(access, facts, deps.ssh, deps.newUi(), deps.installUrl);
+  // 2. Install dl there (never older than what it has), then everything else; its checklist replayed here.
+  const c = palette(deps.color);
+  await ensureServerDl(access, facts, deps.ssh, {
+    name: chosen.alias ?? facts.hostname ?? access.target,
+    ui: deps.newUi,
+    say: (line) => deps.write(`  ${c.yellow("!")} ${line}\n`),
+    ...(deps.installUrl ? { installUrl: deps.installUrl } : {}),
+    ...(deps.registry ? { registry: deps.registry } : {}),
+  });
   const { capacity } = await installOnServer(access, facts, deps.ssh, {}, deps.newUi);
 
   // 3. The keys it still lacks: the provider from Autopilot's picker, the GitHub token; stored in one quiet pass.
@@ -448,8 +457,8 @@ async function ready(deps: SetupDeps, remote: RemoteServer, capacity: number | u
 }
 
 const TASK_PLACES = (platform: NodeJS.Platform): SelectOption[] => [
-  { value: "server", label: "Use my own server" },
-  { value: "local", label: "Run them on this computer", detail: platform === "darwin" ? "needs Docker Desktop or OrbStack" : "needs Docker" },
+  { value: "server", label: "My own server", detail: "keeps going when this laptop sleeps · needs SSH access" },
+  { value: "local", label: "This computer", detail: platform === "darwin" ? "needs Docker Desktop or OrbStack" : "needs Docker" },
 ];
 
 /**
@@ -466,7 +475,7 @@ export async function setupForTasks(options: SetupOptions & {
   const { io } = options;
   const c = palette(io.color === true);
   const platform = options.platform ?? process.platform;
-  io.out(`\n  ${c.bold("Background tasks keep going when this laptop sleeps.")}\n\n`);
+  io.out("\n");
   let place: Place = "server";
   // Where this computer can't run them (Windows), there's one real choice: say why, and go on.
   const unsupported = localUnsupported(platform);
@@ -475,7 +484,7 @@ export async function setupForTasks(options: SetupOptions & {
   } else {
     const prompter = options.prompter ?? new TtyPrompter({ color: io.color === true });
     try {
-      place = (await prompter.select(`  ${c.bold("Where should they run?")}`, TASK_PLACES(platform), 0)).value as Place;
+      place = (await prompter.select(`  ${c.bold("Where should background tasks run?")}`, TASK_PLACES(platform), 0)).value as Place;
     } catch (error) {
       if (!(error instanceof PromptCancelled)) throw error;
       io.out(`  ${c.dim("Cancelled. Nothing changed.")}\n\n`);

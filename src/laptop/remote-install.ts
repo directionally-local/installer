@@ -2,7 +2,8 @@ import { agentCapacity } from "../detect.js";
 import { CELL_MEMORY_MB } from "../layout.js";
 import { OPENROUTER, type ProviderAnswer } from "../provider.js";
 import { PlainUi, type Ui } from "../ui.js";
-import { dlVersion } from "../versions.js";
+import { updateCommand } from "../install-method.js";
+import { compareSemver, dlVersion } from "../versions.js";
 import type { Need } from "./credentials.js";
 import { shellQuote, type ServerFacts, type SshExec } from "./ssh.js";
 import type { SshAccess } from "./config.js";
@@ -11,6 +12,7 @@ import type { SshAccess } from "./config.js";
  * Installing on the user's server from the laptop, over SSH, through the server-side
  * commands' machine-readable modes:
  *   1. bootstrap   install.sh with DL_INSTALL_ONLY=1 and this laptop's DL_VERSION (plain `.. step` / `ok step: detail` lines)
+ *                  (skipped when the server already runs this dl or a newer one: see planServerDl)
  *   2. install     `dl up --access ssh --answers-stdin --events json` with `{}` (NDJSON out): everything but the keys
  *   3. needs       `dl up --needs --access ssh` (one JSON line: which keys it still lacks)
  *   4. keys        the same `dl up --answers-stdin`, now with the provider Autopilot's picker chose and the GitHub token
@@ -38,10 +40,12 @@ function sudo(facts: Pick<ServerFacts, "root">): string {
  * install.sh on the server, stopping before `dl up`, and installing this laptop's own dl
  * version (DL_VERSION), never npm's latest: the server's dl pins the Autopilot and Hotcell it
  * installs, so the same dl on both ends means the same Autopilot as the laptop's session client.
+ * `null` leaves DL_VERSION out (npm's latest): only when this laptop's version isn't on npm and
+ * npm's latest couldn't be looked up either (see planServerDl).
  */
-export function bootstrapCommand(facts: Pick<ServerFacts, "root">, installUrl = INSTALL_URL, version = dlVersion()): string {
-  if (!EXACT_VERSION.test(version)) throw new Error(`Not a dl version: ${JSON.stringify(version)}`);
-  const env = `DL_INSTALL_ONLY=1 DL_VERSION=${version}`;
+export function bootstrapCommand(facts: Pick<ServerFacts, "root">, installUrl = INSTALL_URL, version: string | null = dlVersion()): string {
+  if (version !== null && !EXACT_VERSION.test(version)) throw new Error(`Not a dl version: ${JSON.stringify(version)}`);
+  const env = `DL_INSTALL_ONLY=1${version === null ? "" : ` DL_VERSION=${version}`}`;
   const run = facts.root ? `${env} sh /tmp/dl-install.sh` : `sudo -n env ${env} sh /tmp/dl-install.sh`;
   return `curl -fsSL ${shellQuote(installUrl)} -o /tmp/dl-install.sh && ${run}`;
 }
@@ -122,13 +126,108 @@ export class BootstrapRenderer {
   }
 }
 
-export async function bootstrap(access: SshAccess, facts: ServerFacts, ssh: SshExec, ui: Ui, installUrl?: string, version?: string): Promise<void> {
+export async function bootstrap(access: SshAccess, facts: ServerFacts, ssh: SshExec, ui: Ui, installUrl?: string, version?: string | null): Promise<void> {
   const renderer = new BootstrapRenderer(ui);
   const result = await ssh(access, bootstrapCommand(facts, installUrl, version), {
     onStdoutLine: (line) => renderer.stdout(line),
     onStderrLine: (line) => renderer.stderr(line),
   });
   renderer.finish(result.code);
+}
+
+/** What npm knows about dl's versions; tests replace it. */
+export interface DlRegistry {
+  /** Whether npm has this exact version: undefined when npm couldn't be asked. */
+  has(version: string): Promise<boolean | undefined>;
+  /** npm's latest dl, or undefined when npm couldn't be asked. */
+  latest(): Promise<string | undefined>;
+}
+
+const REGISTRY = "https://registry.npmjs.org/directionallylocal";
+
+export const npmRegistry: DlRegistry = {
+  async has(version) {
+    try {
+      const response = await fetch(`${REGISTRY}/${encodeURIComponent(version)}`, { signal: AbortSignal.timeout(10_000) });
+      if (response.status === 404) return false;
+      return response.ok ? true : undefined;
+    } catch {
+      return undefined;
+    }
+  },
+  async latest() {
+    try {
+      const response = await fetch(`${REGISTRY}/latest`, { signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) return undefined;
+      const version = ((await response.json()) as { version?: unknown }).version;
+      return typeof version === "string" && EXACT_VERSION.test(version) ? version : undefined;
+    } catch {
+      return undefined;
+    }
+  },
+};
+
+/** The dl version installed on the server, or undefined when it has none (or it can't be read). */
+export async function serverDlVersion(access: SshAccess, ssh: SshExec): Promise<string | undefined> {
+  const result = await ssh(access, "command -v dl >/dev/null 2>&1 && dl --version");
+  if (result.code !== 0) return undefined;
+  const version = result.stdout.trim().split("\n").at(-1)?.trim();
+  return version && EXACT_VERSION.test(version) ? version : undefined;
+}
+
+/**
+ * Which dl the server should get. A server is never downgraded: one that runs a newer dl than
+ * this laptop is left as it is, and this laptop is the one to update. The same version means
+ * nothing to install. An older server (or one without dl) gets this laptop's version, unless
+ * npm doesn't have it (a development build): then the server keeps its own dl, or gets npm's
+ * latest when it has none.
+ */
+export type DlPlan =
+  /** Run install.sh with this exact version, or `null` for npm's latest. */
+  | { action: "install"; version: string | null; message?: string }
+  | { action: "keep"; reason: "same" | "newer" | "unpublished"; message?: string };
+
+export async function planServerDl(input: {
+  name: string;
+  server: string | undefined;
+  laptop?: string;
+  registry?: DlRegistry;
+  /** The command that updates this laptop's dl. */
+  update?: string;
+}): Promise<DlPlan> {
+  const { name, server, laptop = dlVersion(), registry = npmRegistry } = input;
+  if (server !== undefined) {
+    const order = compareSemver(server, laptop);
+    if (order > 0) {
+      return { action: "keep", reason: "newer", message: `${name} runs dl ${server}, newer than this laptop's ${laptop}. Update this laptop: ${input.update ?? updateCommand()}` };
+    }
+    if (order === 0) return { action: "keep", reason: "same" };
+  }
+  // Unknown (npm unreachable) is treated as published: install.sh says so if it isn't.
+  if ((await registry.has(laptop)) !== false) return { action: "install", version: laptop };
+  const unpublished = `This laptop's dl ${laptop} isn't on npm (a development build?)`;
+  if (server !== undefined) {
+    return { action: "keep", reason: "unpublished", message: `${unpublished}, so ${name} keeps its dl ${server}.` };
+  }
+  const latest = await registry.latest();
+  return { action: "install", version: latest ?? null, message: `${unpublished}, so ${name} gets npm's latest dl${latest ? ` (${latest})` : ""} instead.` };
+}
+
+/**
+ * Brings the server's dl to this laptop's version when that's an upgrade (see planServerDl).
+ * Messages go to `say`, one line each. Returns the plan it followed.
+ */
+export async function ensureServerDl(
+  access: SshAccess,
+  facts: ServerFacts,
+  ssh: SshExec,
+  options: { name: string; ui: () => Ui; say: (line: string) => void; installUrl?: string; registry?: DlRegistry; laptop?: string },
+): Promise<DlPlan> {
+  const server = await serverDlVersion(access, ssh);
+  const plan = await planServerDl({ name: options.name, server, ...(options.laptop ? { laptop: options.laptop } : {}), ...(options.registry ? { registry: options.registry } : {}) });
+  if (plan.message) options.say(plan.message);
+  if (plan.action === "install") await bootstrap(access, facts, ssh, options.ui(), options.installUrl, plan.version);
+  return plan;
 }
 
 /** Which keys the server still lacks, so a configured server is asked nothing. */

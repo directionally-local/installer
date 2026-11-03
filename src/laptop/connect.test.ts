@@ -5,7 +5,11 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseConnectState } from "../provider.js";
+import { updateCommand } from "../install-method.js";
 import { ConnectCancelled, runAutopilotConnect, type ConnectSpawner } from "./connect.js";
+
+/** The update hint for how this dl is installed. */
+const UPDATE = updateCommand().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 let root: string;
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "dl-connect-test-")); });
@@ -68,7 +72,7 @@ describe("autopilot connect from dl", () => {
     const cancelled = fakeConnect(DEEPSEEK, 1);
     await assert.rejects(() => runAutopilotConnect({}, { autopilot: async () => AUTOPILOT, spawn: cancelled.spawn, tmp: root }), ConnectCancelled);
     const old = fakeConnect(DEEPSEEK, 2);
-    await assert.rejects(() => runAutopilotConnect({}, { autopilot: async () => AUTOPILOT, spawn: old.spawn, tmp: root }), /too old to pick a provider[\s\S]*npm install -g directionallylocal/);
+    await assert.rejects(() => runAutopilotConnect({}, { autopilot: async () => AUTOPILOT, spawn: old.spawn, tmp: root }), new RegExp(`too old to pick a provider[\\s\\S]*${UPDATE}`));
     await assert.rejects(() => runAutopilotConnect({}, { autopilot: async () => undefined, spawn: old.spawn, tmp: root }), /isn't installed/);
     assert.deepEqual(await readdir(root), []);
   });

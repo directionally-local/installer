@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { Prompter } from "../prompt.js";
 import { PlainUi } from "../ui.js";
+import { updateCommand } from "../install-method.js";
 import { saveRemote, type RemoteServer } from "./config.js";
 import type { SshExec } from "./ssh.js";
 import {
@@ -18,6 +19,9 @@ import {
   type UpdateIO,
 } from "./update.js";
 import { dlVersion, pinnedAutopilotVersion, pinnedHotcellVersion } from "../versions.js";
+
+/** The update hint for how this dl is installed. */
+const UPDATE = updateCommand().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const roots: string[] = [];
 const previous = process.env.AUTOPILOT_REMOTES_FILE;
@@ -36,10 +40,11 @@ afterEach(async () => {
 
 const STATE = JSON.stringify({ version: 1, autopilotVersion: "2.7.0", hotcellVersion: "1.4.0" });
 
-function fakeSsh(options: { state?: string; upCode?: number; upLines?: string[] } = {}) {
+function fakeSsh(options: { state?: string; upCode?: number; upLines?: string[]; dl?: string } = {}) {
   const commands: string[] = [];
   const exec: SshExec = async (_access, command, opts) => {
     commands.push(command);
+    if (command.includes("dl --version")) return options.dl ? { code: 0, stdout: `${options.dl}\n`, stderr: "" } : { code: 1, stdout: "", stderr: "" };
     if (command.includes("id -u")) return { code: 0, stdout: "0\nroot\nubuntu 24.04\nx86_64\nroot\nbox\n", stderr: "" };
     if (command.includes("dl-install.sh")) {
       for (const line of [".. Installing dl", "ok Installing dl: 0.9.0"]) opts?.onStdoutLine?.(line);
@@ -95,6 +100,7 @@ function deps(overrides: Partial<Parameters<typeof update>[1]> = {}) {
       interactive: false,
       sleep: async () => {},
       latestDl: async () => undefined,
+      registry: { has: async () => true, latest: async () => undefined },
       ...overrides,
     } as Parameters<typeof update>[1],
   };
@@ -155,6 +161,50 @@ describe("dl update", () => {
     assert.match(io.text(), /ok Installing dl: 0\.9\.0/);
   });
 
+  it("never downgrades a server's dl: newer is left alone, the same isn't reinstalled, older is upgraded", async () => {
+    await saveRemote(server("box"));
+    const here = dlVersion();
+    const [major, minor, patch] = here.split(/[.-]/).map(Number) as [number, number, number];
+
+    // Newer than this laptop: nothing installed, nothing run, and the command that updates this laptop.
+    const newer = fakeSsh({ dl: `${major}.${minor}.${patch + 1}` });
+    const ahead = deps({ ssh: newer.exec, running: async () => 0 });
+    assert.equal(await update([], ahead.deps), 0);
+    assert.ok(!newer.commands.some((command) => command.includes("dl-install.sh")), "no older dl installed over a newer one");
+    assert.ok(!newer.commands.some((command) => command.includes("dl up")), "the server is left as it is");
+    assert.match(ahead.io.text(), new RegExp(`! box runs dl ${major}\\.${minor}\\.${patch + 1}, newer than this laptop's ${here.replace(/\./g, "\\.")}\\. Update this laptop: ${UPDATE}\n`));
+    assert.match(ahead.io.text(), /Left box as it is\./);
+
+    // A pre-release of the next version is newer too (semver, not just the numbers).
+    const rc = fakeSsh({ dl: `${major}.${minor + 1}.0-rc.1` });
+    assert.equal(await update([], deps({ ssh: rc.exec, running: async () => 0 }).deps), 0);
+    assert.ok(!rc.commands.some((command) => command.includes("dl-install.sh")));
+
+    // The same: dl isn't reinstalled, but dl up still brings Autopilot and Hotcell to its pins.
+    const same = fakeSsh({ dl: here });
+    const level = deps({ ssh: same.exec, running: async () => 0 });
+    assert.equal(await update([], level.deps), 0);
+    assert.ok(!same.commands.some((command) => command.includes("dl-install.sh")));
+    assert.ok(same.commands.includes("dl up --answers-stdin --events json"));
+    assert.doesNotMatch(level.io.text(), /newer than this laptop/);
+
+    // Older: upgraded to this laptop's version, as before.
+    const older = fakeSsh({ dl: "0.0.1" });
+    assert.equal(await update([], deps({ ssh: older.exec, running: async () => 0 }).deps), 0);
+    assert.ok(older.commands.some((command) => command.includes(`DL_VERSION=${here} sh`)));
+    assert.ok(older.commands.some((command) => command.includes("dl up")));
+  });
+
+  it("with an unpublished dl here, keeps the server's own dl and still updates the rest", async () => {
+    await saveRemote(server("box"));
+    const ssh = fakeSsh({ dl: "0.0.1" });
+    const { io, deps: base } = deps({ ssh: ssh.exec, running: async () => 0, registry: { has: async () => false, latest: async () => "0.0.2" } });
+    assert.equal(await update([], base), 0);
+    assert.ok(!ssh.commands.some((command) => command.includes("dl-install.sh")));
+    assert.match(io.text(), new RegExp(`! This laptop's dl ${dlVersion().replace(/\./g, "\\.")} isn't on npm \\(a development build\\?\\), so box keeps its dl 0\\.0\\.1\\.`));
+    assert.ok(ssh.commands.includes("dl up --answers-stdin --events json"));
+  });
+
   it("updates this computer by running its setup again, and says when the laptop's own dl is behind", async () => {
     await saveRemote(server("this-computer", false));
     let ran = 0;
@@ -166,12 +216,12 @@ describe("dl update", () => {
     assert.equal(await update(["this-computer"], base), 0);
     assert.equal(ran, 1);
     assert.match(io.text(), /Updating this-computer[\s\S]*✓ this-computer is up to date {2}Autopilot \d+\.\d+\.\d+ · Hotcell 0\.1\.30/);
-    assert.match(io.text(), /dl 99\.0\.0 is out \(this is \d+\.\d+\.\d+\): npm install -g directionallylocal/);
+    assert.match(io.text(), new RegExp(`dl 99\\.0\\.0 is out \\(this is \\d+\\.\\d+\\.\\d+\\): ${UPDATE}`));
 
     // A place left on another Autopilot than the one this dl bundles: say so, with the one command that fixes it.
     const drift = deps({ running: async () => 0, local: async () => ({ autopilot: "2.7.0", hotcell: "0.1.30" }) });
     assert.equal(await update(["this-computer"], drift.deps), 0);
-    assert.match(drift.io.text(), /! this-computer runs Autopilot 2\.7\.0; this laptop's dl bundles \d+\.\d+\.\d+\. Match them: npm install -g directionallylocal/);
+    assert.match(drift.io.text(), new RegExp(`! this-computer runs Autopilot 2\\.7\\.0; this laptop's dl bundles \\d+\\.\\d+\\.\\d+\\. Match them: ${UPDATE}`));
   });
 
   it("knows each place's Autopilot and Hotcell versions, for dl status", async () => {
