@@ -1,4 +1,5 @@
 import type { FreeConfig } from "./config.js";
+import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
 /**
  * Settings the owner can change while the service runs, without a release. Each one starts
@@ -26,13 +27,19 @@ export const RUNTIME_SETTINGS = {
   openAdmission: { kind: "flag", env: "OPEN_ADMISSION" },
   /** Cached prompt tokens' weight against the token allowance, 0 to 1. */
   cachedTokenWeight: { kind: "weight", env: "CACHED_TOKEN_WEIGHT" },
+  /** OpenRouter hosts to try first; [] for none (cheapest first). */
+  openRouterProviderOrder: { kind: "slugs", env: "OPENROUTER_PROVIDER_ORDER" },
+  /** OpenRouter precision filter; [] for none. */
+  openRouterQuantizations: { kind: "quantizations", env: "OPENROUTER_QUANTIZATIONS" },
+  /** "deny" or "allow". */
+  openRouterDataCollection: { kind: "dataCollection", env: "OPENROUTER_DATA_COLLECTION" },
 } as const;
 
 export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;
 type Kind = (typeof RUNTIME_SETTINGS)[RuntimeKey]["kind"];
 
-/** A stored override: a number, a boolean, or null for "no cap" (USD caps only). */
-export type OverrideValue = number | boolean | null;
+/** A stored override: a number, a boolean, null for "no cap" (USD caps only), a list or a word. */
+export type OverrideValue = number | boolean | null | string | string[];
 export type Overrides = Partial<Record<RuntimeKey, OverrideValue>>;
 
 /** One change: `value` undefined clears the override. */
@@ -63,6 +70,12 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "boolean" ? value : "invalid";
     case "weight":
       return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : "invalid";
+    case "slugs":
+      return Array.isArray(value) && isProviderSlugList(value) ? value.map((slug) => slug.toLowerCase()) : "invalid";
+    case "quantizations":
+      return Array.isArray(value) && isQuantizationList(value) ? [...value] : "invalid";
+    case "dataCollection":
+      return value === "allow" || value === "deny" ? value : "invalid";
   }
 }
 
@@ -72,6 +85,9 @@ const RULES: Record<Kind, string> = {
   usd: `a number of dollars, 0 to ${MAX_USD}, or "none" for no cap`,
   flag: "true or false",
   weight: "a number from 0 to 1",
+  slugs: 'a list of up to 10 OpenRouter provider slugs, e.g. ["deepinfra", "novita"], or [] for none',
+  quantizations: 'a list of OpenRouter quantization levels, e.g. ["fp8", "bf16"], or [] for no filter',
+  dataCollection: '"deny" or "allow"',
 };
 
 /**
@@ -131,11 +147,11 @@ export function applyOverrides(config: FreeConfig, overrides: Overrides): FreeCo
 }
 
 /** The runtime settings of a config, as the admin API shows them (no secrets). */
-export function settingsView(config: FreeConfig): Record<RuntimeKey, number | boolean | null> {
-  const out = {} as Record<RuntimeKey, number | boolean | null>;
+export function settingsView(config: FreeConfig): Record<RuntimeKey, OverrideValue> {
+  const out = {} as Record<RuntimeKey, OverrideValue>;
   for (const key of Object.keys(RUNTIME_SETTINGS) as RuntimeKey[]) {
     const value = (config as unknown as Record<string, unknown>)[key];
-    out[key] = value === undefined ? null : (value as number | boolean);
+    out[key] = value === undefined ? null : Array.isArray(value) ? [...(value as string[])] : (value as OverrideValue);
   }
   return out;
 }

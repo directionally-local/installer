@@ -292,7 +292,7 @@ export class DirectoryObject extends DurableObject {
           if (before === undefined) continue;
           sql.exec("DELETE FROM settings WHERE key = ?", `override:${change.key}`);
         } else {
-          if (before === change.value) continue;
+          if (JSON.stringify(before) === JSON.stringify(change.value)) continue;
           sql.exec(
             "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             `override:${change.key}`,

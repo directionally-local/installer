@@ -37,6 +37,9 @@ describe("runtime settings (units)", () => {
       maxActiveUsers: 50,
       openAdmission: false,
       cachedTokenWeight: 0.02,
+      openRouterProviderOrder: [],
+      openRouterQuantizations: ["fp8", "mxfp8", "fp16", "bf16", "fp32"],
+      openRouterDataCollection: "deny",
     });
   });
 

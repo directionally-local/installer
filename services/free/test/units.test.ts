@@ -154,6 +154,24 @@ describe("config", () => {
     assert.throws(() => readFreeConfig({ ...BASE_ENV, OPENROUTER_API_KEY: "" }), /OPENROUTER_API_KEY/);
   });
 
+  it("reads the OpenRouter routing settings", () => {
+    const config = readFreeConfig(BASE_ENV);
+    assert.deepEqual(config.openRouterProviderOrder, [], "no pinned host by default");
+    assert.deepEqual(config.openRouterQuantizations, ["fp8", "mxfp8", "fp16", "bf16", "fp32"]);
+    assert.equal(config.openRouterDataCollection, "deny");
+    assert.deepEqual(readFreeConfig({ ...BASE_ENV, OPENROUTER_QUANTIZATIONS: "BF16, fp32" }).openRouterQuantizations, ["bf16", "fp32"]);
+    assert.deepEqual(readFreeConfig({ ...BASE_ENV, OPENROUTER_QUANTIZATIONS: "" }).openRouterQuantizations, []);
+    assert.equal(readFreeConfig({ ...BASE_ENV, OPENROUTER_DATA_COLLECTION: "Allow" }).openRouterDataCollection, "allow");
+    for (const bad of ["fp5", "fp8;bf16"]) assert.throws(() => readFreeConfig({ ...BASE_ENV, OPENROUTER_QUANTIZATIONS: bad }), /OPENROUTER_QUANTIZATIONS/);
+    assert.throws(() => readFreeConfig({ ...BASE_ENV, OPENROUTER_DATA_COLLECTION: "maybe" }), /OPENROUTER_DATA_COLLECTION/);
+    assert.deepEqual(readFreeConfig({ ...BASE_ENV, OPENROUTER_PROVIDER_ORDER: "" }).openRouterProviderOrder, []);
+    assert.deepEqual(readFreeConfig({ ...BASE_ENV, OPENROUTER_PROVIDER_ORDER: "none" }).openRouterProviderOrder, []);
+    assert.deepEqual(readFreeConfig({ ...BASE_ENV, OPENROUTER_PROVIDER_ORDER: " DeepSeek , morph/fp8 ," }).openRouterProviderOrder, ["deepseek", "morph/fp8"]);
+    for (const bad of ["deep seek", "a;b", Array.from({ length: 11 }, (_, i) => `p${i}`).join(",")]) {
+      assert.throws(() => readFreeConfig({ ...BASE_ENV, OPENROUTER_PROVIDER_ORDER: bad }), /OPENROUTER_PROVIDER_ORDER/);
+    }
+  });
+
   it("reads the cached-token weight, with COUNT_CACHED_TOKENS=false meaning 0", () => {
     assert.equal(readFreeConfig(BASE_ENV).cachedTokenWeight, 0.02);
     assert.equal(readFreeConfig({ ...BASE_ENV, COUNT_CACHED_TOKENS: "false" }).cachedTokenWeight, 0);

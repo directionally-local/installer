@@ -4,6 +4,8 @@
  * the owner's decisions in installer#78.
  */
 
+import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type DataCollection, type Quantization } from "./routing.js";
+
 export class ConfigError extends Error {}
 
 export interface FreeConfig {
@@ -35,6 +37,15 @@ export interface FreeConfig {
    * an uncached one. The USD caps always use the real reported cost.
    */
   cachedTokenWeight: number;
+  /**
+   * OpenRouter hosts to try first, as provider slugs (OPENROUTER_PROVIDER_ORDER, comma-separated).
+   * Empty (the default) means no pinned host: the cheapest host that passes the filters first.
+   */
+  openRouterProviderOrder: readonly string[];
+  /** Hosts allowed by precision (OPENROUTER_QUANTIZATIONS). Default: native FP8 and wider. Empty means no filter. */
+  openRouterQuantizations: readonly Quantization[];
+  /** `deny` (default) keeps only hosts that neither train on nor store prompts (OPENROUTER_DATA_COLLECTION). */
+  openRouterDataCollection: DataCollection;
   /** The kill switch from `env`; the admin endpoint has its own, and either one pauses. */
   paused: boolean;
   /** The public origin for links, when the request's own origin isn't it (behind a proxy). */
@@ -62,6 +73,9 @@ export const DEFAULTS = {
    * `POST /admin/config {"cachedTokenWeight": ...}` if needed.
    */
   cachedTokenWeight: 0.02,
+  openRouterProviderOrder: [] as readonly string[],
+  openRouterQuantizations: FULL_PRECISION,
+  openRouterDataCollection: "deny" as DataCollection,
 } as const;
 
 export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
@@ -82,6 +96,9 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     openAdmission: flag(env.OPEN_ADMISSION, DEFAULTS.openAdmission, "OPEN_ADMISSION"),
     countCachedTokens: flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS"),
     cachedTokenWeight: cachedWeight(env),
+    openRouterProviderOrder: providerOrder(env.OPENROUTER_PROVIDER_ORDER),
+    openRouterQuantizations: quantizations(env.OPENROUTER_QUANTIZATIONS),
+    openRouterDataCollection: dataCollection(env.OPENROUTER_DATA_COLLECTION),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
   };
@@ -124,6 +141,27 @@ function cachedWeight(env: Record<string, unknown>): number {
     return parsed;
   }
   return flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS") ? DEFAULTS.cachedTokenWeight : 0;
+}
+
+/** Unset or empty (or "none") means no pinned host. */
+function providerOrder(value: unknown): readonly string[] {
+  const slugs = splitList(value) ?? DEFAULTS.openRouterProviderOrder;
+  if (!isProviderSlugList(slugs)) throw new ConfigError(`OPENROUTER_PROVIDER_ORDER must be up to 10 comma-separated provider slugs, e.g. "deepinfra,novita" (got "${String(value)}").`);
+  return slugs;
+}
+
+/** Unset means native precision and wider; empty (or "none") means no precision filter. */
+function quantizations(value: unknown): readonly Quantization[] {
+  const levels = splitList(value) ?? DEFAULTS.openRouterQuantizations;
+  if (!isQuantizationList(levels)) throw new ConfigError(`OPENROUTER_QUANTIZATIONS must be comma-separated OpenRouter quantization levels, e.g. "fp8,bf16" (got "${String(value)}").`);
+  return levels;
+}
+
+function dataCollection(value: unknown): DataCollection {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return DEFAULTS.openRouterDataCollection;
+  if (raw === "allow" || raw === "deny") return raw;
+  throw new ConfigError(`OPENROUTER_DATA_COLLECTION must be "deny" or "allow" (got "${raw}").`);
 }
 
 function flag(value: unknown, fallback: boolean, name: string): boolean {

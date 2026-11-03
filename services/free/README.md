@@ -74,6 +74,37 @@ The default weight of 0.02 is OpenRouter's cache-read price divided by its input
 `COUNT_CACHED_TOKENS=false` still works and means a weight of 0, unless `CACHED_TOKEN_WEIGHT`
 is set. The USD caps always use the real cost OpenRouter reports.
 
+## Which OpenRouter host serves requests
+
+Every chat request asks OpenRouter for the cheapest host that passes two filters, with fallbacks
+on among the hosts that pass:
+
+```json
+"provider": { "sort": "price", "allow_fallbacks": true,
+              "quantizations": ["fp8", "mxfp8", "fp16", "bf16", "fp32"], "data_collection": "deny" }
+```
+
+- **Full precision.** DeepSeek V4.1 Flash 1017 ships FP8 weights, so FP8 and anything wider
+  is allowed. FP6, FP4, integer quantizations and hosts that don't state a precision
+  (`unknown`) are excluded.
+- **No prompt collection.** `data_collection: "deny"` keeps only hosts OpenRouter lists as
+  neither training on nor storing prompts. DeepSeek's own host is excluded by this filter.
+
+Each setting has an env var and an admin override (`POST /admin/config`):
+
+| setting | env | default |
+|---|---|---|
+| `openRouterProviderOrder` | `OPENROUTER_PROVIDER_ORDER` (comma-separated slugs) | empty: no pinned host, cheapest first |
+| `openRouterQuantizations` | `OPENROUTER_QUANTIZATIONS` (comma-separated levels) | `fp8,mxfp8,fp16,bf16,fp32`; empty means no filter |
+| `openRouterDataCollection` | `OPENROUTER_DATA_COLLECTION` | `deny` (`allow` is permitted) |
+
+Setting an order sends `order` instead of `sort`. The filters still apply, so a pinned host
+that fails them is skipped. Hosts bill different prices for the same model, so check
+`requests.cost_usd` after any change.
+
+As a backstop on the company key, also turn off "Allow providers that may train on inputs" in
+OpenRouter's account privacy settings.
+
 ## Sign-out and server keys
 
 - **Sign out:** `POST /v1/token/revoke`. Send the access token as the bearer, `{"refresh_token"}`
