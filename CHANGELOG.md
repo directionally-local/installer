@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.10.1](https://github.com/directionally-local/installer/compare/v0.10.0...v0.10.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.3.0 ([90d648f](https://github.com/directionally-local/installer/commit/90d648ffe248cd498390f01452c81a566dec49cd))
+* **install:** dl works in the same terminal, one Node copy, no leftover caches ([79428de](https://github.com/directionally-local/installer/commit/79428dec17b918163e3c406223e95be0c37355ae))
+* **install:** spell out the PATH check as an if, for older shellcheck ([b24936d](https://github.com/directionally-local/installer/commit/b24936d3d76b1fd01e31577779fb42fc4d2deb22))
+* **laptop:** dl status reports a laptop install; tell Autopilot dl launched it ([acb4aef](https://github.com/directionally-local/installer/commit/acb4aefbc2a25bc54d6969cba97b987d2c616def))
+
 ## [0.10.0](https://github.com/directionally-local/installer/compare/v0.9.4...v0.10.0) (2026-11-03)
 
 
