@@ -37,6 +37,6 @@ This is option 1 for laptops and option 2 for servers from the issue, not option
 ## Follow-ups this decision creates
 
 1. **Bare `dl` and `dl -c` spawn plain Autopilot on a laptop** — the code change, in its own pull request. It replaces the `attach-remote` path in `src/laptop/session.ts` for the local case and leaves the remote path for servers.
-2. **Does a laptop still need Docker at setup?** If interactive sessions are plain Autopilot, a person who never runs `dl run` needs no sandbox at all. Either setup makes Docker optional and `dl run` asks for it when first used, or setup keeps requiring it. Not decided here.
+2. **Does a laptop still need Docker at setup?** No. Bare `dl` with nothing set up runs plain Autopilot, with no setup at all; the sandbox stack (Docker, Hotcell, the image, the GitHub token) is set up the first time `dl run` is used, which asks whether tasks run on your own server or on this computer, or with `dl setup`.
 3. **Autopilot's remote screen still needs parity** (`/resume`, `/clear`, your own messages) — for servers. [autopilot#1092](https://github.com/directionally-local/autopilot/issues/1092), [autopilot#1093](https://github.com/directionally-local/autopilot/issues/1093) stay on the roadmap, no longer on the phase-0 critical path for laptops.
 4. **Help text and README** describe the old behaviour until follow-up 1 lands; they change with it, not before.

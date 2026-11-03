@@ -176,7 +176,7 @@ describe("cli", () => {
     assert.equal(await main(["--help"], io), 0);
     assert.match(out, /dl up \[--dry-run\]/);
     assert.match(out, /^Directionally Local: coding agents that run on this computer or on your own server\./);
-    assert.match(out, /dl +the first time: set up where agents run, pick a provider and model\n[\s\S]*dl setup +set up or repair where your agents run/);
+    assert.match(out, /dl +talk to an agent: a new session each time\. With nothing set up,\n +plain autopilot here[\s\S]*dl setup +set up or repair where background tasks run[\s\S]*The first time, it asks where tasks run/);
     assert.match(out, /dl provider +the provider and GitHub token on each place \(dl keys is the same\)/);
     assert.match(out, /--autopilot-version <x\.y\.z> +default: the version this dl ships with \(\d+\.\d+\.\d+\)/);
     assert.match(out, /dl use \[NAME\] +where tasks and bare dl go without --server/);

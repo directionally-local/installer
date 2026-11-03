@@ -7,14 +7,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { main, splitPassthrough } from "../cli.js";
+import { main, splitPassthrough, type MainOptions } from "../cli.js";
 import { PATHS } from "../layout.js";
 import { PAIRED_NAME } from "../local/layout.js";
 import { ScriptedPrompter } from "../prompt.js";
 import { fakeTunnels, type FakeTunnel } from "../test-support/fake-tunnel.js";
 import { DEFAULT_MODEL, type LaptopIO } from "./commands.js";
-import { saveRemote, type RemoteServer } from "./config.js";
-import { autopilotOnPath, bundledAutopilot, openSession, planSession, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput, type SessionSpawner } from "./session.js";
+import { loadRemotes, saveRemote, type RemoteServer } from "./config.js";
+import type { SetupOptions } from "./setup.js";
+import { autopilotOnPath, bundledAutopilot, openSession, planSession, startHere, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput, type SessionSpawner } from "./session.js";
 import { loadSessions, rememberSession } from "./session-store.js";
 import { createOpener, type RemoteOpener } from "./tunnel.js";
 
@@ -750,7 +751,7 @@ describe("finding Autopilot", () => {
 });
 
 describe("dl routing for projects", () => {
-  it("dl new with nothing set up says what to do; dl status is the overview", async () => {
+  it("dl status with nothing set up is the overview of what to type", async () => {
     const cwd = process.cwd();
     const plain = join(root, "plain");
     await mkdir(plain);
@@ -758,18 +759,151 @@ describe("dl routing for projects", () => {
     try {
       let text = "";
       const io = { out: (chunk: string) => { text += chunk; }, err: (chunk: string) => { text += chunk; } };
-      assert.equal(await main(["new"], io, { terminal: true }), 1);
-      assert.match(text, /dl new starts a new session once something is set up: dl/);
-      // On an installed server, dl status shows the server's overview instead.
-      if (!existsSync(PATHS.state)) {
-        await saveRemote(place("dl-test", api.url));
-        text = "";
-        assert.equal(await main(["status"], io, { terminal: true }), 0);
-        assert.match(text, /on this laptop/, "dl status: the overview, anywhere");
-        assert.match(text.replace(/\x1b\[[0-9;]*m/g, ""), /Talk to an agent: type {2}dl/);
-      }
+      // Not at a terminal, dl new can't open a session, and says so.
+      assert.equal(await main(["new"], io, { terminal: false, root: false, serverState: async () => undefined }), 1);
+      assert.match(text, /dl new starts a new session in a terminal: dl/);
+      await saveRemote(place("dl-test", api.url));
+      text = "";
+      assert.equal(await main(["status"], io, { terminal: true, root: false, serverState: async () => undefined }), 0);
+      assert.match(text, /on this laptop/, "dl status: the overview, anywhere");
+      assert.match(text.replace(/\x1b\[[0-9;]*m/g, ""), /Talk to an agent: type {2}dl/);
     } finally {
       process.chdir(cwd);
     }
+  });
+});
+
+const plainText = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
+
+describe("dl the first time on a laptop", () => {
+  let plain: FakePlainAutopilot;
+  let setups: SetupOptions[];
+  beforeEach(() => { plain = new FakePlainAutopilot(); setups = []; });
+
+  /** main() as a laptop with nothing set up sees it: not root, no server state, fakes for Autopilot and setup. */
+  const laptop = (prompter?: ScriptedPrompter, extra: Partial<MainOptions> = {}): MainOptions => ({
+    terminal: true,
+    root: false,
+    serverState: async () => undefined,
+    session: { autopilot: async () => AUTOPILOT, probe: async () => true, placeModel: async () => undefined, spawn: plain.spawn, signals: new EventEmitter() },
+    setup: async (options) => { setups.push(options); return 0; },
+    ...(prompter ? { prompter } : {}),
+    ...extra,
+  });
+
+  async function inside<T>(dir: string, work: () => Promise<T>): Promise<T> {
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      return await work();
+    } finally {
+      process.chdir(cwd);
+    }
+  }
+
+  it("bare dl is plain autopilot in this folder, with nothing set up, installed or asked first", async () => {
+    const dir = join(root, "fresh");
+    await mkdir(dir);
+    const io = capture();
+    const prompter = new ScriptedPrompter({});
+    assert.equal(await inside(dir, () => main([], io, laptop(prompter))), 0);
+    assert.equal(plain.launches.length, 1);
+    assert.deepEqual(plain.launches[0]!.args, AUTOPILOT.args, "just `autopilot`: its own first run picks the provider");
+    assert.equal(plain.launches[0]!.cwd, dir);
+    assert.deepEqual(setups, [], "no setup wizard: no place, no Docker, no sandbox image, no services");
+    assert.deepEqual(prompter.asked, [], "nothing asked: no place, no provider picker, no GitHub token");
+    assert.equal(io.text(), "", "dl gets out of the way");
+    assert.deepEqual(await loadRemotes(), [], "nothing saved: still nothing set up");
+    // dl -c and dl new are plain autopilot too, and what came after -- passes through.
+    assert.equal(await inside(dir, () => main(["-c"], capture(), laptop())), 0);
+    assert.deepEqual(plain.launches[1]!.args, [...AUTOPILOT.args, "-c"]);
+    assert.equal(await inside(dir, () => main(["new", "--", "--verbose"], capture(), laptop())), 0);
+    assert.deepEqual(plain.launches[2]!.args, [...AUTOPILOT.args, "--verbose"]);
+    assert.equal(api.requests.length, 0);
+  });
+
+  it("only needs a Node that Autopilot runs on", async () => {
+    const dir = join(root, "fresh");
+    await mkdir(dir);
+    const io = capture();
+    assert.equal(await startHere({ cwd: dir, autopilot: async () => AUTOPILOT, spawn: plain.spawn, signals: new EventEmitter(), nodeVersion: "20.11.0" }, io), 1);
+    assert.match(io.text(), /✗ Node\.js 20 is unsupported[\s\S]*Update Node \(nodejs\.org, or your package manager\), then run dl again\./);
+    assert.equal(plain.launches.length, 0);
+    assert.equal(await startHere({ cwd: dir, autopilot: async () => AUTOPILOT, spawn: plain.spawn, signals: new EventEmitter(), nodeVersion: "24.22.1" }, capture()), 0);
+    assert.equal(plain.launches.length, 1);
+  });
+
+  it("as root, or without a terminal, says what this is instead", async () => {
+    for (const options of [{ root: true }, { terminal: false }]) {
+      const io = capture();
+      assert.equal(await main([], io, laptop(undefined, options)), 0);
+      assert.match(io.text(), /isn't set up on this machine/);
+      assert.equal(plain.launches.length, 0);
+      assert.deepEqual(setups, []);
+    }
+  });
+
+  it("with this computer set up, bare dl and dl -c are unchanged; with a server as the default, so is the session there", { timeout: 30_000 }, async () => {
+    await saveRemote(place(PAIRED_NAME, api.url));
+    const dir = await checkout();
+    assert.equal(await inside(dir, () => main([], capture(), laptop())), 0);
+    assert.equal(await inside(dir, () => main(["-c"], capture(), laptop())), 0);
+    assert.deepEqual(plain.launches.map((launch) => launch.args), [AUTOPILOT.args, [...AUTOPILOT.args, "-c"]]);
+    assert.deepEqual(setups, []);
+
+    await saveRemote(place("box", api.url));
+    const file = JSON.parse(await readFile(process.env.AUTOPILOT_REMOTES_FILE!, "utf8")) as Record<string, unknown>;
+    await writeFile(process.env.AUTOPILOT_REMOTES_FILE!, JSON.stringify({ ...file, default: "box" }));
+    const io = capture();
+    assert.equal(await inside(dir, () => main([], io, laptop(undefined, { session: { autopilot: async () => AUTOPILOT, probe: async () => true, placeModel: async () => undefined, spawn: autopilot.spawn, signals: new EventEmitter() } }))), 0);
+    assert.equal(autopilot.launches[0]!.args[1], "attach-remote");
+    assert.match(plainText(io.text()), /· Connecting to box \(default\) · me\/app/);
+    assert.equal(plain.launches.length, 2, "not plain autopilot");
+  });
+
+  it("dl run with nowhere to send tasks asks where they run, sets that up, then sends the task", { timeout: 30_000 }, async () => {
+    const dir = await checkout();
+    const runs: Array<{ task: string; cwd: string }> = [];
+    for (const [answer, expected] of [["2", "local"], ["1", "server"]] as const) {
+      setups = [];
+      const prompter = new ScriptedPrompter({ "Where should they run?": answer });
+      const io = capture();
+      const code = await inside(dir, () => main(["run", "fix", "the", "test"], io, laptop(prompter, {
+        setup: async (options) => { setups.push(options); await saveRemote(place(expected === "local" ? PAIRED_NAME : "box", api.url)); return 0; },
+        run: async (input) => { runs.push({ task: input.task, cwd: input.cwd }); return 0; },
+      })));
+      assert.equal(code, 0);
+      assert.match(plainText(io.text()), /Background tasks keep going when this laptop sleeps\./);
+      assert.deepEqual(prompter.asked.map((question) => plainText(question).trim()), ["Where should they run?"]);
+      assert.equal(setups.length, 1);
+      assert.equal(setups[0]!.place, expected, "straight into that setup, without asking where again");
+      assert.equal(runs.at(-1)!.task, "fix the test");
+      await writeFile(process.env.AUTOPILOT_REMOTES_FILE!, JSON.stringify({ remotes: [] }));
+    }
+    assert.equal(runs.length, 2);
+  });
+
+  it("dl run asks nothing once a place is set up, and outside a GitHub repository stops before asking", async () => {
+    const loose = join(root, "loose");
+    await mkdir(loose);
+    const prompter = new ScriptedPrompter({});
+    const io = capture();
+    assert.equal(await inside(loose, () => main(["run", "fix it"], io, laptop(prompter, { run: async () => 0 }))), 1);
+    assert.match(io.text(), /no "origin" git remote; pass --repo owner\/name/);
+    assert.deepEqual(prompter.asked, []);
+    assert.deepEqual(setups, []);
+
+    await saveRemote(place("box", api.url));
+    let sent = 0;
+    assert.equal(await inside(loose, () => main(["run", "fix it"], capture(), laptop(prompter, { run: async () => { sent++; return 0; } }))), 0);
+    assert.equal(sent, 1);
+    assert.deepEqual(prompter.asked, []);
+    assert.deepEqual(setups, []);
+  });
+
+  it("dl setup still sets things up when asked", async () => {
+    assert.equal(await main(["setup"], capture(), laptop()), 0);
+    assert.equal(setups.length, 1);
+    assert.equal(setups[0]!.place, undefined, "its own question: where should they run");
   });
 });

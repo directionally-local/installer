@@ -20,11 +20,13 @@ import { checkServer, describeHost, discoverKeys, hostOf, parseSshConfig, parseT
 import { openRemote, withConnections, type RemoteOpener } from "./tunnel.js";
 
 /**
- * `dl` the first time (and `dl setup`): the installer of the stack, and nothing more. It asks
- * where agents should run, installs Hotcell + Autopilot there (this computer, or the user's
- * own server over SSH), hands the provider and model choice to Autopilot's own picker, pushes
- * the key to the place, takes the GitHub token, and opens a session right away. Nothing is
- * exposed on a server: `dl` reaches it through an SSH tunnel.
+ * `dl setup` (and `dl run` the first time): the installer of the sandbox stack, and nothing
+ * more. It asks where background tasks should run, installs Hotcell + Autopilot there (this
+ * computer, or the user's own server over SSH), hands the provider and model choice to
+ * Autopilot's own picker, pushes the key to the place, takes the GitHub token, and opens a
+ * session right away (`dl setup`) or goes on with the task (`dl run`). Bare `dl` on a laptop
+ * with nothing set up never comes here: it is plain Autopilot. Nothing is exposed on a
+ * server: `dl` reaches it through an SSH tunnel.
  */
 
 /** "On this computer": installs everything locally; returns the server to save, how many agents fit, and what's still missing. */
@@ -61,8 +63,13 @@ export interface SetupDeps {
   interactive?: boolean;
   /** This laptop's platform (process.platform): "On this computer" isn't offered where it can't run. */
   platform?: NodeJS.Platform;
+  /** Where to set up, already answered (`dl run`'s question): skips the title and "Where". */
+  place?: Place;
   now?: () => Date;
 }
+
+/** Where background tasks run: this computer, or the user's own server. */
+export type Place = "local" | "server";
 
 const PLACES: SelectOption[] = [
   { value: "local", label: "On this computer", detail: "start now · nothing to rent · pauses when this computer sleeps" },
@@ -71,6 +78,9 @@ const PLACES: SelectOption[] = [
 
 export async function setupWizard(deps: SetupDeps): Promise<RemoteServer | undefined> {
   const c = palette(deps.color);
+  // `dl run` asked already, in its own words.
+  if (deps.place === "server") return setUpServer(deps);
+  if (deps.place === "local" && deps.localSetup) return setUpHere(deps);
   deps.write(`\n  ${c.bold("Directionally Local")}\n  Background coding agents. Where should they run?\n\n`);
   const ui = deps.newUi();
   // Where this computer can't run agents (Windows), the list would hold one real choice: say why, and go on.
@@ -86,31 +96,34 @@ export async function setupWizard(deps: SetupDeps): Promise<RemoteServer | undef
   if (where === "local" && !deps.localSetup) {
     ui.line("info", "On this computer", "coming soon");
     if (!(await confirm(ui, deps.prompter, "Set up on your own server instead?"))) {
-      deps.write(`\n  ${c.dim("Nothing changed. Run")} dl ${c.dim("when you're ready.")}\n\n`);
+      deps.write(`\n  ${c.dim("Nothing changed. Run")} dl setup ${c.dim("when you're ready.")}\n\n`);
       return undefined;
     }
     ui.answered("Where", "On my own server");
     where = "server";
   }
 
-  if (where === "local") {
-    // Install first; the keys come after, from Autopilot's own picker and the GitHub CLI.
-    const { remote, capacity, needs } = await deps.localSetup!({ ui: deps.newUi(), prompter: deps.prompter });
-    const remotesFile = deps.remotesFile ?? remotesPath();
-    const isNew = !(await loadRemotes(remotesFile)).some((entry) => entry.name === remote.name);
-    await gatherAndStore(deps, needs, remote.name, "this computer", async (answers) => {
-      if (!deps.localConfigure) throw new Error("This build can't store keys on this computer.");
-      await deps.localConfigure(answers);
-    });
-    // Saved only once the keys are stored, as the server path does: a run killed at the
-    // picker leaves no place behind, so `dl` again resumes at the picker instead of
-    // opening a session on a place that has no provider and can't serve a turn.
-    await saveRemote(remote, remotesFile);
-    await offerThisComputer(deps, remote, remotesFile, isNew);
-    await ready(deps, remote, capacity);
-    return remote;
-  }
+  if (where === "local") return setUpHere(deps);
   return setUpServer(deps);
+}
+
+/** "On this computer": Hotcell, Autopilot's server, the sandbox image, then the keys. */
+async function setUpHere(deps: SetupDeps): Promise<RemoteServer> {
+  // Install first; the keys come after, from Autopilot's own picker and the GitHub CLI.
+  const { remote, capacity, needs } = await deps.localSetup!({ ui: deps.newUi(), prompter: deps.prompter });
+  const remotesFile = deps.remotesFile ?? remotesPath();
+  const isNew = !(await loadRemotes(remotesFile)).some((entry) => entry.name === remote.name);
+  await gatherAndStore(deps, needs, remote.name, "this computer", async (answers) => {
+    if (!deps.localConfigure) throw new Error("This build can't store keys on this computer.");
+    await deps.localConfigure(answers);
+  });
+  // Saved only once the keys are stored, as the server path does: a run killed at the
+  // picker leaves no place behind, so `dl setup` again resumes at the picker instead of
+  // sending work to a place that has no provider and can't serve a turn.
+  await saveRemote(remote, remotesFile);
+  await offerThisComputer(deps, remote, remotesFile, isNew);
+  await ready(deps, remote, capacity);
+  return remote;
 }
 
 async function setUpServer(deps: SetupDeps): Promise<RemoteServer> {
@@ -430,15 +443,66 @@ async function ready(deps: SetupDeps, remote: RemoteServer, capacity: number | u
   const c = palette(deps.color);
   deps.write(`\n  ${c.green("✓")} ${c.bold("Ready")}${capacity ? ` · fits ~${capacity} agents at once` : ""}\n`);
   if (deps.openSession) await deps.openSession(remote);
-  else deps.write(`  ${c.dim("Type")} dl ${c.dim("to talk to an agent; dl status shows where they run.")}\n\n`);
+  // From `dl run`, the task follows straight away.
+  else if (!deps.place) deps.write(`  ${c.dim("Type")} dl ${c.dim("to talk to an agent; dl status shows where they run.")}\n\n`);
+}
+
+const TASK_PLACES = (platform: NodeJS.Platform): SelectOption[] => [
+  { value: "server", label: "Use my own server" },
+  { value: "local", label: "Run them on this computer", detail: platform === "darwin" ? "needs Docker Desktop or OrbStack" : "needs Docker" },
+];
+
+/**
+ * `dl run` on a laptop with nowhere to send tasks: the one question, then the same setup as
+ * `dl setup` for that place (Hotcell, the sandbox image, the keys, the GitHub token), and the
+ * task goes on from there. Returns 0 when a place is ready, or setup's own exit code.
+ */
+export async function setupForTasks(options: SetupOptions & {
+  prompter?: Prompter;
+  platform?: NodeJS.Platform;
+  /** The setup to run once the place is chosen; `setup` unless replaced (tests). */
+  setUp?: (options: SetupOptions) => Promise<number>;
+}): Promise<number> {
+  const { io } = options;
+  const c = palette(io.color === true);
+  const platform = options.platform ?? process.platform;
+  io.out(`\n  ${c.bold("Background tasks keep going when this laptop sleeps.")}\n\n`);
+  let place: Place = "server";
+  // Where this computer can't run them (Windows), there's one real choice: say why, and go on.
+  const unsupported = localUnsupported(platform);
+  if (unsupported) {
+    io.out(`  ${c.dim(unsupported)}\n`);
+  } else {
+    const prompter = options.prompter ?? new TtyPrompter({ color: io.color === true });
+    try {
+      place = (await prompter.select(`  ${c.bold("Where should they run?")}`, TASK_PLACES(platform), 0)).value as Place;
+    } catch (error) {
+      if (!(error instanceof PromptCancelled)) throw error;
+      io.out(`  ${c.dim("Cancelled. Nothing changed.")}\n\n`);
+      return 130;
+    }
+  }
+  const { setUp = setup, prompter: _prompter, platform: _platform, ...rest } = options;
+  return setUp({ ...rest, place });
 }
 
 function laptopName(name: string): string {
   return name.replace(/\.local$/, "").replace(/[^\p{L}\p{N} ._'()@-]/gu, "-").slice(0, 40) || "laptop";
 }
 
+export interface SetupOptions {
+  io: LaptopIO;
+  terminal: boolean;
+  localSetup?: LocalSetup;
+  localConfigure?: LocalConfigure;
+  identityFile?: string;
+  cwd?: string;
+  /** Already answered by `dl run`'s question; it also means no session at the end (the task follows). */
+  place?: Place;
+}
+
 /** `dl setup` with the real terminal, ssh, gh, Autopilot, and filesystem. */
-export async function setup(options: { io: LaptopIO; terminal: boolean; localSetup?: LocalSetup; localConfigure?: LocalConfigure; identityFile?: string; cwd?: string }): Promise<number> {
+export async function setup(options: SetupOptions): Promise<number> {
   const { io, terminal } = options;
   const color = io.color === true;
   const execFileAsync = promisify(execFile);
@@ -472,13 +536,14 @@ export async function setup(options: { io: LaptopIO; terminal: boolean; localSet
       localConfigure: options.localConfigure ?? ((answers) => configureThisComputer(answers)),
       ...(identityFile ? { identityFile } : {}),
       interactive: terminal && process.stdin.isTTY === true,
+      ...(options.place ? { place: options.place } : {}),
       // The session needs the terminal; without one the Ready line says what to type.
-      ...(terminal ? { openSession: async () => { sessionCode = await openSession({ cwd: options.cwd ?? process.cwd() }, io); return sessionCode; } } : {}),
+      ...(terminal && !options.place ? { openSession: async () => { sessionCode = await openSession({ cwd: options.cwd ?? process.cwd() }, io); return sessionCode; } } : {}),
     });
   } catch (error) {
     if (!(error instanceof PromptCancelled)) throw error;
     // Esc / Ctrl-C at a question: the terminal is restored; say so quietly and stop.
-    io.out(`  ${palette(color).dim("Cancelled. Run")} dl ${palette(color).dim("when you're ready; it picks up where it stopped.")}\n\n`);
+    io.out(`  ${palette(color).dim("Cancelled. Run")} dl setup ${palette(color).dim("when you're ready; it picks up where it stopped.")}\n\n`);
     return 130;
   }
   return sessionCode ?? 0;
