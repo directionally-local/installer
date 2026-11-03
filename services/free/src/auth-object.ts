@@ -17,6 +17,8 @@ export const REFRESH_TTL_MS = 30 * 86_400_000;
 export const REFRESH_REUSE_GRACE_MS = 30_000;
 const OAUTH_STATE_TTL_MS = 600_000;
 const POLL_TOLERANCE_MS = 250;
+/** `oauth_states.device_hash` of an admin dashboard sign-in; never a SHA-256 hex, so never a device code. */
+const ADMIN_SIGN_IN = "admin-dashboard";
 
 export type DeviceStatus = "pending" | "needs_invite" | "approved" | "denied" | "not_invited" | "consumed";
 
@@ -164,6 +166,37 @@ export class AuthObject extends DurableObject {
     const device = this.#byHash(row.device_hash);
     if (!device || device.expires_at <= now || device.status !== "pending") return undefined;
     return { deviceRef: device.device_hash, clientDeviceId: device.client_device_id };
+  }
+
+  /**
+   * Starts a GitHub round trip for the admin dashboard's browser sign-in. Same shape as
+   * `beginOAuth`, but bound to no device code: its row carries `ADMIN_SIGN_IN` instead, so a
+   * device callback can't consume it and this one can't consume a device state.
+   */
+  async beginAdminOAuth(now: number): Promise<{ state: string; browser: string }> {
+    const state = randomToken();
+    const browser = randomToken();
+    this.ctx.storage.sql.exec("DELETE FROM oauth_states WHERE device_hash = ? AND expires_at <= ?", ADMIN_SIGN_IN, now);
+    this.ctx.storage.sql.exec(
+      "INSERT INTO oauth_states (state_hash, device_hash, browser_hash, expires_at) VALUES (?, ?, ?, ?)",
+      await sha256Hex(state),
+      ADMIN_SIGN_IN,
+      await sha256Hex(browser),
+      now + OAUTH_STATE_TTL_MS,
+    );
+    return { state, browser };
+  }
+
+  /** Consumes an admin sign-in `state`: once, unexpired, and only with the browser cookie it was issued with. */
+  async claimAdminOAuthState(state: string, browser: string, now: number): Promise<boolean> {
+    const stateHash = await sha256Hex(state);
+    const row = this.ctx.storage.sql
+      .exec<{ device_hash: string; browser_hash: string; expires_at: number }>("SELECT * FROM oauth_states WHERE state_hash = ?", stateHash)
+      .toArray()[0];
+    if (!row || row.device_hash !== ADMIN_SIGN_IN) return false;
+    this.ctx.storage.sql.exec("DELETE FROM oauth_states WHERE state_hash = ?", stateHash);
+    if (row.expires_at <= now) return false;
+    return timingSafeEqual(await sha256Hex(browser), row.browser_hash);
   }
 
   /**

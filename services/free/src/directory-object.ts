@@ -1,6 +1,7 @@
 import { DurableObject, type DurableObjectState } from "cloudflare:workers";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
+import { dashboardData, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
 import { readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
@@ -148,14 +149,70 @@ const SCHEMA = [
      admin_tokens   INTEGER NOT NULL,
      admin_requests INTEGER NOT NULL
    )`,
+  // Per person per UTC day, for the admin dashboard: requests (admins' left out), new session
+  // events, charged tokens and cost. Counts only, kept up to date with each record below.
+  `CREATE TABLE IF NOT EXISTS daily_activity (
+     day            INTEGER NOT NULL,
+     github_id      INTEGER NOT NULL,
+     requests       INTEGER NOT NULL,
+     events         INTEGER NOT NULL,
+     charged_tokens INTEGER NOT NULL,
+     cost_usd       REAL NOT NULL,
+     PRIMARY KEY (day, github_id)
+   ) WITHOUT ROWID`,
+  // A copy of the per-person weekly caps an admin set (the AccountObject enforces them), so the
+  // dashboard can tell who reached their own allowance. NULL means the default.
+  `CREATE TABLE IF NOT EXISTS grants (
+     github_id     INTEGER PRIMARY KEY,
+     weekly_tokens INTEGER,
+     weekly_usd    REAL
+   )`,
 ];
+
+/** Set in `settings` once `daily_activity` has been built from the existing log. */
+const ROLLUP_READY = "rollup:daily_activity";
 
 export class DirectoryObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
+      this.#backfillDailyActivity();
     });
+  }
+
+  /** Builds `daily_activity` from the request log and events once, the first time this code runs. */
+  #backfillDailyActivity(): void {
+    const sql = this.ctx.storage.sql;
+    if (sql.exec("SELECT 1 FROM settings WHERE key = ?", ROLLUP_READY).toArray().length > 0) return;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("DELETE FROM daily_activity");
+      sql.exec(
+        `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd)
+         SELECT at / ${DAY_MS}, github_id, COUNT(*), 0, SUM(charged_tokens), SUM(cost_usd) FROM requests WHERE is_admin = 0 GROUP BY 1, 2`,
+      );
+      sql.exec(
+        `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd)
+         SELECT at / ${DAY_MS}, github_id, 0, COUNT(*), 0, 0 FROM events WHERE true GROUP BY 1, 2
+         ON CONFLICT (day, github_id) DO UPDATE SET events = events + excluded.events`,
+      );
+      sql.exec("INSERT INTO settings (key, value) VALUES (?, '1')", ROLLUP_READY);
+    });
+  }
+
+  #addActivity(githubId: number, at: number, change: { requests: number; events: number; chargedTokens: number; costUsd: number }): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (day, github_id) DO UPDATE SET
+         requests = requests + excluded.requests, events = events + excluded.events,
+         charged_tokens = charged_tokens + excluded.charged_tokens, cost_usd = cost_usd + excluded.cost_usd`,
+      Math.floor(at / DAY_MS),
+      githubId,
+      change.requests,
+      change.events,
+      change.chargedTokens,
+      change.costUsd,
+    );
   }
 
   // ─── Admission ────────────────────────────────────────────────────────────
@@ -402,6 +459,7 @@ export class DirectoryObject extends DurableObject {
         admin ? record.chargedTokens : 0,
         admin,
       );
+      if (!admin) this.#addActivity(record.githubId, record.at, { requests: 1, events: 0, chargedTokens: record.chargedTokens, costUsd: record.costUsd });
     });
   }
 
@@ -424,12 +482,29 @@ export class DirectoryObject extends DurableObject {
           )
           .toArray();
         accepted += inserted.length;
+        if (inserted.length > 0) this.#addActivity(githubId, event.at, { requests: 0, events: 1, chargedTokens: 0, costUsd: 0 });
       }
     });
     return accepted;
   }
 
   // ─── Metrics ─────────────────────────────────────────────────────────────
+
+  /** Mirrors an admin's per-person caps (undefined: unchanged; null: back to the default). */
+  async recordGrant(input: { githubId: number; tokensPerWeek: number | null | undefined; usdPerWeek: number | null | undefined }): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("INSERT OR IGNORE INTO grants (github_id, weekly_tokens, weekly_usd) VALUES (?, NULL, NULL)", input.githubId);
+      if (input.tokensPerWeek !== undefined) sql.exec("UPDATE grants SET weekly_tokens = ? WHERE github_id = ?", input.tokensPerWeek, input.githubId);
+      if (input.usdPerWeek !== undefined) sql.exec("UPDATE grants SET weekly_usd = ? WHERE github_id = ?", input.usdPerWeek, input.githubId);
+      sql.exec("DELETE FROM grants WHERE github_id = ? AND weekly_tokens IS NULL AND weekly_usd IS NULL", input.githubId);
+    });
+  }
+
+  /** The admin dashboard's tables (see dashboard-data.ts). Admins are left out. */
+  async dashboard(input: { now: number; adminIds: number[]; limits: DashboardLimits; topWeek?: number }): Promise<DashboardData> {
+    return dashboardData(this.ctx.storage.sql, input);
+  }
 
   /** Admin analytics over whole UTC days `from`..`to` (inclusive), computed from the stored records. */
   async metrics(input: { from: number; to: number; now: number; top?: number }): Promise<Record<string, unknown>> {
