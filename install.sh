@@ -209,7 +209,7 @@ on_path() {
 # Ubuntu's ~/.profile adds when it exists) or ~/bin. Never replaces a dl that isn't ours.
 link_on_path() {
   for linkdir in "$HOME/.local/bin" "$HOME/bin"; do
-    on_path "$linkdir" && [ -d "$linkdir" ] && [ -w "$linkdir" ] || continue
+    if ! { on_path "$linkdir" && [ -d "$linkdir" ] && [ -w "$linkdir" ]; }; then continue; fi
     linked=""
     for name in dl directionallylocal; do
       if [ -e "$linkdir/$name" ] || [ -L "$linkdir/$name" ]; then
