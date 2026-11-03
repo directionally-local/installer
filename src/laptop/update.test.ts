@@ -17,7 +17,7 @@ import {
   update,
   type UpdateIO,
 } from "./update.js";
-import { pinnedAutopilotVersion, pinnedHotcellVersion } from "../versions.js";
+import { dlVersion, pinnedAutopilotVersion, pinnedHotcellVersion } from "../versions.js";
 
 const roots: string[] = [];
 const previous = process.env.AUTOPILOT_REMOTES_FILE;
@@ -151,6 +151,7 @@ describe("dl update", () => {
     assert.equal(up, "dl up --answers-stdin --events json", "no --access: the server keeps the way it is reached");
     const bootstrap = ssh.commands.findIndex((command) => command.includes("dl-install.sh"));
     assert.ok(bootstrap >= 0 && bootstrap < ssh.commands.indexOf(up!), "the server's dl first: it pins the Autopilot it installs");
+    assert.match(ssh.commands[bootstrap]!, new RegExp(`DL_VERSION=${dlVersion().replace(/\./g, "\\.")} sh`), "the laptop's own dl version, so both ends match");
     assert.match(io.text(), /ok Installing dl: 0\.9\.0/);
   });
 

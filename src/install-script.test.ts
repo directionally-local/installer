@@ -1,8 +1,9 @@
-import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, it } from "node:test";
+import { dirname, join } from "node:path";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseOsRelease } from "./detect.js";
 
@@ -65,5 +66,212 @@ describe("install.sh", () => {
     assert.equal(failed.stdout, "Directionally Local\n.. Getting the installer\n");
     assert.match(failed.stderr, /npm ERR! 404 Not Found[\s\S]*directionallylocal: installing directionallylocal@latest failed/);
     assert.equal(failed.up, undefined);
+  });
+});
+
+/**
+ * Runs install.sh as a laptop user would, with every command it calls stubbed on PATH: a
+ * Node that is patched or not, npm installing a fake dl into --prefix, and curl serving a
+ * Node.js download from `dist`. DL_TTY names a missing file, so there's no terminal to start dl in.
+ */
+function laptopInstall(options: { os?: "Darwin" | "Linux"; uid?: number; nodePatched?: boolean; shell?: string; env?: Record<string, string>; dist?: (dir: string) => void; npmFails?: boolean; terminal?: boolean; extraPath?: string } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "dl-install-laptop-"));
+  const bin = join(dir, "stubs");
+  const home = join(dir, "home");
+  const dist = join(dir, "dist");
+  for (const path of [bin, home, dist]) mkdirSync(path);
+  const stub = (name: string, body: string, where = bin) => {
+    writeFileSync(join(where, name), `#!/bin/sh\n${body}\n`);
+    chmodSync(join(where, name), 0o755);
+  };
+  stub("id", `echo ${options.uid ?? 501}`);
+  stub("uname", `case "$1" in -m) echo arm64 ;; *) echo ${options.os ?? "Darwin"} ;; esac`);
+  // A Node: -e is the CVE check; anything else runs dl's entry, which answers --version.
+  const node = (patched: boolean) => `case "$1" in -e) exit ${patched ? 0 : 1} ;; -v) echo v24.22.1 ;; *) [ "$2" = --version ] && echo 0.10.0 || echo "dl $* in $(pwd)" >> "${dir}/started.log" ;; esac`;
+  stub("node", node(options.nodePatched ?? true));
+  // npm: records its arguments and installs a dl entry point under --prefix.
+  const npm = options.npmFails ? 'echo "npm ERR! 404"; exit 1' : `echo "$*" >> "${dir}/npm.log"
+prefix=""; while [ $# -gt 0 ]; do [ "$1" = --prefix ] && prefix=$2; shift; done
+mkdir -p "$prefix/lib/node_modules/directionallylocal/bin" && echo '// dl' > "$prefix/lib/node_modules/directionallylocal/bin/directionallylocal.mjs"`;
+  stub("npm", npm);
+  stub("curl", `echo "$*" >> "${dir}/curl.log"
+out=""; url=""; while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift ;; -*) ;; *) url=$1 ;; esac; shift; done
+file="${dist}/$(basename "$url")"; [ -f "$file" ] || exit 22
+if [ -n "$out" ]; then cp "$file" "$out"; else cat "$file"; fi`);
+  stub("sudo", `echo "sudo $*" >> "${dir}/sudo.log"; exit 1`);
+  options.dist?.(dist);
+  // An empty file stands in for the terminal: opening it works, as /dev/tty does at one.
+  const tty = join(dir, "terminal");
+  if (options.terminal) writeFileSync(tty, "");
+  {
+    const result = spawnSync("sh", [SCRIPT], {
+      cwd: home,
+      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home, SHELL: options.shell ?? "/bin/zsh", DL_NODE_DIST: "https://nodejs.example/dist", DL_TTY: options.terminal ? tty : join(dir, "no-terminal"), DL_SERVER_STATE: join(dir, "no-server-state"), ...options.env, ...(options.extraPath ? { PATH: `${options.extraPath}:${bin}:/usr/bin:/bin` } : {}) },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const read = (path: string) => existsSync(path) ? readFileSync(path, "utf8") : undefined;
+    // The caller removes `dir` once it has read what it needs.
+    return { ...result, dir, home, read, npm: read(join(dir, "npm.log")), curl: read(join(dir, "curl.log")), sudo: read(join(dir, "sudo.log")) };
+  }
+}
+
+/** A Node.js 24 download and its SHASUMS256.txt, as nodejs.org lays them out. */
+function nodeDist(dist: string, options: { corrupt?: boolean } = {}): void {
+  const name = "node-v24.22.1-darwin-arm64";
+  const build = join(dist, "build");
+  mkdirSync(join(build, name, "bin"), { recursive: true });
+  const write = (file: string, body: string) => {
+    writeFileSync(join(build, name, "bin", file), `#!/bin/sh\n${body}\n`);
+    chmodSync(join(build, name, "bin", file), 0o755);
+  };
+  write("node", 'case "$1" in -e) exit 0 ;; -v) echo v24.22.1 ;; *) echo 0.10.0 ;; esac');
+  write("npm", `echo "own $*" >> "${dirname(dist)}/npm.log"
+prefix=""; while [ $# -gt 0 ]; do [ "$1" = --prefix ] && prefix=$2; shift; done
+mkdir -p "$prefix/lib/node_modules/directionallylocal/bin" && echo '// dl' > "$prefix/lib/node_modules/directionallylocal/bin/directionallylocal.mjs"`);
+  const tarball = join(dist, `${name}.tar.gz`);
+  execFileSync("tar", ["-czf", tarball, "-C", build, name]);
+  const sum = createHash("sha256").update(readFileSync(tarball)).digest("hex");
+  writeFileSync(join(dist, "SHASUMS256.txt"), `${"0".repeat(64)}  node-v24.22.1-linux-x64.tar.gz\n${options.corrupt ? "f".repeat(64) : sum}  ${name}.tar.gz\n${"1".repeat(64)}  ${name}.tar.xz\n`);
+}
+
+describe("install.sh on a laptop", () => {
+  const cleanup: string[] = [];
+  const run = (options: Parameters<typeof laptopInstall>[0] = {}) => {
+    const result = laptopInstall(options);
+    cleanup.push(result.dir);
+    return result;
+  };
+  after(() => { for (const dir of cleanup) rmSync(dir, { recursive: true, force: true }); });
+
+  it("on macOS, with a patched Node, installs dl into ~/.directionallylocal with no sudo and puts it on PATH", () => {
+    const result = run();
+    assert.equal(result.status, 0, result.stderr);
+    const root = join(result.home, ".directionallylocal");
+    assert.match(result.npm ?? "", new RegExp(`^install -g --prefix ${root}/dl --no-audit --no-fund --loglevel=error directionallylocal@latest$`, "m"));
+    assert.equal(result.sudo, undefined, "no sudo");
+    assert.equal(result.curl, undefined, "no Node download");
+    const wrapper = result.read(join(root, "bin", "dl"))!;
+    assert.match(wrapper, new RegExp(`exec "[^"]*/stubs/node" "${root}/dl/lib/node_modules/directionallylocal/bin/directionallylocal\\.mjs" "\\$@"`));
+    assert.doesNotMatch(wrapper, /export PATH/, "the user's own Node: nothing added to PATH");
+    assert.ok(existsSync(join(root, "bin", "directionallylocal")));
+    assert.equal(result.read(join(result.home, ".zshrc")), `\n# Directionally Local (dl)\nexport PATH="${root}/bin:$PATH"\n`);
+    assert.match(result.stdout, /ok Installing dl: dl 0\.10\.0 · in .*\.directionallylocal\n\.\. Adding dl to your PATH\nok Adding dl to your PATH: in .*\/\.zshrc\n/);
+    assert.match(result.stdout, /Open a new terminal tab if dl isn't found\./);
+    assert.match(result.stdout, /Then type: dl\n$/, "no terminal: dl isn't started");
+    assert.doesNotMatch(result.stdout, /sudo sh/, "the server hint is for Linux");
+  });
+
+  it("is safe to run again: one PATH line, DL_VERSION pins the version", () => {
+    const first = laptopInstall({ env: { DL_VERSION: "0.10.0" } });
+    cleanup.push(first.dir);
+    assert.equal(first.status, 0, first.stderr);
+    const again = spawnSync("sh", [SCRIPT], { cwd: first.home, env: { PATH: `${first.dir}/stubs:/usr/bin:/bin`, HOME: first.home, SHELL: "/bin/zsh", DL_VERSION: "0.10.0", DL_TTY: "/nonexistent" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    assert.equal(again.status, 0, again.stderr);
+    const rc = first.read(join(first.home, ".zshrc"))!;
+    assert.equal(rc.match(/Directionally Local/g)?.length, 1);
+    assert.match(first.read(join(first.dir, "npm.log"))!, /directionallylocal@0\.10\.0\n.*directionallylocal@0\.10\.0\n$/);
+  });
+
+  it("without a patched Node, installs Node.js 24 from nodejs.org into ~/.directionallylocal, checked against SHASUMS256.txt", () => {
+    const result = run({ nodePatched: false, shell: "/bin/bash", dist: (dist) => nodeDist(dist) });
+    assert.equal(result.status, 0, result.stderr);
+    const root = join(result.home, ".directionallylocal");
+    assert.match(result.curl ?? "", /nodejs\.example\/dist\/SHASUMS256\.txt[\s\S]*nodejs\.example\/dist\/node-v24\.22\.1-darwin-arm64\.tar\.gz/);
+    assert.match(result.stdout, /ok Installing Node\.js 24: v24\.22\.1 · in .*\.directionallylocal\/node/);
+    assert.match(result.npm ?? "", /^own install -g --prefix .*\.directionallylocal\/dl /m, "dl installed with its own Node's npm");
+    const wrapper = result.read(join(root, "bin", "dl"))!;
+    assert.match(wrapper, new RegExp(`export PATH="${root}/node/bin:\\$PATH"\nexec "${root}/node/bin/node" `), "its own Node, on PATH for dl only");
+    assert.ok(existsSync(join(root, "node", "bin", "node")));
+    assert.ok(!existsSync(join(root, "node-v24.22.1-darwin-arm64.tar.gz.download")), "the download is removed");
+    assert.match(result.read(join(result.home, ".bash_profile")) ?? "", /export PATH=".*\.directionallylocal\/bin:\$PATH"/, "bash on macOS reads .bash_profile");
+  });
+
+  it("refuses a Node.js download whose checksum doesn't match", () => {
+    const result = run({ nodePatched: false, dist: (dist) => nodeDist(dist, { corrupt: true }) });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /the Node\.js download didn't match its checksum/);
+    assert.ok(!existsSync(join(result.home, ".directionallylocal", "node")));
+    assert.equal(result.npm, undefined);
+  });
+
+  it("on Linux as a user is a laptop too, and says how to install a server instead", () => {
+    const result = run({ os: "Linux", shell: "/usr/bin/fish" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.sudo, undefined);
+    assert.match(result.stdout, /For a server instead, run it as root: curl -fsSL https:\/\/directionallylocal\.run \| sudo sh/);
+    assert.match(result.read(join(result.home, ".config", "fish", "conf.d", "directionallylocal.fish")) ?? "", /set -gx PATH ".*\.directionallylocal\/bin" \$PATH/);
+  });
+
+  it("with dl already on PATH and DL_NO_MODIFY_PATH=1, touches no startup file and prints no fallback", () => {
+    const home = mkdtempSync(join(tmpdir(), "dl-home-"));
+    cleanup.push(home);
+    const result = run({ env: { DL_NO_MODIFY_PATH: "1", DL_HOME: join(home, "dl-here") } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(!existsSync(join(result.home, ".zshrc")));
+    assert.ok(existsSync(join(home, "dl-here", "bin", "dl")));
+    assert.match(result.stdout, /Open a new terminal tab if dl isn't found/, "not on PATH yet");
+    const onPath = run({ env: { DL_NO_MODIFY_PATH: "1", DL_HOME: join(home, "dl-there") }, extraPath: join(home, "dl-there", "bin") });
+    assert.equal(onPath.status, 0, onPath.stderr);
+    assert.doesNotMatch(onPath.stdout, /Open a new terminal tab/);
+  });
+
+  it("at a terminal, ends by starting dl in the folder it ran from", () => {
+    const result = laptopInstall({ terminal: true });
+    cleanup.push(result.dir);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.read(join(result.dir, "started.log")) ?? "", new RegExp(`^dl .*directionallylocal\\.mjs in ${result.home}\n$`));
+    assert.doesNotMatch(result.stdout, /Then type: dl/);
+    const skipped = laptopInstall({ terminal: true, env: { DL_NO_START: "1" } });
+    cleanup.push(skipped.dir);
+    assert.equal(skipped.read(join(skipped.dir, "started.log")), undefined);
+  });
+
+  it("refuses root on macOS, and fails clearly when npm does", () => {
+    const root = run({ uid: 0 });
+    assert.equal(root.status, 1);
+    assert.match(root.stderr, /run it as yourself, without sudo/);
+    const failed = run({ npmFails: true });
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /npm ERR! 404[\s\S]*directionallylocal: installing directionallylocal@latest failed/);
+  });
+
+  it("DL_MODE must be server or laptop", () => {
+    const result = run({ env: { DL_MODE: "desktop" } });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /DL_MODE is server or laptop \(got desktop\)/);
+  });
+});
+
+describe("install.sh: server or laptop", () => {
+  it("root on Linux, the laptop's setup over SSH, or a machine dl up set up is a server; DL_MODE decides when set", { skip: !supportedHost() && "needs Ubuntu or Debian" }, () => {
+    // As root: the server path, as before (install() stubs id as 0).
+    const rooted = install({ DL_INSTALL_ONLY: "1" });
+    assert.equal(rooted.status, 0, rooted.stderr);
+    assert.match(rooted.npm ?? "", /^install -g --no-audit/m, "a global install, not into a home directory");
+    // DL_MODE=server as a user: the server path, through sudo, as before this rule.
+    const user = laptopInstall({ os: "Linux", env: { DL_MODE: "server" } });
+    try {
+      assert.equal(user.status, 1, "the stub sudo fails");
+      assert.match(user.sudo ?? "", /^sudo -E npm install -g/m, "the server path, through sudo");
+    } finally {
+      rmSync(user.dir, { recursive: true, force: true });
+    }
+    const viaSetup = laptopInstall({ os: "Linux", env: { DL_INSTALL_ONLY: "1" } });
+    try {
+      assert.match(viaSetup.sudo ?? "", /^sudo -E npm install -g/m, "DL_INSTALL_ONLY=1 (the laptop's setup, over SSH) is always a server");
+    } finally {
+      rmSync(viaSetup.dir, { recursive: true, force: true });
+    }
+    // A user on a Linux machine dl up already set up as a server: the server path too.
+    const state = mkdtempSync(join(tmpdir(), "dl-state-"));
+    writeFileSync(join(state, "state.json"), "{}");
+    const serverUser = laptopInstall({ os: "Linux", env: { DL_SERVER_STATE: join(state, "state.json") } });
+    try {
+      assert.match(serverUser.sudo ?? "", /^sudo -E npm install -g/m);
+    } finally {
+      rmSync(serverUser.dir, { recursive: true, force: true });
+      rmSync(state, { recursive: true, force: true });
+    }
   });
 });

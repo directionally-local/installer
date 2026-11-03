@@ -5,6 +5,7 @@ import { PlainUi, RecordingUi } from "../ui.js";
 import { applyOnServer, bootstrap, bootstrapCommand, BootstrapRenderer, EventReplayer, installOnServer, pairLaptop, serverNeeds, wireAnswers } from "./remote-install.js";
 import { openrouterAnswer } from "../provider.js";
 import type { ServerFacts } from "./ssh.js";
+import { dlVersion } from "../versions.js";
 
 const root: ServerFacts = { user: "root", root: true, sudo: false, os: "Ubuntu 24.04", arch: "arm64", newHostKey: false };
 const sudoer: ServerFacts = { ...root, user: "me", root: false, sudo: true };
@@ -12,8 +13,18 @@ const box = { target: "box" };
 
 describe("installing over SSH", () => {
   it("bootstraps with install.sh, under sudo -n when not root", () => {
-    assert.equal(bootstrapCommand(root), "curl -fsSL 'https://directionallylocal.run' -o /tmp/dl-install.sh && DL_INSTALL_ONLY=1 sh /tmp/dl-install.sh");
-    assert.equal(bootstrapCommand(sudoer), "curl -fsSL 'https://directionallylocal.run' -o /tmp/dl-install.sh && sudo -n env DL_INSTALL_ONLY=1 sh /tmp/dl-install.sh");
+    assert.equal(bootstrapCommand(root, undefined, "0.10.1"), "curl -fsSL 'https://directionallylocal.run' -o /tmp/dl-install.sh && DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh /tmp/dl-install.sh");
+    assert.equal(bootstrapCommand(sudoer, undefined, "0.10.1"), "curl -fsSL 'https://directionallylocal.run' -o /tmp/dl-install.sh && sudo -n env DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh /tmp/dl-install.sh");
+  });
+
+  it("installs this laptop's own dl version on the server, never npm's latest", async () => {
+    assert.match(bootstrapCommand(root), new RegExp(`DL_INSTALL_ONLY=1 DL_VERSION=${dlVersion().replace(/\./g, "\\.")} sh /tmp/dl-install\\.sh$`));
+    assert.doesNotMatch(bootstrapCommand(sudoer), /latest/);
+    assert.match(bootstrapCommand(root, undefined, "1.0.0-rc.1"), /DL_VERSION=1\.0\.0-rc\.1 /);
+    for (const bad of ["latest", "1.0", "1.0.0; rm -rf /", "$(id)"]) assert.throws(() => bootstrapCommand(root, undefined, bad), /Not a dl version/);
+    const server = new FakeSshServer();
+    await bootstrap(box, root, server.exec, new RecordingUi(), undefined, "0.10.1");
+    assert.match(server.calls[0]!.command, /DL_VERSION=0\.10\.1 sh/);
   });
 
   it("turns install.sh's plain lines into checklist steps", async () => {

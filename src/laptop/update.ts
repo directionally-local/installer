@@ -183,7 +183,8 @@ export async function update(args: string[], deps: UpdateDeps): Promise<number> 
   const facts = await checkServer(remote.ssh, deps.ssh, remote.name);
   const before = await serverVersions(remote.ssh, deps.ssh);
   deps.io.out(`\n  ${c.bold("Updating")} ${remote.name}${before ? c.dim(`  (Autopilot ${before.autopilot} · Hotcell ${before.hotcell})`) : ""}\n\n`);
-  // The server's dl first: it pins the Autopilot it installs, so a current dl means a current Autopilot.
+  // The server's dl first, at this laptop's own version: it pins the Autopilot it installs, so
+  // the same dl on both ends means the same Autopilot as this laptop's session client.
   await bootstrap(remote.ssh, facts, deps.ssh, deps.newUi(), deps.installUrl ?? INSTALL_URL);
   const replay = new EventReplayer(deps.newUi);
   // No --access: the server keeps the way it's reached. `{}` means "no new answers", so a

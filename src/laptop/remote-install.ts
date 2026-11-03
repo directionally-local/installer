@@ -2,6 +2,7 @@ import { agentCapacity } from "../detect.js";
 import { CELL_MEMORY_MB } from "../layout.js";
 import { OPENROUTER, type ProviderAnswer } from "../provider.js";
 import { PlainUi, type Ui } from "../ui.js";
+import { dlVersion } from "../versions.js";
 import type { Need } from "./credentials.js";
 import { shellQuote, type ServerFacts, type SshExec } from "./ssh.js";
 import type { SshAccess } from "./config.js";
@@ -9,7 +10,7 @@ import type { SshAccess } from "./config.js";
 /**
  * Installing on the user's server from the laptop, over SSH, through the server-side
  * commands' machine-readable modes:
- *   1. bootstrap   install.sh with DL_INSTALL_ONLY=1 (plain `.. step` / `ok step: detail` lines)
+ *   1. bootstrap   install.sh with DL_INSTALL_ONLY=1 and this laptop's DL_VERSION (plain `.. step` / `ok step: detail` lines)
  *   2. install     `dl up --access ssh --answers-stdin --events json` with `{}` (NDJSON out): everything but the keys
  *   3. needs       `dl up --needs --access ssh` (one JSON line: which keys it still lacks)
  *   4. keys        the same `dl up --answers-stdin`, now with the provider Autopilot's picker chose and the GitHub token
@@ -33,10 +34,19 @@ function sudo(facts: Pick<ServerFacts, "root">): string {
   return facts.root ? "" : "sudo -n ";
 }
 
-export function bootstrapCommand(facts: Pick<ServerFacts, "root">, installUrl = INSTALL_URL): string {
-  const run = facts.root ? "DL_INSTALL_ONLY=1 sh /tmp/dl-install.sh" : "sudo -n env DL_INSTALL_ONLY=1 sh /tmp/dl-install.sh";
+/**
+ * install.sh on the server, stopping before `dl up`, and installing this laptop's own dl
+ * version (DL_VERSION), never npm's latest: the server's dl pins the Autopilot and Hotcell it
+ * installs, so the same dl on both ends means the same Autopilot as the laptop's session client.
+ */
+export function bootstrapCommand(facts: Pick<ServerFacts, "root">, installUrl = INSTALL_URL, version = dlVersion()): string {
+  if (!EXACT_VERSION.test(version)) throw new Error(`Not a dl version: ${JSON.stringify(version)}`);
+  const env = `DL_INSTALL_ONLY=1 DL_VERSION=${version}`;
+  const run = facts.root ? `${env} sh /tmp/dl-install.sh` : `sudo -n env ${env} sh /tmp/dl-install.sh`;
   return `curl -fsSL ${shellQuote(installUrl)} -o /tmp/dl-install.sh && ${run}`;
 }
+
+const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 
 /**
  * Renders install.sh's plain lines as a checklist. Steps aren't known up front, so each new
@@ -112,9 +122,9 @@ export class BootstrapRenderer {
   }
 }
 
-export async function bootstrap(access: SshAccess, facts: ServerFacts, ssh: SshExec, ui: Ui, installUrl?: string): Promise<void> {
+export async function bootstrap(access: SshAccess, facts: ServerFacts, ssh: SshExec, ui: Ui, installUrl?: string, version?: string): Promise<void> {
   const renderer = new BootstrapRenderer(ui);
-  const result = await ssh(access, bootstrapCommand(facts, installUrl), {
+  const result = await ssh(access, bootstrapCommand(facts, installUrl, version), {
     onStdoutLine: (line) => renderer.stdout(line),
     onStderrLine: (line) => renderer.stderr(line),
   });
