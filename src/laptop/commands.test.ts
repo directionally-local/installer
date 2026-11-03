@@ -261,7 +261,7 @@ describe("dl on a laptop", () => {
 
   it("guides a laptop that isn't connected yet", async () => {
     const io = capture();
-    await assert.rejects(() => runs({}, io), /Nothing is set up yet\. Run: dl {2}\(or, for a server someone else set up: dl connect/);
+    await assert.rejects(() => runs({}, io), /No tasks yet: dl run "TASK" sends one \(or, for a server someone else set up: dl connect/);
     assert.equal(await servers([], io), 0);
     assert.match(io.text(), /Nothing set up yet\. {2}dl setup {2}or, for a server someone else set up: dl connect https:\/\/your-server/);
   });

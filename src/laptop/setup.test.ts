@@ -14,7 +14,7 @@ import { PromptCancelled } from "../prompt.js";
 import type { ConnectResult } from "../provider.js";
 import type { ServerAnswers } from "./remote-install.js";
 import { loadSettings } from "./settings.js";
-import { serverLabel, setupWizard, type LocalSetup, type SetupDeps } from "./setup.js";
+import { serverLabel, setupForTasks, setupWizard, type LocalSetup, type SetupDeps, type SetupOptions } from "./setup.js";
 import { createOpener } from "./tunnel.js";
 
 const GH = `gho_${"a".repeat(36)}`;
@@ -412,5 +412,47 @@ describe("dl setup on a laptop", () => {
     const info = run.ui.events.find((event) => event.startsWith("line info On this computer"));
     assert.match(info ?? "", /isn't supported on Windows yet; connect a server instead[\s\S]*WSL 2/);
     assert.ok(run.ui.events.includes("answered Where | On my own server"));
+  });
+
+  describe("from dl run, with the place already chosen", () => {
+    const local: RemoteServer = { name: "this-computer", url: "http://127.0.0.1:4096", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" };
+
+    it("this computer: no title, no Where, the keys and GitHub token that sandboxes need, and no session after Ready", async () => {
+      const run = deps(new FakeSshServer(), { "GitHub CLI": "" }, { ...fakeLocal(local), openSession: undefined, place: "local" });
+      assert.deepEqual(await setupWizard(run.deps), local);
+      assert.ok(!run.prompter.asked.some((question) => question.includes("Where")), run.prompter.asked.join("\n"));
+      assert.doesNotMatch(run.text(), /Where should they run/);
+      assert.deepEqual(run.connects, [{}], "the provider for the sandboxes, from Autopilot's picker");
+      assert.ok(run.prompter.asked.some((question) => question.includes("Use your GitHub CLI login")), "the GitHub token is asked here, where pull requests need it");
+      assert.match(run.text(), /✓ Ready · fits ~4 agents at once\n$/, "the task follows; no 'Type dl' hint");
+    });
+
+    it("a server: straight to which server", async () => {
+      const run = deps(new FakeSshServer(), { Server: "1", "GitHub CLI": "" }, { openSession: undefined, place: "server" });
+      assert.equal((await setupWizard(run.deps))?.name, "box");
+      assert.ok(!run.prompter.asked.some((question) => question.includes("Where")));
+    });
+
+    it("asks where tasks run (this computer needs Docker), and on Windows goes to a server without asking", async () => {
+      const chosen: SetupOptions[] = [];
+      const setUp = async (options: SetupOptions) => { chosen.push(options); return 0; };
+      let text = "";
+      const io = { out: (chunk: string) => { text += chunk; }, err: (chunk: string) => { text += chunk; }, color: false };
+      const prompter = new ScriptedPrompter({ "Where should they run?": "Run them on this computer" });
+      assert.equal(await setupForTasks({ io, terminal: true, prompter, platform: "darwin", setUp }), 0);
+      assert.equal(chosen[0]!.place, "local");
+      assert.match(text, /Background tasks keep going when this laptop sleeps\./);
+
+      const options: string[] = [];
+      const listing = { select: async (_question: string, list: Array<{ label: string; detail?: string }>) => { options.push(...list.map((option) => `${option.label}${option.detail ? ` (${option.detail})` : ""}`)); return { value: "server" }; } } as unknown as ScriptedPrompter;
+      assert.equal(await setupForTasks({ io, terminal: true, prompter: listing, platform: "darwin", setUp }), 0);
+      assert.deepEqual(options, ["Use my own server", "Run them on this computer (needs Docker Desktop or OrbStack)"]);
+      assert.equal(chosen[1]!.place, "server");
+
+      const never = new ScriptedPrompter({});
+      assert.equal(await setupForTasks({ io, terminal: true, prompter: never, platform: "win32", setUp }), 0);
+      assert.deepEqual(never.asked, []);
+      assert.equal(chosen[2]!.place, "server");
+    });
   });
 });

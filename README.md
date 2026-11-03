@@ -11,23 +11,27 @@ npm install -g directionallylocal
 dl
 ```
 
-`dl` is the installer of the stack and nothing more. The first time it asks one question, where your agents should run:
+`dl` starts Autopilot in the folder you're in. There's nothing to set up first: no Docker, no sandbox, no GitHub token. Autopilot's own first run picks your provider and signs you in. Every `dl` is a new session; `dl -c` continues the last one.
 
-- **On this computer** — start now, nothing to rent, pauses when this computer sleeps. macOS and Linux; not offered on Windows yet (connect a server, or run `dl` inside WSL 2, which takes the Linux path).
-- **On my own server** — keeps going when your laptop is closed; needs SSH access.
-
-For a server, `dl` lists the hosts in `~/.ssh/config` (or takes `user@host[:port]`), checks it over SSH, installs itself there, and pairs this laptop. Nothing is exposed on the server: `dl` reaches it through an SSH tunnel.
-
-Then it installs Hotcell and Autopilot on the place, builds the sandbox image and starts the services, as a few progress lines. What a new user sees, start to finish:
+Background tasks are the part that needs setting up, and `dl` sets them up the first time you ask for one. `dl run "task"` with nowhere to send it asks one question:
 
 ```
-  Directionally Local
-  Background coding agents. Where should they run?
+  Background tasks keep going when this laptop sleeps.
 
-  ✓ Where                 On this computer
+  Where should they run?
+  › Use my own server
+    Run them on this computer   needs Docker Desktop or OrbStack
+```
+
+- **Use my own server** — keeps going when your laptop is closed; needs SSH access. `dl` lists the hosts in `~/.ssh/config` (or takes `user@host[:port]`), checks it over SSH, installs itself there, and pairs this laptop. Nothing is exposed on the server: `dl` reaches it through an SSH tunnel.
+- **Run them on this computer** — nothing to rent; tasks pause while it sleeps. macOS and Linux, with Docker; not offered on Windows yet (use a server, or WSL 2, which takes the Linux path).
+
+Then it installs Hotcell and Autopilot on the place, builds the sandbox image, starts the services, asks for the provider (Autopilot's picker) and the GitHub token, and sends the task. `dl setup` does the same without a task, for when you'd rather set things up first. What it shows, for this computer:
+
+```
   ✓ Checking this computer   macOS 15.1 · Docker Desktop 29.5.2 · Node 24.22.1 · 120 GB free
-  ✓ Installing Hotcell (sandbox SDK) + Autopilot (harness)   Autopilot 3.0.3 · Hotcell 0.1.30
-  ✓ Building the sandbox image   Node 24 · Autopilot 3.0.3
+  ✓ Installing Hotcell (sandbox SDK) + Autopilot (harness)   Autopilot 3.1.2 · Hotcell 0.1.38
+  ✓ Building the sandbox image   Node 24 · Autopilot 3.1.2
   ✓ Starting services     start at login · logs in ~/.directionallylocal/logs
   ✓ Connecting            this computer · tasks pause while it sleeps
 
@@ -40,12 +44,12 @@ Then it installs Hotcell and Autopilot on the place, builds the sandbox image an
 
   ✓ Ready · fits ~6 agents at once
 
-  [Autopilot, in the folder you ran dl from]
+  · Sending to this-computer: you/app at 1a2b3c4  deepseek-v4-pro
 ```
 
 ### The provider and model
 
-The provider and model are Autopilot's choice to make, so `dl` hands over to Autopilot's own picker (`autopilot connect`): any of its providers (OpenRouter, DeepSeek, OpenAI, Anthropic, Moonshot, Z.ai, Ollama, LM Studio, a custom OpenAI-compatible endpoint, …), its key, and its model. The same choice configures your own `autopilot` command. `dl` keeps the model as that place's model (`dl run` and sessions on a server use it unless `-m` names another; on this computer bare `dl` is that same `autopilot`, so it uses what you picked there) and pushes the key to the place:
+For background tasks, the provider and model are Autopilot's choice to make too, so `dl` hands over to Autopilot's own picker (`autopilot connect`): any of its providers (OpenRouter, DeepSeek, OpenAI, Anthropic, Moonshot, Z.ai, Ollama, LM Studio, a custom OpenAI-compatible endpoint, …), its key, and its model. The same choice configures your own `autopilot` command. `dl` keeps the model as that place's model (`dl run` and sessions on a server use it unless `-m` names another; on this computer bare `dl` is that same `autopilot`, so it uses what you picked there) and pushes the key to the place:
 
 - **On this computer,** into Hotcell's keystore (a 0600 file under `~/.directionallylocal/hotcell`, not the login Keychain).
 - **On a server,** over the same SSH channel the install used, into Hotcell's keystore there.
@@ -54,11 +58,11 @@ Keys stay on the place. Sandboxes get spend-capped gateway tokens from Hotcell i
 
 ### The GitHub token
 
-Agents push branches and open pull requests through GitHub, so each place needs a token. `dl` offers your GitHub CLI login (`gh auth token`) as *"Use your GitHub CLI login (you)? It stays on this computer."*; without one it says so in one line and asks for a fine-grained token with Contents and Pull requests read/write. The token stays on the place too; sandboxes push through Autopilot's repository-scoped proxy.
+Background tasks push branches and open pull requests through GitHub, so each place needs a token; a plain `dl` session never asks for one. `dl` offers your GitHub CLI login (`gh auth token`) as *"Use your GitHub CLI login (you)? It stays on this computer."*; without one it says so in one line and asks for a fine-grained token with Contents and Pull requests read/write. The token stays on the place too; sandboxes push through Autopilot's repository-scoped proxy.
 
 ### Then a session
 
-Setup ends with one line, `✓ Ready · fits ~6 agents at once`, and opens a session at once. What bare `dl` opens from then on depends on where your agents run (the default place, `dl use`; `--server NAME` picks another):
+`dl setup` ends with one line, `✓ Ready · fits ~6 agents at once`, and opens a session at once. What bare `dl` opens depends on where your agents run (the default place, `dl use`; `--server NAME` picks another). With nothing set up, it's plain Autopilot, as for this computer:
 
 **On this computer, `dl` is plain Autopilot.** It starts `autopilot` in the terminal, in the folder you ran it from, exactly as if you had typed `autopilot`: every Autopilot feature works (`/resume`, `/clear`, `!` shell commands, MCP servers), with your own Autopilot config and the provider `autopilot connect` set up. Any folder works, git or not, and nothing is sent anywhere: the agent edits the folder directly and stops when the terminal closes. Every `dl` is a new session; `dl -c` is `autopilot -c`, and anything after `--` goes to Autopilot as is (`dl -- --session ID`).
 
@@ -94,13 +98,13 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 
 | Command | What it does |
 | --- | --- |
-| `dl` | The first time: set up where agents run, pick a provider and model in Autopilot's list, then talk to an agent. Afterwards, a new session each time. On this computer: plain `autopilot` in this folder, any folder, with your own Autopilot config (`dl -- ARGS` passes ARGS to it). On a server: inside a GitHub repository, that repository's agent session; anywhere else, a chat; it keeps running when you leave. |
+| `dl` | Talk to an agent: a new session each time. With nothing set up, plain `autopilot` in this folder (its first run picks the provider); nothing is installed. On this computer: plain `autopilot` in this folder, any folder, with your own Autopilot config (`dl -- ARGS` passes ARGS to it). On a server: inside a GitHub repository, that repository's agent session; anywhere else, a chat; it keeps running when you leave. |
 | `dl -c`, `dl --continue` | On this computer, `autopilot -c`. On a server, reopen the latest conversation started from this folder there. |
-| `dl setup` | Set up or repair where your agents run. Safe to re-run. `--identity FILE` names the SSH key to use. |
+| `dl setup` | Set up or repair where background tasks run. Safe to re-run. `--identity FILE` names the SSH key to use. |
 | `dl new` | The same as bare `dl`: a new session here. Kept as an alias for a release. |
 | `dl status` | Where your agents run, their provider, model and Autopilot and Hotcell versions (next to this laptop's pins), and what they're doing. Works anywhere. |
 | `dl connect URL` | Connect to a server someone else set up; approve the code it shows. |
-| `dl run "TASK"` | Run a task in a sandbox on the place, in the background, from inside a GitHub repository; it ends in a pull request. Ctrl-C stops watching, not the task. |
+| `dl run "TASK"` | Run a task in a sandbox on the place, in the background, from inside a GitHub repository; it ends in a pull request. Ctrl-C stops watching, not the task. The first time, it asks where tasks run and sets that up. |
 | `dl runs` | Your tasks and their pull requests. `--json` for scripts. |
 | `dl watch ID` / `dl cancel ID` | Follow a task, or stop one. |
 | `dl pull ID` | Check out a task's branch here. |

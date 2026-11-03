@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { PAIRED_NAME } from "../local/layout.js";
+import { nodeAdvisory } from "../node-advisory.js";
 import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
 import { palette } from "../ui.js";
 import { findAutopilot, supportsAttachRemote, type AutopilotCommand } from "./autopilot.js";
@@ -21,6 +22,8 @@ export { autopilotOnPath, bundledAutopilot, findAutopilot, supportsAttachRemote,
 /**
  * Bare `dl`: an interactive Autopilot session. Where it runs depends on the place:
  *
+ * - **Nothing set up yet**: plain `autopilot`, as on this computer (startHere). The sandbox
+ *   stack is set up only when background tasks are asked for (`dl run`, `dl setup`).
  * - **This computer**: plain `autopilot` in this folder, with the terminal attached, exactly as
  *   if the person had typed it. A new session every time; `dl -c` is `autopilot -c`. It uses the
  *   person's own Autopilot config (the provider `autopilot connect` set up), works in any folder,
@@ -130,6 +133,22 @@ export async function openSession(input: SessionInput, io: LaptopIO): Promise<nu
   }
   if (target.remote.name === PAIRED_NAME) return runPlainAutopilot(input, io);
   return startSession(await planSession(input.cwd), target, input, io);
+}
+
+/**
+ * Bare `dl` on a laptop with nothing set up: plain Autopilot in this folder, as on a laptop
+ * whose place is this computer. Nothing is installed or asked first: no Docker, no sandbox,
+ * no GitHub token. Autopilot's own first run picks the provider and signs in. The one thing
+ * it needs is a Node.js it can run on (the one running dl).
+ */
+export async function startHere(input: SessionInput & { nodeVersion?: string }, io: LaptopIO): Promise<number> {
+  const node = nodeAdvisory(input.nodeVersion ?? process.versions.node);
+  if (!node.ok) {
+    const c = palette(io.color === true);
+    io.err(`  ${c.red("✗")} ${node.message}\n    Update Node (nodejs.org, or your package manager), then run dl again.\n`);
+    return 1;
+  }
+  return runPlainAutopilot(input, io);
 }
 
 /**

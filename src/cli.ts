@@ -8,16 +8,17 @@ import { cancel, connect, describeError, laptopHome, pull, run, runs, servers, u
 import { loadRemotes } from "./laptop/config.js";
 import { provider as providerCommand } from "./laptop/provider.js";
 import { model } from "./laptop/settings.js";
-import { openSession, type SessionInput } from "./laptop/session.js";
+import { openSession, startHere, type SessionInput } from "./laptop/session.js";
+import { detectGitHubRepository } from "./laptop/git.js";
 import { preview as laptopPreview } from "./laptop/preview.js";
-import { setup } from "./laptop/setup.js";
+import { setup, setupForTasks, type SetupOptions } from "./laptop/setup.js";
 import { realSshExec } from "./laptop/ssh.js";
 import { update } from "./laptop/update.js";
 import { localCommand } from "./local/cli.js";
 import { localStatus, setUpOnThisComputer } from "./local/setup.js";
 import { pinnedAutopilotVersion, pinnedHotcellVersion } from "./versions.js";
-import { TtyPrompter } from "./prompt.js";
-import { readState } from "./state.js";
+import { TtyPrompter, type Prompter } from "./prompt.js";
+import { readState as readInstallState, type InstallState } from "./state.js";
 import { DryRunSystem, RealSystem, type System } from "./system.js";
 import { uninstall } from "./uninstall.js";
 import { JsonUi, PlainUi, TerminalUi, palette, type Ui } from "./ui.js";
@@ -29,8 +30,8 @@ Send a task; it runs in its own sandbox and comes back as a pull request.
 (dl is short for directionallylocal; both work.)
 
 On your laptop:
-  dl                      the first time: set up where agents run, pick a provider and model
-                          in Autopilot's list, then talk to an agent. Afterwards: a new session.
+  dl                      talk to an agent: a new session each time. With nothing set up,
+                          plain autopilot here (its first run picks a provider); nothing to install
   dl  (on this computer)  plain autopilot in this folder, any folder: every Autopilot feature,
                           your own Autopilot config; the agent edits this folder and stops
                           when the terminal closes (dl -- ARGS passes ARGS to autopilot)
@@ -39,13 +40,15 @@ On your laptop:
                           from the pushed commit, send no patch); anywhere else, a chat
   dl -c, --continue       this computer: autopilot -c; a server: reopen the latest session
                           started from this folder there
-  dl setup                set up or repair where your agents run (safe to re-run)
+  dl setup                set up or repair where background tasks run (safe to re-run)
   dl new                  the same as bare dl (a new session)
   dl status               where your agents run, their provider, model and versions, and what they're doing
   dl connect URL          connect to a server someone else set up (approve the code it shows)
   dl run "TASK"           run a task in a sandbox, in the background, from inside a GitHub
                           repository; it ends in a pull request
-                          (your uncommitted changes go along; Ctrl-C stops watching, not the task)
+                          (your uncommitted changes go along; Ctrl-C stops watching, not the task).
+                          The first time, it asks where tasks run: your own server, or this
+                          computer (needs Docker Desktop or OrbStack), and sets that up
   dl runs                 your tasks and their pull requests
   dl watch ID             follow a task      dl cancel ID   stop one
   dl pull ID              check out a task's branch here
@@ -101,13 +104,31 @@ Used by the laptop's setup (over SSH, as root):
   dl keys set <provider>|github --stdin --json   replace a key read from stdin
 `;
 
+/** What main() runs against; tests replace the parts that touch this machine. */
+export interface MainOptions {
+  terminal?: boolean;
+  stdin?: NodeJS.ReadableStream & { isTTY?: boolean };
+  /** The server's install state (a server has one); read from this machine unless replaced. */
+  serverState?: () => Promise<InstallState | undefined>;
+  /** Running as root; process.getuid() unless replaced. */
+  root?: boolean;
+  /** Merged into every session dl opens (how Autopilot is found and started). */
+  session?: Partial<SessionInput>;
+  /** `dl setup` and `dl run`'s first-time setup; the real ones unless replaced. */
+  setup?: (options: SetupOptions) => Promise<number>;
+  /** `dl run`'s question; the terminal's own unless replaced. */
+  prompter?: Prompter;
+  /** Sends the task; the real `run` unless replaced. */
+  run?: typeof run;
+}
+
 export async function main(
   argv: string[],
   io: { out: (text: string) => void; err: (text: string) => void } = {
     out: (text) => process.stdout.write(text),
     err: (text) => process.stderr.write(text),
   },
-  options: { terminal?: boolean; stdin?: NodeJS.ReadableStream & { isTTY?: boolean } } = {},
+  options: MainOptions = {},
 ): Promise<number> {
   // Everything after `--` belongs to Autopilot (bare dl on this computer): `dl -- --session ID`.
   const split = splitPassthrough(argv);
@@ -198,6 +219,11 @@ export async function main(
     return 1;
   }
 
+  const readState = (from: System) => options.serverState ? options.serverState() : readInstallState(from);
+  const isRoot = () => options.root ?? runningAsRoot();
+  const sessionInput = (...args: Parameters<typeof sessionInputFrom>) => ({ ...sessionInputFrom(...args), ...options.session });
+  const setUp = options.setup ?? setup;
+
   try {
     switch (command) {
       case "up": {
@@ -249,15 +275,20 @@ export async function main(
           // Bare dl with a place set up: a new session here. On this computer that's plain
           // `autopilot` in this folder (`dl -c` is `autopilot -c`); on a server, the repository's
           // conversation or a chat (`dl -c` reopens the latest). `dl status` is the overview.
-          if (!command && terminal && (await loadRemotes()).length > 0) {
-            const code = await openSession(sessionInput(values, passthrough, { continue: values.continue === true }), laptopIO);
-            if (code !== undefined) return code;
+          if (!command && terminal) {
+            const input = sessionInput(values, passthrough, { continue: values.continue === true });
+            if (values.server || (await loadRemotes()).length > 0) {
+              const code = await openSession(input, laptopIO);
+              if (code !== undefined) return code;
+            } else if (!isRoot()) {
+              // A laptop with nothing set up: plain Autopilot, with nothing to install or answer
+              // first. The sandbox stack waits until background tasks are asked for (dl run).
+              return await startHere(input, laptopIO);
+            }
           }
           // A laptop connected to places gets its own overview (`dl status` shows it from anywhere);
           // otherwise, what this is and how to start.
           if ((!command || command === "status") && await laptopHome(laptopIO, undefined, undefined, { ssh: realSshExec, local: localVersions })) return 0;
-          // A laptop with nothing set up yet: the wizard (it needs someone to answer it).
-          if (!command && terminal && !isRoot() && (await loadRemotes()).length === 0) return await setup({ io: laptopIO, terminal });
           io.out(NOT_A_SERVER(colors));
           return command ? 1 : 0;
         }
@@ -274,7 +305,7 @@ export async function main(
         return 0;
       }
       case "setup":
-        return await setup({ io: laptopIO, terminal, ...(values.identity ? { identityFile: values.identity } : {}) });
+        return await setUp({ io: laptopIO, terminal, ...(values.identity ? { identityFile: values.identity } : {}) });
       case "update":
         return await update(parsed.positionals.slice(1), {
           ssh: realSshExec,
@@ -305,7 +336,15 @@ export async function main(
           io.err(`  Usage: dl run "fix the flaky checkout test"   ${colors.dim("(from inside a GitHub repository)")}\n`);
           return 2;
         }
-        return await interruptible((signal) => run({
+        // A laptop with nowhere to send tasks: ask where they should run, set that up, then go on.
+        if (!values.server && (await loadRemotes()).length === 0 && terminal && !isRoot()) {
+          // Not from a GitHub repository: say so before asking anything or installing.
+          if (!values.repo) await detectGitHubRepository(process.cwd());
+          const code = await setupForTasks({ io: laptopIO, terminal, setUp, ...(options.prompter ? { prompter: options.prompter } : {}) });
+          if (code !== 0) return code;
+          if ((await loadRemotes()).length === 0) return 1;
+        }
+        return await interruptible((signal) => (options.run ?? run)({
           task,
           cwd: process.cwd(),
           signal,
@@ -333,7 +372,8 @@ export async function main(
       case "new": {
         // An alias of bare dl for a release: a new conversation, the old one keeps running.
         if ((await loadRemotes()).length === 0) {
-          io.err(`  dl new starts a new session once something is set up: dl\n`);
+          if (terminal && !isRoot() && !values.server) return await startHere(sessionInput(values, passthrough, { continue: false }), laptopIO);
+          io.err(`  dl new starts a new session in a terminal: dl\n`);
           return 1;
         }
         const code = await openSession(sessionInput(values, passthrough, { continue: false }), laptopIO);
@@ -445,11 +485,13 @@ export async function main(
 const NOT_A_SERVER = (c: ReturnType<typeof palette>) => `
   ${c.bold("Directionally Local")}  ${c.dim("isn't set up on this machine.")}
 
-  Coding agents that run on this computer or on your own server: send a task,
-  get a pull request back.
+  Coding agents that run on this computer or on your own server.
 
-  ${c.dim("Set it up here, or on a server over SSH (asks a few questions):")}
-     dl setup
+  ${c.dim("Talk to an agent in this folder (plain Autopilot, nothing to set up):")}
+     dl
+
+  ${c.dim("Background tasks that end in a pull request (asks where they run):")}
+     dl run "fix the flaky checkout test"      ${c.dim("or")}  dl setup
 
   ${c.dim("Or on a server (as root, on Ubuntu or Debian):")}
      curl -fsSL https://directionallylocal.run | sh
@@ -496,7 +538,7 @@ async function interruptible<T>(work: (signal: AbortSignal) => Promise<T>): Prom
   }
 }
 
-function isRoot(): boolean {
+function runningAsRoot(): boolean {
   return process.getuid?.() === 0;
 }
 
@@ -526,7 +568,7 @@ async function logTail(path: string, c: ReturnType<typeof palette>): Promise<str
 }
 
 /** What bare dl (and dl new) hand to openSession: the flags it understands, and what came after `--`. */
-function sessionInput(
+function sessionInputFrom(
   values: { server?: string | undefined; model?: string | undefined; "no-local-changes"?: boolean | undefined },
   passthrough: string[],
   options: { continue: boolean },

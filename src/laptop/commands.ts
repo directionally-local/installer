@@ -141,7 +141,7 @@ async function runOn(client: RemoteClient, remote: RemoteServer, reason: TargetR
 /** `dl runs`: tasks on every connected server, newest first. */
 export async function runs(input: { server?: string; json?: boolean; open?: RemoteOpener }, io = processIO): Promise<void> {
   const remotes = input.server ? [await resolveRemote(input.server)] : await loadRemotes();
-  if (remotes.length === 0) throw new Error("Nothing is set up yet. Run: dl  (or, for a server someone else set up: dl connect https://your-server)");
+  if (remotes.length === 0) throw new Error('No tasks yet: dl run "TASK" sends one (or, for a server someone else set up: dl connect https://your-server)');
   return withConnections(input.open, (connections) => listRuns(remotes, connections, input.json === true, io));
 }
 
