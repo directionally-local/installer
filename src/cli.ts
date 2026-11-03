@@ -10,6 +10,7 @@ import { serverKeysCommand } from "./keys.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
 import { cancel, connect, describeError, laptopHome, laptopReady, pull, run, runs, servers, use, watch, type ReadyHere } from "./laptop/commands.js";
 import { autopilotOnPath, bundledAutopilotVersion } from "./laptop/autopilot.js";
+import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
 import { loadRemotes } from "./laptop/config.js";
 import { provider as providerCommand } from "./laptop/provider.js";
 import { model } from "./laptop/settings.js";
@@ -47,6 +48,11 @@ On your laptop:
                           from the pushed commit, send no patch); anywhere else, a chat
   dl -c, --continue       this computer: autopilot -c; a server: reopen the latest session
                           started from this folder there
+  dl --from-claude-code   continue this folder's latest Claude Code conversation here, in a new
+                          Autopilot session (read on this computer; asks first)
+  dl claude-code hook install   when Claude Code hits its usage or rate limit, show how to continue
+                          in dl (adds a hook to ~/.claude/settings.json after asking; backs it up)
+  dl claude-code hook remove    take that hook out again
   dl setup                set up or repair where background tasks run (safe to re-run)
   dl new                  the same as bare dl (a new session)
   dl status               where your agents run, their provider, model and versions, and what they're doing
@@ -174,6 +180,7 @@ export async function main(
         "auth-format": { type: "string" },
         "no-local-changes": { type: "boolean" },
         continue: { type: "boolean", short: "c" },
+        "from-claude-code": { type: "boolean" },
       },
     });
   } catch (error) {
@@ -232,7 +239,27 @@ export async function main(
   const setUp = options.setup ?? setup;
 
   try {
+    if (values["from-claude-code"]) {
+      // The transcript is on this computer, so the session runs here, whatever places are set up.
+      if (command || values.continue || values.server) {
+        io.err("  dl --from-claude-code starts a new session on this computer; use it on its own: dl --from-claude-code\n");
+        return 2;
+      }
+      if (!terminal) {
+        io.err("  dl --from-claude-code needs a terminal.\n");
+        return 2;
+      }
+      return await startHere(sessionInput(values, ["--from-claude-code", ...passthrough], { continue: false }), laptopIO);
+    }
     switch (command) {
+      case "claude-code": {
+        const prompter = options.prompter ?? new TtyPrompter();
+        return await claudeCodeCommand(parsed.positionals.slice(1), {
+          io: laptopIO,
+          stdin: options.stdin ?? process.stdin,
+          ...(terminal ? { confirm: async (question: string) => !/^n/i.test((await prompter.text(question)).trim()) } : {}),
+        });
+      }
       case "up": {
         if (values.needs) {
           io.out(`${JSON.stringify({ needs: await needs(system, access ? { access } : {}) })}\n`);

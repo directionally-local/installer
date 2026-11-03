@@ -828,6 +828,20 @@ describe("dl the first time on a laptop", () => {
     assert.equal(api.requests.length, 0);
   });
 
+  it("dl --from-claude-code is autopilot --from-claude-code in this folder", async () => {
+    const dir = join(root, "fresh");
+    await mkdir(dir);
+    assert.equal(await inside(dir, () => main(["--from-claude-code"], capture(), laptop())), 0);
+    assert.deepEqual(plain.launches[0]!.args, [...AUTOPILOT.args, "--from-claude-code"]);
+    assert.equal(plain.launches[0]!.cwd, dir);
+    assert.equal(await inside(dir, () => main(["--from-claude-code", "-m", "deepseek-v4-pro"], capture(), laptop())), 0);
+    assert.deepEqual(plain.launches[1]!.args, [...AUTOPILOT.args, "-m", "deepseek-v4-pro", "--from-claude-code"]);
+    const io = capture();
+    assert.equal(await inside(dir, () => main(["--from-claude-code", "-c"], io, laptop())), 2);
+    assert.match(io.text(), /use it on its own/);
+    assert.equal(plain.launches.length, 2);
+  });
+
   it("only needs a Node that Autopilot runs on", async () => {
     const dir = join(root, "fresh");
     await mkdir(dir);
