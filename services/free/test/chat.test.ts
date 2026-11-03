@@ -28,7 +28,11 @@ describe("chat completions", () => {
     assert.equal(call.headers.authorization, "Bearer sk-or-test");
     assert.equal(call.body.model, MODEL);
     assert.deepEqual(call.body.usage, { include: true });
-    assert.deepEqual(call.body.provider, { sort: "price" }, "our routing replaces the client's");
+    assert.deepEqual(
+      call.body.provider,
+      { sort: "price", allow_fallbacks: true, quantizations: ["fp8", "mxfp8", "fp16", "bf16", "fp32"], data_collection: "deny" },
+      "our routing replaces the client's: cheapest full-precision host that doesn't collect prompts",
+    );
     assert.equal(call.body.models, undefined, "no model fallback");
     assert.equal(call.body.session_id, "session-abc");
     assert.match(String(call.body.user), /^dl-[0-9a-f]{32}$/);
@@ -41,6 +45,45 @@ describe("chat completions", () => {
     assert.equal(allowance.spentUsdThisWeek, 0.0021, "the USD cap uses the real reported cost");
     assert.equal(response.headers.get("x-dl-tokens-remaining"), String(50_000_000 - 254));
     assert.equal(response.headers.get("x-dl-quota-resets-at"), "2026-11-09T00:00:00.000Z");
+  });
+
+  it("routes to OpenRouter hosts from the env settings: order override, precision and data filters", async () => {
+    const filters = { allow_fallbacks: true, quantizations: ["fp8", "mxfp8", "fp16", "bf16", "fp32"], data_collection: "deny" };
+    for (const [vars, expected] of [
+      [{}, { sort: "price", allow_fallbacks: true, quantizations: ["fp8", "mxfp8", "fp16", "bf16", "fp32"], data_collection: "deny" }],
+      [{ OPENROUTER_PROVIDER_ORDER: "" }, { sort: "price", allow_fallbacks: true, quantizations: ["fp8", "mxfp8", "fp16", "bf16", "fp32"], data_collection: "deny" }],
+      [{ OPENROUTER_PROVIDER_ORDER: "DeepInfra, novita/fp8" }, { order: ["deepinfra", "novita/fp8"], ...filters }],
+      [{ OPENROUTER_QUANTIZATIONS: "bf16,fp16" }, { sort: "price", allow_fallbacks: true, quantizations: ["bf16", "fp16"], data_collection: "deny" }],
+      [{ OPENROUTER_QUANTIZATIONS: "none" }, { sort: "price", allow_fallbacks: true, data_collection: "deny" }],
+      [{ OPENROUTER_DATA_COLLECTION: "allow" }, { sort: "price", ...filters, data_collection: "allow" }],
+    ] as const) {
+      const { service, token } = await member(vars as Record<string, string>);
+      assert.equal((await chat(service, token)).status, 200);
+      assert.deepEqual(service.calls.openRouter.at(-1)!.body.provider, expected, JSON.stringify(vars));
+    }
+    const invalid: Array<Record<string, string>> = [{ OPENROUTER_PROVIDER_ORDER: "not a slug" }, { OPENROUTER_QUANTIZATIONS: "fp8,fp5" }, { OPENROUTER_DATA_COLLECTION: "maybe" }];
+    for (const vars of invalid) {
+      const broken = await createService(vars);
+      assert.equal(await errorCode(await broken.request("POST", "/v1/device/code", { body: {} })), "misconfigured", JSON.stringify(vars));
+    }
+  });
+
+  it("lets the admin change the routing at runtime, and validates it", async () => {
+    const { service, token, adminToken } = await member();
+    const set = (body: unknown) => service.request("POST", "/admin/config", { token: adminToken, body });
+    assert.equal((await set({ openRouterProviderOrder: ["deepinfra"], openRouterQuantizations: ["bf16"], openRouterDataCollection: "allow" })).status, 200);
+    await chat(service, token);
+    assert.deepEqual(service.calls.openRouter.at(-1)!.body.provider, { order: ["deepinfra"], allow_fallbacks: true, quantizations: ["bf16"], data_collection: "allow" });
+    for (const bad of [
+      { openRouterProviderOrder: "deepinfra" },
+      { openRouterProviderOrder: ["bad slug"] },
+      { openRouterQuantizations: ["fp5"] },
+      { openRouterQuantizations: "fp8" },
+      { openRouterDataCollection: "sometimes" },
+    ]) assert.equal((await set(bad)).status, 400, JSON.stringify(bad));
+    await set({ openRouterProviderOrder: null, openRouterQuantizations: null, openRouterDataCollection: null });
+    await chat(service, token);
+    assert.deepEqual(service.calls.openRouter.at(-1)!.body.provider, { sort: "price", allow_fallbacks: true, quantizations: ["fp8", "mxfp8", "fp16", "bf16", "fp32"], data_collection: "deny" }, "cleared overrides go back to env");
   });
 
   it("leaves cached tokens out when COUNT_CACHED_TOKENS is false", async () => {

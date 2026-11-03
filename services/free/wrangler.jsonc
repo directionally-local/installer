@@ -12,6 +12,9 @@
     "MIN_GITHUB_ACCOUNT_AGE_DAYS": "30",
     "OPEN_ADMISSION": "false",
     "COUNT_CACHED_TOKENS": "true",
+    "OPENROUTER_PROVIDER_ORDER": "",
+    "OPENROUTER_QUANTIZATIONS": "fp8,mxfp8,fp16,bf16,fp32",
+    "OPENROUTER_DATA_COLLECTION": "deny",
     "PAUSED": "false"
   },
   "durable_objects": {
