@@ -2,32 +2,34 @@
 
 Coding agents on your own hardware, in six phases. Each phase ends at a gate you can test, not a date. A phase starts when the one before it passes its gate. Everything else runs as a background track that never blocks the phases.
 
-Last updated 2 November 2026. On npm today: dl 0.9.4, Autopilot 3.1.2, Hotcell 0.1.38, camouflage-tui 2.11.0, Serverless Objects 0.13.6.
+Last updated 3 November 2026. On npm today: dl 0.9.4, Autopilot 3.1.2, Hotcell 0.1.38, camouflage-tui 2.11.0, Serverless Objects 0.13.6.
 
 Scope: the Directionally Local repositories (installer, autopilot, hotcell, serverless-objects, pr-deck), camouflage, and the Aster apps.
 
 Issues carry a `phase-0` to `phase-5` label in `autopilot` and `installer`; `decision` marks a choice the owner has to make before building.
 
-## Next up, in order
+## The next eight weeks: 3 November to 28 December
 
-Everything here serves the phase 0 gate: two weeks of daily use. Work top to bottom; items 1 and 2 can run alongside everything after them.
+For these eight weeks, work is ordered by one test: does it bring more people to dl each week, keep them coming back, or turn them into paying users? Anything that doesn't waits until January (list below). Phase 0 daily use runs alongside, not before.
 
-1. **Ship the free managed tier to the first testers.** Sign in with GitHub, get free DeepSeek V4.1 Flash tokens, no API key. Testers are already waiting for it, and "do you also provide the inference?" is the first question they ask. [installer#78](https://github.com/directionally-local/installer/issues/78), [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102)
-2. **Autopilot reports its state to herdr.** Early users already run herdr to manage many agents; this makes Autopilot fit their setup today. [autopilot#1103](https://github.com/directionally-local/autopilot/issues/1103)
-3. **Build the laptop mode that was decided: plain Autopilot.** Bare `dl` runs `autopilot` in the terminal; `dl run` keeps the sandbox. [installer#72](https://github.com/directionally-local/installer/issues/72), [decision](decisions/laptop-mode.md)
-4. **Stay light: eight sessions on an 8 GB laptop.** Measure eight working Autopilot sessions on a small machine and keep each one's memory within budget. *No issue yet.*
-5. **Every `dl` starts a new session,** with `dl -c` to continue. [installer#71](https://github.com/directionally-local/installer/issues/71)
-6. **Session titles and state, then `/resume` and `/clear` in remote sessions.** #1046 first, since `/resume` needs titles to list. [autopilot#1046](https://github.com/directionally-local/autopilot/issues/1046), [autopilot#1092](https://github.com/directionally-local/autopilot/issues/1092)
-7. **Your own messages in a reopened session.** Without them a resumed session shows answers with no questions. [autopilot#1093](https://github.com/directionally-local/autopilot/issues/1093)
-8. **Pull requests titled from commits.** [autopilot#1049](https://github.com/directionally-local/autopilot/issues/1049)
-9. **Pin Hotcell, decide the release-PR floors check, fix the flaky test.** [installer#73](https://github.com/directionally-local/installer/issues/73), [installer#74](https://github.com/directionally-local/installer/issues/74), [autopilot#1091](https://github.com/directionally-local/autopilot/issues/1091)
-10. **Warn when a server needs a reboot for a security update.** `dl doctor` and `dl status` read `/var/run/reboot-required`. Ubuntu installs kernel fixes automatically, but they only apply after a reboot nobody is told about. *No issue yet.*
-11. **Run the fresh-VM test early.** Phase 1's gate, but running it now on a cheap server shows what phase 1 has to fix. [installer#47](https://github.com/directionally-local/installer/issues/47)
-12. **Then stop building and use it.** Daily, as a new user would, until the two weeks pass. What breaks becomes the next list.
+| Week | Dates | What ships |
+| --- | --- | --- |
+| 1 | 3–9 Nov | **Free managed tier, invite-only (3 Nov):** GitHub sign-in, a weekly allowance that resets every Monday, a global spend stop, a kill switch, and a per-request usage log (account, tokens, cached tokens, cost). [installer#78](https://github.com/directionally-local/installer/issues/78), [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102) · **Open to every existing user once the admin dashboard and the one-account-per-person checks work:** one account per GitHub user, and GitHub accounts younger than 30 days need an invite code · Cached tokens charged at their real cost · The weekly allowance can be changed without a release · **Admin dashboard (by 9 Nov):** weekly active users, cohort retention, cost per user, who hit the limit ([installer#86](https://github.com/directionally-local/installer/issues/86)) · Retire the old Kimiflare Cloud service ([installer#84](https://github.com/directionally-local/installer/pull/84) checklist) |
+| 2 | 10–16 Nov | **Bring your Claude Code setup, part 1:** dl's first run finds an existing `CLAUDE.md`, MCP config and repository context, locally ([autopilot#1126](https://github.com/directionally-local/autopilot/issues/1126)) |
+| 3 | 17–23 Nov | **Bring your Claude Code setup, part 2:** the first session works in under two minutes ([autopilot#1126](https://github.com/directionally-local/autopilot/issues/1126)) · **Continue in dl:** when Claude Code hits a rate limit, one keystroke opens the same task in dl ([autopilot#1127](https://github.com/directionally-local/autopilot/issues/1127)) |
+| 4 | 24–30 Nov | **Autopilot reports its state to herdr** ([autopilot#1103](https://github.com/directionally-local/autopilot/issues/1103)) |
+| 5 | 1–7 Dec | **"Your tokens are back":** the Monday reset is shown to free-tier users ([installer#87](https://github.com/directionally-local/installer/issues/87)) · Pull request upstream so herdr lists dl as a supported agent |
+| 6 | 8–14 Dec | **Pro plan, $20 a month:** a much larger weekly Flash allowance plus DeepSeek V4 Pro, offered at the moment a free user reaches the limit ([installer#88](https://github.com/directionally-local/installer/issues/88)) |
+| 7 | 15–21 Dec | Fixes from the Pro launch and from the usage data; the fresh-VM test ([installer#47](https://github.com/directionally-local/installer/issues/47)) |
+| 8 | 22–28 Dec | Hardening and first-run quality; nothing new starts |
+
+**Kept throughout, because they protect the first run:** laptop mode (plain Autopilot), every `dl` a new session with `dl -c` to continue, eight sessions on an 8 GB laptop, the fresh-VM test, and guardrails for destructive actions so a first run never costs anyone their data ([autopilot#1125](https://github.com/directionally-local/autopilot/issues/1125)).
+
+**Waits until January, unless it breaks something for users:** reboot-required warnings, the release floors check, the multiplexer (phase 2), the native apps (phase 3), team servers and autonomous agents (phases 4 and 5). Pull requests titled from commits already shipped (autopilot#1114).
 
 ## Parallel lane: the free managed tier
 
-People sign in with GitHub and get free tokens instead of bringing an API key. Unlike bring-your-own-key, every token is visible to us. The plan is up to 15 million DeepSeek V4.1 Flash tokens per person per week, for a capped number of people. It revives the earlier Kimiflare Cloud service, which was built for Cloudflare Workers AI and removed from Autopilot in September; most of its design carries over to OpenRouter. Tracked in [installer#78](https://github.com/directionally-local/installer/issues/78) (service) and [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102) (client).
+People sign in with GitHub and get free tokens instead of bringing an API key. Unlike bring-your-own-key, every token is visible to us. Each person gets 50 million DeepSeek V4.1 Flash tokens or $5 of real cost per week, whichever comes first, inside a $250 weekly and $1,000 total budget; the allowance resets every Monday. Bring-your-own-key stays unlimited and free, and sends counts only (requests, tokens, sessions, timestamps). It revives the earlier Kimiflare Cloud service, which was built for Cloudflare Workers AI and removed from Autopilot in September; most of its design carries over to OpenRouter. Tracked in [installer#78](https://github.com/directionally-local/installer/issues/78) (service) and [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102) (client).
 
 **In the MVP**
 - Sign in with GitHub through a device code, from `autopilot` or `dl`.
@@ -46,9 +48,9 @@ People sign in with GitHub and get free tokens instead of bringing an API key. U
 
 **What it costs**
 - Measured on real Autopilot usage: 0.6% of tokens are output and 94% of input is served from cache.
-- 15 million tokens a week at that mix: about $0.17 per person on `deepseek-v4.1-flash`, about $0.72 if caching never hits.
-- A thousand people using all of it: roughly $170 to $720 a week.
-- 15 million tokens is about four hours of heavy daily use, so most people won't reach it.
+- 50 million tokens a week at that mix: about $0.57 per person on `deepseek-v4.1-flash`, about $2.40 if caching never hits.
+- A thousand people using all of it: roughly $570 to $2,400 a week.
+- 50 million tokens is about thirteen hours of heavy daily use, so most people won't reach it.
 - dl's current default is the dated `-1017` model at nearly seven times the input price; switch to the plain alias.
 
 ## Phase 2 in detail: the multiplexer MVP
@@ -296,7 +298,7 @@ These never block a phase.
 3. **How does a teammate reach a shared server?** SSH, the team's Tailscale, or a public address. Blocks phase 4.
 4. **Who pays, and who gets stopped?** One company key with per-person limits, or everyone's own key. Blocks phase 4.
 5. **What happens when a server is full?** Queue, per-person share, or a second server.
-6. **Free tier: do cached tokens count fully toward the weekly allowance, how many people get in, and what's the privacy statement at sign-in?** [installer#78](https://github.com/directionally-local/installer/issues/78)
+6. ~~**Free tier: do cached tokens count fully toward the weekly allowance, how many people get in, and what's the privacy statement at sign-in?**~~ **Decided:** cached tokens count at their real cost; 50 million tokens or $5 a week; one account per GitHub user; accounts under 30 days need an invite. [installer#78](https://github.com/directionally-local/installer/issues/78)
 7. **Should the floors check block release PRs?** [installer#74](https://github.com/directionally-local/installer/issues/74)
 
 ## Every open issue, placed on the roadmap
