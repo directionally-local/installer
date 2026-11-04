@@ -80,6 +80,8 @@ export interface SessionInput {
   sessionsFile?: string;
   /** Where plain Autopilot's DL_REFERRAL comes from and is kept (referral.ts); the real environment and files unless replaced (tests). */
   referral?: ReferralOptions;
+  /** The Node.js version plain Autopilot will run on; this process's unless replaced (tests). */
+  nodeVersion?: string;
 }
 
 const realSpawn: SessionSpawner = (command, args, env, options = {}) => spawn(command, args, { stdio: "inherit", env, ...(options.cwd ? { cwd: options.cwd } : {}) });
@@ -144,7 +146,7 @@ export async function openSession(input: SessionInput, io: LaptopIO): Promise<nu
  * no GitHub token. Autopilot's own first run picks the provider and signs in. The one thing
  * it needs is a Node.js it can run on (the one running dl).
  */
-export async function startHere(input: SessionInput & { nodeVersion?: string }, io: LaptopIO): Promise<number> {
+export async function startHere(input: SessionInput, io: LaptopIO): Promise<number> {
   const node = nodeAdvisory(input.nodeVersion ?? process.versions.node);
   if (!node.ok) {
     const c = palette(io.color === true);
