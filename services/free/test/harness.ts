@@ -1,5 +1,6 @@
 import { registerHooks } from "node:module";
 import { DatabaseSync } from "node:sqlite";
+import assert from "node:assert/strict";
 
 /**
  * A small in-process stand-in for the Workers runtime, enough to drive the free tier end to
@@ -128,6 +129,13 @@ export interface GitHubUserFixture {
   id: number;
   login: string;
   createdAt?: string;
+  /** `public_repos` on GitHub's /user (default 1). */
+  publicRepos?: number;
+  /**
+   * What GitHub's GraphQL API answers for the last year's contributions (default 0):
+   * a count, "error" (HTTP 502) or "throw" (the fetch itself fails).
+   */
+  contributions?: number | "error" | "throw";
 }
 
 export type OpenRouterHandler = (body: Record<string, unknown>, init: RequestInit) => Response | Promise<Response>;
@@ -141,6 +149,8 @@ export interface Service {
     /** Calls to Luminal's chat completions (a fake: nothing leaves the process). */
     luminal: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     githubTokens: Array<{ code: string; redirect_uri?: string }>;
+    /** Contribution lookups on GitHub's GraphQL API, by login. */
+    githubGraphql: string[];
     /** Posts to ALERT_WEBHOOK_URL (any URL on alerts.test, discord.com, hooks.slack.com or api.telegram.org). */
     webhooks: Array<{ url: string; body: Record<string, unknown> }>;
     /** Messages sent through the fake ALERT_EMAIL binding (with `email: true`). */
@@ -226,7 +236,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
     ...namespaces,
   };
   const clock = { now: NOW };
-  const calls: Service["calls"] = { openRouter: [], luminal: [], githubTokens: [], webhooks: [], emails: [], stripe: [] };
+  const calls: Service["calls"] = { openRouter: [], luminal: [], githubTokens: [], githubGraphql: [], webhooks: [], emails: [], stripe: [] };
   let stripe = (path: string, _form?: URLSearchParams): Response | Promise<Response> =>
     path === "/v1/checkout/sessions"
       ? Response.json({ id: `cs_test_${calls.stripe.length}`, url: `https://checkout.stripe.com/c/pay/cs_test_${calls.stripe.length}` })
@@ -252,7 +262,16 @@ export async function createService(vars: Record<string, string> = {}, options: 
     if (url === "https://api.github.com/user") {
       const token = new Headers(init.headers).get("authorization")?.replace("Bearer token-for-", "") ?? "";
       const user = JSON.parse(decodeURIComponent(token)) as GitHubUserFixture;
-      return Response.json({ id: user.id, login: user.login, created_at: user.createdAt ?? "2015-01-01T00:00:00Z" });
+      return Response.json({ id: user.id, login: user.login, created_at: user.createdAt ?? "2015-01-01T00:00:00Z", public_repos: user.publicRepos ?? 1, followers: 0 });
+    }
+    if (url === "https://api.github.com/graphql") {
+      const token = new Headers(init.headers).get("authorization")?.replace("Bearer token-for-", "") ?? "";
+      const user = JSON.parse(decodeURIComponent(token)) as GitHubUserFixture;
+      calls.githubGraphql.push(user.login);
+      assert.match(String(init.body), /viewer \{ contributionsCollection \{ contributionCalendar \{ totalContributions/);
+      if (user.contributions === "throw") throw new TypeError("fetch failed");
+      if (user.contributions === "error") return Response.json({ message: "Server Error" }, { status: 502 });
+      return Response.json({ data: { viewer: { contributionsCollection: { contributionCalendar: { totalContributions: user.contributions ?? 0 } } } } });
     }
     if (url === "https://openrouter.ai/api/v1/chat/completions") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;

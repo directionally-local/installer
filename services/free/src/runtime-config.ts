@@ -25,6 +25,8 @@ export const RUNTIME_SETTINGS = {
   maxActiveUsers: { kind: "count", env: "MAX_ACTIVE_USERS" },
   /** Accounts old enough get in without an invite. */
   openAdmission: { kind: "flag", env: "OPEN_ADMISSION" },
+  /** New accounts need a public repo or a contribution in the last year to skip the invite. */
+  requireGithubActivity: { kind: "flag", env: "REQUIRE_GITHUB_ACTIVITY" },
   /** Cached prompt tokens' weight against the token allowance, 0 to 1. */
   cachedTokenWeight: { kind: "weight", env: "CACHED_TOKEN_WEIGHT" },
   /** OpenRouter hosts to try first; [] for none (cheapest first). */

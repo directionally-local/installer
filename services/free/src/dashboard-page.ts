@@ -24,6 +24,8 @@ export interface SpendView {
   paused: boolean;
   pausedByEnv: boolean;
   openAdmission: boolean;
+  /** New accounts need a public repo or a contribution in the last year to skip the invite. */
+  requireGithubActivity: boolean;
   maxActiveUsers: number;
   weeklyTokens: number;
   perPersonWeeklyUsd: number | null;
@@ -316,7 +318,7 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
 <div class="tiles">
 <div class="tile">This week, since ${escapeHtml(day(currentWeek))}<b>${usd(spend.weekUsd)} <span class="muted">of ${escapeHtml(cap(spend.weeklyCapUsd))}</span></b>${meter(spend.weekUsd, spend.weeklyCapUsd, "weekly spend against the weekly cap")}<span class="note">Resets ${escapeHtml(weekday(spend.resetsAt))} 00:00 UTC</span></div>
 <div class="tile">Since the start<b>${usd(spend.totalUsd)} <span class="muted">of ${escapeHtml(cap(spend.totalCapUsd))}</span></b>${meter(spend.totalUsd, spend.totalCapUsd, "total spend against the total cap")}<span class="note">Admin use, not counted: ${usd(spend.adminWeekUsd)} this week, ${usd(spend.adminTotalUsd)} in all</span></div>
-<div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">Admission: ${spend.openAdmission ? `open (old enough GitHub accounts); ${count(data.people.admitted)} admitted, no cap while open` : `invite-only; ${count(data.people.admitted)} of ${count(spend.maxActiveUsers)} admitted`}. Queue starts at ${escapeHtml(percent(spend.queueThreshold))} of the weekly cap. Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} a week.</span></div>
+<div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">Admission: ${spend.openAdmission ? `open (old enough GitHub accounts${spend.requireGithubActivity ? " with a public repo or a contribution in the last year" : ""}); ${count(data.people.admitted)} admitted, no cap while open` : `invite-only; ${count(data.people.admitted)} of ${count(spend.maxActiveUsers)} admitted`}. GitHub activity check: ${spend.requireGithubActivity ? "on" : "off"}. Queue starts at ${escapeHtml(percent(spend.queueThreshold))} of the weekly cap. Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} a week.</span></div>
 </div>
 <p class="note">Caps are the effective values, with admin overrides applied.</p>
 </section>`;
@@ -565,8 +567,8 @@ export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendV
   switch (table) {
     case "spend":
       body = csv(
-        ["week_start", "week_usd", "weekly_cap_usd", "total_usd", "total_cap_usd", "admin_week_usd", "admin_total_usd", "paused", "paused_by_env", "open_admission", "admitted", "max_active_users", "resets_at", "primary_upstream", "luminal_credit_usd", "luminal_credit_used_usd", "free_credit_week_usd", "weekly_credit_usd"],
-        [[day(data.currentWeek), spend.weekUsd, spend.weeklyCapUsd, spend.totalUsd, spend.totalCapUsd, spend.adminWeekUsd, spend.adminTotalUsd, spend.paused, spend.pausedByEnv, spend.openAdmission, data.people.admitted, spend.maxActiveUsers, new Date(spend.resetsAt).toISOString(), spend.primaryUpstream, spend.creditUsd, spend.creditUsedUsd, spend.freeCreditWeekUsd, spend.weeklyCreditUsd]],
+        ["week_start", "week_usd", "weekly_cap_usd", "total_usd", "total_cap_usd", "admin_week_usd", "admin_total_usd", "paused", "paused_by_env", "open_admission", "admitted", "max_active_users", "resets_at", "primary_upstream", "luminal_credit_usd", "luminal_credit_used_usd", "free_credit_week_usd", "weekly_credit_usd", "require_github_activity"],
+        [[day(data.currentWeek), spend.weekUsd, spend.weeklyCapUsd, spend.totalUsd, spend.totalCapUsd, spend.adminWeekUsd, spend.adminTotalUsd, spend.paused, spend.pausedByEnv, spend.openAdmission, data.people.admitted, spend.maxActiveUsers, new Date(spend.resetsAt).toISOString(), spend.primaryUpstream, spend.creditUsd, spend.creditUsedUsd, spend.freeCreditWeekUsd, spend.weeklyCreditUsd, spend.requireGithubActivity]],
       );
       break;
     case "weekly-active":

@@ -7,6 +7,8 @@
  *
  *   code                          when
  *   account_too_new               GitHub account younger than MIN_GITHUB_ACCOUNT_AGE_DAYS, no invite code used
+ *   no_github_activity            GitHub account with no public repository and no contribution in the last year
+ *                                 (requireGithubActivity), no invite code used
  *   invite_required               invite-only (or not yet eligible for open admission), no invite code used
  *   cohort_full                   MAX_ACTIVE_USERS people are already in
  *   too_many_signups              too many new accounts from one network today
@@ -23,12 +25,15 @@
  * the API for a token whose account isn't on the free tier.
  */
 
-export const SIGN_IN_REFUSALS = ["account_too_new", "invite_required", "cohort_full", "too_many_signups"] as const;
+export const SIGN_IN_REFUSALS = ["account_too_new", "no_github_activity", "invite_required", "cohort_full", "too_many_signups"] as const;
 export type SignInRefusal = (typeof SIGN_IN_REFUSALS)[number];
 
 export function isSignInRefusal(value: unknown): value is SignInRefusal {
   return typeof value === "string" && (SIGN_IN_REFUSALS as readonly string[]).includes(value);
 }
+
+/** Why an account with no public repository and no recent contribution needs an invite. */
+export const NO_GITHUB_ACTIVITY_REASON = "Your GitHub account has no public repositories or contributions yet, so it needs an invite code for the free tier.";
 
 export function signInRefusal(code: SignInRefusal, minAccountAgeDays: number): { heading: string; message: string } {
   switch (code) {
@@ -36,6 +41,11 @@ export function signInRefusal(code: SignInRefusal, minAccountAgeDays: number): {
       return {
         heading: "Invite code needed",
         message: `This GitHub account is less than ${minAccountAgeDays} days old, so it needs an invite code for the free tier. Run sign-in again and enter your code on the sign-in page.`,
+      };
+    case "no_github_activity":
+      return {
+        heading: "Invite code needed",
+        message: `${NO_GITHUB_ACTIVITY_REASON} Ask a friend for an invite code, then run sign-in again and enter it on the sign-in page.`,
       };
     case "invite_required":
       return {

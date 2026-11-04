@@ -131,20 +131,3 @@ export function everActiveFriends(sql: Sql, referrers: readonly number[]): Map<n
   for (const row of rows) out.set(row.referrer_id, row.n);
   return out;
 }
-
-/** The first 4 hextets of an IPv6 address, or the IPv4 address itself; undefined when it isn't an address. */
-export function networkOf(ip: string): string | undefined {
-  const value = ip.trim().toLowerCase();
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) return value;
-  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(value);
-  if (mapped) return mapped[1];
-  if (!/^[0-9a-f:]+$/.test(value) || !value.includes(":")) return undefined;
-  const [head, tail] = value.split("::") as [string, string | undefined];
-  if (value.split("::").length > 2) return undefined;
-  const left = head ? head.split(":") : [];
-  const right = tail ? tail.split(":") : [];
-  const fill = value.includes("::") ? 8 - left.length - right.length : 0;
-  const groups = [...left, ...Array<string>(Math.max(0, fill)).fill("0"), ...right];
-  if (groups.length !== 8 || groups.some((group) => group.length === 0 || group.length > 4)) return undefined;
-  return `${groups.slice(0, 4).map((group) => group.replace(/^0+(?=.)/, "")).join(":")}::/64`;
-}

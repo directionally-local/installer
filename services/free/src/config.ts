@@ -34,6 +34,12 @@ export interface FreeConfig {
    * invite code (still within `maxActiveUsers`). Off by default: invite-only for everyone.
    */
   openAdmission: boolean;
+  /**
+   * New accounts need some real GitHub activity to get in without an invite code: at least one
+   * public repository, or at least one contribution in the last year. Accounts without either
+   * are treated like accounts that are too new. If GitHub can't answer, the check passes.
+   */
+  requireGithubActivity: boolean;
   /** Kept for compatibility: false sets the cached-token weight to 0 unless CACHED_TOKEN_WEIGHT is set. */
   countCachedTokens: boolean;
   /**
@@ -148,6 +154,7 @@ export const DEFAULTS = {
   perPersonWeeklyUsdCap: 5,
   minGithubAccountAgeDays: 30,
   openAdmission: false,
+  requireGithubActivity: true,
   /**
    * OpenRouter's cache-read price over its input price for deepseek/deepseek-v4.1-flash-1017,
    * from https://openrouter.ai/api/v1/models on 2026-11-03: input $0.30/M, cache read
@@ -216,6 +223,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     perPersonWeeklyUsdCap: usd(env.PER_PERSON_WEEKLY_USD_CAP, DEFAULTS.perPersonWeeklyUsdCap, "PER_PERSON_WEEKLY_USD_CAP"),
     minGithubAccountAgeDays: whole(env.MIN_GITHUB_ACCOUNT_AGE_DAYS, DEFAULTS.minGithubAccountAgeDays, "MIN_GITHUB_ACCOUNT_AGE_DAYS"),
     openAdmission: flag(env.OPEN_ADMISSION, DEFAULTS.openAdmission, "OPEN_ADMISSION"),
+    requireGithubActivity: flag(env.REQUIRE_GITHUB_ACTIVITY, DEFAULTS.requireGithubActivity, "REQUIRE_GITHUB_ACTIVITY"),
     countCachedTokens: flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS"),
     cachedTokenWeight: cachedWeight(env),
     openRouterProviderOrder: providerOrder(env.OPENROUTER_PROVIDER_ORDER),

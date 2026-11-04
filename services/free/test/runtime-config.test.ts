@@ -36,6 +36,7 @@ describe("runtime settings (units)", () => {
       globalTotalUsdCap: 1000,
       maxActiveUsers: 50,
       openAdmission: false,
+      requireGithubActivity: true,
       cachedTokenWeight: 0.02,
       openRouterProviderOrder: [],
       openRouterQuantizations: ["fp8", "mxfp8", "fp16", "bf16", "fp32"],
