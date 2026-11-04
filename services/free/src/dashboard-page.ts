@@ -26,9 +26,14 @@ export interface SpendView {
   maxActiveUsers: number;
   weeklyTokens: number;
   perPersonWeeklyUsd: number | null;
+  /** Share of the weekly cap at which sign-ups queue. */
+  queueThreshold: number;
 }
 
-export const CSV_TABLES = ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits"] as const;
+/** The red banner shows at this share of either cap. */
+export const BANNER_SHARE = 0.8;
+
+export const CSV_TABLES = ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel"] as const;
 export type CsvTable = (typeof CSV_TABLES)[number];
 
 export function isCsvTable(name: string): name is CsvTable {
@@ -81,6 +86,9 @@ svg text { fill: var(--muted); font: 11px system-ui, sans-serif; }
 .axis { stroke: var(--line); stroke-width: 1; }
 .key { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 2px; vertical-align: -0.1rem; margin-right: 0.3rem; background: var(--accent); }
 .key.soft { background: var(--soft); }
+.banner { background: #b3261e; color: #fff; border-radius: 6px; padding: 0.6rem 0.9rem; margin: 0.75rem 0; font-weight: 600; }
+.alltime { border: 2px solid var(--line); border-radius: 8px; padding: 0.75rem 1rem; margin: 0.75rem 0; }
+.alltime b { display: block; font-size: 2rem; font-variant-numeric: tabular-nums; }
 `;
 
 export function nonce(): string {
@@ -167,6 +175,13 @@ function percent(share: number): string {
   return `${(share * 100).toFixed(share > 0 && share < 0.1 ? 1 : 0)}%`;
 }
 
+/** "3 days", "5 hours". */
+function waited(ms: number): string {
+  const hours = Math.max(0, Math.floor(ms / 3_600_000));
+  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"}`;
+  return `${Math.floor(hours / 24)} days`;
+}
+
 function cap(value: number | null): string {
   return value === null ? "no cap" : usd(value);
 }
@@ -246,12 +261,21 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
         ? `Free tokens stopped until ${weekday(spend.resetsAt)}: weekly budget reached`
         : "Serving";
 
+  const weekShare = spend.weeklyCapUsd !== null && spend.weeklyCapUsd > 0 ? spend.weekUsd / spend.weeklyCapUsd : 0;
+  const totalShare = spend.totalCapUsd !== null && spend.totalCapUsd > 0 ? spend.totalUsd / spend.totalCapUsd : 0;
+  const warnings = [
+    ...(weekShare >= BANNER_SHARE ? [`${percent(weekShare)} of the ${cap(spend.weeklyCapUsd)} weekly cap used (${usd(spend.weekUsd)}).`] : []),
+    ...(totalShare >= BANNER_SHARE ? [`${percent(totalShare)} of the ${cap(spend.totalCapUsd)} all-time cap used (${usd(spend.totalUsd)}).`] : []),
+  ];
+  const banner = warnings.length > 0 ? `<p class="banner" role="alert">${warnings.map(escapeHtml).join(" ")}</p>` : "";
+  const allTime = `<div class="alltime">All-time free spend<b>${usd(spend.totalUsd)} <span class="muted">of ${escapeHtml(cap(spend.totalCapUsd))}</span></b>${meter(spend.totalUsd, spend.totalCapUsd, "all-time spend against the all-time cap")}<span class="note">${spend.totalCapUsd === null ? "No all-time cap." : `${usd(Math.max(0, spend.totalCapUsd - spend.totalUsd))} left. Free tokens stop at the cap.`}</span></div>`;
+
   const spendSection = `<section>
 <div class="head"><h2>Global spend</h2>${csvLink("spend")}</div>
 <div class="tiles">
 <div class="tile">This week, since ${escapeHtml(day(currentWeek))}<b>${usd(spend.weekUsd)} <span class="muted">of ${escapeHtml(cap(spend.weeklyCapUsd))}</span></b>${meter(spend.weekUsd, spend.weeklyCapUsd, "weekly spend against the weekly cap")}<span class="note">Resets ${escapeHtml(weekday(spend.resetsAt))} 00:00 UTC</span></div>
 <div class="tile">Since the start<b>${usd(spend.totalUsd)} <span class="muted">of ${escapeHtml(cap(spend.totalCapUsd))}</span></b>${meter(spend.totalUsd, spend.totalCapUsd, "total spend against the total cap")}<span class="note">Admin use, not counted: ${usd(spend.adminWeekUsd)} this week, ${usd(spend.adminTotalUsd)} in all</span></div>
-<div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">Admission: ${spend.openAdmission ? "open (old enough GitHub accounts)" : "invite-only"}; ${count(data.people.admitted)} of ${count(spend.maxActiveUsers)} admitted. Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} a week.</span></div>
+<div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">Admission: ${spend.openAdmission ? `open (old enough GitHub accounts); ${count(data.people.admitted)} admitted, no cap while open` : `invite-only; ${count(data.people.admitted)} of ${count(spend.maxActiveUsers)} admitted`}. Queue starts at ${escapeHtml(percent(spend.queueThreshold))} of the weekly cap. Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} a week.</span></div>
 </div>
 <p class="note">Caps are the effective values, with admin overrides applied.</p>
 </section>`;
@@ -365,6 +389,45 @@ ${
 <p class="note">This week and last. The day is the UTC day a person's running total first reached their weekly allowance: ${Math.round(TOKEN_LIMIT_SHARE * 100)}% of the token allowance (the last few requests' worth can't be reserved) or all of the dollar allowance. Allowances are today's values, including per-person grants.</p>
 </section>`;
 
+  const q = data.queue;
+  const queueSection = `<section>
+<div class="head"><h2>Queue for free tokens</h2>${csvLink("queue")}</div>
+<div class="tiles">
+<div class="tile">Waiting now<b>${count(q.waiting)}</b><span class="note">${q.oldestQueuedAt === null ? "Nobody waiting." : `Longest wait: ${escapeHtml(waited(data.now - q.oldestQueuedAt))}, since ${escapeHtml(weekday(q.oldestQueuedAt))}`}</span></div>
+<div class="tile">Admitted this Monday<b>${q.thisWeek ? count(q.thisWeek.admitted) : "–"}</b><span class="note">${
+    q.thisWeek
+      ? `${count(q.thisWeek.waitingBefore)} were waiting. Forecast: ${usd(q.thisWeek.avgUsd)} per active × (${count(q.thisWeek.actives)} actives + admitted) ≤ ${escapeHtml(cap(q.thisWeek.budgetUsd))}.`
+      : "This week's admission runs on the first request of the week."
+  }</span></div>
+<div class="tile">Ever queued<b>${count(q.everQueued)}</b><span class="note">${count(q.admittedEver)} let in so far.</span></div>
+</div>
+</section>`;
+
+  const r = data.referrals;
+  const referralSection = `<section>
+<div class="head"><h2>Referrals</h2>${csvLink("referrals")}</div>
+<div class="tiles">
+<div class="tile">Links used<b>${count(r.linksUsed)}</b><span class="note">Sign-ups that carried a code; ${count(r.blocked)} didn't count (own code, unknown code or same network).</span></div>
+<div class="tile">Sign-ups via referral<b>${count(r.signups)}</b><span class="note">${count(r.becameActive)} became weekly active (${REGULAR_DAYS}+ request days in a week).</span></div>
+<div class="tile">Bonus tokens granted this week<b>${escapeHtml(tokens(r.bonusTokensThisWeek))}</b><span class="note">A week, across ${count(r.peopleWithBonus)} people. Counts within the free budget.</span></div>
+</div>
+</section>`;
+
+  const funnelSection = `<section>
+<div class="head"><h2>Funnel</h2>${csvLink("funnel")}</div>
+<div class="scroll"><table>
+<thead><tr><th>Signed up, week of</th><th>Sign-ups</th><th>First request</th><th>Weekly active</th></tr></thead>
+<tbody>
+${data.funnel
+  .map(
+    (row) =>
+      `<tr${row.weekStart === null ? ` class="sel"` : ""}><td>${row.weekStart === null ? "All time" : escapeHtml(thisOrDate(row.weekStart))}</td><td>${count(row.signedUp)}</td><td>${count(row.firstRequest)}${row.signedUp > 0 ? ` <span class="muted">(${percent(row.firstRequest / row.signedUp)})</span>` : ""}</td><td>${count(row.weeklyActive)}${row.signedUp > 0 ? ` <span class="muted">(${percent(row.weeklyActive / row.signedUp)})</span>` : ""}</td></tr>`,
+  )
+  .join("\n")}
+</tbody></table></div>
+<p class="note">Weekly active: requests on ${REGULAR_DAYS} or more days of some Monday–Sunday week. Admins left out.</p>
+</section>`;
+
   const header = `<header>
 <h1>${escapeHtml(PRODUCT_NAME)}: admin</h1>
 <span class="muted">Signed in as <strong>${escapeHtml(input.login)}</strong>${
@@ -373,7 +436,7 @@ ${
 </header>
 <p class="note">${count(data.people.admitted)} people admitted, ${count(data.people.activeThisWeek)} active this week. Admins are left out of every number. Updated ${escapeHtml(new Date(data.now).toISOString().slice(0, 16).replace("T", " "))} UTC. Counts, tokens, cost and times only.</p>`;
 
-  return shell(`Admin · ${PRODUCT_NAME}`, [header, spendSection, activeSection, retentionSection, costSection, limitsSection].join("\n"));
+  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, allTime, spendSection, queueSection, referralSection, funnelSection, activeSection, retentionSection, costSection, limitsSection].join("\n"));
 }
 
 // ─── CSV ──────────────────────────────────────────────────────────────────
@@ -419,6 +482,22 @@ export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendV
         ["week_start", "rank", "github_login", "github_id", "requests", "charged_tokens", "cost_usd", "days_active"],
         data.top.map((person, index) => [day(data.topWeek), index + 1, person.login, person.githubId, person.requests, person.tokens, person.costUsd, person.activeDays]),
       );
+      break;
+    case "queue": {
+      const q = data.queue;
+      body = csv(
+        ["waiting", "oldest_queued_at", "admitted_this_monday", "waiting_before_this_monday", "forecast_avg_usd", "forecast_actives", "forecast_budget_usd", "ever_queued", "admitted_ever"],
+        [[q.waiting, q.oldestQueuedAt === null ? null : new Date(q.oldestQueuedAt).toISOString(), q.thisWeek?.admitted ?? null, q.thisWeek?.waitingBefore ?? null, q.thisWeek?.avgUsd ?? null, q.thisWeek?.actives ?? null, q.thisWeek?.budgetUsd ?? null, q.everQueued, q.admittedEver]],
+      );
+      break;
+    }
+    case "referrals": {
+      const r = data.referrals;
+      body = csv(["links_used", "signups", "blocked", "became_active", "bonus_tokens_this_week", "people_with_bonus"], [[r.linksUsed, r.signups, r.blocked, r.becameActive, r.bonusTokensThisWeek, r.peopleWithBonus]]);
+      break;
+    }
+    case "funnel":
+      body = csv(["signup_week", "signed_up", "first_request", "weekly_active"], data.funnel.map((row) => [row.weekStart === null ? "all" : day(row.weekStart), row.signedUp, row.firstRequest, row.weeklyActive]));
       break;
     case "limits":
       body = csv(

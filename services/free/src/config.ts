@@ -16,6 +16,10 @@ export interface FreeConfig {
   /** GitHub numeric ids that may call the admin endpoints and skip the invite step. */
   adminGithubIds: ReadonlySet<number>;
   weeklyTokens: number;
+  /**
+   * Non-admin people at most while admission is invite-only. With open admission there is no
+   * cap: the queue keeps spend inside the weekly budget instead (see queue.ts).
+   */
   maxActiveUsers: number;
   /** USD across everyone but admins, this week. Undefined means no weekly stop. */
   globalWeeklyUsdCap: number | undefined;
@@ -51,10 +55,42 @@ export interface FreeConfig {
    * (OPENROUTER_HOST_COOLDOWN_MINUTES). 0 turns host avoidance off.
    */
   openRouterHostCooldownMinutes: number;
+  /**
+   * The queue starts when this week's free spend reaches this share of the weekly cap
+   * (QUEUE_THRESHOLD, 0 to 1). Each Monday, the queue is admitted up to the same share.
+   */
+  queueThreshold: number;
+  /** Places a queued person moves up for each referred friend who became weekly active (QUEUE_REFERRAL_PLACES). */
+  queueReferralPlaces: number;
+  /** Tokens a week each side of an active referral gets (REFERRAL_BONUS_TOKENS). */
+  referralBonusTokens: number;
+  /** The most referral bonus one person gets a week (REFERRAL_BONUS_CAP). */
+  referralBonusCap: number;
+  /** Referral links are this plus the code (REFERRAL_LINK_BASE). */
+  referralLinkBase: string;
+  /** What the paid plans are, for `/v1/me` and the 402 refusals. */
+  offers: Offers;
+  /** Where spend and health alerts go (ALERT_WEBHOOK_URL): Discord, Slack or Telegram. */
+  alertWebhookUrl: string | undefined;
+  /** ALERT_WEBHOOK_KIND: auto (from the URL), discord, slack or telegram. */
+  alertWebhookKind: AlertKind;
+  /** Where alert email goes (ALERT_EMAIL_TO); needs the ALERT_EMAIL send_email binding. */
+  alertEmailTo: string | undefined;
+  /** The alert email's sender (ALERT_EMAIL_FROM), on a zone with Email Routing on. */
+  alertEmailFrom: string;
+  /** Telegram's chat id (ALERT_TELEGRAM_CHAT_ID), unless the URL carries `chat_id`. */
+  alertTelegramChatId: string | undefined;
   /** The kill switch from `env`; the admin endpoint has its own, and either one pauses. */
   paused: boolean;
   /** The public origin for links, when the request's own origin isn't it (behind a proxy). */
   publicUrl: string | undefined;
+}
+
+export type AlertKind = "auto" | "discord" | "slack" | "telegram";
+
+export interface Offers {
+  pro: { priceUsdMonthly: number; tokensPerWeek: number };
+  topup: { priceUsd: number; tokens: number; validDays: number };
 }
 
 export const DEFAULTS = {
@@ -82,6 +118,17 @@ export const DEFAULTS = {
   openRouterQuantizations: FULL_PRECISION,
   openRouterDataCollection: "deny" as DataCollection,
   openRouterHostCooldownMinutes: 10,
+  queueThreshold: 0.8,
+  queueReferralPlaces: 25,
+  referralBonusTokens: 10_000_000,
+  referralBonusCap: 50_000_000,
+  referralLinkBase: "https://dl.new/r/",
+  proPriceUsdMonthly: 10,
+  proTokensPerWeek: 100_000_000,
+  topupPriceUsd: 3,
+  topupTokens: 50_000_000,
+  topupValidDays: 30,
+  alertEmailFrom: "alerts@dl.new",
 } as const;
 
 /** The longest host cooldown, in minutes: a day. */
@@ -109,6 +156,27 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     openRouterQuantizations: quantizations(env.OPENROUTER_QUANTIZATIONS),
     openRouterDataCollection: dataCollection(env.OPENROUTER_DATA_COLLECTION),
     openRouterHostCooldownMinutes: hostCooldown(env.OPENROUTER_HOST_COOLDOWN_MINUTES),
+    queueThreshold: share(env.QUEUE_THRESHOLD, DEFAULTS.queueThreshold, "QUEUE_THRESHOLD"),
+    queueReferralPlaces: whole(env.QUEUE_REFERRAL_PLACES, DEFAULTS.queueReferralPlaces, "QUEUE_REFERRAL_PLACES"),
+    referralBonusTokens: whole(env.REFERRAL_BONUS_TOKENS, DEFAULTS.referralBonusTokens, "REFERRAL_BONUS_TOKENS"),
+    referralBonusCap: whole(env.REFERRAL_BONUS_CAP, DEFAULTS.referralBonusCap, "REFERRAL_BONUS_CAP"),
+    referralLinkBase: text(env.REFERRAL_LINK_BASE) ?? DEFAULTS.referralLinkBase,
+    offers: {
+      pro: {
+        priceUsdMonthly: amount(env.PRO_PRICE_USD_MONTHLY, DEFAULTS.proPriceUsdMonthly, "PRO_PRICE_USD_MONTHLY"),
+        tokensPerWeek: whole(env.PRO_TOKENS_PER_WEEK, DEFAULTS.proTokensPerWeek, "PRO_TOKENS_PER_WEEK"),
+      },
+      topup: {
+        priceUsd: amount(env.TOPUP_PRICE_USD, DEFAULTS.topupPriceUsd, "TOPUP_PRICE_USD"),
+        tokens: whole(env.TOPUP_TOKENS, DEFAULTS.topupTokens, "TOPUP_TOKENS"),
+        validDays: whole(env.TOPUP_VALID_DAYS, DEFAULTS.topupValidDays, "TOPUP_VALID_DAYS"),
+      },
+    },
+    alertWebhookUrl: webhookUrl(env.ALERT_WEBHOOK_URL),
+    alertWebhookKind: alertKind(env.ALERT_WEBHOOK_KIND),
+    alertTelegramChatId: text(env.ALERT_TELEGRAM_CHAT_ID),
+    alertEmailTo: emailAddress(env.ALERT_EMAIL_TO, "ALERT_EMAIL_TO"),
+    alertEmailFrom: emailAddress(env.ALERT_EMAIL_FROM, "ALERT_EMAIL_FROM") ?? DEFAULTS.alertEmailFrom,
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
   };
@@ -130,6 +198,51 @@ function whole(value: unknown, fallback: number, name: string): number {
   const parsed = Number(raw.replace(/_/g, ""));
   if (!Number.isSafeInteger(parsed) || parsed < 0) throw new ConfigError(`${name} must be a whole number (got "${raw}").`);
   return parsed;
+}
+
+/** A share from 0 to 1. */
+function share(value: unknown, fallback: number, name: string): number {
+  const raw = text(value);
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) throw new ConfigError(`${name} must be a number from 0 to 1 (got "${raw}").`);
+  return parsed;
+}
+
+/** A number of dollars, always set. */
+function amount(value: unknown, fallback: number, name: string): number {
+  const raw = text(value);
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) throw new ConfigError(`${name} must be a number of dollars (got "${raw}").`);
+  return parsed;
+}
+
+function webhookUrl(value: unknown): string | undefined {
+  const raw = text(value);
+  if (raw === undefined) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ConfigError("ALERT_WEBHOOK_URL must be an https URL.");
+  }
+  if (url.protocol !== "https:") throw new ConfigError("ALERT_WEBHOOK_URL must be an https URL.");
+  return raw;
+}
+
+function emailAddress(value: unknown, name: string): string | undefined {
+  const raw = text(value);
+  if (raw === undefined) return undefined;
+  if (!/^[^\s@<>"(),;:]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(raw)) throw new ConfigError(`${name} must be one email address (got "${raw}").`);
+  return raw;
+}
+
+function alertKind(value: unknown): AlertKind {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return "auto";
+  if (raw === "auto" || raw === "discord" || raw === "slack" || raw === "telegram") return raw;
+  throw new ConfigError(`ALERT_WEBHOOK_KIND must be auto, discord, slack or telegram (got "${raw}").`);
 }
 
 /** Dollars. `none` (or `off`) turns the cap off; unset means the default. */

@@ -43,6 +43,9 @@ for (const root of roots) {
     const lines = source.split("\n");
     for (const { pattern, why } of FORBIDDEN) {
       lines.forEach((line, index) => {
+        // A line may opt out with a stated reason, e.g. an optional binding that is only
+        // touched when it exists: `// portable-exception: <why>`.
+        if (/\/\/ portable-exception: \S/.test(line)) return;
         if (pattern.test(line)) violations.push(`${file}:${index + 1}: ${why}`);
       });
     }

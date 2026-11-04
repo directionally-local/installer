@@ -16,9 +16,15 @@ export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env
 export const env = {};
 `)}`;
 
+/** `cloudflare:email`'s EmailMessage, keeping what it was given so a fake binding can read it. */
+const EMAIL_STUB = `data:text/javascript,${encodeURIComponent(`
+export class EmailMessage { constructor(from, to, raw) { this.from = from; this.to = to; this.raw = raw; } }
+`)}`;
+
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "cloudflare:workers") return { url: STUB, format: "module", shortCircuit: true };
+    if (specifier === "cloudflare:email") return { url: EMAIL_STUB, format: "module", shortCircuit: true };
     return next(specifier, context);
   },
 });
@@ -130,7 +136,14 @@ export interface Service {
   env: Record<string, unknown>;
   clock: { now: number };
   handler: { fetch(request: Request, env: never): Promise<Response> };
-  calls: { openRouter: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>; githubTokens: Array<{ code: string; redirect_uri?: string }> };
+  calls: {
+    openRouter: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
+    githubTokens: Array<{ code: string; redirect_uri?: string }>;
+    /** Posts to ALERT_WEBHOOK_URL (any URL on alerts.test, discord.com, hooks.slack.com or api.telegram.org). */
+    webhooks: Array<{ url: string; body: Record<string, unknown> }>;
+    /** Messages sent through the fake ALERT_EMAIL binding (with `email: true`). */
+    emails: Array<{ from: string; to: string; raw: string }>;
+  };
   setOpenRouter(handler: OpenRouterHandler): void;
   request(method: string, path: string, options?: { body?: unknown; token?: string; headers?: Record<string, string>; form?: Record<string, string>; ip?: string }): Promise<Response>;
   signIn(user: GitHubUserFixture, options?: { invite?: string; deviceId?: string }): Promise<Tokens>;
@@ -175,7 +188,7 @@ export function sse(chunks: string[], options: { split?: boolean } = {}): Respon
   return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
-export async function createService(vars: Record<string, string> = {}): Promise<Service> {
+export async function createService(vars: Record<string, string> = {}, options: { email?: boolean } = {}): Promise<Service> {
   const [{ createHandler }, { AuthObject }, { DirectoryObject }, { AccountObject }, { RateLimiterObject }] = await Promise.all([
     import("../src/app.js"),
     import("../src/auth-object.js"),
@@ -200,7 +213,14 @@ export async function createService(vars: Record<string, string> = {}): Promise<
     ...namespaces,
   };
   const clock = { now: NOW };
-  const calls: Service["calls"] = { openRouter: [], githubTokens: [] };
+  const calls: Service["calls"] = { openRouter: [], githubTokens: [], webhooks: [], emails: [] };
+  if (options.email) {
+    envRef.env.ALERT_EMAIL = {
+      async send(message: { from: string; to: string; raw: string }) {
+        calls.emails.push({ from: message.from, to: message.to, raw: message.raw });
+      },
+    };
+  }
   let openRouter: OpenRouterHandler = () => completion(usage(100, 10));
 
   const fetcher = async (input: string, init: RequestInit = {}): Promise<Response> => {
@@ -220,6 +240,10 @@ export async function createService(vars: Record<string, string> = {}): Promise<
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       calls.openRouter.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
       return openRouter(body, init);
+    }
+    if (/^https:\/\/(alerts\.test|discord\.com|hooks\.slack\.com|api\.telegram\.org)\//.test(url)) {
+      calls.webhooks.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
+      return new Response("ok");
     }
     throw new Error(`unexpected fetch ${url}`);
   };

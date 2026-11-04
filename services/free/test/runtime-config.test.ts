@@ -41,6 +41,10 @@ describe("runtime settings (units)", () => {
       openRouterQuantizations: ["fp8", "mxfp8", "fp16", "bf16", "fp32"],
       openRouterDataCollection: "deny",
       openRouterHostCooldownMinutes: 10,
+      queueThreshold: 0.8,
+      queueReferralPlaces: 25,
+      referralBonusTokens: 10_000_000,
+      referralBonusCap: 50_000_000,
     });
   });
 

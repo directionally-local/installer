@@ -85,7 +85,12 @@ describe("free tier portability", () => {
   it("uses no Node.js built-ins or Cloudflare-only APIs", async () => {
     for (const base of [service, shared]) {
       for (const file of await sourceFiles(base)) {
-        const source = await read(base, file);
+        // A line may opt out with a stated reason (`// portable-exception: <why>`), as the
+        // alert email's optional send_email binding does; scripts/check-portable-apis.mjs agrees.
+        const source = (await read(base, file))
+          .split("\n")
+          .filter((line) => !/\/\/ portable-exception: \S/.test(line))
+          .join("\n");
         for (const pattern of FORBIDDEN) {
           assert.doesNotMatch(source, pattern, `${file} matches ${pattern}`);
         }

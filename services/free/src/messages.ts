@@ -61,3 +61,17 @@ export function weeklyBudgetMessage(resetsAt: string): string {
 }
 
 export const TOTAL_BUDGET_MESSAGE = "Free tokens are paused for everyone: the free tier's total budget is used up. Your own key still works.";
+
+/** The 402 a queued person gets for free tokens (`free_tier_queued`). `wait` is e.g. "about 3 days". */
+export function queuedMessage(position: number, wait: string): string {
+  return `You're #${position} in line for free tokens (${wait}). Each friend who starts using dl moves you up. Your own key works now.`;
+}
+
+/** The 402 for a used-up weekly allowance (`quota_exceeded`). */
+export function quotaMessage(reason: "tokens" | "spend", resetsAt: string): string {
+  const what = reason === "spend" ? "spending allowance" : "token allowance";
+  return `This week's free ${what} is used up. It resets at ${resetsAt}.`;
+}
+
+export const QUEUED_SIGNED_IN =
+  "Free tokens are busy this week, so you're in line for them; your terminal shows your place. Your own key and paid plans work now.";

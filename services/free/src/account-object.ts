@@ -71,6 +71,11 @@ export type ReserveResult =
 export interface Limits {
   weeklyTokens: number;
   weeklyUsd: number | undefined;
+  /**
+   * This week's referral bonus, added on top of the weekly tokens (default or grant). The USD
+   * allowance grows in the same proportion, so the bonus isn't cut short by the dollar cap.
+   */
+  bonusTokens?: number;
 }
 
 interface AccountRow {
@@ -357,8 +362,11 @@ export class AccountObject extends DurableObject<AccountEnv> {
 
   #allowance(row: AccountRow | undefined, now: number, limits: Limits): Allowance {
     const reserved = this.ctx.storage.sql.exec<{ total: number | null }>("SELECT SUM(amount) AS total FROM reservations").toArray()[0]?.total ?? 0;
-    const tokensPerWeek = row?.weekly_tokens ?? limits.weeklyTokens;
-    const usdPerWeek = row?.weekly_usd ?? limits.weeklyUsd ?? null;
+    const baseTokens = row?.weekly_tokens ?? limits.weeklyTokens;
+    const bonus = Math.max(0, limits.bonusTokens ?? 0);
+    const tokensPerWeek = baseTokens + bonus;
+    const baseUsd = row?.weekly_usd ?? limits.weeklyUsd ?? null;
+    const usdPerWeek = baseUsd !== null && bonus > 0 && baseTokens > 0 ? Math.round(baseUsd * (tokensPerWeek / baseTokens) * 1e6) / 1e6 : baseUsd;
     const used = row?.used ?? 0;
     const spent = row?.cost_used ?? 0;
     const spendLeft = usdPerWeek === null || spent < usdPerWeek;

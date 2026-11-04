@@ -95,14 +95,17 @@ describe("open admission", () => {
     assert.match(flow.page, /invite-only for now/);
   });
 
-  it("still stops at MAX_ACTIVE_USERS, which the admin can raise at runtime", async () => {
+  it("has no cap on people while open: MAX_ACTIVE_USERS applies only while invite-only", async () => {
     const { service: svc, admin } = await service("env");
     await svc.request("POST", "/admin/config", { token: admin, body: { maxActiveUsers: 1 } });
     assert.equal((await attempt(svc, admin, OLD, "none", 100)).admitted, true);
-    const full = await attempt(svc, admin, OLD, "none", 101);
-    assert.deepEqual([full.admitted, full.code], [false, "cohort_full"]);
-    await svc.request("POST", "/admin/config", { token: admin, body: { maxActiveUsers: 2 } });
-    assert.equal((await attempt(svc, admin, OLD, "none", 102)).admitted, true);
+    assert.equal((await attempt(svc, admin, OLD, "none", 101)).admitted, true, "open: past the cap");
+    // A young account with an invite isn't capped either while admission is open.
+    assert.equal((await attempt(svc, admin, NEW, "valid", 102)).admitted, true);
+    // Back to invite-only: the cap holds again.
+    await svc.request("POST", "/admin/config", { token: admin, body: { openAdmission: false } });
+    const full = await attempt(svc, admin, OLD, "valid", 103);
+    assert.equal(full.admitted, false);
   });
 
   it("keeps one account per GitHub id: signing in again doesn't take another place", async () => {

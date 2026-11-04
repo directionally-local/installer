@@ -59,3 +59,15 @@ declare module "cloudflare:workers" {
 
   export const env: unknown;
 }
+
+/**
+ * The send_email binding's message class. Only the free tier's alert email uses it, behind a
+ * dynamic import that runs only where the optional ALERT_EMAIL binding exists.
+ */
+declare module "cloudflare:email" {
+  export class EmailMessage {
+    constructor(from: string, to: string, raw: string | ReadableStream);
+    readonly from: string;
+    readonly to: string;
+  }
+}
