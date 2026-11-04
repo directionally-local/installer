@@ -11,6 +11,7 @@ import { palette } from "../ui.js";
 import { findAutopilot, supportsAttachRemote, type AutopilotCommand } from "./autopilot.js";
 import { RemoteApiError, type RemoteClient, type RemoteConversation } from "./client.js";
 import { describeError, pickModel, type LaptopIO } from "./commands.js";
+import { referralForAutopilot, settleReferral, withReferral, type ReferralOptions } from "./referral.js";
 import { placeModel } from "./settings.js";
 import { recordLastUsed, resolveTarget, type RemoteServer, type TargetReason } from "./config.js";
 import { detectGitHubRepository, snapshotWorkingTree, type WorkingTreeSnapshot } from "./git.js";
@@ -77,6 +78,8 @@ export interface SessionInput {
   spawn?: SessionSpawner;
   signals?: SignalSource;
   sessionsFile?: string;
+  /** Where plain Autopilot's DL_REFERRAL comes from and is kept (referral.ts); the real environment and files unless replaced (tests). */
+  referral?: ReferralOptions;
 }
 
 const realSpawn: SessionSpawner = (command, args, env, options = {}) => spawn(command, args, { stdio: "inherit", env, ...(options.cwd ? { cwd: options.cwd } : {}) });
@@ -169,6 +172,7 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
     ...(input.model ? ["-m", input.model] : []),
     ...(input.args ?? []),
   ];
+  const referral = await referralForAutopilot({ env: process.env, ...input.referral });
   const signals = input.signals ?? process;
   let child: SessionChild | undefined;
   // Autopilot gets Ctrl-C from the terminal itself; dl must not die of it underneath.
@@ -183,11 +187,15 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
     const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | Error>((resolve) => {
       // AUTOPILOT_LAUNCHED_BY tells Autopilot dl started it, so its own hints (the exit line's
       // "continue with") name dl's commands and the product, not `autopilot resume ID`.
-      const started = (input.spawn ?? realSpawn)(autopilot.command, args, { ...process.env, AUTOPILOT_LAUNCHED_BY: "dl" }, { cwd: input.cwd });
+      // DL_REFERRAL: the invite link's code, from the environment or kept from an earlier run
+      // until the free tier sign-in (Autopilot's) credits it. See referral.ts.
+      const env = withReferral({ ...process.env, AUTOPILOT_LAUNCHED_BY: "dl" }, referral);
+      const started = (input.spawn ?? realSpawn)(autopilot.command, args, env, { cwd: input.cwd });
       child = started;
       started.on("exit", (code, signal) => resolve({ code, signal }));
       started.on("error", (error) => resolve(error));
     });
+    if (referral) await settleReferral({ env: process.env, ...input.referral });
     if (outcome instanceof Error) {
       io.err(`  ${c.red("✗")} Couldn't start Autopilot: ${outcome.message}. Update: ${c.bold(updateCommand())}\n`);
       return 1;

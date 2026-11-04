@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -87,7 +87,7 @@ function laptopInstall(options: { os?: "Darwin" | "Linux"; uid?: number; nodePat
   stub("id", `echo ${options.uid ?? 501}`);
   stub("uname", `case "$1" in -m) echo arm64 ;; *) echo ${options.os ?? "Darwin"} ;; esac`);
   // A Node: -e is the CVE check; anything else runs dl's entry, which answers --version.
-  const node = (patched: boolean) => `case "$1" in -e) exit ${patched ? 0 : 1} ;; -v) echo v24.22.1 ;; *) [ "$2" = --version ] && echo 0.10.0 || { echo "dl $* in $(pwd)" >> "${dir}/started.log"; exit ${options.dlExit ?? 0}; } ;; esac`;
+  const node = (patched: boolean) => `case "$1" in -e) exit ${patched ? 0 : 1} ;; -v) echo v24.22.1 ;; *) [ "$2" = --version ] && echo 0.10.0 || { echo "dl $* in $(pwd)" >> "${dir}/started.log"; echo "\${DL_REFERRAL-unset}" >> "${dir}/referral.log"; exit ${options.dlExit ?? 0}; } ;; esac`;
   stub("node", node(options.nodePatched ?? true));
   // npm: records its arguments and installs a dl entry point under --prefix.
   const npm = options.npmFails ? 'echo "npm ERR! 404"; exit 1' : `echo "$*" >> "${dir}/npm.log"
@@ -243,6 +243,41 @@ describe("install.sh on a laptop", () => {
     // DL_NO_START=1 (as dl.new/continue does before starting dl itself): one line, not two saying the same.
     assert.match(skipped.stdout, /\n\n {2}Then run: source ~\/\.zshrc && dl\n$/);
     assert.doesNotMatch(skipped.stdout, /Next time/);
+  });
+
+  it("from an invite link, starts dl with DL_REFERRAL and keeps the code for a later sign-in", () => {
+    const result = run({ terminal: true, env: { DL_REFERRAL: "Octo-Cat" } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.read(join(result.dir, "referral.log")), "octo-cat\n", "dl gets the code, lowercased");
+    const kept = join(result.home, ".config", "directionallylocal", "pending-referral");
+    assert.equal(result.read(kept), "octo-cat\n");
+    assert.equal(statSync(kept).mode & 0o777, 0o600);
+
+    // Without a terminal dl isn't started; the kept code is what credits the sign-in later.
+    const later = run({ env: { DL_REFERRAL: "octo" } });
+    assert.equal(later.status, 0, later.stderr);
+    assert.equal(later.read(join(later.dir, "referral.log")), undefined);
+    assert.equal(later.read(join(later.home, ".config", "directionallylocal", "pending-referral")), "octo\n");
+
+    // A code kept already stays: the first link is the one credited.
+    const second = run({ terminal: true, env: { DL_REFERRAL: "other" }, home: (home) => { mkdirSync(join(home, ".config", "directionallylocal"), { recursive: true }); writeFileSync(join(home, ".config", "directionallylocal", "pending-referral"), "octo\n"); } });
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(second.read(join(second.home, ".config", "directionallylocal", "pending-referral")), "octo\n");
+    assert.equal(second.read(join(second.dir, "referral.log")), "other\n", "this run still passes its own code on");
+  });
+
+  it("ignores a DL_REFERRAL that isn't a GitHub username, and passes nothing on without one", () => {
+    for (const bad of ["-octo", "octo cat", "a".repeat(40), "$(id)"]) {
+      const result = run({ terminal: true, env: { DL_REFERRAL: bad } });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /Ignoring DL_REFERRAL: an invite code is a GitHub username\./);
+      assert.equal(result.read(join(result.dir, "referral.log")), "unset\n", bad);
+      assert.ok(!existsSync(join(result.home, ".config", "directionallylocal")));
+    }
+    const plain = run({ terminal: true });
+    assert.equal(plain.read(join(plain.dir, "referral.log")), "unset\n");
+    assert.doesNotMatch(plain.stdout, /DL_REFERRAL/);
+    assert.ok(!existsSync(join(plain.home, ".config", "directionallylocal")));
   });
 
   it("links dl into ~/.local/bin when this shell has it on PATH, so dl works in the same terminal", () => {

@@ -843,6 +843,26 @@ describe("dl the first time on a laptop", () => {
     assert.equal(plain.launches.length, 2);
   });
 
+  it("passes an invite link's DL_REFERRAL to Autopilot, and keeps passing it on later runs until the free tier sign-in", async () => {
+    const dir = join(root, "fresh");
+    await mkdir(dir);
+    const config = process.env.XDG_CONFIG_HOME!;
+    const withEnv = (extra: Record<string, string>) => laptop(undefined, { session: { autopilot: async () => AUTOPILOT, spawn: plain.spawn, signals: new EventEmitter(), referral: { env: { XDG_CONFIG_HOME: config, ...extra } } } });
+    // The install script started dl with the link's code.
+    assert.equal(await inside(dir, () => main([], capture(), withEnv({ DL_REFERRAL: "Octo" }))), 0);
+    assert.equal(plain.launches[0]!.env.DL_REFERRAL, "octo");
+    assert.equal(await readFile(join(config, "directionallylocal", "pending-referral"), "utf8"), "octo\n");
+    // A later dl, without the variable, and with no sign-in yet: still passed on.
+    assert.equal(await inside(dir, () => main(["-c"], capture(), withEnv({}))), 0);
+    assert.equal(plain.launches[1]!.env.DL_REFERRAL, "octo");
+    // Autopilot signs in to the free tier during that run: its config gets a refresh token.
+    await mkdir(join(config, "autopilot"), { recursive: true });
+    await writeFile(join(config, "autopilot", "config.json"), JSON.stringify({ provider: "directionally-local", providers: { "directionally-local": { apiKey: "at", refreshToken: "rt" } } }));
+    assert.equal(await inside(dir, () => main([], capture(), withEnv({}))), 0);
+    assert.equal(plain.launches[2]!.env.DL_REFERRAL, undefined, "credited: no longer passed on");
+    await assert.rejects(readFile(join(config, "directionallylocal", "pending-referral"), "utf8"), "and no longer kept");
+  });
+
   it("only needs a Node that Autopilot runs on", async () => {
     const dir = join(root, "fresh");
     await mkdir(dir);

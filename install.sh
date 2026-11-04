@@ -25,6 +25,10 @@
 # Pin a version: DL_VERSION=0.1.0. Install from a local tarball: DL_PACKAGE=/path/to.tgz.
 # Laptop: DL_HOME=DIR installs somewhere else; DL_NO_START=1 doesn't start dl at the end;
 # DL_NO_MODIFY_PATH=1 leaves your shell's startup file alone.
+# Invite links (curl -fsSL https://dl.new/r/CODE | sh) set DL_REFERRAL=CODE, a GitHub login:
+# it's passed on to dl, which passes it to Autopilot for the free tier sign-in. On a laptop it's
+# also kept in ~/.config/directionallylocal/pending-referral until that sign-in, so signing in on
+# a later run still credits it.
 set -eu
 
 DL_HOME="${DL_HOME:-${HOME:-}/.directionallylocal}"
@@ -244,6 +248,25 @@ add_to_path() {
   step_done "Added dl to your PATH" "in $rc"
 }
 
+# DL_REFERRAL as the free tier service takes it: a GitHub login, lowercased. Fails for anything else.
+normalize_referral() {
+  code=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case $code in
+    ""|-*|*-|*[!a-z0-9-]*) return 1 ;;
+  esac
+  [ "${#code}" -le 39 ] || return 1
+  printf '%s' "$code"
+}
+
+# The referral, kept for dl until the free tier sign-in (dl deletes it then). The first one
+# stays: a second link before signing in doesn't replace it. Never fails the install.
+keep_referral() {
+  config="${XDG_CONFIG_HOME:-$HOME/.config}"
+  file="$config/directionallylocal/pending-referral"
+  if [ -e "$file" ]; then return 0; fi
+  (umask 077 && mkdir -p "$config/directionallylocal" && printf '%s\n' "$DL_REFERRAL" >"$file") 2>/dev/null || true
+}
+
 # A laptop: everything under $DL_HOME, as this user; no sudo, no services.
 laptop_main() {
   case $(uname -s) in
@@ -334,9 +357,12 @@ laptop_main() {
     fi
   fi
 
+  if [ -n "${DL_REFERRAL:-}" ]; then keep_referral; fi
+
   if [ -n "$start" ]; then
     say ""
     code=0
+    # DL_REFERRAL (exported in main) goes with it: dl passes it to Autopilot.
     "$DL_HOME/bin/dl" <"$tty" || code=$?
     # Back at the shell this script was piped from, where dl isn't on PATH yet: say so now,
     # when it's needed, as the lines above have scrolled away.
@@ -358,6 +384,15 @@ main() {
     ""|server|laptop) ;;
     *) fail "DL_MODE is server or laptop (got ${DL_MODE})" ;;
   esac
+  # An invite link's code stays in the environment of dl (and of dl up, through sudo -E).
+  if [ -n "${DL_REFERRAL:-}" ]; then
+    if DL_REFERRAL=$(normalize_referral "$DL_REFERRAL"); then
+      export DL_REFERRAL
+    else
+      say "  Ignoring DL_REFERRAL: an invite code is a GitHub username."
+      unset DL_REFERRAL
+    fi
+  fi
   if [ "$(install_mode)" = laptop ]; then
     laptop_main
     return
