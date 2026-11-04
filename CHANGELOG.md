@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.12.0](https://github.com/directionally-local/installer/compare/v0.11.0...v0.12.0) (2026-11-04)
+
+
+### Features
+
+* **free:** steer around a failing OpenRouter host; sign-in codes last 15 minutes ([c58af05](https://github.com/directionally-local/installer/commit/c58af0583327e59748ae434a6b0e64b4ce7c2717))
+* **free:** steer around a failing OpenRouter host; sign-in codes last 15 minutes ([f3435b5](https://github.com/directionally-local/installer/commit/f3435b58f66c739e9b80005b8a6c81c4ad70da1a))
+* **laptop:** dl status shows the free tier account ([38ac660](https://github.com/directionally-local/installer/commit/38ac660a212b847958da5dfabbef8c832123929d))
+* **laptop:** dl status shows the free tier account ([2b491f2](https://github.com/directionally-local/installer/commit/2b491f2dfb548673c82aeabfcad4dfae4db3de15))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.6.0 ([bae53ab](https://github.com/directionally-local/installer/commit/bae53ab9ea244602fc89b0c7785d7b3e640d0040))
+* **deps:** install Autopilot 3.6.0 ([bb74c31](https://github.com/directionally-local/installer/commit/bb74c31fdcdfc19e39e279284a857c8de8333489))
+* **laptop:** dl status says when sign-in is unfinished; one PATH hint after install ([40c5b36](https://github.com/directionally-local/installer/commit/40c5b361fbdeccb4f9ec6a4dbfa83c878f9e323d))
+* **laptop:** dl status says when sign-in is unfinished; one PATH hint after install ([6b33842](https://github.com/directionally-local/installer/commit/6b33842d82cf1f4375d1440d9b3c99dfee42baf3))
+
 ## [0.11.0](https://github.com/directionally-local/installer/compare/v0.10.1...v0.11.0) (2026-11-03)
 
 
