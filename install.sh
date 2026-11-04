@@ -57,8 +57,15 @@ step_done() {
 LOG=$(mktemp)
 # NPM_CACHE: the laptop install's own npm cache, removed when it's done (see laptop_main).
 NPM_CACHE=""
-# Ending with an error (fail, or a command under set -e) counts a failed install.
-trap 'exit_code=$?; rm -f "$LOG"; if [ -n "$NPM_CACHE" ]; then rm -rf "$NPM_CACHE"; fi; if [ "$exit_code" -ne 0 ]; then count_install failed; fi' EXIT
+# On the way out: clean up, and count a failed install when it ends with an error (fail, or a
+# command under set -e). The script's exit code stays what it was.
+on_exit() {
+  exit_code=$?
+  rm -f "$LOG"
+  if [ -n "$NPM_CACHE" ]; then rm -rf "$NPM_CACHE"; fi
+  if [ "$exit_code" -ne 0 ]; then count_install failed; fi
+}
+trap on_exit EXIT
 
 # The anonymous count at the end: the step the install is on (one of preflight, node,
 # install_dl, path, dl_up), laptop or server, and dl's version once it's installed.
