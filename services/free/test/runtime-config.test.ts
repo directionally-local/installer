@@ -45,6 +45,10 @@ describe("runtime settings (units)", () => {
       queueReferralPlaces: 25,
       referralBonusTokens: 10_000_000,
       referralBonusCap: 50_000_000,
+      primaryUpstream: "luminal",
+      luminalCreditUsd: 2000,
+      luminalWeeklyCreditUsd: 250,
+      luminalFirstByteTimeoutSeconds: 30,
     });
   });
 

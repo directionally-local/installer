@@ -28,12 +28,22 @@ export interface SpendView {
   perPersonWeeklyUsd: number | null;
   /** Share of the weekly cap at which sign-ups queue. */
   queueThreshold: number;
+  /** The upstream setting, and whether Luminal has a key (without one, OpenRouter serves). */
+  primaryUpstream: "luminal" | "openrouter";
+  luminalConfigured: boolean;
+  /** Luminal credit: the balance, used since the start, used this week (all, and free usage only). */
+  creditUsd: number;
+  creditUsedUsd: number;
+  creditWeekUsd: number;
+  freeCreditWeekUsd: number;
+  /** The weekly credit budget the queue protects; null for none. */
+  weeklyCreditUsd: number | null;
 }
 
 /** The red banner shows at this share of either cap. */
 export const BANNER_SHARE = 0.8;
 
-export const CSV_TABLES = ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "paid"] as const;
+export const CSV_TABLES = ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "paid", "upstreams"] as const;
 export type CsvTable = (typeof CSV_TABLES)[number];
 
 export function isCsvTable(name: string): name is CsvTable {
@@ -182,6 +192,11 @@ function waited(ms: number): string {
   return `${Math.floor(hours / 24)} days`;
 }
 
+function ms(value: number | null): string {
+  if (value === null) return "–";
+  return value >= 1000 ? `${(value / 1000).toFixed(1)} s` : `${Math.round(value)} ms`;
+}
+
 function cap(value: number | null): string {
   return value === null ? "no cap" : usd(value);
 }
@@ -252,10 +267,15 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
   const thisOrDate = (week: number) => (week === currentWeek ? `${day(week)} (this week)` : day(week));
 
   const weeklyCapReached = spend.weeklyCapUsd !== null && spend.weekUsd >= spend.weeklyCapUsd;
+  const luminalServing = spend.primaryUpstream === "luminal" && spend.luminalConfigured;
+  const creditShare = spend.creditUsd > 0 ? spend.creditUsedUsd / spend.creditUsd : spend.creditUsedUsd > 0 ? 1 : 0;
+  const creditOut = luminalServing && spend.creditUsedUsd >= spend.creditUsd;
   const totalCapReached = spend.totalCapUsd !== null && spend.totalUsd >= spend.totalCapUsd;
   const state = spend.paused
     ? `Paused for everyone${spend.pausedByEnv ? " (PAUSED in env)" : " (admin switch)"}`
-    : totalCapReached
+    : creditOut
+      ? "Paused: Luminal credit used up (upstream_credit_exhausted)"
+      : totalCapReached
       ? "Free tokens stopped: total budget reached"
       : weeklyCapReached
         ? `Free tokens stopped until ${weekday(spend.resetsAt)}: weekly budget reached`
@@ -266,9 +286,10 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
   const warnings = [
     ...(weekShare >= BANNER_SHARE ? [`${percent(weekShare)} of the ${cap(spend.weeklyCapUsd)} weekly cap used (${usd(spend.weekUsd)}).`] : []),
     ...(totalShare >= BANNER_SHARE ? [`${percent(totalShare)} of the ${cap(spend.totalCapUsd)} all-time cap used (${usd(spend.totalUsd)}).`] : []),
+    ...(creditShare >= BANNER_SHARE ? [`${percent(creditShare)} of the ${usd(spend.creditUsd)} Luminal credit used (${usd(spend.creditUsedUsd)}).`] : []),
   ];
   const banner = warnings.length > 0 ? `<p class="banner" role="alert">${warnings.map(escapeHtml).join(" ")}</p>` : "";
-  const allTime = `<div class="alltime">All-time free spend<b>${usd(spend.totalUsd)} <span class="muted">of ${escapeHtml(cap(spend.totalCapUsd))}</span></b>${meter(spend.totalUsd, spend.totalCapUsd, "all-time spend against the all-time cap")}<span class="note">${spend.totalCapUsd === null ? "No all-time cap." : `${usd(Math.max(0, spend.totalCapUsd - spend.totalUsd))} left. Free tokens stop at the cap.`}</span></div>`;
+  const allTime = `<div class="alltime">All-time free cash spend<b>${usd(spend.totalUsd)} <span class="muted">of ${escapeHtml(cap(spend.totalCapUsd))}</span></b>${meter(spend.totalUsd, spend.totalCapUsd, "all-time spend against the all-time cap")}<span class="note">${spend.totalCapUsd === null ? "No all-time cap." : `${usd(Math.max(0, spend.totalCapUsd - spend.totalUsd))} left. Free tokens stop at the cap.`}</span></div>`;
 
   const spendSection = `<section>
 <div class="head"><h2>Global spend</h2>${csvLink("spend")}</div>
@@ -278,6 +299,26 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
 <div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">Admission: ${spend.openAdmission ? `open (old enough GitHub accounts); ${count(data.people.admitted)} admitted, no cap while open` : `invite-only; ${count(data.people.admitted)} of ${count(spend.maxActiveUsers)} admitted`}. Queue starts at ${escapeHtml(percent(spend.queueThreshold))} of the weekly cap. Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} a week.</span></div>
 </div>
 <p class="note">Caps are the effective values, with admin overrides applied.</p>
+</section>`;
+
+  const upstreamRow = (row: DashboardData["upstreams"][number]) =>
+    `<tr><td>${row.upstream === "luminal" ? "Luminal" : "OpenRouter"}</td><td>${count(row.requests)}</td><td>${count(row.errors)}${row.requests > 0 ? ` <span class="muted">(${percent(row.errors / row.requests)})</span>` : ""}</td><td>${ms(row.medianTtftMs)}</td><td>${ms(row.p90TtftMs)}</td><td>${ms(row.medianTtfbMs)}</td><td>${row.cacheHitShare === null ? "–" : percent(row.cacheHitShare)}</td><td>${usd(row.creditUsd)}</td><td>${usd(row.cashUsd)}</td></tr>`;
+  const upstreamTable = (window: "today" | "week") => `<div class="scroll"><table>
+<thead><tr><th>${window === "today" ? "Today (UTC)" : `This week, since ${escapeHtml(day(currentWeek))}`}</th><th>Requests</th><th>Errors</th><th>TTFT median</th><th>TTFT p90</th><th>TTFB median</th><th>Cache hits</th><th>Credit</th><th>Cash</th></tr></thead>
+<tbody>
+${data.upstreams.filter((row) => row.window === window).map(upstreamRow).join("\n")}
+</tbody></table></div>`;
+  const serving = luminalServing ? "Luminal" : spend.primaryUpstream === "luminal" ? "OpenRouter (no LUMINAL_API_KEY)" : "OpenRouter";
+  const upstreamSection = `<section>
+<div class="head"><h2>Upstreams</h2>${csvLink("upstreams")}</div>
+<div class="tiles">
+<div class="tile">Luminal credit used<b>${usd(spend.creditUsedUsd)} <span class="muted">of ${usd(spend.creditUsd)}</span></b>${meter(spend.creditUsedUsd, spend.creditUsd, "Luminal credit used against the balance")}<span class="note">${usd(Math.max(0, spend.creditUsd - spend.creditUsedUsd))} left. Luminal-served usage pauses at the balance.</span></div>
+<div class="tile">Credit this week<b>${usd(spend.freeCreditWeekUsd)} <span class="muted">of ${escapeHtml(cap(spend.weeklyCreditUsd))}</span></b>${meter(spend.freeCreditWeekUsd, spend.weeklyCreditUsd, "free credit this week against the weekly credit budget")}<span class="note">Free usage; ${usd(spend.creditWeekUsd)} with admins and paid plans. The queue starts at ${escapeHtml(percent(spend.queueThreshold))} of the weekly credit budget.</span></div>
+<div class="tile">Serving<b class="state">${escapeHtml(serving)}</b><span class="note">primaryUpstream: ${escapeHtml(spend.primaryUpstream)}. No automatic switch between upstreams.</span></div>
+</div>
+${upstreamTable("today")}
+${upstreamTable("week")}
+<p class="note">Admins included. TTFT: time to the first content chunk (text, reasoning or a tool call); TTFB: time to the response headers. Errors: 429, 5xx, timeouts, unreachable and failed streams. Credit is Luminal's prepaid credit at its list prices; cash is OpenRouter's reported cost, the only spend the caps count.</p>
 </section>`;
 
   const activeSection = `<section>
@@ -447,7 +488,7 @@ ${data.funnel
 </header>
 <p class="note">${count(data.people.admitted)} people admitted, ${count(data.people.activeThisWeek)} active this week. Admins are left out of every number. Updated ${escapeHtml(new Date(data.now).toISOString().slice(0, 16).replace("T", " "))} UTC. Counts, tokens, cost and times only.</p>`;
 
-  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, allTime, spendSection, queueSection, referralSection, paidSection, funnelSection, activeSection, retentionSection, costSection, limitsSection].join("\n"));
+  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, allTime, spendSection, upstreamSection, queueSection, referralSection, paidSection, funnelSection, activeSection, retentionSection, costSection, limitsSection].join("\n"));
 }
 
 // ─── CSV ──────────────────────────────────────────────────────────────────
@@ -469,8 +510,8 @@ export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendV
   switch (table) {
     case "spend":
       body = csv(
-        ["week_start", "week_usd", "weekly_cap_usd", "total_usd", "total_cap_usd", "admin_week_usd", "admin_total_usd", "paused", "paused_by_env", "open_admission", "admitted", "max_active_users", "resets_at"],
-        [[day(data.currentWeek), spend.weekUsd, spend.weeklyCapUsd, spend.totalUsd, spend.totalCapUsd, spend.adminWeekUsd, spend.adminTotalUsd, spend.paused, spend.pausedByEnv, spend.openAdmission, data.people.admitted, spend.maxActiveUsers, new Date(spend.resetsAt).toISOString()]],
+        ["week_start", "week_usd", "weekly_cap_usd", "total_usd", "total_cap_usd", "admin_week_usd", "admin_total_usd", "paused", "paused_by_env", "open_admission", "admitted", "max_active_users", "resets_at", "primary_upstream", "luminal_credit_usd", "luminal_credit_used_usd", "free_credit_week_usd", "weekly_credit_usd"],
+        [[day(data.currentWeek), spend.weekUsd, spend.weeklyCapUsd, spend.totalUsd, spend.totalCapUsd, spend.adminWeekUsd, spend.adminTotalUsd, spend.paused, spend.pausedByEnv, spend.openAdmission, data.people.admitted, spend.maxActiveUsers, new Date(spend.resetsAt).toISOString(), spend.primaryUpstream, spend.creditUsd, spend.creditUsedUsd, spend.freeCreditWeekUsd, spend.weeklyCreditUsd]],
       );
       break;
     case "weekly-active":
@@ -515,6 +556,15 @@ export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendV
       );
       break;
     }
+    case "upstreams":
+      body = csv(
+        ["window", "upstream", "requests", "errors", "ttft_median_ms", "ttft_p90_ms", "ttfb_median_ms", "cache_hit_share", "credit_usd", "cash_usd"],
+        [
+          ...data.upstreams.map((row) => [row.window, row.upstream, row.requests, row.errors, row.medianTtftMs, row.p90TtftMs, row.medianTtfbMs, row.cacheHitShare, row.creditUsd, row.cashUsd]),
+          ["all_time", "luminal_credit", null, null, null, null, null, null, spend.creditUsedUsd, null],
+        ],
+      );
+      break;
     case "funnel":
       body = csv(["signup_week", "signed_up", "first_request", "weekly_active"], data.funnel.map((row) => [row.weekStart === null ? "all" : day(row.weekStart), row.signedUp, row.firstRequest, row.weeklyActive]));
       break;

@@ -94,3 +94,19 @@ export function costOf(usage: Usage | undefined, fallbackTokens: number): number
 function count(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
 }
+
+/** USD per million tokens, as in config.ts `Prices`. */
+export interface TokenPrices {
+  input: number;
+  cached: number;
+  output: number;
+}
+
+/**
+ * What `usage` costs at list prices: uncached prompt tokens at the input price, cached prompt
+ * tokens at the cached price, and completion tokens (reasoning included) at the output price.
+ */
+export function costAtPrices(usage: Usage, prices: TokenPrices): number {
+  const uncached = usage.promptTokens - usage.cachedTokens;
+  return (uncached * prices.input + usage.cachedTokens * prices.cached + usage.completionTokens * prices.output) / 1_000_000;
+}
