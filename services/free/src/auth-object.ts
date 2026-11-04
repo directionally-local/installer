@@ -10,7 +10,8 @@ import { newUserCode } from "./codes.js";
  * database holds nothing usable.
  */
 
-export const DEVICE_CODE_TTL_MS = 600_000;
+/** How long a sign-in code works: long enough to switch to a phone and sign in to GitHub there. */
+export const DEVICE_CODE_TTL_MS = 15 * 60_000;
 export const POLL_INTERVAL_S = 5;
 export const REFRESH_TTL_MS = 30 * 86_400_000;
 /** A rotated refresh token used again within this window is a retry, not theft. */

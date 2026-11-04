@@ -80,6 +80,17 @@ describe("stream metering", () => {
     assert.equal(outcome.errored, true);
   });
 
+  it("names the host and says when the upstream failed", async () => {
+    const ok = await run(`data: {"provider":"DeepInfra","choices":[]}\n\ndata: {"provider":"DeepInfra","usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n`);
+    assert.equal(ok.outcome.host, "deepinfra");
+    assert.equal(ok.outcome.upstreamFailed, false);
+    const failed = await run(`data: {"provider":"Morph","error":{"code":502,"message":"x"}}\n\ndata: [DONE]\n\n`);
+    assert.equal(failed.outcome.host, "morph");
+    assert.equal(failed.outcome.upstreamFailed, true);
+    const cut = await run(`data: {"provider":"Morph","choices":[]}\n\n`);
+    assert.equal(cut.outcome.upstreamFailed, true, "ended without [DONE]");
+  });
+
   it("reads a final line with no trailing newline", async () => {
     const { outcome } = await run(`data: {"usage":{"prompt_tokens":1,"completion_tokens":1}}`);
     assert.equal(outcome.usage?.completionTokens, 1);

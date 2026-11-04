@@ -1,4 +1,4 @@
-import type { FreeConfig } from "./config.js";
+import { MAX_HOST_COOLDOWN_MINUTES, type FreeConfig } from "./config.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
 /**
@@ -33,6 +33,8 @@ export const RUNTIME_SETTINGS = {
   openRouterQuantizations: { kind: "quantizations", env: "OPENROUTER_QUANTIZATIONS" },
   /** "deny" or "allow". */
   openRouterDataCollection: { kind: "dataCollection", env: "OPENROUTER_DATA_COLLECTION" },
+  /** Minutes a host that failed a request is skipped; 0 turns it off. */
+  openRouterHostCooldownMinutes: { kind: "minutes", env: "OPENROUTER_HOST_COOLDOWN_MINUTES" },
 } as const;
 
 export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;
@@ -76,6 +78,8 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return Array.isArray(value) && isQuantizationList(value) ? [...value] : "invalid";
     case "dataCollection":
       return value === "allow" || value === "deny" ? value : "invalid";
+    case "minutes":
+      return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_HOST_COOLDOWN_MINUTES ? value : "invalid";
   }
 }
 
@@ -88,6 +92,7 @@ const RULES: Record<Kind, string> = {
   slugs: 'a list of up to 10 OpenRouter provider slugs, e.g. ["deepinfra", "novita"], or [] for none',
   quantizations: 'a list of OpenRouter quantization levels, e.g. ["fp8", "bf16"], or [] for no filter',
   dataCollection: '"deny" or "allow"',
+  minutes: `a whole number of minutes, 0 to ${MAX_HOST_COOLDOWN_MINUTES} (0 turns it off)`,
 };
 
 /**

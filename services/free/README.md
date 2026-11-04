@@ -4,6 +4,9 @@ A portable Worker with Durable Objects (SQLite) that gives signed-in people a we
 `deepseek/deepseek-v4.1-flash-1017` through OpenRouter. Sign-in is GitHub by device code. The
 contract is in `src/app.ts`, and the refusal sentences are in `src/messages.ts`.
 
+A sign-in code lasts 15 minutes (`expires_in: 900`), long enough to open the link on a phone
+and sign in to GitHub there. The terminal polls every 5 seconds.
+
 ## Admission
 
 There is one account per GitHub user, keyed on the numeric GitHub id.
@@ -97,6 +100,7 @@ Each setting has an env var and an admin override (`POST /admin/config`):
 | `openRouterProviderOrder` | `OPENROUTER_PROVIDER_ORDER` (comma-separated slugs) | empty: no pinned host, cheapest first |
 | `openRouterQuantizations` | `OPENROUTER_QUANTIZATIONS` (comma-separated levels) | `fp8,mxfp8,fp16,bf16,fp32`; empty means no filter |
 | `openRouterDataCollection` | `OPENROUTER_DATA_COLLECTION` | `deny` (`allow` is permitted) |
+| `openRouterHostCooldownMinutes` | `OPENROUTER_HOST_COOLDOWN_MINUTES` | `10`; `0` turns host avoidance off |
 
 Setting an order sends `order` instead of `sort`. The filters still apply, so a pinned host
 that fails them is skipped. Hosts bill different prices for the same model, so check
@@ -104,6 +108,34 @@ that fails them is skipped. Hosts bill different prices for the same model, so c
 
 As a backstop on the company key, also turn off "Allow providers that may train on inputs" in
 OpenRouter's account privacy settings.
+
+### Steering around a failing host
+
+OpenRouter says which host served each response: the `provider` field of a completion or of
+each stream chunk, and `error.metadata.provider_name` on an error. When a request fails in a
+way the host is to blame for (an HTTP 5xx naming the host, an error body, or a stream that
+carries an error or ends without `[DONE]`), that host is listed as failing for
+`openRouterHostCooldownMinutes` (10 by default). A client closing its stream, a 4xx, a 429
+and an error that names no host don't count.
+
+While a host is listed, new requests add it to `ignore`, and the filters and the sort pick
+the next host:
+
+```json
+"provider": { "sort": "price", "allow_fallbacks": true,
+              "quantizations": ["fp8", "mxfp8", "fp16", "bf16", "fp32"], "data_collection": "deny",
+              "ignore": ["morph"] }
+```
+
+If OpenRouter then answers that no host is available, the request is sent once more without
+`ignore`. The list is one small table in the rate-limiter object `openrouter-hosts`, shared
+by every request. Each row is a host and when it last failed; whether it still counts is
+decided from the current cooldown, so a change, or `0`, applies to the next request.
+
+Each request with a known host adds to `host_daily` (requests and failures per host per day),
+and each failure adds a row to `host_failures` (time, host, `http_5xx` | `error_body` |
+`stream`, upstream status). Counts only, never content. `GET /admin/metrics` returns
+`hosts: [{host, requests, failures, failureRate}]` for its date range.
 
 ## Sign-out and server keys
 

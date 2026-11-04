@@ -7,7 +7,7 @@ import { MAX_SERVER_KEYS, parseServerKey, type AccountObject, type Allowance, ty
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig } from "./config.js";
-import type { DirectoryObject, RequestRecord } from "./directory-object.js";
+import type { DirectoryObject, HostFailure, RequestRecord } from "./directory-object.js";
 import { apiError, json } from "./errors.js";
 import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, type SpendView } from "./dashboard-page.js";
 import { cleanBatch } from "./events.js";
@@ -24,7 +24,7 @@ import {
 import { confirmPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, tooNewIntro } from "./pages.js";
 import { ALLOWED_MODELS, chargedTokens, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
-import { providerPreferences } from "./routing.js";
+import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
 import { meterStream } from "./sse.js";
 import { DAY_MS, isoDay, weekEnd } from "./week.js";
@@ -106,6 +106,7 @@ export interface Env {
   OPENROUTER_PROVIDER_ORDER?: string;
   OPENROUTER_QUANTIZATIONS?: string;
   OPENROUTER_DATA_COLLECTION?: string;
+  OPENROUTER_HOST_COOLDOWN_MINUTES?: string;
   PAUSED?: string;
   PUBLIC_URL?: string;
   AUTH: DurableObjectNamespace<AuthObject>;
@@ -283,6 +284,11 @@ function directory(c: Ctx) {
 
 function auth(c: Ctx) {
   return c.env.AUTH.getByName("auth");
+}
+
+/** The OpenRouter hosts that failed recently (see rate-limit-object.ts). */
+function hosts(c: Ctx) {
+  return c.env.RATE_LIMITER.getByName(HOSTS_OBJECT);
 }
 
 /** The config with the admin's runtime overrides applied, the kill switch, and non-admin spend. */
@@ -754,10 +760,13 @@ async function chat(c: Ctx): Promise<Response> {
   const upstreamBody: Record<string, unknown> = { ...body, max_tokens: reservation.maxTokens, usage: { include: true } };
   delete upstreamBody.max_completion_tokens;
   // Never fall back to another model, and route on our terms (see routing.ts): the cheapest
-  // full-precision host that doesn't collect prompts, unless the owner pinned an order.
+  // full-precision host that doesn't collect prompts, unless the owner pinned an order, and
+  // not a host that failed a request in the last few minutes.
   delete upstreamBody.models;
   delete upstreamBody.route;
-  upstreamBody.provider = providerPreferences(gate.config);
+  const cooldownMs = gate.config.openRouterHostCooldownMinutes * 60_000;
+  const failingHosts = cooldownMs > 0 ? await hosts(c).failingHosts(c.now() - cooldownMs) : [];
+  upstreamBody.provider = providerPreferences(gate.config, failingHosts);
   upstreamBody.user = `dl-${(await sha256Hex(`free:${identity.githubId}`)).slice(0, 32)}`;
   const sessionId = c.request.headers.get("x-session-id") ?? (typeof body.session_id === "string" ? body.session_id : undefined);
   if (sessionId && /^[\x21-\x7e]{1,256}$/.test(sessionId)) upstreamBody.session_id = sessionId;
@@ -765,7 +774,10 @@ async function chat(c: Ctx): Promise<Response> {
   if (stream) upstreamBody.stream_options = { include_usage: true };
 
   const started = c.now();
-  const settle = async (usage: Usage | undefined, status: string, chargeNothing = false) => {
+  /** `host` is who served or failed the request; with `failure`, it goes on the failing list too. */
+  const settle = async (usage: Usage | undefined, status: string, options: { chargeNothing?: boolean; host?: string; failure?: HostFailure } = {}) => {
+    const { chargeNothing = false, host, failure } = options;
+    if (host && failure && cooldownMs > 0) await hosts(c).markHostFailing(host, c.now());
     const charged = chargeNothing ? 0 : usage ? chargedTokens(usage, gate.config.cachedTokenWeight) : undefined;
     const cost = chargeNothing ? 0 : usage ? costOf(usage, 0) : undefined;
     const settled = await person.settle({ reservationId: reservation.reservationId, charged, costUsd: cost, limits, now: c.now() });
@@ -781,32 +793,48 @@ async function chat(c: Ctx): Promise<Response> {
       costUsd: settled.costUsd,
       status,
       latencyMs: c.now() - started,
+      ...(host ? { host } : {}),
+      ...(host && failure ? { hostFailure: failure } : {}),
     };
     await directory(c).recordRequest(record);
     return settled.allowance;
   };
 
-  let upstream: Response;
-  try {
-    upstream = await c.fetch(OPENROUTER_URL, {
+  const send = (payload: Record<string, unknown>) =>
+    c.fetch(OPENROUTER_URL, {
       method: "POST",
       headers: {
         authorization: `Bearer ${c.config.openRouterApiKey}`,
         "content-type": "application/json",
         "http-referer": "https://directionallylocal.com",
         "x-title": "Directionally Local",
-        ...(upstreamBody.session_id ? { "x-session-id": String(upstreamBody.session_id) } : {}),
+        ...(payload.session_id ? { "x-session-id": String(payload.session_id) } : {}),
       },
-      body: JSON.stringify(upstreamBody),
+      body: JSON.stringify(payload),
     });
+
+  let upstream: Response;
+  let errorText: string | undefined;
+  try {
+    upstream = await send(upstreamBody);
+    if (!upstream.ok) {
+      errorText = await upstream.text().catch(() => "");
+      // Skipping the failing hosts left none: ask once more with every host allowed.
+      if (failingHosts.length > 0 && isNoHostError(upstream.status, errorText)) {
+        upstream = await send({ ...upstreamBody, provider: providerPreferences(gate.config) });
+        errorText = upstream.ok ? undefined : await upstream.text().catch(() => "");
+      }
+    }
   } catch {
-    const allowance = await settle(undefined, "upstream_error", true);
+    const allowance = await settle(undefined, "upstream_error", { chargeNothing: true });
     return apiError(502, "upstream_error", "The model provider couldn't be reached. Try again.", {}, quotaHeaders(allowance));
   }
 
   if (!upstream.ok) {
-    const text = await upstream.text().catch(() => "");
-    const allowance = await settle(undefined, "upstream_error", true);
+    const text = errorText ?? "";
+    const host = upstream.status >= 500 ? hostOf(parseJson(text)) : undefined;
+    const failure: HostFailure | undefined = host ? { kind: "http_5xx", upstreamStatus: upstream.status } : undefined;
+    const allowance = await settle(undefined, "upstream_error", { chargeNothing: true, ...(host ? { host } : {}), ...(failure ? { failure } : {}) });
     const quota = quotaHeaders(allowance);
     if (upstream.status === 429) {
       const retryAfter = Math.max(1, Number(upstream.headers.get("retry-after")) || 10);
@@ -817,8 +845,11 @@ async function chat(c: Ctx): Promise<Response> {
 
   const contentType = upstream.headers.get("content-type") ?? "";
   if (stream && upstream.body && contentType.includes("text/event-stream")) {
-    const metered = meterStream(upstream.body, async ({ usage, errored }) => {
-      await settle(usage, usage ? (errored ? "stream_error" : "ok") : "no_usage");
+    const metered = meterStream(upstream.body, async ({ usage, errored, upstreamFailed, host }) => {
+      await settle(usage, usage ? (errored ? "stream_error" : "ok") : "no_usage", {
+        ...(host ? { host } : {}),
+        ...(upstreamFailed ? { failure: { kind: "stream", upstreamStatus: null } as HostFailure } : {}),
+      });
     });
     return new Response(metered, {
       status: 200,
@@ -827,17 +858,23 @@ async function chat(c: Ctx): Promise<Response> {
   }
 
   const text = await upstream.text();
-  let usage: Usage | undefined;
-  try {
-    usage = parseUsage((JSON.parse(text) as { usage?: unknown }).usage);
-  } catch {
-    usage = undefined;
-  }
-  const allowance = await settle(usage, usage ? "ok" : "no_usage");
+  const parsed = parseJson(text) as { usage?: unknown; error?: unknown } | undefined;
+  const usage = parseUsage(parsed?.usage);
+  const host = hostOf(parsed);
+  const failure: HostFailure | undefined = parsed?.error ? { kind: "error_body", upstreamStatus: null } : undefined;
+  const allowance = await settle(usage, usage ? "ok" : "no_usage", { ...(host ? { host } : {}), ...(failure ? { failure } : {}) });
   return new Response(text, {
     status: 200,
     headers: { "content-type": contentType || "application/json", "cache-control": "no-store", ...quotaHeaders(allowance) },
   });
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
 }
 
 function numberOrUndefined(value: unknown): number | undefined {
