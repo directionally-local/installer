@@ -69,6 +69,124 @@ jobs:
           echo "::error::$NAME@$VERSION wasn't installable after publishing."
           exit 1
 
+  # dl's prebuilt bundles: one .tar.gz per platform with dl, its exact dependencies and that
+  # platform's binaries (scripts/build-bundle.sh), so the install script downloads one file
+  # with a known size instead of npm looking up and fetching ~170 packages. Built on each
+  # platform itself, from the version just published to npm (each build counts as an npm
+  # download). A platform whose build fails just has no bundle: the install script uses npm
+  # there, as before.
+  bundle:
+    needs: [release-please, publish]
+    if: needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-24.04
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+          - platform: darwin-arm64
+            runner: macos-15
+          - platform: darwin-x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Node.js major the bundle's native parts are built for. The install script's own
+      # Node.js is 24; anyone running another major gets npm.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          check-latest: true
+
+      - name: Build the bundle
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          sh scripts/build-bundle.sh "directionallylocal@$VERSION" "$VERSION" bundles
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.platform }}
+          path: bundles/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Publishes the bundles that built, with their list (dl-bundles.txt), as assets of the
+  # GitHub release. https://directionallylocal.run/dl/ redirects there until an R2 bucket is
+  # set up (next job).
+  publish-bundles:
+    needs: [release-please, bundle]
+    if: ${{ !cancelled() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          path: bundles
+          merge-multiple: true
+
+      - name: Write dl-bundles.txt
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          ls bundles/*.line >/dev/null 2>&1 || { echo "::error::No platform's bundle built."; exit 1; }
+          {
+            echo "# dl $VERSION prebuilt bundles: platform, file, SHA-256, bytes, Node.js major."
+            cat bundles/*.line
+          } > bundles/dl-bundles.txt
+          rm bundles/*.line
+          cat bundles/dl-bundles.txt
+          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            grep -q "^$platform " bundles/dl-bundles.txt || echo "::warning::No bundle for $platform; the install script uses npm there."
+          done
+
+      # The list goes up last, so it never names a tarball that isn't there yet.
+      - name: Upload to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          gh release upload "v$VERSION" bundles/*.tar.gz --clobber -R "$GITHUB_REPOSITORY"
+          gh release upload "v$VERSION" bundles/dl-bundles.txt --clobber -R "$GITHUB_REPOSITORY"
+
+  # The same files in the R2 bucket the site serves /dl/ from, once it's set up: the
+  # repository variable DL_BUNDLES_BUCKET names it, and CLOUDFLARE_API_TOKEN must be allowed
+  # to edit R2 (Workers R2 Storage: Edit) as well as Workers. Skipped until then.
+  publish-bundles-r2:
+    needs: [release-please, publish-bundles]
+    if: ${{ !cancelled() && needs.publish-bundles.result == 'success' && vars.DL_BUNDLES_BUCKET != '' }}
+    runs-on: ubuntu-latest
+    environment: cloudflare
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy the release's bundles to R2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BUCKET: ${{ vars.DL_BUNDLES_BUCKET }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          gh release download "v$VERSION" -R "$GITHUB_REPOSITORY" -p 'dl-*.tar.gz' -p dl-bundles.txt -D bundles
+          for file in bundles/*.tar.gz; do
+            npx --yes wrangler@4 r2 object put "$BUCKET/dl/$VERSION/$(basename "$file")" --file "$file" --content-type application/gzip --remote
+          done
+          # The list last: at this version, then as the latest.
+          for key in "dl/$VERSION/dl-bundles.txt" "dl/latest/dl-bundles.txt"; do
+            npx --yes wrangler@4 r2 object put "$BUCKET/$key" --file bundles/dl-bundles.txt --content-type "text/plain; charset=utf-8" --remote
+          done
+
   # The install script at https://directionallylocal.run is part of the release: it's
   # deployed only after that version is on npm, so the one-liner and
   # `npm install directionallylocal@latest` always match. Needs two repository (or

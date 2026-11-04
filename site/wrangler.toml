@@ -7,3 +7,11 @@ main = "index.ts"
 compatibility_date = "2026-10-01"
 workers_dev = false
 routes = [{ pattern = "directionallylocal.run", custom_domain = true }]
+
+# dl's prebuilt bundles (/dl/...), uploaded by the release workflow. Until this binding is
+# set, /dl/ redirects to the same files among the GitHub release's assets. To serve them from
+# R2 instead: create the bucket (npx wrangler r2 bucket create directionallylocal-bundles),
+# then uncomment these lines and keep wrangler.jsonc's r2_buckets in sync.
+# [[r2_buckets]]
+# binding = "BUNDLES"
+# bucket_name = "directionallylocal-bundles"
