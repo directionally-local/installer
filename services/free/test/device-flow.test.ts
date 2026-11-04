@@ -90,6 +90,14 @@ describe("browser sign-in", () => {
     assert.match(page.headers.get("content-security-policy") ?? "", /default-src 'none'/);
   });
 
+  it("links the privacy policy and terms on the sign-in pages", async () => {
+    const service = await createService();
+    const entry = await (await service.request("GET", "/device")).text();
+    assert.match(entry, /<a href="https:\/\/directionallylocal\.com\/privacy\/">Privacy<\/a> · <a href="https:\/\/directionallylocal\.com\/terms\/">Terms<\/a>/);
+    const done = await (await service.request("GET", "/device/callback?error=access_denied&state=x")).text();
+    assert.match(done, /directionallylocal\.com\/privacy\//);
+  });
+
   it("binds the OAuth state to the device code and the browser that started it", async () => {
     const service = await createService();
     const issued = (await (await service.request("POST", "/v1/device/code", { body: {} })).json()) as { user_code: string; device_code: string };

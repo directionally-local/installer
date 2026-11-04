@@ -14,8 +14,14 @@ tokens went in, came from cache and came out, the cost, the model and the time; 
 hash of the repository's remote URL). We never store your prompts, completions, code, file paths or file
 contents. Your GitHub account is used only to know who you are.</p>`;
 
+/** The privacy policy and terms live on the main site, directionallylocal.com (dl.new has copies). */
+export const PRIVACY_URL = "https://directionallylocal.com/privacy/";
+export const TERMS_URL = "https://directionallylocal.com/terms/";
+
+const LEGAL_LINKS = `<p class="muted"><a href="${PRIVACY_URL}">Privacy</a> · <a href="${TERMS_URL}">Terms</a></p>`;
+
 function shell(title: string, body: string, status = 200): Response {
-  return page({ title: `${title} · ${PRODUCT_NAME}`, body: `<h1>${escapeHtml(PRODUCT_NAME)}</h1>\n${body}`, status });
+  return page({ title: `${title} · ${PRODUCT_NAME}`, body: `<h1>${escapeHtml(PRODUCT_NAME)}</h1>\n${body}\n${LEGAL_LINKS}`, status });
 }
 
 /** `ref` is a referral code from `/device?ref=`, carried through to sign-in. */
