@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.14.0](https://github.com/directionally-local/installer/compare/v0.13.0...v0.14.0) (2026-11-04)
+
+
+### Features
+
+* count install script downloads and finished installs for the funnel ([6a2abdd](https://github.com/directionally-local/installer/commit/6a2abdd433b24e89de758e95dfbf8eb652d49b1c))
+* **free:** show the invite link on the sign-in success page ([b2e8957](https://github.com/directionally-local/installer/commit/b2e89572bbba79729e0c7763e906728205410a8e))
+* **free:** show the invite link on the sign-in success page ([0b530c2](https://github.com/directionally-local/installer/commit/0b530c2f7f3bd09736726c526bd342b62f1f726b))
+* install funnel — count script downloads and finished installs ([bd2fcb0](https://github.com/directionally-local/installer/commit/bd2fcb0ad9eb5bfd888ce38b370b44a0ec281f56))
+* **install:** install dl from one prebuilt bundle per platform ([1f9f228](https://github.com/directionally-local/installer/commit/1f9f2280fb5354375c8723d84a025df6e1a10f87))
+* **install:** show what the install is doing, and download less on a laptop ([5d104d2](https://github.com/directionally-local/installer/commit/5d104d281b5ae133660c9870b784801e7d30f5c0))
+* **install:** show what the install is doing, and download less on a laptop ([7519ba4](https://github.com/directionally-local/installer/commit/7519ba4bdd20c80e1aa7f0cfcaf0ae3262cfb004))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.8.0 ([1eab8cd](https://github.com/directionally-local/installer/commit/1eab8cde37cb141ccbbd8a5c678f3735c11d88c0))
+* install.sh's exit trap is a function, for shellcheck ([a5cc5c2](https://github.com/directionally-local/installer/commit/a5cc5c2d92088f0e90bb80021b63b82295348360))
+
 ## [0.13.0](https://github.com/directionally-local/installer/compare/v0.12.0...v0.13.0) (2026-11-04)
 
 
