@@ -344,10 +344,83 @@ describe("admin dashboard numbers", () => {
   });
 });
 
+describe("admin dashboard install funnel", () => {
+  it("shows scripts served → installs → sign-ups → first request → active, per day and per week, with a CSV", async () => {
+    const service = await createService();
+    const directory = service.directory();
+    const post = async (kind: "download" | "install", body: Record<string, unknown>, when: string, times = 1) => {
+      service.clock.now = at(when);
+      for (let i = 0; i < times; i++) assert.equal((await service.request("POST", `/v1/telemetry/${kind}`, { body, ip: `192.0.2.${i}` })).status, 204);
+    };
+    const install = { os: "darwin", arch: "arm64", mode: "laptop", dlVersion: "0.13.0", result: "ok", via: "home" };
+    await post("download", { route: "home", client: "curl" }, "2026-11-03", 5);
+    await post("download", { route: "invite", client: "wget" }, "2026-11-03", 2);
+    await post("download", { route: "run", client: "curl" }, "2026-11-04", 3);
+    await post("download", { route: "home", client: "curl" }, "2026-10-28", 4);
+    await post("install", install, "2026-11-03", 4);
+    await post("install", { ...install, os: "linux", arch: "x64", mode: "server", result: "failed", failedStep: "dl_up" }, "2026-11-03", 2);
+    await post("install", { ...install, result: "failed", failedStep: "node" }, "2026-11-04");
+    service.clock.now = NOW;
+    const admit = (githubId: number, login: string, when: string, isAdmin = false) =>
+      directory.admit({ githubId, login, isAdmin, inviteCode: undefined, clientDeviceId: null, accountTooNew: false, openAdmission: true, maxActive: 100, now: at(when) });
+    await admit(ADMIN_ID, "owner", "2026-11-03", true);
+    await admit(100, "alice", "2026-11-03");
+    await admit(101, "bob", "2026-11-03");
+    await admit(102, "carol", "2026-10-28");
+    const request = (githubId: number, when: string) =>
+      directory.recordRequest({ githubId, isAdmin: githubId === ADMIN_ID, at: at(when), model: MODEL, promptTokens: 10, completionTokens: 0, cachedTokens: 0, chargedTokens: 10, costUsd: 0.01, status: "ok", latencyMs: 100 });
+    await request(100, "2026-11-03");
+    await request(100, "2026-11-04");
+    await request(102, "2026-10-28");
+    await request(102, "2026-10-29");
+    await request(102, "2026-10-30");
+    await request(102, "2026-11-04");
+    await request(ADMIN_ID, "2026-11-03");
+
+    const cookie = await adminCookie(service);
+    const rows = await csv(service, cookie, "install-funnel");
+    const row = (period: string, start: string) => rows.find((r) => r.period === period && r.start === start)!;
+    assert.equal(rows.filter((r) => r.period === "day").length, 14);
+    assert.equal(rows.filter((r) => r.period === "week").length, 8);
+    assert.deepEqual(row("day", "2026-11-03"), {
+      period: "day", start: "2026-11-03", scripts_served: "7", served_home: "5", served_invite: "2", served_private_invite: "0", served_continue: "0", served_run: "0",
+      installs_ok: "4", installs_failed: "2", signed_up: "2", first_request: "1", active: "1",
+    });
+    assert.deepEqual(
+      [row("day", "2026-11-04").scripts_served, row("day", "2026-11-04").installs_failed, row("day", "2026-11-04").active],
+      ["3", "1", "2"],
+    );
+    const thisWeek = row("week", "2026-11-02");
+    assert.deepEqual([thisWeek.scripts_served, thisWeek.installs_ok, thisWeek.installs_failed, thisWeek.signed_up, thisWeek.first_request, thisWeek.active], ["10", "4", "3", "2", "1", "0"]);
+    const lastWeek = row("week", "2026-10-26");
+    assert.deepEqual([lastWeek.scripts_served, lastWeek.signed_up, lastWeek.first_request, lastWeek.active], ["4", "1", "1", "1"], "carol: 3 request days");
+
+    const installs = await csv(service, cookie, "installs");
+    assert.deepEqual(
+      installs.map((r) => [r.kind, r.os, r.arch, r.mode, r.step, r.ok, r.failed]),
+      [
+        ["system", "darwin", "arm64", "laptop", "", "4", "1"],
+        ["system", "linux", "x64", "server", "", "0", "2"],
+        ["failed_step", "", "", "", "dl_up", "", "2"],
+        ["failed_step", "", "", "", "node", "", "1"],
+      ],
+    );
+
+    const html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    assert.match(html, /<h2>Funnel<\/h2>/);
+    assert.match(html, /Anonymous counts: one per script served/);
+    assert.match(html, /can't be joined to people/);
+    assert.match(html, /Server setup \(dl up\)<\/td><td>2</);
+    assert.match(html, /macOS arm64<\/td><td>laptop<\/td><td>4<\/td><td>1</);
+    assert.match(html, /install-funnel\.csv/);
+    assert.match(html, /<h3>By sign-up week<\/h3>/);
+  });
+});
+
 describe("admin dashboard privacy", () => {
   // Columns that hold anything but counts, tokens, cost, time or who: never read by the dashboard.
   const FORBIDDEN = ["props", "session_id", "type", "model", "status", "received_at", "latency_ms", "note", "code_hash", "device_id", "old_value", "new_value", "changed_by_login"];
-  const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_timings"]);
+  const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_timings", "download_daily", "install_daily"]);
 
   it("reads only allowed tables and columns", async () => {
     const { DASHBOARD_COLUMNS } = await import("../src/dashboard-data.js");
@@ -371,7 +444,7 @@ describe("admin dashboard privacy", () => {
     });
     try {
       assert.equal((await service.request("GET", "/admin", { headers: { cookie } })).status, 200);
-      for (const table of ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "paid", "upstreams"]) await csv(service, cookie, table);
+      for (const table of ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"]) await csv(service, cookie, table);
     } finally {
       db.prepare = prepare;
       db.setAuthorizer?.(null);

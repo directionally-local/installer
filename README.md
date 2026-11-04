@@ -162,6 +162,8 @@ curl -fsSL https://directionallylocal.run | sh
 
 Which one it is: a server when it runs as root on Linux, when the laptop's setup runs it (`DL_INSTALL_ONLY=1`), or on a Linux machine `dl up` has already set up; anything else is a laptop. That's the line `dl` itself draws: on a machine with no server install, root gets the server's instructions and everyone else the laptop's. `DL_MODE=server` or `DL_MODE=laptop` overrides it.
 
+When it ends, either way, it sends one anonymous count to the free tier service, in the background: OS (`darwin` or `linux`), chip (`arm64` or `x64`), laptop or server, the `dl` version, ok or the step that failed, and which page it came from (`DL_INSTALL_VIA`, set by dl.new's scripts). No IP address or identity is kept. `DL_NO_TELEMETRY=1`, `DO_NOT_TRACK=1` or a `CI` variable turns it off. The install pages count scripts served the same way (see `services/free/README.md`, "Install counts").
+
 ## What it sets up on a server
 
 - **Node.js 24 LTS,** if Node is missing or lacks the fix for CVE-2026-111497 (22.23.4+, 24.22.1+ and 26.12.1+ are accepted). Node security releases from NodeSource are added to Ubuntu's automatic updates, which otherwise skip them. Delete `/etc/apt/apt.conf.d/52directionallylocal-nodejs` to opt out.

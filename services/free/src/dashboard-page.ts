@@ -1,5 +1,6 @@
 import { escapeHtml } from "../../shared/src/html.js";
-import { COHORT_WEEKS, REGULAR_DAYS, RETENTION_OFFSETS, TOKEN_LIMIT_SHARE, WEEKS_SHOWN, type DashboardData } from "./dashboard-data.js";
+import { DOWNLOAD_ROUTES } from "./telemetry.js";
+import { COHORT_WEEKS, FUNNEL_DAYS, REGULAR_DAYS, RETENTION_OFFSETS, TOKEN_LIMIT_SHARE, WEEKS_SHOWN, type DashboardData, type InstallFunnelRow } from "./dashboard-data.js";
 import { PRODUCT_NAME } from "./pages.js";
 import { isoDay } from "./week.js";
 
@@ -43,7 +44,7 @@ export interface SpendView {
 /** The red banner shows at this share of either cap. */
 export const BANNER_SHARE = 0.8;
 
-export const CSV_TABLES = ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "paid", "upstreams"] as const;
+export const CSV_TABLES = ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"] as const;
 export type CsvTable = (typeof CSV_TABLES)[number];
 
 export function isCsvTable(name: string): name is CsvTable {
@@ -70,6 +71,7 @@ body { margin: 0 auto; max-width: 64rem; padding: 1rem; font: 15px/1.45 system-u
 header { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: baseline; justify-content: space-between; }
 h1 { font-size: 1.3rem; margin: 0.5rem 0; }
 h2 { font-size: 1.1rem; margin: 2rem 0 0.5rem; }
+h3 { font-size: 0.95rem; margin: 1.25rem 0 0.4rem; }
 section { border-top: 1px solid var(--line); }
 .muted, figcaption, .note { color: var(--muted); }
 .note { font-size: 0.85rem; }
@@ -256,6 +258,24 @@ function meter(value: number, max: number | null, label: string): string {
 <rect class="bar" x="0" y="0" width="${filled.toFixed(1)}" height="10" rx="3"></rect>
 </svg>`;
 }
+
+/** Column headings for where a script was served. */
+const ROUTE_LABELS: Record<(typeof DOWNLOAD_ROUTES)[number], string> = {
+  home: "dl.new",
+  invite: "Invite",
+  private_invite: "Private invite",
+  continue: "Continue",
+  run: "directionallylocal.run",
+};
+/** install.sh's steps, as the failed-steps table names them. */
+const STEP_LABELS: Record<string, string> = {
+  "": "(not said)",
+  preflight: "Checks (system, user, curl)",
+  node: "Installing Node.js",
+  install_dl: "Installing dl",
+  path: "Putting dl on PATH",
+  dl_up: "Server setup (dl up)",
+};
 
 const short = (ms: number) => isoDay(ms).slice(5);
 
@@ -465,8 +485,43 @@ ${
 </div>
 </section>`;
 
+  const f = data.installFunnel;
+  const of = (part: number, whole: number) => (whole > 0 ? ` <span class="muted">(${percent(part / whole)})</span>` : "");
+  const routeTitle = (row: InstallFunnelRow) =>
+    DOWNLOAD_ROUTES.filter((route) => row.downloadsByRoute[route] > 0)
+      .map((route) => `${ROUTE_LABELS[route]} ${count(row.downloadsByRoute[route])}`)
+      .join(" · ");
+  const funnelTable = (rows: InstallFunnelRow[], period: "day" | "week") => `<div class="scroll"><table>
+<thead><tr><th>${period === "day" ? "Day" : "Week of"}</th><th>Scripts served*</th>${DOWNLOAD_ROUTES.map((route) => `<th>${escapeHtml(ROUTE_LABELS[route])}</th>`).join("")}<th>Installs ok*</th><th>Installs failed*</th><th>Sign-ups</th><th>First request</th><th>${period === "day" ? "Active that day" : "Weekly active"}</th></tr></thead>
+<tbody>
+${rows
+  .map(
+    (row) =>
+      `<tr><td>${escapeHtml(period === "day" ? weekday(row.start) : thisOrDate(row.start))}</td><td title="${escapeHtml(routeTitle(row))}">${count(row.downloads)}</td>${DOWNLOAD_ROUTES.map((route) => `<td class="muted">${count(row.downloadsByRoute[route])}</td>`).join("")}<td>${count(row.installsOk)}${of(row.installsOk, row.downloads)}</td><td>${count(row.installsFailed)}</td><td>${count(row.signedUp)}${of(row.signedUp, row.installsOk)}</td><td>${count(row.firstRequest)}</td><td>${count(row.active)}</td></tr>`,
+  )
+  .join("\n")}
+</tbody></table></div>`;
   const funnelSection = `<section>
-<div class="head"><h2>Funnel</h2>${csvLink("funnel")}</div>
+<div class="head"><h2>Funnel</h2><span>${csvLink("install-funnel")} · ${csvLink("installs")}</span></div>
+<p class="note">Scripts served → installs finished → free tier sign-ups → first request → active. * Anonymous counts: one per script served (dl.new and directionallylocal.run) and one per install that finished, with no IP, account or device, so they can't be joined to people or to each other. A percentage is of the column before it. Installs skip CI and anyone with DL_NO_TELEMETRY=1 or DO_NOT_TRACK=1; directionallylocal.run serves the same script to laptops and servers, so the split is in installs.</p>
+<h3>Last ${FUNNEL_DAYS} days</h3>
+${funnelTable(f.days, "day")}
+<h3>Per week</h3>
+${funnelTable(f.weeks, "week")}
+<p class="note">Sign-ups: people admitted that period. First request: people whose first request was in it. Active: a request that day; for a week, requests on ${REGULAR_DAYS} or more of its days. Admins left out. Days and weeks are UTC.</p>
+<div class="tiles">
+<div class="tile">Installs by system, last ${WEEKS_SHOWN} weeks*<div class="scroll"><table>
+<thead><tr><th>System</th><th>Mode</th><th>Ok</th><th>Failed</th></tr></thead>
+<tbody>
+${f.platforms.length === 0 ? `<tr><td colspan="4" class="l muted">No installs counted yet.</td></tr>` : f.platforms.map((row) => `<tr><td>${escapeHtml(`${row.os === "darwin" ? "macOS" : "Linux"} ${row.arch}`)}</td><td>${escapeHtml(row.mode)}</td><td>${count(row.ok)}</td><td>${count(row.failed)}</td></tr>`).join("\n")}
+</tbody></table></div></div>
+<div class="tile">Top failed steps, last ${WEEKS_SHOWN} weeks*<div class="scroll"><table>
+<thead><tr><th>Step</th><th>Failed</th></tr></thead>
+<tbody>
+${f.failedSteps.length === 0 ? `<tr><td colspan="2" class="l muted">No failed installs.</td></tr>` : f.failedSteps.map((row) => `<tr><td>${escapeHtml(STEP_LABELS[row.step] ?? row.step)}</td><td>${count(row.failed)}</td></tr>`).join("\n")}
+</tbody></table></div></div>
+</div>
+<h3>By sign-up week</h3>
 <div class="scroll"><table>
 <thead><tr><th>Signed up, week of</th><th>Sign-ups</th><th>First request</th><th>Weekly active</th></tr></thead>
 <tbody>
@@ -477,7 +532,7 @@ ${data.funnel
   )
   .join("\n")}
 </tbody></table></div>
-<p class="note">Weekly active: requests on ${REGULAR_DAYS} or more days of some Monday–Sunday week. Admins left out.</p>
+<p class="note">The same people followed from the week they signed up. Weekly active: requests on ${REGULAR_DAYS} or more days of some Monday–Sunday week. Admins left out.</p>
 </section>`;
 
   const header = `<header>
@@ -567,6 +622,33 @@ export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendV
       break;
     case "funnel":
       body = csv(["signup_week", "signed_up", "first_request", "weekly_active"], data.funnel.map((row) => [row.weekStart === null ? "all" : day(row.weekStart), row.signedUp, row.firstRequest, row.weeklyActive]));
+      break;
+    case "install-funnel":
+      body = csv(
+        ["period", "start", "scripts_served", ...DOWNLOAD_ROUTES.map((route) => `served_${route}`), "installs_ok", "installs_failed", "signed_up", "first_request", "active"],
+        (["day", "week"] as const).flatMap((period) =>
+          (period === "day" ? data.installFunnel.days : data.installFunnel.weeks).map((row) => [
+            period,
+            day(row.start),
+            row.downloads,
+            ...DOWNLOAD_ROUTES.map((route) => row.downloadsByRoute[route]),
+            row.installsOk,
+            row.installsFailed,
+            row.signedUp,
+            row.firstRequest,
+            row.active,
+          ]),
+        ),
+      );
+      break;
+    case "installs":
+      body = csv(
+        ["kind", "os", "arch", "mode", "step", "ok", "failed"],
+        [
+          ...data.installFunnel.platforms.map((row) => ["system", row.os, row.arch, row.mode, null, row.ok, row.failed]),
+          ...data.installFunnel.failedSteps.map((row) => ["failed_step", null, null, null, row.step || "unknown", null, row.failed]),
+        ],
+      );
       break;
     case "limits":
       body = csv(

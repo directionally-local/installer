@@ -15,6 +15,7 @@ import { networkOf, normalizeReferralCode, referralLink } from "./referrals.js";
 import { apiError, json } from "./errors.js";
 import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, type SpendView } from "./dashboard-page.js";
 import { cleanBatch } from "./events.js";
+import { cleanDownload, cleanInstall, MAX_TELEMETRY_BYTES } from "./telemetry.js";
 import {
   DEVICE_TAKEN_MESSAGE,
   INVALID_INVITE_MESSAGE,
@@ -108,6 +109,10 @@ const LIMITS = {
   inviteAttemptIp: { capacity: 10, perHour: 10 },
   signupIp: { capacity: 3, perHour: 3 / 24 },
   referralLookupIp: perMinute(60),
+  // Download counts come from the dl.new and directionallylocal.run Workers, which share a few
+  // Cloudflare addresses, so this one is generous; install counts come from people's machines.
+  telemetryDownloadIp: perMinute(600),
+  telemetryInstallIp: { capacity: 20, perHour: 20 },
 } satisfies Record<string, Limit>;
 
 export interface Env {
@@ -232,6 +237,8 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "GET" && path === "/v1/models") return models(c);
   if (method === "POST" && path === "/v1/chat/completions") return chat(c);
   if (method === "POST" && path === "/v1/events") return events(c);
+  if (method === "POST" && path === "/v1/telemetry/download") return telemetry(c, "download");
+  if (method === "POST" && path === "/v1/telemetry/install") return telemetry(c, "install");
   if (method === "GET" && path.startsWith("/v1/referrals/")) return referralLookup(c, path.slice("/v1/referrals/".length));
   if (method === "POST" && path === "/v1/billing/checkout") return billingCheckout(c);
   if (method === "POST" && path === "/v1/billing/portal") return billingPortal(c);
@@ -1007,6 +1014,34 @@ async function events(c: Ctx): Promise<Response> {
   const cleaned = cleanBatch(body, c.now());
   const accepted = await directory(c).recordEvents(identity.githubId, cleaned, c.now());
   return json({ accepted }, 202);
+}
+
+/**
+ * POST /v1/telemetry/download {route, client} and POST /v1/telemetry/install {os, arch, mode,
+ * dlVersion, result, failedStep?, via}: anonymous counts for the install funnel (telemetry.ts).
+ * No sign-in. Each adds one to that day's total for its values; nothing else is kept. The rate
+ * limit is per IP, keyed by a hash salted with the signing key and the day, so the address
+ * itself is never stored. 204 when counted.
+ */
+async function telemetry(c: Ctx, kind: "download" | "install"): Promise<Response> {
+  const day = Math.floor(c.now() / DAY_MS);
+  const ipKey = await sha256Hex(`telemetry:${c.config.tokenSigningKey}:${day}:${c.ip}`);
+  const retry = await limited(c, `telemetry:${kind}:${ipKey}`, kind === "download" ? LIMITS.telemetryDownloadIp : LIMITS.telemetryInstallIp);
+  if (retry !== undefined) return rateLimited(retry);
+  if (Number(c.request.headers.get("content-length") ?? 0) > MAX_TELEMETRY_BYTES) return apiError(413, "too_large", "A telemetry body is under 1 KB.");
+  const text = await c.request.text();
+  if (text.length > MAX_TELEMETRY_BYTES) return apiError(413, "too_large", "A telemetry body is under 1 KB.");
+  const body = parseJson(text);
+  if (kind === "download") {
+    const count = cleanDownload(body);
+    if (typeof count === "string") return apiError(400, "invalid_request", count);
+    await directory(c).countDownload(count, day);
+  } else {
+    const count = cleanInstall(body);
+    if (typeof count === "string") return apiError(400, "invalid_request", count);
+    await directory(c).countInstall(count, day);
+  }
+  return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 }
 
 // ─── Inference ──────────────────────────────────────────────────────────────

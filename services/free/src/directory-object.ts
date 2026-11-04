@@ -1,6 +1,7 @@
 import { DurableObject, type DurableObjectState } from "cloudflare:workers";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
+import type { DownloadCount, InstallCount } from "./telemetry.js";
 import { dashboardData, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
 import { creditAlert, creditPausedAlert, crossed, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, queueStartedAlert, totalSpendAlert, upstreamErrorAlert, weeklySpendAlert, type Alert } from "./alerts.js";
@@ -370,6 +371,27 @@ const SCHEMA = [
      requests INTEGER NOT NULL,
      errors   INTEGER NOT NULL,
      PRIMARY KEY (minute, upstream)
+   ) WITHOUT ROWID`,
+  // The install funnel's anonymous counts (telemetry.ts): per UTC day and allowlisted values,
+  // how many install scripts were served and how many installs finished. Nothing per person.
+  `CREATE TABLE IF NOT EXISTS download_daily (
+     day       INTEGER NOT NULL,
+     route     TEXT NOT NULL,
+     client    TEXT NOT NULL,
+     downloads INTEGER NOT NULL,
+     PRIMARY KEY (day, route, client)
+   ) WITHOUT ROWID`,
+  `CREATE TABLE IF NOT EXISTS install_daily (
+     day         INTEGER NOT NULL,
+     os          TEXT NOT NULL,
+     arch        TEXT NOT NULL,
+     mode        TEXT NOT NULL,
+     dl_version  TEXT NOT NULL,
+     result      TEXT NOT NULL,
+     failed_step TEXT NOT NULL,
+     via         TEXT NOT NULL,
+     installs    INTEGER NOT NULL,
+     PRIMARY KEY (day, os, arch, mode, dl_version, result, failed_step, via)
    ) WITHOUT ROWID`,
   `CREATE TABLE IF NOT EXISTS subscriptions (
      github_id  INTEGER PRIMARY KEY,
@@ -1226,6 +1248,33 @@ export class DirectoryObject extends DurableObject {
       }
     });
     return accepted;
+  }
+
+  /** Adds one to the day's count of install scripts served (telemetry.ts). */
+  async countDownload(count: DownloadCount, day: number): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO download_daily (day, route, client, downloads) VALUES (?, ?, ?, 1)
+       ON CONFLICT (day, route, client) DO UPDATE SET downloads = downloads + 1`,
+      day,
+      count.route,
+      count.client,
+    );
+  }
+
+  /** Adds one to the day's count of finished installs with these values (telemetry.ts). */
+  async countInstall(count: InstallCount, day: number): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO install_daily (day, os, arch, mode, dl_version, result, failed_step, via, installs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT (day, os, arch, mode, dl_version, result, failed_step, via) DO UPDATE SET installs = installs + 1`,
+      day,
+      count.os,
+      count.arch,
+      count.mode,
+      count.dlVersion,
+      count.result,
+      count.failedStep,
+      count.via,
+    );
   }
 
   // ─── Metrics ─────────────────────────────────────────────────────────────

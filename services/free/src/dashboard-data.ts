@@ -1,3 +1,4 @@
+import { DOWNLOAD_ROUTES, type DownloadRoute } from "./telemetry.js";
 import { DAY_MS, weekStart } from "./week.js";
 
 /**
@@ -7,6 +8,9 @@ import { DAY_MS, weekStart } from "./week.js";
  * event type, event properties or session ids, and never any content. A test runs these
  * queries under an SQLite authorizer that allows only the columns listed in
  * `DASHBOARD_COLUMNS`.
+ *
+ * The install funnel also reads `download_daily` and `install_daily`: anonymous per-day counts of
+ * install scripts served and installs finished, which can't be joined to people (telemetry.ts).
  *
  * The upstream section reads `upstream_daily` and `upstream_timings` instead: per upstream,
  * counts, tokens, dollars and milliseconds, with no person attached (admins included there).
@@ -31,6 +35,8 @@ export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   queue_runs: ["week_start", "ran_at", "admitted", "waiting_before", "avg_usd", "actives", "budget_usd"],
   referrals: ["referred_id", "referrer_id", "outcome", "at"],
   subscriptions: ["github_id", "state", "period_end", "state_at"],
+  download_daily: ["day", "route", "client", "downloads"],
+  install_daily: ["day", "os", "arch", "mode", "dl_version", "result", "failed_step", "via", "installs"],
   payments: ["github_id", "kind", "amount_cents", "at"],
 };
 
@@ -176,6 +182,37 @@ export interface FunnelRow {
   weeklyActive: number;
 }
 
+/** Days of the install funnel shown one by one. */
+export const FUNNEL_DAYS = 14;
+
+/**
+ * One day or one week of the install funnel, from the top: scripts served (anonymous, by
+ * route) → installs finished (anonymous, ok or failed) → free tier sign-ups → people whose
+ * first request was in this period → active people (any request that day; for a week, requests
+ * on REGULAR_DAYS or more of its days). The first two are separate counts, not the same people.
+ */
+export interface InstallFunnelRow {
+  /** The day, or the Monday of the week, as Unix ms. */
+  start: number;
+  downloads: number;
+  downloadsByRoute: Record<DownloadRoute, number>;
+  installsOk: number;
+  installsFailed: number;
+  signedUp: number;
+  firstRequest: number;
+  active: number;
+}
+
+export interface InstallFunnel {
+  /** The last FUNNEL_DAYS days and the last WEEKS_SHOWN weeks, newest first. */
+  days: InstallFunnelRow[];
+  weeks: InstallFunnelRow[];
+  /** Over the weeks shown: finished installs by OS, chip and mode, most first. */
+  platforms: Array<{ os: string; arch: string; mode: string; ok: number; failed: number }>;
+  /** Over the weeks shown: the steps installs failed at, most first ("" when it didn't say). */
+  failedSteps: Array<{ step: string; failed: number }>;
+}
+
 export interface DashboardData {
   now: number;
   currentWeek: number;
@@ -191,6 +228,8 @@ export interface DashboardData {
   paid: PaidView;
   /** Sign-ups → first request → weekly active (3+ request days in a week), per sign-up week and in all. */
   funnel: FunnelRow[];
+  /** Downloads → installs → sign-ups → first request → active, per day and per week. */
+  installFunnel: InstallFunnel;
   /** Per upstream, today and this week. */
   upstreams: UpstreamStats[];
 }
@@ -221,8 +260,8 @@ export function dashboardData(
   // One pass over the window: per person per week, days active, requests, tokens and cost.
   // The weekly actives, retention and cost tables are all computed from it.
   const personWeeks = sql
-    .exec<{ github_id: number; week: number; days: number; requests: number; tokens: number; cost: number }>(
-      `SELECT github_id, ${WEEK_OF_DAY} AS week, COUNT(*) AS days, SUM(requests) AS requests,
+    .exec<{ github_id: number; week: number; days: number; request_days: number; requests: number; tokens: number; cost: number }>(
+      `SELECT github_id, ${WEEK_OF_DAY} AS week, COUNT(*) AS days, SUM(requests > 0) AS request_days, SUM(requests) AS requests,
               SUM(charged_tokens) AS tokens, SUM(cost_usd) AS cost
        FROM daily_activity WHERE day >= ? AND ${notAdmin("github_id")}
        GROUP BY github_id, week`,
@@ -408,10 +447,10 @@ export function dashboardData(
 
   // The funnel per sign-up week (last WEEKS_SHOWN weeks) and in all.
   const funnelRows = sql
-    .exec<{ github_id: number; admitted_at: number; requested: number; active: number }>(
-      `WITH reqdays AS (SELECT github_id, ${WEEK_OF_DAY} AS week, COUNT(*) AS days FROM daily_activity WHERE requests > 0 GROUP BY github_id, week),
-            per AS (SELECT github_id, MAX(days >= ${REGULAR_DAYS}) AS active FROM reqdays GROUP BY github_id)
-       SELECT p.github_id AS github_id, p.admitted_at AS admitted_at, per.github_id IS NOT NULL AS requested, COALESCE(per.active, 0) AS active
+    .exec<{ github_id: number; admitted_at: number; requested: number; active: number; first_day: number | null }>(
+      `WITH reqdays AS (SELECT github_id, ${WEEK_OF_DAY} AS week, COUNT(*) AS days, MIN(day) AS first_day FROM daily_activity WHERE requests > 0 GROUP BY github_id, week),
+            per AS (SELECT github_id, MAX(days >= ${REGULAR_DAYS}) AS active, MIN(first_day) AS first_day FROM reqdays GROUP BY github_id)
+       SELECT p.github_id AS github_id, p.admitted_at AS admitted_at, per.github_id IS NOT NULL AS requested, COALESCE(per.active, 0) AS active, per.first_day AS first_day
        FROM people p LEFT JOIN per ON per.github_id = p.github_id WHERE ${notAdmin("p.github_id")}`,
       admins,
     )
@@ -455,6 +494,12 @@ export function dashboardData(
   };
 
   const upstreams = upstreamStats(sql, input.now);
+  // Weekly actives by requests (3+ request days) and each person's first request day, from the
+  // scans above, so the install funnel doesn't read daily_activity again.
+  const requestRegulars = new Map<number, number>();
+  for (const row of personWeeks) if (row.request_days >= REGULAR_DAYS) requestRegulars.set(row.week, (requestRegulars.get(row.week) ?? 0) + 1);
+  const firstRequestDays = funnelRows.flatMap((row) => (row.first_day === null ? [] : [row.first_day]));
+  const installFunnel = installFunnelData(sql, input.now, admins, { firstRequestDays, weeklyActive: requestRegulars });
 
   return {
     now: input.now,
@@ -464,6 +509,7 @@ export function dashboardData(
     paid,
     referrals,
     funnel,
+    installFunnel,
     weeklyActive,
     cohorts,
     weeklyCost,
@@ -472,6 +518,83 @@ export function dashboardData(
     limitHits,
     people: { admitted, activeThisWeek: weeklyActive[weeklyActive.length - 1]?.active ?? 0 },
   };
+}
+
+/**
+ * The install funnel (see `InstallFunnelRow`). `admins`: ADMIN_GITHUB_IDS as a JSON array.
+ * `people`: each non-admin's first request day, and per week (its Monday's day number) how many
+ * made requests on REGULAR_DAYS or more days, as `dashboardData` already has them.
+ */
+export function installFunnelData(sql: Sql, now: number, admins: string, people: { firstRequestDays: Iterable<number>; weeklyActive: ReadonlyMap<number, number> }): InstallFunnel {
+  const today = Math.floor(now / DAY_MS);
+  const currentWeekDay = weekStart(now) / DAY_MS;
+  const firstWeekDay = currentWeekDay - 7 * (WEEKS_SHOWN - 1);
+  const firstDay = Math.min(firstWeekDay, today - (FUNNEL_DAYS - 1));
+  const empty = (start: number): InstallFunnelRow => ({
+    start: start * DAY_MS,
+    downloads: 0,
+    downloadsByRoute: Object.fromEntries(DOWNLOAD_ROUTES.map((route) => [route, 0])) as Record<DownloadRoute, number>,
+    installsOk: 0,
+    installsFailed: 0,
+    signedUp: 0,
+    firstRequest: 0,
+    active: 0,
+  });
+  const days = new Map<number, InstallFunnelRow>();
+  for (let day = today - (FUNNEL_DAYS - 1); day <= today; day++) days.set(day, empty(day));
+  const weeks = new Map<number, InstallFunnelRow>();
+  for (let week = firstWeekDay; week <= currentWeekDay; week += 7) weeks.set(week, empty(week));
+  /** The rows a day counts in: its own and its week's (when shown). */
+  const rowsOf = (day: number) => [days.get(day), weeks.get(day - ((day + 3) % 7))].filter((row): row is InstallFunnelRow => row !== undefined);
+
+  for (const row of sql
+    .exec<{ day: number; route: string; n: number }>("SELECT day, route, SUM(downloads) AS n FROM download_daily WHERE day >= ? GROUP BY day, route", firstDay)
+    .toArray()) {
+    for (const target of rowsOf(row.day)) {
+      target.downloads += row.n;
+      if (row.route in target.downloadsByRoute) target.downloadsByRoute[row.route as DownloadRoute] += row.n;
+    }
+  }
+  for (const row of sql
+    .exec<{ day: number; result: string; n: number }>("SELECT day, result, SUM(installs) AS n FROM install_daily WHERE day >= ? GROUP BY day, result", firstDay)
+    .toArray()) {
+    for (const target of rowsOf(row.day)) {
+      if (row.result === "ok") target.installsOk += row.n;
+      else target.installsFailed += row.n;
+    }
+  }
+  for (const row of sql
+    .exec<{ day: number; n: number }>(`SELECT admitted_at / ${DAY_MS} AS day, COUNT(*) AS n FROM people WHERE admitted_at >= ? AND ${notAdmin("github_id")} GROUP BY 1`, firstDay * DAY_MS, admins)
+    .toArray()) {
+    for (const target of rowsOf(row.day)) target.signedUp += row.n;
+  }
+  for (const day of people.firstRequestDays) for (const target of rowsOf(day)) target.firstRequest++;
+  for (const row of sql
+    .exec<{ day: number; n: number }>(`SELECT day, COUNT(*) AS n FROM daily_activity WHERE day >= ? AND requests > 0 AND ${notAdmin("github_id")} GROUP BY day`, firstDay, admins)
+    .toArray()) {
+    const target = days.get(row.day);
+    if (target) target.active = row.n;
+  }
+  for (const [week, n] of people.weeklyActive) {
+    const target = weeks.get(week);
+    if (target) target.active = n;
+  }
+
+  const platforms = sql
+    .exec<{ os: string; arch: string; mode: string; ok: number; failed: number }>(
+      `SELECT os, arch, mode, SUM(CASE WHEN result = 'ok' THEN installs ELSE 0 END) AS ok, SUM(CASE WHEN result = 'ok' THEN 0 ELSE installs END) AS failed
+       FROM install_daily WHERE day >= ? GROUP BY os, arch, mode ORDER BY ok + failed DESC, os, arch, mode`,
+      firstWeekDay,
+    )
+    .toArray();
+  const failedSteps = sql
+    .exec<{ step: string; failed: number }>(
+      `SELECT failed_step AS step, SUM(installs) AS failed FROM install_daily WHERE day >= ? AND result = 'failed'
+       GROUP BY failed_step ORDER BY failed DESC, failed_step LIMIT 10`,
+      firstWeekDay,
+    )
+    .toArray();
+  return { days: [...days.values()].reverse(), weeks: [...weeks.values()].reverse(), platforms, failedSteps };
 }
 
 /** Per upstream, today and this week: counts from `upstream_daily`, percentiles from `upstream_timings`. */
