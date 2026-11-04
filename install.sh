@@ -29,6 +29,7 @@
 # it's passed on to dl, which passes it to Autopilot for the free tier sign-in. On a laptop it's
 # also kept in ~/.config/directionallylocal/pending-referral until that sign-in, so signing in on
 # a later run still credits it.
+# At the end it sends one anonymous count to free.directionallylocal.com (OS, chip, laptop or server, dl version, ok or the step that failed, which page); no IP or identity is kept, and DL_NO_TELEMETRY=1, DO_NOT_TRACK=1 or CI turns it off.
 set -eu
 
 DL_HOME="${DL_HOME:-${HOME:-}/.directionallylocal}"
@@ -56,7 +57,38 @@ step_done() {
 LOG=$(mktemp)
 # NPM_CACHE: the laptop install's own npm cache, removed when it's done (see laptop_main).
 NPM_CACHE=""
-trap 'rm -f "$LOG"; if [ -n "$NPM_CACHE" ]; then rm -rf "$NPM_CACHE"; fi' EXIT
+# Ending with an error (fail, or a command under set -e) counts a failed install.
+trap 'exit_code=$?; rm -f "$LOG"; if [ -n "$NPM_CACHE" ]; then rm -rf "$NPM_CACHE"; fi; if [ "$exit_code" -ne 0 ]; then count_install failed; fi' EXIT
+
+# The anonymous count at the end: the step the install is on (one of preflight, node,
+# install_dl, path, dl_up), laptop or server, and dl's version once it's installed.
+STAGE=preflight
+COUNT_MODE=""
+COUNT_VERSION=""
+COUNTED=""
+
+# Sends the one count, in the background: never waits, prints nothing, never fails the install.
+# Off with DL_NO_TELEMETRY=1, DO_NOT_TRACK=1, or in CI. Every value is from a fixed list.
+count_install() {
+  if [ -n "$COUNTED" ] || [ -z "$COUNT_MODE" ]; then return 0; fi
+  COUNTED=1
+  case "${DL_NO_TELEMETRY:-}" in ""|0|false) ;; *) return 0 ;; esac
+  case "${DO_NOT_TRACK:-}" in ""|0|false) ;; *) return 0 ;; esac
+  if [ -n "${CI:-}" ]; then return 0; fi
+  command -v curl >/dev/null 2>&1 || return 0
+  case $(uname -s 2>/dev/null) in Darwin) c_os=darwin ;; Linux) c_os=linux ;; *) return 0 ;; esac
+  case $(uname -m 2>/dev/null) in arm64|aarch64) c_arch=arm64 ;; x86_64|amd64) c_arch=x64 ;; *) return 0 ;; esac
+  case "${DL_INSTALL_VIA:-}" in home|invite|continue) c_via=$DL_INSTALL_VIA ;; *) c_via=run ;; esac
+  c_version=""
+  case $COUNT_VERSION in
+    *[!0-9.]*) ;;
+    [0-9]*.[0-9]*.[0-9]*) c_version=$COUNT_VERSION ;;
+  esac
+  c_body=$(printf '{"os":"%s","arch":"%s","mode":"%s","dlVersion":"%s","result":"%s",' "$c_os" "$c_arch" "$COUNT_MODE" "$c_version" "$1")
+  if [ "$1" = failed ]; then c_body="$c_body\"failedStep\":\"$STAGE\","; fi
+  c_body="$c_body\"via\":\"$c_via\"}"
+  (curl -fsS -m 3 -X POST -H 'Content-Type: application/json' -d "$c_body" https://free.directionallylocal.com/v1/telemetry/install >/dev/null 2>&1 &) 2>/dev/null || true
+}
 # Runs a command as root, through sudo when needed (keeping DL_* answers in the environment).
 as_root() {
   if [ "$(id -u)" -eq 0 ]; then
@@ -287,6 +319,7 @@ laptop_main() {
 
   # A Node that's new enough is used where it is; otherwise dl gets its own, which goes on
   # PATH only for dl and what it starts (Autopilot, npm), not for your shell.
+  STAGE=node
   own=""
   if node_is_patched; then
     node=$(command -v node)
@@ -301,6 +334,7 @@ laptop_main() {
   npm="$node_dir/npm"
   [ -x "$npm" ] || npm=npm
 
+  STAGE=install_dl
   package="${DL_PACKAGE:-directionallylocal@${DL_VERSION:-latest}}"
   step "Installing dl"
   # npm's download cache, and the Node.js headers node-gyp fetches to build a native module,
@@ -322,8 +356,10 @@ laptop_main() {
     fi
     chmod 755 "$DL_HOME/bin/$name"
   done
-  step_done "Installed dl" "dl $("$DL_HOME/bin/dl" --version 2>/dev/null || echo "") · in $DL_HOME"
+  COUNT_VERSION=$("$DL_HOME/bin/dl" --version 2>/dev/null || echo "")
+  step_done "Installed dl" "dl $COUNT_VERSION · in $DL_HOME"
 
+  STAGE=path
   if [ "${DL_NO_MODIFY_PATH:-}" != "1" ]; then
     add_to_path "$os"
   fi
@@ -358,6 +394,8 @@ laptop_main() {
   fi
 
   if [ -n "${DL_REFERRAL:-}" ]; then keep_referral; fi
+  # Installed: counted now, before dl starts (what dl does after is dl's, not the install's).
+  count_install ok
 
   if [ -n "$start" ]; then
     say ""
@@ -393,7 +431,8 @@ main() {
       unset DL_REFERRAL
     fi
   fi
-  if [ "$(install_mode)" = laptop ]; then
+  COUNT_MODE=$(install_mode)
+  if [ "$COUNT_MODE" = laptop ]; then
     laptop_main
     return
   fi
@@ -419,6 +458,7 @@ main() {
   # Node must have the fix for CVE-2026-111497 (Brotli RCE via fetch): 22.23.4+, 24.22.1+ or
   # 26.12.1+, the same rule as Hotcell's engines. A missing or unsupported Node gets 24 LTS
   # (security fixes until April 2028); an unpatched 22, 24 or 26 is upgraded on its own line.
+  STAGE=node
   if ! node_is_patched; then
     line=24
     case "$(node_major)" in 24|26) line=$(node_major) ;; esac
@@ -429,14 +469,17 @@ main() {
     step_done "Installed Node.js" "$(node -v)"
   fi
 
+  STAGE=install_dl
   package="${DL_PACKAGE:-directionallylocal@${DL_VERSION:-latest}}"
   step "Getting the installer"
   quietly "installing $package" as_root npm install -g --no-audit --no-fund --loglevel=error "$package"
-  step_done "Got the installer" "dl $(dl --version 2>/dev/null || echo "")"
+  COUNT_VERSION=$(dl --version 2>/dev/null || echo "")
+  step_done "Got the installer" "dl $COUNT_VERSION"
 
   # The laptop's setup stops here: it asks for the keys itself and runs `dl up` next,
   # with its own progress display.
   if [ "${DL_INSTALL_ONLY:-}" = "1" ]; then
+    count_install ok
     return 0
   fi
 
@@ -444,11 +487,13 @@ main() {
   # node exists even when there's no controlling terminal.
   # dl up continues the same screen, so it skips its own title.
   export DL_TITLE_SHOWN=1
+  STAGE=dl_up
   if (exec </dev/tty) 2>/dev/null; then
     as_root directionallylocal up </dev/tty
   else
     as_root directionallylocal up
   fi
+  count_install ok
 }
 
 main "$@"

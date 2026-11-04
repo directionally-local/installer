@@ -19,26 +19,45 @@ function supportedHost(): boolean {
  * Runs install.sh with every command it calls stubbed on PATH: root, a patched Node, curl
  * present, npm recording its arguments, and `directionallylocal` noting that `up` ran.
  */
-function install(env: Record<string, string>, options: { npmFails?: boolean } = {}) {
+function install(env: Record<string, string>, options: { npmFails?: boolean; dlUpFails?: boolean; counts?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dl-install-"));
   const stub = (name: string, body: string) => {
     writeFileSync(join(dir, name), `#!/bin/sh\n${body}\n`);
     chmodSync(join(dir, name), 0o755);
   };
   stub("id", 'echo 0');
-  stub("uname", 'echo Linux');
+  stub("uname", 'case "$1" in -m) echo x86_64 ;; *) echo Linux ;; esac');
   stub("node", 'exit 0');
-  stub("curl", 'exit 0');
+  stub("curl", `echo "$*" >> "${dir}/curl.log"`);
   stub("npm", options.npmFails ? 'echo "npm ERR! 404 Not Found"; exit 1' : `echo "$*" >> "${dir}/npm.log"`);
   stub("dl", 'echo 0.1.2');
-  stub("directionallylocal", `echo "$*" >> "${dir}/up.log"`);
+  stub("directionallylocal", `echo "$*" >> "${dir}/up.log"${options.dlUpFails ? "; exit 3" : ""}`);
   try {
-    const result = spawnSync("sh", [SCRIPT], { env: { PATH: `${dir}:/usr/bin:/bin`, ...env }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    // The anonymous count is off unless a test turns it on (DL_NO_TELEMETRY: "").
+    const result = spawnSync("sh", [SCRIPT], { env: { PATH: `${dir}:/usr/bin:/bin`, DL_NO_TELEMETRY: "1", ...env }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     const read = (name: string) => existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : undefined;
-    return { ...result, npm: read("npm.log"), up: read("up.log") };
+    return { ...result, npm: read("npm.log"), up: read("up.log"), counts: options.counts ? installCounts(join(dir, "curl.log")) : [] };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+const COUNT_URL = "https://free.directionallylocal.com/v1/telemetry/install";
+
+/**
+ * The install counts the script sent through the curl stub (its arguments, one call a line).
+ * The count runs in the background after the script exits, so this waits briefly for it.
+ */
+function installCounts(log: string, waitMs = 1500): Array<{ args: string; body: Record<string, unknown> }> {
+  const read = () =>
+    (existsSync(log) ? readFileSync(log, "utf8") : "")
+      .replace(/[^\n]*$/, "")
+      .split("\n")
+      .filter((line) => line.includes(COUNT_URL));
+  const deadline = Date.now() + waitMs;
+  // Only wait when a count may be on its way: the opt-out tests expect none and pay the full wait.
+  while (read().length === 0 && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+  return read().map((args) => ({ args, body: JSON.parse(/-d (\{.*\}) https:/.exec(args)![1]!) as Record<string, unknown> }));
 }
 
 describe("install.sh", () => {
@@ -108,13 +127,14 @@ if [ -n "$out" ]; then cp "$file" "$out"; else cat "$file"; fi`);
   {
     const result = spawnSync("sh", [SCRIPT], {
       cwd: home,
-      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home, SHELL: options.shell ?? "/bin/zsh", DL_NODE_DIST: "https://nodejs.example/dist", DL_TTY: options.terminal ? tty : join(dir, "no-terminal"), DL_SERVER_STATE: join(dir, "no-server-state"), ...options.env, ...(extraPath ? { PATH: `${extraPath}:${bin}:/usr/bin:/bin` } : {}) },
+      env: { PATH: `${bin}:/usr/bin:/bin`, DL_NO_TELEMETRY: "1", HOME: home, SHELL: options.shell ?? "/bin/zsh", DL_NODE_DIST: "https://nodejs.example/dist", DL_TTY: options.terminal ? tty : join(dir, "no-terminal"), DL_SERVER_STATE: join(dir, "no-server-state"), ...options.env, ...(extraPath ? { PATH: `${extraPath}:${bin}:/usr/bin:/bin` } : {}) },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
     const read = (path: string) => existsSync(path) ? readFileSync(path, "utf8") : undefined;
     // The caller removes `dir` once it has read what it needs.
-    return { ...result, dir, home, read, npm: read(join(dir, "npm.log")), curl: read(join(dir, "curl.log")), sudo: read(join(dir, "sudo.log")) };
+    const counts = () => installCounts(join(dir, "curl.log"));
+    return { ...result, dir, home, read, counts, npm: read(join(dir, "npm.log")), curl: read(join(dir, "curl.log")), sudo: read(join(dir, "sudo.log")) };
   }
 }
 
@@ -349,6 +369,73 @@ describe("install.sh on a laptop", () => {
     const result = run({ env: { DL_MODE: "desktop" } });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /DL_MODE is server or laptop \(got desktop\)/);
+  });
+});
+
+describe("install.sh: the anonymous install count", () => {
+  const cleanup: string[] = [];
+  const run = (options: Parameters<typeof laptopInstall>[0] = {}) => {
+    const result = laptopInstall({ ...options, env: { DL_NO_TELEMETRY: "", ...options.env } });
+    cleanup.push(result.dir);
+    return result;
+  };
+  after(() => { for (const dir of cleanup) rmSync(dir, { recursive: true, force: true }); });
+
+  it("sends one count when a laptop install finishes: only allowlisted values, in the background, printing nothing", () => {
+    const result = run();
+    assert.equal(result.status, 0, result.stderr);
+    const counts = result.counts();
+    assert.equal(counts.length, 1);
+    assert.deepEqual(counts[0]!.body, { os: "darwin", arch: "arm64", mode: "laptop", dlVersion: "0.10.0", result: "ok", via: "run" });
+    assert.match(counts[0]!.args, /^-fsS -m 3 -X POST -H Content-Type: application\/json -d \{/);
+    assert.doesNotMatch(result.stdout + result.stderr, /telemetry|free\.directionallylocal|anonymous|count/i);
+  });
+
+  it("says which page it came from (DL_INSTALL_VIA from dl.new), and run for anything else", () => {
+    assert.equal(run({ env: { DL_INSTALL_VIA: "invite" } }).counts()[0]!.body.via, "invite");
+    assert.equal(run({ env: { DL_INSTALL_VIA: "continue" } }).counts()[0]!.body.via, "continue");
+    assert.equal(run({ env: { DL_INSTALL_VIA: "evil\",\"x\":\"1" } }).counts()[0]!.body.via, "run");
+  });
+
+  it("counts a failed install with the step it failed at, and still fails the same way", () => {
+    const npm = run({ npmFails: true });
+    assert.equal(npm.status, 1);
+    assert.deepEqual(npm.counts().map((count) => count.body), [{ os: "darwin", arch: "arm64", mode: "laptop", dlVersion: "", result: "failed", failedStep: "install_dl", via: "run" }]);
+    const node = run({ nodePatched: false, dist: (dist) => nodeDist(dist, { corrupt: true }) });
+    assert.equal(node.status, 1);
+    assert.equal(node.counts()[0]!.body.failedStep, "node");
+    const root = run({ uid: 0 });
+    assert.equal(root.status, 1);
+    assert.equal(root.counts()[0]!.body.failedStep, "preflight");
+  });
+
+  it("is sent before dl starts, once, whatever dl does after", () => {
+    const result = run({ terminal: true, dlExit: 4 });
+    assert.equal(result.status, 4);
+    assert.deepEqual(result.counts().map((count) => count.body.result), ["ok"]);
+  });
+
+  it("is skipped with DL_NO_TELEMETRY=1, DO_NOT_TRACK=1 or in CI", () => {
+    for (const env of [{ DL_NO_TELEMETRY: "1" }, { DO_NOT_TRACK: "1" }, { CI: "true" }] as Array<Record<string, string>>) {
+      const result = run({ env });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(result.counts(), [], JSON.stringify(env));
+    }
+  });
+
+  it("on a server, counts the install after dl up, or the step that failed", { skip: !supportedHost() && "needs Ubuntu or Debian" }, () => {
+    const only = install({ DL_NO_TELEMETRY: "", DL_INSTALL_ONLY: "1" }, { counts: true });
+    assert.equal(only.status, 0, only.stderr);
+    assert.deepEqual(only.counts.map((count) => count.body), [{ os: "linux", arch: "x64", mode: "server", dlVersion: "0.1.2", result: "ok", via: "run" }]);
+    const full = install({ DL_NO_TELEMETRY: "", DL_INSTALL_VIA: "home" }, { counts: true });
+    assert.equal(full.up, "up\n");
+    assert.deepEqual(full.counts.map((count) => [count.body.result, count.body.via]), [["ok", "home"]]);
+    const up = install({ DL_NO_TELEMETRY: "" }, { dlUpFails: true, counts: true });
+    assert.equal(up.status, 3);
+    assert.deepEqual(up.counts.map((count) => [count.body.result, count.body.failedStep]), [["failed", "dl_up"]]);
+    const npm = install({ DL_NO_TELEMETRY: "" }, { npmFails: true, counts: true });
+    assert.deepEqual(npm.counts.map((count) => [count.body.result, count.body.failedStep, count.body.dlVersion]), [["failed", "install_dl", ""]]);
+    assert.deepEqual(install({ DO_NOT_TRACK: "1" }, { counts: true }).counts, []);
   });
 });
 

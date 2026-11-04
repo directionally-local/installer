@@ -3,6 +3,10 @@
  * `curl -fsSL https://directionallylocal.run | sh`. Browsers go to the marketing site.
  * The zone's subdomains are users' instant addresses (and the domain is on the Public
  * Suffix List), so this serves nothing else and never sets a cookie.
+ *
+ * Each script served is counted, anonymously, at the free tier service (`downloadCount`,
+ * `sendCount`): only that it was served, from here, to curl, wget or something else, and the
+ * day it arrives. No IP address, no user agent, nothing from the URL.
  */
 
 export const MARKETING_SITE = "https://directionallylocal.com/";
@@ -37,4 +41,39 @@ const SECURITY_HEADERS = {
 
 function textHeaders(): Record<string, string> {
   return { "Content-Type": "text/plain; charset=utf-8", ...SECURITY_HEADERS };
+}
+
+/** Where the free tier service counts scripts served (services/free, POST /v1/telemetry/download). */
+export const TELEMETRY_URL = "https://free.directionallylocal.com/v1/telemetry/download";
+
+export interface DownloadCount {
+  route: "run";
+  client: "curl" | "wget" | "other";
+}
+
+/**
+ * The count for a response, or undefined when it isn't a script served: a redirect, a 404, a
+ * HEAD. dl.new's scripts fetch this one with `?via=<page>` after counting it there, so those
+ * aren't counted twice.
+ */
+export function downloadCount(request: Request, response: Response): DownloadCount | undefined {
+  if (request.method !== "GET" || response.status !== 200) return undefined;
+  if (new URL(request.url).searchParams.has("via")) return undefined;
+  const agent = request.headers.get("User-Agent") ?? "";
+  const client = /^curl\//i.test(agent) ? "curl" : /^wget\//i.test(agent) ? "wget" : "other";
+  return { route: "run", client };
+}
+
+/** Sends one count; never throws and gives up after 3 seconds. For `ctx.waitUntil`. */
+export async function sendCount(count: DownloadCount, url: string, fetcher: typeof fetch = fetch): Promise<void> {
+  try {
+    await fetcher(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(count),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch {
+    // Counting is best effort: the script was already served.
+  }
 }

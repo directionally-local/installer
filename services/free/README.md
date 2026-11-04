@@ -519,6 +519,33 @@ and each failure adds a row to `host_failures` (time, host, `http_5xx` | `error_
 A per-person grant (`POST /admin/people/:id/grant`) still wins over the weekly defaults. The kill
 switch is `POST /admin/pause` and `/admin/unpause`; `PAUSED=true` in env pauses as well.
 
+## Install counts
+
+Two public endpoints count the top of the funnel, anonymously. No sign-in; each adds one to a
+per-UTC-day total for its values, and nothing else is stored: no IP address, user agent, invite
+code, account or device. `204` when counted, `400 invalid_request` for any value outside the
+lists, `413` over 1 KB, `429` when rate-limited.
+
+| request | sent by |
+|---|---|
+| `POST /v1/telemetry/download {"route", "client"}` | the dl.new and directionallylocal.run Workers, after serving an install script (`ctx.waitUntil`, never delaying it) |
+| `POST /v1/telemetry/install {"os", "arch", "mode", "dlVersion", "result", "failedStep"?, "via"}` | `install.sh`, once at the end, in the background with `curl -m 3` |
+
+- `route`: `home` (dl.new), `invite` (dl.new/r/…), `private_invite` (dl.new/i/…), `continue`
+  (dl.new/continue), `run` (directionallylocal.run; laptops and servers fetch the same URL, so
+  the split is the install's `mode`). dl.new's scripts fetch directionallylocal.run with
+  `?via=`, which isn't counted again. `client`: `curl`, `wget` or `other`.
+- `os` `darwin|linux`, `arch` `arm64|x64`, `mode` `laptop|server`, `dlVersion` `x.y.z` (or empty
+  when it failed before dl was installed), `result` `ok|failed`, `failedStep` (with `failed`
+  only) `preflight|node|install_dl|path|dl_up`, `via` `home|invite|continue|run` (from
+  `DL_INSTALL_VIA`, which the dl.new scripts set).
+- install.sh skips it with `DL_NO_TELEMETRY=1`, `DO_NOT_TRACK=1` or `CI` set.
+- Rate limits per IP: 600 downloads a minute (they come from a few Cloudflare addresses) and 20
+  installs an hour. The limiter's key is a SHA-256 of the IP salted with `TOKEN_SIGNING_KEY` and
+  the day, so the address isn't stored there either.
+- Stored in the Directory's `download_daily` and `install_daily`. The counts are best effort:
+  anyone can post one, so read them as trends, not exact numbers.
+
 ## Admin dashboard
 
 `GET /admin` is a server-rendered page for admins: weekly active developers (3+ days and any
@@ -527,15 +554,19 @@ day, last 8 weeks), cohort retention (weeks 1, 2 and 4 after sign-up), cost per 
 this week and last (and on which day), and global spend against the effective caps with the
 pause and admission state. Each table has a CSV at `/admin/dashboard/<table>.csv`
 (`spend`, `weekly-active`, `retention`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`,
-`queue`, `referrals`, `funnel`, `paid`, `upstreams`).
+`queue`, `referrals`, `funnel`, `install-funnel`, `installs`, `paid`, `upstreams`).
 
 At the top: a red banner when free spend is at 80% or more of either cap, and the all-time spend
 against the all-time cap ($1,000). Then the queue (waiting now, the longest wait, how many this
 Monday let in and the forecast behind it), referrals (links used, sign-ups via referral, how many
 became weekly active, bonus tokens a week granted this week), paid plans (active Pro
 subscribers, top-ups this week and month, revenue before tax this week and month, and what paid
-usage cost upstream), and the funnel per sign-up week
-and in all (sign-ups → first request → weekly active). Counts only, no content.
+usage cost upstream), and the funnel: per day (last 14) and per week (last 8), install scripts
+served by route → installs finished, ok and failed → sign-ups → first request → active (that
+day; for a week, 3+ request days), then installs by OS, chip and mode and the top failed steps,
+then the funnel per sign-up week and in all (sign-ups → first request → weekly active). The
+first two steps are [anonymous counts](#install-counts) and can't be joined to people. Counts
+only, no content.
 
 **Upstreams** (after global spend): the Luminal credit gauge (used against `luminalCreditUsd`),
 this week's free credit against the weekly credit budget, which upstream is serving, and per
@@ -550,7 +581,8 @@ credit. CSV: `upstreams`.
   counts, charged tokens and cost, plus GitHub logins, sign-up times, per-person grants and the
   spend totals, and for the launch sections the queue (ids and times), the Monday runs (counts
   and the forecast) and referrals (ids, time and outcome), and for the upstreams `upstream_daily`
-  and `upstream_timings` (counts, tokens, dollars and milliseconds per upstream, no person). No model, event type or properties,
+  and `upstream_timings` (counts, tokens, dollars and milliseconds per upstream, no person), and
+  for the install funnel `download_daily` and `install_daily` (anonymous counts). No model, event type or properties,
   session ids, prompts or code. A test runs
   the dashboard under an SQLite authorizer that allows only those columns.
 - **The roll-up** is kept up to date with each request and event, and built once from the
