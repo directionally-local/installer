@@ -55,6 +55,8 @@ step_done() {
 
 # Quiet steps: output goes to a log that's shown only if the step fails.
 LOG=$(mktemp)
+# How long the last quiet step took, in seconds.
+STEP_SECONDS=0
 # NPM_CACHE: the laptop install's own npm cache, removed when it's done (see laptop_main).
 NPM_CACHE=""
 # On the way out: clean up, and count a failed install when it ends with an error (fail, or a
@@ -115,34 +117,151 @@ frame() {
 
 # On failure, show only this step's own output, not the earlier steps' in the same log.
 show_step_log() {
-  tail -n "+$(($1 + 1))" "$LOG" | tail -n 15 | while IFS= read -r line; do
+  # Without npm's progress lines (http, info, timing): the error is in what's left.
+  tail -n "+$(($1 + 1))" "$LOG" | grep -v '^npm \(http\|info\|timing\) ' | tail -n 15 | while IFS= read -r line; do
     if [ -n "$FANCY" ]; then printf '    \033[2m%s\033[0m\n' "$line" >&2; else printf '    %s\n' "$line" >&2; fi
   done
+}
+
+# A step's live progress: when WATCH names a function, quietly calls it about once a second
+# with the log line the step's output starts after. It sets LABEL (what's happening now, in
+# place of the step's name), DETAIL (how far along) and SLOW_MB (the download's size, for the
+# slow-network hint; empty once the download is done). WATCH is cleared when the step ends.
+WATCH=""
+LABEL=""
+DETAIL=""
+SLOW_MB=""
+
+# m:ss
+clock() {
+  printf '%d:%02d' $(($1 / 60)) $(($1 % 60))
+}
+
+# A line under the running step, once: it scrolls up with the steps and stays readable.
+hint() {
+  if [ -n "$FANCY" ]; then printf '\r\033[2K    \033[33m%s\033[0m\n' "$*"; else say "   $*"; fi
 }
 
 quietly() {
   what=$1
   shift
   from=$(wc -l <"$LOG")
-  if [ -z "$FANCY" ]; then
+  if [ -z "$FANCY" ] && [ -z "$WATCH" ]; then
     "$@" >>"$LOG" 2>&1 || { show_step_log "$from"; fail "$what failed"; }
     return 0
   fi
-  # Run in the background and animate the current step until it finishes.
+  # Run in the background and show the current step until it finishes: animated at a
+  # terminal; otherwise a plain line when the step moves on, and its progress every 15 s.
   "$@" >>"$LOG" 2>&1 &
   pid=$!
   started=$(date +%s)
   tick=0
+  LABEL=$STEP
+  DETAIL=""
+  SLOW_MB=""
+  hinted=""
+  printed="$STEP"
+  printed_at=0
   while kill -0 "$pid" 2>/dev/null; do
     elapsed=$(($(date +%s) - started))
-    printf '\r\033[2K  \033[36m%s\033[0m %-33s\033[2m%d:%02d\033[0m' "$(frame "$tick")" "$STEP" $((elapsed / 60)) $((elapsed % 60))
+    if [ -n "$WATCH" ] && [ $((tick % 10)) -eq 0 ]; then
+      "$WATCH" "$from"
+      # After 90 s still downloading: probably a slow connection, so say what to expect.
+      # (DL_SLOW_AFTER shortens the wait in tests.)
+      if [ -z "$hinted" ] && [ -n "$SLOW_MB" ] && [ "$elapsed" -ge "${DL_SLOW_AFTER:-90}" ]; then
+        hinted=1
+        hint "Slow network? This downloads about $SLOW_MB MB. It keeps going; press Ctrl+C to stop."
+      fi
+    fi
+    if [ -n "$FANCY" ]; then
+      printf '\r\033[2K  \033[36m%s\033[0m %-33s\033[2m%s%s\033[0m' "$(frame "$tick")" "$LABEL" "${DETAIL:+$DETAIL · }" "$(clock "$elapsed")"
+    elif [ "$LABEL" != "$printed" ] || { [ -n "$DETAIL" ] && [ $((elapsed - printed_at)) -ge 15 ]; }; then
+      say "   $LABEL${DETAIL:+: $DETAIL} ($(clock "$elapsed"))"
+      printed=$LABEL
+      printed_at=$elapsed
+    fi
     tick=$((tick + 1))
     sleep 0.1
   done
+  WATCH=""
   if ! wait "$pid"; then
-    printf '\r\033[2K  \033[31m✗\033[0m %s\n\n' "$STEP"
+    if [ -n "$FANCY" ]; then printf '\r\033[2K  \033[31m✗\033[0m %s\n\n' "$LABEL"; fi
     show_step_log "$from"
     fail "$what failed"
+  fi
+  STEP_SECONDS=$(($(date +%s) - started))
+}
+
+# The size of a file in bytes, 0 while it doesn't exist.
+file_bytes() {
+  if [ -f "$1" ]; then wc -c <"$1" | tr -d ' '; else echo 0; fi
+}
+
+# Megabytes, for people: 37 (rounded; at least 1).
+mb() {
+  echo $((($1 + 999999) / 1000000))
+}
+
+# The size a URL will download, from its Content-Length (after redirects); empty when unknown.
+remote_bytes() {
+  curl -fsSIL "$1" 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "content-length:" { n = $2 } END { if (n > 0) print n }'
+}
+
+# WATCH for a curl download (DOWNLOAD_TO, DOWNLOAD_BYTES): "45% · 14 of 31 MB".
+watch_download() {
+  got=$(file_bytes "$DOWNLOAD_TO")
+  if [ -n "$DOWNLOAD_BYTES" ] && [ "$DOWNLOAD_BYTES" -gt 0 ]; then
+    DETAIL="$((got * 100 / DOWNLOAD_BYTES))% · $((got / 1000000)) of $(mb "$DOWNLOAD_BYTES") MB"
+    SLOW_MB=$(mb "$DOWNLOAD_BYTES")
+  else
+    DETAIL="$((got / 1000000)) MB so far"
+  fi
+}
+
+# Downloads URL $1 to $2 as step $3 (the label shown while it runs), with its progress.
+download() {
+  DOWNLOAD_TO=$2
+  DOWNLOAD_BYTES=$(remote_bytes "$1") || DOWNLOAD_BYTES=""
+  STEP="$3${DOWNLOAD_BYTES:+ ($(mb "$DOWNLOAD_BYTES") MB)}"
+  if [ -n "$FANCY" ]; then printf '\r\033[2K'; fi
+  step "$STEP"
+  WATCH=watch_download
+  quietly "downloading $1" curl -fsSL "$1" -o "$2"
+}
+
+# About how much the npm install downloads (dl, Autopilot and their packages), for the
+# slow-network hint; npm doesn't say in advance.
+NPM_DOWNLOAD_MB=40
+
+# WATCH for `npm install --loglevel=info`: which phase it's in, read from its log.
+watch_npm() {
+  steplog=$(tail -n "+$(($1 + 1))" "$LOG")
+  if printf '%s\n' "$steplog" | grep -q '^gyp info it worked'; then
+    # node-gyp compiling a native module: no prebuilt one for this computer.
+    LABEL="Building native parts (one time, ~1 min)"
+    DETAIL=""
+    SLOW_MB=""
+  elif printf '%s\n' "$steplog" | grep -q '^npm info run '; then
+    LABEL="Setting up Autopilot"
+    DETAIL=""
+    SLOW_MB=""
+  else
+    LABEL="Downloading dl"
+    SLOW_MB=$NPM_DOWNLOAD_MB
+    # First npm looks up each package (one request apiece), then downloads them: about as
+    # many as it looked up, so that's the total.
+    packages=$(printf '%s\n' "$steplog" | grep -c '^npm http fetch GET 200 [^ ]*\.tgz ') || packages=0
+    fetched=$(printf '%s\n' "$steplog" | grep -c '^npm http fetch GET 200 ') || fetched=0
+    looked=$((fetched - packages))
+    if [ "$packages" -gt 0 ] && [ "$packages" -lt "$looked" ]; then
+      DETAIL="$packages of ~$looked packages"
+    elif [ "$packages" -gt 0 ]; then
+      DETAIL="$packages packages"
+    elif [ "$looked" -gt 0 ]; then
+      DETAIL="looking up packages ($looked)"
+    else
+      DETAIL=""
+    fi
   fi
 }
 
@@ -184,28 +303,38 @@ sha256_of() {
   fi
 }
 
+# Whether this computer's tar can unpack .tar.xz: macOS's always can; GNU tar needs xz.
+can_unxz() {
+  [ "$1" = darwin ] || command -v xz >/dev/null 2>&1
+}
+
 # Node.js 24 LTS from nodejs.org into $DL_HOME, checked against its published SHA-256.
+# The .tar.xz when tar can unpack it: half the download of the .tar.gz (28 MB, not 53).
 install_own_node() {
   base="${DL_NODE_DIST:-https://nodejs.org/dist/latest-v24.x}"
   step "Installing Node.js 24"
   sums=$(curl -fsSL "$base/SHASUMS256.txt") || fail "couldn't reach nodejs.org to download Node.js"
-  want="-$1-$2.tar.gz"
+  ext=tar.gz
+  if can_unxz "$1"; then ext=tar.xz; fi
+  want="-$1-$2.$ext"
   file=$(printf '%s\n' "$sums" | awk -v want="$want" 'substr($2, length($2) - length(want) + 1) == want { print $2; exit }')
   expected=$(printf '%s\n' "$sums" | awk -v file="$file" '$2 == file { print $1; exit }')
   if [ -z "$file" ] || [ -z "$expected" ]; then fail "nodejs.org has no Node.js 24 for $1-$2"; fi
   download="$DL_HOME/$file.download"
-  quietly "downloading $file" curl -fsSL "$base/$file" -o "$download"
+  download "$base/$file" "$download" "Downloading Node.js 24"
+  STEP="Installing Node.js 24"
   if [ "$(sha256_of "$download")" != "$expected" ]; then
     rm -f "$download"
     fail "the Node.js download didn't match its checksum; try again"
   fi
-  dir="${file%.tar.gz}"
+  dir="${file%."$ext"}"
   # Unpacked aside, then moved into place as $DL_HOME/node itself: one copy of Node, with no
   # versioned directory (or link to one) beside it.
   staging="$DL_HOME/node.unpacking"
   rm -rf "$staging"
   mkdir -p "$staging"
-  quietly "unpacking Node.js" tar -xzf "$download" -C "$staging"
+  if [ "$ext" = tar.xz ]; then unpack=-xJf; else unpack=-xzf; fi
+  quietly "unpacking Node.js" tar "$unpack" "$download" -C "$staging"
   rm -f "$download"
   [ -x "$staging/$dir/bin/node" ] || fail "the Node.js download has no $dir/bin/node"
   # What dl never uses: the C headers for building native addons (node-gyp downloads its own
@@ -347,9 +476,12 @@ laptop_main() {
   # npm's download cache, and the Node.js headers node-gyp fetches to build a native module,
   # go in a folder of their own that's removed afterwards: dl's packages are installed once,
   # and kept in ~/.npm and ~/.cache/node-gyp they'd take another 190 MB.
+  # --loglevel=info and --foreground-scripts put each download and install script in the log,
+  # which is where watch_npm reads the progress from.
   NPM_CACHE="$DL_HOME/npm-cache"
   rm -rf "$NPM_CACHE"
-  quietly "installing $package" env PATH="$node_dir:$PATH" npm_config_devdir="$NPM_CACHE/node-gyp" "$npm" install -g --prefix "$DL_HOME/dl" --cache "$NPM_CACHE" --no-audit --no-fund --loglevel=error "$package"
+  WATCH=watch_npm
+  quietly "installing $package" env PATH="$node_dir:$PATH" npm_config_devdir="$NPM_CACHE/node-gyp" "$npm" install -g --prefix "$DL_HOME/dl" --cache "$NPM_CACHE" --no-audit --no-fund --no-update-notifier --loglevel=info --foreground-scripts "$package"
   rm -rf "$NPM_CACHE"
   entry="$DL_HOME/dl/lib/node_modules/directionallylocal/bin/directionallylocal.mjs"
   [ -f "$entry" ] || fail "npm installed $package, but $entry is missing"
@@ -364,7 +496,7 @@ laptop_main() {
     chmod 755 "$DL_HOME/bin/$name"
   done
   COUNT_VERSION=$("$DL_HOME/bin/dl" --version 2>/dev/null || echo "")
-  step_done "Installed dl" "dl $COUNT_VERSION · in $DL_HOME"
+  step_done "Installed dl" "dl $COUNT_VERSION · in $DL_HOME · $(clock "${STEP_SECONDS:-0}")"
 
   STAGE=path
   if [ "${DL_NO_MODIFY_PATH:-}" != "1" ]; then

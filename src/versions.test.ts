@@ -5,11 +5,13 @@ import { compareSemver, installedVersion, packageSpecs, pinnedAutopilotVersion, 
 
 describe("one Autopilot and one Hotcell version", () => {
   it("pins autopilot-ai and hotcell exactly in package.json, and those pins are what places install", () => {
-    const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { dependencies: Record<string, string> };
+    const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { dependencies: Record<string, string>; devDependencies: Record<string, string> };
     assert.match(manifest.dependencies["autopilot-ai"]!, /^\d+\.\d+\.\d+$/, "an exact version, no ^ or ~");
-    assert.match(manifest.dependencies["hotcell"]!, /^\d+\.\d+\.\d+$/, "an exact version, no ^ or ~");
+    assert.match(manifest.devDependencies["hotcell"]!, /^\d+\.\d+\.\d+$/, "an exact version, no ^ or ~");
+    // Hotcell is installed where a sandbox or server is set up, not with dl itself.
+    assert.equal(manifest.dependencies["hotcell"], undefined, "installing dl doesn't download Hotcell");
     assert.equal(pinnedAutopilotVersion(), manifest.dependencies["autopilot-ai"]);
-    assert.equal(pinnedHotcellVersion(), manifest.dependencies["hotcell"]);
+    assert.equal(pinnedHotcellVersion(), manifest.devDependencies["hotcell"]);
     const installed = JSON.parse(readFileSync(new URL("../node_modules/autopilot-ai/package.json", import.meta.url), "utf8")) as { version: string };
     assert.equal(installed.version, pinnedAutopilotVersion(), "the bundled session client is that version");
     assert.throws(() => pinnedAutopilotVersion({ "autopilot-ai": "^3.0.2" }), /exact version/);

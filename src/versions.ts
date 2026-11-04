@@ -8,6 +8,12 @@ import { readFileSync } from "node:fs";
  * the same sandboxes, and a broken Hotcell release can't reach anyone without a dl release.
  * `dl update` brings a place back to both pins.
  *
+ * Hotcell's pin is a devDependency: dl itself never loads Hotcell, it installs `hotcell@<pin>`
+ * into a place's own release directory when a sandbox or server is set up (dl up, dl setup,
+ * dl run). As a devDependency it stays exact and Dependabot still bumps it, but installing
+ * dl (the one-line install on a laptop, or `npm install -g`) no longer downloads Hotcell's
+ * daemon and its Docker client, which plain Autopilot on a laptop never uses.
+ *
  * For testing unpublished builds, DL_AUTOPILOT_SPEC and DL_HOTCELL_SPEC name an npm spec
  * or a path to a .tgz (several, separated by spaces, when a package needs sibling tarballs)
  * to install instead of `autopilot-ai@<version>` / `hotcell@<version>`.
@@ -16,6 +22,7 @@ import { readFileSync } from "node:fs";
 interface Manifest {
   version: string;
   dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
 }
 
 let manifest: Manifest | undefined;
@@ -42,7 +49,7 @@ export function pinnedAutopilotVersion(deps: Record<string, string> | undefined 
 }
 
 /** The exact hotcell version dl ships with and installs on places. */
-export function pinnedHotcellVersion(deps: Record<string, string> | undefined = readManifest().dependencies): string {
+export function pinnedHotcellVersion(deps: Record<string, string> | undefined = readManifest().devDependencies): string {
   return pinnedVersion("hotcell", deps);
 }
 
