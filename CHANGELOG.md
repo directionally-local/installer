@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.13.0](https://github.com/directionally-local/installer/compare/v0.12.0...v0.13.0) (2026-11-04)
+
+
+### Features
+
+* **free:** land Stripe billing ([#117](https://github.com/directionally-local/installer/issues/117)) and the Luminal upstream ([#119](https://github.com/directionally-local/installer/issues/119)) on main ([52887dc](https://github.com/directionally-local/installer/commit/52887dcdd83ae2360ffe4a577379d52eb639bd8b))
+* **free:** link the privacy policy and terms on the sign-in pages ([e0f93c9](https://github.com/directionally-local/installer/commit/e0f93c9d96dc06bf775728f9e14cc417df317139))
+* **free:** open sign-up with a queue, referrals, spend alerts and launch dashboard ([76d26a7](https://github.com/directionally-local/installer/commit/76d26a71a5991cec1cecd0203c6909f8433bad47))
+* **free:** serve the free tier from Luminal on prepaid credit ([579c869](https://github.com/directionally-local/installer/commit/579c8695df705d9f3cf36e049ed6c1ce44003a2d))
+* **laptop:** pass an invite link's DL_REFERRAL through to Autopilot ([79149ef](https://github.com/directionally-local/installer/commit/79149ef56eeaef53332d8856ffab88c20cf2e1a3))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.7.0 ([577a17b](https://github.com/directionally-local/installer/commit/577a17ba0fc184383ea3bb388e1d2cbfc1b38cc4))
+* **deps:** install Autopilot 3.7.0 ([f3f8f2e](https://github.com/directionally-local/installer/commit/f3f8f2e1b50bee0cf58cf18e623e8930c58a7788))
+
 ## [0.12.0](https://github.com/directionally-local/installer/compare/v0.11.0...v0.12.0) (2026-11-04)
 
 
