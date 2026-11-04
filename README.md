@@ -84,6 +84,8 @@ dl status                           # where agents run, their provider, model an
 
 `dl status` says when a place runs another Autopilot or Hotcell than this laptop's `dl` pins: `! box runs Hotcell 0.1.30, this dl pins 0.1.38   dl update box`.
 
+When Autopilot here uses the free tier, `dl status` also shows the account: `Free tier  @octo · 49.9M of 50M tokens left this week · resets Mon 09:00` (local time). dl reads Autopilot's sign-in and asks the free tier service once (`GET /v1/me`, 3 seconds at most, never refreshing the sign-in); if that fails it shows only `@octo`, or nothing.
+
 The "fits ~N agents" figure is a conservative estimate: memory left after the host's own share (at least 1.5 GB or 15%), divided by 1 GB per sandbox, capped at two per CPU. Measured numbers will replace it.
 
 ### One Autopilot and one Hotcell version

@@ -83,30 +83,62 @@ export async function autopilotOnPath(env: NodeJS.ProcessEnv = process.env): Pro
   return undefined;
 }
 
+/** What `autopilot auth status` says: the active provider, and whether a session can start. */
+export interface AutopilotAuth {
+  /** The active provider's id, e.g. "directionally-local" for the free tier. */
+  active: string;
+  /** See `parseAuthStatus`. */
+  setUp: boolean;
+}
+
 /**
- * Whether Autopilot can start a session without asking how it should think first, from
- * `autopilot auth status` (read-only: it lists providers and where each key comes from, and
- * starts nothing). False when the active provider has no key and none is in the environment
- * (first run would use that one): no provider chosen yet, or the free tier not signed in.
- * Undefined when it can't tell (no Autopilot, an error, a slow answer, output it doesn't know).
+ * Asks `autopilot auth status` (read-only: it lists providers and where each key comes from,
+ * and starts nothing). Undefined when it can't tell (no Autopilot, an error, a slow answer,
+ * output it doesn't know).
  */
-export async function autopilotSetUp(
+export async function autopilotAuth(
   autopilot: AutopilotCommand | undefined,
   exec: (command: string, args: string[]) => Promise<string> = async (command, args) =>
     (await execFileAsync(command, args, { timeout: 5_000, env: { ...process.env, NO_COLOR: "1" } })).stdout,
-): Promise<boolean | undefined> {
+): Promise<AutopilotAuth | undefined> {
   if (!autopilot) return undefined;
   const stdout = await exec(autopilot.command, [...autopilot.args, "auth", "status"]).catch(() => undefined);
-  return stdout === undefined ? undefined : parseAuthStatus(stdout);
+  if (stdout === undefined) return undefined;
+  const setUp = parseAuthStatus(stdout);
+  const active = parseActiveProvider(stdout);
+  return setUp === undefined || active === undefined ? undefined : { active, setUp };
+}
+
+/**
+ * Whether Autopilot can start a session without asking how it should think first. False when
+ * the active provider has no key and none is in the environment (first run would use that
+ * one): no provider chosen yet, or the free tier not signed in. Undefined when it can't tell.
+ */
+export async function autopilotSetUp(
+  autopilot: AutopilotCommand | undefined,
+  exec?: (command: string, args: string[]) => Promise<string>,
+): Promise<boolean | undefined> {
+  return (await autopilotAuth(autopilot, exec))?.setUp;
+}
+
+const AUTH_ROW = /^([›> ]) (\S+) +.* · (no key needed|no key|key in \S+)\s*$/;
+
+function authRows(stdout: string): RegExpMatchArray[] {
+  return stdout.split("\n").map((line) => line.match(AUTH_ROW)).filter((row) => row !== null);
 }
 
 /** `autopilot auth status`'s rows ("› openrouter  OpenRouter (active) · no key"): set up or not, as above. */
 export function parseAuthStatus(stdout: string): boolean | undefined {
-  const rows = stdout.split("\n").map((line) => line.match(/^([›> ]) (\S+) +.* · (no key needed|no key|key in \S+)\s*$/)).filter((row) => row !== null);
+  const rows = authRows(stdout);
   const active = rows.find((row) => row[1] !== " ");
   if (!active) return undefined;
   if (active[3] !== "no key") return true;
   return rows.some((row) => row[3] === "key in env");
+}
+
+/** The active provider's id in `autopilot auth status`, or undefined. */
+export function parseActiveProvider(stdout: string): string | undefined {
+  return authRows(stdout).find((row) => row[1] !== " ")?.[2];
 }
 
 /** An Autopilot that knows `attach-remote` lists its options (an older one prints its general help). */
