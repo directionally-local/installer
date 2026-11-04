@@ -14,7 +14,7 @@ describe("device code", () => {
     assert.equal(body.verification_uri, "https://free.test/device");
     assert.equal(body.verification_uri_complete, `https://free.test/device?user_code=${body.user_code}`);
     assert.equal(body.interval, 5);
-    assert.equal(body.expires_in, 600);
+    assert.equal(body.expires_in, 900);
   });
 
   it("rate-limits code requests per IP", async () => {
@@ -45,10 +45,13 @@ describe("polling", () => {
     assert.equal(await errorCode(await poll()), "authorization_pending");
   });
 
-  it("expires after ten minutes", async () => {
+  it("expires after fifteen minutes", async () => {
     const service = await createService();
     const issued = (await (await service.request("POST", "/v1/device/code", { body: {} })).json()) as { device_code: string; user_code: string };
-    service.clock.now += 600_001;
+    service.clock.now += 14 * 60_000;
+    assert.equal(await errorCode(await service.request("POST", "/v1/device/token", { body: { device_code: issued.device_code } })), "authorization_pending", "still good after 14 minutes");
+    assert.match(await (await service.request("GET", `/device?user_code=${issued.user_code}`)).text(), new RegExp(issued.user_code));
+    service.clock.now += 60_001;
     assert.equal(await errorCode(await service.request("POST", "/v1/device/token", { body: { device_code: issued.device_code } })), "expired_token");
     const page = await service.request("GET", `/device?user_code=${issued.user_code}`);
     assert.match(await page.text(), /unknown or has expired/);

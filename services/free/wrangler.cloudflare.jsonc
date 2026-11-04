@@ -15,6 +15,7 @@
     "OPENROUTER_PROVIDER_ORDER": "",
     "OPENROUTER_QUANTIZATIONS": "fp8,mxfp8,fp16,bf16,fp32",
     "OPENROUTER_DATA_COLLECTION": "deny",
+    "OPENROUTER_HOST_COOLDOWN_MINUTES": "10",
     "PAUSED": "false"
   },
   "durable_objects": {

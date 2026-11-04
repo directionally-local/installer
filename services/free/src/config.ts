@@ -46,6 +46,11 @@ export interface FreeConfig {
   openRouterQuantizations: readonly Quantization[];
   /** `deny` (default) keeps only hosts that neither train on nor store prompts (OPENROUTER_DATA_COLLECTION). */
   openRouterDataCollection: DataCollection;
+  /**
+   * How long an OpenRouter host that just failed a request is skipped, in minutes
+   * (OPENROUTER_HOST_COOLDOWN_MINUTES). 0 turns host avoidance off.
+   */
+  openRouterHostCooldownMinutes: number;
   /** The kill switch from `env`; the admin endpoint has its own, and either one pauses. */
   paused: boolean;
   /** The public origin for links, when the request's own origin isn't it (behind a proxy). */
@@ -76,7 +81,11 @@ export const DEFAULTS = {
   openRouterProviderOrder: [] as readonly string[],
   openRouterQuantizations: FULL_PRECISION,
   openRouterDataCollection: "deny" as DataCollection,
+  openRouterHostCooldownMinutes: 10,
 } as const;
+
+/** The longest host cooldown, in minutes: a day. */
+export const MAX_HOST_COOLDOWN_MINUTES = 1440;
 
 export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
   const signingKey = required(env, "TOKEN_SIGNING_KEY");
@@ -99,6 +108,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     openRouterProviderOrder: providerOrder(env.OPENROUTER_PROVIDER_ORDER),
     openRouterQuantizations: quantizations(env.OPENROUTER_QUANTIZATIONS),
     openRouterDataCollection: dataCollection(env.OPENROUTER_DATA_COLLECTION),
+    openRouterHostCooldownMinutes: hostCooldown(env.OPENROUTER_HOST_COOLDOWN_MINUTES),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
   };
@@ -162,6 +172,12 @@ function dataCollection(value: unknown): DataCollection {
   if (raw === undefined) return DEFAULTS.openRouterDataCollection;
   if (raw === "allow" || raw === "deny") return raw;
   throw new ConfigError(`OPENROUTER_DATA_COLLECTION must be "deny" or "allow" (got "${raw}").`);
+}
+
+function hostCooldown(value: unknown): number {
+  const minutes = whole(value, DEFAULTS.openRouterHostCooldownMinutes, "OPENROUTER_HOST_COOLDOWN_MINUTES");
+  if (minutes > MAX_HOST_COOLDOWN_MINUTES) throw new ConfigError(`OPENROUTER_HOST_COOLDOWN_MINUTES must be 0 to ${MAX_HOST_COOLDOWN_MINUTES} (got "${minutes}").`);
+  return minutes;
 }
 
 function flag(value: unknown, fallback: boolean, name: string): boolean {

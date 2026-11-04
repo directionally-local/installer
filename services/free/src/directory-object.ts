@@ -56,6 +56,20 @@ export interface RequestRecord {
   /** ok | upstream_error | stream_error | abandoned */
   status: string;
   latencyMs: number | null;
+  /** The OpenRouter host that served or failed the request, as a slug, when OpenRouter said. */
+  host?: string;
+  /** Set when the request failed in a way the host is blamed for. */
+  hostFailure?: HostFailure;
+}
+
+/**
+ * A request the host is blamed for: an HTTP 5xx from it, an error body, or a stream that
+ * failed before it finished. Counts only, never content.
+ */
+export interface HostFailure {
+  kind: "http_5xx" | "error_body" | "stream";
+  /** The upstream HTTP status for `http_5xx`, else null. */
+  upstreamStatus: number | null;
 }
 
 export interface SpendSummary {
@@ -162,6 +176,23 @@ const SCHEMA = [
    ) WITHOUT ROWID`,
   // A copy of the per-person weekly caps an admin set (the AccountObject enforces them), so the
   // dashboard can tell who reached their own allowance. NULL means the default.
+  // Per OpenRouter host per UTC day: requests it served or failed and how many failed, so the
+  // dashboard can show error rates by host. Plus one row per host failure. Counts only.
+  `CREATE TABLE IF NOT EXISTS host_daily (
+     day      INTEGER NOT NULL,
+     host     TEXT NOT NULL,
+     requests INTEGER NOT NULL,
+     failures INTEGER NOT NULL,
+     PRIMARY KEY (day, host)
+   ) WITHOUT ROWID`,
+  `CREATE TABLE IF NOT EXISTS host_failures (
+     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+     at              INTEGER NOT NULL,
+     host            TEXT NOT NULL,
+     kind            TEXT NOT NULL,
+     upstream_status INTEGER
+   )`,
+  `CREATE INDEX IF NOT EXISTS host_failures_at ON host_failures (at)`,
   `CREATE TABLE IF NOT EXISTS grants (
      github_id     INTEGER PRIMARY KEY,
      weekly_tokens INTEGER,
@@ -460,6 +491,25 @@ export class DirectoryObject extends DurableObject {
         admin,
       );
       if (!admin) this.#addActivity(record.githubId, record.at, { requests: 1, events: 0, chargedTokens: record.chargedTokens, costUsd: record.costUsd });
+      if (record.host) {
+        const failed = record.hostFailure ? 1 : 0;
+        this.ctx.storage.sql.exec(
+          `INSERT INTO host_daily (day, host, requests, failures) VALUES (?, ?, 1, ?)
+           ON CONFLICT (day, host) DO UPDATE SET requests = requests + 1, failures = failures + excluded.failures`,
+          Math.floor(record.at / DAY_MS),
+          record.host,
+          failed,
+        );
+        if (record.hostFailure) {
+          this.ctx.storage.sql.exec(
+            "INSERT INTO host_failures (at, host, kind, upstream_status) VALUES (?, ?, ?, ?)",
+            record.at,
+            record.host,
+            record.hostFailure.kind,
+            record.hostFailure.upstreamStatus,
+          );
+        }
+      }
     });
   }
 
@@ -665,10 +715,21 @@ export class DirectoryObject extends DurableObject {
       )
       .toArray()[0];
 
+    const hosts = sql
+      .exec<{ host: string; requests: number; failures: number }>(
+        `SELECT host, SUM(requests) AS requests, SUM(failures) AS failures FROM host_daily
+         WHERE day >= ? AND day < ? GROUP BY host ORDER BY requests DESC, host`,
+        from / DAY_MS,
+        until / DAY_MS,
+      )
+      .toArray()
+      .map((row) => ({ host: row.host, requests: row.requests, failures: row.failures, failureRate: share(row.failures, row.requests) }));
+
     return {
       from: isoDay(from),
       to: isoDay(until - DAY_MS),
       daily,
+      hosts,
       weeklyActive,
       retention,
       totals: {

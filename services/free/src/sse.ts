@@ -1,17 +1,25 @@
 import { parseUsage, type Usage } from "./quota.js";
+import { hostOf } from "./routing.js";
 
 /**
  * Passes an OpenRouter server-sent-event stream through unchanged while reading the `usage`
  * object it sends in its last chunk. `onEnd` runs exactly once, before the stream closes, when
  * the upstream ends, fails, or the client goes away, so the reservation is always settled
  * while the request is still alive, with no work deferred past the response. The content is never kept: only the
- * usage counts leave this function.
+ * usage counts, the host's name and whether the stream failed leave this function.
  */
 
 export interface StreamOutcome {
   usage: Usage | undefined;
   /** The stream carried an `error` object, failed, or was cancelled before it finished. */
   errored: boolean;
+  /**
+   * The upstream's fault: an `error` object, a failed read, or an end without `[DONE]`. A
+   * client going away is not.
+   */
+  upstreamFailed: boolean;
+  /** The host that served the stream (its chunks' `provider` field), as a slug. */
+  host: string | undefined;
 }
 
 const MAX_LINE_BUFFER = 4 * 1024 * 1024;
@@ -22,6 +30,9 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
   let buffer = "";
   let usage: Usage | undefined;
   let errored = false;
+  let upstreamFailed = false;
+  let done = false;
+  let host: string | undefined;
   let ended = false;
 
   const scan = (final: boolean) => {
@@ -32,12 +43,17 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
       const line = raw.trimEnd();
       if (!line.startsWith("data:")) continue;
       const data = line.slice(5).trim();
+      if (data === "[DONE]") done = true;
       if (!data || data === "[DONE]") continue;
       try {
         const parsed = JSON.parse(data) as { usage?: unknown; error?: unknown };
         const found = parseUsage(parsed.usage);
         if (found) usage = found;
-        if (parsed.error) errored = true;
+        host ??= hostOf(parsed);
+        if (parsed.error) {
+          errored = true;
+          upstreamFailed = true;
+        }
       } catch {
         // A partial or non-JSON data line carries no usage.
       }
@@ -47,7 +63,7 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
   const finish = async () => {
     if (ended) return;
     ended = true;
-    await onEnd({ usage, errored });
+    await onEnd({ usage, errored, upstreamFailed, host });
   };
 
   return new ReadableStream<Uint8Array>({
@@ -57,6 +73,7 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
         result = await reader.read();
       } catch (error) {
         errored = true;
+        upstreamFailed = true;
         await finish();
         controller.error(error);
         return;
@@ -64,6 +81,7 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
       if (result.done) {
         buffer += decoder.decode();
         scan(true);
+        if (!done) upstreamFailed = true;
         await finish();
         controller.close();
         return;

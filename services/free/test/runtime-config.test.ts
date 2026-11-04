@@ -40,6 +40,7 @@ describe("runtime settings (units)", () => {
       openRouterProviderOrder: [],
       openRouterQuantizations: ["fp8", "mxfp8", "fp16", "bf16", "fp32"],
       openRouterDataCollection: "deny",
+      openRouterHostCooldownMinutes: 10,
     });
   });
 

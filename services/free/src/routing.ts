@@ -14,7 +14,13 @@
  *   privacy setting on the company key is the hard backstop.
  * - `order`, when set, names hosts to try first. It replaces the price sort; the filters still
  *   apply, so an ordered host that fails them is skipped.
+ * - `ignore` lists hosts that failed recently (see `HostCooldowns` in rate-limit-object.ts).
+ *   The filters and the sort then pick the next host. If that leaves no host at all, the
+ *   request is sent once more without `ignore` (see `isNoHostError`).
  */
+
+/** The rate-limiter object that keeps the hosts that failed recently. */
+export const HOSTS_OBJECT = "openrouter-hosts";
 
 /** OpenRouter's quantization levels. An empty list means no precision filter. */
 export const QUANTIZATIONS = ["int4", "int8", "fp4", "mxfp4", "nvfp4", "fp6", "fp8", "mxfp8", "fp16", "bf16", "fp32", "unknown"] as const;
@@ -53,12 +59,54 @@ export interface RoutingConfig {
   openRouterDataCollection: DataCollection;
 }
 
-/** The `provider` object sent to OpenRouter. */
-export function providerPreferences(config: RoutingConfig): Record<string, unknown> {
+/** The `provider` object sent to OpenRouter. `ignore` names hosts to skip on this request. */
+export function providerPreferences(config: RoutingConfig, ignore: readonly string[] = []): Record<string, unknown> {
   const filters = {
     allow_fallbacks: true,
     ...(config.openRouterQuantizations.length > 0 ? { quantizations: [...config.openRouterQuantizations] } : {}),
     data_collection: config.openRouterDataCollection,
+    ...(ignore.length > 0 ? { ignore: [...ignore].slice(0, MAX_SLUGS) } : {}),
   };
   return config.openRouterProviderOrder.length > 0 ? { order: [...config.openRouterProviderOrder], ...filters } : { sort: "price", ...filters };
+}
+
+/**
+ * A host name as OpenRouter reports it ("Morph", "DeepInfra", "Google Vertex") as the slug its
+ * routing fields take ("morph", "deepinfra", "google-vertex"). Undefined when there is none.
+ */
+export function hostSlug(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-")
+    .replace(/[^a-z0-9./-]/g, "");
+  return SLUG.test(slug) ? slug : undefined;
+}
+
+/**
+ * The host behind an OpenRouter response body or stream chunk: the top-level `provider` field
+ * on a completion, or `error.metadata.provider_name` on an error.
+ */
+export function hostOf(parsed: unknown): string | undefined {
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const body = parsed as { provider?: unknown; error?: { metadata?: { provider_name?: unknown } } };
+  return hostSlug(body.provider) ?? hostSlug(body.error?.metadata?.provider_name);
+}
+
+/**
+ * Whether OpenRouter refused a request because no host passed the routing preferences
+ * ("No endpoints found ...", "No allowed providers are available ..."), rather than a host
+ * failing.
+ */
+export function isNoHostError(status: number, text: string): boolean {
+  if (status < 400 || status === 429 || status === 401 || status === 402) return false;
+  let message = text;
+  try {
+    const parsed = JSON.parse(text) as { error?: { message?: unknown } };
+    if (typeof parsed.error?.message === "string") message = parsed.error.message;
+  } catch {
+    // not JSON: match the raw text
+  }
+  return /no (allowed )?(providers?|endpoints?)\b.*\b(available|found)|no (providers?|endpoints?) (are )?available/i.test(message);
 }
