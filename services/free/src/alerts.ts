@@ -3,8 +3,10 @@ import type { AlertKind, FreeConfig } from "./config.js";
 /**
  * Alerts to the owner's chat: free spend crossing 50%, 80% and 100% of the weekly cap (once
  * per threshold per week) and of the all-time cap (once per threshold, ever), the kill switch,
- * the queue starting, and an OpenRouter host failing more than 20% of its requests over the
- * last hour. Counts and dollars only.
+ * the queue starting, an OpenRouter host failing more than 20% of its requests over the
+ * last hour, Luminal credit used crossing 50%, 80% and 100% of the balance (once each per
+ * balance), Luminal-served usage pausing because the credit ran out, and Luminal failing more
+ * than 20% of at least 20 requests over the last hour. Counts and dollars only.
  *
  * ALERT_WEBHOOK_URL picks the format from its host, or ALERT_WEBHOOK_KIND sets it:
  *
@@ -95,8 +97,9 @@ export function pauseAlert(paused: boolean, login: string): Alert {
     : { subject: "dl free tier: free tokens resumed (kill switch off)", text: `dl free tier: free tokens resumed by ${login} (kill switch off).` };
 }
 
-export function queueStartedAlert(weekUsd: number, capUsd: number | undefined): Alert {
-  const spend = capUsd === undefined ? "" : ` (${dollars(weekUsd)} of the ${dollars(capUsd)} weekly cap used)`;
+export function queueStartedAlert(weekUsd: number, capUsd: number | undefined, budget: "cash" | "credit" = "cash"): Alert {
+  const what = budget === "credit" ? "weekly Luminal credit budget" : "weekly cap";
+  const spend = capUsd === undefined ? "" : ` (${dollars(weekUsd)} of the ${dollars(capUsd)} ${what} used)`;
   return {
     subject: "dl free tier: the queue started",
     text: `dl free tier: the queue started${spend}. New sign-ups wait in line for free tokens until Monday's admission.`,
@@ -108,6 +111,30 @@ export function hostFailureAlert(host: string, failures: number, requests: numbe
   return {
     subject: `dl free tier: OpenRouter host ${host} failing (${rate})`,
     text: `dl free tier: OpenRouter host ${host} failed ${failures} of ${requests} requests in the last hour (${rate}). New requests avoid it while it keeps failing.`,
+  };
+}
+
+export function creditAlert(usedUsd: number, balanceUsd: number, threshold: number): Alert {
+  const end = threshold >= 1 ? " Free and Pro usage is paused until the credit is topped up and LUMINAL_CREDIT_USD raised." : "";
+  return {
+    subject: `dl free tier: ${percentOf(threshold)} of the ${dollars(balanceUsd)} Luminal credit used`,
+    text: `dl free tier: ${dollars(usedUsd)} of the ${dollars(balanceUsd)} Luminal credit used (${percentOf(threshold)}).${end}`,
+  };
+}
+
+export function creditPausedAlert(usedUsd: number, balanceUsd: number): Alert {
+  return {
+    subject: "dl free tier: paused, Luminal credit used up",
+    text: `dl free tier: requests are refused with upstream_credit_exhausted: ${dollars(usedUsd)} of the ${dollars(balanceUsd)} Luminal credit is used. Top up and raise luminalCreditUsd (POST /admin/config), or switch primaryUpstream to "openrouter".`,
+  };
+}
+
+export function upstreamErrorAlert(upstream: string, errors: number, requests: number): Alert {
+  const rate = `${Math.round((errors / requests) * 100)}%`;
+  const name = upstream === "luminal" ? "Luminal" : upstream === "openrouter" ? "OpenRouter" : upstream;
+  return {
+    subject: `dl free tier: ${name} failing (${rate})`,
+    text: `dl free tier: ${name} failed ${errors} of ${requests} requests in the last hour (${rate}). Clients retry on their own; nothing switches upstream automatically.`,
   };
 }
 

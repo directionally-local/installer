@@ -1,4 +1,4 @@
-import type { FreeConfig } from "./config.js";
+import type { FreeConfig, Upstream } from "./config.js";
 import { DAY_MS, WEEK_MS, weekEnd } from "./week.js";
 
 /**
@@ -17,6 +17,13 @@ import { DAY_MS, WEEK_MS, weekEnd } from "./week.js";
  *   admitted = the largest N with avg × (actives + N) ≤ budget, i.e. floor(budget / avg) − actives,
  *              at least 0 and at most the queue's length. No weekly cap: everyone.
  *
+ * When Luminal serves requests (`creditMode`: `primaryUpstream` is "luminal" and LUMINAL_API_KEY
+ * is set), the cash caps stay near zero, so the queue watches Luminal credit instead: a new
+ * sign-up waits once this week's free credit spend reaches `queueThreshold` of
+ * `luminalWeeklyCreditUsd`, and Monday's admission fills the same share of that weekly credit
+ * budget (no more than the credit left), with last week's free credit spend per active as the
+ * average. The cash test still applies too, so OpenRouter spend can also start the queue.
+ *
  * Order: oldest first, and each referred friend who became weekly active moves a person up
  * `queueReferralPlaces` places (25): sort by (place in line − 25 × friends, then place in line).
  */
@@ -32,6 +39,16 @@ export interface Policy {
   queueReferralPlaces: number;
   referralBonusTokens: number;
   referralBonusCap: number;
+  primaryUpstream: Upstream;
+  /** LUMINAL_API_KEY is set; without it every request goes to OpenRouter. */
+  luminalConfigured: boolean;
+  luminalCreditUsd: number;
+  luminalWeeklyCreditUsd: number | undefined;
+}
+
+/** Whether Luminal serves requests, so the queue and alerts watch its credit. */
+export function creditMode(policy: Pick<Policy, "primaryUpstream" | "luminalConfigured">): boolean {
+  return policy.primaryUpstream === "luminal" && policy.luminalConfigured;
 }
 
 export function policyOf(config: FreeConfig): Policy {
@@ -45,6 +62,10 @@ export function policyOf(config: FreeConfig): Policy {
     queueReferralPlaces: config.queueReferralPlaces,
     referralBonusTokens: config.referralBonusTokens,
     referralBonusCap: config.referralBonusCap,
+    primaryUpstream: config.primaryUpstream,
+    luminalConfigured: config.luminalApiKey !== undefined,
+    luminalCreditUsd: config.luminalCreditUsd,
+    luminalWeeklyCreditUsd: config.luminalWeeklyCreditUsd,
   };
 }
 
@@ -78,11 +99,40 @@ export function forecast(input: {
   return { avgUsd, actives: input.lastWeekActives, budgetUsd, room };
 }
 
+/**
+ * The forecast in credit mode: the same arithmetic over last week's free Luminal credit spend,
+ * a budget of `queueThreshold` × the weekly credit budget, and no more than the credit left.
+ */
+export function creditForecast(input: {
+  lastWeekCreditUsd: number;
+  lastWeekActives: number;
+  policy: Pick<Policy, "queueThreshold" | "perPersonWeeklyUsdCap" | "luminalCreditUsd" | "luminalWeeklyCreditUsd">;
+  creditUsedUsd: number;
+}): Forecast {
+  const { policy } = input;
+  return forecast({
+    lastWeekUsd: input.lastWeekCreditUsd,
+    lastWeekActives: input.lastWeekActives,
+    policy: { globalWeeklyUsdCap: policy.luminalWeeklyCreditUsd, globalTotalUsdCap: policy.luminalCreditUsd, queueThreshold: policy.queueThreshold, perPersonWeeklyUsdCap: policy.perPersonWeeklyUsdCap },
+    totalSpentUsd: input.creditUsedUsd,
+  });
+}
+
 /** Whether a new sign-up waits: free spend at the threshold, or people already waiting. */
-export function shouldQueue(input: { weekUsd: number; queueLength: number; policy: Pick<Policy, "globalWeeklyUsdCap" | "queueThreshold"> }): boolean {
+export function shouldQueue(input: {
+  weekUsd: number;
+  /** This week's free Luminal credit spend; only counts in credit mode. */
+  weekCreditUsd?: number;
+  queueLength: number;
+  policy: Pick<Policy, "globalWeeklyUsdCap" | "queueThreshold"> & Partial<Pick<Policy, "primaryUpstream" | "luminalConfigured" | "luminalWeeklyCreditUsd">>;
+}): boolean {
   if (input.queueLength > 0) return true;
-  const cap = input.policy.globalWeeklyUsdCap;
-  return cap !== undefined && input.weekUsd >= input.policy.queueThreshold * cap;
+  const { policy } = input;
+  const cap = policy.globalWeeklyUsdCap;
+  if (cap !== undefined && input.weekUsd >= policy.queueThreshold * cap) return true;
+  const credit = policy.luminalWeeklyCreditUsd;
+  const inCreditMode = policy.primaryUpstream !== undefined && creditMode({ primaryUpstream: policy.primaryUpstream, luminalConfigured: policy.luminalConfigured === true });
+  return inCreditMode && credit !== undefined && (input.weekCreditUsd ?? 0) >= policy.queueThreshold * credit;
 }
 
 export interface Waiting {

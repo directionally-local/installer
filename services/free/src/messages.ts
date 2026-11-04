@@ -14,6 +14,10 @@
  *   service_paused                the owner paused the free tier (reason "paused")
  *   global_weekly_budget_reached  this week's global USD cap is used up (resetsAt: when it resumes)
  *   global_total_budget_reached   the total USD cap is used up (resetsAt: null; resumes only if the owner raises it)
+ *   upstream_credit_exhausted     the Luminal credit is used up (503; free and Pro usage pause until it is topped up)
+ *   upstream_busy                 Luminal answered 429 (HTTP 429, Retry-After): transient, retry
+ *   upstream_unavailable          Luminal answered 5xx or couldn't be reached (HTTP 503, Retry-After): transient, retry
+ *   upstream_timeout              Luminal sent nothing before the first-byte timeout (HTTP 503, Retry-After): transient, retry
  *
  * `not_invited` is still returned for a sign-in recorded before these codes existed, and by
  * the API for a token whose account isn't on the free tier.
@@ -68,10 +72,15 @@ export function queuedMessage(position: number, wait: string): string {
 }
 
 /** The 402 for a used-up weekly allowance (`quota_exceeded`). */
-export function quotaMessage(reason: "tokens" | "spend", resetsAt: string): string {
+export function quotaMessage(reason: "tokens" | "spend", resetsAt: string, plan: "free" | "pro" = "free"): string {
   const what = reason === "spend" ? "spending allowance" : "token allowance";
-  return `This week's free ${what} is used up. It resets at ${resetsAt}.`;
+  return `This week's ${plan === "pro" ? "Pro" : "free"} ${what} is used up. It resets at ${resetsAt}.`;
 }
 
 export const QUEUED_SIGNED_IN =
   "Free tokens are busy this week, so you're in line for them; your terminal shows your place. Your own key and paid plans work now.";
+
+export const CREDIT_EXHAUSTED_MESSAGE = "Free tokens are paused while we top up. Your own key still works.";
+export const UPSTREAM_BUSY_MESSAGE = "The free tier is busy right now; retrying…";
+export const UPSTREAM_UNAVAILABLE_MESSAGE = "The free tier's model provider is having trouble right now; retrying…";
+export const UPSTREAM_TIMEOUT_MESSAGE = "The free tier's model provider didn't answer in time; retrying…";

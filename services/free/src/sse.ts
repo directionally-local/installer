@@ -20,11 +20,27 @@ export interface StreamOutcome {
   upstreamFailed: boolean;
   /** The host that served the stream (its chunks' `provider` field), as a slug. */
   host: string | undefined;
+  /** When the first chunk with content (text, reasoning or a tool call) passed, by `now`; undefined if none did. */
+  firstContentAt: number | undefined;
+  /** Whether any content reached the client. */
+  contentSent: boolean;
+}
+
+/** Whether a stream chunk carries content: text, reasoning or a tool call in any choice's delta. */
+export function hasContent(parsed: unknown): boolean {
+  const choices = (parsed as { choices?: unknown } | null)?.choices;
+  if (!Array.isArray(choices)) return false;
+  return choices.some((choice) => {
+    const delta = (choice as { delta?: Record<string, unknown> } | null)?.delta;
+    if (!delta || typeof delta !== "object") return false;
+    const text = (key: string) => typeof delta[key] === "string" && (delta[key] as string).length > 0;
+    return text("content") || text("reasoning") || text("reasoning_content") || (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0);
+  });
 }
 
 const MAX_LINE_BUFFER = 4 * 1024 * 1024;
 
-export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: StreamOutcome) => Promise<void>): ReadableStream<Uint8Array> {
+export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: StreamOutcome) => Promise<void>, now: () => number = () => Date.now()): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -33,6 +49,7 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
   let upstreamFailed = false;
   let done = false;
   let host: string | undefined;
+  let firstContentAt: number | undefined;
   let ended = false;
 
   const scan = (final: boolean) => {
@@ -50,6 +67,7 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
         const found = parseUsage(parsed.usage);
         if (found) usage = found;
         host ??= hostOf(parsed);
+        if (firstContentAt === undefined && hasContent(parsed)) firstContentAt = now();
         if (parsed.error) {
           errored = true;
           upstreamFailed = true;
@@ -63,7 +81,7 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
   const finish = async () => {
     if (ended) return;
     ended = true;
-    await onEnd({ usage, errored, upstreamFailed, host });
+    await onEnd({ usage, errored, upstreamFailed, host, firstContentAt, contentSent: firstContentAt !== undefined });
   };
 
   return new ReadableStream<Uint8Array>({

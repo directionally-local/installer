@@ -8,6 +8,9 @@ import { DAY_MS, weekStart } from "./week.js";
  * queries under an SQLite authorizer that allows only the columns listed in
  * `DASHBOARD_COLUMNS`.
  *
+ * The upstream section reads `upstream_daily` and `upstream_timings` instead: per upstream,
+ * counts, tokens, dollars and milliseconds, with no person attached (admins included there).
+ *
  * Admins are left out of every number: anyone in ADMIN_GITHUB_IDS (passed in) and anyone
  * admitted as an admin. Their requests aren't rolled up in the first place.
  *
@@ -17,15 +20,22 @@ import { DAY_MS, weekStart } from "./week.js";
 
 /** Tables and columns the dashboard may read. Everything is counts, tokens, cost, time or who. */
 export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
-  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd"],
+  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd", "paid_cost_usd", "credit_usd"],
   people: ["github_id", "login", "admitted_at", "admitted_via"],
   grants: ["github_id", "weekly_tokens", "weekly_usd"],
-  spend_weeks: ["week_start", "usd", "tokens", "requests", "admin_usd", "admin_tokens", "admin_requests"],
+  spend_weeks: ["week_start", "usd", "tokens", "requests", "admin_usd", "admin_tokens", "admin_requests", "paid_usd", "paid_tokens", "paid_requests", "credit_usd", "free_credit_usd"],
+  upstream_daily: ["day", "upstream", "requests", "errors", "prompt_tokens", "cached_tokens", "cash_usd", "credit_usd"],
+  upstream_timings: ["at", "upstream", "ttfb_ms", "ttft_ms"],
   settings: ["key", "value"],
   queue: ["github_id", "queued_at", "admitted_at", "admitted_how"],
   queue_runs: ["week_start", "ran_at", "admitted", "waiting_before", "avg_usd", "actives", "budget_usd"],
   referrals: ["referred_id", "referrer_id", "outcome", "at"],
+  subscriptions: ["github_id", "state", "period_end", "state_at"],
+  payments: ["github_id", "kind", "amount_cents", "at"],
 };
+
+/** Pro counts as subscribed this long past its period end (as in account-object.ts). */
+const PRO_GRACE_MS = 3 * DAY_MS;
 
 /** Weeks of weekly actives and cost on the page. */
 export const WEEKS_SHOWN = 8;
@@ -125,6 +135,39 @@ export interface ReferralView {
   peopleWithBonus: number;
 }
 
+export interface PaidView {
+  /** Active Pro subscriptions now. */
+  proSubscribers: number;
+  topupsThisWeek: number;
+  topupsThisMonth: number;
+  /** Revenue before tax, USD, from payments this week (Monday UTC) and this calendar month (UTC). */
+  revenueWeekUsd: number;
+  revenueMonthUsd: number;
+  /** What paid usage (Pro and top-ups) cost upstream: logged apart from the free caps. */
+  paidCostWeekUsd: number;
+  paidCostMonthUsd: number;
+  paidRequestsWeek: number;
+}
+
+/** One upstream over one window (today, UTC, or this Monday-to-Sunday week). Admins included. */
+export interface UpstreamStats {
+  upstream: "luminal" | "openrouter";
+  window: "today" | "week";
+  requests: number;
+  /** Requests the upstream failed: 429, 5xx, a timeout, a network error or a failed stream. */
+  errors: number;
+  medianTtftMs: number | null;
+  p90TtftMs: number | null;
+  medianTtfbMs: number | null;
+  /** Cached prompt tokens over prompt tokens; null without prompt tokens. */
+  cacheHitShare: number | null;
+  /** Real money (OpenRouter) and prepaid credit (Luminal). */
+  cashUsd: number;
+  creditUsd: number;
+}
+
+export const UPSTREAM_NAMES = ["luminal", "openrouter"] as const;
+
 export interface FunnelRow {
   /** Monday of the sign-up week; null for the all-time row. */
   weekStart: number | null;
@@ -145,8 +188,11 @@ export interface DashboardData {
   people: { admitted: number; activeThisWeek: number };
   queue: QueueView;
   referrals: ReferralView;
+  paid: PaidView;
   /** Sign-ups → first request → weekly active (3+ request days in a week), per sign-up week and in all. */
   funnel: FunnelRow[];
+  /** Per upstream, today and this week. */
+  upstreams: UpstreamStats[];
 }
 
 /** The slice of `ctx.storage.sql` the queries need. */
@@ -383,10 +429,39 @@ export function dashboardData(
   }
   const funnel = [funnelTotal, ...[...funnelByWeek.values()].reverse()];
 
+  // Paid plans: counts and sums only.
+  const monthStart = Date.UTC(new Date(input.now).getUTCFullYear(), new Date(input.now).getUTCMonth(), 1);
+  const proSubscribers =
+    sql
+      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM subscriptions WHERE state = 'active' AND (period_end IS NULL OR period_end + ? > ?)", PRO_GRACE_MS, input.now)
+      .toArray()[0]?.n ?? 0;
+  const sums = (since: number) =>
+    sql
+      .exec<{ topups: number | null; cents: number | null }>("SELECT SUM(kind = 'topup') AS topups, SUM(amount_cents) AS cents FROM payments WHERE at >= ?", since)
+      .toArray()[0];
+  const week = sums(currentWeek);
+  const month = sums(monthStart);
+  const paidWeek = sql.exec<{ usd: number; n: number }>("SELECT paid_usd AS usd, paid_requests AS n FROM spend_weeks WHERE week_start = ?", currentWeek).toArray()[0];
+  const paidMonth = sql.exec<{ usd: number | null }>("SELECT SUM(paid_cost_usd) AS usd FROM daily_activity WHERE day >= ?", monthStart / DAY_MS).toArray()[0];
+  const paid: PaidView = {
+    proSubscribers,
+    topupsThisWeek: week?.topups ?? 0,
+    topupsThisMonth: month?.topups ?? 0,
+    revenueWeekUsd: (week?.cents ?? 0) / 100,
+    revenueMonthUsd: (month?.cents ?? 0) / 100,
+    paidCostWeekUsd: paidWeek?.usd ?? 0,
+    paidCostMonthUsd: paidMonth?.usd ?? 0,
+    paidRequestsWeek: paidWeek?.n ?? 0,
+  };
+
+  const upstreams = upstreamStats(sql, input.now);
+
   return {
     now: input.now,
+    upstreams,
     currentWeek,
     queue,
+    paid,
     referrals,
     funnel,
     weeklyActive,
@@ -397,6 +472,52 @@ export function dashboardData(
     limitHits,
     people: { admitted, activeThisWeek: weeklyActive[weeklyActive.length - 1]?.active ?? 0 },
   };
+}
+
+/** Per upstream, today and this week: counts from `upstream_daily`, percentiles from `upstream_timings`. */
+export function upstreamStats(sql: Sql, now: number): UpstreamStats[] {
+  const today = Math.floor(now / DAY_MS);
+  const week = weekStart(now) / DAY_MS;
+  const out: UpstreamStats[] = [];
+  for (const [window, fromDay] of [["today", today], ["week", week]] as const) {
+    for (const upstream of UPSTREAM_NAMES) {
+      const row = sql
+        .exec<{ requests: number | null; errors: number | null; prompt: number | null; cached: number | null; cash: number | null; credit: number | null }>(
+          `SELECT SUM(requests) AS requests, SUM(errors) AS errors, SUM(prompt_tokens) AS prompt, SUM(cached_tokens) AS cached,
+                  SUM(cash_usd) AS cash, SUM(credit_usd) AS credit
+           FROM upstream_daily WHERE upstream = ? AND day >= ?`,
+          upstream,
+          fromDay,
+        )
+        .toArray()[0];
+      const since = fromDay * DAY_MS;
+      out.push({
+        upstream,
+        window,
+        requests: row?.requests ?? 0,
+        errors: row?.errors ?? 0,
+        medianTtftMs: percentile(sql, "ttft_ms", upstream, since, 0.5),
+        p90TtftMs: percentile(sql, "ttft_ms", upstream, since, 0.9),
+        medianTtfbMs: percentile(sql, "ttfb_ms", upstream, since, 0.5),
+        cacheHitShare: row?.prompt ? (row.cached ?? 0) / row.prompt : null,
+        cashUsd: row?.cash ?? 0,
+        creditUsd: row?.credit ?? 0,
+      });
+    }
+  }
+  return out;
+}
+
+/** The nearest-rank percentile of one timing column since `since`; null without values. */
+function percentile(sql: Sql, column: "ttft_ms" | "ttfb_ms", upstream: string, since: number, share: number): number | null {
+  const n = sql.exec<{ n: number }>(`SELECT COUNT(${column}) AS n FROM upstream_timings WHERE upstream = ? AND at >= ?`, upstream, since).toArray()[0]?.n ?? 0;
+  if (n === 0) return null;
+  const rank = Math.max(1, Math.ceil(share * n));
+  return (
+    sql
+      .exec<{ v: number }>(`SELECT ${column} AS v FROM upstream_timings WHERE upstream = ? AND at >= ? AND ${column} IS NOT NULL ORDER BY ${column} LIMIT 1 OFFSET ?`, upstream, since, rank - 1)
+      .toArray()[0]?.v ?? null
+  );
 }
 
 /** The median of a list (sorted here); null when it's empty. */

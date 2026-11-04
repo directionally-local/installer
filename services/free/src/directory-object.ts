@@ -3,8 +3,9 @@ import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import { dashboardData, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
-import { crossed, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, queueStartedAlert, totalSpendAlert, weeklySpendAlert, type Alert } from "./alerts.js";
-import { etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
+import { creditAlert, creditPausedAlert, crossed, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, queueStartedAlert, totalSpendAlert, upstreamErrorAlert, weeklySpendAlert, type Alert } from "./alerts.js";
+import type { Upstream } from "./config.js";
+import { creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
@@ -63,6 +64,22 @@ export interface RequestRecord {
   host?: string;
   /** Set when the request failed in a way the host is blamed for. */
   hostFailure?: HostFailure;
+  /** Paid usage (Pro or a top-up): logged and shown, but not counted against the free caps. */
+  paid?: boolean;
+  /**
+   * Who served (or failed) the request; "openrouter" when unset. Only OpenRouter's `costUsd`
+   * is cash: the global caps count it alone. A Luminal request's `costUsd` is its cost at
+   * OpenRouter prices (what the person's dollar allowance was charged), and `creditUsd` is
+   * what it took from the Luminal credit.
+   */
+  upstream?: Upstream;
+  /** Luminal credit used, USD (0 for OpenRouter). */
+  creditUsd?: number;
+  /** Milliseconds to the upstream's response headers, and to the first content chunk. */
+  ttfbMs?: number | null;
+  ttftMs?: number | null;
+  /** The upstream failed the request (429, 5xx, a timeout, a network error or a failed stream). */
+  upstreamError?: boolean;
 }
 
 /**
@@ -93,8 +110,13 @@ export interface PersonState {
 
 export interface Gate {
   paused: boolean;
+  /** Cash (OpenRouter) spend by everyone but admins: what the global caps count. */
   weekUsd: number;
   totalUsd: number;
+  /** Luminal credit used by everyone, admins and paid usage included, since the start. */
+  creditUsedUsd: number;
+  /** Free Luminal credit spend this week (no admins, no paid usage): what the queue watches in credit mode. */
+  weekCreditUsd: number;
   overrides: Overrides;
   person?: PersonState;
 }
@@ -111,6 +133,10 @@ export interface QueueRun {
 }
 
 export interface SpendSummary {
+  /** Paid usage (Pro and top-ups) this week, apart from the free caps. */
+  paidUsd: number;
+  paidTokens: number;
+  paidRequests: number;
   weekStart: number;
   resetsAt: number;
   /** Everyone but admins: what the global caps count. */
@@ -124,6 +150,10 @@ export interface SpendSummary {
   /** Everyone but admins, since the service started. */
   totalSpentUsd: number;
   adminTotalSpentUsd: number;
+  /** Luminal credit: used by everyone since the start, everyone this week, and free usage this week. */
+  creditUsedUsd: number;
+  creditWeekUsd: number;
+  freeCreditWeekUsd: number;
 }
 
 const ACTIVITY = `(SELECT github_id, at FROM requests UNION ALL SELECT github_id, at FROM events)`;
@@ -290,7 +320,85 @@ const SCHEMA = [
      key TEXT PRIMARY KEY,
      at  INTEGER NOT NULL
    )`,
+  // Billing (stripe.ts): webhook events already handled (idempotency), which Stripe customer is
+  // whose, payments for the revenue numbers (amounts before tax, in cents), and a copy of each
+  // Pro subscription's state for the dashboard (the AccountObject holds the one that counts).
+  `CREATE TABLE IF NOT EXISTS billing_events (
+     id   TEXT PRIMARY KEY,
+     kind TEXT NOT NULL,
+     at   INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS customers (
+     customer_id TEXT PRIMARY KEY,
+     github_id   INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS payments (
+     id           TEXT PRIMARY KEY,
+     github_id    INTEGER NOT NULL,
+     kind         TEXT NOT NULL,
+     amount_cents INTEGER NOT NULL,
+     at           INTEGER NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS payments_at ON payments (at)`,
+  // Per upstream per UTC day, for the dashboard: requests (admins included: it is the upstream's
+  // load), upstream errors, prompt and cached tokens, cash (OpenRouter) and credit (Luminal) cost.
+  `CREATE TABLE IF NOT EXISTS upstream_daily (
+     day           INTEGER NOT NULL,
+     upstream      TEXT NOT NULL,
+     requests      INTEGER NOT NULL,
+     errors        INTEGER NOT NULL,
+     prompt_tokens INTEGER NOT NULL,
+     cached_tokens INTEGER NOT NULL,
+     cash_usd      REAL NOT NULL,
+     credit_usd    REAL NOT NULL,
+     PRIMARY KEY (day, upstream)
+   ) WITHOUT ROWID`,
+  // Per request with a response: time to the first byte (headers) and to the first content
+  // chunk, by upstream, for the median and p90. No person, no content; rows older than 15 days go.
+  `CREATE TABLE IF NOT EXISTS upstream_timings (
+     id       INTEGER PRIMARY KEY AUTOINCREMENT,
+     at       INTEGER NOT NULL,
+     upstream TEXT NOT NULL,
+     ttfb_ms  INTEGER,
+     ttft_ms  INTEGER
+   )`,
+  `CREATE INDEX IF NOT EXISTS upstream_timings_at ON upstream_timings (at)`,
+  // Per upstream per minute, for the Luminal error-rate alert; rows older than two hours go.
+  `CREATE TABLE IF NOT EXISTS upstream_minutes (
+     minute   INTEGER NOT NULL,
+     upstream TEXT NOT NULL,
+     requests INTEGER NOT NULL,
+     errors   INTEGER NOT NULL,
+     PRIMARY KEY (minute, upstream)
+   ) WITHOUT ROWID`,
+  `CREATE TABLE IF NOT EXISTS subscriptions (
+     github_id  INTEGER PRIMARY KEY,
+     state      TEXT NOT NULL,
+     period_end INTEGER,
+     state_at   INTEGER NOT NULL
+   )`,
 ];
+
+/** Columns added after their table first shipped: added in place on start. */
+const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> = [
+  ["requests", "paid", "INTEGER NOT NULL DEFAULT 0"],
+  ["spend_weeks", "paid_usd", "REAL NOT NULL DEFAULT 0"],
+  ["spend_weeks", "paid_tokens", "INTEGER NOT NULL DEFAULT 0"],
+  ["spend_weeks", "paid_requests", "INTEGER NOT NULL DEFAULT 0"],
+  ["daily_activity", "paid_cost_usd", "REAL NOT NULL DEFAULT 0"],
+  // Upstreams (Luminal and OpenRouter): who served each request, the credit it used, and timing.
+  ["requests", "upstream", "TEXT NOT NULL DEFAULT 'openrouter'"],
+  ["requests", "credit_usd", "REAL NOT NULL DEFAULT 0"],
+  ["requests", "ttfb_ms", "INTEGER"],
+  ["requests", "ttft_ms", "INTEGER"],
+  ["requests", "upstream_error", "INTEGER NOT NULL DEFAULT 0"],
+  ["spend_weeks", "credit_usd", "REAL NOT NULL DEFAULT 0"],
+  ["spend_weeks", "free_credit_usd", "REAL NOT NULL DEFAULT 0"],
+  ["daily_activity", "credit_usd", "REAL NOT NULL DEFAULT 0"],
+];
+
+/** Timings older than this are dropped: the dashboard shows today and this week. */
+const TIMINGS_MAX_AGE_MS = 15 * DAY_MS;
 
 /** Set in `settings` once `daily_activity` has been built from the existing log. */
 const ROLLUP_READY = "rollup:daily_activity";
@@ -300,6 +408,10 @@ export class DirectoryObject extends DurableObject {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
+      for (const [table, column, definition] of ADDED_COLUMNS) {
+        const columns = this.ctx.storage.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray();
+        if (!columns.some((existing) => existing.name === column)) this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      }
       this.#backfillDailyActivity();
     });
   }
@@ -312,7 +424,13 @@ export class DirectoryObject extends DurableObject {
       sql.exec("DELETE FROM daily_activity");
       sql.exec(
         `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd)
-         SELECT at / ${DAY_MS}, github_id, COUNT(*), 0, SUM(charged_tokens), SUM(cost_usd) FROM requests WHERE is_admin = 0 GROUP BY 1, 2`,
+         SELECT at / ${DAY_MS}, github_id, COUNT(*), 0, SUM(CASE WHEN paid = 0 THEN charged_tokens ELSE 0 END),
+                SUM(CASE WHEN paid = 0 THEN cost_usd ELSE 0 END) FROM requests WHERE is_admin = 0 GROUP BY 1, 2`,
+      );
+      sql.exec(
+        `UPDATE daily_activity SET paid_cost_usd = (SELECT COALESCE(SUM(r.cost_usd), 0) FROM requests r
+           WHERE r.is_admin = 0 AND r.paid = 1 AND r.github_id = daily_activity.github_id AND r.at / ${DAY_MS} = daily_activity.day)
+         WHERE EXISTS (SELECT 1 FROM requests r WHERE r.paid = 1 LIMIT 1)`,
       );
       sql.exec(
         `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd)
@@ -323,18 +441,22 @@ export class DirectoryObject extends DurableObject {
     });
   }
 
-  #addActivity(githubId: number, at: number, change: { requests: number; events: number; chargedTokens: number; costUsd: number }): void {
+  /** Free tokens and cost go in `charged_tokens` and `cost_usd`; paid cost in `paid_cost_usd`. */
+  #addActivity(githubId: number, at: number, change: { requests: number; events: number; chargedTokens: number; costUsd: number; paidCostUsd?: number; creditUsd?: number }): void {
     this.ctx.storage.sql.exec(
-      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd, paid_cost_usd, credit_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (day, github_id) DO UPDATE SET
          requests = requests + excluded.requests, events = events + excluded.events,
-         charged_tokens = charged_tokens + excluded.charged_tokens, cost_usd = cost_usd + excluded.cost_usd`,
+         charged_tokens = charged_tokens + excluded.charged_tokens, cost_usd = cost_usd + excluded.cost_usd,
+         paid_cost_usd = paid_cost_usd + excluded.paid_cost_usd, credit_usd = credit_usd + excluded.credit_usd`,
       Math.floor(at / DAY_MS),
       githubId,
       change.requests,
       change.events,
       change.chargedTokens,
       change.costUsd,
+      change.paidCostUsd ?? 0,
+      change.creditUsd ?? 0,
     );
   }
 
@@ -389,7 +511,8 @@ export class DirectoryObject extends DurableObject {
         // Invited people and admins don't: an invite is the owner's own choice.
         if (created && via === "open" && input.policy) {
           const waiting = this.#waitingCount();
-          if (shouldQueue({ weekUsd: this.#spendSync(input.now).spentUsd, queueLength: waiting, policy: input.policy })) {
+          const spend = this.#spendSync(input.now);
+          if (shouldQueue({ weekUsd: spend.spentUsd, weekCreditUsd: spend.freeCreditWeekUsd, queueLength: waiting, policy: input.policy })) {
             sql.exec("INSERT OR IGNORE INTO queue (github_id, queued_at) VALUES (?, ?)", input.githubId, input.now);
             queued = true;
             queueStarted = waiting === 0;
@@ -523,8 +646,8 @@ export class DirectoryObject extends DurableObject {
     const thisWeek = weekStart(now) / DAY_MS;
     const admins = JSON.stringify(policy.adminIds);
     const last = this.ctx.storage.sql
-      .exec<{ actives: number; usd: number | null }>(
-        `SELECT COUNT(DISTINCT github_id) AS actives, SUM(cost_usd) AS usd FROM daily_activity
+      .exec<{ actives: number; usd: number | null; credit: number | null }>(
+        `SELECT COUNT(DISTINCT github_id) AS actives, SUM(cost_usd) AS usd, SUM(credit_usd) AS credit FROM daily_activity
          WHERE day >= ? AND day < ? AND requests > 0
            AND github_id NOT IN (SELECT github_id FROM people WHERE admitted_via = 'admin') AND github_id NOT IN (SELECT value FROM json_each(?))`,
         thisWeek - 7,
@@ -532,7 +655,10 @@ export class DirectoryObject extends DurableObject {
         admins,
       )
       .toArray()[0];
-    return forecast({ lastWeekUsd: last?.usd ?? 0, lastWeekActives: last?.actives ?? 0, policy, totalSpentUsd: this.#spendSync(now).totalSpentUsd });
+    const spend = this.#spendSync(now);
+    // With Luminal serving, the queue protects the credit (see queue.ts).
+    if (creditMode(policy)) return creditForecast({ lastWeekCreditUsd: last?.credit ?? 0, lastWeekActives: last?.actives ?? 0, policy, creditUsedUsd: spend.creditUsedUsd });
+    return forecast({ lastWeekUsd: last?.usd ?? 0, lastWeekActives: last?.actives ?? 0, policy, totalSpentUsd: spend.totalSpentUsd });
   }
 
   /** Monday's admission, once per week, on the first call of the week (see queue.ts). */
@@ -726,6 +852,8 @@ export class DirectoryObject extends DurableObject {
       paused: this.#paused(),
       weekUsd: spend.spentUsd,
       totalUsd: spend.totalSpentUsd,
+      creditUsedUsd: spend.creditUsedUsd,
+      weekCreditUsd: spend.freeCreditWeekUsd,
       overrides,
       ...(policy && githubId !== undefined ? { person: this.#personState(githubId, now, policy) } : {}),
     };
@@ -758,9 +886,23 @@ export class DirectoryObject extends DurableObject {
 
   #spendSync(now: number): SpendSummary {
     const start = weekStart(now);
-    type Row = { usd: number; tokens: number; requests: number; admin_usd: number; admin_tokens: number; admin_requests: number };
+    type Row = {
+      usd: number;
+      tokens: number;
+      requests: number;
+      admin_usd: number;
+      admin_tokens: number;
+      admin_requests: number;
+      paid_usd: number;
+      paid_tokens: number;
+      paid_requests: number;
+      credit_usd: number;
+      free_credit_usd: number;
+    };
     const row = this.ctx.storage.sql.exec<Row>("SELECT * FROM spend_weeks WHERE week_start = ?", start).toArray()[0];
-    const total = this.ctx.storage.sql.exec<{ usd: number | null; admin_usd: number | null }>("SELECT SUM(usd) AS usd, SUM(admin_usd) AS admin_usd FROM spend_weeks").toArray()[0];
+    const total = this.ctx.storage.sql
+      .exec<{ usd: number | null; admin_usd: number | null; credit_usd: number | null }>("SELECT SUM(usd) AS usd, SUM(admin_usd) AS admin_usd, SUM(credit_usd) AS credit_usd FROM spend_weeks")
+      .toArray()[0];
     return {
       weekStart: start,
       resetsAt: weekEnd(now),
@@ -770,9 +912,60 @@ export class DirectoryObject extends DurableObject {
       adminSpentUsd: round(row?.admin_usd ?? 0),
       adminTokens: row?.admin_tokens ?? 0,
       adminRequests: row?.admin_requests ?? 0,
+      paidUsd: round(row?.paid_usd ?? 0),
+      paidTokens: row?.paid_tokens ?? 0,
+      paidRequests: row?.paid_requests ?? 0,
       totalSpentUsd: round(total?.usd ?? 0),
       adminTotalSpentUsd: round(total?.admin_usd ?? 0),
+      creditUsedUsd: round(total?.credit_usd ?? 0),
+      creditWeekUsd: round(row?.credit_usd ?? 0),
+      freeCreditWeekUsd: round(row?.free_credit_usd ?? 0),
     };
+  }
+
+  // ─── Billing ─────────────────────────────────────────────────────────────
+
+  /** Whether a Stripe event id was handled already (webhooks are delivered at least once). */
+  async billingEventSeen(id: string): Promise<boolean> {
+    return this.ctx.storage.sql.exec("SELECT 1 FROM billing_events WHERE id = ?", id).toArray().length > 0;
+  }
+
+  /** Marks an event handled; false when another delivery got there first. */
+  async markBillingEvent(id: string, kind: string, now: number): Promise<boolean> {
+    return this.ctx.storage.sql.exec("INSERT INTO billing_events (id, kind, at) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING RETURNING id", id, kind, now).toArray().length > 0;
+  }
+
+  async mapCustomer(customerId: string, githubId: number): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT INTO customers (customer_id, github_id) VALUES (?, ?) ON CONFLICT(customer_id) DO NOTHING", customerId, githubId);
+  }
+
+  async customerOwner(customerId: string): Promise<number | undefined> {
+    return this.ctx.storage.sql.exec<{ github_id: number }>("SELECT github_id FROM customers WHERE customer_id = ?", customerId).toArray()[0]?.github_id;
+  }
+
+  /** A payment for the revenue numbers, once per id (a Checkout Session or an invoice). */
+  async recordPayment(input: { id: string; githubId: number; kind: "pro" | "topup"; amountCents: number; at: number }): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO payments (id, github_id, kind, amount_cents, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+      input.id,
+      input.githubId,
+      input.kind,
+      input.amountCents,
+      input.at,
+    );
+  }
+
+  /** The dashboard's copy of a Pro subscription's state; older events don't overwrite newer ones. */
+  async mirrorSubscription(input: { githubId: number; state: string; periodEnd: number | null | undefined; eventAt: number }): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO subscriptions (github_id, state, period_end, state_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(github_id) DO UPDATE SET state = excluded.state, period_end = COALESCE(excluded.period_end, period_end), state_at = excluded.state_at
+       WHERE excluded.state_at >= subscriptions.state_at`,
+      input.githubId,
+      input.state,
+      input.periodEnd ?? null,
+      input.eventAt,
+    );
   }
 
   // ─── Records ─────────────────────────────────────────────────────────────
@@ -786,8 +979,9 @@ export class DirectoryObject extends DurableObject {
     const alerts: Alert[] = [];
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
-        `INSERT INTO requests (github_id, is_admin, at, model, prompt_tokens, completion_tokens, cached_tokens, charged_tokens, cost_usd, status, latency_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO requests (github_id, is_admin, at, model, prompt_tokens, completion_tokens, cached_tokens, charged_tokens, cost_usd, status, latency_ms, paid,
+                               upstream, credit_usd, ttfb_ms, ttft_ms, upstream_error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         record.githubId,
         record.isAdmin ? 1 : 0,
         record.at,
@@ -799,23 +993,86 @@ export class DirectoryObject extends DurableObject {
         record.costUsd,
         record.status,
         record.latencyMs,
+        record.paid ? 1 : 0,
+        record.upstream ?? "openrouter",
+        record.creditUsd ?? 0,
+        record.ttfbMs ?? null,
+        record.ttftMs ?? null,
+        record.upstreamError ? 1 : 0,
       );
       const admin = record.isAdmin ? 1 : 0;
+      // Three buckets: admins; paid usage (Pro, top-ups); and free usage, the only one the caps count.
+      const paid = !admin && record.paid === true;
+      const free = !admin && !paid;
+      // The dollar columns of spend_weeks are cash: OpenRouter's cost only. Luminal credit is
+      // kept apart, all of it in credit_usd and the free share in free_credit_usd.
+      const upstream: Upstream = record.upstream ?? "openrouter";
+      const cash = upstream === "openrouter" ? record.costUsd : 0;
+      const credit = upstream === "luminal" ? (record.creditUsd ?? 0) : 0;
       this.ctx.storage.sql.exec(
-        `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests, paid_usd, paid_tokens, paid_requests, credit_usd, free_credit_usd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(week_start) DO UPDATE SET
            usd = usd + excluded.usd, tokens = tokens + excluded.tokens, requests = requests + excluded.requests,
            admin_usd = admin_usd + excluded.admin_usd, admin_tokens = admin_tokens + excluded.admin_tokens,
-           admin_requests = admin_requests + excluded.admin_requests`,
+           admin_requests = admin_requests + excluded.admin_requests,
+           paid_usd = paid_usd + excluded.paid_usd, paid_tokens = paid_tokens + excluded.paid_tokens, paid_requests = paid_requests + excluded.paid_requests,
+           credit_usd = credit_usd + excluded.credit_usd, free_credit_usd = free_credit_usd + excluded.free_credit_usd`,
         weekStart(record.at),
-        admin ? 0 : record.costUsd,
-        admin ? 0 : record.chargedTokens,
-        admin ? 0 : 1,
-        admin ? record.costUsd : 0,
+        free ? cash : 0,
+        free ? record.chargedTokens : 0,
+        free ? 1 : 0,
+        admin ? cash : 0,
         admin ? record.chargedTokens : 0,
         admin,
+        paid ? cash : 0,
+        paid ? record.chargedTokens : 0,
+        paid ? 1 : 0,
+        credit,
+        free ? credit : 0,
       );
-      if (!admin) this.#addActivity(record.githubId, record.at, { requests: 1, events: 0, chargedTokens: record.chargedTokens, costUsd: record.costUsd });
+      if (!admin) {
+        // cost_usd here is what the allowance was charged (OpenRouter prices), for cost per person.
+        this.#addActivity(record.githubId, record.at, {
+          requests: 1,
+          events: 0,
+          chargedTokens: free ? record.chargedTokens : 0,
+          costUsd: free ? record.costUsd : 0,
+          paidCostUsd: paid ? cash : 0,
+          creditUsd: free ? credit : 0,
+        });
+      }
+      this.ctx.storage.sql.exec(
+        `INSERT INTO upstream_daily (day, upstream, requests, errors, prompt_tokens, cached_tokens, cash_usd, credit_usd) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+         ON CONFLICT (day, upstream) DO UPDATE SET requests = requests + 1, errors = errors + excluded.errors,
+           prompt_tokens = prompt_tokens + excluded.prompt_tokens, cached_tokens = cached_tokens + excluded.cached_tokens,
+           cash_usd = cash_usd + excluded.cash_usd, credit_usd = credit_usd + excluded.credit_usd`,
+        Math.floor(record.at / DAY_MS),
+        upstream,
+        record.upstreamError ? 1 : 0,
+        record.promptTokens,
+        record.cachedTokens,
+        cash,
+        credit,
+      );
+      if (record.ttfbMs != null || record.ttftMs != null) {
+        this.ctx.storage.sql.exec("INSERT INTO upstream_timings (at, upstream, ttfb_ms, ttft_ms) VALUES (?, ?, ?, ?)", record.at, upstream, record.ttfbMs ?? null, record.ttftMs ?? null);
+        this.ctx.storage.sql.exec("DELETE FROM upstream_timings WHERE at < ?", record.at - TIMINGS_MAX_AGE_MS);
+      }
+      const minute = Math.floor(record.at / 60_000);
+      this.ctx.storage.sql.exec(
+        `INSERT INTO upstream_minutes (minute, upstream, requests, errors) VALUES (?, ?, 1, ?)
+         ON CONFLICT (minute, upstream) DO UPDATE SET requests = requests + 1, errors = errors + excluded.errors`,
+        minute,
+        upstream,
+        record.upstreamError ? 1 : 0,
+      );
+      this.ctx.storage.sql.exec("DELETE FROM upstream_minutes WHERE minute < ?", minute - 120);
+      if (policy && upstream === "luminal") {
+        const errorAlert = this.#upstreamAlert(upstream, record.at);
+        if (errorAlert) alerts.push(errorAlert);
+        if (credit > 0) alerts.push(...this.#creditAlerts(record.at, policy));
+      }
       if (record.host) {
         const failed = record.hostFailure ? 1 : 0;
         this.ctx.storage.sql.exec(
@@ -848,7 +1105,7 @@ export class DirectoryObject extends DurableObject {
           if (alert) alerts.push(alert);
         }
       }
-      if (policy && !admin) alerts.push(...this.#spendAlerts(record.at, policy));
+      if (policy && free) alerts.push(...this.#spendAlerts(record.at, policy));
     });
     return alerts;
   }
@@ -899,10 +1156,51 @@ export class DirectoryObject extends DurableObject {
     return undefined;
   }
 
+  /** Luminal credit used crossing 50%, 80% and 100% of the balance: once each per balance (a new balance re-arms them). */
+  #creditAlerts(now: number, policy: Policy): Alert[] {
+    const balance = policy.luminalCreditUsd;
+    if (balance <= 0) return [];
+    const prefix = `credit:${balance}:`;
+    const used = this.#spendSync(now).creditUsedUsd;
+    const hit = crossed(used / balance, this.#sentThresholds(prefix));
+    if (!hit) return [];
+    for (const threshold of hit.mark) this.#markAlert(`${prefix}${threshold}`, now);
+    return [creditAlert(used, balance, hit.threshold)];
+  }
+
+  /**
+   * The alert for Luminal-served usage pausing because the credit ran out: once per balance.
+   * Undefined when it was already sent.
+   */
+  async creditPausedAlert(balance: number, now: number): Promise<Alert | undefined> {
+    if (!this.#markAlert(`credit-paused:${balance}`, now)) return undefined;
+    return creditPausedAlert(this.#spendSync(now).creditUsedUsd, balance);
+  }
+
+  /** An upstream failing more than 20% of at least 20 requests in the last hour: alert once until it recovers. */
+  #upstreamAlert(upstream: Upstream, now: number): Alert | undefined {
+    const since = Math.floor((now - HOST_WINDOW_MS) / 60_000);
+    const row = this.ctx.storage.sql
+      .exec<{ requests: number | null; errors: number | null }>("SELECT SUM(requests) AS requests, SUM(errors) AS errors FROM upstream_minutes WHERE upstream = ? AND minute > ?", upstream, since)
+      .toArray()[0];
+    const requests = row?.requests ?? 0;
+    const errors = row?.errors ?? 0;
+    const key = `upstream:${upstream}`;
+    if (requests >= HOST_MIN_REQUESTS && errors / requests > HOST_FAILURE_RATE) {
+      return this.#markAlert(key, now) ? upstreamErrorAlert(upstream, errors, requests) : undefined;
+    }
+    if (requests >= HOST_MIN_REQUESTS) this.ctx.storage.sql.exec("DELETE FROM alerts_sent WHERE key = ?", key);
+    return undefined;
+  }
+
   /** The queue-started alert for an admission that queued the first person. */
   async queueStartedAlert(now: number, envPolicy: Policy): Promise<Alert> {
     const policy = this.#policy(envPolicy);
-    return queueStartedAlert(this.#spendSync(now).spentUsd, policy.globalWeeklyUsdCap);
+    const spend = this.#spendSync(now);
+    if (creditMode(policy) && policy.luminalWeeklyCreditUsd !== undefined && spend.freeCreditWeekUsd >= policy.queueThreshold * policy.luminalWeeklyCreditUsd) {
+      return queueStartedAlert(spend.freeCreditWeekUsd, policy.luminalWeeklyCreditUsd, "credit");
+    }
+    return queueStartedAlert(spend.spentUsd, policy.globalWeeklyUsdCap);
   }
 
   /** Stores cleaned events; ids already stored for this person are ignored. Returns how many were new. */

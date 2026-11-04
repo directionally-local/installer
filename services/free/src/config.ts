@@ -80,10 +80,46 @@ export interface FreeConfig {
   alertEmailFrom: string;
   /** Telegram's chat id (ALERT_TELEGRAM_CHAT_ID), unless the URL carries `chat_id`. */
   alertTelegramChatId: string | undefined;
+  /** Stripe billing (stripe.ts). Without the secret key, the billing endpoints answer 503 billing_unavailable. */
+  stripe: StripeConfig;
+  /** Pro's weekly dollar ceiling (PRO_WEEKLY_USD_CAP); undefined (the default) means tokens only. */
+  proWeeklyUsdCap: number | undefined;
+  /**
+   * Which upstream serves chat requests (PRIMARY_UPSTREAM): "luminal" (the default) or
+   * "openrouter". There is no automatic switch between them: a Luminal error goes back to
+   * the client as a transient error. Without LUMINAL_API_KEY, OpenRouter serves.
+   */
+  primaryUpstream: Upstream;
+  /** Luminal's API key (LUMINAL_API_KEY, a secret). Never logged. */
+  luminalApiKey: string | undefined;
+  /** Seconds to wait for Luminal's response headers before answering a transient 503 (LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS). */
+  luminalFirstByteTimeoutSeconds: number;
+  /** Luminal list prices, USD per million tokens (LUMINAL_PRICE_INPUT, _CACHED, _OUTPUT). Luminal reports no cost. */
+  luminalPrices: Prices;
+  /**
+   * The OpenRouter prices we were billed for the same model, USD per million tokens (OPENROUTER_PRICE_INPUT,
+   * _CACHED, _OUTPUT). A Luminal request counts against the per-person dollar allowance at
+   * these prices, so the allowance means the same whichever upstream served.
+   */
+  openRouterPrices: Prices;
+  /** Prepaid Luminal credit, USD (LUMINAL_CREDIT_USD). At or past it, Luminal-served usage pauses. */
+  luminalCreditUsd: number;
+  /** Free Luminal credit a week the queue protects (LUMINAL_WEEKLY_CREDIT_USD); undefined: no weekly credit budget. */
+  luminalWeeklyCreditUsd: number | undefined;
   /** The kill switch from `env`; the admin endpoint has its own, and either one pauses. */
   paused: boolean;
   /** The public origin for links, when the request's own origin isn't it (behind a proxy). */
   publicUrl: string | undefined;
+}
+
+export type Upstream = "luminal" | "openrouter";
+export const UPSTREAMS: readonly Upstream[] = ["luminal", "openrouter"];
+
+/** USD per million tokens. Cached is the price of a cached prompt token; reasoning is billed as output. */
+export interface Prices {
+  input: number;
+  cached: number;
+  output: number;
 }
 
 export type AlertKind = "auto" | "discord" | "slack" | "telegram";
@@ -91,6 +127,16 @@ export type AlertKind = "auto" | "discord" | "slack" | "telegram";
 export interface Offers {
   pro: { priceUsdMonthly: number; tokensPerWeek: number };
   topup: { priceUsd: number; tokens: number; validDays: number };
+}
+
+export interface StripeConfig {
+  secretKey: string | undefined;
+  webhookSecret: string | undefined;
+  pricePro: string | undefined;
+  priceTopup: string | undefined;
+  successUrl: string;
+  cancelUrl: string;
+  portalReturnUrl: string;
 }
 
 export const DEFAULTS = {
@@ -129,7 +175,27 @@ export const DEFAULTS = {
   topupTokens: 50_000_000,
   topupValidDays: 30,
   alertEmailFrom: "alerts@dl.new",
+  billingSuccessUrl: "https://dl.new/billing/success",
+  billingCancelUrl: "https://dl.new/billing/cancel",
+  billingPortalReturnUrl: "https://dl.new/billing",
+  primaryUpstream: "luminal" as Upstream,
+  luminalFirstByteTimeoutSeconds: 30,
+  /** https://luminal.com/pricing, 2026-11-04. */
+  luminalPrices: { input: 0.1425, cached: 0.0029, output: 0.57 } as Prices,
+  /**
+   * What OpenRouter actually billed us: the prices of the cheapest full-precision host that
+   * served the free tier (Morph), as listed by OpenRouter's endpoints API
+   * (https://openrouter.ai/api/v1/models/deepseek/deepseek-v4.1-flash-1017/endpoints) on
+   * 2026-11-04, and matched by a real billed request. So a person's week ends where it did
+   * before Luminal. Recheck against `requests.cost_usd` of OpenRouter rows if hosts change.
+   */
+  openRouterPrices: { input: 0.035, cached: 0.006, output: 0.315 } as Prices,
+  luminalCreditUsd: 2000,
+  luminalWeeklyCreditUsd: 250,
 } as const;
+
+/** The longest first-byte wait for Luminal, in seconds. */
+export const MAX_FIRST_BYTE_TIMEOUT_SECONDS = 300;
 
 /** The longest host cooldown, in minutes: a day. */
 export const MAX_HOST_COOLDOWN_MINUTES = 1440;
@@ -177,6 +243,23 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     alertTelegramChatId: text(env.ALERT_TELEGRAM_CHAT_ID),
     alertEmailTo: emailAddress(env.ALERT_EMAIL_TO, "ALERT_EMAIL_TO"),
     alertEmailFrom: emailAddress(env.ALERT_EMAIL_FROM, "ALERT_EMAIL_FROM") ?? DEFAULTS.alertEmailFrom,
+    stripe: {
+      secretKey: text(env.STRIPE_SECRET_KEY),
+      webhookSecret: text(env.STRIPE_WEBHOOK_SECRET),
+      pricePro: stripeId(env.STRIPE_PRICE_PRO, "price_", "STRIPE_PRICE_PRO"),
+      priceTopup: stripeId(env.STRIPE_PRICE_TOPUP, "price_", "STRIPE_PRICE_TOPUP"),
+      successUrl: httpsUrl(env.BILLING_SUCCESS_URL, "BILLING_SUCCESS_URL") ?? DEFAULTS.billingSuccessUrl,
+      cancelUrl: httpsUrl(env.BILLING_CANCEL_URL, "BILLING_CANCEL_URL") ?? DEFAULTS.billingCancelUrl,
+      portalReturnUrl: httpsUrl(env.BILLING_PORTAL_RETURN_URL, "BILLING_PORTAL_RETURN_URL") ?? DEFAULTS.billingPortalReturnUrl,
+    },
+    proWeeklyUsdCap: text(env.PRO_WEEKLY_USD_CAP) === undefined ? undefined : usd(env.PRO_WEEKLY_USD_CAP, 0, "PRO_WEEKLY_USD_CAP"),
+    primaryUpstream: upstream(env.PRIMARY_UPSTREAM),
+    luminalApiKey: text(env.LUMINAL_API_KEY),
+    luminalFirstByteTimeoutSeconds: timeoutSeconds(env.LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS),
+    luminalPrices: prices(env, "LUMINAL_PRICE", DEFAULTS.luminalPrices),
+    openRouterPrices: prices(env, "OPENROUTER_PRICE", DEFAULTS.openRouterPrices),
+    luminalCreditUsd: amount(env.LUMINAL_CREDIT_USD, DEFAULTS.luminalCreditUsd, "LUMINAL_CREDIT_USD"),
+    luminalWeeklyCreditUsd: usd(env.LUMINAL_WEEKLY_CREDIT_USD, DEFAULTS.luminalWeeklyCreditUsd, "LUMINAL_WEEKLY_CREDIT_USD"),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
   };
@@ -216,6 +299,20 @@ function amount(value: unknown, fallback: number, name: string): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) throw new ConfigError(`${name} must be a number of dollars (got "${raw}").`);
   return parsed;
+}
+
+function stripeId(value: unknown, prefix: string, name: string): string | undefined {
+  const raw = text(value);
+  if (raw === undefined) return undefined;
+  if (!raw.startsWith(prefix) || !/^[A-Za-z0-9_]+$/.test(raw)) throw new ConfigError(`${name} must be a Stripe id starting with ${prefix} (got "${raw}").`);
+  return raw;
+}
+
+function httpsUrl(value: unknown, name: string): string | undefined {
+  const raw = text(value);
+  if (raw === undefined) return undefined;
+  if (!/^https:\/\/\S+$/.test(raw)) throw new ConfigError(`${name} must be an https URL.`);
+  return raw;
 }
 
 function webhookUrl(value: unknown): string | undefined {
@@ -291,6 +388,32 @@ function hostCooldown(value: unknown): number {
   const minutes = whole(value, DEFAULTS.openRouterHostCooldownMinutes, "OPENROUTER_HOST_COOLDOWN_MINUTES");
   if (minutes > MAX_HOST_COOLDOWN_MINUTES) throw new ConfigError(`OPENROUTER_HOST_COOLDOWN_MINUTES must be 0 to ${MAX_HOST_COOLDOWN_MINUTES} (got "${minutes}").`);
   return minutes;
+}
+
+function upstream(value: unknown): Upstream {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return DEFAULTS.primaryUpstream;
+  if ((UPSTREAMS as readonly string[]).includes(raw)) return raw as Upstream;
+  throw new ConfigError(`PRIMARY_UPSTREAM must be "luminal" or "openrouter" (got "${raw}").`);
+}
+
+function timeoutSeconds(value: unknown): number {
+  const raw = text(value);
+  if (raw === undefined) return DEFAULTS.luminalFirstByteTimeoutSeconds;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > MAX_FIRST_BYTE_TIMEOUT_SECONDS) {
+    throw new ConfigError(`LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS must be more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS} (got "${raw}").`);
+  }
+  return parsed;
+}
+
+/** `<prefix>_INPUT`, `<prefix>_CACHED` and `<prefix>_OUTPUT`, in USD per million tokens. */
+function prices(env: Record<string, unknown>, prefix: string, fallback: Prices): Prices {
+  return {
+    input: amount(env[`${prefix}_INPUT`], fallback.input, `${prefix}_INPUT`),
+    cached: amount(env[`${prefix}_CACHED`], fallback.cached, `${prefix}_CACHED`),
+    output: amount(env[`${prefix}_OUTPUT`], fallback.output, `${prefix}_OUTPUT`),
+  };
 }
 
 function flag(value: unknown, fallback: boolean, name: string): boolean {

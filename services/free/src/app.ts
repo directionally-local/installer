@@ -6,8 +6,9 @@ import type { Limit } from "../../shared/src/rate-limit.js";
 import { MAX_SERVER_KEYS, parseServerKey, type AccountObject, type Allowance, type Limits, type ServerKeyView } from "./account-object.js";
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
-import { ConfigError, readFreeConfig, type FreeConfig } from "./config.js";
+import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
 import type { DirectoryObject, Gate, HostFailure, PersonState, RequestRecord } from "./directory-object.js";
+import { createCheckout, createPortal, githubIdFrom, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
 import { deliverAlerts, pauseAlert, type Alert, type EmailBinding } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
 import { networkOf, normalizeReferralCode, referralLink } from "./referrals.js";
@@ -18,8 +19,12 @@ import {
   DEVICE_TAKEN_MESSAGE,
   INVALID_INVITE_MESSAGE,
   isSignInRefusal,
+  CREDIT_EXHAUSTED_MESSAGE,
   PAUSED_MESSAGE,
   QUEUED_SIGNED_IN,
+  UPSTREAM_BUSY_MESSAGE,
+  UPSTREAM_TIMEOUT_MESSAGE,
+  UPSTREAM_UNAVAILABLE_MESSAGE,
   queuedMessage,
   quotaMessage,
   signInRefusal,
@@ -28,7 +33,7 @@ import {
   type SignInRefusal,
 } from "./messages.js";
 import { confirmPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, tooNewIntro } from "./pages.js";
-import { ALLOWED_MODELS, chargedTokens, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
+import { ALLOWED_MODELS, chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
@@ -38,7 +43,8 @@ import { DAY_MS, isoDay, weekEnd } from "./week.js";
 /**
  * The free managed tier's HTTP surface: device-flow sign-in with GitHub, the account and
  * OpenAI-compatible inference endpoints, usage events, and the admin API. Inference goes to
- * OpenRouter on the service's key; nothing else is called for tokens.
+ * one upstream, `primaryUpstream`: Luminal (the default, on prepaid credit) or OpenRouter, both
+ * on the service's keys. There is no automatic switch between them (see `chat`).
  *
  * Sign-out: `POST /v1/token/revoke` with the access token as the bearer and/or
  * `{refresh_token}` ends that sign-in session: its refresh tokens are deleted and its access
@@ -60,6 +66,15 @@ import { DAY_MS, isoDay, weekEnd } from "./week.js";
 
 export const VERSION = "0.1.0";
 export const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+export const LUMINAL_URL = "https://flash.luminal.cloud/v1/chat/completions";
+/** Luminal's id for the one model the free tier serves. */
+export const LUMINAL_MODELS: Readonly<Record<(typeof ALLOWED_MODELS)[number], string>> = {
+  "deepseek/deepseek-v4.1-flash-1017": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+};
+/** OpenRouter-only request fields Luminal's OpenAI-compatible API doesn't take. */
+const OPENROUTER_ONLY_FIELDS = ["provider", "usage", "models", "route", "transforms", "plugins", "session_id", "reasoning", "max_tokens"] as const;
+/** Retry-After for a transient Luminal error that didn't say, in seconds. */
+const DEFAULT_RETRY_AFTER_S = 5;
 export const ACCESS_TTL_S = 3600;
 /** How long a revoked session id is remembered: past any access token from it (TTL plus verify leeway). */
 const REVOKED_SESSION_TTL_MS = (ACCESS_TTL_S + 120) * 1000;
@@ -131,6 +146,26 @@ export interface Env {
   ALERT_TELEGRAM_CHAT_ID?: string;
   ALERT_EMAIL_TO?: string;
   ALERT_EMAIL_FROM?: string;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_PRICE_PRO?: string;
+  STRIPE_PRICE_TOPUP?: string;
+  BILLING_SUCCESS_URL?: string;
+  BILLING_CANCEL_URL?: string;
+  BILLING_PORTAL_RETURN_URL?: string;
+  PRO_WEEKLY_USD_CAP?: string;
+  PRIMARY_UPSTREAM?: string;
+  /** A secret. Without it, OpenRouter serves every request. Never logged. */
+  LUMINAL_API_KEY?: string;
+  LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS?: string;
+  LUMINAL_PRICE_INPUT?: string;
+  LUMINAL_PRICE_CACHED?: string;
+  LUMINAL_PRICE_OUTPUT?: string;
+  OPENROUTER_PRICE_INPUT?: string;
+  OPENROUTER_PRICE_CACHED?: string;
+  OPENROUTER_PRICE_OUTPUT?: string;
+  LUMINAL_CREDIT_USD?: string;
+  LUMINAL_WEEKLY_CREDIT_USD?: string;
   /** Cloudflare's send_email binding for alert email; optional (absent off Cloudflare). */
   ALERT_EMAIL?: EmailBinding;
   AUTH: DurableObjectNamespace<AuthObject>;
@@ -198,6 +233,9 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/v1/chat/completions") return chat(c);
   if (method === "POST" && path === "/v1/events") return events(c);
   if (method === "GET" && path.startsWith("/v1/referrals/")) return referralLookup(c, path.slice("/v1/referrals/".length));
+  if (method === "POST" && path === "/v1/billing/checkout") return billingCheckout(c);
+  if (method === "POST" && path === "/v1/billing/portal") return billingPortal(c);
+  if (method === "POST" && path === "/v1/billing/webhook") return billingWebhook(c);
 
   if (method === "GET" && path === "/device") return devicePage(c);
   if (method === "GET" && path === "/device/authorize") return deviceAuthorize(c);
@@ -245,7 +283,13 @@ async function readForm(c: Ctx): Promise<URLSearchParams> {
 
 /** `bonusTokens`: this week's referral bonus, added on top of the weekly allowance. */
 function limitsFor(config: FreeConfig, bonusTokens = 0): Limits {
-  return { weeklyTokens: config.weeklyTokens, weeklyUsd: config.perPersonWeeklyUsdCap, ...(bonusTokens > 0 ? { bonusTokens } : {}) };
+  return {
+    weeklyTokens: config.weeklyTokens,
+    weeklyUsd: config.perPersonWeeklyUsdCap,
+    proTokensPerWeek: config.offers.pro.tokensPerWeek,
+    proUsdPerWeek: config.proWeeklyUsdCap,
+    ...(bonusTokens > 0 ? { bonusTokens } : {}),
+  };
 }
 
 const signingKeys = new Map<string, Promise<CryptoKey>>();
@@ -325,6 +369,8 @@ interface Runtime {
   paused: boolean;
   weekUsd: number;
   totalUsd: number;
+  /** Luminal credit used since the start, by everyone. */
+  creditUsedUsd: number;
   /** The caller's queue place, referral numbers and bonus, when `c.callerId` was set. */
   person?: PersonState;
 }
@@ -341,6 +387,7 @@ function runtime(c: Ctx): Promise<Runtime> {
       paused: c.config.paused || gate.paused,
       weekUsd: gate.weekUsd,
       totalUsd: gate.totalUsd,
+      creditUsedUsd: gate.creditUsedUsd,
       ...(gate.person ? { person: gate.person } : {}),
     }));
   return c.runtimeState;
@@ -742,7 +789,8 @@ async function me(c: Ctx): Promise<Response> {
   const { config, person } = await runtime(c);
   const allowance = await account(c, identity.githubId).allowance(c.now(), limitsFor(config, person?.bonusTokens));
   if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
-  const queue = person?.queue ?? null;
+  // A Pro subscriber isn't waiting for anything; their place is kept if Pro ends.
+  const queue = allowance.plan === "pro" ? null : (person?.queue ?? null);
   const view = allowanceView(allowance);
   return json({
     login: identity.login,
@@ -750,8 +798,11 @@ async function me(c: Ctx): Promise<Response> {
     status: allowance.status,
     allowance: queue ? { ...view, remaining: 0 } : view,
     models: [...ALLOWED_MODELS],
-    plan: "free",
-    topupTokensLeft: 0,
+    plan: allowance.plan,
+    topupTokensLeft: allowance.topupTokensLeft,
+    pro: allowance.plan === "pro" || allowance.proPeriodEnd !== null
+      ? { periodEnd: allowance.proPeriodEnd === null ? null : new Date(allowance.proPeriodEnd).toISOString(), cancelAtPeriodEnd: allowance.proCancelAtPeriodEnd }
+      : null,
     "queue": queue ? { position: queue.position, etaAt: new Date(queue.etaAt).toISOString(), waiting: queue.waiting } : null,
     referral: person?.referral
       ? {
@@ -765,6 +816,154 @@ async function me(c: Ctx): Promise<Response> {
       : null,
     offers: offers(config),
   });
+}
+
+// ─── Billing ────────────────────────────────────────────────────────────────
+
+function billingReady(c: Ctx, product?: Product): Response | undefined {
+  const { stripe } = c.config;
+  const price = product === "pro" ? stripe.pricePro : product === "topup" ? stripe.priceTopup : "n/a";
+  if (!stripe.secretKey || !price) return apiError(503, "billing_unavailable", "Paid plans aren't available yet. Your own key and the free tier still work.");
+  return undefined;
+}
+
+/**
+ * POST /v1/billing/checkout {product: "pro" | "topup"} → {url}: a Stripe Checkout page with
+ * Stripe Tax and the billing address. Needs a signed-in access token (not a server key).
+ */
+async function billingCheckout(c: Ctx): Promise<Response> {
+  const identity = await authenticate(c);
+  if (identity instanceof Response) return identity;
+  const guarded = await apiGuard(c, identity);
+  if (guarded) return guarded;
+  const body = (await readJson(c)) ?? {};
+  const product = body.product;
+  if (product !== "pro" && product !== "topup") return apiError(400, "invalid_request", 'Send {product: "pro"} or {product: "topup"}.');
+  const unavailable = billingReady(c, product);
+  if (unavailable) return unavailable;
+  const person = account(c, identity.githubId);
+  const allowance = await person.allowance(c.now(), limitsFor((await runtime(c)).config));
+  if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
+  if (allowance.status === "suspended") return apiError(403, "suspended", "This account is suspended from the free tier.");
+  if (product === "pro" && allowance.plan === "pro") return apiError(409, "already_pro", "This account already has Pro. Manage it from the billing portal.");
+  const billing = await person.billing();
+  try {
+    const session = await createCheckout(c.fetch, {
+      product,
+      config: c.config.stripe,
+      githubId: identity.githubId,
+      login: identity.login,
+      customerId: billing.customerId,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    return json({ url: session.url });
+  } catch (error) {
+    if (error instanceof StripeError) return apiError(502, "billing_error", "Stripe couldn't start the checkout. Try again in a minute.");
+    throw error;
+  }
+}
+
+/** POST /v1/billing/portal → {url}: Stripe's Customer Portal, for cancelling Pro or changing the card. */
+async function billingPortal(c: Ctx): Promise<Response> {
+  const identity = await authenticate(c);
+  if (identity instanceof Response) return identity;
+  const guarded = await apiGuard(c, identity);
+  if (guarded) return guarded;
+  const unavailable = billingReady(c);
+  if (unavailable) return unavailable;
+  const billing = await account(c, identity.githubId).billing();
+  if (!billing.customerId) return apiError(404, "no_billing_account", "There is nothing to manage yet: this account hasn't bought anything.");
+  try {
+    return json(await createPortal(c.fetch, { config: c.config.stripe, customerId: billing.customerId }));
+  } catch (error) {
+    if (error instanceof StripeError) return apiError(502, "billing_error", "Stripe couldn't open the billing portal. Try again in a minute.");
+    throw error;
+  }
+}
+
+/**
+ * POST /v1/billing/webhook: Stripe's events, verified with STRIPE_WEBHOOK_SECRET and handled
+ * once per event id. Handled: checkout.session.completed, invoice.paid,
+ * invoice.payment_failed, customer.subscription.updated and customer.subscription.deleted;
+ * anything else is acknowledged and ignored.
+ */
+async function billingWebhook(c: Ctx): Promise<Response> {
+  const secret = c.config.stripe.webhookSecret;
+  if (!secret) return apiError(503, "billing_unavailable", "Billing isn't configured.");
+  const raw = await c.request.text();
+  const verified = await verifyWebhook(raw, c.request.headers.get("stripe-signature"), secret, c.now());
+  if ("error" in verified) return apiError(400, "invalid_signature", `Webhook refused: ${verified.error}.`);
+  const { event } = verified;
+  if (await directory(c).billingEventSeen(event.id)) return json({ received: true, duplicate: true });
+  const outcome = await applyBillingEvent(c, event);
+  await directory(c).markBillingEvent(event.id, event.type, c.now());
+  return json({ received: true, outcome });
+}
+
+/** Applies one event. Every step is idempotent on its own, so a retried delivery is harmless. */
+async function applyBillingEvent(c: Ctx, event: StripeEvent): Promise<string> {
+  const object = event.data.object;
+  const eventAt = event.created;
+  const customerId = idOf(object.customer);
+  const owner = async (...candidates: unknown[]) => githubIdFrom(...candidates) ?? (customerId ? await directory(c).customerOwner(customerId) : undefined);
+  const subscription = async (githubId: number, input: { subscriptionId: string; state: "active" | "past_due" | "canceled"; periodEnd: number | null | undefined; cancelAtPeriodEnd?: boolean }) => {
+    const person = account(c, githubId);
+    const applied = await person.applySubscription({ ...input, ...(customerId ? { customerId } : {}), eventAt });
+    if (!applied) return "stale";
+    const state = await person.billing();
+    await directory(c).mirrorSubscription({ githubId, state: state.proState, periodEnd: state.periodEnd, eventAt });
+    return `pro_${input.state}`;
+  };
+
+  switch (event.type) {
+    case "checkout.session.completed": {
+      const githubId = githubIdFrom(object.client_reference_id, object.metadata?.github_id);
+      if (githubId === undefined) return "ignored";
+      if (customerId) {
+        await directory(c).mapCustomer(customerId, githubId);
+        await account(c, githubId).setCustomer(customerId);
+      }
+      const product = object.metadata?.product ?? (object.mode === "subscription" ? "pro" : "topup");
+      if (product === "topup") {
+        if (object.payment_status !== "paid") return "unpaid";
+        const { tokens, validDays } = c.config.offers.topup;
+        const createdAt = eventAt * 1000;
+        await account(c, githubId).grantTopup({ id: String(object.id), tokens, createdAt, expiresAt: createdAt + validDays * DAY_MS });
+        await directory(c).recordPayment({ id: String(object.id), githubId, kind: "topup", amountCents: cents(object.amount_subtotal ?? object.amount_total), at: createdAt });
+        return "topup_granted";
+      }
+      const subscriptionId = idOf(object.subscription);
+      if (!subscriptionId) return "ignored";
+      return subscription(githubId, { subscriptionId, state: "active", periodEnd: undefined });
+    }
+    case "invoice.paid":
+    case "invoice.payment_failed": {
+      const { subscriptionId, metadata } = invoiceSubscription(object);
+      if (!subscriptionId) return "ignored";
+      const githubId = await owner(metadata.github_id);
+      if (githubId === undefined) return "ignored";
+      if (event.type === "invoice.payment_failed") return subscription(githubId, { subscriptionId, state: "past_due", periodEnd: undefined });
+      await directory(c).recordPayment({ id: String(object.id), githubId, kind: "pro", amountCents: cents(object.total_excluding_tax ?? object.subtotal ?? object.amount_paid), at: eventAt * 1000 });
+      return subscription(githubId, { subscriptionId, state: "active", periodEnd: invoicePeriodEnd(object) });
+    }
+    case "customer.subscription.updated":
+    case "customer.subscription.deleted": {
+      const githubId = await owner(object.metadata?.github_id);
+      if (githubId === undefined || typeof object.id !== "string") return "ignored";
+      return subscription(githubId, {
+        subscriptionId: object.id,
+        state: event.type === "customer.subscription.deleted" ? "canceled" : proState(object.status),
+        periodEnd: periodEnd(object),
+        cancelAtPeriodEnd: object.cancel_at_period_end === true,
+      });
+    }
+    default:
+      return "ignored";
+  }
+}
+
+function cents(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 0;
 }
 
 /**
@@ -850,38 +1049,54 @@ async function chat(c: Ctx): Promise<Response> {
   }
 
   if (gate.paused) return pausedError(await headers());
+  // Which upstream serves: the setting, unless Luminal has no key. Never switched mid-request.
+  const upstream: Upstream = gate.config.primaryUpstream === "luminal" && c.config.luminalApiKey ? "luminal" : "openrouter";
+  if (upstream === "luminal" && gate.creditUsedUsd >= gate.config.luminalCreditUsd) {
+    // The credit is used up: free and Pro usage pause (admins too) until it is topped up.
+    const paused = await directory(c).creditPausedAlert(gate.config.luminalCreditUsd, c.now());
+    if (paused) await alert(c, [paused]);
+    return apiError(503, "upstream_credit_exhausted", CREDIT_EXHAUSTED_MESSAGE, { reason: "credit_exhausted", pausedForEveryone: true, resetsAt: null }, await headers());
+  }
+  // Why free tokens are unavailable to a free-plan person right now, if they are: queued, or a
+  // global cap reached. Pro and top-ups still work; the reservation decides which applies.
   const place = isAdmin ? null : (gate.person?.queue ?? null);
-  if (place) {
-    const etaAt = new Date(place.etaAt).toISOString();
-    return apiError(
-      402,
-      "free_tier_queued",
-      queuedMessage(place.position, waitText(place.etaAt, c.now())),
-      { position: place.position, etaAt, offers: offers(gate.config), referralLink: link },
-      await headers(),
-    );
-  }
-  if (!isAdmin) {
-    // The global caps read as a pause for everyone, with when it ends; a person's own key still works.
-    const { globalTotalUsdCap: total, globalWeeklyUsdCap: weekly } = gate.config;
-    if (total !== undefined && gate.totalUsd >= total) {
-      return apiError(503, "global_total_budget_reached", TOTAL_BUDGET_MESSAGE, { reason: "total_budget", pausedForEveryone: true, resetsAt: null }, await headers());
-    }
-    if (weekly !== undefined && gate.weekUsd >= weekly) {
-      const resumes = weekEnd(c.now());
-      const resetsAt = new Date(resumes).toISOString();
-      const retryAfter = String(Math.max(1, Math.ceil((resumes - c.now()) / 1000)));
-      return apiError(503, "global_weekly_budget_reached", weeklyBudgetMessage(resetsAt), { reason: "weekly_budget", pausedForEveryone: true, resetsAt }, { ...(await headers()), "retry-after": retryAfter });
-    }
-  }
+  const { globalTotalUsdCap: total, globalWeeklyUsdCap: weekly } = gate.config;
+  const freeBlock: (() => Promise<Response>) | undefined = isAdmin
+    ? undefined
+    : place
+      ? async () =>
+          apiError(
+            402,
+            "free_tier_queued",
+            queuedMessage(place.position, waitText(place.etaAt, c.now())),
+            { position: place.position, etaAt: new Date(place.etaAt).toISOString(), offers: offers(gate.config), referralLink: link },
+            await headers(),
+          )
+      : total !== undefined && gate.totalUsd >= total
+        ? async () => apiError(503, "global_total_budget_reached", TOTAL_BUDGET_MESSAGE, { reason: "total_budget", pausedForEveryone: true, resetsAt: null }, await headers())
+        : weekly !== undefined && gate.weekUsd >= weekly
+          ? async () => {
+              // The global caps read as a pause for everyone, with when it ends; a person's own key still works.
+              const resumes = weekEnd(c.now());
+              const resetsAt = new Date(resumes).toISOString();
+              const retryAfter = String(Math.max(1, Math.ceil((resumes - c.now()) / 1000)));
+              return apiError(503, "global_weekly_budget_reached", weeklyBudgetMessage(resetsAt), { reason: "weekly_budget", pausedForEveryone: true, resetsAt }, { ...(await headers()), "retry-after": retryAfter });
+            }
+          : undefined;
 
   const requestedMax = numberOrUndefined(body.max_tokens) ?? numberOrUndefined(body.max_completion_tokens);
-  const reservation = await person.reserve({ promptEstimate: estimatePromptTokens(bodyBytes), requestedMaxTokens: requestedMax, limits, now: c.now() });
+  const reservation = await person.reserve({
+    promptEstimate: estimatePromptTokens(bodyBytes),
+    requestedMaxTokens: requestedMax,
+    limits: { ...limits, freeBlocked: freeBlock !== undefined },
+    now: c.now(),
+  });
   if (!reservation.ok) {
     const quota = quotaHeaders(reservation.allowance);
     if (reservation.code === "quota_exceeded") {
+      if (freeBlock && reservation.allowance.plan === "free") return freeBlock();
       const resetsAt = new Date(reservation.allowance.resetsAt).toISOString();
-      return apiError(402, "quota_exceeded", quotaMessage(reservation.reason, resetsAt), { resetsAt, reason: reservation.reason, offers: offers(gate.config), referralLink: link }, quota);
+      return apiError(402, "quota_exceeded", quotaMessage(reservation.reason, resetsAt, reservation.allowance.plan), { resetsAt, reason: reservation.reason, offers: offers(gate.config), referralLink: link }, quota);
     }
     if (reservation.code === "suspended") return apiError(403, "suspended", "This account is suspended from the free tier.", {}, quota);
     return apiError(403, "not_invited", "This GitHub account isn't on the free tier.", {}, quota);
@@ -896,7 +1111,7 @@ async function chat(c: Ctx): Promise<Response> {
   delete upstreamBody.models;
   delete upstreamBody.route;
   const cooldownMs = gate.config.openRouterHostCooldownMinutes * 60_000;
-  const failingHosts = cooldownMs > 0 ? await hosts(c).failingHosts(c.now() - cooldownMs) : [];
+  const failingHosts = cooldownMs > 0 && upstream === "openrouter" ? await hosts(c).failingHosts(c.now() - cooldownMs) : [];
   upstreamBody.provider = providerPreferences(gate.config, failingHosts);
   upstreamBody.user = `dl-${(await sha256Hex(`free:${identity.githubId}`)).slice(0, 32)}`;
   const sessionId = c.request.headers.get("x-session-id") ?? (typeof body.session_id === "string" ? body.session_id : undefined);
@@ -905,13 +1120,23 @@ async function chat(c: Ctx): Promise<Response> {
   if (stream) upstreamBody.stream_options = { include_usage: true };
 
   const started = c.now();
-  /** `host` is who served or failed the request; with `failure`, it goes on the failing list too. */
-  const settle = async (usage: Usage | undefined, status: string, options: { chargeNothing?: boolean; host?: string; failure?: HostFailure } = {}) => {
+  /**
+   * `host` is who served or failed the request; with `failure`, it goes on the failing list too.
+   * A Luminal request is charged to the person's dollar allowance at OpenRouter prices, so the
+   * allowance means the same on either upstream, and its Luminal price goes to the credit.
+   */
+  const settle = async (
+    usage: Usage | undefined,
+    status: string,
+    options: { chargeNothing?: boolean; host?: string; failure?: HostFailure; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean } = {},
+  ) => {
     const { chargeNothing = false, host, failure } = options;
     if (host && failure && cooldownMs > 0) await hosts(c).markHostFailing(host, c.now());
     const charged = chargeNothing ? 0 : usage ? chargedTokens(usage, gate.config.cachedTokenWeight) : undefined;
-    const cost = chargeNothing ? 0 : usage ? costOf(usage, 0) : undefined;
+    const cost = chargeNothing ? 0 : usage ? (upstream === "luminal" ? costAtPrices(usage, gate.config.openRouterPrices) : costOf(usage, 0)) : undefined;
     const settled = await person.settle({ reservationId: reservation.reservationId, charged, costUsd: cost, limits, now: c.now() });
+    // Without usage, the credit is charged what the allowance was: the reservation at the fallback price.
+    const creditUsd = upstream !== "luminal" || chargeNothing ? 0 : usage ? costAtPrices(usage, gate.config.luminalPrices) : settled.costUsd;
     const record: RequestRecord = {
       githubId: identity.githubId,
       isAdmin,
@@ -922,14 +1147,22 @@ async function chat(c: Ctx): Promise<Response> {
       cachedTokens: usage?.cachedTokens ?? 0,
       chargedTokens: settled.charged,
       costUsd: settled.costUsd,
+      ...(settled.paid ? { paid: true } : {}),
       status,
       latencyMs: c.now() - started,
       ...(host ? { host } : {}),
       ...(host && failure ? { hostFailure: failure } : {}),
+      upstream,
+      creditUsd,
+      ttfbMs: options.ttfbMs ?? null,
+      ttftMs: options.ttftMs ?? null,
+      ...(options.upstreamError ? { upstreamError: true } : {}),
     };
     await alert(c, await directory(c).recordRequest(record, policyOf(gate.config)));
     return settled.allowance;
   };
+
+  if (upstream === "luminal") return luminalChat(c, { body, stream, maxTokens: reservation.maxTokens, user: String(upstreamBody.user), started, settle, timeoutSeconds: gate.config.luminalFirstByteTimeoutSeconds, reservedAllowance: reservation.allowance });
 
   const send = (payload: Record<string, unknown>) =>
     c.fetch(OPENROUTER_URL, {
@@ -944,60 +1177,197 @@ async function chat(c: Ctx): Promise<Response> {
       body: JSON.stringify(payload),
     });
 
-  let upstream: Response;
+  let response: Response;
   let errorText: string | undefined;
   try {
-    upstream = await send(upstreamBody);
-    if (!upstream.ok) {
-      errorText = await upstream.text().catch(() => "");
+    response = await send(upstreamBody);
+    if (!response.ok) {
+      errorText = await response.text().catch(() => "");
       // Skipping the failing hosts left none: ask once more with every host allowed.
-      if (failingHosts.length > 0 && isNoHostError(upstream.status, errorText)) {
-        upstream = await send({ ...upstreamBody, provider: providerPreferences(gate.config) });
-        errorText = upstream.ok ? undefined : await upstream.text().catch(() => "");
+      if (failingHosts.length > 0 && isNoHostError(response.status, errorText)) {
+        response = await send({ ...upstreamBody, provider: providerPreferences(gate.config) });
+        errorText = response.ok ? undefined : await response.text().catch(() => "");
       }
     }
   } catch {
-    const allowance = await settle(undefined, "upstream_error", { chargeNothing: true });
+    const allowance = await settle(undefined, "upstream_error", { chargeNothing: true, upstreamError: true });
     return apiError(502, "upstream_error", "The model provider couldn't be reached. Try again.", {}, quotaHeaders(allowance));
   }
+  const ttfbMs = c.now() - started;
 
-  if (!upstream.ok) {
+  if (!response.ok) {
     const text = errorText ?? "";
-    const host = upstream.status >= 500 ? hostOf(parseJson(text)) : undefined;
-    const failure: HostFailure | undefined = host ? { kind: "http_5xx", upstreamStatus: upstream.status } : undefined;
-    const allowance = await settle(undefined, "upstream_error", { chargeNothing: true, ...(host ? { host } : {}), ...(failure ? { failure } : {}) });
+    const host = response.status >= 500 ? hostOf(parseJson(text)) : undefined;
+    const failure: HostFailure | undefined = host ? { kind: "http_5xx", upstreamStatus: response.status } : undefined;
+    const upstreamError = response.status === 429 || response.status >= 500;
+    const allowance = await settle(undefined, "upstream_error", { chargeNothing: true, ttfbMs, upstreamError, ...(host ? { host } : {}), ...(failure ? { failure } : {}) });
     const quota = quotaHeaders(allowance);
-    if (upstream.status === 429) {
-      const retryAfter = Math.max(1, Number(upstream.headers.get("retry-after")) || 10);
+    if (response.status === 429) {
+      const retryAfter = Math.max(1, Number(response.headers.get("retry-after")) || 10);
       return rateLimited(retryAfter, quota);
     }
-    return apiError(upstream.status >= 500 ? 502 : upstream.status === 402 ? 503 : 400, upstream.status === 402 ? "service_paused" : "upstream_error", upstreamMessage(text), { upstreamStatus: upstream.status }, quota);
+    return apiError(response.status >= 500 ? 502 : response.status === 402 ? 503 : 400, response.status === 402 ? "service_paused" : "upstream_error", upstreamMessage(text), { upstreamStatus: response.status }, quota);
   }
 
-  const contentType = upstream.headers.get("content-type") ?? "";
-  if (stream && upstream.body && contentType.includes("text/event-stream")) {
-    const metered = meterStream(upstream.body, async ({ usage, errored, upstreamFailed, host }) => {
-      await settle(usage, usage ? (errored ? "stream_error" : "ok") : "no_usage", {
-        ...(host ? { host } : {}),
-        ...(upstreamFailed ? { failure: { kind: "stream", upstreamStatus: null } as HostFailure } : {}),
-      });
-    });
+  const contentType = response.headers.get("content-type") ?? "";
+  if (stream && response.body && contentType.includes("text/event-stream")) {
+    const metered = meterStream(
+      response.body,
+      async ({ usage, errored, upstreamFailed, host, firstContentAt }) => {
+        await settle(usage, usage ? (errored ? "stream_error" : "ok") : "no_usage", {
+          ttfbMs,
+          ...(firstContentAt !== undefined ? { ttftMs: firstContentAt - started } : {}),
+          ...(upstreamFailed ? { upstreamError: true } : {}),
+          ...(host ? { host } : {}),
+          ...(upstreamFailed ? { failure: { kind: "stream", upstreamStatus: null } as HostFailure } : {}),
+        });
+      },
+      c.now,
+    );
     return new Response(metered, {
       status: 200,
       headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", ...quotaHeaders(reservation.allowance) },
     });
   }
 
-  const text = await upstream.text();
+  const text = await response.text();
   const parsed = parseJson(text) as { usage?: unknown; error?: unknown } | undefined;
   const usage = parseUsage(parsed?.usage);
   const host = hostOf(parsed);
   const failure: HostFailure | undefined = parsed?.error ? { kind: "error_body", upstreamStatus: null } : undefined;
-  const allowance = await settle(usage, usage ? "ok" : "no_usage", { ...(host ? { host } : {}), ...(failure ? { failure } : {}) });
+  const allowance = await settle(usage, usage ? "ok" : "no_usage", {
+    ttfbMs,
+    ttftMs: c.now() - started,
+    ...(failure ? { upstreamError: true } : {}),
+    ...(host ? { host } : {}),
+    ...(failure ? { failure } : {}),
+  });
   return new Response(text, {
     status: 200,
     headers: { "content-type": contentType || "application/json", "cache-control": "no-store", ...quotaHeaders(allowance) },
   });
+}
+
+type Settle = (
+  usage: Usage | undefined,
+  status: string,
+  options?: { chargeNothing?: boolean; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean },
+) => Promise<Allowance>;
+
+/**
+ * One request to Luminal. There is no switch to OpenRouter on failure: a 429, a 5xx, no
+ * response before the first-byte timeout, or a network error goes back to the client as a
+ * transient error with Retry-After, and the client retries. A stream that fails part way is
+ * passed through as it is, like OpenRouter's.
+ */
+async function luminalChat(
+  c: Ctx,
+  input: {
+    body: Record<string, unknown>;
+    stream: boolean;
+    maxTokens: number;
+    user: string;
+    started: number;
+    settle: Settle;
+    timeoutSeconds: number;
+    reservedAllowance: Allowance;
+  },
+): Promise<Response> {
+  const { body, stream, started, settle } = input;
+  const payload: Record<string, unknown> = { ...body, model: LUMINAL_MODELS[body.model as keyof typeof LUMINAL_MODELS], max_completion_tokens: input.maxTokens, user: input.user };
+  // OpenRouter's `reasoning: {effort}` is `reasoning_effort` in the OpenAI shape.
+  const effort = (body.reasoning as { effort?: unknown } | undefined)?.effort;
+  if (typeof effort === "string" && payload.reasoning_effort === undefined) payload.reasoning_effort = effort;
+  for (const field of OPENROUTER_ONLY_FIELDS) delete payload[field];
+  if (stream) payload.stream_options = { include_usage: true };
+  else delete payload.stream_options;
+
+  const transient = async (status: 429 | 503, code: string, message: string, retryAfterHeader: string | null, record: { status: string; ttfbMs?: number }) => {
+    const allowance = await settle(undefined, record.status, { chargeNothing: true, upstreamError: true, ...(record.ttfbMs !== undefined ? { ttfbMs: record.ttfbMs } : {}) });
+    const retryAfter = Math.max(1, Math.ceil(Number(retryAfterHeader)) || DEFAULT_RETRY_AFTER_S);
+    return apiError(status, code, message, { retryAfter, retryable: true, upstream: "luminal" }, { ...quotaHeaders(allowance), "retry-after": String(retryAfter) });
+  };
+
+  let response: Response | "timeout";
+  try {
+    response = await fetchWithTimeout(
+      c.fetch,
+      LUMINAL_URL,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${c.config.luminalApiKey}`, "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      input.timeoutSeconds * 1000,
+    );
+  } catch {
+    return transient(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, null, { status: "upstream_unreachable" });
+  }
+  if (response === "timeout") return transient(503, "upstream_timeout", UPSTREAM_TIMEOUT_MESSAGE, null, { status: "upstream_timeout" });
+  const ttfbMs = c.now() - started;
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    const retryAfter = response.headers.get("retry-after");
+    if (response.status === 429) return transient(429, "upstream_busy", UPSTREAM_BUSY_MESSAGE, retryAfter, { status: "upstream_busy", ttfbMs });
+    if (response.status >= 500) return transient(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, retryAfter, { status: "upstream_error", ttfbMs });
+    // A 4xx: the request itself (400), or the service's key or account (401, 402, 403).
+    const ours = response.status === 401 || response.status === 402 || response.status === 403;
+    const allowance = await settle(undefined, "upstream_error", { chargeNothing: true, ttfbMs, ...(ours ? { upstreamError: true } : {}) });
+    return apiError(ours ? 502 : 400, "upstream_error", ours ? "The model provider refused the service's key. Try again later." : upstreamMessage(text), { upstreamStatus: response.status }, quotaHeaders(allowance));
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (stream && response.body && contentType.includes("text/event-stream")) {
+    const metered = meterStream(
+      response.body,
+      async ({ usage, errored, upstreamFailed, firstContentAt }) => {
+        await settle(usage, usage ? (errored ? "stream_error" : "ok") : "no_usage", {
+          ttfbMs,
+          ...(firstContentAt !== undefined ? { ttftMs: firstContentAt - started } : {}),
+          ...(upstreamFailed ? { upstreamError: true } : {}),
+        });
+      },
+      c.now,
+    );
+    return new Response(metered, {
+      status: 200,
+      headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", ...quotaHeaders(input.reservedAllowance) },
+    });
+  }
+
+  const text = await response.text();
+  const parsed = parseJson(text) as { usage?: unknown; error?: unknown } | undefined;
+  const usage = parseUsage(parsed?.usage);
+  const allowance = await settle(usage, usage ? "ok" : "no_usage", { ttfbMs, ttftMs: c.now() - started, ...(parsed?.error ? { upstreamError: true } : {}) });
+  return new Response(text, {
+    status: 200,
+    headers: { "content-type": contentType || "application/json", "cache-control": "no-store", ...quotaHeaders(allowance) },
+  });
+}
+
+/**
+ * `fetch`, or "timeout" when no response (headers) arrived within `ms`; the request is then
+ * aborted. A network error still throws.
+ */
+async function fetchWithTimeout(fetcher: Fetch, url: string, init: RequestInit, ms: number): Promise<Response | "timeout"> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), ms);
+  });
+  const request = fetcher(url, { ...init, signal: controller.signal });
+  try {
+    const result = await Promise.race([request, timeout]);
+    if (result === "timeout") {
+      controller.abort();
+      // The aborted request rejects later; nothing waits for it.
+      request.catch(() => undefined);
+    }
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function parseJson(text: string): unknown {
@@ -1042,6 +1412,20 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       ...spend,
       weekStart: new Date(spend.weekStart).toISOString(),
       resetsAt: new Date(spend.resetsAt).toISOString(),
+      paid: { usd: spend.paidUsd, tokens: spend.paidTokens, requests: spend.paidRequests },
+      upstream: {
+        primary: config.primaryUpstream,
+        serving: config.primaryUpstream === "luminal" && c.config.luminalApiKey ? "luminal" : "openrouter",
+        luminalConfigured: c.config.luminalApiKey !== undefined,
+      },
+      luminalCredit: {
+        balanceUsd: config.luminalCreditUsd,
+        usedUsd: spend.creditUsedUsd,
+        leftUsd: Math.max(0, Math.round((config.luminalCreditUsd - spend.creditUsedUsd) * 1e6) / 1e6),
+        weekUsd: spend.creditWeekUsd,
+        freeWeekUsd: spend.freeCreditWeekUsd,
+        weeklyBudgetUsd: config.luminalWeeklyCreditUsd ?? null,
+      },
       caps: {
         globalWeeklyUsd: config.globalWeeklyUsdCap ?? null,
         globalTotalUsd: config.globalTotalUsdCap ?? null,
@@ -1303,6 +1687,13 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     weeklyTokens: config.weeklyTokens,
     perPersonWeeklyUsd: config.perPersonWeeklyUsdCap ?? null,
     queueThreshold: config.queueThreshold,
+    primaryUpstream: config.primaryUpstream,
+    luminalConfigured: c.config.luminalApiKey !== undefined,
+    creditUsd: config.luminalCreditUsd,
+    creditUsedUsd: spend.creditUsedUsd,
+    creditWeekUsd: spend.creditWeekUsd,
+    freeCreditWeekUsd: spend.freeCreditWeekUsd,
+    weeklyCreditUsd: config.luminalWeeklyCreditUsd ?? null,
   };
   if (csv !== undefined && isCsvTable(csv)) return dashboardCsv(csv, data, view);
   return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie });

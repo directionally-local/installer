@@ -1,4 +1,4 @@
-import { MAX_HOST_COOLDOWN_MINUTES, type FreeConfig } from "./config.js";
+import { MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, UPSTREAMS, type FreeConfig } from "./config.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
 /**
@@ -43,6 +43,14 @@ export const RUNTIME_SETTINGS = {
   referralBonusTokens: { kind: "tokens", env: "REFERRAL_BONUS_TOKENS" },
   /** The most referral bonus tokens one person gets a week. */
   referralBonusCap: { kind: "tokens", env: "REFERRAL_BONUS_CAP" },
+  /** "luminal" or "openrouter": which upstream serves chat requests. No automatic switch. */
+  primaryUpstream: { kind: "upstream", env: "PRIMARY_UPSTREAM" },
+  /** Prepaid Luminal credit, USD; raise it after a top-up. */
+  luminalCreditUsd: { kind: "amount", env: "LUMINAL_CREDIT_USD" },
+  /** Free Luminal credit a week the queue protects, USD; "none" for no weekly credit budget. */
+  luminalWeeklyCreditUsd: { kind: "usd", env: "LUMINAL_WEEKLY_CREDIT_USD" },
+  /** Seconds to wait for Luminal's first byte before a transient 503. */
+  luminalFirstByteTimeoutSeconds: { kind: "seconds", env: "LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS" },
 } as const;
 
 export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;
@@ -88,6 +96,12 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return value === "allow" || value === "deny" ? value : "invalid";
     case "minutes":
       return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_HOST_COOLDOWN_MINUTES ? value : "invalid";
+    case "upstream":
+      return typeof value === "string" && (UPSTREAMS as readonly string[]).includes(value) ? value : "invalid";
+    case "amount":
+      return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= MAX_USD ? value : "invalid";
+    case "seconds":
+      return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= MAX_FIRST_BYTE_TIMEOUT_SECONDS ? value : "invalid";
   }
 }
 
@@ -101,6 +115,9 @@ const RULES: Record<Kind, string> = {
   quantizations: 'a list of OpenRouter quantization levels, e.g. ["fp8", "bf16"], or [] for no filter',
   dataCollection: '"deny" or "allow"',
   minutes: `a whole number of minutes, 0 to ${MAX_HOST_COOLDOWN_MINUTES} (0 turns it off)`,
+  upstream: '"luminal" or "openrouter"',
+  amount: `a number of dollars, 0 to ${MAX_USD}`,
+  seconds: `a number of seconds, more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS}`,
 };
 
 /**

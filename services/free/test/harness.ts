@@ -138,13 +138,21 @@ export interface Service {
   handler: { fetch(request: Request, env: never): Promise<Response> };
   calls: {
     openRouter: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
+    /** Calls to Luminal's chat completions (a fake: nothing leaves the process). */
+    luminal: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     githubTokens: Array<{ code: string; redirect_uri?: string }>;
     /** Posts to ALERT_WEBHOOK_URL (any URL on alerts.test, discord.com, hooks.slack.com or api.telegram.org). */
     webhooks: Array<{ url: string; body: Record<string, unknown> }>;
     /** Messages sent through the fake ALERT_EMAIL binding (with `email: true`). */
     emails: Array<{ from: string; to: string; raw: string }>;
+    /** Calls to api.stripe.com: path, form body (decoded) and headers. */
+    stripe: Array<{ path: string; form: URLSearchParams; headers: Record<string, string> }>;
   };
+  /** Answers calls to api.stripe.com (default: a Checkout or portal session with a URL). */
+  setStripe(handler: (path: string, form: URLSearchParams) => Response | Promise<Response>): void;
   setOpenRouter(handler: OpenRouterHandler): void;
+  /** Answers calls to Luminal (default: a completion with Luminal-shaped usage, no cost). */
+  setLuminal(handler: OpenRouterHandler): void;
   request(method: string, path: string, options?: { body?: unknown; token?: string; headers?: Record<string, string>; form?: Record<string, string>; ip?: string }): Promise<Response>;
   signIn(user: GitHubUserFixture, options?: { invite?: string; deviceId?: string }): Promise<Tokens>;
   directory(): any;
@@ -162,6 +170,11 @@ export interface Tokens {
 /** A usage object the way OpenRouter reports it. */
 export function usage(prompt: number, completion: number, cached = 0, cost = 0.001): Record<string, unknown> {
   return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion, cost, prompt_tokens_details: { cached_tokens: cached } };
+}
+
+/** A usage object the way Luminal reports it: cached tokens, but no cost. */
+export function luminalUsage(prompt: number, completion: number, cached = 0): Record<string, unknown> {
+  return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion, prompt_tokens_details: { cached_tokens: cached } };
 }
 
 export function completion(usageObject: Record<string, unknown> | undefined): Response {
@@ -213,7 +226,11 @@ export async function createService(vars: Record<string, string> = {}, options: 
     ...namespaces,
   };
   const clock = { now: NOW };
-  const calls: Service["calls"] = { openRouter: [], githubTokens: [], webhooks: [], emails: [] };
+  const calls: Service["calls"] = { openRouter: [], luminal: [], githubTokens: [], webhooks: [], emails: [], stripe: [] };
+  let stripe = (path: string, _form?: URLSearchParams): Response | Promise<Response> =>
+    path === "/v1/checkout/sessions"
+      ? Response.json({ id: `cs_test_${calls.stripe.length}`, url: `https://checkout.stripe.com/c/pay/cs_test_${calls.stripe.length}` })
+      : Response.json({ id: "bps_test_1", url: "https://billing.stripe.com/p/session/test_1" });
   if (options.email) {
     envRef.env.ALERT_EMAIL = {
       async send(message: { from: string; to: string; raw: string }) {
@@ -222,6 +239,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
     };
   }
   let openRouter: OpenRouterHandler = () => completion(usage(100, 10));
+  let luminal: OpenRouterHandler = () => completion(luminalUsage(100, 10));
 
   const fetcher = async (input: string, init: RequestInit = {}): Promise<Response> => {
     const url = String(input);
@@ -240,6 +258,17 @@ export async function createService(vars: Record<string, string> = {}, options: 
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       calls.openRouter.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
       return openRouter(body, init);
+    }
+    if (url === "https://flash.luminal.cloud/v1/chat/completions") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      calls.luminal.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
+      return luminal(body, init);
+    }
+    if (url.startsWith("https://api.stripe.com/")) {
+      const path = new URL(url).pathname;
+      const form = new URLSearchParams(String(init.body));
+      calls.stripe.push({ path, form, headers: Object.fromEntries(new Headers(init.headers).entries()) });
+      return stripe(path, form);
     }
     if (/^https:\/\/(alerts\.test|discord\.com|hooks\.slack\.com|api\.telegram\.org)\//.test(url)) {
       calls.webhooks.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
@@ -287,6 +316,12 @@ export async function createService(vars: Record<string, string> = {}, options: 
     calls,
     setOpenRouter: (next) => {
       openRouter = next;
+    },
+    setLuminal: (next) => {
+      luminal = next;
+    },
+    setStripe: (next) => {
+      stripe = next as never;
     },
     request,
     signIn,
