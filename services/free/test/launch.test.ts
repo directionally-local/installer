@@ -599,7 +599,7 @@ describe("dashboard additions", () => {
     const cookie = await adminCookie(service);
     let html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
     assert.doesNotMatch(html, /class="banner"/);
-    assert.match(html, /All-time free spend<b>\$0 <span class="muted">of \$1000<\/span>/);
+    assert.match(html, /All-time free cash spend<b>\$0 <span class="muted">of \$1000<\/span>/);
 
     const referrer = await signUp(service, { id: 100, login: "ref", ip: "198.51.100.1" });
     await signUp(service, { id: 101, login: "pal", ip: "198.51.100.2", referral: "ref" });

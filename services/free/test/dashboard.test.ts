@@ -347,7 +347,7 @@ describe("admin dashboard numbers", () => {
 describe("admin dashboard privacy", () => {
   // Columns that hold anything but counts, tokens, cost, time or who: never read by the dashboard.
   const FORBIDDEN = ["props", "session_id", "type", "model", "status", "received_at", "latency_ms", "note", "code_hash", "device_id", "old_value", "new_value", "changed_by_login"];
-  const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments"]);
+  const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_timings"]);
 
   it("reads only allowed tables and columns", async () => {
     const { DASHBOARD_COLUMNS } = await import("../src/dashboard-data.js");
@@ -371,7 +371,7 @@ describe("admin dashboard privacy", () => {
     });
     try {
       assert.equal((await service.request("GET", "/admin", { headers: { cookie } })).status, 200);
-      for (const table of ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "paid"]) await csv(service, cookie, table);
+      for (const table of ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "paid", "upstreams"]) await csv(service, cookie, table);
     } finally {
       db.prepare = prepare;
       db.setAuthorizer?.(null);

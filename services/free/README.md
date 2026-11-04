@@ -1,7 +1,8 @@
 # Free managed tier service
 
 A portable Worker with Durable Objects (SQLite) that gives signed-in people a weekly allowance of
-`deepseek/deepseek-v4.1-flash-1017` through OpenRouter. Sign-in is GitHub by device code. The
+`deepseek/deepseek-v4.1-flash-1017`, served by Luminal on prepaid credit (or by OpenRouter, by an
+admin switch; see [Upstreams](#upstreams-luminal-and-openrouter)). Sign-in is GitHub by device code. The
 contract is in `src/app.ts`, and the refusal sentences are in `src/messages.ts`.
 
 A sign-in code lasts 15 minutes (`expires_in: 900`), long enough to open the link on a phone
@@ -170,6 +171,14 @@ new open sign-up still gets an account (identity, referral link, own-key use, pa
 queued for free tokens, in order. People already in keep their allowance for the week. Invited
 people and admins are never queued: an invite is the owner's own choice.
 
+**With Luminal serving** (`primaryUpstream` is `luminal` and `LUMINAL_API_KEY` is set), the cash
+caps stay near zero, so the queue watches Luminal credit instead: a new open sign-up waits once
+**this week's free Luminal credit spend reaches `QUEUE_THRESHOLD` (0.8) of
+`LUMINAL_WEEKLY_CREDIT_USD` ($250)**. The cash test above still applies as well. Monday's
+admission uses the same arithmetic over credit: the average is last week's free credit spend per
+active, and the budget is `QUEUE_THRESHOLD × LUMINAL_WEEKLY_CREDIT_USD`, at most the credit left
+(`LUMINAL_CREDIT_USD` minus credit used). Free means non-admin and not Pro or a top-up.
+
 **Each Monday** (on the first request after Monday 00:00 UTC), the queue is admitted front first,
 as many as the forecast allows:
 
@@ -220,7 +229,10 @@ Free spend crossing **50%, 80% and 100%** of the weekly cap (once per threshold 
 the all-time cap (once per threshold, ever) sends an alert; a jump past several thresholds sends
 one. So do the kill switch (pause and resume), the queue starting (its first queued sign-up), and
 an OpenRouter host failing more than 20% of at least 20 requests over the last hour (once, until
-it recovers). Messages:
+it recovers). With Luminal: credit used crossing **50%, 80% and 100%** of `luminalCreditUsd`
+(once each per balance, so raising the balance re-arms them), the pause when the credit is used up
+(once per balance), and Luminal failing more than 20% of at least 20 requests over the last hour
+(429, 5xx, timeouts, unreachable, failed streams; once, until it recovers). Messages:
 
 ```
 dl free tier: $200 of the $250 weekly cap used (80%). Resets Mon 00:00 UTC.
@@ -228,6 +240,9 @@ dl free tier: $500 of the $1,000 all-time cap used (50%). It doesn't reset; free
 dl free tier: free tokens paused for everyone by <login> (kill switch).
 dl free tier: the queue started ($200 of the $250 weekly cap used). New sign-ups wait in line for free tokens until Monday's admission.
 dl free tier: OpenRouter host <slug> failed 9 of 40 requests in the last hour (23%). New requests avoid it while it keeps failing.
+dl free tier: $1,600 of the $2,000 Luminal credit used (80%).
+dl free tier: requests are refused with upstream_credit_exhausted: $2,000.12 of the $2,000 Luminal credit is used. Top up and raise luminalCreditUsd (POST /admin/config), or switch primaryUpstream to "openrouter".
+dl free tier: Luminal failed 5 of 20 requests in the last hour (25%). Clients retry on their own; nothing switches upstream automatically.
 ```
 
 **Email (primary).** The Cloudflare config binds `send_email` as `ALERT_EMAIL`. Each alert is a
@@ -276,6 +291,10 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `global_total_budget_reached` | chat (503) | `reason: "total_budget"`, `pausedForEveryone: true`, `resetsAt: null` |
 | `quota_exceeded` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `offers`, `referralLink` |
 | `free_tier_queued` | chat (402) | `position`, `etaAt`, `offers`, `referralLink` |
+| `upstream_credit_exhausted` | chat (503) | `reason: "credit_exhausted"`, `pausedForEveryone: true`, `resetsAt: null` |
+| `upstream_busy` | chat (429, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
+| `upstream_unavailable` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
+| `upstream_timeout` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `not_invited` | API, and older sign-ins | none |
 
 The two global budget codes mean "free tokens are paused for everyone, and your own key still
@@ -301,10 +320,16 @@ with who made it and when.
 | `queueReferralPlaces` | `QUEUE_REFERRAL_PLACES` | 25 |
 | `referralBonusTokens` | `REFERRAL_BONUS_TOKENS` | 10,000,000 |
 | `referralBonusCap` | `REFERRAL_BONUS_CAP` | 50,000,000 |
+| `primaryUpstream` | `PRIMARY_UPSTREAM` | `luminal` (`openrouter` is the manual switch) |
+| `luminalCreditUsd` | `LUMINAL_CREDIT_USD` | 2000 |
+| `luminalWeeklyCreditUsd` | `LUMINAL_WEEKLY_CREDIT_USD` | 250; `none` for no weekly credit budget |
+| `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
 
 Env only: `REFERRAL_LINK_BASE` (`https://dl.new/r/`), the offers above, `ALERT_EMAIL_TO`,
 `ALERT_EMAIL_FROM` (`alerts@dl.new`), `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_KIND`,
-`ALERT_TELEGRAM_CHAT_ID`.
+`ALERT_TELEGRAM_CHAT_ID`, the prices `LUMINAL_PRICE_INPUT`, `LUMINAL_PRICE_CACHED`,
+`LUMINAL_PRICE_OUTPUT`, `OPENROUTER_PRICE_INPUT`, `OPENROUTER_PRICE_CACHED`,
+`OPENROUTER_PRICE_OUTPUT`, and the secret `LUMINAL_API_KEY`.
 
 ```sh
 # Read the effective values, the env values, the overrides and the change log
@@ -325,7 +350,86 @@ charged = uncached prompt tokens + completion tokens + ceil(cached prompt tokens
 The default weight of 0.02 is OpenRouter's cache-read price divided by its input price for
 `deepseek/deepseek-v4.1-flash-1017`: $0.006/M over $0.30/M, as listed on 2026-11-03.
 `COUNT_CACHED_TOKENS=false` still works and means a weight of 0, unless `CACHED_TOKEN_WEIGHT`
-is set. The USD caps always use the real cost OpenRouter reports.
+is set. The global USD caps count only real cash: the cost OpenRouter reports. The per-person
+dollar allowance counts every request: OpenRouter's reported cost, or a Luminal request's tokens
+at the OpenRouter prices we were billed (see below).
+
+## Upstreams: Luminal and OpenRouter
+
+Chat requests go to one upstream, the runtime setting `primaryUpstream`:
+
+- **`luminal`** (the default): `https://flash.luminal.cloud/v1/chat/completions` with
+  `LUMINAL_API_KEY`, model `deepseek-ai/DeepSeek-V4.1-Flash-1017`. The request is the client's,
+  with `max_completion_tokens` set to the reserved output cap, `stream_options.include_usage` on
+  streams, OpenRouter's `reasoning: {effort}` sent as `reasoning_effort`, and OpenRouter-only
+  fields (`provider`, `usage`, `models`, `route`, `transforms`, `plugins`, `session_id`,
+  `max_tokens`) removed. Free, Pro and admin requests all go there.
+- **`openrouter`**: the OpenRouter request below, unchanged, with its filters and host avoidance.
+  This is a manual switch (`POST /admin/config {"primaryUpstream": "openrouter"}`).
+
+Without `LUMINAL_API_KEY`, OpenRouter serves whatever the setting says. Set the key with
+`wrangler secret put LUMINAL_API_KEY`; it is never logged or shown by the admin API.
+
+**No automatic fallback.** A request is never switched from one upstream to the other. When
+Luminal fails, the client gets a transient error and retries on its own:
+
+| Luminal | client gets |
+|---|---|
+| 429 | 429 `upstream_busy`, "The free tier is busy right now; retrying…", Luminal's `Retry-After` (default 5 s) |
+| 5xx, or unreachable | 503 `upstream_unavailable`, `Retry-After` |
+| no response headers within `luminalFirstByteTimeoutSeconds` (30) | 503 `upstream_timeout`, `Retry-After: 5`; the Luminal request is aborted |
+| a stream failing part way | passed through as it is (the stream ends with an error) |
+| 400 | 400 `upstream_error` with Luminal's message |
+| 401, 402, 403 | 502 `upstream_error` (the service's key or account) |
+
+None of these is charged. Autopilot's dl client retries only `rate_limited` today, so it needs to
+treat these three codes (or `retryable: true`) as retryable before Luminal goes live.
+
+**Credit.** Luminal reports `usage.prompt_tokens_details.cached_tokens` but no cost, so each
+request's credit is computed from its usage at Luminal's list prices (USD per million tokens,
+from luminal.com/pricing):
+
+| | env | default |
+|---|---|---|
+| input | `LUMINAL_PRICE_INPUT` | 0.1425 |
+| cached input | `LUMINAL_PRICE_CACHED` | 0.0029 |
+| output (reasoning included) | `LUMINAL_PRICE_OUTPUT` | 0.57 |
+
+```
+credit = (uncached prompt × input + cached prompt × cached + completion × output) ÷ 1,000,000
+```
+
+A stream that ends without usage is charged its reservation at the fallback price, like
+OpenRouter's. Credit used is the sum over every Luminal request (free, Pro and admin). When it
+reaches `luminalCreditUsd` ($2,000; raise it after a top-up with `POST /admin/config`), every
+chat request is refused with 503 `upstream_credit_exhausted` ("Free tokens are paused while we
+top up. Your own key still works.") and Luminal isn't called. Nothing switches to OpenRouter;
+the owner can do that by hand.
+
+**What the caps count.**
+
+- **Global caps (cash only).** The weekly ($250) and all-time ($1,000) caps count only what
+  OpenRouter billed. Luminal credit is prepaid, so it isn't counted there; with Luminal serving
+  they stay near zero. The queue watches the weekly credit budget instead (see the queue).
+- **Per-person allowance (every request).** The 50M tokens are charged the same on both
+  upstreams. The $5 a week is charged a Luminal request's cost **at the OpenRouter prices we
+  were actually billed** (`OPENROUTER_PRICE_INPUT` 0.035, `OPENROUTER_PRICE_CACHED` 0.006,
+  `OPENROUTER_PRICE_OUTPUT` 0.315 per million tokens), not at Luminal's. These are the prices of
+  Morph, the cheapest full-precision host that served the free tier, as listed by OpenRouter's
+  endpoints API on 2026-11-04, and a real billed request matched them. So a person's week ends
+  where it did before the switch to Luminal, and Luminal's prices don't change what the free
+  tier gives.
+- **The request log** has `upstream`, `credit_usd`, `ttfb_ms`, `ttft_ms` and `upstream_error`
+  on every row. `cost_usd` stays what the person's allowance was charged: OpenRouter's reported
+  cost, or OpenRouter prices for a Luminal request.
+
+`GET /admin/spend` adds `upstream: {primary, serving, luminalConfigured}` and
+`luminalCredit: {balanceUsd, usedUsd, leftUsd, weekUsd, freeWeekUsd, weeklyBudgetUsd}`.
+
+**Telemetry.** Each request records the time to the response headers (TTFB) and to the first
+chunk with content (TTFT: text, reasoning or a tool call), per upstream, in `upstream_timings`
+(time, upstream and the two numbers; no person, kept 15 days), and per-day counts in
+`upstream_daily` (requests, upstream errors, prompt and cached tokens, cash and credit).
 
 ## Which OpenRouter host serves requests
 
@@ -423,7 +527,7 @@ day, last 8 weeks), cohort retention (weeks 1, 2 and 4 after sign-up), cost per 
 this week and last (and on which day), and global spend against the effective caps with the
 pause and admission state. Each table has a CSV at `/admin/dashboard/<table>.csv`
 (`spend`, `weekly-active`, `retention`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`,
-`queue`, `referrals`, `funnel`, `paid`).
+`queue`, `referrals`, `funnel`, `paid`, `upstreams`).
 
 At the top: a red banner when free spend is at 80% or more of either cap, and the all-time spend
 against the all-time cap ($1,000). Then the queue (waiting now, the longest wait, how many this
@@ -433,12 +537,20 @@ subscribers, top-ups this week and month, revenue before tax this week and month
 usage cost upstream), and the funnel per sign-up week
 and in all (sign-ups → first request → weekly active). Counts only, no content.
 
+**Upstreams** (after global spend): the Luminal credit gauge (used against `luminalCreditUsd`),
+this week's free credit against the weekly credit budget, which upstream is serving, and per
+upstream for today and this week: requests, errors, median and p90 time to first token, median
+time to first byte, cache-hit share (cached over prompt tokens), credit and cash. These count
+admin requests too, since they measure the upstream. The red banner also shows at 80% of the
+credit. CSV: `upstreams`.
+
 - **Admins are left out of every number:** anyone in `ADMIN_GITHUB_IDS` and anyone admitted as
   an admin.
 - **What it reads:** only `daily_activity`, a per-person per-day roll-up of request and event
   counts, charged tokens and cost, plus GitHub logins, sign-up times, per-person grants and the
   spend totals, and for the launch sections the queue (ids and times), the Monday runs (counts
-  and the forecast) and referrals (ids, time and outcome). No model, event type or properties,
+  and the forecast) and referrals (ids, time and outcome), and for the upstreams `upstream_daily`
+  and `upstream_timings` (counts, tokens, dollars and milliseconds per upstream, no person). No model, event type or properties,
   session ids, prompts or code. A test runs
   the dashboard under an SQLite authorizer that allows only those columns.
 - **The roll-up** is kept up to date with each request and event, and built once from the
