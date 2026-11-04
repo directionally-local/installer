@@ -32,7 +32,7 @@ import {
   weeklyBudgetMessage,
   type SignInRefusal,
 } from "./messages.js";
-import { confirmPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, tooNewIntro } from "./pages.js";
+import { confirmPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, signedInDonePage, tooNewIntro } from "./pages.js";
 import { ALLOWED_MODELS, chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
@@ -699,7 +699,11 @@ async function admitAndFinish(
     await auth(c).decide(deviceRef, "approved", identity, c.now());
     if (result.queueStarted) await alert(c, [await directory(c).queueStartedAlert(c.now(), policyOf(c.config))]);
     const queued = result.queued ? ` ${QUEUED_SIGNED_IN}` : "";
-    return donePage("You're signed in", `Signed in as ${identity.login}.${queued} Return to your terminal; you can close this tab.`);
+    const invite =
+      config.referralBonusTokens > 0
+        ? { link: referralLink(config.referralLinkBase, result.referralCode), bonusTokens: config.referralBonusTokens, capTokens: config.referralBonusCap }
+        : undefined;
+    return signedInDonePage(`Signed in as ${identity.login}.${queued} Return to your terminal; you can close this tab.`, invite);
   }
   const intro = accountTooNew ? tooNewIntro(config.minGithubAccountAgeDays) : INVITE_ONLY_INTRO;
   const refuse = async (code: SignInRefusal, status: "not_invited" | "denied", httpStatus: number) => {

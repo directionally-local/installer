@@ -24,7 +24,7 @@ import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
  */
 
 export type AdmitResult =
-  | { ok: true; created: boolean; via: "existing" | "admin" | "open" | "invite"; queued: boolean; queueStarted: boolean }
+  | { ok: true; created: boolean; via: "existing" | "admin" | "open" | "invite"; queued: boolean; queueStarted: boolean; referralCode: string }
   | { ok: false; reason: "needs_invite" | "invalid_invite" | "cohort_full" | "device_taken" };
 
 /** One logged change to a runtime setting or the kill switch. */
@@ -502,7 +502,7 @@ export class DirectoryObject extends DurableObject {
       }
       const admitted = (via: "existing" | "admin" | "open" | "invite", created: boolean): AdmitResult => {
         if (input.clientDeviceId) sql.exec("INSERT OR IGNORE INTO devices (device_id, github_id) VALUES (?, ?)", input.clientDeviceId, input.githubId);
-        this.#ensureCode(input.githubId, input.login, input.now);
+        const referralCode = this.#ensureCode(input.githubId, input.login, input.now);
         if (created && via !== "admin" && input.referralCode) this.#recordReferral(input.githubId, input.login, input.referralCode, input.now);
         if (input.networkHash) this.#recordNetwork(input.githubId, input.networkHash, input.now);
         let queued = false;
@@ -518,7 +518,7 @@ export class DirectoryObject extends DurableObject {
             queueStarted = waiting === 0;
           }
         }
-        return { ok: true, created, via, queued, queueStarted };
+        return { ok: true, created, via, queued, queueStarted, referralCode };
       };
       const existing = sql.exec<PersonRow>("SELECT * FROM people WHERE github_id = ?", input.githubId).toArray()[0];
       if (existing) {
