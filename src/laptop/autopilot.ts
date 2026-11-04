@@ -83,6 +83,32 @@ export async function autopilotOnPath(env: NodeJS.ProcessEnv = process.env): Pro
   return undefined;
 }
 
+/**
+ * Whether Autopilot can start a session without asking how it should think first, from
+ * `autopilot auth status` (read-only: it lists providers and where each key comes from, and
+ * starts nothing). False when the active provider has no key and none is in the environment
+ * (first run would use that one): no provider chosen yet, or the free tier not signed in.
+ * Undefined when it can't tell (no Autopilot, an error, a slow answer, output it doesn't know).
+ */
+export async function autopilotSetUp(
+  autopilot: AutopilotCommand | undefined,
+  exec: (command: string, args: string[]) => Promise<string> = async (command, args) =>
+    (await execFileAsync(command, args, { timeout: 5_000, env: { ...process.env, NO_COLOR: "1" } })).stdout,
+): Promise<boolean | undefined> {
+  if (!autopilot) return undefined;
+  const stdout = await exec(autopilot.command, [...autopilot.args, "auth", "status"]).catch(() => undefined);
+  return stdout === undefined ? undefined : parseAuthStatus(stdout);
+}
+
+/** `autopilot auth status`'s rows ("› openrouter  OpenRouter (active) · no key"): set up or not, as above. */
+export function parseAuthStatus(stdout: string): boolean | undefined {
+  const rows = stdout.split("\n").map((line) => line.match(/^([›> ]) (\S+) +.* · (no key needed|no key|key in \S+)\s*$/)).filter((row) => row !== null);
+  const active = rows.find((row) => row[1] !== " ");
+  if (!active) return undefined;
+  if (active[3] !== "no key") return true;
+  return rows.some((row) => row[3] === "key in env");
+}
+
 /** An Autopilot that knows `attach-remote` lists its options (an older one prints its general help). */
 export async function supportsAttachRemote(autopilot: AutopilotCommand): Promise<boolean> {
   try {

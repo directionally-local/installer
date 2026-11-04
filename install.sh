@@ -318,19 +318,23 @@ laptop_main() {
   if [ "$os" = linux ]; then
     say "  For a server instead, run it as root: curl -fsSL https://directionallylocal.run | sudo sh"
   fi
+  # Interactive: go straight into dl in this folder (plain Autopilot the first time).
+  # (DL_TTY stands in for the terminal in tests.)
+  tty="${DL_TTY:-/dev/tty}"
+  start=""
+  if [ "${DL_NO_START:-}" != "1" ] && (exec <"$tty") 2>/dev/null; then start=1; fi
+  # When dl isn't started here, the "Then run: … && dl" line at the end says the same as
+  # "Next time, …", so only one of the two is printed.
   if [ -n "$fix" ]; then
     say ""
     if [ "${DL_NO_MODIFY_PATH:-}" = "1" ]; then
       remind "dl isn't on your PATH. To use it, run: $fix"
-    else
+    elif [ -n "$start" ]; then
       remind "Next time, open a new terminal or run: $fix"
     fi
   fi
 
-  # Interactive: go straight into dl in this folder (plain Autopilot the first time).
-  # (DL_TTY stands in for the terminal in tests.)
-  tty="${DL_TTY:-/dev/tty}"
-  if [ "${DL_NO_START:-}" != "1" ] && (exec <"$tty") 2>/dev/null; then
+  if [ -n "$start" ]; then
     say ""
     code=0
     "$DL_HOME/bin/dl" <"$tty" || code=$?
@@ -339,7 +343,7 @@ laptop_main() {
     if [ -n "$fix" ]; then remind "To use dl in this terminal, run: $fix"; fi
     return "$code"
   fi
-  if [ -n "$fix" ]; then say "  Then run: $fix && dl"; else say "  Then type: dl"; fi
+  if [ -n "$fix" ]; then remind "Then run: $fix && dl"; else say "  Then type: dl"; fi
 }
 
 # A line the person needs to act on: bold, so it stands out from the steps above.

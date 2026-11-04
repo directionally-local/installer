@@ -372,7 +372,12 @@ export interface ReadyHere {
   bundled?: boolean;
   /** Where dl is installed, as the person would type it (~ for the home directory). */
   installedIn: string;
+  /** False when that Autopilot has no provider yet (or the free tier isn't signed in); undefined when unknown. */
+  setUp?: boolean;
 }
+
+/** `dl status`'s line when Autopilot can't start a session yet. */
+export const NOT_SIGNED_IN = "Not signed in yet: run dl in a project folder and choose Free, or use your own API key.";
 
 /**
  * `dl status` on a laptop where nothing else is set up: plain `dl` works already (it runs
@@ -386,6 +391,7 @@ export function laptopReady(info: ReadyHere, io: LaptopIO = processIO): void {
   row("Autopilot", info.autopilot
     ? `${info.autopilot} ${c.dim(info.bundled === false ? "· the one on your PATH" : "· comes with dl")}`
     : `${c.yellow("not installed")}   ${c.dim(updateCommand())}`);
+  if (info.autopilot && info.setUp === false) io.out(`  ${c.yellow("!")} ${NOT_SIGNED_IN}\n`);
   io.out("\n");
   io.out(`  ${c.dim("Start, in a project folder:")}\n`);
   io.out(`     ${c.bold("dl")}          ${c.dim("a new session with Autopilot in that folder")}\n`);

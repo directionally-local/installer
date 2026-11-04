@@ -218,15 +218,20 @@ describe("cli", () => {
   it("dl status shows the laptop's overview", async () => {
     let out = "";
     const io = { out: (text: string) => { out += text; }, err: () => {} };
-    const laptop = { root: false, serverState: async () => undefined };
+    const laptop = { root: false, serverState: async () => undefined, autopilotSetUp: async () => true };
     // Right after the install script: no places yet, but plain dl works, so say what's installed and how to start.
     assert.equal(await main(["status"], io, laptop), 0);
     assert.doesNotMatch(out, /isn't set up/);
+    assert.doesNotMatch(out, /Not signed in/);
     assert.match(out, /Directionally Local {2}on this laptop\n\n {2}dl {9}\d+\.\d+\.\d+ · installed in \S+\n {2}Autopilot {2}\d+\.\d+\.\d+ · comes with dl\n/);
     assert.match(out, /Start, in a project folder:\n {5}dl {10}a new session with Autopilot in that folder\n {5}dl -c {7}continue the last session there\n/);
     assert.match(out, /Next steps\n {5}dl run "fix the flaky checkout test" {3}a background task that ends in a pull request\n {5}dl setup {4}set up where background tasks run/);
     assert.match(out, /curl -fsSL https:\/\/directionallylocal\.run \| sudo sh\n/);
     assert.match(out, /dl connect https:\/\/your-server/);
+    // Before Autopilot has a provider (first run not finished): one line says so.
+    out = "";
+    assert.equal(await main(["status"], io, { ...laptop, autopilotSetUp: async () => false }), 0);
+    assert.match(out, /comes with dl\n {2}! Not signed in yet: run dl in a project folder and choose Free, or use your own API key\.\n/);
     // As root, with no server install: the server's instructions, with sudo, as the install script says.
     out = "";
     assert.equal(await main(["status"], io, { ...laptop, root: true }), 1);
