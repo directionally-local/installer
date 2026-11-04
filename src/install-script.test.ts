@@ -93,7 +93,7 @@ describe("install.sh", () => {
  * Node that is patched or not, npm installing a fake dl into --prefix, and curl serving a
  * Node.js download from `dist`. DL_TTY names a missing file, so there's no terminal to start dl in.
  */
-function laptopInstall(options: { os?: "Darwin" | "Linux"; uid?: number; nodePatched?: boolean; shell?: string; env?: Record<string, string>; dist?: (dir: string) => void; npmFails?: boolean; terminal?: boolean; extraPath?: string | ((home: string) => string); home?: (home: string) => void; dlExit?: number } = {}) {
+function laptopInstall(options: { os?: "Darwin" | "Linux"; uid?: number; nodePatched?: boolean; shell?: string; env?: Record<string, string>; dist?: (dir: string) => void; npmFails?: boolean; npmOutput?: string; terminal?: boolean; extraPath?: string | ((home: string) => string); home?: (home: string) => void; dlExit?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dl-install-laptop-"));
   const bin = join(dir, "stubs");
   const home = join(dir, "home");
@@ -109,14 +109,15 @@ function laptopInstall(options: { os?: "Darwin" | "Linux"; uid?: number; nodePat
   const node = (patched: boolean) => `case "$1" in -e) exit ${patched ? 0 : 1} ;; -v) echo v24.22.1 ;; *) [ "$2" = --version ] && echo 0.10.0 || { echo "dl $* in $(pwd)" >> "${dir}/started.log"; echo "\${DL_REFERRAL-unset}" >> "${dir}/referral.log"; exit ${options.dlExit ?? 0}; } ;; esac`;
   stub("node", node(options.nodePatched ?? true));
   // npm: records its arguments and installs a dl entry point under --prefix.
-  const npm = options.npmFails ? 'echo "npm ERR! 404"; exit 1' : `echo "$*" >> "${dir}/npm.log"
+  const npm = options.npmFails ? 'echo "npm http fetch GET 404 https://registry.npmjs.org/directionallylocal 80ms"; echo "npm ERR! 404"; exit 1' : `echo "$*" >> "${dir}/npm.log"
+${options.npmOutput ?? ""}
 prefix=""; while [ $# -gt 0 ]; do [ "$1" = --prefix ] && prefix=$2; shift; done
 mkdir -p "$prefix/lib/node_modules/directionallylocal/bin" && echo '// dl' > "$prefix/lib/node_modules/directionallylocal/bin/directionallylocal.mjs"`;
   stub("npm", npm);
   stub("curl", `echo "$*" >> "${dir}/curl.log"
-out=""; url=""; while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift ;; -*) ;; *) url=$1 ;; esac; shift; done
+out=""; url=""; head=""; while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift ;; -*I*) head=1 ;; -*) ;; *) url=$1 ;; esac; shift; done
 file="${dist}/$(basename "$url")"; [ -f "$file" ] || exit 22
-if [ -n "$out" ]; then cp "$file" "$out"; else cat "$file"; fi`);
+if [ -n "$head" ]; then printf 'HTTP/2 200\\r\\ncontent-length: %s\\r\\n\\r\\n' "$(wc -c < "$file" | tr -d ' ')"; elif [ -n "$out" ]; then cp "$file" "$out"; else cat "$file"; fi`);
   stub("sudo", `echo "sudo $*" >> "${dir}/sudo.log"; exit 1`);
   options.dist?.(dist);
   options.home?.(home);
@@ -156,10 +157,15 @@ function nodeDist(dist: string, options: { corrupt?: boolean } = {}): void {
   write("npm", `echo "own $*" >> "${dirname(dist)}/npm.log"
 prefix=""; while [ $# -gt 0 ]; do [ "$1" = --prefix ] && prefix=$2; shift; done
 mkdir -p "$prefix/lib/node_modules/directionallylocal/bin" && echo '// dl' > "$prefix/lib/node_modules/directionallylocal/bin/directionallylocal.mjs"`);
-  const tarball = join(dist, `${name}.tar.gz`);
-  execFileSync("tar", ["-czf", tarball, "-C", build, name]);
-  const sum = createHash("sha256").update(readFileSync(tarball)).digest("hex");
-  writeFileSync(join(dist, "SHASUMS256.txt"), `${"0".repeat(64)}  node-v24.22.1-linux-x64.tar.gz\n${options.corrupt ? "f".repeat(64) : sum}  ${name}.tar.gz\n${"1".repeat(64)}  ${name}.tar.xz\n`);
+  // Both archives nodejs.org has; the install takes the .tar.xz (half the size) when tar can unpack it.
+  const sums = [`${"0".repeat(64)}  node-v24.22.1-linux-x64.tar.gz`];
+  for (const [ext, flag] of [["tar.gz", "-czf"], ["tar.xz", "-cJf"]] as const) {
+    const tarball = join(dist, `${name}.${ext}`);
+    execFileSync("tar", [flag, tarball, "-C", build, name]);
+    const sum = createHash("sha256").update(readFileSync(tarball)).digest("hex");
+    sums.push(`${options.corrupt ? "f".repeat(64) : sum}  ${name}.${ext}`);
+  }
+  writeFileSync(join(dist, "SHASUMS256.txt"), `${sums.join("\n")}\n`);
 }
 
 describe("install.sh on a laptop", () => {
@@ -175,7 +181,7 @@ describe("install.sh on a laptop", () => {
     const result = run();
     assert.equal(result.status, 0, result.stderr);
     const root = join(result.home, ".directionallylocal");
-    assert.match(result.npm ?? "", new RegExp(`^install -g --prefix ${root}/dl --cache ${root}/npm-cache --no-audit --no-fund --loglevel=error directionallylocal@latest$`, "m"));
+    assert.match(result.npm ?? "", new RegExp(`^install -g --prefix ${root}/dl --cache ${root}/npm-cache --no-audit --no-fund --no-update-notifier --loglevel=info --foreground-scripts directionallylocal@latest$`, "m"));
     assert.ok(!existsSync(join(root, "npm-cache")), "npm's cache for the install is removed afterwards");
     assert.equal(result.sudo, undefined, "no sudo");
     assert.equal(result.curl, undefined, "no Node download");
@@ -184,7 +190,7 @@ describe("install.sh on a laptop", () => {
     assert.doesNotMatch(wrapper, /export PATH/, "the user's own Node: nothing added to PATH");
     assert.ok(existsSync(join(root, "bin", "directionallylocal")));
     assert.equal(result.read(join(result.home, ".zshrc")), `\n# Directionally Local (dl)\nexport PATH="${root}/bin:$PATH"\n`);
-    assert.match(result.stdout, /ok Installing dl: dl 0\.10\.0 · in .*\.directionallylocal\n\.\. Adding dl to your PATH\nok Adding dl to your PATH: in .*\/\.zshrc\n/);
+    assert.match(result.stdout, /ok Installing dl: dl 0\.10\.0 · in .*\.directionallylocal · 0:0\d\n\.\. Adding dl to your PATH\nok Adding dl to your PATH: in .*\/\.zshrc\n/);
     assert.match(result.stdout, /\n\n {2}Then run: source ~\/\.zshrc && dl\n$/, "no terminal: dl isn't started; this shell's PATH can't change: the one line that fixes it");
     assert.doesNotMatch(result.stdout, /Next time/, "not also the same advice a second way");
     assert.doesNotMatch(result.stdout, /sudo sh/, "the server hint is for Linux");
@@ -205,7 +211,9 @@ describe("install.sh on a laptop", () => {
     const result = run({ nodePatched: false, shell: "/bin/bash", dist: (dist) => nodeDist(dist) });
     assert.equal(result.status, 0, result.stderr);
     const root = join(result.home, ".directionallylocal");
-    assert.match(result.curl ?? "", /nodejs\.example\/dist\/SHASUMS256\.txt[\s\S]*nodejs\.example\/dist\/node-v24\.22\.1-darwin-arm64\.tar\.gz/);
+    assert.match(result.curl ?? "", /nodejs\.example\/dist\/SHASUMS256\.txt[\s\S]*-o \S*\.directionallylocal\/node-v24\.22\.1-darwin-arm64\.tar\.xz\.download nodejs\.example\/dist\/node-v24\.22\.1-darwin-arm64\.tar\.xz|nodejs\.example\/dist\/node-v24\.22\.1-darwin-arm64\.tar\.xz -o/, "the .tar.xz, half the download");
+    assert.doesNotMatch(result.curl ?? "", /\.tar\.gz/);
+    assert.match(result.stdout, /\.\. Downloading Node\.js 24 \(1 MB\)\n/, "its size, from the download's Content-Length");
     assert.match(result.stdout, /ok Installing Node\.js 24: v24\.22\.1 · in .*\.directionallylocal\/node/);
     assert.match(result.npm ?? "", /^own install -g --prefix .*\.directionallylocal\/dl /m, "dl installed with its own Node's npm");
     const wrapper = result.read(join(root, "bin", "dl"))!;
@@ -356,6 +364,30 @@ describe("install.sh on a laptop", () => {
     assert.deepEqual(readdirSync(root).sort(), ["bin", "dl", "node"]);
   });
 
+  it("shows what the install is doing: downloading, setting up Autopilot, building native parts, and a hint on a slow network", () => {
+    // npm's --loglevel=info lines, as the install reads them; a phase lasts long enough to be seen.
+    const npmOutput = [
+      'echo "npm http fetch GET 200 https://registry.npmjs.org/autopilot-ai 80ms (cache miss)" >&2',
+      'echo "npm http fetch GET 200 https://registry.npmjs.org/autopilot-ai/-/autopilot-ai-3.7.0.tgz 90ms (cache miss)" >&2',
+      'echo "npm http fetch GET 200 https://registry.npmjs.org/ink/-/ink-7.1.1.tgz 90ms (cache miss)" >&2',
+      "sleep 2",
+      'echo "npm info run isolated-vm@6.2.0 install node_modules/isolated-vm node-gyp-build || node-gyp rebuild" >&2',
+      "sleep 1.5",
+      'echo "gyp info it worked if it ends with ok" >&2',
+      "sleep 1.5",
+    ].join("\n");
+    const result = run({ npmOutput, env: { DL_SLOW_AFTER: "1" } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /\.\. Installing dl\n {3}Downloading dl(: \S.*)? \(0:00\)\n {3}Slow network\? This downloads about 40 MB\. It keeps going; press Ctrl\+C to stop\.\n {3}Setting up Autopilot \(0:0\d\)\n {3}Building native parts \(one time, ~1 min\) \(0:0\d\)\nok Installing dl: /);
+    assert.equal(result.stdout.match(/Slow network/g)?.length, 1, "the hint once");
+
+    // A quick install: no hint, and no build step when nothing is compiled.
+    const quick = run({ npmOutput: npmOutput.replace(/^echo "gyp.*$/m, "").replace(/sleep \S+/g, "sleep 1.1") });
+    assert.equal(quick.status, 0, quick.stderr);
+    assert.doesNotMatch(quick.stdout, /Slow network|Building native parts/);
+    assert.match(quick.stdout, /Setting up Autopilot/);
+  });
+
   it("refuses root on macOS, and fails clearly when npm does", () => {
     const root = run({ uid: 0 });
     assert.equal(root.status, 1);
@@ -363,6 +395,7 @@ describe("install.sh on a laptop", () => {
     const failed = run({ npmFails: true });
     assert.equal(failed.status, 1);
     assert.match(failed.stderr, /npm ERR! 404[\s\S]*directionallylocal: installing directionallylocal@latest failed/);
+    assert.doesNotMatch(failed.stderr, /npm http fetch/, "the error, without npm's progress lines");
   });
 
   it("DL_MODE must be server or laptop", () => {
@@ -407,6 +440,25 @@ describe("install.sh: the anonymous install count", () => {
     const root = run({ uid: 0 });
     assert.equal(root.status, 1);
     assert.equal(root.counts()[0]!.body.failedStep, "preflight");
+  });
+
+  it("maps the progress phases onto the same steps: the Node.js download is node, npm's phases are install_dl", () => {
+    // The Node.js download itself fails (shown as "Downloading Node.js 24"): node.
+    const download = run({ nodePatched: false, dist: (dist) => { nodeDist(dist); rmSync(join(dist, "node-v24.22.1-darwin-arm64.tar.xz")); } });
+    assert.equal(download.status, 1);
+    assert.match(download.stderr, /downloading https:\/\/nodejs\.example\/dist\/node-v24\.22\.1-darwin-arm64\.tar\.xz failed/);
+    assert.deepEqual(download.counts().map((count) => [count.body.result, count.body.failedStep]), [["failed", "node"]]);
+    // npm failing after it got to "Setting up Autopilot" and "Building native parts": still install_dl.
+    const npmOutput = 'echo "npm info run isolated-vm@6.2.0 install node_modules/isolated-vm node-gyp-build" >&2; echo "gyp info it worked if it ends with ok" >&2; sleep 1.2; exit 1';
+    const build = run({ npmOutput });
+    assert.equal(build.status, 1);
+    assert.match(build.stdout, /Building native parts/);
+    assert.deepEqual(build.counts().map((count) => [count.body.result, count.body.failedStep]), [["failed", "install_dl"]]);
+    // A slow install that finishes is one ok count; the hint doesn't change it.
+    const slow = run({ npmOutput: 'echo "npm http fetch GET 200 https://registry.npmjs.org/x 5ms" >&2; sleep 1.5', env: { DL_SLOW_AFTER: "1" } });
+    assert.equal(slow.status, 0, slow.stderr);
+    assert.match(slow.stdout, /Slow network\?/);
+    assert.deepEqual(slow.counts().map((count) => count.body.result), ["ok"]);
   });
 
   it("is sent before dl starts, once, whatever dl does after", () => {
