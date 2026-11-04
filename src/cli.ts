@@ -9,7 +9,8 @@ import { doctor, formatChecks } from "./doctor.js";
 import { serverKeysCommand } from "./keys.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
 import { cancel, connect, describeError, laptopHome, laptopReady, pull, run, runs, servers, use, watch, type ReadyHere } from "./laptop/commands.js";
-import { autopilotOnPath, autopilotSetUp, bundledAutopilotVersion, findAutopilot } from "./laptop/autopilot.js";
+import { autopilotAuth, autopilotOnPath, bundledAutopilotVersion, findAutopilot, type AutopilotAuth } from "./laptop/autopilot.js";
+import { FREE_TIER_PROVIDER, freeTierAccount, freeTierLine, type FreeTierAccount } from "./laptop/free-tier.js";
 import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
 import { loadRemotes } from "./laptop/config.js";
 import { provider as providerCommand } from "./laptop/provider.js";
@@ -133,8 +134,10 @@ export interface MainOptions {
   prompter?: Prompter;
   /** Sends the task; the real `run` unless replaced. */
   run?: typeof run;
-  /** Whether Autopilot has a provider (`dl status`); asks the real one (`autopilot auth status`) unless replaced. */
-  autopilotSetUp?: () => Promise<boolean | undefined>;
+  /** Autopilot's active provider and whether it can start (`dl status`); asks the real one (`autopilot auth status`) unless replaced. */
+  autopilotAuth?: () => Promise<AutopilotAuth | undefined>;
+  /** The free tier account (`dl status`, when Autopilot uses the free tier); reads Autopilot's sign-in and GET /v1/me unless replaced. */
+  freeTierAccount?: () => Promise<FreeTierAccount | undefined>;
 }
 
 export async function main(
@@ -324,13 +327,15 @@ export async function main(
           }
           // A laptop connected to places gets its own overview (`dl status` shows it from anywhere);
           // otherwise, what this is and how to start.
-          if ((!command || command === "status") && await laptopHome(laptopIO, undefined, undefined, { ssh: realSshExec, local: localVersions })) return 0;
+          // What Autopilot here uses, asked once and only when it's shown (never as root).
+          const local = (!command || command === "status") && !isRoot() ? localAutopilot(options) : undefined;
+          if ((!command || command === "status") && await laptopHome(laptopIO, undefined, undefined, { ssh: realSshExec, local: localVersions }, local?.then((state) => state.freeTier))) return 0;
           // A laptop with no places is still set up: plain dl runs Autopilot here. Say what's
           // installed and how to start. (Root on a machine without a server install gets the
           // server's instructions instead, as the install script draws the same line.)
-          if ((!command || command === "status") && !isRoot()) {
-            const setUp = await (options.autopilotSetUp ?? (async () => autopilotSetUp(await findAutopilot())))();
-            laptopReady({ ...(await readyHere()), ...(setUp === undefined ? {} : { setUp }) }, laptopIO);
+          if (local) {
+            const { setUp, freeTier } = await local;
+            laptopReady({ ...(await readyHere()), ...(setUp === undefined ? {} : { setUp }), ...(freeTier ? { freeTier } : {}) }, laptopIO);
             return 0;
           }
           io.out(NOT_A_SERVER(colors));
@@ -593,6 +598,23 @@ async function localVersions(): Promise<{ autopilot: string; hotcell: string } |
     return state ? { autopilot: state.autopilotVersion, hotcell: state.hotcellVersion } : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * For `dl status`: whether Autopilot here can start a session, and, when its active provider
+ * is the free tier, the account line. Read-only; never throws, and anything it can't tell is
+ * left out.
+ */
+async function localAutopilot(options: MainOptions): Promise<{ setUp?: boolean; freeTier?: string }> {
+  try {
+    const auth = await (options.autopilotAuth ?? (async () => autopilotAuth(await findAutopilot())))();
+    if (!auth) return {};
+    if (auth.active !== FREE_TIER_PROVIDER || !auth.setUp) return { setUp: auth.setUp };
+    const account = await (options.freeTierAccount ?? (() => freeTierAccount()))().catch(() => undefined);
+    return { setUp: true, ...(account ? { freeTier: freeTierLine(account) } : {}) };
+  } catch {
+    return {};
   }
 }
 

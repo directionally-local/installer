@@ -218,20 +218,39 @@ describe("cli", () => {
   it("dl status shows the laptop's overview", async () => {
     let out = "";
     const io = { out: (text: string) => { out += text; }, err: () => {} };
-    const laptop = { root: false, serverState: async () => undefined, autopilotSetUp: async () => true };
+    // Stubs: never the real Autopilot, its config or the network.
+    const laptop = { root: false, serverState: async () => undefined, autopilotAuth: async () => ({ active: "openrouter", setUp: true }), freeTierAccount: async () => { throw new Error("not on the free tier: not asked"); } };
     // Right after the install script: no places yet, but plain dl works, so say what's installed and how to start.
     assert.equal(await main(["status"], io, laptop), 0);
     assert.doesNotMatch(out, /isn't set up/);
     assert.doesNotMatch(out, /Not signed in/);
-    assert.match(out, /Directionally Local {2}on this laptop\n\n {2}dl {9}\d+\.\d+\.\d+ · installed in \S+\n {2}Autopilot {2}\d+\.\d+\.\d+ · comes with dl\n/);
+    assert.doesNotMatch(out, /Free tier/);
+    assert.match(out, /Directionally Local {2}on this computer\n\n {2}dl {9}\d+\.\d+\.\d+ · installed in \S+\n {2}Autopilot {2}\d+\.\d+\.\d+ · comes with dl\n/);
     assert.match(out, /Start, in a project folder:\n {5}dl {10}a new session with Autopilot in that folder\n {5}dl -c {7}continue the last session there\n/);
     assert.match(out, /Next steps\n {5}dl run "fix the flaky checkout test" {3}a background task that ends in a pull request\n {5}dl setup {4}set up where background tasks run/);
     assert.match(out, /curl -fsSL https:\/\/directionallylocal\.run \| sudo sh\n/);
     assert.match(out, /dl connect https:\/\/your-server/);
     // Before Autopilot has a provider (first run not finished): one line says so.
     out = "";
-    assert.equal(await main(["status"], io, { ...laptop, autopilotSetUp: async () => false }), 0);
+    assert.equal(await main(["status"], io, { ...laptop, autopilotAuth: async () => ({ active: "directionally-local", setUp: false }) }), 0);
     assert.match(out, /comes with dl\n {2}! Not signed in yet: run dl in a project folder and choose Free, or use your own API key\.\n/);
+    assert.doesNotMatch(out, /Free tier/);
+    // Signed in to the free tier: who, what's left this week and when it comes back, in local time.
+    const free = { ...laptop, autopilotAuth: async () => ({ active: "directionally-local", setUp: true }) };
+    const resetsAt = "2026-11-09T00:00:00.000Z";
+    const reset = new Date(resetsAt).toLocaleDateString("en-US", { weekday: "short" }) + " " + new Date(resetsAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+    out = "";
+    assert.equal(await main(["status"], io, { ...free, freeTierAccount: async () => ({ login: "octo", remaining: 49_900_000, tokensPerWeek: 50_000_000, resetsAt }) }), 0);
+    assert.ok(out.includes(`comes with dl\n  Free tier  @octo · 49.9M of 50M tokens left this week · resets ${reset}\n`), out);
+    out = "";
+    assert.equal(await main(["status"], io, { ...free, freeTierAccount: async () => ({ login: "octo" }) }), 0);
+    assert.match(out, /comes with dl\n {2}Free tier {2}@octo\n\n/, "the service couldn't be asked: the login only");
+    for (const account of [async () => undefined, async () => { throw new Error("offline"); }]) {
+      out = "";
+      assert.equal(await main(["status"], io, { ...free, freeTierAccount: account }), 0);
+      assert.doesNotMatch(out, /Free tier/);
+      assert.match(out, /comes with dl\n\n/);
+    }
     // As root, with no server install: the server's instructions, with sudo, as the install script says.
     out = "";
     assert.equal(await main(["status"], io, { ...laptop, root: true }), 1);
@@ -239,7 +258,11 @@ describe("cli", () => {
     await saveRemote({ name: "box", url: "http://127.0.0.1:9", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" });
     out = "";
     assert.equal(await main(["status"], io, laptop), 0);
-    assert.match(out, /Directionally Local {2}on this laptop[\s\S]*Runs on +● box/);
+    assert.match(out, /Directionally Local {2}on this computer[\s\S]*Runs on +● box/);
+    assert.doesNotMatch(out, /Free tier/);
+    out = "";
+    assert.equal(await main(["status"], io, { ...free, freeTierAccount: async () => ({ login: "octo", remaining: 800, tokensPerWeek: 50_000_000, resetsAt }) }), 0);
+    assert.match(out, /Hotcell .*\n {2}Free tier {2}@octo · 800 of 50M tokens left this week · resets /, "with places too");
     assert.match(await (async () => { out = ""; await main(["--help"], io); return out; })(), /dl status +where your agents run, their provider, model and versions, and what they're doing/);
   });
 

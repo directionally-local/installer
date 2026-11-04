@@ -768,8 +768,8 @@ describe("dl routing for projects", () => {
       assert.match(text, /dl new starts a new session in a terminal: dl/);
       await saveRemote(place("dl-test", api.url));
       text = "";
-      assert.equal(await main(["status"], io, { terminal: true, root: false, serverState: async () => undefined }), 0);
-      assert.match(text, /on this laptop/, "dl status: the overview, anywhere");
+      assert.equal(await main(["status"], io, { terminal: true, root: false, serverState: async () => undefined, autopilotAuth: async () => undefined }), 0);
+      assert.match(text, /on this computer/, "dl status: the overview, anywhere");
       assert.match(text.replace(/\x1b\[[0-9;]*m/g, ""), /Talk to an agent: type {2}dl/);
     } finally {
       process.chdir(cwd);
@@ -791,6 +791,7 @@ describe("dl the first time on a laptop", () => {
     serverState: async () => undefined,
     session: { autopilot: async () => AUTOPILOT, probe: async () => true, placeModel: async () => undefined, spawn: plain.spawn, signals: new EventEmitter() },
     setup: async (options) => { setups.push(options); return 0; },
+    autopilotAuth: async () => undefined,
     ...(prompter ? { prompter } : {}),
     ...extra,
   });
@@ -854,7 +855,7 @@ describe("dl the first time on a laptop", () => {
   });
 
   it("as root, or without a terminal, says what this is instead", async () => {
-    for (const [options, says] of [[{ root: true }, /isn't set up on this machine/], [{ terminal: false }, /on this laptop[\s\S]*dl -c {7}continue the last session there/]] as const) {
+    for (const [options, says] of [[{ root: true }, /isn't set up on this machine/], [{ terminal: false }, /on this computer[\s\S]*dl -c {7}continue the last session there/]] as const) {
       const io = capture();
       assert.equal(await main([], io, laptop(undefined, options)), 0);
       assert.match(io.text(), says);
