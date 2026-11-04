@@ -1,17 +1,18 @@
 import type { DurableObjectNamespace } from "cloudflare:workers";
 import { randomToken, sha256Hex } from "../../shared/src/auth.js";
-import { githubAuthorizeUrl, githubUserFromCode, type Fetch } from "../../shared/src/github.js";
+import { githubAuthorizeUrl, githubContributionsLastYear, githubSignInFromCode, githubUserFromCode, type Fetch } from "../../shared/src/github.js";
 import { hmacKey, signJwt, verifyJwt } from "../../shared/src/jwt.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
 import { MAX_SERVER_KEYS, parseServerKey, type AccountObject, type Allowance, type Limits, type ServerKeyView } from "./account-object.js";
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
-import type { DirectoryObject, Gate, HostFailure, PersonState, RequestRecord } from "./directory-object.js";
+import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, PersonState, RequestRecord } from "./directory-object.js";
 import { createCheckout, createPortal, githubIdFrom, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
 import { deliverAlerts, pauseAlert, type Alert, type EmailBinding } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
-import { networkOf, normalizeReferralCode, referralLink } from "./referrals.js";
+import { normalizeReferralCode, referralLink } from "./referrals.js";
+import { networkOf, rateLimitNetwork } from "./network.js";
 import { apiError, json } from "./errors.js";
 import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, type SpendView } from "./dashboard-page.js";
 import { cleanBatch } from "./events.js";
@@ -33,7 +34,7 @@ import {
   weeklyBudgetMessage,
   type SignInRefusal,
 } from "./messages.js";
-import { confirmPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, signedInDonePage, tooNewIntro } from "./pages.js";
+import { confirmPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
 import { ALLOWED_MODELS, chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
@@ -128,6 +129,7 @@ export interface Env {
   PER_PERSON_WEEKLY_USD_CAP?: string;
   MIN_GITHUB_ACCOUNT_AGE_DAYS?: string;
   OPEN_ADMISSION?: string;
+  REQUIRE_GITHUB_ACTIVITY?: string;
   COUNT_CACHED_TOKENS?: string;
   CACHED_TOKEN_WEIGHT?: string;
   OPENROUTER_PROVIDER_ORDER?: string;
@@ -199,6 +201,8 @@ interface Ctx {
   now: () => number;
   fetch: Fetch;
   ip: string;
+  /** What per-IP limits key on: the IPv4 address, or the IPv6 /64 (see network.ts). */
+  ipNet: string;
   base: string;
 }
 
@@ -215,7 +219,8 @@ export function createHandler(options: HandlerOptions = {}): { fetch(request: Re
         throw error;
       }
       const url = new URL(request.url);
-      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip: clientIp(request), base: config.publicUrl ?? url.origin };
+      const ip = clientIp(request);
+      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin };
       return route(ctx);
     },
   };
@@ -436,7 +441,7 @@ function pausedError(headers: Record<string, string> = {}): Response {
 
 async function deviceCode(c: Ctx): Promise<Response> {
   if (await isPaused(c)) return pausedError();
-  const retry = await limited(c, `device:ip:${c.ip}`, LIMITS.deviceCodeIp);
+  const retry = await limited(c, `device:ip:${c.ipNet}`, LIMITS.deviceCodeIp);
   if (retry !== undefined) return rateLimited(retry);
   const body = (await readJson(c)) ?? {};
   const deviceId = typeof body.device_id === "string" && /^[A-Za-z0-9._:-]{8,128}$/.test(body.device_id) ? body.device_id : null;
@@ -462,7 +467,7 @@ const POLL_MESSAGES = {
 } as const;
 
 async function deviceToken(c: Ctx): Promise<Response> {
-  const retry = await limited(c, `poll:ip:${c.ip}`, LIMITS.pollIp);
+  const retry = await limited(c, `poll:ip:${c.ipNet}`, LIMITS.pollIp);
   if (retry !== undefined) return rateLimited(retry);
   const body = await readJson(c);
   const code = body?.device_code;
@@ -485,7 +490,7 @@ async function deviceToken(c: Ctx): Promise<Response> {
 }
 
 async function refresh(c: Ctx): Promise<Response> {
-  const retry = await limited(c, `refresh:ip:${c.ip}`, LIMITS.refreshIp);
+  const retry = await limited(c, `refresh:ip:${c.ipNet}`, LIMITS.refreshIp);
   if (retry !== undefined) return rateLimited(retry);
   const body = await readJson(c);
   const token = body?.refresh_token;
@@ -503,7 +508,7 @@ async function refresh(c: Ctx): Promise<Response> {
  * not an error (RFC 7009 §2.2), so a retried sign-out succeeds.
  */
 async function revoke(c: Ctx): Promise<Response> {
-  const retry = await limited(c, `refresh:ip:${c.ip}`, LIMITS.refreshIp);
+  const retry = await limited(c, `refresh:ip:${c.ipNet}`, LIMITS.refreshIp);
   if (retry !== undefined) return rateLimited(retry);
   const body = (await readJson(c)) ?? {};
   const refreshToken = typeof body.refresh_token === "string" && body.refresh_token ? body.refresh_token : undefined;
@@ -647,27 +652,76 @@ async function deviceCallback(c: Ctx): Promise<Response> {
     return donePage("Sign-in cancelled", "GitHub sign-in was cancelled. You can close this tab.");
   }
   const code = c.url.searchParams.get("code");
-  const user = code
-    ? await githubUserFromCode(
+  const signIn = code
+    ? await githubSignInFromCode(
         { clientId: c.config.githubClientId, clientSecret: c.config.githubClientSecret },
         code,
         `${c.base}/device/callback`,
         c.fetch,
-        "directionallylocal-free",
+        GITHUB_USER_AGENT,
       )
     : undefined;
-  if (!user) return donePage("GitHub sign-in failed", "GitHub didn't confirm who you are. Open the link from your terminal and try again.", 502);
+  if (!signIn) return donePage("GitHub sign-in failed", "GitHub didn't confirm who you are. Open the link from your terminal and try again.", 502);
+  const { user } = signIn;
 
   const identity: Identity = { githubId: user.id, login: user.login };
   const minAgeMs = c.config.minGithubAccountAgeDays * DAY_MS;
   const accountTooNew = minAgeMs > 0 && (user.createdAt === undefined || c.now() - user.createdAt < minAgeMs);
-  return admitAndFinish(c, claimed.deviceRef, claimed.clientDeviceId, identity, undefined, accountTooNew, undefined, claimed.referralCode ?? undefined);
+  const inviteReason: InviteReason | undefined = accountTooNew
+    ? "account_too_new"
+    : (await hasGithubActivity(c, user.id, user.publicRepos, signIn.accessToken))
+      ? undefined
+      : "no_github_activity";
+  return admitAndFinish(c, claimed.deviceRef, claimed.clientDeviceId, identity, undefined, inviteReason, undefined, claimed.referralCode ?? undefined);
+}
+
+const GITHUB_USER_AGENT = "directionallylocal-free";
+/** How long the sign-up activity check waits for GitHub's GraphQL API before letting the person through. */
+const GITHUB_CHECK_TIMEOUT_MS = 5000;
+
+/** Why an account needs an invite code even when admission is open. */
+type InviteReason = "account_too_new" | "no_github_activity";
+
+function inviteReasonOf(reason: string | null): InviteReason | undefined {
+  return reason === "account_too_new" || reason === "no_github_activity" ? reason : undefined;
+}
+
+function inviteIntro(reason: InviteReason | undefined, minAccountAgeDays: number): string {
+  if (reason === "account_too_new") return tooNewIntro(minAccountAgeDays);
+  if (reason === "no_github_activity") return NO_GITHUB_ACTIVITY_INTRO;
+  return INVITE_ONLY_INTRO;
+}
+
+/**
+ * The sign-up GitHub activity check (`requireGithubActivity`): an account passes with at least
+ * one public repository (from the /user response already read) or, only when it has none, at
+ * least one contribution in the last year (one GraphQL call with the person's own token, which
+ * needs no scope). Admins and people already admitted are never checked. It fails open: when
+ * GitHub errors or is slow, the person passes, and the outcome is counted (an alert goes out
+ * when that happens often in a day).
+ */
+async function hasGithubActivity(c: Ctx, githubId: number, publicRepos: number | undefined, accessToken: string): Promise<boolean> {
+  const { config } = await runtime(c);
+  if (!config.requireGithubActivity || c.config.adminGithubIds.has(githubId)) return true;
+  if (publicRepos !== undefined && publicRepos > 0) return true;
+  if (await directory(c).getPerson(githubId)) return true;
+  let outcome: GithubCheckOutcome;
+  try {
+    outcome = (await githubContributionsLastYear(accessToken, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS)) > 0 ? "contributions" : "none";
+  } catch (error) {
+    console.warn("GitHub activity check failed open:", error instanceof Error ? error.message : String(error));
+    outcome = "error";
+  }
+  const checkAlert = await directory(c).countGithubCheck(outcome, c.now());
+  if (checkAlert) await alert(c, [checkAlert]);
+  return outcome !== "none";
 }
 
 /**
  * Runs admission and records the outcome on the device code, then renders the page for it.
  * `inviteCode` is set on the invite step only. With open admission, an account old enough
- * gets in without one (within the per-network sign-up limit and the cohort size).
+ * and with some GitHub activity (`inviteReason` undefined) gets in without one (within the
+ * per-network sign-up limit and the cohort size).
  */
 async function admitAndFinish(
   c: Ctx,
@@ -675,14 +729,15 @@ async function admitAndFinish(
   clientDeviceId: string | null,
   identity: Identity,
   inviteCode: string | undefined,
-  accountTooNew: boolean,
+  inviteReason: InviteReason | undefined,
   ticket?: string,
   referralCode?: string,
 ): Promise<Response> {
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
   const { config } = await runtime(c);
-  const signupKey = `signup:ip:${c.ip}`;
-  const openEligible = config.openAdmission && !accountTooNew && inviteCode === undefined;
+  const signupKey = `signup:ip:${c.ipNet}`;
+  const needsInvite = inviteReason !== undefined;
+  const openEligible = config.openAdmission && !needsInvite && inviteCode === undefined;
   const signupsLeft = openEligible ? (await c.env.RATE_LIMITER.getByName(signupKey).check(signupKey, LIMITS.signupIp, 1, c.now())).allowed : true;
   const result = await directory(c).admit({
     githubId: identity.githubId,
@@ -690,7 +745,7 @@ async function admitAndFinish(
     isAdmin,
     inviteCode,
     clientDeviceId,
-    accountTooNew,
+    accountTooNew: needsInvite,
     openAdmission: openEligible && signupsLeft,
     // With open admission there is no cap on people: the queue keeps free spend in budget.
     inviteOnly: !config.openAdmission,
@@ -712,7 +767,7 @@ async function admitAndFinish(
         : undefined;
     return signedInDonePage(`Signed in as ${identity.login}.${queued} Return to your terminal; you can close this tab.`, invite);
   }
-  const intro = accountTooNew ? tooNewIntro(config.minGithubAccountAgeDays) : INVITE_ONLY_INTRO;
+  const intro = inviteIntro(inviteReason, config.minGithubAccountAgeDays);
   const refuse = async (code: SignInRefusal, status: "not_invited" | "denied", httpStatus: number) => {
     await auth(c).decide(deviceRef, status, identity, c.now(), code);
     const { heading, message } = signInRefusal(code, config.minGithubAccountAgeDays);
@@ -721,7 +776,7 @@ async function admitAndFinish(
   switch (result.reason) {
     case "needs_invite": {
       if (openEligible && !signupsLeft) return refuse("too_many_signups", "denied", 429);
-      const issued = await auth(c).decide(deviceRef, "needs_invite", identity, c.now(), accountTooNew ? "account_too_new" : "invite_required");
+      const issued = await auth(c).decide(deviceRef, "needs_invite", identity, c.now(), inviteReason ?? "invite_required");
       return invitePage(issued.ticket ?? "", identity.login, undefined, intro);
     }
     case "invalid_invite":
@@ -739,14 +794,14 @@ async function deviceInvite(c: Ctx): Promise<Response> {
   const ticket = form.get("ticket") ?? "";
   const found = ticket ? await auth(c).ticket(ticket, c.now()) : undefined;
   if (!found) return donePage("Sign-in expired", "This step expired. Start sign-in again in your terminal.", 400);
-  const retry = await limited(c, `invite:ip:${c.ip}`, LIMITS.inviteAttemptIp);
+  const retry = await limited(c, `invite:ip:${c.ipNet}`, LIMITS.inviteAttemptIp);
   if (retry !== undefined) return invitePage(ticket, found.login, `Too many attempts. Try again in ${Math.ceil(retry / 60)} minutes.`);
-  const signups = await c.env.RATE_LIMITER.getByName(`signup:ip:${c.ip}`).check(`signup:ip:${c.ip}`, LIMITS.signupIp, 1, c.now());
+  const signups = await c.env.RATE_LIMITER.getByName(`signup:ip:${c.ipNet}`).check(`signup:ip:${c.ipNet}`, LIMITS.signupIp, 1, c.now());
   if (!signups.allowed) return invitePage(ticket, found.login, "Too many new accounts from this network today. Try again tomorrow.");
-  const tooNew = found.reason === "account_too_new";
+  const inviteReason = inviteReasonOf(found.reason);
   const inviteCode = (form.get("invite_code") ?? "").trim();
-  if (!inviteCode) return invitePage(ticket, found.login, "Enter an invite code.", tooNew ? tooNewIntro((await runtime(c)).config.minGithubAccountAgeDays) : INVITE_ONLY_INTRO);
-  return admitAndFinish(c, found.deviceRef, found.clientDeviceId, found, inviteCode, tooNew, ticket, found.referralCode ?? undefined);
+  if (!inviteCode) return invitePage(ticket, found.login, "Enter an invite code.", inviteIntro(inviteReason, (await runtime(c)).config.minGithubAccountAgeDays));
+  return admitAndFinish(c, found.deviceRef, found.clientDeviceId, found, inviteCode, inviteReason, ticket, found.referralCode ?? undefined);
 }
 
 async function deviceNoInvite(c: Ctx): Promise<Response> {
@@ -754,7 +809,7 @@ async function deviceNoInvite(c: Ctx): Promise<Response> {
   const ticket = form.get("ticket") ?? "";
   const found = ticket ? await auth(c).ticket(ticket, c.now()) : undefined;
   if (!found) return donePage("Sign-in expired", "This step expired. Start sign-in again in your terminal.", 400);
-  const code: SignInRefusal = found.reason === "account_too_new" ? "account_too_new" : "invite_required";
+  const code: SignInRefusal = inviteReasonOf(found.reason) ?? "invite_required";
   await auth(c).decide(found.deviceRef, "not_invited", found, c.now(), code);
   const { heading, message } = signInRefusal(code, (await runtime(c)).config.minGithubAccountAgeDays);
   return donePage(heading, message);
@@ -771,7 +826,7 @@ async function deviceDeny(c: Ctx): Promise<Response> {
 
 async function apiGuard(c: Ctx, identity: Identity, headers: () => Promise<Record<string, string>> = async () => ({})): Promise<Response | undefined> {
   const retry =
-    (await limited(c, `api:gh:${identity.githubId}`, LIMITS.apiPerson)) ?? (await limited(c, `api:ip:${c.ip}`, LIMITS.apiIp));
+    (await limited(c, `api:gh:${identity.githubId}`, LIMITS.apiPerson)) ?? (await limited(c, `api:ip:${c.ipNet}`, LIMITS.apiIp));
   return retry === undefined ? undefined : rateLimited(retry, await headers());
 }
 
@@ -983,7 +1038,7 @@ function cents(value: unknown): number {
  * Nothing else: no id, usage or dates. Cacheable for 5 minutes.
  */
 async function referralLookup(c: Ctx, raw: string): Promise<Response> {
-  const retry = await limited(c, `referral:ip:${c.ip}`, LIMITS.referralLookupIp);
+  const retry = await limited(c, `referral:ip:${c.ipNet}`, LIMITS.referralLookupIp);
   if (retry !== undefined) return rateLimited(retry);
   const cache = { "cache-control": "public, max-age=300" };
   let decoded: string;
@@ -1029,7 +1084,7 @@ async function events(c: Ctx): Promise<Response> {
  */
 async function telemetry(c: Ctx, kind: "download" | "install"): Promise<Response> {
   const day = Math.floor(c.now() / DAY_MS);
-  const ipKey = await sha256Hex(`telemetry:${c.config.tokenSigningKey}:${day}:${c.ip}`);
+  const ipKey = await sha256Hex(`telemetry:${c.config.tokenSigningKey}:${day}:${c.ipNet}`);
   const retry = await limited(c, `telemetry:${kind}:${ipKey}`, kind === "download" ? LIMITS.telemetryDownloadIp : LIMITS.telemetryInstallIp);
   if (retry !== undefined) return rateLimited(retry);
   if (Number(c.request.headers.get("content-length") ?? 0) > MAX_TELEMETRY_BYTES) return apiError(413, "too_large", "A telemetry body is under 1 KB.");
@@ -1722,6 +1777,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     paused,
     pausedByEnv: c.config.paused,
     openAdmission: config.openAdmission,
+    requireGithubActivity: config.requireGithubActivity,
     maxActiveUsers: config.maxActiveUsers,
     weeklyTokens: config.weeklyTokens,
     perPersonWeeklyUsd: config.perPersonWeeklyUsdCap ?? null,
@@ -1739,7 +1795,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
 }
 
 async function adminSignIn(c: Ctx): Promise<Response> {
-  const retry = await limited(c, `admin-signin:ip:${c.ip}`, LIMITS.adminSignInIp);
+  const retry = await limited(c, `admin-signin:ip:${c.ipNet}`, LIMITS.adminSignInIp);
   if (retry !== undefined) return signInPage(`Too many sign-in attempts. Try again in ${Math.ceil(retry / 60)} minutes.`, 429);
   const begun = await auth(c).beginAdminOAuth(c.now());
   return new Response(null, {

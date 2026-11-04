@@ -4,7 +4,7 @@ import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
 import { dashboardData, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
-import { creditAlert, creditPausedAlert, crossed, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, queueStartedAlert, totalSpendAlert, upstreamErrorAlert, weeklySpendAlert, type Alert } from "./alerts.js";
+import { creditAlert, creditPausedAlert, crossed, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, queueStartedAlert, totalSpendAlert, upstreamErrorAlert, weeklySpendAlert, type Alert } from "./alerts.js";
 import type { Upstream } from "./config.js";
 import { creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type ReferralOutcome } from "./referrals.js";
@@ -393,6 +393,14 @@ const SCHEMA = [
      installs    INTEGER NOT NULL,
      PRIMARY KEY (day, os, arch, mode, dl_version, result, failed_step, via)
    ) WITHOUT ROWID`,
+  // Per UTC day, outcomes of the sign-up GitHub activity check's contribution lookup (app.ts):
+  // "contributions" passed, "none" sent to the invite step, "error" let through. Counts only.
+  `CREATE TABLE IF NOT EXISTS github_checks_daily (
+     day     INTEGER NOT NULL,
+     outcome TEXT NOT NULL,
+     n       INTEGER NOT NULL,
+     PRIMARY KEY (day, outcome)
+   ) WITHOUT ROWID`,
   `CREATE TABLE IF NOT EXISTS subscriptions (
      github_id  INTEGER PRIMARY KEY,
      state      TEXT NOT NULL,
@@ -424,6 +432,9 @@ const TIMINGS_MAX_AGE_MS = 15 * DAY_MS;
 
 /** Set in `settings` once `daily_activity` has been built from the existing log. */
 const ROLLUP_READY = "rollup:daily_activity";
+
+/** What the sign-up GitHub activity check's contribution lookup found (app.ts). */
+export type GithubCheckOutcome = "contributions" | "none" | "error";
 
 export class DirectoryObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
@@ -496,7 +507,10 @@ export class DirectoryObject extends DurableObject {
     isAdmin: boolean;
     inviteCode: string | undefined;
     clientDeviceId: string | null;
-    /** The GitHub account is younger than the minimum age: it needs an invite even with open admission. */
+    /**
+     * The account needs an invite even with open admission: its GitHub account is younger than
+     * the minimum age, or has no public activity (see app.ts).
+     */
     accountTooNew: boolean;
     /** Admit accounts that aren't too new without an invite. */
     openAdmission?: boolean;
@@ -1250,6 +1264,25 @@ export class DirectoryObject extends DurableObject {
     return accepted;
   }
 
+  /**
+   * Counts one outcome of the sign-up GitHub activity check's contribution lookup. Returns the
+   * alert when GitHub errors reach GITHUB_CHECK_ERROR_ALERT today (once a day).
+   */
+  async countGithubCheck(outcome: GithubCheckOutcome, now: number): Promise<Alert | undefined> {
+    const day = Math.floor(now / DAY_MS);
+    const n =
+      this.ctx.storage.sql
+        .exec<{ n: number }>(
+          `INSERT INTO github_checks_daily (day, outcome, n) VALUES (?, ?, 1)
+           ON CONFLICT (day, outcome) DO UPDATE SET n = n + 1 RETURNING n`,
+          day,
+          outcome,
+        )
+        .toArray()[0]?.n ?? 0;
+    if (outcome !== "error" || n < GITHUB_CHECK_ERROR_ALERT) return undefined;
+    return this.#markAlert(`github-check-errors:${day}`, now) ? githubCheckErrorAlert(n) : undefined;
+  }
+
   /** Adds one to the day's count of install scripts served (telemetry.ts). */
   async countDownload(count: DownloadCount, day: number): Promise<void> {
     this.ctx.storage.sql.exec(
@@ -1473,11 +1506,19 @@ export class DirectoryObject extends DurableObject {
       .toArray()
       .map((row) => ({ host: row.host, requests: row.requests, failures: row.failures, failureRate: share(row.failures, row.requests) }));
 
+    const githubChecks: Record<GithubCheckOutcome, number> = { contributions: 0, none: 0, error: 0 };
+    for (const row of sql
+      .exec<{ outcome: string; n: number }>("SELECT outcome, SUM(n) AS n FROM github_checks_daily WHERE day >= ? AND day < ? GROUP BY outcome", from / DAY_MS, until / DAY_MS)
+      .toArray()) {
+      if (row.outcome in githubChecks) githubChecks[row.outcome as GithubCheckOutcome] = row.n;
+    }
+
     return {
       from: isoDay(from),
       to: isoDay(until - DAY_MS),
       daily,
       hosts,
+      githubChecks,
       weeklyActive,
       retention,
       totals: {

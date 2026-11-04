@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { base64urlEncode, timingSafeEqual } from "../src/auth.js";
-import { githubAuthorizeUrl, githubUserFromCode } from "../src/github.js";
+import { githubAuthorizeUrl, githubContributionsLastYear, githubSignInFromCode, githubUserFromCode, GITHUB_GRAPHQL_URL } from "../src/github.js";
 import { hmacKey, signJwt, verifyJwt } from "../src/jwt.js";
 
 const SECRET = "0123456789abcdef0123456789abcdef";
@@ -52,13 +52,34 @@ describe("GitHub OAuth", () => {
     const fetcher = async (url: string) =>
       url.includes("access_token")
         ? Response.json({ access_token: "gho_x" })
-        : Response.json({ id: 7, login: "octo", created_at: "2020-01-01T00:00:00Z" });
+        : Response.json({ id: 7, login: "octo", created_at: "2020-01-01T00:00:00Z", public_repos: 3 });
     assert.deepEqual(await githubUserFromCode({ clientId: "a", clientSecret: "b" }, "code", "https://x.test/cb", fetcher), {
       id: 7,
       login: "octo",
       createdAt: Date.parse("2020-01-01T00:00:00Z"),
+      publicRepos: 3,
     });
+    assert.equal((await githubSignInFromCode({ clientId: "a", clientSecret: "b" }, "code", "https://x.test/cb", fetcher))?.accessToken, "gho_x");
     const refused = async () => Response.json({ error: "bad_verification_code" });
     assert.equal(await githubUserFromCode({ clientId: "a", clientSecret: "b" }, "code", "https://x.test/cb", refused), undefined);
+  });
+
+  it("reads the last year's contribution count with the user's token, and throws on errors and timeouts", async () => {
+    const seen: Array<{ url: string; auth: string | null; body: string }> = [];
+    const answer = (body: unknown, status = 200) => async (url: string, init?: RequestInit) => {
+      seen.push({ url, auth: new Headers(init?.headers).get("authorization"), body: String(init?.body) });
+      return Response.json(body, { status });
+    };
+    const calendar = (n: unknown) => ({ data: { viewer: { contributionsCollection: { contributionCalendar: { totalContributions: n } } } } });
+    assert.equal(await githubContributionsLastYear("gho_x", answer(calendar(12))), 12);
+    assert.equal(seen[0]!.url, GITHUB_GRAPHQL_URL);
+    assert.equal(seen[0]!.auth, "Bearer gho_x");
+    assert.match(seen[0]!.body, /contributionsCollection/);
+    assert.equal(await githubContributionsLastYear("gho_x", answer(calendar(0))), 0);
+    await assert.rejects(githubContributionsLastYear("gho_x", answer({ message: "Bad credentials" }, 401)));
+    await assert.rejects(githubContributionsLastYear("gho_x", answer({ errors: [{ message: "rate limited" }] })));
+    await assert.rejects(githubContributionsLastYear("gho_x", answer(calendar("lots"))));
+    await assert.rejects(githubContributionsLastYear("gho_x", async () => { throw new TypeError("network down"); }));
+    await assert.rejects(githubContributionsLastYear("gho_x", () => new Promise<Response>(() => {}), "dl", 20), /longer than 20 ms/);
   });
 });

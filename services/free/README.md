@@ -16,6 +16,16 @@ There is one account per GitHub user, keyed on the numeric GitHub id.
   invite code.
 - **Open admission (`OPEN_ADMISSION=true`, or the admin override).** GitHub accounts at least
   `MIN_GITHUB_ACCOUNT_AGE_DAYS` (30) old get in without a code. Younger accounts still need one.
+- **Some real GitHub activity (`requireGithubActivity`, on by default).** A new account also
+  needs at least one public repository, or at least one contribution in the last year, to get in
+  without a code; one with neither is treated like a too-new account (invite step, refusal code
+  `no_github_activity`). The repository count comes from the `/user` response sign-in already
+  reads; only when it is 0 does the service make one GraphQL call
+  (`viewer.contributionsCollection.contributionCalendar.totalContributions`) with the person's
+  own sign-in token, which needs no OAuth scope. Admins and people already admitted are never
+  checked. If GitHub errors or takes more than 5 seconds, the person gets in (fail open); each
+  lookup's outcome is counted per day (`githubChecks` in `GET /admin/metrics`), and 5 errors in
+  a UTC day send one alert.
 - **`MAX_ACTIVE_USERS` applies only while invite-only** (admins aren't counted). With open
   admission there is no cap on people: everyone old enough gets an account at once, and the
   [queue](#the-queue-for-free-tokens) keeps free spend inside the weekly budget instead. So
@@ -23,6 +33,10 @@ There is one account per GitHub user, keyed on the numeric GitHub id.
   change.
 - In both modes, a device that already holds another account's grant is refused, and each
   network gets 3 new accounts a day.
+- **Per-IP limits are per network.** Every per-IP rate limit (sign-ups, device codes, polling,
+  refresh, invite attempts, the API, referral lookups, telemetry, admin sign-in) keys an IPv6
+  address by its /64, since one host can rotate through its whole /64; an IPv4 address (and an
+  IPv4-mapped IPv6 address, `::ffff:1.2.3.4`) is its own network. `src/network.ts`.
 
 ## API contract for the open launch
 
@@ -282,6 +296,7 @@ use the same sentence, so a client that doesn't know a code can show the message
 | code | where | extra |
 |---|---|---|
 | `account_too_new` | `POST /v1/device/token` | `reason` |
+| `no_github_activity` | `POST /v1/device/token` | `reason` |
 | `invite_required` | `POST /v1/device/token` | `reason` |
 | `cohort_full` | `POST /v1/device/token` | `reason` |
 | `too_many_signups` | `POST /v1/device/token` | `reason` |
@@ -315,6 +330,7 @@ with who made it and when.
 | `globalTotalUsdCap` | `GLOBAL_TOTAL_USD_CAP` | 1000 |
 | `maxActiveUsers` | `MAX_ACTIVE_USERS` (invite-only only) | 50 |
 | `openAdmission` | `OPEN_ADMISSION` | false |
+| `requireGithubActivity` | `REQUIRE_GITHUB_ACTIVITY` | true |
 | `cachedTokenWeight` | `CACHED_TOKEN_WEIGHT` | 0.02 |
 | `queueThreshold` | `QUEUE_THRESHOLD` | 0.8 |
 | `queueReferralPlaces` | `QUEUE_REFERRAL_PLACES` | 25 |
@@ -540,7 +556,7 @@ lists, `413` over 1 KB, `429` when rate-limited.
   only) `preflight|node|install_dl|path|dl_up`, `via` `home|invite|continue|run` (from
   `DL_INSTALL_VIA`, which the dl.new scripts set).
 - install.sh skips it with `DL_NO_TELEMETRY=1`, `DO_NOT_TRACK=1` or `CI` set.
-- Rate limits per IP: 600 downloads a minute (they come from a few Cloudflare addresses) and 20
+- Rate limits per IP (per /64 for IPv6): 600 downloads a minute (they come from a few Cloudflare addresses) and 20
   installs an hour. The limiter's key is a SHA-256 of the IP salted with `TOKEN_SIGNING_KEY` and
   the day, so the address isn't stored there either.
 - Stored in the Directory's `download_daily` and `install_daily`. The counts are best effort:

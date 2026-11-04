@@ -2,7 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADMIN_ID, authorize, completion, createService, MODEL, NOW, usage, type Service, type Tokens } from "./harness.js";
 import { etaAt, forecast, queueOrder, shouldQueue, waitText } from "../src/queue.js";
-import { codeFor, networkOf, normalizeReferralCode } from "../src/referrals.js";
+import { codeFor, normalizeReferralCode } from "../src/referrals.js";
+import { networkOf } from "../src/network.js";
 import { alertRequest, crossed, deliverAlerts, mimeMessage, resolveKind, weeklySpendAlert } from "../src/alerts.js";
 
 const DAY = 86_400_000;

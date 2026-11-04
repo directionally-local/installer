@@ -12,7 +12,8 @@ const DISCLOSURE = `
 tokens went in, came from cache and came out, the cost, the model and the time; and session events from Autopilot
 (when a session starts and ends, turns, tool-call counts, pull requests opened, error codes, version and OS, and a
 hash of the repository's remote URL). We never store your prompts, completions, code, file paths or file
-contents. Your GitHub account is used only to know who you are.</p>`;
+contents. Your GitHub account is used to know who you are and, when you first join, to check that it has a public
+repository or a contribution in the last year (we read the two counts and don't keep them).</p>`;
 
 /** The privacy policy and terms live on the main site, directionallylocal.com (dl.new has copies). */
 export const PRIVACY_URL = "https://directionallylocal.com/privacy/";
@@ -60,6 +61,9 @@ export const INVITE_ONLY_INTRO = "The free tier is invite-only for now: enter yo
 export function tooNewIntro(minAccountAgeDays: number): string {
   return `This GitHub account is less than ${minAccountAgeDays} days old, so it needs an invite code for the free tier: enter your invite code.`;
 }
+
+/** The invite step's intro for an account with no public repository or recent contribution. */
+export const NO_GITHUB_ACTIVITY_INTRO = "Your GitHub account has no public repositories or contributions yet, so it needs an invite code for the free tier: enter your invite code.";
 
 /** The invite step. `intro` says why a code is needed (invite-only, or the account is too new). */
 export function invitePage(ticket: string, login: string, error?: string, intro: string = INVITE_ONLY_INTRO): Response {

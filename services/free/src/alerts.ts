@@ -6,7 +6,9 @@ import type { AlertKind, FreeConfig } from "./config.js";
  * the queue starting, an OpenRouter host failing more than 20% of its requests over the
  * last hour, Luminal credit used crossing 50%, 80% and 100% of the balance (once each per
  * balance), Luminal-served usage pausing because the credit ran out, and Luminal failing more
- * than 20% of at least 20 requests over the last hour. Counts and dollars only.
+ * than 20% of at least 20 requests over the last hour, and the sign-up GitHub activity check
+ * letting people through because GitHub didn't answer (5 times in a UTC day, once a day).
+ * Counts and dollars only.
  *
  * ALERT_WEBHOOK_URL picks the format from its host, or ALERT_WEBHOOK_KIND sets it:
  *
@@ -126,6 +128,16 @@ export function creditPausedAlert(usedUsd: number, balanceUsd: number): Alert {
   return {
     subject: "dl free tier: paused, Luminal credit used up",
     text: `dl free tier: requests are refused with upstream_credit_exhausted: ${dollars(usedUsd)} of the ${dollars(balanceUsd)} Luminal credit is used. Top up and raise luminalCreditUsd (POST /admin/config), or switch primaryUpstream to "openrouter".`,
+  };
+}
+
+/** Sign-ups a day let through because GitHub's API didn't answer the activity check, before the alert. */
+export const GITHUB_CHECK_ERROR_ALERT = 5;
+
+export function githubCheckErrorAlert(errors: number): Alert {
+  return {
+    subject: "dl free tier: GitHub activity check failing open",
+    text: `dl free tier: GitHub's API didn't answer the sign-up activity check ${errors} times today (UTC), so those sign-ups were let through without it. Counts are in GET /admin/metrics (githubChecks).`,
   };
 }
 
