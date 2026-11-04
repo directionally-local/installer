@@ -2,6 +2,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADMIN_ID, completion, createInvite, createService, errorCode, MODEL, usage, type Service, type Tokens } from "./harness.js";
 
+/** A key's secret: everything after dlk_<n>_<id>_. Splitting on "_" isn't it, as the secret itself can hold "_". */
+const keySecret = (key: string) => key.replace(/^dlk_[0-9]+_[a-z0-9]{12}_/, "");
+
 async function setup(): Promise<{ service: Service; admin: string; alice: Tokens; invite: () => Promise<string> }> {
   const service = await createService();
   const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
@@ -103,7 +106,7 @@ describe("server keys", () => {
 
     const listed = await service.request("GET", "/v1/keys", { token: alice.access_token });
     const text = await listed.text();
-    assert.ok(!text.includes(body.key.split("_").at(-1)!), "the secret is never listed");
+    assert.ok(!text.includes(keySecret(body.key)), "the secret is never listed");
     assert.deepEqual(JSON.parse(text), { keys: [{ id: body.id, name: "hetzner-1", createdAt: "2026-11-04T12:00:00.000Z", lastUsedAt: "2026-11-04T12:00:05.000Z" }], max: 5 });
 
     const people = await (await service.request("GET", "/admin/people", { token: admin })).text();
@@ -117,7 +120,7 @@ describe("server keys", () => {
     const { key } = (await (await service.request("POST", "/v1/keys", { token: alice.access_token, body: { name: "box" } })).json()) as { key: string };
     const state = (service.namespaces.ACCOUNT!.instances.get("gh:100") as { state: { db: { prepare(sql: string): { all(): unknown[] } } } }).state;
     const dump = JSON.stringify(state.db.prepare("SELECT * FROM server_keys").all());
-    assert.ok(!dump.includes(key.split("_").at(-1)!));
+    assert.ok(!dump.includes(keySecret(key)));
   });
 
   it("keeps working after the access token has expired", async () => {
