@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { downloadCount, MARKETING_SITE, respond, sendCount, TELEMETRY_URL } from "./handler.js";
+import { downloadCount, MARKETING_SITE, RELEASES, respond, route, sendCount, TELEMETRY_URL, type BundleStore } from "./handler.js";
 
 const script = await readFile(new URL("../install.sh", import.meta.url), "utf8");
 const get = (url: string, headers: Record<string, string> = { Accept: "*/*" }) => respond(new Request(url, { headers }), script);
@@ -80,13 +80,61 @@ describe("directionallylocal.run download counts", () => {
     try {
       const ctx = { waitUntil: (promise: Promise<unknown>) => void waits.push(promise) };
       const request = () => new Request("https://directionallylocal.run/", { headers: { "User-Agent": "curl/8.5.0", Accept: "*/*" } });
-      assert.equal(worker.fetch(request(), {}, ctx).status, 200);
-      assert.equal(worker.fetch(request(), { TELEMETRY_URL: "off" }, ctx).status, 200);
-      assert.equal(worker.fetch(request()).status, 200, "works without a ctx");
+      assert.equal((await worker.fetch(request(), {}, ctx)).status, 200);
+      assert.equal((await worker.fetch(request(), { TELEMETRY_URL: "off" }, ctx)).status, 200);
+      assert.equal((await worker.fetch(request())).status, 200, "works without a ctx");
+      // A bundle download (from R2 or the redirect to GitHub) isn't counted as a script.
+      const store: BundleStore = { get: async () => ({ body: new Response("tarball").body!, size: 7, httpEtag: '"a"' }) };
+      const bundle = new Request("https://directionallylocal.run/dl/0.14.0/dl-0.14.0-linux-x64.tar.gz", { headers: { "User-Agent": "curl/8.5.0", Accept: "*/*" } });
+      assert.equal((await worker.fetch(bundle, { BUNDLES: store }, ctx)).status, 200);
+      assert.equal((await worker.fetch(bundle.clone(), {}, ctx)).status, 302);
       await Promise.all(waits);
       assert.deepEqual(posted, [`${TELEMETRY_URL} {"route":"run","client":"curl"}`]);
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+});
+
+describe("directionallylocal.run/dl/: dl's prebuilt bundles", () => {
+  const fetchBundle = (path: string, store?: BundleStore, method = "GET") => route(new Request(`https://directionallylocal.run${path}`, { method, headers: { Accept: "*/*" } }), script, store);
+
+  it("redirects to the GitHub release's assets while no bucket is bound", async () => {
+    const list = await fetchBundle("/dl/latest/dl-bundles.txt");
+    assert.equal(list.status, 302);
+    assert.equal(list.headers.get("location"), `${RELEASES}/latest/download/dl-bundles.txt`);
+    const tarball = await fetchBundle("/dl/0.14.0/dl-0.14.0-darwin-arm64.tar.gz");
+    assert.equal(tarball.status, 302);
+    assert.equal(tarball.headers.get("location"), `${RELEASES}/download/v0.14.0/dl-0.14.0-darwin-arm64.tar.gz`);
+    assert.equal((await fetchBundle("/dl/0.14.0/dl-bundles.txt")).headers.get("location"), `${RELEASES}/download/v0.14.0/dl-bundles.txt`);
+  });
+
+  it("serves from the bucket when it has the file, and falls back to GitHub when it doesn't", async () => {
+    const keys: string[] = [];
+    const store: BundleStore = {
+      async get(key) {
+        keys.push(key);
+        if (key !== "dl/0.14.0/dl-0.14.0-linux-x64.tar.gz") return null;
+        return { body: new Response("tarball").body!, size: 7, httpEtag: '"abc"' };
+      },
+    };
+    const found = await fetchBundle("/dl/0.14.0/dl-0.14.0-linux-x64.tar.gz", store);
+    assert.equal(found.status, 200);
+    assert.equal(await found.text(), "tarball");
+    assert.equal(found.headers.get("content-type"), "application/gzip");
+    assert.equal(found.headers.get("content-length"), "7");
+    assert.match(found.headers.get("cache-control") ?? "", /immutable/, "a version's files never change");
+    const missing = await fetchBundle("/dl/latest/dl-bundles.txt", store);
+    assert.equal(missing.status, 302);
+    assert.deepEqual(keys, ["dl/0.14.0/dl-0.14.0-linux-x64.tar.gz", "dl/latest/dl-bundles.txt"]);
+  });
+
+  it("serves only bundle files: anything else under /dl/ is the plain 404", async () => {
+    for (const path of ["/dl/", "/dl/latest/dl-0.14.0-linux-x64.tar.gz", "/dl/0.14.0/install.sh", "/dl/../install.sh", "/dl/0.14/dl-bundles.txt", "/dl/0.14.0/sub/dl-bundles.txt"]) {
+      const response = await fetchBundle(path);
+      assert.ok(response.status === 404 || (response.status === 200 && path === "/dl/../install.sh"), `${path}: ${response.status}`);
+    }
+    // The install script is still at the bare domain, through the same entry point.
+    assert.equal(await (await fetchBundle("/")).text(), script);
   });
 });

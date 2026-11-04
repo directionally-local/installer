@@ -24,7 +24,9 @@
 # Install only (the laptop's setup, which then runs `dl up` itself over SSH): DL_INSTALL_ONLY=1.
 # Pin a version: DL_VERSION=0.1.0. Install from a local tarball: DL_PACKAGE=/path/to.tgz.
 # Laptop: DL_HOME=DIR installs somewhere else; DL_NO_START=1 doesn't start dl at the end;
-# DL_NO_MODIFY_PATH=1 leaves your shell's startup file alone.
+# DL_NO_MODIFY_PATH=1 leaves your shell's startup file alone; DL_NO_BUNDLE=1 installs dl with
+# npm instead of the prebuilt bundle (one download from directionallylocal.run/dl/, checked
+# against its SHA-256; npm is also what's used when there's no bundle for this computer).
 # Invite links (curl -fsSL https://dl.new/r/CODE | sh) set DL_REFERRAL=CODE, a GitHub login:
 # it's passed on to dl, which passes it to Autopilot for the free tier sign-in. On a laptop it's
 # also kept in ~/.config/directionallylocal/pending-referral until that sign-in, so signing in on
@@ -47,7 +49,7 @@ fi
 STEP=""
 step() {
   STEP=$1
-  if [ -n "$FANCY" ]; then printf '  \033[36m⠋\033[0m %s' "$1"; else say ".. $1"; fi
+  if [ -n "$FANCY" ]; then printf '\r\033[2K  \033[36m⠋\033[0m %s' "$1"; else say ".. $1"; fi
 }
 step_done() {
   if [ -n "$FANCY" ]; then printf '\r\033[2K  \033[32m✓\033[0m %-33s\033[2m%s\033[0m\n' "$1" "${2:-}"; else say "ok ${STEP:-$1}${2:+: $2}"; fi
@@ -55,8 +57,6 @@ step_done() {
 
 # Quiet steps: output goes to a log that's shown only if the step fails.
 LOG=$(mktemp)
-# How long the last quiet step took, in seconds.
-STEP_SECONDS=0
 # NPM_CACHE: the laptop install's own npm cache, removed when it's done (see laptop_main).
 NPM_CACHE=""
 # On the way out: clean up, and count a failed install when it ends with an error (fail, or a
@@ -123,6 +123,10 @@ show_step_log() {
   done
 }
 
+# SOFT=1 before quietly: a failure returns 1 (for the caller to try another way) instead of
+# ending the install. Cleared when the step ends, as WATCH is.
+SOFT=""
+
 # A step's live progress: when WATCH names a function, quietly calls it about once a second
 # with the log line the step's output starts after. It sets LABEL (what's happening now, in
 # place of the step's name), DETAIL (how far along) and SLOW_MB (the download's size, for the
@@ -145,10 +149,14 @@ hint() {
 quietly() {
   what=$1
   shift
+  soft=$SOFT
+  SOFT=""
   from=$(wc -l <"$LOG")
   if [ -z "$FANCY" ] && [ -z "$WATCH" ]; then
-    "$@" >>"$LOG" 2>&1 || { show_step_log "$from"; fail "$what failed"; }
-    return 0
+    if "$@" >>"$LOG" 2>&1; then return 0; fi
+    if [ -n "$soft" ]; then return 1; fi
+    show_step_log "$from"
+    fail "$what failed"
   fi
   # Run in the background and show the current step until it finishes: animated at a
   # terminal; otherwise a plain line when the step moves on, and its progress every 15 s.
@@ -185,11 +193,11 @@ quietly() {
   done
   WATCH=""
   if ! wait "$pid"; then
+    if [ -n "$soft" ]; then return 1; fi
     if [ -n "$FANCY" ]; then printf '\r\033[2K  \033[31m✗\033[0m %s\n\n' "$LABEL"; fi
     show_step_log "$from"
     fail "$what failed"
   fi
-  STEP_SECONDS=$(($(date +%s) - started))
 }
 
 # The size of a file in bytes, 0 while it doesn't exist.
@@ -219,11 +227,12 @@ watch_download() {
 }
 
 # Downloads URL $1 to $2 as step $3 (the label shown while it runs), with its progress.
+# $4: its size in bytes, when known already; otherwise it's asked for.
 download() {
   DOWNLOAD_TO=$2
-  DOWNLOAD_BYTES=$(remote_bytes "$1") || DOWNLOAD_BYTES=""
+  DOWNLOAD_BYTES=${4:-}
+  if [ -z "$DOWNLOAD_BYTES" ]; then DOWNLOAD_BYTES=$(remote_bytes "$1") || DOWNLOAD_BYTES=""; fi
   STEP="$3${DOWNLOAD_BYTES:+ ($(mb "$DOWNLOAD_BYTES") MB)}"
-  if [ -n "$FANCY" ]; then printf '\r\033[2K'; fi
   step "$STEP"
   WATCH=watch_download
   quietly "downloading $1" curl -fsSL "$1" -o "$2"
@@ -435,6 +444,60 @@ keep_referral() {
   (umask 077 && mkdir -p "$config/directionallylocal" && printf '%s\n' "$DL_REFERRAL" >"$file") 2>/dev/null || true
 }
 
+# dl's prebuilt bundle for this computer (scripts/build-bundle.sh, built by the release
+# workflow from the same npm package): one download with a known size, instead of npm looking
+# up and fetching ~170 packages one at a time. Unpacks to the same $DL_HOME/dl that npm
+# makes. Returns 1, and the install uses npm instead, when there's none for this computer,
+# its Node.js or this version, or when anything about it goes wrong. Uses $os, $arch and
+# $node from laptop_main. DL_NO_BUNDLE=1 skips it; DL_BUNDLES names another place to get it.
+install_bundle() {
+  if [ -n "${DL_PACKAGE:-}" ] || [ "${DL_NO_BUNDLE:-}" = "1" ]; then return 1; fi
+  # Built against glibc: Alpine and other musl Linux use npm.
+  if [ "$os" = linux ] && ls /lib/ld-musl-* >/dev/null 2>&1; then return 1; fi
+  bundles="${DL_BUNDLES:-https://directionallylocal.run/dl}"
+  list=$(curl -fsSL "$bundles/${DL_VERSION:-latest}/dl-bundles.txt" 2>/dev/null) || return 1
+  # Lines of PLATFORM FILE SHA256 BYTES NODE_MAJOR; a bundle's native parts are built for one
+  # major version of Node.js, so it's used only with that one.
+  major=$("$node" -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')
+  line=$(printf '%s\n' "$list" | awk -v p="$os-$arch" -v m="$major" '$1 == p && $5 == m && $2 ~ /^dl-[0-9A-Za-z.+-]+\.tar\.gz$/ && length($3) == 64 && $3 ~ /^[0-9a-f]+$/ && $4 ~ /^[0-9]+$/ { print $2, $3, $4; exit }')
+  [ -n "$line" ] || return 1
+  file=${line%% *}
+  rest=${line#* }
+  sum=${rest%% *}
+  bytes=${rest#* }
+  version=${file#dl-}
+  version=${version%-"$os-$arch".tar.gz}
+  archive="$DL_HOME/$file.download"
+  SOFT=1
+  if ! download "$bundles/$version/$file" "$archive" "Downloading dl" "$bytes"; then
+    bundle_failed "the download didn't finish"
+    return 1
+  fi
+  if [ "$(sha256_of "$archive")" != "$sum" ]; then
+    bundle_failed "it didn't match its checksum"
+    return 1
+  fi
+  step "Setting up Autopilot"
+  staging="$DL_HOME/dl.unpacking"
+  rm -rf "$staging"
+  mkdir -p "$staging"
+  SOFT=1
+  if ! quietly "unpacking dl" tar -xzf "$archive" -C "$staging" || [ ! -f "$staging/lib/node_modules/directionallylocal/bin/directionallylocal.mjs" ]; then
+    rm -rf "$staging"
+    bundle_failed "it didn't unpack"
+    return 1
+  fi
+  rm -f "$archive"
+  rm -rf "${DL_HOME:?}/dl"
+  mv "$staging" "$DL_HOME/dl"
+}
+
+# The bundle was there but didn't work: say so, once, before npm takes over.
+bundle_failed() {
+  rm -f "$archive"
+  hint "The prebuilt download didn't work ($1); installing with npm instead."
+}
+
 # A laptop: everything under $DL_HOME, as this user; no sudo, no services.
 laptop_main() {
   case $(uname -s) in
@@ -473,16 +536,11 @@ laptop_main() {
   STAGE=install_dl
   package="${DL_PACKAGE:-directionallylocal@${DL_VERSION:-latest}}"
   step "Installing dl"
-  # npm's download cache, and the Node.js headers node-gyp fetches to build a native module,
-  # go in a folder of their own that's removed afterwards: dl's packages are installed once,
-  # and kept in ~/.npm and ~/.cache/node-gyp they'd take another 190 MB.
-  # --loglevel=info and --foreground-scripts put each download and install script in the log,
-  # which is where watch_npm reads the progress from.
-  NPM_CACHE="$DL_HOME/npm-cache"
-  rm -rf "$NPM_CACHE"
-  WATCH=watch_npm
-  quietly "installing $package" env PATH="$node_dir:$PATH" npm_config_devdir="$NPM_CACHE/node-gyp" "$npm" install -g --prefix "$DL_HOME/dl" --cache "$NPM_CACHE" --no-audit --no-fund --no-update-notifier --loglevel=info --foreground-scripts "$package"
-  rm -rf "$NPM_CACHE"
+  dl_started=$(date +%s)
+  if ! install_bundle; then
+    install_with_npm
+  fi
+  STEP="Installing dl"
   entry="$DL_HOME/dl/lib/node_modules/directionallylocal/bin/directionallylocal.mjs"
   [ -f "$entry" ] || fail "npm installed $package, but $entry is missing"
   # $PATH and $@ in the wrappers are theirs to expand when dl runs.
@@ -496,7 +554,7 @@ laptop_main() {
     chmod 755 "$DL_HOME/bin/$name"
   done
   COUNT_VERSION=$("$DL_HOME/bin/dl" --version 2>/dev/null || echo "")
-  step_done "Installed dl" "dl $COUNT_VERSION · in $DL_HOME · $(clock "${STEP_SECONDS:-0}")"
+  step_done "Installed dl" "dl $COUNT_VERSION · in $DL_HOME · $(clock $(($(date +%s) - dl_started)))"
 
   STAGE=path
   if [ "${DL_NO_MODIFY_PATH:-}" != "1" ]; then
@@ -547,6 +605,22 @@ laptop_main() {
     return "$code"
   fi
   if [ -n "$fix" ]; then remind "Then run: $fix && dl"; else say "  Then type: dl"; fi
+}
+
+# dl from npm (no bundle for this computer, or it didn't work). Uses $package, $npm and
+# $node_dir from laptop_main.
+install_with_npm() {
+  STEP="Installing dl"
+  # npm's download cache, and the Node.js headers node-gyp fetches to build a native module,
+  # go in a folder of their own that's removed afterwards: dl's packages are installed once,
+  # and kept in ~/.npm and ~/.cache/node-gyp they'd take another 190 MB.
+  # --loglevel=info and --foreground-scripts put each download and install script in the log,
+  # which is where watch_npm reads the progress from.
+  NPM_CACHE="$DL_HOME/npm-cache"
+  rm -rf "$NPM_CACHE"
+  WATCH=watch_npm
+  quietly "installing $package" env PATH="$node_dir:$PATH" npm_config_devdir="$NPM_CACHE/node-gyp" "$npm" install -g --prefix "$DL_HOME/dl" --cache "$NPM_CACHE" --no-audit --no-fund --no-update-notifier --loglevel=info --foreground-scripts "$package"
+  rm -rf "$NPM_CACHE"
 }
 
 # A line the person needs to act on: bold, so it stands out from the steps above.

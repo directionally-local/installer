@@ -168,6 +168,24 @@ mkdir -p "$prefix/lib/node_modules/directionallylocal/bin" && echo '// dl' > "$p
   writeFileSync(join(dist, "SHASUMS256.txt"), `${sums.join("\n")}\n`);
 }
 
+/**
+ * dl's prebuilt bundles as the release publishes them: dl-bundles.txt and one .tar.gz per
+ * platform, holding lib/node_modules/directionallylocal as npm lays it out under --prefix.
+ */
+function bundleDist(dist: string, options: { platform?: string; node?: number; corrupt?: boolean; missing?: boolean } = {}): void {
+  const platform = options.platform ?? "darwin-arm64";
+  const file = `dl-0.14.0-${platform}.tar.gz`;
+  const build = join(dist, "bundle-build");
+  mkdirSync(join(build, "lib", "node_modules", "directionallylocal", "bin"), { recursive: true });
+  writeFileSync(join(build, "lib", "node_modules", "directionallylocal", "bin", "directionallylocal.mjs"), "// dl from the bundle\n");
+  const tarball = join(dist, file);
+  execFileSync("tar", ["-czf", tarball, "-C", build, "lib"]);
+  const sum = createHash("sha256").update(readFileSync(tarball)).digest("hex");
+  const bytes = statSync(tarball).size;
+  if (options.missing) rmSync(tarball);
+  writeFileSync(join(dist, "dl-bundles.txt"), `# dl 0.14.0\nlinux-x64 dl-0.14.0-linux-x64.tar.gz ${"0".repeat(64)} 123 24\n${platform} ${file} ${options.corrupt ? "f".repeat(64) : sum} ${bytes} ${options.node ?? 24}\n`);
+}
+
 describe("install.sh on a laptop", () => {
   const cleanup: string[] = [];
   const run = (options: Parameters<typeof laptopInstall>[0] = {}) => {
@@ -184,7 +202,8 @@ describe("install.sh on a laptop", () => {
     assert.match(result.npm ?? "", new RegExp(`^install -g --prefix ${root}/dl --cache ${root}/npm-cache --no-audit --no-fund --no-update-notifier --loglevel=info --foreground-scripts directionallylocal@latest$`, "m"));
     assert.ok(!existsSync(join(root, "npm-cache")), "npm's cache for the install is removed afterwards");
     assert.equal(result.sudo, undefined, "no sudo");
-    assert.equal(result.curl, undefined, "no Node download");
+    assert.doesNotMatch(result.curl ?? "", /nodejs/, "no Node download");
+    assert.match(result.curl ?? "", /^-fsSL https:\/\/directionallylocal\.run\/dl\/latest\/dl-bundles\.txt$/m, "it looked for a prebuilt bundle; there's none, so npm");
     const wrapper = result.read(join(root, "bin", "dl"))!;
     assert.match(wrapper, new RegExp(`exec "[^"]*/stubs/node" "${root}/dl/lib/node_modules/directionallylocal/bin/directionallylocal\\.mjs" "\\$@"`));
     assert.doesNotMatch(wrapper, /export PATH/, "the user's own Node: nothing added to PATH");
@@ -388,6 +407,54 @@ describe("install.sh on a laptop", () => {
     assert.match(quick.stdout, /Setting up Autopilot/);
   });
 
+  it("installs dl from the prebuilt bundle for this computer: one download, its size shown, checked against its SHA-256", () => {
+    const result = run({ dist: (dist) => bundleDist(dist) });
+    assert.equal(result.status, 0, result.stderr);
+    const root = join(result.home, ".directionallylocal");
+    assert.equal(result.npm, undefined, "no npm");
+    assert.match(result.curl ?? "", /^-fsSL https:\/\/directionallylocal\.run\/dl\/latest\/dl-bundles\.txt\n-fsSL https:\/\/directionallylocal\.run\/dl\/0\.14\.0\/dl-0\.14\.0-darwin-arm64\.tar\.gz -o /m, "the list, then this computer's bundle (its size is in the list)");
+    assert.equal(result.read(join(root, "dl", "lib", "node_modules", "directionallylocal", "bin", "directionallylocal.mjs")), "// dl from the bundle\n");
+    assert.match(result.read(join(root, "bin", "dl")) ?? "", /directionallylocal\.mjs" "\$@"/);
+    assert.deepEqual(readdirSync(root).sort(), ["bin", "dl"], "no download or unpacking directory left");
+    assert.match(result.stdout, /\.\. Installing dl\n\.\. Downloading dl \(1 MB\)\n(.*\n)*\.\. Setting up Autopilot\nok Installing dl: dl 0\.10\.0 · in .*\.directionallylocal · 0:0\d\n/);
+
+    // DL_VERSION picks that version's list.
+    const pinned = run({ dist: (dist) => bundleDist(dist), env: { DL_VERSION: "0.14.0" } });
+    assert.equal(pinned.status, 0, pinned.stderr);
+    assert.match(pinned.curl ?? "", /^-fsSL https:\/\/directionallylocal\.run\/dl\/0\.14\.0\/dl-bundles\.txt$/m);
+    assert.equal(pinned.npm, undefined);
+  });
+
+  it("falls back to npm when the bundle doesn't check out, isn't there, or isn't for this computer", () => {
+    const corrupt = run({ dist: (dist) => bundleDist(dist, { corrupt: true }) });
+    assert.equal(corrupt.status, 0, corrupt.stderr);
+    assert.match(corrupt.stdout, /The prebuilt download didn't work \(it didn't match its checksum\); installing with npm instead\.\n/);
+    assert.match(corrupt.npm ?? "", /^install -g --prefix /m);
+    assert.deepEqual(readdirSync(join(corrupt.home, ".directionallylocal")).sort(), ["bin", "dl"], "the bad download is removed");
+
+    const missing = run({ dist: (dist) => bundleDist(dist, { missing: true }) });
+    assert.equal(missing.status, 0, missing.stderr);
+    assert.match(missing.stdout, /The prebuilt download didn't work \(the download didn't finish\); installing with npm instead\./);
+    assert.match(missing.npm ?? "", /^install -g /m);
+
+    // Quietly npm: no bundle for this platform, or one built for another Node.js major version.
+    for (const bundle of [{ platform: "darwin-x64" }, { node: 22 }]) {
+      const other = run({ dist: (dist) => bundleDist(dist, bundle) });
+      assert.equal(other.status, 0, other.stderr);
+      assert.match(other.npm ?? "", /^install -g /m, JSON.stringify(bundle));
+      assert.doesNotMatch(other.stdout, /prebuilt/);
+      assert.doesNotMatch(other.curl ?? "", /\.tar\.gz/);
+    }
+
+    // DL_PACKAGE (a local build) and DL_NO_BUNDLE=1 don't look for one.
+    for (const env of [{ DL_PACKAGE: "/tmp/directionallylocal-0.14.0.tgz" }, { DL_NO_BUNDLE: "1" }] as Record<string, string>[]) {
+      const skipped = run({ dist: (dist) => bundleDist(dist), env });
+      assert.equal(skipped.status, 0, skipped.stderr);
+      assert.equal(skipped.curl, undefined, JSON.stringify(env));
+      assert.match(skipped.npm ?? "", /^install -g /m);
+    }
+  });
+
   it("refuses root on macOS, and fails clearly when npm does", () => {
     const root = run({ uid: 0 });
     assert.equal(root.status, 1);
@@ -459,6 +526,20 @@ describe("install.sh: the anonymous install count", () => {
     assert.equal(slow.status, 0, slow.stderr);
     assert.match(slow.stdout, /Slow network\?/);
     assert.deepEqual(slow.counts().map((count) => count.body.result), ["ok"]);
+  });
+
+  it("is sent the same way when dl comes from the prebuilt bundle, or npm after a bundle that didn't work", () => {
+    const bundled = run({ dist: (dist) => bundleDist(dist) });
+    assert.equal(bundled.status, 0, bundled.stderr);
+    assert.equal(bundled.npm, undefined, "from the bundle");
+    assert.deepEqual(bundled.counts().map((count) => count.body), [{ os: "darwin", arch: "arm64", mode: "laptop", dlVersion: "0.10.0", result: "ok", via: "run" }]);
+    const fellBack = run({ dist: (dist) => bundleDist(dist, { corrupt: true }) });
+    assert.equal(fellBack.status, 0, fellBack.stderr);
+    assert.match(fellBack.stdout, /installing with npm instead/);
+    assert.deepEqual(fellBack.counts().map((count) => count.body.result), ["ok"], "a bundle that didn't work isn't a failed install");
+    const failed = run({ dist: (dist) => bundleDist(dist, { corrupt: true }), npmFails: true });
+    assert.equal(failed.status, 1);
+    assert.deepEqual(failed.counts().map((count) => [count.body.result, count.body.failedStep]), [["failed", "install_dl"]]);
   });
 
   it("is sent before dl starts, once, whatever dl does after", () => {
