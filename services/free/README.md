@@ -352,7 +352,7 @@ The default weight of 0.02 is OpenRouter's cache-read price divided by its input
 `COUNT_CACHED_TOKENS=false` still works and means a weight of 0, unless `CACHED_TOKEN_WEIGHT`
 is set. The global USD caps count only real cash: the cost OpenRouter reports. The per-person
 dollar allowance counts every request: OpenRouter's reported cost, or a Luminal request's tokens
-at OpenRouter's list prices (see below).
+at the OpenRouter prices we were billed (see below).
 
 ## Upstreams: Luminal and OpenRouter
 
@@ -412,13 +412,13 @@ the owner can do that by hand.
   OpenRouter billed. Luminal credit is prepaid, so it isn't counted there; with Luminal serving
   they stay near zero. The queue watches the weekly credit budget instead (see the queue).
 - **Per-person allowance (every request).** The 50M tokens are charged the same on both
-  upstreams. The $5 a week is charged a Luminal request's cost **at OpenRouter's list prices**
-  (`OPENROUTER_PRICE_INPUT` 0.30, `OPENROUTER_PRICE_CACHED` 0.006, `OPENROUTER_PRICE_OUTPUT`
-  1.20), not at Luminal's. So a person's week ends at the same point whichever upstream served
-  them, and switching upstreams (or Luminal changing prices) doesn't change what the free tier
-  gives. The output price is an estimate (Luminal's output price scaled by the same ~2.1× as its
-  input and cache prices); check it against OpenRouter's model list and set
-  `OPENROUTER_PRICE_OUTPUT` if it differs.
+  upstreams. The $5 a week is charged a Luminal request's cost **at the OpenRouter prices we
+  were actually billed** (`OPENROUTER_PRICE_INPUT` 0.035, `OPENROUTER_PRICE_CACHED` 0.006,
+  `OPENROUTER_PRICE_OUTPUT` 0.315 per million tokens), not at Luminal's. These are the prices of
+  Morph, the cheapest full-precision host that served the free tier, as listed by OpenRouter's
+  endpoints API on 2026-11-04, and a real billed request matched them. So a person's week ends
+  where it did before the switch to Luminal, and Luminal's prices don't change what the free
+  tier gives.
 - **The request log** has `upstream`, `credit_usd`, `ttfb_ms`, `ttft_ms` and `upstream_error`
   on every row. `cost_usd` stays what the person's allowance was charged: OpenRouter's reported
   cost, or OpenRouter prices for a Luminal request.

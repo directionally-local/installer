@@ -97,7 +97,7 @@ export interface FreeConfig {
   /** Luminal list prices, USD per million tokens (LUMINAL_PRICE_INPUT, _CACHED, _OUTPUT). Luminal reports no cost. */
   luminalPrices: Prices;
   /**
-   * OpenRouter list prices for the same model, USD per million tokens (OPENROUTER_PRICE_INPUT,
+   * The OpenRouter prices we were billed for the same model, USD per million tokens (OPENROUTER_PRICE_INPUT,
    * _CACHED, _OUTPUT). A Luminal request counts against the per-person dollar allowance at
    * these prices, so the allowance means the same whichever upstream served.
    */
@@ -183,12 +183,13 @@ export const DEFAULTS = {
   /** https://luminal.com/pricing, 2026-11-04. */
   luminalPrices: { input: 0.1425, cached: 0.0029, output: 0.57 } as Prices,
   /**
-   * OpenRouter's input and cache-read prices are its list prices of 2026-11-03 (see
-   * `cachedTokenWeight`). The output price is an estimate: Luminal's output price scaled by the
-   * same factor as its input and cache prices (about 2.1×). Check it against
-   * https://openrouter.ai/api/v1/models and set OPENROUTER_PRICE_OUTPUT if it differs.
+   * What OpenRouter actually billed us: the prices of the cheapest full-precision host that
+   * served the free tier (Morph), as listed by OpenRouter's endpoints API
+   * (https://openrouter.ai/api/v1/models/deepseek/deepseek-v4.1-flash-1017/endpoints) on
+   * 2026-11-04, and matched by a real billed request. So a person's week ends where it did
+   * before Luminal. Recheck against `requests.cost_usd` of OpenRouter rows if hosts change.
    */
-  openRouterPrices: { input: 0.3, cached: 0.006, output: 1.2 } as Prices,
+  openRouterPrices: { input: 0.035, cached: 0.006, output: 0.315 } as Prices,
   luminalCreditUsd: 2000,
   luminalWeeklyCreditUsd: 250,
 } as const;

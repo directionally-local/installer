@@ -16,8 +16,11 @@ const HOOK = "https://alerts.test/hook";
 const BIG = { prompt: 1_000_000, completion: 100_000, cached: 200_000 };
 /** BIG at Luminal's list prices: 0.8 × 0.1425 + 0.2 × 0.0029 + 0.1 × 0.57. */
 const BIG_CREDIT = 0.8 * 0.1425 + 0.2 * 0.0029 + 0.1 * 0.57;
-/** BIG at OpenRouter's prices: 0.8 × 0.30 + 0.2 × 0.006 + 0.1 × 1.20. */
-const BIG_EQUIVALENT = 0.8 * 0.3 + 0.2 * 0.006 + 0.1 * 1.2;
+/**
+ * BIG at the OpenRouter prices we were billed (Morph, per OpenRouter's endpoints API on
+ * 2026-11-04): 0.8 × 0.035 + 0.2 × 0.006 + 0.1 × 0.315.
+ */
+const BIG_EQUIVALENT = 0.8 * 0.035 + 0.2 * 0.006 + 0.1 * 0.315;
 
 let ips = 0;
 async function member(vars: Record<string, string> = {}): Promise<{ service: Service; token: string; adminToken: string }> {
@@ -246,7 +249,9 @@ describe("Luminal credit", () => {
     });
     const used: Usage = { promptTokens: 1_000_000, completionTokens: 1_000_000, cachedTokens: 500_000, costUsd: undefined };
     assert.equal(costAtPrices(used, config.luminalPrices), 0.5 + 0.25 + 2);
-    assert.deepEqual(config.openRouterPrices, { input: 0.3, cached: 0.006, output: 3 });
+    assert.deepEqual(config.openRouterPrices, { input: 0.035, cached: 0.006, output: 3 });
+    // The defaults: Morph's prices on OpenRouter, 2026-11-04.
+    assert.deepEqual(readFreeConfig({ OPENROUTER_API_KEY: "k", GITHUB_CLIENT_ID: "i", GITHUB_CLIENT_SECRET: "s", TOKEN_SIGNING_KEY: "x".repeat(32) }).openRouterPrices, { input: 0.035, cached: 0.006, output: 0.315 });
     assert.equal(config.luminalCreditUsd, 2000);
     assert.equal(config.luminalWeeklyCreditUsd, 250);
   });
@@ -316,10 +321,10 @@ describe("cash caps and the queue with Luminal", () => {
   });
 
   it("charges the per-person dollar allowance at OpenRouter prices on Luminal", async () => {
-    const { service, token } = await member({ PER_PERSON_WEEKLY_USD_CAP: "0.5" });
+    const { service, token } = await member({ PER_PERSON_WEEKLY_USD_CAP: "0.1" });
     service.setLuminal(() => completion(luminalUsage(BIG.prompt, BIG.completion, BIG.cached)));
-    assert.equal((await chat(service, token)).status, 200); // 0.36 at OpenRouter prices
-    assert.equal((await chat(service, token)).status, 200); // 0.72
+    assert.equal((await chat(service, token)).status, 200); // 0.0607 at the billed OpenRouter prices
+    assert.equal((await chat(service, token)).status, 200); // 0.1214: past the cap
     const refused = await chat(service, token);
     assert.equal(refused.status, 402);
     const error = await errorOf(refused);
