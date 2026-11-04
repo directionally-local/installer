@@ -17,15 +17,20 @@ import { DAY_MS, weekStart } from "./week.js";
 
 /** Tables and columns the dashboard may read. Everything is counts, tokens, cost, time or who. */
 export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
-  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd"],
+  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd", "paid_cost_usd"],
   people: ["github_id", "login", "admitted_at", "admitted_via"],
   grants: ["github_id", "weekly_tokens", "weekly_usd"],
-  spend_weeks: ["week_start", "usd", "tokens", "requests", "admin_usd", "admin_tokens", "admin_requests"],
+  spend_weeks: ["week_start", "usd", "tokens", "requests", "admin_usd", "admin_tokens", "admin_requests", "paid_usd", "paid_tokens", "paid_requests"],
   settings: ["key", "value"],
   queue: ["github_id", "queued_at", "admitted_at", "admitted_how"],
   queue_runs: ["week_start", "ran_at", "admitted", "waiting_before", "avg_usd", "actives", "budget_usd"],
   referrals: ["referred_id", "referrer_id", "outcome", "at"],
+  subscriptions: ["github_id", "state", "period_end", "state_at"],
+  payments: ["github_id", "kind", "amount_cents", "at"],
 };
+
+/** Pro counts as subscribed this long past its period end (as in account-object.ts). */
+const PRO_GRACE_MS = 3 * DAY_MS;
 
 /** Weeks of weekly actives and cost on the page. */
 export const WEEKS_SHOWN = 8;
@@ -125,6 +130,20 @@ export interface ReferralView {
   peopleWithBonus: number;
 }
 
+export interface PaidView {
+  /** Active Pro subscriptions now. */
+  proSubscribers: number;
+  topupsThisWeek: number;
+  topupsThisMonth: number;
+  /** Revenue before tax, USD, from payments this week (Monday UTC) and this calendar month (UTC). */
+  revenueWeekUsd: number;
+  revenueMonthUsd: number;
+  /** What paid usage (Pro and top-ups) cost upstream: logged apart from the free caps. */
+  paidCostWeekUsd: number;
+  paidCostMonthUsd: number;
+  paidRequestsWeek: number;
+}
+
 export interface FunnelRow {
   /** Monday of the sign-up week; null for the all-time row. */
   weekStart: number | null;
@@ -145,6 +164,7 @@ export interface DashboardData {
   people: { admitted: number; activeThisWeek: number };
   queue: QueueView;
   referrals: ReferralView;
+  paid: PaidView;
   /** Sign-ups → first request → weekly active (3+ request days in a week), per sign-up week and in all. */
   funnel: FunnelRow[];
 }
@@ -383,10 +403,36 @@ export function dashboardData(
   }
   const funnel = [funnelTotal, ...[...funnelByWeek.values()].reverse()];
 
+  // Paid plans: counts and sums only.
+  const monthStart = Date.UTC(new Date(input.now).getUTCFullYear(), new Date(input.now).getUTCMonth(), 1);
+  const proSubscribers =
+    sql
+      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM subscriptions WHERE state = 'active' AND (period_end IS NULL OR period_end + ? > ?)", PRO_GRACE_MS, input.now)
+      .toArray()[0]?.n ?? 0;
+  const sums = (since: number) =>
+    sql
+      .exec<{ topups: number | null; cents: number | null }>("SELECT SUM(kind = 'topup') AS topups, SUM(amount_cents) AS cents FROM payments WHERE at >= ?", since)
+      .toArray()[0];
+  const week = sums(currentWeek);
+  const month = sums(monthStart);
+  const paidWeek = sql.exec<{ usd: number; n: number }>("SELECT paid_usd AS usd, paid_requests AS n FROM spend_weeks WHERE week_start = ?", currentWeek).toArray()[0];
+  const paidMonth = sql.exec<{ usd: number | null }>("SELECT SUM(paid_cost_usd) AS usd FROM daily_activity WHERE day >= ?", monthStart / DAY_MS).toArray()[0];
+  const paid: PaidView = {
+    proSubscribers,
+    topupsThisWeek: week?.topups ?? 0,
+    topupsThisMonth: month?.topups ?? 0,
+    revenueWeekUsd: (week?.cents ?? 0) / 100,
+    revenueMonthUsd: (month?.cents ?? 0) / 100,
+    paidCostWeekUsd: paidWeek?.usd ?? 0,
+    paidCostMonthUsd: paidMonth?.usd ?? 0,
+    paidRequestsWeek: paidWeek?.n ?? 0,
+  };
+
   return {
     now: input.now,
     currentWeek,
     queue,
+    paid,
     referrals,
     funnel,
     weeklyActive,

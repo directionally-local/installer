@@ -68,9 +68,9 @@ export function queuedMessage(position: number, wait: string): string {
 }
 
 /** The 402 for a used-up weekly allowance (`quota_exceeded`). */
-export function quotaMessage(reason: "tokens" | "spend", resetsAt: string): string {
+export function quotaMessage(reason: "tokens" | "spend", resetsAt: string, plan: "free" | "pro" = "free"): string {
   const what = reason === "spend" ? "spending allowance" : "token allowance";
-  return `This week's free ${what} is used up. It resets at ${resetsAt}.`;
+  return `This week's ${plan === "pro" ? "Pro" : "free"} ${what} is used up. It resets at ${resetsAt}.`;
 }
 
 export const QUEUED_SIGNED_IN =

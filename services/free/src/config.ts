@@ -80,6 +80,10 @@ export interface FreeConfig {
   alertEmailFrom: string;
   /** Telegram's chat id (ALERT_TELEGRAM_CHAT_ID), unless the URL carries `chat_id`. */
   alertTelegramChatId: string | undefined;
+  /** Stripe billing (stripe.ts). Without the secret key, the billing endpoints answer 503 billing_unavailable. */
+  stripe: StripeConfig;
+  /** Pro's weekly dollar ceiling (PRO_WEEKLY_USD_CAP); undefined (the default) means tokens only. */
+  proWeeklyUsdCap: number | undefined;
   /** The kill switch from `env`; the admin endpoint has its own, and either one pauses. */
   paused: boolean;
   /** The public origin for links, when the request's own origin isn't it (behind a proxy). */
@@ -91,6 +95,16 @@ export type AlertKind = "auto" | "discord" | "slack" | "telegram";
 export interface Offers {
   pro: { priceUsdMonthly: number; tokensPerWeek: number };
   topup: { priceUsd: number; tokens: number; validDays: number };
+}
+
+export interface StripeConfig {
+  secretKey: string | undefined;
+  webhookSecret: string | undefined;
+  pricePro: string | undefined;
+  priceTopup: string | undefined;
+  successUrl: string;
+  cancelUrl: string;
+  portalReturnUrl: string;
 }
 
 export const DEFAULTS = {
@@ -129,6 +143,9 @@ export const DEFAULTS = {
   topupTokens: 50_000_000,
   topupValidDays: 30,
   alertEmailFrom: "alerts@dl.new",
+  billingSuccessUrl: "https://dl.new/billing/success",
+  billingCancelUrl: "https://dl.new/billing/cancel",
+  billingPortalReturnUrl: "https://dl.new/billing",
 } as const;
 
 /** The longest host cooldown, in minutes: a day. */
@@ -177,6 +194,16 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     alertTelegramChatId: text(env.ALERT_TELEGRAM_CHAT_ID),
     alertEmailTo: emailAddress(env.ALERT_EMAIL_TO, "ALERT_EMAIL_TO"),
     alertEmailFrom: emailAddress(env.ALERT_EMAIL_FROM, "ALERT_EMAIL_FROM") ?? DEFAULTS.alertEmailFrom,
+    stripe: {
+      secretKey: text(env.STRIPE_SECRET_KEY),
+      webhookSecret: text(env.STRIPE_WEBHOOK_SECRET),
+      pricePro: stripeId(env.STRIPE_PRICE_PRO, "price_", "STRIPE_PRICE_PRO"),
+      priceTopup: stripeId(env.STRIPE_PRICE_TOPUP, "price_", "STRIPE_PRICE_TOPUP"),
+      successUrl: httpsUrl(env.BILLING_SUCCESS_URL, "BILLING_SUCCESS_URL") ?? DEFAULTS.billingSuccessUrl,
+      cancelUrl: httpsUrl(env.BILLING_CANCEL_URL, "BILLING_CANCEL_URL") ?? DEFAULTS.billingCancelUrl,
+      portalReturnUrl: httpsUrl(env.BILLING_PORTAL_RETURN_URL, "BILLING_PORTAL_RETURN_URL") ?? DEFAULTS.billingPortalReturnUrl,
+    },
+    proWeeklyUsdCap: text(env.PRO_WEEKLY_USD_CAP) === undefined ? undefined : usd(env.PRO_WEEKLY_USD_CAP, 0, "PRO_WEEKLY_USD_CAP"),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
   };
@@ -216,6 +243,20 @@ function amount(value: unknown, fallback: number, name: string): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) throw new ConfigError(`${name} must be a number of dollars (got "${raw}").`);
   return parsed;
+}
+
+function stripeId(value: unknown, prefix: string, name: string): string | undefined {
+  const raw = text(value);
+  if (raw === undefined) return undefined;
+  if (!raw.startsWith(prefix) || !/^[A-Za-z0-9_]+$/.test(raw)) throw new ConfigError(`${name} must be a Stripe id starting with ${prefix} (got "${raw}").`);
+  return raw;
+}
+
+function httpsUrl(value: unknown, name: string): string | undefined {
+  const raw = text(value);
+  if (raw === undefined) return undefined;
+  if (!/^https:\/\/\S+$/.test(raw)) throw new ConfigError(`${name} must be an https URL.`);
+  return raw;
 }
 
 function webhookUrl(value: unknown): string | undefined {

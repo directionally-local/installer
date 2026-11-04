@@ -63,6 +63,8 @@ export interface RequestRecord {
   host?: string;
   /** Set when the request failed in a way the host is blamed for. */
   hostFailure?: HostFailure;
+  /** Paid usage (Pro or a top-up): logged and shown, but not counted against the free caps. */
+  paid?: boolean;
 }
 
 /**
@@ -111,6 +113,10 @@ export interface QueueRun {
 }
 
 export interface SpendSummary {
+  /** Paid usage (Pro and top-ups) this week, apart from the free caps. */
+  paidUsd: number;
+  paidTokens: number;
+  paidRequests: number;
   weekStart: number;
   resetsAt: number;
   /** Everyone but admins: what the global caps count. */
@@ -290,6 +296,41 @@ const SCHEMA = [
      key TEXT PRIMARY KEY,
      at  INTEGER NOT NULL
    )`,
+  // Billing (stripe.ts): webhook events already handled (idempotency), which Stripe customer is
+  // whose, payments for the revenue numbers (amounts before tax, in cents), and a copy of each
+  // Pro subscription's state for the dashboard (the AccountObject holds the one that counts).
+  `CREATE TABLE IF NOT EXISTS billing_events (
+     id   TEXT PRIMARY KEY,
+     kind TEXT NOT NULL,
+     at   INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS customers (
+     customer_id TEXT PRIMARY KEY,
+     github_id   INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS payments (
+     id           TEXT PRIMARY KEY,
+     github_id    INTEGER NOT NULL,
+     kind         TEXT NOT NULL,
+     amount_cents INTEGER NOT NULL,
+     at           INTEGER NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS payments_at ON payments (at)`,
+  `CREATE TABLE IF NOT EXISTS subscriptions (
+     github_id  INTEGER PRIMARY KEY,
+     state      TEXT NOT NULL,
+     period_end INTEGER,
+     state_at   INTEGER NOT NULL
+   )`,
+];
+
+/** Columns added after their table first shipped: added in place on start. */
+const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> = [
+  ["requests", "paid", "INTEGER NOT NULL DEFAULT 0"],
+  ["spend_weeks", "paid_usd", "REAL NOT NULL DEFAULT 0"],
+  ["spend_weeks", "paid_tokens", "INTEGER NOT NULL DEFAULT 0"],
+  ["spend_weeks", "paid_requests", "INTEGER NOT NULL DEFAULT 0"],
+  ["daily_activity", "paid_cost_usd", "REAL NOT NULL DEFAULT 0"],
 ];
 
 /** Set in `settings` once `daily_activity` has been built from the existing log. */
@@ -300,6 +341,10 @@ export class DirectoryObject extends DurableObject {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
+      for (const [table, column, definition] of ADDED_COLUMNS) {
+        const columns = this.ctx.storage.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray();
+        if (!columns.some((existing) => existing.name === column)) this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      }
       this.#backfillDailyActivity();
     });
   }
@@ -312,7 +357,13 @@ export class DirectoryObject extends DurableObject {
       sql.exec("DELETE FROM daily_activity");
       sql.exec(
         `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd)
-         SELECT at / ${DAY_MS}, github_id, COUNT(*), 0, SUM(charged_tokens), SUM(cost_usd) FROM requests WHERE is_admin = 0 GROUP BY 1, 2`,
+         SELECT at / ${DAY_MS}, github_id, COUNT(*), 0, SUM(CASE WHEN paid = 0 THEN charged_tokens ELSE 0 END),
+                SUM(CASE WHEN paid = 0 THEN cost_usd ELSE 0 END) FROM requests WHERE is_admin = 0 GROUP BY 1, 2`,
+      );
+      sql.exec(
+        `UPDATE daily_activity SET paid_cost_usd = (SELECT COALESCE(SUM(r.cost_usd), 0) FROM requests r
+           WHERE r.is_admin = 0 AND r.paid = 1 AND r.github_id = daily_activity.github_id AND r.at / ${DAY_MS} = daily_activity.day)
+         WHERE EXISTS (SELECT 1 FROM requests r WHERE r.paid = 1 LIMIT 1)`,
       );
       sql.exec(
         `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd)
@@ -323,18 +374,21 @@ export class DirectoryObject extends DurableObject {
     });
   }
 
-  #addActivity(githubId: number, at: number, change: { requests: number; events: number; chargedTokens: number; costUsd: number }): void {
+  /** Free tokens and cost go in `charged_tokens` and `cost_usd`; paid cost in `paid_cost_usd`. */
+  #addActivity(githubId: number, at: number, change: { requests: number; events: number; chargedTokens: number; costUsd: number; paidCostUsd?: number }): void {
     this.ctx.storage.sql.exec(
-      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd, paid_cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (day, github_id) DO UPDATE SET
          requests = requests + excluded.requests, events = events + excluded.events,
-         charged_tokens = charged_tokens + excluded.charged_tokens, cost_usd = cost_usd + excluded.cost_usd`,
+         charged_tokens = charged_tokens + excluded.charged_tokens, cost_usd = cost_usd + excluded.cost_usd,
+         paid_cost_usd = paid_cost_usd + excluded.paid_cost_usd`,
       Math.floor(at / DAY_MS),
       githubId,
       change.requests,
       change.events,
       change.chargedTokens,
       change.costUsd,
+      change.paidCostUsd ?? 0,
     );
   }
 
@@ -758,7 +812,7 @@ export class DirectoryObject extends DurableObject {
 
   #spendSync(now: number): SpendSummary {
     const start = weekStart(now);
-    type Row = { usd: number; tokens: number; requests: number; admin_usd: number; admin_tokens: number; admin_requests: number };
+    type Row = { usd: number; tokens: number; requests: number; admin_usd: number; admin_tokens: number; admin_requests: number; paid_usd: number; paid_tokens: number; paid_requests: number };
     const row = this.ctx.storage.sql.exec<Row>("SELECT * FROM spend_weeks WHERE week_start = ?", start).toArray()[0];
     const total = this.ctx.storage.sql.exec<{ usd: number | null; admin_usd: number | null }>("SELECT SUM(usd) AS usd, SUM(admin_usd) AS admin_usd FROM spend_weeks").toArray()[0];
     return {
@@ -770,9 +824,57 @@ export class DirectoryObject extends DurableObject {
       adminSpentUsd: round(row?.admin_usd ?? 0),
       adminTokens: row?.admin_tokens ?? 0,
       adminRequests: row?.admin_requests ?? 0,
+      paidUsd: round(row?.paid_usd ?? 0),
+      paidTokens: row?.paid_tokens ?? 0,
+      paidRequests: row?.paid_requests ?? 0,
       totalSpentUsd: round(total?.usd ?? 0),
       adminTotalSpentUsd: round(total?.admin_usd ?? 0),
     };
+  }
+
+  // ─── Billing ─────────────────────────────────────────────────────────────
+
+  /** Whether a Stripe event id was handled already (webhooks are delivered at least once). */
+  async billingEventSeen(id: string): Promise<boolean> {
+    return this.ctx.storage.sql.exec("SELECT 1 FROM billing_events WHERE id = ?", id).toArray().length > 0;
+  }
+
+  /** Marks an event handled; false when another delivery got there first. */
+  async markBillingEvent(id: string, kind: string, now: number): Promise<boolean> {
+    return this.ctx.storage.sql.exec("INSERT INTO billing_events (id, kind, at) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING RETURNING id", id, kind, now).toArray().length > 0;
+  }
+
+  async mapCustomer(customerId: string, githubId: number): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT INTO customers (customer_id, github_id) VALUES (?, ?) ON CONFLICT(customer_id) DO NOTHING", customerId, githubId);
+  }
+
+  async customerOwner(customerId: string): Promise<number | undefined> {
+    return this.ctx.storage.sql.exec<{ github_id: number }>("SELECT github_id FROM customers WHERE customer_id = ?", customerId).toArray()[0]?.github_id;
+  }
+
+  /** A payment for the revenue numbers, once per id (a Checkout Session or an invoice). */
+  async recordPayment(input: { id: string; githubId: number; kind: "pro" | "topup"; amountCents: number; at: number }): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO payments (id, github_id, kind, amount_cents, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+      input.id,
+      input.githubId,
+      input.kind,
+      input.amountCents,
+      input.at,
+    );
+  }
+
+  /** The dashboard's copy of a Pro subscription's state; older events don't overwrite newer ones. */
+  async mirrorSubscription(input: { githubId: number; state: string; periodEnd: number | null | undefined; eventAt: number }): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO subscriptions (github_id, state, period_end, state_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(github_id) DO UPDATE SET state = excluded.state, period_end = COALESCE(excluded.period_end, period_end), state_at = excluded.state_at
+       WHERE excluded.state_at >= subscriptions.state_at`,
+      input.githubId,
+      input.state,
+      input.periodEnd ?? null,
+      input.eventAt,
+    );
   }
 
   // ─── Records ─────────────────────────────────────────────────────────────
@@ -786,8 +888,8 @@ export class DirectoryObject extends DurableObject {
     const alerts: Alert[] = [];
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
-        `INSERT INTO requests (github_id, is_admin, at, model, prompt_tokens, completion_tokens, cached_tokens, charged_tokens, cost_usd, status, latency_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO requests (github_id, is_admin, at, model, prompt_tokens, completion_tokens, cached_tokens, charged_tokens, cost_usd, status, latency_ms, paid)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         record.githubId,
         record.isAdmin ? 1 : 0,
         record.at,
@@ -799,23 +901,39 @@ export class DirectoryObject extends DurableObject {
         record.costUsd,
         record.status,
         record.latencyMs,
+        record.paid ? 1 : 0,
       );
       const admin = record.isAdmin ? 1 : 0;
+      // Three buckets: admins; paid usage (Pro, top-ups); and free usage, the only one the caps count.
+      const paid = !admin && record.paid === true;
+      const free = !admin && !paid;
       this.ctx.storage.sql.exec(
-        `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests, paid_usd, paid_tokens, paid_requests) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(week_start) DO UPDATE SET
            usd = usd + excluded.usd, tokens = tokens + excluded.tokens, requests = requests + excluded.requests,
            admin_usd = admin_usd + excluded.admin_usd, admin_tokens = admin_tokens + excluded.admin_tokens,
-           admin_requests = admin_requests + excluded.admin_requests`,
+           admin_requests = admin_requests + excluded.admin_requests,
+           paid_usd = paid_usd + excluded.paid_usd, paid_tokens = paid_tokens + excluded.paid_tokens, paid_requests = paid_requests + excluded.paid_requests`,
         weekStart(record.at),
-        admin ? 0 : record.costUsd,
-        admin ? 0 : record.chargedTokens,
-        admin ? 0 : 1,
+        free ? record.costUsd : 0,
+        free ? record.chargedTokens : 0,
+        free ? 1 : 0,
         admin ? record.costUsd : 0,
         admin ? record.chargedTokens : 0,
         admin,
+        paid ? record.costUsd : 0,
+        paid ? record.chargedTokens : 0,
+        paid ? 1 : 0,
       );
-      if (!admin) this.#addActivity(record.githubId, record.at, { requests: 1, events: 0, chargedTokens: record.chargedTokens, costUsd: record.costUsd });
+      if (!admin) {
+        this.#addActivity(record.githubId, record.at, {
+          requests: 1,
+          events: 0,
+          chargedTokens: free ? record.chargedTokens : 0,
+          costUsd: free ? record.costUsd : 0,
+          paidCostUsd: paid ? record.costUsd : 0,
+        });
+      }
       if (record.host) {
         const failed = record.hostFailure ? 1 : 0;
         this.ctx.storage.sql.exec(
@@ -848,7 +966,7 @@ export class DirectoryObject extends DurableObject {
           if (alert) alerts.push(alert);
         }
       }
-      if (policy && !admin) alerts.push(...this.#spendAlerts(record.at, policy));
+      if (policy && free) alerts.push(...this.#spendAlerts(record.at, policy));
     });
     return alerts;
   }

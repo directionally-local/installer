@@ -36,7 +36,8 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
                  "resetsAt": "2026-11-09T00:00:00.000Z", "usdPerWeek": 6, "spentUsdThisWeek": 0 },
   "models": ["deepseek/deepseek-v4.1-flash-1017"],
   "plan": "free",                       // "free" | "pro"
-  "topupTokensLeft": 0,
+  "topupTokensLeft": 0,                 // unexpired top-up tokens not yet used
+  "pro": null,                          // or { "periodEnd": ISO string | null, "cancelAtPeriodEnd": false }
   "queue": null,                        // or { "position": 214, "etaAt": "2026-11-16T00:00:00.000Z", "waiting": 300 }
   "referral": { "code": "alice", "link": "https://dl.new/r/alice", "joined": 2, "activeThisWeek": 1,
                 "bonusTokensPerWeek": 10000000, "bonusCapPerWeek": 50000000 },
@@ -47,6 +48,9 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
 
 - `allowance.tokensPerWeek` includes this week's referral bonus; the dollar allowance grows in the
   same proportion. While queued, `allowance.remaining` is 0.
+- With Pro, `allowance` is Pro's: 100M tokens a week (`PRO_TOKENS_PER_WEEK`), no referral bonus,
+  and no dollar ceiling unless `PRO_WEEKLY_USD_CAP` is set. `queue` is null for Pro (a place in
+  line is kept in case Pro ends).
 - `referral.joined`: sign-ups with this person's code that count. `activeThisWeek`: those friends
   whose pair counts toward this week's bonus (see [Referrals](#referrals)).
 - `offers` come from config (`PRO_PRICE_USD_MONTHLY`, `PRO_TOKENS_PER_WEEK`, `TOPUP_PRICE_USD`,
@@ -89,6 +93,74 @@ For the dl.new invite page. Rate-limited per IP (60 a minute), `cache-control: p
 - `200 {"valid": true, "login": "Alice", "bonusTokensPerWeek": 10000000}` when the code belongs to
   an admitted, unsuspended account. `login` is the current GitHub login.
 - `404 {"valid": false}` otherwise. Nothing else is returned: no id, usage or dates.
+
+### Billing (`Authorization: Bearer <access token>`; a server key is refused)
+
+| request | response |
+|---|---|
+| `POST /v1/billing/checkout {"product": "pro"}` | `{"url": "https://checkout.stripe.com/…"}`: a subscription Checkout |
+| `POST /v1/billing/checkout {"product": "topup"}` | `{"url": …}`: a one-time payment Checkout |
+| `POST /v1/billing/portal` | `{"url": "https://billing.stripe.com/…"}`: the Customer Portal (cancel Pro, change card) |
+
+Refusals: 400 `invalid_request` (unknown product), 403 `not_invited` / `suspended`, 409
+`already_pro`, 404 `no_billing_account` (portal before any purchase), 502 `billing_error`
+(Stripe refused), 503 `billing_unavailable` (Stripe isn't configured). Checkout returns to
+`https://dl.new/billing/success` or `/billing/cancel` (`BILLING_SUCCESS_URL`,
+`BILLING_CANCEL_URL`); the portal returns to `https://dl.new/billing` (`BILLING_PORTAL_RETURN_URL`).
+
+## Paid plans (Stripe)
+
+- **Pro**, $10 a month: 100M tokens a week of DeepSeek V4.1 Flash 1017, in place of the free
+  50M. Pro starts when its Checkout completes and stays on while the subscription is active and
+  its paid period (plus 3 days' grace for a late renewal webhook) hasn't ended.
+- **Top-up**, $3 once: 50M tokens, valid 30 days from purchase, used only after the week's
+  allowance (free or Pro) runs out, earliest expiry first. A free person who is queued, or meets
+  a global free cap, can still use top-ups.
+- **Paid usage** (anything under Pro, and top-up tokens) is logged like any request, with
+  `requests.paid = 1`, and counted apart: `spend_weeks.paid_usd/paid_tokens/paid_requests` and
+  `daily_activity.paid_cost_usd`. It never counts toward the weekly or all-time free caps, the
+  spend alerts or the queue forecast. The kill switch still stops everything.
+- **Checkout** is created server-side with Stripe Tax (`automatic_tax[enabled]=true`) and the
+  billing address collected (`billing_address_collection=required`; an existing customer gets
+  `customer_update[address]=auto`). Prices are Stripe Price ids from config, never amounts in
+  code. The GitHub id rides along as `client_reference_id` and metadata on the session, the
+  subscription and the payment.
+- **Webhook** `POST /v1/billing/webhook`: the `Stripe-Signature` header is verified
+  (HMAC-SHA256 of `<t>.<raw body>` with `STRIPE_WEBHOOK_SECRET`, 5-minute tolerance), and each
+  event id is handled once (`billing_events`); every step is idempotent too (top-ups by Checkout
+  Session id, payments by session or invoice id), so a retried delivery is harmless. An event
+  older than the last one applied to a person's subscription is ignored, so out-of-order
+  deliveries can't undo a newer state.
+
+  | event | effect |
+  |---|---|
+  | `checkout.session.completed` | saves the customer; Pro: active; top-up: +50M for 30 days (only when `payment_status` is `paid`) |
+  | `invoice.paid` | Pro active until the invoice's period end; revenue recorded |
+  | `invoice.payment_failed` | back to free (the free allowance, never no access) |
+  | `customer.subscription.updated` | `active`/`trialing` → Pro; `past_due`, `unpaid`, `incomplete` → free; period end and cancel-at-period-end kept |
+  | `customer.subscription.deleted` | free |
+
+- **Revenue** on the dashboard is before tax (`amount_subtotal` of a top-up session,
+  `total_excluding_tax` of a Pro invoice), in USD.
+
+### Stripe setup (the owner, once)
+
+1. **Products and prices.** In test mode first:
+   `STRIPE_SECRET_KEY=sk_test_… node services/free/scripts/stripe-setup.mjs --webhook https://free.directionallylocal.com/v1/billing/webhook`
+   creates "dl Pro" ($10.00/month) and "dl top-up, 50M tokens" ($3.00 once), both tax-exclusive
+   with tax code `txcd_10000000`, and the webhook endpoint, and prints `STRIPE_PRICE_PRO`,
+   `STRIPE_PRICE_TOPUP` and `STRIPE_WEBHOOK_SECRET`. For live mode, create the same in the
+   Dashboard (the script refuses live keys).
+2. **Stripe Tax.** Dashboard → Tax: add the business address and turn on collection where
+   registered.
+3. **Customer Portal.** Dashboard → Settings → Billing → Customer portal: allow cancelling
+   subscriptions (at period end) and updating payment methods, then save.
+4. **Webhook endpoint** (if not made by the script): `https://free.directionallylocal.com/v1/billing/webhook`
+   with the events `checkout.session.completed`, `invoice.paid`, `invoice.payment_failed`,
+   `customer.subscription.updated`, `customer.subscription.deleted`.
+5. **Secrets and vars:** `wrangler secret put STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`;
+   vars `STRIPE_PRICE_PRO`, `STRIPE_PRICE_TOPUP`. Without the secret key, the billing endpoints
+   answer `billing_unavailable` and everything else works as before.
 
 ## The queue for free tokens
 
@@ -351,12 +423,14 @@ day, last 8 weeks), cohort retention (weeks 1, 2 and 4 after sign-up), cost per 
 this week and last (and on which day), and global spend against the effective caps with the
 pause and admission state. Each table has a CSV at `/admin/dashboard/<table>.csv`
 (`spend`, `weekly-active`, `retention`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`,
-`queue`, `referrals`, `funnel`).
+`queue`, `referrals`, `funnel`, `paid`).
 
 At the top: a red banner when free spend is at 80% or more of either cap, and the all-time spend
 against the all-time cap ($1,000). Then the queue (waiting now, the longest wait, how many this
 Monday let in and the forecast behind it), referrals (links used, sign-ups via referral, how many
-became weekly active, bonus tokens a week granted this week), and the funnel per sign-up week
+became weekly active, bonus tokens a week granted this week), paid plans (active Pro
+subscribers, top-ups this week and month, revenue before tax this week and month, and what paid
+usage cost upstream), and the funnel per sign-up week
 and in all (sign-ups → first request → weekly active). Counts only, no content.
 
 - **Admins are left out of every number:** anyone in `ADMIN_GITHUB_IDS` and anyone admitted as

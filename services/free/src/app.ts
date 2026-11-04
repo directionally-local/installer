@@ -8,6 +8,7 @@ import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig } from "./config.js";
 import type { DirectoryObject, Gate, HostFailure, PersonState, RequestRecord } from "./directory-object.js";
+import { createCheckout, createPortal, githubIdFrom, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
 import { deliverAlerts, pauseAlert, type Alert, type EmailBinding } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
 import { networkOf, normalizeReferralCode, referralLink } from "./referrals.js";
@@ -131,6 +132,14 @@ export interface Env {
   ALERT_TELEGRAM_CHAT_ID?: string;
   ALERT_EMAIL_TO?: string;
   ALERT_EMAIL_FROM?: string;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_PRICE_PRO?: string;
+  STRIPE_PRICE_TOPUP?: string;
+  BILLING_SUCCESS_URL?: string;
+  BILLING_CANCEL_URL?: string;
+  BILLING_PORTAL_RETURN_URL?: string;
+  PRO_WEEKLY_USD_CAP?: string;
   /** Cloudflare's send_email binding for alert email; optional (absent off Cloudflare). */
   ALERT_EMAIL?: EmailBinding;
   AUTH: DurableObjectNamespace<AuthObject>;
@@ -198,6 +207,9 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/v1/chat/completions") return chat(c);
   if (method === "POST" && path === "/v1/events") return events(c);
   if (method === "GET" && path.startsWith("/v1/referrals/")) return referralLookup(c, path.slice("/v1/referrals/".length));
+  if (method === "POST" && path === "/v1/billing/checkout") return billingCheckout(c);
+  if (method === "POST" && path === "/v1/billing/portal") return billingPortal(c);
+  if (method === "POST" && path === "/v1/billing/webhook") return billingWebhook(c);
 
   if (method === "GET" && path === "/device") return devicePage(c);
   if (method === "GET" && path === "/device/authorize") return deviceAuthorize(c);
@@ -245,7 +257,13 @@ async function readForm(c: Ctx): Promise<URLSearchParams> {
 
 /** `bonusTokens`: this week's referral bonus, added on top of the weekly allowance. */
 function limitsFor(config: FreeConfig, bonusTokens = 0): Limits {
-  return { weeklyTokens: config.weeklyTokens, weeklyUsd: config.perPersonWeeklyUsdCap, ...(bonusTokens > 0 ? { bonusTokens } : {}) };
+  return {
+    weeklyTokens: config.weeklyTokens,
+    weeklyUsd: config.perPersonWeeklyUsdCap,
+    proTokensPerWeek: config.offers.pro.tokensPerWeek,
+    proUsdPerWeek: config.proWeeklyUsdCap,
+    ...(bonusTokens > 0 ? { bonusTokens } : {}),
+  };
 }
 
 const signingKeys = new Map<string, Promise<CryptoKey>>();
@@ -742,7 +760,8 @@ async function me(c: Ctx): Promise<Response> {
   const { config, person } = await runtime(c);
   const allowance = await account(c, identity.githubId).allowance(c.now(), limitsFor(config, person?.bonusTokens));
   if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
-  const queue = person?.queue ?? null;
+  // A Pro subscriber isn't waiting for anything; their place is kept if Pro ends.
+  const queue = allowance.plan === "pro" ? null : (person?.queue ?? null);
   const view = allowanceView(allowance);
   return json({
     login: identity.login,
@@ -750,8 +769,11 @@ async function me(c: Ctx): Promise<Response> {
     status: allowance.status,
     allowance: queue ? { ...view, remaining: 0 } : view,
     models: [...ALLOWED_MODELS],
-    plan: "free",
-    topupTokensLeft: 0,
+    plan: allowance.plan,
+    topupTokensLeft: allowance.topupTokensLeft,
+    pro: allowance.plan === "pro" || allowance.proPeriodEnd !== null
+      ? { periodEnd: allowance.proPeriodEnd === null ? null : new Date(allowance.proPeriodEnd).toISOString(), cancelAtPeriodEnd: allowance.proCancelAtPeriodEnd }
+      : null,
     "queue": queue ? { position: queue.position, etaAt: new Date(queue.etaAt).toISOString(), waiting: queue.waiting } : null,
     referral: person?.referral
       ? {
@@ -765,6 +787,154 @@ async function me(c: Ctx): Promise<Response> {
       : null,
     offers: offers(config),
   });
+}
+
+// ─── Billing ────────────────────────────────────────────────────────────────
+
+function billingReady(c: Ctx, product?: Product): Response | undefined {
+  const { stripe } = c.config;
+  const price = product === "pro" ? stripe.pricePro : product === "topup" ? stripe.priceTopup : "n/a";
+  if (!stripe.secretKey || !price) return apiError(503, "billing_unavailable", "Paid plans aren't available yet. Your own key and the free tier still work.");
+  return undefined;
+}
+
+/**
+ * POST /v1/billing/checkout {product: "pro" | "topup"} → {url}: a Stripe Checkout page with
+ * Stripe Tax and the billing address. Needs a signed-in access token (not a server key).
+ */
+async function billingCheckout(c: Ctx): Promise<Response> {
+  const identity = await authenticate(c);
+  if (identity instanceof Response) return identity;
+  const guarded = await apiGuard(c, identity);
+  if (guarded) return guarded;
+  const body = (await readJson(c)) ?? {};
+  const product = body.product;
+  if (product !== "pro" && product !== "topup") return apiError(400, "invalid_request", 'Send {product: "pro"} or {product: "topup"}.');
+  const unavailable = billingReady(c, product);
+  if (unavailable) return unavailable;
+  const person = account(c, identity.githubId);
+  const allowance = await person.allowance(c.now(), limitsFor((await runtime(c)).config));
+  if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
+  if (allowance.status === "suspended") return apiError(403, "suspended", "This account is suspended from the free tier.");
+  if (product === "pro" && allowance.plan === "pro") return apiError(409, "already_pro", "This account already has Pro. Manage it from the billing portal.");
+  const billing = await person.billing();
+  try {
+    const session = await createCheckout(c.fetch, {
+      product,
+      config: c.config.stripe,
+      githubId: identity.githubId,
+      login: identity.login,
+      customerId: billing.customerId,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    return json({ url: session.url });
+  } catch (error) {
+    if (error instanceof StripeError) return apiError(502, "billing_error", "Stripe couldn't start the checkout. Try again in a minute.");
+    throw error;
+  }
+}
+
+/** POST /v1/billing/portal → {url}: Stripe's Customer Portal, for cancelling Pro or changing the card. */
+async function billingPortal(c: Ctx): Promise<Response> {
+  const identity = await authenticate(c);
+  if (identity instanceof Response) return identity;
+  const guarded = await apiGuard(c, identity);
+  if (guarded) return guarded;
+  const unavailable = billingReady(c);
+  if (unavailable) return unavailable;
+  const billing = await account(c, identity.githubId).billing();
+  if (!billing.customerId) return apiError(404, "no_billing_account", "There is nothing to manage yet: this account hasn't bought anything.");
+  try {
+    return json(await createPortal(c.fetch, { config: c.config.stripe, customerId: billing.customerId }));
+  } catch (error) {
+    if (error instanceof StripeError) return apiError(502, "billing_error", "Stripe couldn't open the billing portal. Try again in a minute.");
+    throw error;
+  }
+}
+
+/**
+ * POST /v1/billing/webhook: Stripe's events, verified with STRIPE_WEBHOOK_SECRET and handled
+ * once per event id. Handled: checkout.session.completed, invoice.paid,
+ * invoice.payment_failed, customer.subscription.updated and customer.subscription.deleted;
+ * anything else is acknowledged and ignored.
+ */
+async function billingWebhook(c: Ctx): Promise<Response> {
+  const secret = c.config.stripe.webhookSecret;
+  if (!secret) return apiError(503, "billing_unavailable", "Billing isn't configured.");
+  const raw = await c.request.text();
+  const verified = await verifyWebhook(raw, c.request.headers.get("stripe-signature"), secret, c.now());
+  if ("error" in verified) return apiError(400, "invalid_signature", `Webhook refused: ${verified.error}.`);
+  const { event } = verified;
+  if (await directory(c).billingEventSeen(event.id)) return json({ received: true, duplicate: true });
+  const outcome = await applyBillingEvent(c, event);
+  await directory(c).markBillingEvent(event.id, event.type, c.now());
+  return json({ received: true, outcome });
+}
+
+/** Applies one event. Every step is idempotent on its own, so a retried delivery is harmless. */
+async function applyBillingEvent(c: Ctx, event: StripeEvent): Promise<string> {
+  const object = event.data.object;
+  const eventAt = event.created;
+  const customerId = idOf(object.customer);
+  const owner = async (...candidates: unknown[]) => githubIdFrom(...candidates) ?? (customerId ? await directory(c).customerOwner(customerId) : undefined);
+  const subscription = async (githubId: number, input: { subscriptionId: string; state: "active" | "past_due" | "canceled"; periodEnd: number | null | undefined; cancelAtPeriodEnd?: boolean }) => {
+    const person = account(c, githubId);
+    const applied = await person.applySubscription({ ...input, ...(customerId ? { customerId } : {}), eventAt });
+    if (!applied) return "stale";
+    const state = await person.billing();
+    await directory(c).mirrorSubscription({ githubId, state: state.proState, periodEnd: state.periodEnd, eventAt });
+    return `pro_${input.state}`;
+  };
+
+  switch (event.type) {
+    case "checkout.session.completed": {
+      const githubId = githubIdFrom(object.client_reference_id, object.metadata?.github_id);
+      if (githubId === undefined) return "ignored";
+      if (customerId) {
+        await directory(c).mapCustomer(customerId, githubId);
+        await account(c, githubId).setCustomer(customerId);
+      }
+      const product = object.metadata?.product ?? (object.mode === "subscription" ? "pro" : "topup");
+      if (product === "topup") {
+        if (object.payment_status !== "paid") return "unpaid";
+        const { tokens, validDays } = c.config.offers.topup;
+        const createdAt = eventAt * 1000;
+        await account(c, githubId).grantTopup({ id: String(object.id), tokens, createdAt, expiresAt: createdAt + validDays * DAY_MS });
+        await directory(c).recordPayment({ id: String(object.id), githubId, kind: "topup", amountCents: cents(object.amount_subtotal ?? object.amount_total), at: createdAt });
+        return "topup_granted";
+      }
+      const subscriptionId = idOf(object.subscription);
+      if (!subscriptionId) return "ignored";
+      return subscription(githubId, { subscriptionId, state: "active", periodEnd: undefined });
+    }
+    case "invoice.paid":
+    case "invoice.payment_failed": {
+      const { subscriptionId, metadata } = invoiceSubscription(object);
+      if (!subscriptionId) return "ignored";
+      const githubId = await owner(metadata.github_id);
+      if (githubId === undefined) return "ignored";
+      if (event.type === "invoice.payment_failed") return subscription(githubId, { subscriptionId, state: "past_due", periodEnd: undefined });
+      await directory(c).recordPayment({ id: String(object.id), githubId, kind: "pro", amountCents: cents(object.total_excluding_tax ?? object.subtotal ?? object.amount_paid), at: eventAt * 1000 });
+      return subscription(githubId, { subscriptionId, state: "active", periodEnd: invoicePeriodEnd(object) });
+    }
+    case "customer.subscription.updated":
+    case "customer.subscription.deleted": {
+      const githubId = await owner(object.metadata?.github_id);
+      if (githubId === undefined || typeof object.id !== "string") return "ignored";
+      return subscription(githubId, {
+        subscriptionId: object.id,
+        state: event.type === "customer.subscription.deleted" ? "canceled" : proState(object.status),
+        periodEnd: periodEnd(object),
+        cancelAtPeriodEnd: object.cancel_at_period_end === true,
+      });
+    }
+    default:
+      return "ignored";
+  }
+}
+
+function cents(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 0;
 }
 
 /**
@@ -850,38 +1020,46 @@ async function chat(c: Ctx): Promise<Response> {
   }
 
   if (gate.paused) return pausedError(await headers());
+  // Why free tokens are unavailable to a free-plan person right now, if they are: queued, or a
+  // global cap reached. Pro and top-ups still work; the reservation decides which applies.
   const place = isAdmin ? null : (gate.person?.queue ?? null);
-  if (place) {
-    const etaAt = new Date(place.etaAt).toISOString();
-    return apiError(
-      402,
-      "free_tier_queued",
-      queuedMessage(place.position, waitText(place.etaAt, c.now())),
-      { position: place.position, etaAt, offers: offers(gate.config), referralLink: link },
-      await headers(),
-    );
-  }
-  if (!isAdmin) {
-    // The global caps read as a pause for everyone, with when it ends; a person's own key still works.
-    const { globalTotalUsdCap: total, globalWeeklyUsdCap: weekly } = gate.config;
-    if (total !== undefined && gate.totalUsd >= total) {
-      return apiError(503, "global_total_budget_reached", TOTAL_BUDGET_MESSAGE, { reason: "total_budget", pausedForEveryone: true, resetsAt: null }, await headers());
-    }
-    if (weekly !== undefined && gate.weekUsd >= weekly) {
-      const resumes = weekEnd(c.now());
-      const resetsAt = new Date(resumes).toISOString();
-      const retryAfter = String(Math.max(1, Math.ceil((resumes - c.now()) / 1000)));
-      return apiError(503, "global_weekly_budget_reached", weeklyBudgetMessage(resetsAt), { reason: "weekly_budget", pausedForEveryone: true, resetsAt }, { ...(await headers()), "retry-after": retryAfter });
-    }
-  }
+  const { globalTotalUsdCap: total, globalWeeklyUsdCap: weekly } = gate.config;
+  const freeBlock: (() => Promise<Response>) | undefined = isAdmin
+    ? undefined
+    : place
+      ? async () =>
+          apiError(
+            402,
+            "free_tier_queued",
+            queuedMessage(place.position, waitText(place.etaAt, c.now())),
+            { position: place.position, etaAt: new Date(place.etaAt).toISOString(), offers: offers(gate.config), referralLink: link },
+            await headers(),
+          )
+      : total !== undefined && gate.totalUsd >= total
+        ? async () => apiError(503, "global_total_budget_reached", TOTAL_BUDGET_MESSAGE, { reason: "total_budget", pausedForEveryone: true, resetsAt: null }, await headers())
+        : weekly !== undefined && gate.weekUsd >= weekly
+          ? async () => {
+              // The global caps read as a pause for everyone, with when it ends; a person's own key still works.
+              const resumes = weekEnd(c.now());
+              const resetsAt = new Date(resumes).toISOString();
+              const retryAfter = String(Math.max(1, Math.ceil((resumes - c.now()) / 1000)));
+              return apiError(503, "global_weekly_budget_reached", weeklyBudgetMessage(resetsAt), { reason: "weekly_budget", pausedForEveryone: true, resetsAt }, { ...(await headers()), "retry-after": retryAfter });
+            }
+          : undefined;
 
   const requestedMax = numberOrUndefined(body.max_tokens) ?? numberOrUndefined(body.max_completion_tokens);
-  const reservation = await person.reserve({ promptEstimate: estimatePromptTokens(bodyBytes), requestedMaxTokens: requestedMax, limits, now: c.now() });
+  const reservation = await person.reserve({
+    promptEstimate: estimatePromptTokens(bodyBytes),
+    requestedMaxTokens: requestedMax,
+    limits: { ...limits, freeBlocked: freeBlock !== undefined },
+    now: c.now(),
+  });
   if (!reservation.ok) {
     const quota = quotaHeaders(reservation.allowance);
     if (reservation.code === "quota_exceeded") {
+      if (freeBlock && reservation.allowance.plan === "free") return freeBlock();
       const resetsAt = new Date(reservation.allowance.resetsAt).toISOString();
-      return apiError(402, "quota_exceeded", quotaMessage(reservation.reason, resetsAt), { resetsAt, reason: reservation.reason, offers: offers(gate.config), referralLink: link }, quota);
+      return apiError(402, "quota_exceeded", quotaMessage(reservation.reason, resetsAt, reservation.allowance.plan), { resetsAt, reason: reservation.reason, offers: offers(gate.config), referralLink: link }, quota);
     }
     if (reservation.code === "suspended") return apiError(403, "suspended", "This account is suspended from the free tier.", {}, quota);
     return apiError(403, "not_invited", "This GitHub account isn't on the free tier.", {}, quota);
@@ -922,6 +1100,7 @@ async function chat(c: Ctx): Promise<Response> {
       cachedTokens: usage?.cachedTokens ?? 0,
       chargedTokens: settled.charged,
       costUsd: settled.costUsd,
+      ...(settled.paid ? { paid: true } : {}),
       status,
       latencyMs: c.now() - started,
       ...(host ? { host } : {}),
@@ -1042,6 +1221,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       ...spend,
       weekStart: new Date(spend.weekStart).toISOString(),
       resetsAt: new Date(spend.resetsAt).toISOString(),
+      paid: { usd: spend.paidUsd, tokens: spend.paidTokens, requests: spend.paidRequests },
       caps: {
         globalWeeklyUsd: config.globalWeeklyUsdCap ?? null,
         globalTotalUsd: config.globalTotalUsdCap ?? null,
