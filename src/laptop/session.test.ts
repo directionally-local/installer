@@ -777,6 +777,10 @@ describe("dl routing for projects", () => {
   });
 });
 
+// A patched Node, so these don't depend on the runner's: CI's cache once had 22.23.3, which dl
+// rightly refuses (CVE-2026-111497) before starting Autopilot.
+const PATCHED_NODE = "24.22.1";
+
 const plainText = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
 
 describe("dl the first time on a laptop", () => {
@@ -789,7 +793,7 @@ describe("dl the first time on a laptop", () => {
     terminal: true,
     root: false,
     serverState: async () => undefined,
-    session: { autopilot: async () => AUTOPILOT, probe: async () => true, placeModel: async () => undefined, spawn: plain.spawn, signals: new EventEmitter() },
+    session: { nodeVersion: PATCHED_NODE, autopilot: async () => AUTOPILOT, probe: async () => true, placeModel: async () => undefined, spawn: plain.spawn, signals: new EventEmitter() },
     setup: async (options) => { setups.push(options); return 0; },
     autopilotAuth: async () => undefined,
     ...(prompter ? { prompter } : {}),
@@ -847,7 +851,7 @@ describe("dl the first time on a laptop", () => {
     const dir = join(root, "fresh");
     await mkdir(dir);
     const config = process.env.XDG_CONFIG_HOME!;
-    const withEnv = (extra: Record<string, string>) => laptop(undefined, { session: { autopilot: async () => AUTOPILOT, spawn: plain.spawn, signals: new EventEmitter(), referral: { env: { XDG_CONFIG_HOME: config, ...extra } } } });
+    const withEnv = (extra: Record<string, string>) => laptop(undefined, { session: { nodeVersion: PATCHED_NODE, autopilot: async () => AUTOPILOT, spawn: plain.spawn, signals: new EventEmitter(), referral: { env: { XDG_CONFIG_HOME: config, ...extra } } } });
     // The install script started dl with the link's code.
     assert.equal(await inside(dir, () => main([], capture(), withEnv({ DL_REFERRAL: "Octo" }))), 0);
     assert.equal(plain.launches[0]!.env.DL_REFERRAL, "octo");
@@ -896,7 +900,7 @@ describe("dl the first time on a laptop", () => {
     const file = JSON.parse(await readFile(process.env.AUTOPILOT_REMOTES_FILE!, "utf8")) as Record<string, unknown>;
     await writeFile(process.env.AUTOPILOT_REMOTES_FILE!, JSON.stringify({ ...file, default: "box" }));
     const io = capture();
-    assert.equal(await inside(dir, () => main([], io, laptop(undefined, { session: { autopilot: async () => AUTOPILOT, probe: async () => true, placeModel: async () => undefined, spawn: autopilot.spawn, signals: new EventEmitter() } }))), 0);
+    assert.equal(await inside(dir, () => main([], io, laptop(undefined, { session: { nodeVersion: PATCHED_NODE, autopilot: async () => AUTOPILOT, probe: async () => true, placeModel: async () => undefined, spawn: autopilot.spawn, signals: new EventEmitter() } }))), 0);
     assert.equal(autopilot.launches[0]!.args[1], "attach-remote");
     assert.match(plainText(io.text()), /· Connecting to box \(default\) · me\/app/);
     assert.equal(plain.launches.length, 2, "not plain autopilot");
