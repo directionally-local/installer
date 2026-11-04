@@ -21,7 +21,7 @@ export const RUNTIME_SETTINGS = {
   globalWeeklyUsdCap: { kind: "usd", env: "GLOBAL_WEEKLY_USD_CAP" },
   /** USD across everyone but admins, in total. */
   globalTotalUsdCap: { kind: "usd", env: "GLOBAL_TOTAL_USD_CAP" },
-  /** Active non-admin people at most. */
+  /** Active non-admin people at most, while admission is invite-only. */
   maxActiveUsers: { kind: "count", env: "MAX_ACTIVE_USERS" },
   /** Accounts old enough get in without an invite. */
   openAdmission: { kind: "flag", env: "OPEN_ADMISSION" },
@@ -35,6 +35,14 @@ export const RUNTIME_SETTINGS = {
   openRouterDataCollection: { kind: "dataCollection", env: "OPENROUTER_DATA_COLLECTION" },
   /** Minutes a host that failed a request is skipped; 0 turns it off. */
   openRouterHostCooldownMinutes: { kind: "minutes", env: "OPENROUTER_HOST_COOLDOWN_MINUTES" },
+  /** Share of the weekly cap at which new sign-ups are queued, 0 to 1. */
+  queueThreshold: { kind: "weight", env: "QUEUE_THRESHOLD" },
+  /** Places a queued person moves up per referred friend who became weekly active. */
+  queueReferralPlaces: { kind: "count", env: "QUEUE_REFERRAL_PLACES" },
+  /** Tokens a week for each side of an active referral. */
+  referralBonusTokens: { kind: "tokens", env: "REFERRAL_BONUS_TOKENS" },
+  /** The most referral bonus tokens one person gets a week. */
+  referralBonusCap: { kind: "tokens", env: "REFERRAL_BONUS_CAP" },
 } as const;
 
 export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;
@@ -137,9 +145,10 @@ export function readOverrides(stored: Array<{ key: string; value: string }>): Ov
 }
 
 /** The config with overrides applied. */
-export function applyOverrides(config: FreeConfig, overrides: Overrides): FreeConfig {
-  const next: FreeConfig = { ...config };
+export function applyOverrides<T extends Partial<FreeConfig>>(config: T, overrides: Overrides): T {
+  const next: T = { ...config };
   for (const [key, value] of Object.entries(overrides) as Array<[RuntimeKey, OverrideValue]>) {
+    if (!(key in config)) continue;
     switch (RUNTIME_SETTINGS[key].kind) {
       case "usd":
         (next as unknown as Record<string, unknown>)[key] = value === null ? undefined : value;

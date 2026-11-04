@@ -15,8 +15,177 @@ There is one account per GitHub user, keyed on the numeric GitHub id.
   invite code.
 - **Open admission (`OPEN_ADMISSION=true`, or the admin override).** GitHub accounts at least
   `MIN_GITHUB_ACCOUNT_AGE_DAYS` (30) old get in without a code. Younger accounts still need one.
-- In both modes, new people stop at `MAX_ACTIVE_USERS` (admins aren't counted). A device that
-  already holds another account's grant is refused, and each network gets 3 new accounts a day.
+- **`MAX_ACTIVE_USERS` applies only while invite-only** (admins aren't counted). With open
+  admission there is no cap on people: everyone old enough gets an account at once, and the
+  [queue](#the-queue-for-free-tokens) keeps free spend inside the weekly budget instead. So
+  turning `openAdmission` on is the one switch for open sign-up; the smoke-test cap (20) needs no
+  change.
+- In both modes, a device that already holds another account's grant is refused, and each
+  network gets 3 new accounts a day.
+
+## API contract for the open launch
+
+Autopilot and dl.new build against these shapes. Fields may be added; none are removed.
+
+### `GET /v1/me`
+
+```jsonc
+{
+  "login": "alice", "githubId": 123, "status": "active",
+  "allowance": { "tokensPerWeek": 60000000, "usedThisWeek": 0, "remaining": 60000000,
+                 "resetsAt": "2026-11-09T00:00:00.000Z", "usdPerWeek": 6, "spentUsdThisWeek": 0 },
+  "models": ["deepseek/deepseek-v4.1-flash-1017"],
+  "plan": "free",                       // "free" | "pro"
+  "topupTokensLeft": 0,
+  "queue": null,                        // or { "position": 214, "etaAt": "2026-11-16T00:00:00.000Z", "waiting": 300 }
+  "referral": { "code": "alice", "link": "https://dl.new/r/alice", "joined": 2, "activeThisWeek": 1,
+                "bonusTokensPerWeek": 10000000, "bonusCapPerWeek": 50000000 },
+  "offers": { "pro": { "priceUsdMonthly": 10, "tokensPerWeek": 100000000 },
+              "topup": { "priceUsd": 3, "tokens": 50000000, "validDays": 30 } }
+}
+```
+
+- `allowance.tokensPerWeek` includes this week's referral bonus; the dollar allowance grows in the
+  same proportion. While queued, `allowance.remaining` is 0.
+- `referral.joined`: sign-ups with this person's code that count. `activeThisWeek`: those friends
+  whose pair counts toward this week's bonus (see [Referrals](#referrals)).
+- `offers` come from config (`PRO_PRICE_USD_MONTHLY`, `PRO_TOKENS_PER_WEEK`, `TOPUP_PRICE_USD`,
+  `TOPUP_TOKENS`, `TOPUP_VALID_DAYS`).
+
+### Refusals for free tokens (`POST /v1/chat/completions`, HTTP 402)
+
+Out of tokens (a free user):
+
+```json
+{ "error": { "code": "quota_exceeded", "message": "This week's free token allowance is used up. It resets at 2026-11-09T00:00:00.000Z.",
+             "reason": "tokens", "resetsAt": "2026-11-09T00:00:00.000Z",
+             "offers": { "pro": { "priceUsdMonthly": 10, "tokensPerWeek": 100000000 }, "topup": { "priceUsd": 3, "tokens": 50000000, "validDays": 30 } },
+             "referralLink": "https://dl.new/r/alice" } }
+```
+
+Queued:
+
+```json
+{ "error": { "code": "free_tier_queued",
+             "message": "You're #214 in line for free tokens (about 3 days). Each friend who starts using dl moves you up. Your own key works now.",
+             "position": 214, "etaAt": "2026-11-09T00:00:00.000Z",
+             "offers": { "pro": { "priceUsdMonthly": 10, "tokensPerWeek": 100000000 }, "topup": { "priceUsd": 3, "tokens": 50000000, "validDays": 30 } },
+             "referralLink": "https://dl.new/r/alice" } }
+```
+
+The wait reads "about N days" under two weeks, else "about N weeks".
+
+### Sign-up with a referral code
+
+- `POST /v1/device/code {"referral_code": "alice"}`: optional. A code, any case, or the whole link
+  (`https://dl.new/r/alice`). Anything that isn't a code is ignored, never an error.
+- `GET /device?ref=alice` (also with `user_code`): the browser carries the code through GitHub
+  sign-in. A code from the terminal wins over one from the browser.
+
+### `GET /v1/referrals/<code>` (public)
+
+For the dl.new invite page. Rate-limited per IP (60 a minute), `cache-control: public, max-age=300`.
+
+- `200 {"valid": true, "login": "Alice", "bonusTokensPerWeek": 10000000}` when the code belongs to
+  an admitted, unsuspended account. `login` is the current GitHub login.
+- `404 {"valid": false}` otherwise. Nothing else is returned: no id, usage or dates.
+
+## The queue for free tokens
+
+From the open launch, sign-up is never a hard block for new people. While **this week's free
+spend is at or above `QUEUE_THRESHOLD` (0.8) of the weekly cap**, or anyone is already waiting, a
+new open sign-up still gets an account (identity, referral link, own-key use, paid plans) but is
+queued for free tokens, in order. People already in keep their allowance for the week. Invited
+people and admins are never queued: an invite is the owner's own choice.
+
+**Each Monday** (on the first request after Monday 00:00 UTC), the queue is admitted front first,
+as many as the forecast allows:
+
+```
+avg      = last week's free cost ÷ last week's actives    (non-admins with a free request)
+           no data: the per-person weekly USD cap ($5)
+budget   = QUEUE_THRESHOLD × weekly cap, and at most what is left of the all-time cap
+admitted = the largest N with avg × (actives + N) ≤ budget
+         = floor(budget ÷ avg) − actives, at least 0, at most the queue's length
+```
+
+For example, 30 actives at $5 last week and a $250 cap: floor(200 ÷ 5) − 30 = 10 people get in.
+No weekly cap means everyone gets in.
+
+**Order:** oldest first; each referred friend who has become weekly active moves a person up
+`QUEUE_REFERRAL_PLACES` (25) places, ahead of whoever held that place.
+
+**Estimated wait:** a person at position P expects free tokens on the Monday after
+ceil(P ÷ per-week) weekly admissions, where per-week is the last Monday that let anyone in, or
+today's forecast when none has yet (at least 1).
+
+**Admin:** `GET /admin/queue` lists the line (position, id, login, queued at, active friends),
+the last 12 Monday runs with their forecast inputs, and today's forecast.
+`POST /admin/queue/admit {"count": 10}` lets the next 10 in now.
+
+## Referrals
+
+- **Codes:** everyone admitted gets a code: their GitHub login, lowercased, mapped to the numeric
+  GitHub id. The link is `REFERRAL_LINK_BASE` + code, `https://dl.new/r/<code>`. The code never
+  changes, even when the login does; if a login's code already belongs to someone else (a login
+  that changed hands), the code is `<login>-<id in base 36>`.
+- **Weekly active:** requests on 3 or more distinct UTC days of one Monday–Sunday week.
+- **Bonus:** a referral counts for the current week when both people are weekly active last week
+  or so far this week: it starts the day both reach 3 days and lasts while both stay weekly
+  active, recomputed each week. Each counting referral gives **both** sides
+  `REFERRAL_BONUS_TOKENS` (10M) a week, up to `REFERRAL_BONUS_CAP` (50M) a week per person. Bonus
+  tokens are free tokens: their cost counts within the weekly budget.
+- **Anti-abuse:** only new accounts can be referred, once. No payout for a person's own code
+  (`self`), an unknown code, or two accounts seen on the same network (the same IPv4 address or
+  IPv6 /64), at sign-up or at any later sign-in of either; a referral that turns out to share a
+  network stops counting. One device can't hold both accounts (a device keeps one grant), and
+  the per-network limit of 3 new accounts a day applies to referred sign-ups too. Networks are
+  stored as keyed hashes, only for this check.
+
+## Alerts
+
+Free spend crossing **50%, 80% and 100%** of the weekly cap (once per threshold per week) and of
+the all-time cap (once per threshold, ever) sends an alert; a jump past several thresholds sends
+one. So do the kill switch (pause and resume), the queue starting (its first queued sign-up), and
+an OpenRouter host failing more than 20% of at least 20 requests over the last hour (once, until
+it recovers). Messages:
+
+```
+dl free tier: $200 of the $250 weekly cap used (80%). Resets Mon 00:00 UTC.
+dl free tier: $500 of the $1,000 all-time cap used (50%). It doesn't reset; free tokens stop at 100% unless the cap is raised.
+dl free tier: free tokens paused for everyone by <login> (kill switch).
+dl free tier: the queue started ($200 of the $250 weekly cap used). New sign-ups wait in line for free tokens until Monday's admission.
+dl free tier: OpenRouter host <slug> failed 9 of 40 requests in the last hour (23%). New requests avoid it while it keeps failing.
+```
+
+**Email (primary).** The Cloudflare config binds `send_email` as `ALERT_EMAIL`. Each alert is a
+small plain-text RFC 5322 message from `ALERT_EMAIL_FROM` (`alerts@dl.new`) to `ALERT_EMAIL_TO`.
+The subject is the short line (`dl free tier: 80% of the $250 weekly cap used`); the body is the
+message above plus a link to the dashboard (`<PUBLIC_URL>/admin`). The binding is optional:
+without it (Serverless Objects, or not set up yet) alerts go to the webhook, and with neither they
+are written to the log. With both, both get every alert. The one line that loads
+`cloudflare:email` runs only when the binding exists and carries a `portable-exception` note for
+the portability check.
+
+One-time setup (the owner, in Cloudflare; dl.new has no mail today, and directionallylocal.com's
+Google Workspace mail and DNS are not touched):
+
+1. Cloudflare → dl.new → Email → Email Routing → Enable (adds MX/TXT records on dl.new only).
+2. Add and verify the destination address (Email Routing → Destination addresses).
+3. Set `ALERT_EMAIL_TO` to that address (a var or secret). Optionally pin the binding to it with
+   `"destination_address"` in `wrangler.cloudflare.jsonc`.
+
+**Webhook.** `ALERT_WEBHOOK_URL` (a secret: it holds a token). The format comes from the host, or
+`ALERT_WEBHOOK_KIND` (`discord`, `slack`, `telegram`):
+
+| kind | URL | body |
+|---|---|---|
+| Discord | `https://discord.com/api/webhooks/…` | `{"content": text}` |
+| Slack | `https://hooks.slack.com/services/…` | `{"text": text}` |
+| Telegram | `https://api.telegram.org/bot<token>/sendMessage` | `{"chat_id", "text"}`; chat id from `ALERT_TELEGRAM_CHAT_ID` or `?chat_id=` on the URL |
+| other | any https URL | `{"text": text, "content": text}` |
+
+A failed alert is logged and not retried; it never fails the request that triggered it.
 
 ## Refusals
 
@@ -33,7 +202,8 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `service_paused` | device code, device token, chat | `reason: "paused"`, `pausedForEveryone: true`, `resetsAt: null` |
 | `global_weekly_budget_reached` | chat (503) | `reason: "weekly_budget"`, `pausedForEveryone: true`, `resetsAt` (ISO time), `Retry-After` header |
 | `global_total_budget_reached` | chat (503) | `reason: "total_budget"`, `pausedForEveryone: true`, `resetsAt: null` |
-| `quota_exceeded` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt` |
+| `quota_exceeded` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `offers`, `referralLink` |
+| `free_tier_queued` | chat (402) | `position`, `etaAt`, `offers`, `referralLink` |
 | `not_invited` | API, and older sign-ins | none |
 
 The two global budget codes mean "free tokens are paused for everyone, and your own key still
@@ -52,9 +222,17 @@ with who made it and when.
 | `perPersonWeeklyUsdCap` | `PER_PERSON_WEEKLY_USD_CAP` | 5 |
 | `globalWeeklyUsdCap` | `GLOBAL_WEEKLY_USD_CAP` | 250 |
 | `globalTotalUsdCap` | `GLOBAL_TOTAL_USD_CAP` | 1000 |
-| `maxActiveUsers` | `MAX_ACTIVE_USERS` | 50 |
+| `maxActiveUsers` | `MAX_ACTIVE_USERS` (invite-only only) | 50 |
 | `openAdmission` | `OPEN_ADMISSION` | false |
 | `cachedTokenWeight` | `CACHED_TOKEN_WEIGHT` | 0.02 |
+| `queueThreshold` | `QUEUE_THRESHOLD` | 0.8 |
+| `queueReferralPlaces` | `QUEUE_REFERRAL_PLACES` | 25 |
+| `referralBonusTokens` | `REFERRAL_BONUS_TOKENS` | 10,000,000 |
+| `referralBonusCap` | `REFERRAL_BONUS_CAP` | 50,000,000 |
+
+Env only: `REFERRAL_LINK_BASE` (`https://dl.new/r/`), the offers above, `ALERT_EMAIL_TO`,
+`ALERT_EMAIL_FROM` (`alerts@dl.new`), `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_KIND`,
+`ALERT_TELEGRAM_CHAT_ID`.
 
 ```sh
 # Read the effective values, the env values, the overrides and the change log
@@ -172,13 +350,22 @@ day, last 8 weeks), cohort retention (weeks 1, 2 and 4 after sign-up), cost per 
 (total, median, mean, and the top 10 of any week), who reached their token or dollar allowance
 this week and last (and on which day), and global spend against the effective caps with the
 pause and admission state. Each table has a CSV at `/admin/dashboard/<table>.csv`
-(`spend`, `weekly-active`, `retention`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`).
+(`spend`, `weekly-active`, `retention`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`,
+`queue`, `referrals`, `funnel`).
+
+At the top: a red banner when free spend is at 80% or more of either cap, and the all-time spend
+against the all-time cap ($1,000). Then the queue (waiting now, the longest wait, how many this
+Monday let in and the forecast behind it), referrals (links used, sign-ups via referral, how many
+became weekly active, bonus tokens a week granted this week), and the funnel per sign-up week
+and in all (sign-ups → first request → weekly active). Counts only, no content.
 
 - **Admins are left out of every number:** anyone in `ADMIN_GITHUB_IDS` and anyone admitted as
   an admin.
 - **What it reads:** only `daily_activity`, a per-person per-day roll-up of request and event
   counts, charged tokens and cost, plus GitHub logins, sign-up times, per-person grants and the
-  spend totals. No model, event type or properties, session ids, prompts or code. A test runs
+  spend totals, and for the launch sections the queue (ids and times), the Monday runs (counts
+  and the forecast) and referrals (ids, time and outcome). No model, event type or properties,
+  session ids, prompts or code. A test runs
   the dashboard under an SQLite authorizer that allows only those columns.
 - **The roll-up** is kept up to date with each request and event, and built once from the
   existing log the first time this version starts.

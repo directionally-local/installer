@@ -22,6 +22,9 @@ export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   grants: ["github_id", "weekly_tokens", "weekly_usd"],
   spend_weeks: ["week_start", "usd", "tokens", "requests", "admin_usd", "admin_tokens", "admin_requests"],
   settings: ["key", "value"],
+  queue: ["github_id", "queued_at", "admitted_at", "admitted_how"],
+  queue_runs: ["week_start", "ran_at", "admitted", "waiting_before", "avg_usd", "actives", "budget_usd"],
+  referrals: ["referred_id", "referrer_id", "outcome", "at"],
 };
 
 /** Weeks of weekly actives and cost on the page. */
@@ -97,6 +100,39 @@ export interface LimitHit {
   usdLimit: number | null;
 }
 
+export interface QueueView {
+  waiting: number;
+  /** Unix ms the longest-waiting person joined the line; null when nobody waits. */
+  oldestQueuedAt: number | null;
+  /** This Monday's admission (this week's run), if it ran. */
+  thisWeek: { admitted: number; waitingBefore: number; avgUsd: number; actives: number; budgetUsd: number | null; ranAt: number } | null;
+  /** Everyone who has waited, and how many got in. */
+  everQueued: number;
+  admittedEver: number;
+}
+
+export interface ReferralView {
+  /** Sign-ups that carried any referral code (including self, unknown and same-network ones). */
+  linksUsed: number;
+  /** Sign-ups that count as referrals (outcome ok). */
+  signups: number;
+  /** Referral sign-ups refused a payout: own code, unknown code, or the same network. */
+  blocked: number;
+  /** Referred people who were weekly active (3+ request days) in some week. */
+  becameActive: number;
+  /** Bonus tokens a week granted this week, summed over everyone, and how many people get one. */
+  bonusTokensThisWeek: number;
+  peopleWithBonus: number;
+}
+
+export interface FunnelRow {
+  /** Monday of the sign-up week; null for the all-time row. */
+  weekStart: number | null;
+  signedUp: number;
+  firstRequest: number;
+  weeklyActive: number;
+}
+
 export interface DashboardData {
   now: number;
   currentWeek: number;
@@ -107,6 +143,10 @@ export interface DashboardData {
   top: TopSpender[];
   limitHits: LimitHit[];
   people: { admitted: number; activeThisWeek: number };
+  queue: QueueView;
+  referrals: ReferralView;
+  /** Sign-ups → first request → weekly active (3+ request days in a week), per sign-up week and in all. */
+  funnel: FunnelRow[];
 }
 
 /** The slice of `ctx.storage.sql` the queries need. */
@@ -278,9 +318,77 @@ export function dashboardData(
   const admitted =
     sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM people WHERE ${notAdmin("github_id")}`, admins).toArray()[0]?.n ?? 0;
 
+  // The queue: who waits now, and this Monday's admission.
+  const queueRow = sql
+    .exec<{ waiting: number; oldest: number | null; ever: number; admitted: number }>(
+      `SELECT SUM(admitted_at IS NULL) AS waiting, MIN(CASE WHEN admitted_at IS NULL THEN queued_at END) AS oldest,
+              COUNT(*) AS ever, SUM(admitted_at IS NOT NULL) AS admitted FROM queue`,
+    )
+    .toArray()[0];
+  const run = sql
+    .exec<{ ran_at: number; admitted: number; waiting_before: number; avg_usd: number; actives: number; budget_usd: number | null }>(
+      "SELECT ran_at, admitted, waiting_before, avg_usd, actives, budget_usd FROM queue_runs WHERE week_start = ?",
+      currentWeek,
+    )
+    .toArray()[0];
+  const queue: QueueView = {
+    waiting: queueRow?.waiting ?? 0,
+    oldestQueuedAt: queueRow?.oldest ?? null,
+    thisWeek: run ? { admitted: run.admitted, waitingBefore: run.waiting_before, avgUsd: run.avg_usd, actives: run.actives, budgetUsd: run.budget_usd, ranAt: run.ran_at } : null,
+    everQueued: queueRow?.ever ?? 0,
+    admittedEver: queueRow?.admitted ?? 0,
+  };
+
+  // Referrals: counts only. Bonus tokens are filled in by the Directory, which knows the rules.
+  const referralRow = sql
+    .exec<{ used: number; ok: number }>("SELECT COUNT(*) AS used, SUM(outcome = 'ok') AS ok FROM referrals")
+    .toArray()[0];
+  const becameActive =
+    sql
+      .exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM referrals r WHERE r.outcome = 'ok' AND EXISTS (
+           SELECT 1 FROM daily_activity d WHERE d.github_id = r.referred_id AND d.requests > 0
+           GROUP BY (d.day - ((d.day + 3) % 7)) HAVING COUNT(*) >= ${REGULAR_DAYS})`,
+      )
+      .toArray()[0]?.n ?? 0;
+  const referrals: ReferralView = {
+    linksUsed: referralRow?.used ?? 0,
+    signups: referralRow?.ok ?? 0,
+    blocked: (referralRow?.used ?? 0) - (referralRow?.ok ?? 0),
+    becameActive,
+    bonusTokensThisWeek: 0,
+    peopleWithBonus: 0,
+  };
+
+  // The funnel per sign-up week (last WEEKS_SHOWN weeks) and in all.
+  const funnelRows = sql
+    .exec<{ github_id: number; admitted_at: number; requested: number; active: number }>(
+      `WITH reqdays AS (SELECT github_id, ${WEEK_OF_DAY} AS week, COUNT(*) AS days FROM daily_activity WHERE requests > 0 GROUP BY github_id, week),
+            per AS (SELECT github_id, MAX(days >= ${REGULAR_DAYS}) AS active FROM reqdays GROUP BY github_id)
+       SELECT p.github_id AS github_id, p.admitted_at AS admitted_at, per.github_id IS NOT NULL AS requested, COALESCE(per.active, 0) AS active
+       FROM people p LEFT JOIN per ON per.github_id = p.github_id WHERE ${notAdmin("p.github_id")}`,
+      admins,
+    )
+    .toArray();
+  const funnelByWeek = new Map<number, FunnelRow>();
+  for (let week = firstWeekDay; week <= currentWeekDay; week += 7) funnelByWeek.set(toMs(week), { weekStart: toMs(week), signedUp: 0, firstRequest: 0, weeklyActive: 0 });
+  const funnelTotal: FunnelRow = { weekStart: null, signedUp: 0, firstRequest: 0, weeklyActive: 0 };
+  for (const row of funnelRows) {
+    for (const target of [funnelTotal, funnelByWeek.get(weekStart(row.admitted_at))]) {
+      if (!target) continue;
+      target.signedUp++;
+      if (row.requested) target.firstRequest++;
+      if (row.active) target.weeklyActive++;
+    }
+  }
+  const funnel = [funnelTotal, ...[...funnelByWeek.values()].reverse()];
+
   return {
     now: input.now,
     currentWeek,
+    queue,
+    referrals,
+    funnel,
     weeklyActive,
     cohorts,
     weeklyCost,

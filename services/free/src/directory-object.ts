@@ -3,7 +3,10 @@ import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import { dashboardData, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
-import { readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
+import { crossed, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, queueStartedAlert, totalSpendAlert, weeklySpendAlert, type Alert } from "./alerts.js";
+import { etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
+import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type ReferralOutcome } from "./referrals.js";
+import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 
 /**
@@ -20,7 +23,7 @@ import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
  */
 
 export type AdmitResult =
-  | { ok: true; created: boolean; via: "existing" | "admin" | "open" | "invite" }
+  | { ok: true; created: boolean; via: "existing" | "admin" | "open" | "invite"; queued: boolean; queueStarted: boolean }
   | { ok: false; reason: "needs_invite" | "invalid_invite" | "cohort_full" | "device_taken" };
 
 /** One logged change to a runtime setting or the kill switch. */
@@ -70,6 +73,41 @@ export interface HostFailure {
   kind: "http_5xx" | "error_body" | "stream";
   /** The upstream HTTP status for `http_5xx`, else null. */
   upstreamStatus: number | null;
+}
+
+/** A person's place in the queue for free tokens. */
+export interface QueuePlace {
+  /** 1 is next. */
+  position: number;
+  /** Unix ms: the Monday they can expect free tokens. */
+  etaAt: number;
+  waiting: number;
+}
+
+/** What `gate` adds for the caller: queue place, referral numbers and this week's bonus. */
+export interface PersonState {
+  queue: QueuePlace | null;
+  bonusTokens: number;
+  referral: { code: string; joined: number; activeThisWeek: number } | null;
+}
+
+export interface Gate {
+  paused: boolean;
+  weekUsd: number;
+  totalUsd: number;
+  overrides: Overrides;
+  person?: PersonState;
+}
+
+/** One Monday's admission from the queue. */
+export interface QueueRun {
+  weekStart: number;
+  ranAt: number;
+  admitted: number;
+  waitingBefore: number;
+  avgUsd: number;
+  actives: number;
+  budgetUsd: number | null;
 }
 
 export interface SpendSummary {
@@ -198,6 +236,60 @@ const SCHEMA = [
      weekly_tokens INTEGER,
      weekly_usd    REAL
    )`,
+  `CREATE INDEX IF NOT EXISTS daily_activity_person ON daily_activity (github_id, day)`,
+  // The queue for free tokens (queue.ts): one row per person who waited; admitted_at is set
+  // when they got in ("weekly" on a Monday, "admin" by hand).
+  `CREATE TABLE IF NOT EXISTS queue (
+     github_id    INTEGER PRIMARY KEY,
+     queued_at    INTEGER NOT NULL,
+     admitted_at  INTEGER,
+     admitted_how TEXT
+   )`,
+  `CREATE INDEX IF NOT EXISTS queue_waiting ON queue (admitted_at, queued_at)`,
+  `CREATE TABLE IF NOT EXISTS queue_runs (
+     week_start     INTEGER PRIMARY KEY,
+     ran_at         INTEGER NOT NULL,
+     admitted       INTEGER NOT NULL,
+     waiting_before INTEGER NOT NULL,
+     avg_usd        REAL NOT NULL,
+     actives        INTEGER NOT NULL,
+     budget_usd     REAL
+   )`,
+  // Referrals (referrals.ts): each person's stable code, and who signed up with whose code.
+  `CREATE TABLE IF NOT EXISTS referral_codes (
+     code       TEXT PRIMARY KEY,
+     github_id  INTEGER NOT NULL UNIQUE,
+     created_at INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS referrals (
+     referred_id INTEGER PRIMARY KEY,
+     referrer_id INTEGER,
+     code        TEXT NOT NULL,
+     at          INTEGER NOT NULL,
+     outcome     TEXT NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS referrals_referrer ON referrals (referrer_id)`,
+  // Keyed hashes of the networks each person signed in from, for referral anti-abuse only.
+  `CREATE TABLE IF NOT EXISTS person_networks (
+     github_id INTEGER NOT NULL,
+     net_hash  TEXT NOT NULL,
+     first_at  INTEGER NOT NULL,
+     PRIMARY KEY (github_id, net_hash)
+   ) WITHOUT ROWID`,
+  `CREATE INDEX IF NOT EXISTS person_networks_net ON person_networks (net_hash)`,
+  // Per OpenRouter host per minute, for the failure-rate alert; rows older than two hours go.
+  `CREATE TABLE IF NOT EXISTS host_minutes (
+     minute   INTEGER NOT NULL,
+     host     TEXT NOT NULL,
+     requests INTEGER NOT NULL,
+     failures INTEGER NOT NULL,
+     PRIMARY KEY (minute, host)
+   ) WITHOUT ROWID`,
+  // Alerts already sent, so each fires once (alerts.ts).
+  `CREATE TABLE IF NOT EXISTS alerts_sent (
+     key TEXT PRIMARY KEY,
+     at  INTEGER NOT NULL
+   )`,
 ];
 
 /** Set in `settings` once `daily_activity` has been built from the existing log. */
@@ -264,36 +356,63 @@ export class DirectoryObject extends DurableObject {
     accountTooNew: boolean;
     /** Admit accounts that aren't too new without an invite. */
     openAdmission?: boolean;
+    /**
+     * Admission is invite-only, so `maxActive` applies. With open admission (false here) there
+     * is no cap on people; the queue holds free spend inside the budget instead.
+     */
+    inviteOnly?: boolean;
     maxActive: number;
+    /** A referral code the sign-up carried (normalized). */
+    referralCode?: string | undefined;
+    /** A keyed hash of the network the sign-in came from (referral anti-abuse). */
+    networkHash?: string | undefined;
+    /** The effective settings; without them nobody is queued. */
+    policy?: Policy;
     now: number;
   }): Promise<AdmitResult> {
     const inviteHash = input.inviteCode ? await sha256Hex(normalizeInviteCode(input.inviteCode)) : undefined;
     const sql = this.ctx.storage.sql;
+    if (input.policy) this.#runWeeklyQueue(input.now, input.policy);
     return this.ctx.storage.transactionSync((): AdmitResult => {
       if (input.clientDeviceId) {
         const holder = sql.exec<{ github_id: number }>("SELECT github_id FROM devices WHERE device_id = ?", input.clientDeviceId).toArray()[0];
         if (holder && holder.github_id !== input.githubId) return { ok: false, reason: "device_taken" };
       }
-      const bindDevice = () => {
+      const admitted = (via: "existing" | "admin" | "open" | "invite", created: boolean): AdmitResult => {
         if (input.clientDeviceId) sql.exec("INSERT OR IGNORE INTO devices (device_id, github_id) VALUES (?, ?)", input.clientDeviceId, input.githubId);
+        this.#ensureCode(input.githubId, input.login, input.now);
+        if (created && via !== "admin" && input.referralCode) this.#recordReferral(input.githubId, input.login, input.referralCode, input.now);
+        if (input.networkHash) this.#recordNetwork(input.githubId, input.networkHash, input.now);
+        let queued = false;
+        let queueStarted = false;
+        // Open sign-ups wait for free tokens while spend is near the cap or others are waiting.
+        // Invited people and admins don't: an invite is the owner's own choice.
+        if (created && via === "open" && input.policy) {
+          const waiting = this.#waitingCount();
+          if (shouldQueue({ weekUsd: this.#spendSync(input.now).spentUsd, queueLength: waiting, policy: input.policy })) {
+            sql.exec("INSERT OR IGNORE INTO queue (github_id, queued_at) VALUES (?, ?)", input.githubId, input.now);
+            queued = true;
+            queueStarted = waiting === 0;
+          }
+        }
+        return { ok: true, created, via, queued, queueStarted };
       };
       const existing = sql.exec<PersonRow>("SELECT * FROM people WHERE github_id = ?", input.githubId).toArray()[0];
       if (existing) {
         sql.exec("UPDATE people SET login = ? WHERE github_id = ?", input.login, input.githubId);
-        bindDevice();
-        return { ok: true, created: false, via: "existing" };
+        return admitted("existing", false);
       }
       if (input.isAdmin) {
         sql.exec("INSERT INTO people (github_id, login, status, admitted_at, admitted_via) VALUES (?, ?, 'active', ?, 'admin')", input.githubId, input.login, input.now);
-        bindDevice();
-        return { ok: true, created: true, via: "admin" };
+        return admitted("admin", true);
       }
-      const active = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM people WHERE status = 'active' AND admitted_via != 'admin'").toArray()[0]?.n ?? 0;
-      if (active >= input.maxActive) return { ok: false, reason: "cohort_full" };
+      if (input.inviteOnly !== false) {
+        const active = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM people WHERE status = 'active' AND admitted_via != 'admin'").toArray()[0]?.n ?? 0;
+        if (active >= input.maxActive) return { ok: false, reason: "cohort_full" };
+      }
       if (input.openAdmission && !input.accountTooNew) {
         sql.exec("INSERT INTO people (github_id, login, status, admitted_at, admitted_via) VALUES (?, ?, 'active', ?, 'open')", input.githubId, input.login, input.now);
-        bindDevice();
-        return { ok: true, created: true, via: "open" };
+        return admitted("open", true);
       }
       if (!inviteHash) return { ok: false, reason: "needs_invite" };
       const invite = sql.exec<{ id: number; used_by: number | null }>("SELECT id, used_by FROM invites WHERE code_hash = ?", inviteHash).toArray()[0];
@@ -306,9 +425,190 @@ export class DirectoryObject extends DurableObject {
         input.now,
         `invite:${invite.id}`,
       );
-      bindDevice();
-      return { ok: true, created: true, via: "invite" };
+      return admitted("invite", true);
     });
+  }
+
+  // ─── Referrals ────────────────────────────────────────────────────────────
+
+  /** Gives a person their stable referral code, once. */
+  #ensureCode(githubId: number, login: string, now: number): string {
+    const sql = this.ctx.storage.sql;
+    const existing = sql.exec<{ code: string }>("SELECT code FROM referral_codes WHERE github_id = ?", githubId).toArray()[0];
+    if (existing) return existing.code;
+    const plainTaken = sql.exec("SELECT 1 FROM referral_codes WHERE code = ?", login.toLowerCase()).toArray().length > 0;
+    const code = codeFor(login, githubId, plainTaken);
+    sql.exec("INSERT INTO referral_codes (code, github_id, created_at) VALUES (?, ?, ?)", code, githubId, now);
+    return code;
+  }
+
+  #recordReferral(githubId: number, login: string, code: string, now: number): void {
+    const sql = this.ctx.storage.sql;
+    const owner = sql.exec<{ github_id: number }>("SELECT github_id FROM referral_codes WHERE code = ?", code).toArray()[0]?.github_id;
+    let outcome: ReferralOutcome = "ok";
+    if (owner === githubId || code === login.toLowerCase()) outcome = "self";
+    else if (owner === undefined) outcome = "unknown_code";
+    sql.exec(
+      "INSERT OR IGNORE INTO referrals (referred_id, referrer_id, code, at, outcome) VALUES (?, ?, ?, ?, ?)",
+      githubId,
+      outcome === "ok" ? owner! : null,
+      code,
+      now,
+      outcome,
+    );
+  }
+
+  /**
+   * Remembers a network a person signed in from, and stops any referral between two people
+   * seen on the same network (at sign-up or later).
+   */
+  #recordNetwork(githubId: number, netHash: string, now: number): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec("INSERT OR IGNORE INTO person_networks (github_id, net_hash, first_at) VALUES (?, ?, ?)", githubId, netHash, now);
+    sql.exec(
+      `UPDATE referrals SET outcome = 'same_network'
+       WHERE outcome = 'ok' AND (referred_id = ? OR referrer_id = ?)
+         AND EXISTS (SELECT 1 FROM person_networks a JOIN person_networks b ON a.net_hash = b.net_hash
+                     WHERE a.github_id = referrals.referred_id AND b.github_id = referrals.referrer_id)`,
+      githubId,
+      githubId,
+    );
+  }
+
+  /** Counting referral pairs for one person or everyone (`githubId` undefined). */
+  #pairs(githubId?: number): Pair[] {
+    const sql = this.ctx.storage.sql;
+    const rows =
+      githubId === undefined
+        ? sql.exec<{ referrer_id: number; referred_id: number }>("SELECT referrer_id, referred_id FROM referrals WHERE outcome = 'ok'").toArray()
+        : sql
+            .exec<{ referrer_id: number; referred_id: number }>(
+              "SELECT referrer_id, referred_id FROM referrals WHERE outcome = 'ok' AND (referrer_id = ? OR referred_id = ?)",
+              githubId,
+              githubId,
+            )
+            .toArray();
+    return rows.map((row) => ({ referrer: row.referrer_id, referred: row.referred_id }));
+  }
+
+  /** The public lookup behind `GET /v1/referrals/<code>`: the current login of an admitted, unsuspended account. */
+  async referralCodeOwner(code: string): Promise<{ login: string } | undefined> {
+    const row = this.ctx.storage.sql
+      .exec<{ login: string }>(
+        "SELECT p.login AS login FROM referral_codes c JOIN people p ON p.github_id = c.github_id WHERE c.code = ? AND p.status = 'active'",
+        code,
+      )
+      .toArray()[0];
+    return row ? { login: row.login } : undefined;
+  }
+
+  // ─── The queue ────────────────────────────────────────────────────────────
+
+  #waitingCount(): number {
+    return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM queue WHERE admitted_at IS NULL").toArray()[0]?.n ?? 0;
+  }
+
+  /** Everyone waiting, front of the line first. */
+  #line(policy: Pick<Policy, "queueReferralPlaces">): Waiting[] {
+    const rows = this.ctx.storage.sql.exec<{ github_id: number; queued_at: number }>("SELECT github_id, queued_at FROM queue WHERE admitted_at IS NULL").toArray();
+    const friends = everActiveFriends(this.ctx.storage.sql, rows.map((row) => row.github_id));
+    return queueOrder(
+      rows.map((row) => ({ githubId: row.github_id, queuedAt: row.queued_at, activeFriends: friends.get(row.github_id) ?? 0 })),
+      policy.queueReferralPlaces,
+    );
+  }
+
+  /** Last week's free cost and actives (non-admins with a request), and the forecast from them. */
+  #forecast(now: number, policy: Policy): Forecast {
+    const thisWeek = weekStart(now) / DAY_MS;
+    const admins = JSON.stringify(policy.adminIds);
+    const last = this.ctx.storage.sql
+      .exec<{ actives: number; usd: number | null }>(
+        `SELECT COUNT(DISTINCT github_id) AS actives, SUM(cost_usd) AS usd FROM daily_activity
+         WHERE day >= ? AND day < ? AND requests > 0
+           AND github_id NOT IN (SELECT github_id FROM people WHERE admitted_via = 'admin') AND github_id NOT IN (SELECT value FROM json_each(?))`,
+        thisWeek - 7,
+        thisWeek,
+        admins,
+      )
+      .toArray()[0];
+    return forecast({ lastWeekUsd: last?.usd ?? 0, lastWeekActives: last?.actives ?? 0, policy, totalSpentUsd: this.#spendSync(now).totalSpentUsd });
+  }
+
+  /** Monday's admission, once per week, on the first call of the week (see queue.ts). */
+  #runWeeklyQueue(now: number, policy: Policy): void {
+    const sql = this.ctx.storage.sql;
+    const week = weekStart(now);
+    if (sql.exec("SELECT 1 FROM queue_runs WHERE week_start = ?", week).toArray().length > 0) return;
+    this.ctx.storage.transactionSync(() => {
+      const line = this.#line(policy);
+      const plan = this.#forecast(now, policy);
+      const admit = line.slice(0, Math.min(line.length, plan.room));
+      for (const person of admit) sql.exec("UPDATE queue SET admitted_at = ?, admitted_how = 'weekly' WHERE github_id = ?", now, person.githubId);
+      sql.exec(
+        "INSERT INTO queue_runs (week_start, ran_at, admitted, waiting_before, avg_usd, actives, budget_usd) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        week,
+        now,
+        admit.length,
+        line.length,
+        plan.avgUsd,
+        plan.actives,
+        plan.budgetUsd,
+      );
+    });
+  }
+
+  #place(githubId: number, now: number, policy: Policy): QueuePlace | null {
+    const sql = this.ctx.storage.sql;
+    if (sql.exec("SELECT 1 FROM queue WHERE github_id = ? AND admitted_at IS NULL", githubId).toArray().length === 0) return null;
+    const line = this.#line(policy);
+    const position = line.findIndex((person) => person.githubId === githubId) + 1;
+    const lastRun = sql.exec<{ admitted: number }>("SELECT admitted FROM queue_runs WHERE admitted > 0 ORDER BY week_start DESC LIMIT 1").toArray()[0];
+    const perWeek = lastRun?.admitted ?? Math.min(this.#forecast(now, policy).room, line.length);
+    return { position, etaAt: etaAt(position, perWeek, now), waiting: line.length };
+  }
+
+  /** Admin: the line, front first. */
+  async queueView(now: number, envPolicy: Policy): Promise<{ waiting: Array<{ position: number; githubId: number; login: string | null; queuedAt: number; activeFriends: number }>; runs: QueueRun[]; forecast: Forecast }> {
+    const policy = this.#policy(envPolicy);
+    this.#runWeeklyQueue(now, policy);
+    const logins = new Map(this.ctx.storage.sql.exec<{ github_id: number; login: string }>("SELECT p.github_id, p.login FROM people p JOIN queue q ON q.github_id = p.github_id WHERE q.admitted_at IS NULL").toArray().map((row) => [row.github_id, row.login]));
+    return {
+      waiting: this.#line(policy).map((person, index) => ({ position: index + 1, githubId: person.githubId, login: logins.get(person.githubId) ?? null, queuedAt: person.queuedAt, activeFriends: person.activeFriends })),
+      runs: this.ctx.storage.sql
+        .exec<{ week_start: number; ran_at: number; admitted: number; waiting_before: number; avg_usd: number; actives: number; budget_usd: number | null }>("SELECT * FROM queue_runs ORDER BY week_start DESC LIMIT 12")
+        .toArray()
+        .map((row) => ({ weekStart: row.week_start, ranAt: row.ran_at, admitted: row.admitted, waitingBefore: row.waiting_before, avgUsd: row.avg_usd, actives: row.actives, budgetUsd: row.budget_usd })),
+      forecast: this.#forecast(now, policy),
+    };
+  }
+
+  /** Admin: lets the next `count` people in now (front of the line first). Returns their ids. */
+  async admitFromQueue(count: number, now: number, envPolicy: Policy): Promise<number[]> {
+    const policy = this.#policy(envPolicy);
+    return this.ctx.storage.transactionSync(() => {
+      const admit = this.#line(policy).slice(0, count);
+      for (const person of admit) this.ctx.storage.sql.exec("UPDATE queue SET admitted_at = ?, admitted_how = 'admin' WHERE github_id = ?", now, person.githubId);
+      return admit.map((person) => person.githubId);
+    });
+  }
+
+  #policy(envPolicy: Policy): Policy {
+    return applyOverrides(envPolicy, this.#overrides());
+  }
+
+  #personState(githubId: number, now: number, policy: Policy): PersonState {
+    const sql = this.ctx.storage.sql;
+    const person = sql.exec<{ login: string }>("SELECT login FROM people WHERE github_id = ?", githubId).toArray()[0];
+    if (!person) return { queue: null, bonusTokens: 0, referral: null };
+    const code = this.#ensureCode(githubId, person.login, now);
+    const counting = countingPairs(sql, this.#pairs(githubId), now);
+    const joined = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ? AND outcome = 'ok'", githubId).toArray()[0]?.n ?? 0;
+    return {
+      queue: this.#place(githubId, now, policy),
+      bonusTokens: bonuses(counting, policy).get(githubId) ?? 0,
+      referral: { code, joined, activeThisWeek: counting.filter((pair) => pair.referrer === githubId).length },
+    };
   }
 
   async createInvites(input: { count: number; note: string | null; createdBy: number; now: number }): Promise<Array<{ id: number; code: string }>> {
@@ -354,11 +654,13 @@ export class DirectoryObject extends DurableObject {
 
   // ─── Kill switch, runtime settings and spend ─────────────────────────────
 
-  async setPaused(paused: boolean, actor?: { githubId: number; login: string; now: number }): Promise<void> {
-    this.ctx.storage.transactionSync(() => {
+  /** Sets the admin kill switch; true when it changed. */
+  async setPaused(paused: boolean, actor?: { githubId: number; login: string; now: number }): Promise<boolean> {
+    return this.ctx.storage.transactionSync(() => {
       const before = this.#paused();
       this.ctx.storage.sql.exec("INSERT INTO settings (key, value) VALUES ('paused', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", paused ? "1" : "0");
       if (actor && before !== paused) this.#log("paused", before, paused, actor);
+      return before !== paused;
     });
   }
 
@@ -410,10 +712,23 @@ export class DirectoryObject extends DurableObject {
       }));
   }
 
-  /** What a request checks before forwarding: the admin kill switch, the overrides and non-admin spend. */
-  async gate(now: number): Promise<{ paused: boolean; weekUsd: number; totalUsd: number; overrides: Overrides }> {
-    const spend = await this.spend(now);
-    return { paused: this.#paused(), weekUsd: spend.spentUsd, totalUsd: spend.totalSpentUsd, overrides: this.#overrides() };
+  /**
+   * What a request checks before forwarding: the admin kill switch, the overrides and non-admin
+   * spend. With the env settings (`envPolicy`), Monday's queue admission runs first if it hasn't
+   * this week; with `githubId` too, the caller's queue place, referral numbers and bonus.
+   */
+  async gate(now: number, envPolicy?: Policy, githubId?: number): Promise<Gate> {
+    const overrides = this.#overrides();
+    const policy = envPolicy ? applyOverrides(envPolicy, overrides) : undefined;
+    if (policy) this.#runWeeklyQueue(now, policy);
+    const spend = this.#spendSync(now);
+    return {
+      paused: this.#paused(),
+      weekUsd: spend.spentUsd,
+      totalUsd: spend.totalSpentUsd,
+      overrides,
+      ...(policy && githubId !== undefined ? { person: this.#personState(githubId, now, policy) } : {}),
+    };
   }
 
   #paused(): boolean {
@@ -438,6 +753,10 @@ export class DirectoryObject extends DurableObject {
   }
 
   async spend(now: number): Promise<SpendSummary> {
+    return this.#spendSync(now);
+  }
+
+  #spendSync(now: number): SpendSummary {
     const start = weekStart(now);
     type Row = { usd: number; tokens: number; requests: number; admin_usd: number; admin_tokens: number; admin_requests: number };
     const row = this.ctx.storage.sql.exec<Row>("SELECT * FROM spend_weeks WHERE week_start = ?", start).toArray()[0];
@@ -458,7 +777,13 @@ export class DirectoryObject extends DurableObject {
 
   // ─── Records ─────────────────────────────────────────────────────────────
 
-  async recordRequest(record: RequestRecord): Promise<void> {
+  /**
+   * Logs one request. With the effective settings (`policy`), also returns the alerts it
+   * triggered: free spend crossing a threshold of either cap, or the host's failure rate over
+   * the last hour passing 20%. Each one is marked sent here, so it fires once.
+   */
+  async recordRequest(record: RequestRecord, policy?: Policy): Promise<Alert[]> {
+    const alerts: Alert[] = [];
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         `INSERT INTO requests (github_id, is_admin, at, model, prompt_tokens, completion_tokens, cached_tokens, charged_tokens, cost_usd, status, latency_ms)
@@ -509,8 +834,75 @@ export class DirectoryObject extends DurableObject {
             record.hostFailure.upstreamStatus,
           );
         }
+        const minute = Math.floor(record.at / 60_000);
+        this.ctx.storage.sql.exec(
+          `INSERT INTO host_minutes (minute, host, requests, failures) VALUES (?, ?, 1, ?)
+           ON CONFLICT (minute, host) DO UPDATE SET requests = requests + 1, failures = failures + excluded.failures`,
+          minute,
+          record.host,
+          failed,
+        );
+        this.ctx.storage.sql.exec("DELETE FROM host_minutes WHERE minute < ?", minute - 120);
+        if (policy) {
+          const alert = this.#hostAlert(record.host, record.at);
+          if (alert) alerts.push(alert);
+        }
       }
+      if (policy && !admin) alerts.push(...this.#spendAlerts(record.at, policy));
     });
+    return alerts;
+  }
+
+  /** Marks an alert key sent; false when it already was. */
+  #markAlert(key: string, now: number): boolean {
+    return this.ctx.storage.sql.exec("INSERT INTO alerts_sent (key, at) VALUES (?, ?) ON CONFLICT(key) DO NOTHING RETURNING key", key, now).toArray().length > 0;
+  }
+
+  #sentThresholds(prefix: string): Set<number> {
+    return new Set(
+      this.ctx.storage.sql
+        .exec<{ key: string }>("SELECT key FROM alerts_sent WHERE key LIKE ?", `${prefix}%`)
+        .toArray()
+        .map((row) => Number(row.key.slice(prefix.length))),
+    );
+  }
+
+  #spendAlerts(now: number, policy: Policy): Alert[] {
+    const spend = this.#spendSync(now);
+    const out: Alert[] = [];
+    const check = (prefix: string, spent: number, cap: number | undefined, message: (spent: number, cap: number, threshold: number) => Alert) => {
+      if (cap === undefined || cap <= 0) return;
+      const hit = crossed(spent / cap, this.#sentThresholds(prefix));
+      if (!hit) return;
+      for (const threshold of hit.mark) this.#markAlert(`${prefix}${threshold}`, now);
+      out.push(message(spent, cap, hit.threshold));
+    };
+    check(`spend:week:${spend.weekStart}:`, spend.spentUsd, policy.globalWeeklyUsdCap, weeklySpendAlert);
+    check("spend:total:", spend.totalSpentUsd, policy.globalTotalUsdCap, totalSpendAlert);
+    return out;
+  }
+
+  /** A host failing more than 20% of at least 20 requests in the last hour: alert once until it recovers. */
+  #hostAlert(host: string, now: number): Alert | undefined {
+    const since = Math.floor((now - HOST_WINDOW_MS) / 60_000);
+    const row = this.ctx.storage.sql
+      .exec<{ requests: number | null; failures: number | null }>("SELECT SUM(requests) AS requests, SUM(failures) AS failures FROM host_minutes WHERE host = ? AND minute > ?", host, since)
+      .toArray()[0];
+    const requests = row?.requests ?? 0;
+    const failures = row?.failures ?? 0;
+    const key = `host:${host}`;
+    if (requests >= HOST_MIN_REQUESTS && failures / requests > HOST_FAILURE_RATE) {
+      return this.#markAlert(key, now) ? hostFailureAlert(host, failures, requests) : undefined;
+    }
+    // Re-armed once the host is healthy again.
+    if (requests >= HOST_MIN_REQUESTS) this.ctx.storage.sql.exec("DELETE FROM alerts_sent WHERE key = ?", key);
+    return undefined;
+  }
+
+  /** The queue-started alert for an admission that queued the first person. */
+  async queueStartedAlert(now: number, envPolicy: Policy): Promise<Alert> {
+    const policy = this.#policy(envPolicy);
+    return queueStartedAlert(this.#spendSync(now).spentUsd, policy.globalWeeklyUsdCap);
   }
 
   /** Stores cleaned events; ids already stored for this person are ignored. Returns how many were new. */
@@ -552,8 +944,17 @@ export class DirectoryObject extends DurableObject {
   }
 
   /** The admin dashboard's tables (see dashboard-data.ts). Admins are left out. */
-  async dashboard(input: { now: number; adminIds: number[]; limits: DashboardLimits; topWeek?: number }): Promise<DashboardData> {
-    return dashboardData(this.ctx.storage.sql, input);
+  async dashboard(input: { now: number; adminIds: number[]; limits: DashboardLimits; topWeek?: number; policy?: Policy }): Promise<DashboardData> {
+    const policy = input.policy ? this.#policy(input.policy) : undefined;
+    if (policy) this.#runWeeklyQueue(input.now, policy);
+    const data = dashboardData(this.ctx.storage.sql, input);
+    if (policy) {
+      // This week's referral bonuses, from the pairs that count (counts only).
+      const granted = bonuses(countingPairs(this.ctx.storage.sql, this.#pairs(), input.now), policy);
+      data.referrals.bonusTokensThisWeek = [...granted.values()].reduce((sum, value) => sum + value, 0);
+      data.referrals.peopleWithBonus = granted.size;
+    }
+    return data;
   }
 
   /** Admin analytics over whole UTC days `from`..`to` (inclusive), computed from the stored records. */

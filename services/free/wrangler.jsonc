@@ -16,7 +16,12 @@
     "OPENROUTER_QUANTIZATIONS": "fp8,mxfp8,fp16,bf16,fp32",
     "OPENROUTER_DATA_COLLECTION": "deny",
     "OPENROUTER_HOST_COOLDOWN_MINUTES": "10",
-    "PAUSED": "false"
+    "PAUSED": "false",
+    "QUEUE_THRESHOLD": "0.8",
+    "QUEUE_REFERRAL_PLACES": "25",
+    "REFERRAL_BONUS_TOKENS": "10000000",
+    "REFERRAL_BONUS_CAP": "50000000",
+    "ALERT_EMAIL_FROM": "alerts@dl.new"
   },
   "durable_objects": {
     "bindings": [

@@ -48,6 +48,7 @@ interface DeviceRow {
   login: string | null;
   ticket_hash: string | null;
   reason: string | null;
+  referral_code: string | null;
 }
 
 interface RefreshRow {
@@ -99,10 +100,11 @@ export class AuthObject extends DurableObject {
     ctx.blockConcurrencyWhile(async () => {
       for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
       this.#migrateOAuthPurpose();
+      this.#migrateReferralCode();
     });
   }
 
-  async issueDeviceCode(input: { clientDeviceId: string | null; now: number }): Promise<{ deviceCode: string; userCode: string; expiresAt: number; interval: number }> {
+  async issueDeviceCode(input: { clientDeviceId: string | null; referralCode?: string | null; now: number }): Promise<{ deviceCode: string; userCode: string; expiresAt: number; interval: number }> {
     const deviceCode = randomToken();
     const deviceHash = await sha256Hex(deviceCode);
     const expiresAt = input.now + DEVICE_CODE_TTL_MS;
@@ -115,14 +117,15 @@ export class AuthObject extends DurableObject {
         continue;
       }
       this.ctx.storage.sql.exec(
-        `INSERT INTO device_codes (device_hash, user_code, status, created_at, expires_at, interval_s, client_device_id)
-         VALUES (?, ?, 'pending', ?, ?, ?, ?)`,
+        `INSERT INTO device_codes (device_hash, user_code, status, created_at, expires_at, interval_s, client_device_id, referral_code)
+         VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)`,
         deviceHash,
         userCode,
         input.now,
         expiresAt,
         POLL_INTERVAL_S,
         input.clientDeviceId,
+        input.referralCode ?? null,
       );
       await this.#scheduleCleanup(input.now);
       return { deviceCode, userCode, expiresAt, interval: POLL_INTERVAL_S };
@@ -140,9 +143,11 @@ export class AuthObject extends DurableObject {
    * Starts the GitHub round trip for a pending code: a random `state` for the URL and a
    * random browser value for a cookie. The callback must present both.
    */
-  async beginOAuth(userCode: string, now: number): Promise<{ state: string; browser: string } | undefined> {
+  async beginOAuth(userCode: string, now: number, referralCode?: string): Promise<{ state: string; browser: string } | undefined> {
     const row = this.#byUserCode(userCode);
     if (!row || row.expires_at <= now || row.status !== "pending") return undefined;
+    // A code from the browser (`/device?ref=`) fills in when the terminal sent none.
+    if (referralCode && row.referral_code === null) this.ctx.storage.sql.exec("UPDATE device_codes SET referral_code = ? WHERE device_hash = ?", referralCode, row.device_hash);
     const state = randomToken();
     const browser = randomToken();
     this.ctx.storage.sql.exec(
@@ -159,7 +164,7 @@ export class AuthObject extends DurableObject {
    * Consumes a `state` from the callback. It must exist, be unexpired, belong to a code that
    * is still pending, and come with the browser cookie set when it was issued.
    */
-  async claimOAuthState(state: string, browser: string, now: number): Promise<{ deviceRef: string; clientDeviceId: string | null } | undefined> {
+  async claimOAuthState(state: string, browser: string, now: number): Promise<{ deviceRef: string; clientDeviceId: string | null; referralCode: string | null } | undefined> {
     const stateHash = await sha256Hex(state);
     const row = this.ctx.storage.sql
       .exec<{ device_hash: string; browser_hash: string; expires_at: number; purpose: string }>("SELECT * FROM oauth_states WHERE state_hash = ?", stateHash)
@@ -170,7 +175,7 @@ export class AuthObject extends DurableObject {
     if (!timingSafeEqual(await sha256Hex(browser), row.browser_hash)) return undefined;
     const device = this.#byHash(row.device_hash);
     if (!device || device.expires_at <= now || device.status !== "pending") return undefined;
-    return { deviceRef: device.device_hash, clientDeviceId: device.client_device_id };
+    return { deviceRef: device.device_hash, clientDeviceId: device.client_device_id, referralCode: device.referral_code };
   }
 
   /**
@@ -252,10 +257,10 @@ export class AuthObject extends DurableObject {
   }
 
   /** The device and person behind an invite-step ticket, and why an invite was asked for. */
-  async ticket(ticket: string, now: number): Promise<(Identity & { deviceRef: string; clientDeviceId: string | null; reason: string | null }) | undefined> {
+  async ticket(ticket: string, now: number): Promise<(Identity & { deviceRef: string; clientDeviceId: string | null; reason: string | null; referralCode: string | null }) | undefined> {
     const row = this.ctx.storage.sql.exec<DeviceRow>("SELECT * FROM device_codes WHERE ticket_hash = ?", await sha256Hex(ticket)).toArray()[0];
     if (!row || row.expires_at <= now || row.status !== "needs_invite" || row.github_id === null || row.login === null) return undefined;
-    return { deviceRef: row.device_hash, githubId: row.github_id, login: row.login, clientDeviceId: row.client_device_id, reason: row.reason };
+    return { deviceRef: row.device_hash, githubId: row.github_id, login: row.login, clientDeviceId: row.client_device_id, reason: row.reason, referralCode: row.referral_code };
   }
 
   /** The CLI's poll (RFC 8628 §3.4–3.5), including `slow_down`. Approved codes pay out once. */
@@ -366,6 +371,12 @@ export class AuthObject extends DurableObject {
       sql.exec("ALTER TABLE oauth_states ADD COLUMN purpose TEXT NOT NULL DEFAULT 'device'");
       sql.exec("UPDATE oauth_states SET purpose = 'admin' WHERE device_hash = ?", LEGACY_ADMIN_MARKER);
     });
+  }
+
+  /** Adds `device_codes.referral_code` to databases created before it existed. */
+  #migrateReferralCode(): void {
+    const columns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('device_codes')").toArray();
+    if (!columns.some((column) => column.name === "referral_code")) this.ctx.storage.sql.exec("ALTER TABLE device_codes ADD COLUMN referral_code TEXT");
   }
 
   async #scheduleCleanup(now: number): Promise<void> {

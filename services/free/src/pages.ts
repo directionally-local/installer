@@ -18,26 +18,29 @@ function shell(title: string, body: string, status = 200): Response {
   return page({ title: `${title} · ${PRODUCT_NAME}`, body: `<h1>${escapeHtml(PRODUCT_NAME)}</h1>\n${body}`, status });
 }
 
-export function enterCodePage(error?: string): Response {
+/** `ref` is a referral code from `/device?ref=`, carried through to sign-in. */
+export function enterCodePage(error?: string, ref?: string): Response {
   return shell(
     "Sign in",
     `${error ? `<p role="alert"><strong>${escapeHtml(error)}</strong></p>` : ""}
 <p>Enter the code your terminal shows.</p>
 <form method="get" action="/device">
   <input name="user_code" autocomplete="off" autocapitalize="characters" placeholder="ABCD-1234" required>
-  <button type="submit">Continue</button>
+${ref ? `  <input type="hidden" name="ref" value="${escapeHtml(ref)}">
+` : ""}  <button type="submit">Continue</button>
 </form>
 ${DISCLOSURE}`,
     error ? 400 : 200,
   );
 }
 
-export function confirmPage(userCode: string): Response {
+export function confirmPage(userCode: string, ref?: string): Response {
   const code = escapeHtml(userCode);
+  const authorize = `/device/authorize?user_code=${encodeURIComponent(userCode)}${ref ? `&ref=${encodeURIComponent(ref)}` : ""}`;
   return shell(
     "Confirm sign-in",
     `<p>Check that your terminal shows <strong><code>${code}</code></strong>, then sign in with GitHub.</p>
-<p><a href="/device/authorize?user_code=${encodeURIComponent(userCode)}"><button type="button">Continue with GitHub</button></a></p>
+<p><a href="${escapeHtml(authorize)}"><button type="button">Continue with GitHub</button></a></p>
 <form method="post" action="/device/deny">
   <input type="hidden" name="user_code" value="${code}">
   <button type="submit">This isn't my code, cancel</button>

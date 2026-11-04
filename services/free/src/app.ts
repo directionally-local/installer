@@ -7,7 +7,10 @@ import { MAX_SERVER_KEYS, parseServerKey, type AccountObject, type Allowance, ty
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig } from "./config.js";
-import type { DirectoryObject, HostFailure, RequestRecord } from "./directory-object.js";
+import type { DirectoryObject, Gate, HostFailure, PersonState, RequestRecord } from "./directory-object.js";
+import { deliverAlerts, pauseAlert, type Alert, type EmailBinding } from "./alerts.js";
+import { policyOf, waitText } from "./queue.js";
+import { networkOf, normalizeReferralCode, referralLink } from "./referrals.js";
 import { apiError, json } from "./errors.js";
 import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, type SpendView } from "./dashboard-page.js";
 import { cleanBatch } from "./events.js";
@@ -16,6 +19,9 @@ import {
   INVALID_INVITE_MESSAGE,
   isSignInRefusal,
   PAUSED_MESSAGE,
+  QUEUED_SIGNED_IN,
+  queuedMessage,
+  quotaMessage,
   signInRefusal,
   TOTAL_BUDGET_MESSAGE,
   weeklyBudgetMessage,
@@ -86,6 +92,7 @@ const LIMITS = {
   refreshIp: { capacity: 60, perHour: 60 },
   inviteAttemptIp: { capacity: 10, perHour: 10 },
   signupIp: { capacity: 3, perHour: 3 / 24 },
+  referralLookupIp: perMinute(60),
 } satisfies Record<string, Limit>;
 
 export interface Env {
@@ -109,6 +116,23 @@ export interface Env {
   OPENROUTER_HOST_COOLDOWN_MINUTES?: string;
   PAUSED?: string;
   PUBLIC_URL?: string;
+  QUEUE_THRESHOLD?: string;
+  QUEUE_REFERRAL_PLACES?: string;
+  REFERRAL_BONUS_TOKENS?: string;
+  REFERRAL_BONUS_CAP?: string;
+  REFERRAL_LINK_BASE?: string;
+  PRO_PRICE_USD_MONTHLY?: string;
+  PRO_TOKENS_PER_WEEK?: string;
+  TOPUP_PRICE_USD?: string;
+  TOPUP_TOKENS?: string;
+  TOPUP_VALID_DAYS?: string;
+  ALERT_WEBHOOK_URL?: string;
+  ALERT_WEBHOOK_KIND?: string;
+  ALERT_TELEGRAM_CHAT_ID?: string;
+  ALERT_EMAIL_TO?: string;
+  ALERT_EMAIL_FROM?: string;
+  /** Cloudflare's send_email binding for alert email; optional (absent off Cloudflare). */
+  ALERT_EMAIL?: EmailBinding;
   AUTH: DurableObjectNamespace<AuthObject>;
   DIRECTORY: DurableObjectNamespace<DirectoryObject>;
   ACCOUNT: DurableObjectNamespace<AccountObject>;
@@ -130,6 +154,8 @@ interface Ctx {
   config: FreeConfig;
   /** This request's runtime view, read once (see `runtime`). */
   runtimeState?: Promise<Runtime>;
+  /** The signed-in caller, set before `runtime` so it also reads their queue place and bonus. */
+  callerId?: number;
   now: () => number;
   fetch: Fetch;
   ip: string;
@@ -171,6 +197,7 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "GET" && path === "/v1/models") return models(c);
   if (method === "POST" && path === "/v1/chat/completions") return chat(c);
   if (method === "POST" && path === "/v1/events") return events(c);
+  if (method === "GET" && path.startsWith("/v1/referrals/")) return referralLookup(c, path.slice("/v1/referrals/".length));
 
   if (method === "GET" && path === "/device") return devicePage(c);
   if (method === "GET" && path === "/device/authorize") return deviceAuthorize(c);
@@ -216,8 +243,9 @@ async function readForm(c: Ctx): Promise<URLSearchParams> {
   return new URLSearchParams(await c.request.text());
 }
 
-function limitsFor(config: FreeConfig): Limits {
-  return { weeklyTokens: config.weeklyTokens, weeklyUsd: config.perPersonWeeklyUsdCap };
+/** `bonusTokens`: this week's referral bonus, added on top of the weekly allowance. */
+function limitsFor(config: FreeConfig, bonusTokens = 0): Limits {
+  return { weeklyTokens: config.weeklyTokens, weeklyUsd: config.perPersonWeeklyUsdCap, ...(bonusTokens > 0 ? { bonusTokens } : {}) };
 }
 
 const signingKeys = new Map<string, Promise<CryptoKey>>();
@@ -297,14 +325,49 @@ interface Runtime {
   paused: boolean;
   weekUsd: number;
   totalUsd: number;
+  /** The caller's queue place, referral numbers and bonus, when `c.callerId` was set. */
+  person?: PersonState;
 }
 
-/** Read once per request: an override changed mid-request applies from the next one. */
+/**
+ * Read once per request: an override changed mid-request applies from the next one. The
+ * Directory also runs Monday's queue admission here, on the first request of the week.
+ */
 function runtime(c: Ctx): Promise<Runtime> {
   c.runtimeState ??= directory(c)
-    .gate(c.now())
-    .then((gate) => ({ config: applyOverrides(c.config, gate.overrides), paused: c.config.paused || gate.paused, weekUsd: gate.weekUsd, totalUsd: gate.totalUsd }));
+    .gate(c.now(), policyOf(c.config), c.callerId)
+    .then((gate: Gate) => ({
+      config: applyOverrides(c.config, gate.overrides),
+      paused: c.config.paused || gate.paused,
+      weekUsd: gate.weekUsd,
+      totalUsd: gate.totalUsd,
+      ...(gate.person ? { person: gate.person } : {}),
+    }));
   return c.runtimeState;
+}
+
+/** Sends alerts by email and/or webhook; never fails the request. */
+async function alert(c: Ctx, alerts: readonly Alert[]): Promise<void> {
+  if (alerts.length === 0) return;
+  await deliverAlerts({ alerts, config: c.config, emailBinding: c.env.ALERT_EMAIL, fetch: c.fetch, adminUrl: `${c.base}/admin`, now: c.now() });
+}
+
+/** The paid offers, from config (Stripe billing sells them). */
+function offers(config: FreeConfig) {
+  return {
+    pro: { priceUsdMonthly: config.offers.pro.priceUsdMonthly, tokensPerWeek: config.offers.pro.tokensPerWeek },
+    topup: { priceUsd: config.offers.topup.priceUsd, tokens: config.offers.topup.tokens, validDays: config.offers.topup.validDays },
+  };
+}
+
+function linkFor(config: FreeConfig, person: PersonState | undefined): string | null {
+  return person?.referral ? referralLink(config.referralLinkBase, person.referral.code) : null;
+}
+
+/** A keyed hash of the caller's network (IPv4 address or IPv6 /64), for referral anti-abuse. */
+async function networkHash(c: Ctx): Promise<string | undefined> {
+  const network = networkOf(c.ip);
+  return network ? sha256Hex(`net:${c.config.tokenSigningKey}:${network}`) : undefined;
 }
 
 async function isPaused(c: Ctx): Promise<boolean> {
@@ -323,7 +386,8 @@ async function deviceCode(c: Ctx): Promise<Response> {
   if (retry !== undefined) return rateLimited(retry);
   const body = (await readJson(c)) ?? {};
   const deviceId = typeof body.device_id === "string" && /^[A-Za-z0-9._:-]{8,128}$/.test(body.device_id) ? body.device_id : null;
-  const issued = await auth(c).issueDeviceCode({ clientDeviceId: deviceId, now: c.now() });
+  const referralCode = normalizeReferralCode(body.referral_code) ?? null;
+  const issued = await auth(c).issueDeviceCode({ clientDeviceId: deviceId, referralCode, now: c.now() });
   const verificationUri = `${c.base}/device`;
   return json({
     device_code: issued.deviceCode,
@@ -465,14 +529,16 @@ async function keys(c: Ctx, rest: string, method: string): Promise<Response> {
 
 // ─── Sign-in: the browser side ──────────────────────────────────────────────
 
+/** `?ref=<referral code>` is carried through the page to GitHub sign-in. */
 async function devicePage(c: Ctx): Promise<Response> {
   const raw = c.url.searchParams.get("user_code");
-  if (!raw) return enterCodePage();
+  const ref = normalizeReferralCode(c.url.searchParams.get("ref") ?? undefined);
+  if (!raw) return enterCodePage(undefined, ref);
   const userCode = normalizeUserCode(raw);
   const found = userCode ? await auth(c).lookup(userCode, c.now()) : undefined;
-  if (!userCode || !found) return enterCodePage("That code is unknown or has expired. Start sign-in again in your terminal.");
+  if (!userCode || !found) return enterCodePage("That code is unknown or has expired. Start sign-in again in your terminal.", ref);
   if (found.status !== "pending") return donePage("Code already used", "This code was already used. Start sign-in again in your terminal if you need to.", 409);
-  return confirmPage(userCode);
+  return confirmPage(userCode, ref);
 }
 
 async function deviceAuthorize(c: Ctx): Promise<Response> {
@@ -482,7 +548,8 @@ async function deviceAuthorize(c: Ctx): Promise<Response> {
     if (userCode) await auth(c).deny(userCode, c.now(), "service_paused");
     return donePage("Paused", PAUSED_MESSAGE, 503);
   }
-  const begun = userCode ? await auth(c).beginOAuth(userCode, c.now()) : undefined;
+  const ref = normalizeReferralCode(c.url.searchParams.get("ref") ?? undefined);
+  const begun = userCode ? await auth(c).beginOAuth(userCode, c.now(), ref) : undefined;
   if (!begun) return enterCodePage("That code is unknown, used or expired. Start sign-in again in your terminal.");
   const location = githubAuthorizeUrl({ clientId: c.config.githubClientId }, `${c.base}/device/callback`, begun.state);
   return new Response(null, {
@@ -540,7 +607,7 @@ async function deviceCallback(c: Ctx): Promise<Response> {
   const identity: Identity = { githubId: user.id, login: user.login };
   const minAgeMs = c.config.minGithubAccountAgeDays * DAY_MS;
   const accountTooNew = minAgeMs > 0 && (user.createdAt === undefined || c.now() - user.createdAt < minAgeMs);
-  return admitAndFinish(c, claimed.deviceRef, claimed.clientDeviceId, identity, undefined, accountTooNew);
+  return admitAndFinish(c, claimed.deviceRef, claimed.clientDeviceId, identity, undefined, accountTooNew, undefined, claimed.referralCode ?? undefined);
 }
 
 /**
@@ -556,6 +623,7 @@ async function admitAndFinish(
   inviteCode: string | undefined,
   accountTooNew: boolean,
   ticket?: string,
+  referralCode?: string,
 ): Promise<Response> {
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
   const { config } = await runtime(c);
@@ -570,14 +638,21 @@ async function admitAndFinish(
     clientDeviceId,
     accountTooNew,
     openAdmission: openEligible && signupsLeft,
+    // With open admission there is no cap on people: the queue keeps free spend in budget.
+    inviteOnly: !config.openAdmission,
     maxActive: config.maxActiveUsers,
+    referralCode,
+    networkHash: await networkHash(c),
+    policy: policyOf(config),
     now: c.now(),
   });
   if (result.ok) {
     if (result.created && (result.via === "invite" || result.via === "open")) await c.env.RATE_LIMITER.getByName(signupKey).spend(signupKey, LIMITS.signupIp, 1, c.now());
     await account(c, identity.githubId).activate({ githubId: identity.githubId, login: identity.login, isAdmin, now: c.now() });
     await auth(c).decide(deviceRef, "approved", identity, c.now());
-    return donePage("You're signed in", `Signed in as ${identity.login}. Return to your terminal; you can close this tab.`);
+    if (result.queueStarted) await alert(c, [await directory(c).queueStartedAlert(c.now(), policyOf(c.config))]);
+    const queued = result.queued ? ` ${QUEUED_SIGNED_IN}` : "";
+    return donePage("You're signed in", `Signed in as ${identity.login}.${queued} Return to your terminal; you can close this tab.`);
   }
   const intro = accountTooNew ? tooNewIntro(config.minGithubAccountAgeDays) : INVITE_ONLY_INTRO;
   const refuse = async (code: SignInRefusal, status: "not_invited" | "denied", httpStatus: number) => {
@@ -613,7 +688,7 @@ async function deviceInvite(c: Ctx): Promise<Response> {
   const tooNew = found.reason === "account_too_new";
   const inviteCode = (form.get("invite_code") ?? "").trim();
   if (!inviteCode) return invitePage(ticket, found.login, "Enter an invite code.", tooNew ? tooNewIntro((await runtime(c)).config.minGithubAccountAgeDays) : INVITE_ONLY_INTRO);
-  return admitAndFinish(c, found.deviceRef, found.clientDeviceId, found, inviteCode, tooNew, ticket);
+  return admitAndFinish(c, found.deviceRef, found.clientDeviceId, found, inviteCode, tooNew, ticket, found.referralCode ?? undefined);
 }
 
 async function deviceNoInvite(c: Ctx): Promise<Response> {
@@ -653,20 +728,64 @@ function allowanceView(allowance: Allowance) {
   };
 }
 
+/**
+ * GET /v1/me. Besides the allowance (with this week's referral bonus included; `remaining` is
+ * 0 while queued): `plan`, `topupTokensLeft`, `queue` (null, or `{position, etaAt}`),
+ * `referral` and `offers`. See the README for the exact shapes.
+ */
 async function me(c: Ctx): Promise<Response> {
   const identity = await authenticate(c, { keys: true });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
-  const allowance = await account(c, identity.githubId).allowance(c.now(), limitsFor((await runtime(c)).config));
+  c.callerId = identity.githubId;
+  const { config, person } = await runtime(c);
+  const allowance = await account(c, identity.githubId).allowance(c.now(), limitsFor(config, person?.bonusTokens));
   if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
+  const queue = person?.queue ?? null;
+  const view = allowanceView(allowance);
   return json({
     login: identity.login,
     githubId: identity.githubId,
     status: allowance.status,
-    allowance: allowanceView(allowance),
+    allowance: queue ? { ...view, remaining: 0 } : view,
     models: [...ALLOWED_MODELS],
+    plan: "free",
+    topupTokensLeft: 0,
+    "queue": queue ? { position: queue.position, etaAt: new Date(queue.etaAt).toISOString(), waiting: queue.waiting } : null,
+    referral: person?.referral
+      ? {
+          code: person.referral.code,
+          link: linkFor(config, person),
+          joined: person.referral.joined,
+          activeThisWeek: person.referral.activeThisWeek,
+          bonusTokensPerWeek: person.bonusTokens,
+          bonusCapPerWeek: config.referralBonusCap,
+        }
+      : null,
+    offers: offers(config),
   });
+}
+
+/**
+ * GET /v1/referrals/<code>, public, for the dl.new invite page: 200 {valid: true, login,
+ * bonusTokensPerWeek} for an admitted, unsuspended account's code, else 404 {valid: false}.
+ * Nothing else: no id, usage or dates. Cacheable for 5 minutes.
+ */
+async function referralLookup(c: Ctx, raw: string): Promise<Response> {
+  const retry = await limited(c, `referral:ip:${c.ip}`, LIMITS.referralLookupIp);
+  if (retry !== undefined) return rateLimited(retry);
+  const cache = { "cache-control": "public, max-age=300" };
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return json({ valid: false }, 404, cache);
+  }
+  const code = normalizeReferralCode(decoded);
+  const owner = code ? await directory(c).referralCodeOwner(code) : undefined;
+  if (!owner) return json({ valid: false }, 404, cache);
+  return json({ valid: true, login: owner.login, bonusTokensPerWeek: (await runtime(c)).config.referralBonusTokens }, 200, cache);
 }
 
 async function models(c: Ctx): Promise<Response> {
@@ -706,8 +825,10 @@ async function chat(c: Ctx): Promise<Response> {
   const person = account(c, identity.githubId);
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
   if (c.config.paused) return pausedError(quotaHeaders(await person.allowance(c.now(), limitsFor(c.config))));
+  c.callerId = identity.githubId;
   const gate = await runtime(c);
-  const limits = limitsFor(gate.config);
+  const limits = limitsFor(gate.config, gate.person?.bonusTokens);
+  const link = linkFor(gate.config, gate.person);
   const headers = async () => quotaHeaders(await person.allowance(c.now(), limits));
 
   const guarded = await apiGuard(c, identity, headers);
@@ -729,6 +850,17 @@ async function chat(c: Ctx): Promise<Response> {
   }
 
   if (gate.paused) return pausedError(await headers());
+  const place = isAdmin ? null : (gate.person?.queue ?? null);
+  if (place) {
+    const etaAt = new Date(place.etaAt).toISOString();
+    return apiError(
+      402,
+      "free_tier_queued",
+      queuedMessage(place.position, waitText(place.etaAt, c.now())),
+      { position: place.position, etaAt, offers: offers(gate.config), referralLink: link },
+      await headers(),
+    );
+  }
   if (!isAdmin) {
     // The global caps read as a pause for everyone, with when it ends; a person's own key still works.
     const { globalTotalUsdCap: total, globalWeeklyUsdCap: weekly } = gate.config;
@@ -749,8 +881,7 @@ async function chat(c: Ctx): Promise<Response> {
     const quota = quotaHeaders(reservation.allowance);
     if (reservation.code === "quota_exceeded") {
       const resetsAt = new Date(reservation.allowance.resetsAt).toISOString();
-      const what = reservation.reason === "spend" ? "spending allowance" : "token allowance";
-      return apiError(402, "quota_exceeded", `This week's free ${what} is used up. It resets at ${resetsAt}.`, { resetsAt, reason: reservation.reason }, quota);
+      return apiError(402, "quota_exceeded", quotaMessage(reservation.reason, resetsAt), { resetsAt, reason: reservation.reason, offers: offers(gate.config), referralLink: link }, quota);
     }
     if (reservation.code === "suspended") return apiError(403, "suspended", "This account is suspended from the free tier.", {}, quota);
     return apiError(403, "not_invited", "This GitHub account isn't on the free tier.", {}, quota);
@@ -796,7 +927,7 @@ async function chat(c: Ctx): Promise<Response> {
       ...(host ? { host } : {}),
       ...(host && failure ? { hostFailure: failure } : {}),
     };
-    await directory(c).recordRequest(record);
+    await alert(c, await directory(c).recordRequest(record, policyOf(gate.config)));
     return settled.allowance;
   };
 
@@ -922,7 +1053,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     });
   }
   if (method === "POST" && (rest === "pause" || rest === "unpause")) {
-    await directory(c).setPaused(rest === "pause", actor);
+    if (await directory(c).setPaused(rest === "pause", actor)) await alert(c, [pauseAlert(rest === "pause", identity.login)]);
     return json({ paused: c.config.paused || rest === "pause", pausedByEnv: c.config.paused });
   }
   if (rest === "config") {
@@ -935,6 +1066,20 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       return adminConfigView(c);
     }
     if (method === "GET") return adminConfigView(c);
+  }
+  if (rest === "queue" && method === "GET") {
+    const queue = await directory(c).queueView(now, policyOf(c.config));
+    return json({
+      waiting: queue.waiting.map((person) => ({ ...person, queuedAt: new Date(person.queuedAt).toISOString() })),
+      runs: queue.runs.map((run) => ({ ...run, weekStart: isoDay(run.weekStart), ranAt: new Date(run.ranAt).toISOString() })),
+      forecast: { ...queue.forecast, room: queue.forecast.room === Number.MAX_SAFE_INTEGER ? null : queue.forecast.room },
+    });
+  }
+  if (rest === "queue/admit" && method === "POST") {
+    const body = (await readJson(c)) ?? {};
+    const count = Number(body.count);
+    if (!Number.isInteger(count) || count < 1 || count > 10_000) return apiError(400, "invalid_request", "Send {count}: 1 to 10000 people to let in now, front of the line first.");
+    return json({ admitted: await directory(c).admitFromQueue(count, now, policyOf(c.config)) });
   }
   if (rest === "invites") {
     if (method === "GET") return json({ invites: await directory(c).listInvites() });
@@ -1138,6 +1283,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
       now,
       adminIds: [...c.config.adminGithubIds],
       limits: { weeklyTokens: config.weeklyTokens, weeklyUsd: config.perPersonWeeklyUsdCap ?? null },
+      policy: policyOf(c.config),
       ...(Number.isFinite(topWeek) ? { topWeek } : {}),
     }),
     directory(c).spend(now),
@@ -1156,6 +1302,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     maxActiveUsers: config.maxActiveUsers,
     weeklyTokens: config.weeklyTokens,
     perPersonWeeklyUsd: config.perPersonWeeklyUsdCap ?? null,
+    queueThreshold: config.queueThreshold,
   };
   if (csv !== undefined && isCsvTable(csv)) return dashboardCsv(csv, data, view);
   return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie });
