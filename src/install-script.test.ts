@@ -165,8 +165,8 @@ describe("install.sh on a laptop", () => {
     assert.ok(existsSync(join(root, "bin", "directionallylocal")));
     assert.equal(result.read(join(result.home, ".zshrc")), `\n# Directionally Local (dl)\nexport PATH="${root}/bin:$PATH"\n`);
     assert.match(result.stdout, /ok Installing dl: dl 0\.10\.0 · in .*\.directionallylocal\n\.\. Adding dl to your PATH\nok Adding dl to your PATH: in .*\/\.zshrc\n/);
-    assert.match(result.stdout, /\n {2}Next time, open a new terminal or run: source ~\/\.zshrc\n/, "this shell's PATH can't change: the one line that fixes it");
-    assert.match(result.stdout, /Then run: source ~\/\.zshrc && dl\n$/, "no terminal: dl isn't started");
+    assert.match(result.stdout, /\n\n {2}Then run: source ~\/\.zshrc && dl\n$/, "no terminal: dl isn't started; this shell's PATH can't change: the one line that fixes it");
+    assert.doesNotMatch(result.stdout, /Next time/, "not also the same advice a second way");
     assert.doesNotMatch(result.stdout, /sudo sh/, "the server hint is for Linux");
   });
 
@@ -235,9 +235,14 @@ describe("install.sh on a laptop", () => {
     assert.doesNotMatch(result.stdout, /Then type: dl/);
     // Back at the shell it was piped from, whose PATH it couldn't change: the line that fixes it, last.
     assert.match(result.stdout, /To use dl in this terminal, run: source ~\/\.zshrc\n$/);
+    assert.match(result.stdout, /\n {2}Next time, open a new terminal or run: source ~\/\.zshrc\n/, "for later terminals, before dl starts");
+    assert.doesNotMatch(result.stdout, /Then run:/);
     const skipped = laptopInstall({ terminal: true, env: { DL_NO_START: "1" } });
     cleanup.push(skipped.dir);
     assert.equal(skipped.read(join(skipped.dir, "started.log")), undefined);
+    // DL_NO_START=1 (as dl.new/continue does before starting dl itself): one line, not two saying the same.
+    assert.match(skipped.stdout, /\n\n {2}Then run: source ~\/\.zshrc && dl\n$/);
+    assert.doesNotMatch(skipped.stdout, /Next time/);
   });
 
   it("links dl into ~/.local/bin when this shell has it on PATH, so dl works in the same terminal", () => {
@@ -268,7 +273,7 @@ describe("install.sh on a laptop", () => {
   it("for sh, says . ~/.profile (sh has no source)", () => {
     const result = run({ os: "Linux", shell: "/bin/sh" });
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Next time, open a new terminal or run: \. ~\/\.profile\n/);
+    assert.match(result.stdout, /Then run: \. ~\/\.profile && dl\n$/);
   });
 
   it("passes on dl's exit code, after the reminder", () => {

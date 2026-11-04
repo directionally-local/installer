@@ -9,7 +9,7 @@ import { doctor, formatChecks } from "./doctor.js";
 import { serverKeysCommand } from "./keys.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
 import { cancel, connect, describeError, laptopHome, laptopReady, pull, run, runs, servers, use, watch, type ReadyHere } from "./laptop/commands.js";
-import { autopilotOnPath, bundledAutopilotVersion } from "./laptop/autopilot.js";
+import { autopilotOnPath, autopilotSetUp, bundledAutopilotVersion, findAutopilot } from "./laptop/autopilot.js";
 import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
 import { loadRemotes } from "./laptop/config.js";
 import { provider as providerCommand } from "./laptop/provider.js";
@@ -133,6 +133,8 @@ export interface MainOptions {
   prompter?: Prompter;
   /** Sends the task; the real `run` unless replaced. */
   run?: typeof run;
+  /** Whether Autopilot has a provider (`dl status`); asks the real one (`autopilot auth status`) unless replaced. */
+  autopilotSetUp?: () => Promise<boolean | undefined>;
 }
 
 export async function main(
@@ -327,7 +329,8 @@ export async function main(
           // installed and how to start. (Root on a machine without a server install gets the
           // server's instructions instead, as the install script draws the same line.)
           if ((!command || command === "status") && !isRoot()) {
-            laptopReady(await readyHere(), laptopIO);
+            const setUp = await (options.autopilotSetUp ?? (async () => autopilotSetUp(await findAutopilot())))();
+            laptopReady({ ...(await readyHere()), ...(setUp === undefined ? {} : { setUp }) }, laptopIO);
             return 0;
           }
           io.out(NOT_A_SERVER(colors));
