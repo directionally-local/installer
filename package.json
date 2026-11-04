@@ -39,7 +39,7 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "autopilot-ai": "3.5.0",
+    "autopilot-ai": "3.6.0",
     "hotcell": "0.1.38"
   }
 }
