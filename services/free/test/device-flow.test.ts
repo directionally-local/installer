@@ -78,6 +78,27 @@ describe("browser sign-in", () => {
     assert.equal(await errorCode(await service.request("POST", "/v1/device/token", { body: { device_code: flow.deviceCode } })), "expired_token");
   });
 
+  it("shows the person's invite link and what it earns once signed in, as selectable text", async () => {
+    const service = await createService();
+    const flow = await startBrowserFlow(service.request, { id: ADMIN_ID, login: "Owner" });
+    assert.match(flow.page, /Signed in as Owner\. Return to your terminal; you can close this tab\./);
+    assert.match(flow.page, /<strong>Invite friends and you both get \+10M tokens a week\.<\/strong>/);
+    assert.match(flow.page, /Your invite link: <code style="user-select: all;[^"]*">https:\/\/dl\.new\/r\/owner<\/code>/);
+    assert.match(flow.page, /up to \+50M a week/);
+    assert.doesNotMatch(flow.page, /<script|<button/, "the CSP allows no scripts, so no Copy button");
+    // The same link /v1/me gives.
+    const tokens = (await (await service.request("POST", "/v1/device/token", { body: { device_code: flow.deviceCode } })).json()) as { access_token: string };
+    const me = (await (await service.request("GET", "/v1/me", { token: tokens.access_token })).json()) as { referral: { link: string } };
+    assert.equal(me.referral.link, "https://dl.new/r/owner");
+  });
+
+  it("leaves the invite out when invites earn nothing", async () => {
+    const service = await createService({ REFERRAL_BONUS_TOKENS: "0" });
+    const flow = await startBrowserFlow(service.request, { id: ADMIN_ID, login: "owner" });
+    assert.match(flow.page, /Signed in as owner\./);
+    assert.doesNotMatch(flow.page, /Invite friends/);
+  });
+
   it("shows the code, the product name and what is collected before GitHub", async () => {
     const service = await createService();
     const issued = (await (await service.request("POST", "/v1/device/code", { body: {} })).json()) as { user_code: string };

@@ -84,3 +84,27 @@ ${DISCLOSURE}`,
 export function donePage(heading: string, message: string, status = 200): Response {
   return shell(heading, `<h2>${escapeHtml(heading)}</h2>\n<p>${escapeHtml(message)}</p>`, status);
 }
+
+/** "10M", "50M", "2.5M": token counts in the page's copy. */
+export function shortTokens(value: number): string {
+  const trim = (v: number) => v.toFixed(1).replace(/\.0$/, "");
+  if (value >= 1e6) return `${trim(value / 1e6)}M`;
+  if (value >= 1e3) return `${trim(value / 1e3)}k`;
+  return String(Math.round(value));
+}
+
+/**
+ * The page after a sign-in succeeds: `message`, then the person's invite link and what it
+ * earns. The CSP allows no scripts, so there is no Copy button: the link is text that one
+ * click selects (`user-select: all`).
+ */
+export function signedInDonePage(message: string, invite?: { link: string; bonusTokens: number; capTokens: number }): Response {
+  const heading = "You're signed in";
+  const inviteHtml = invite
+    ? `
+<p><strong>Invite friends and you both get +${escapeHtml(shortTokens(invite.bonusTokens))} tokens a week.</strong></p>
+<p>Your invite link: <code style="user-select: all; -webkit-user-select: all; word-break: break-all">${escapeHtml(invite.link)}</code></p>
+<p class="muted">The bonus starts when a friend you invite uses dl on 3 days of a week, and adds up to +${escapeHtml(shortTokens(invite.capTokens))} a week. <code>/invite</code> in Autopilot shows your link any time.</p>`
+    : "";
+  return shell(heading, `<h2>${escapeHtml(heading)}</h2>\n<p>${escapeHtml(message)}</p>${inviteHtml}`);
+}
