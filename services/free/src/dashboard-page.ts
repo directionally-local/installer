@@ -33,7 +33,7 @@ export interface SpendView {
 /** The red banner shows at this share of either cap. */
 export const BANNER_SHARE = 0.8;
 
-export const CSV_TABLES = ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel"] as const;
+export const CSV_TABLES = ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "paid"] as const;
 export type CsvTable = (typeof CSV_TABLES)[number];
 
 export function isCsvTable(name: string): name is CsvTable {
@@ -413,6 +413,17 @@ ${
 </div>
 </section>`;
 
+  const p = data.paid;
+  const paidSection = `<section>
+<div class="head"><h2>Paid plans</h2>${csvLink("paid")}</div>
+<div class="tiles">
+<div class="tile">Pro subscribers<b>${count(p.proSubscribers)}</b><span class="note">Active subscriptions now.</span></div>
+<div class="tile">Top-ups<b>${count(p.topupsThisWeek)} <span class="muted">this week</span></b><span class="note">${count(p.topupsThisMonth)} this month.</span></div>
+<div class="tile">Revenue, before tax<b>${usd(p.revenueWeekUsd)} <span class="muted">this week</span></b><span class="note">${usd(p.revenueMonthUsd)} this month (UTC).</span></div>
+<div class="tile">Paid usage cost<b>${usd(p.paidCostWeekUsd)} <span class="muted">this week</span></b><span class="note">${usd(p.paidCostMonthUsd)} this month, ${count(p.paidRequestsWeek)} requests this week. Not counted against the free caps.</span></div>
+</div>
+</section>`;
+
   const funnelSection = `<section>
 <div class="head"><h2>Funnel</h2>${csvLink("funnel")}</div>
 <div class="scroll"><table>
@@ -436,7 +447,7 @@ ${data.funnel
 </header>
 <p class="note">${count(data.people.admitted)} people admitted, ${count(data.people.activeThisWeek)} active this week. Admins are left out of every number. Updated ${escapeHtml(new Date(data.now).toISOString().slice(0, 16).replace("T", " "))} UTC. Counts, tokens, cost and times only.</p>`;
 
-  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, allTime, spendSection, queueSection, referralSection, funnelSection, activeSection, retentionSection, costSection, limitsSection].join("\n"));
+  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, allTime, spendSection, queueSection, referralSection, paidSection, funnelSection, activeSection, retentionSection, costSection, limitsSection].join("\n"));
 }
 
 // ─── CSV ──────────────────────────────────────────────────────────────────
@@ -494,6 +505,14 @@ export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendV
     case "referrals": {
       const r = data.referrals;
       body = csv(["links_used", "signups", "blocked", "became_active", "bonus_tokens_this_week", "people_with_bonus"], [[r.linksUsed, r.signups, r.blocked, r.becameActive, r.bonusTokensThisWeek, r.peopleWithBonus]]);
+      break;
+    }
+    case "paid": {
+      const p = data.paid;
+      body = csv(
+        ["pro_subscribers", "topups_this_week", "topups_this_month", "revenue_week_usd", "revenue_month_usd", "paid_cost_week_usd", "paid_cost_month_usd", "paid_requests_week"],
+        [[p.proSubscribers, p.topupsThisWeek, p.topupsThisMonth, p.revenueWeekUsd, p.revenueMonthUsd, p.paidCostWeekUsd, p.paidCostMonthUsd, p.paidRequestsWeek]],
+      );
       break;
     }
     case "funnel":

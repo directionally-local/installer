@@ -13,6 +13,8 @@ import { weekEnd, weekStart } from "./week.js";
  */
 
 export const RESERVATION_TTL_MS = 30 * 60_000;
+/** Pro stays on this long past the paid period's end, so a renewal webhook that runs late doesn't cut anyone off. */
+export const PRO_GRACE_MS = 3 * 86_400_000;
 /** Server keys per account. */
 export const MAX_SERVER_KEYS = 5;
 /** `last_used_at` is written at most this often per key. */
@@ -47,8 +49,18 @@ export interface AccountEnv {
 
 export type AccountStatus = "active" | "suspended";
 
+export type Plan = "free" | "pro";
+/** Where a request's tokens come from: the weekly allowance (free or Pro), or top-ups. */
+export type Source = "weekly" | "topup";
+
 export interface Allowance {
   exists: boolean;
+  plan: Plan;
+  /** Unexpired top-up tokens not yet used or held. */
+  topupTokensLeft: number;
+  /** Pro's paid period end (Unix ms), or null. */
+  proPeriodEnd: number | null;
+  proCancelAtPeriodEnd: boolean;
   status: AccountStatus | null;
   isAdmin: boolean;
   tokensPerWeek: number;
@@ -63,7 +75,7 @@ export interface Allowance {
 }
 
 export type ReserveResult =
-  | { ok: true; reservationId: string; amount: number; maxTokens: number; allowance: Allowance }
+  | { ok: true; reservationId: string; amount: number; maxTokens: number; source: Source; paid: boolean; allowance: Allowance }
   | { ok: false; code: "not_invited" | "suspended"; allowance: Allowance }
   | { ok: false; code: "quota_exceeded"; reason: "tokens" | "spend"; allowance: Allowance };
 
@@ -76,6 +88,22 @@ export interface Limits {
    * allowance grows in the same proportion, so the bonus isn't cut short by the dollar cap.
    */
   bonusTokens?: number;
+  /** Pro's weekly tokens and dollar ceiling (none when undefined). */
+  proTokensPerWeek?: number;
+  proUsdPerWeek?: number | undefined;
+  /**
+   * Free tokens are unavailable to a free-plan person for now (queued, or a global cap reached):
+   * their requests can use top-ups only. Pro is unaffected.
+   */
+  freeBlocked?: boolean;
+}
+
+export interface BillingState {
+  customerId: string | null;
+  subscriptionId: string | null;
+  proState: "none" | "active" | "past_due" | "canceled";
+  periodEnd: number | null;
+  cancelAtPeriodEnd: boolean;
 }
 
 interface AccountRow {
@@ -124,6 +152,25 @@ const SCHEMA = [
      created_at INTEGER NOT NULL,
      expires_at INTEGER NOT NULL
    )`,
+  // Stripe: the customer, the Pro subscription's state as the webhooks last said (state_at is
+  // the newest event's Unix seconds, so an older event arriving late can't undo a newer one).
+  `CREATE TABLE IF NOT EXISTS billing (
+     k                    INTEGER PRIMARY KEY CHECK (k = 1),
+     customer_id          TEXT,
+     subscription_id      TEXT,
+     pro_state            TEXT NOT NULL DEFAULT 'none',
+     period_end           INTEGER,
+     cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+     state_at             INTEGER NOT NULL DEFAULT 0
+   )`,
+  // Top-ups: tokens bought once, used after the weekly allowance runs out, until they expire.
+  `CREATE TABLE IF NOT EXISTS topups (
+     id         TEXT PRIMARY KEY,
+     tokens     INTEGER NOT NULL,
+     used       INTEGER NOT NULL,
+     created_at INTEGER NOT NULL,
+     expires_at INTEGER NOT NULL
+   )`,
 ];
 
 export class AccountObject extends DurableObject<AccountEnv> {
@@ -131,6 +178,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
+      // Reservations made before billing were all against the weekly allowance, unpaid.
+      const columns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('reservations')").toArray().map((column) => column.name);
+      if (!columns.includes("source")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN source TEXT NOT NULL DEFAULT 'weekly'");
+      if (!columns.includes("paid")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN paid INTEGER NOT NULL DEFAULT 0");
     });
   }
 
@@ -162,23 +213,31 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const before = this.#allowance(row, input.now, input.limits);
     if (!row) return { ok: false, code: "not_invited", allowance: before };
     if (row.status === "suspended") return { ok: false, code: "suspended", allowance: before };
-    if (before.usdPerWeek !== null && before.spentUsdThisWeek >= before.usdPerWeek) {
-      return { ok: false, code: "quota_exceeded", reason: "spend", allowance: before };
+    // The weekly allowance first (free or Pro), then top-ups.
+    const spendReached = before.usdPerWeek !== null && before.spentUsdThisWeek >= before.usdPerWeek;
+    const weeklyRoom = spendReached || (before.plan === "free" && input.limits.freeBlocked) ? 0 : before.remaining;
+    let source: Source = "weekly";
+    let plan = planReservation(input.promptEstimate, input.requestedMaxTokens, weeklyRoom);
+    if (!plan) {
+      source = "topup";
+      plan = planReservation(input.promptEstimate, input.requestedMaxTokens, before.topupTokensLeft);
     }
-    const plan = planReservation(input.promptEstimate, input.requestedMaxTokens, before.remaining);
-    if (!plan) return { ok: false, code: "quota_exceeded", reason: "tokens", allowance: before };
+    if (!plan) return { ok: false, code: "quota_exceeded", reason: spendReached ? "spend" : "tokens", allowance: before };
+    const paid = source === "topup" || before.plan === "pro";
     const reservationId = crypto.randomUUID();
     const expiresAt = input.now + RESERVATION_TTL_MS;
     this.ctx.storage.sql.exec(
-      "INSERT INTO reservations (id, amount, created_at, expires_at) VALUES (?, ?, ?, ?)",
+      "INSERT INTO reservations (id, amount, created_at, expires_at, source, paid) VALUES (?, ?, ?, ?, ?, ?)",
       reservationId,
       plan.amount,
       input.now,
       expiresAt,
+      source,
+      paid ? 1 : 0,
     );
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm === null || alarm > expiresAt) await this.ctx.storage.setAlarm(expiresAt);
-    return { ok: true, reservationId, amount: plan.amount, maxTokens: plan.maxTokens, allowance: this.#allowance(row, input.now, input.limits) };
+    return { ok: true, reservationId, amount: plan.amount, maxTokens: plan.maxTokens, source, paid, allowance: this.#allowance(row, input.now, input.limits) };
   }
 
   /**
@@ -186,19 +245,109 @@ export class AccountObject extends DurableObject<AccountEnv> {
    * reported nothing, so the whole reservation is charged. A reservation the alarm already
    * settled is not charged twice.
    */
-  async settle(input: { reservationId: string; charged: number | undefined; costUsd: number | undefined; limits: Limits; now: number }): Promise<{ charged: number; costUsd: number; allowance: Allowance }> {
+  async settle(input: { reservationId: string; charged: number | undefined; costUsd: number | undefined; limits: Limits; now: number }): Promise<{ charged: number; costUsd: number; paid: boolean; allowance: Allowance }> {
     const reservation = this.ctx.storage.sql
-      .exec<{ amount: number }>("SELECT amount FROM reservations WHERE id = ?", input.reservationId)
+      .exec<{ amount: number; source: Source; paid: number }>("SELECT amount, source, paid FROM reservations WHERE id = ?", input.reservationId)
       .toArray()[0];
     const row = this.#current(input.now);
-    if (!reservation || !row) return { charged: 0, costUsd: 0, allowance: this.#allowance(row, input.now, input.limits) };
+    if (!reservation || !row) return { charged: 0, costUsd: 0, paid: false, allowance: this.#allowance(row, input.now, input.limits) };
     const charged = input.charged ?? reservation.amount;
     const costUsd = input.costUsd ?? costOf(undefined, charged);
-    this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec("DELETE FROM reservations WHERE id = ?", input.reservationId);
-      this.ctx.storage.sql.exec("UPDATE account SET used = used + ?, cost_used = cost_used + ? WHERE github_id = ?", charged, costUsd, row.github_id);
-    });
-    return { charged, costUsd, allowance: this.#allowance(this.#current(input.now), input.now, input.limits) };
+    this.ctx.storage.transactionSync(() => this.#charge(row.github_id, input.reservationId, reservation.source, charged, costUsd, input.now));
+    return { charged, costUsd, paid: reservation.paid === 1, allowance: this.#allowance(this.#current(input.now), input.now, input.limits) };
+  }
+
+  /** Replaces a reservation with its charge: to the week's counters, or to top-ups, earliest expiry first. */
+  #charge(githubId: number, reservationId: string, source: Source, charged: number, costUsd: number, now: number): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec("DELETE FROM reservations WHERE id = ?", reservationId);
+    if (source === "weekly") {
+      sql.exec("UPDATE account SET used = used + ?, cost_used = cost_used + ? WHERE github_id = ?", charged, costUsd, githubId);
+      return;
+    }
+    let left = charged;
+    for (const topup of sql.exec<{ id: string; tokens: number; used: number }>("SELECT id, tokens, used FROM topups WHERE expires_at > ? AND used < tokens ORDER BY expires_at, id", now).toArray()) {
+      if (left <= 0) break;
+      const take = Math.min(left, topup.tokens - topup.used);
+      sql.exec("UPDATE topups SET used = used + ? WHERE id = ?", take, topup.id);
+      left -= take;
+    }
+    // Usage past the last top-up (an overshoot the reservation didn't foresee) goes on the week.
+    if (left > 0) sql.exec("UPDATE account SET used = used + ? WHERE github_id = ?", left, githubId);
+  }
+
+  // ─── Billing ──────────────────────────────────────────────────────────────
+
+  #billing(): BillingState & { stateAt: number } {
+    const row = this.ctx.storage.sql
+      .exec<{ customer_id: string | null; subscription_id: string | null; pro_state: BillingState["proState"]; period_end: number | null; cancel_at_period_end: number; state_at: number }>(
+        "SELECT * FROM billing WHERE k = 1",
+      )
+      .toArray()[0];
+    return {
+      customerId: row?.customer_id ?? null,
+      subscriptionId: row?.subscription_id ?? null,
+      proState: row?.pro_state ?? "none",
+      periodEnd: row?.period_end ?? null,
+      cancelAtPeriodEnd: row?.cancel_at_period_end === 1,
+      stateAt: row?.state_at ?? 0,
+    };
+  }
+
+  /** Pro while the subscription is active and its paid period (plus a grace) hasn't ended. */
+  #plan(now: number): Plan {
+    const billing = this.#billing();
+    return billing.proState === "active" && (billing.periodEnd === null || now < billing.periodEnd + PRO_GRACE_MS) ? "pro" : "free";
+  }
+
+  async billing(): Promise<BillingState> {
+    const { stateAt: _stateAt, ...state } = this.#billing();
+    return state;
+  }
+
+  async setCustomer(customerId: string): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT INTO billing (k, customer_id) VALUES (1, ?) ON CONFLICT(k) DO UPDATE SET customer_id = excluded.customer_id", customerId);
+  }
+
+  /**
+   * Applies a subscription state from a webhook. Ignored when an event newer than this one was
+   * applied already, or when it is about another subscription than the current one and doesn't
+   * start it (a late cancel of an old subscription can't end a new one). A failed payment is
+   * `past_due`: back to free, never to no access.
+   */
+  async applySubscription(input: {
+    subscriptionId: string;
+    state: "active" | "past_due" | "canceled";
+    periodEnd: number | null | undefined;
+    cancelAtPeriodEnd?: boolean;
+    customerId?: string;
+    eventAt: number;
+  }): Promise<boolean> {
+    const current = this.#billing();
+    if (input.eventAt < current.stateAt) return false;
+    if (current.subscriptionId && current.subscriptionId !== input.subscriptionId && input.state !== "active" && current.proState === "active") return false;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO billing (k, customer_id, subscription_id, pro_state, period_end, cancel_at_period_end, state_at) VALUES (1, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(k) DO UPDATE SET customer_id = COALESCE(excluded.customer_id, customer_id), subscription_id = excluded.subscription_id,
+         pro_state = excluded.pro_state, period_end = COALESCE(excluded.period_end, period_end),
+         cancel_at_period_end = excluded.cancel_at_period_end, state_at = excluded.state_at`,
+      input.customerId ?? current.customerId,
+      input.subscriptionId,
+      input.state,
+      input.periodEnd === undefined ? null : input.periodEnd,
+      input.cancelAtPeriodEnd ? 1 : 0,
+      input.eventAt,
+    );
+    return true;
+  }
+
+  /** Adds a top-up once per id (the Checkout Session). False when it was already added. */
+  async grantTopup(input: { id: string; tokens: number; createdAt: number; expiresAt: number }): Promise<boolean> {
+    return (
+      this.ctx.storage.sql
+        .exec("INSERT INTO topups (id, tokens, used, created_at, expires_at) VALUES (?, ?, 0, ?, ?) ON CONFLICT(id) DO NOTHING RETURNING id", input.id, input.tokens, input.createdAt, input.expiresAt)
+        .toArray().length > 0
+    );
   }
 
   async setStatus(status: AccountStatus): Promise<boolean> {
@@ -314,13 +463,13 @@ export class AccountObject extends DurableObject<AccountEnv> {
   async sweep(now: number): Promise<number> {
     const row = this.#current(now);
     const stale = this.ctx.storage.sql
-      .exec<{ id: string; amount: number; created_at: number }>("SELECT id, amount, created_at FROM reservations WHERE expires_at <= ?", now)
+      .exec<{ id: string; amount: number; created_at: number; source: Source; paid: number }>("SELECT id, amount, created_at, source, paid FROM reservations WHERE expires_at <= ?", now)
       .toArray();
     for (const reservation of stale) {
       const costUsd = costOf(undefined, reservation.amount);
       this.ctx.storage.transactionSync(() => {
-        this.ctx.storage.sql.exec("DELETE FROM reservations WHERE id = ?", reservation.id);
-        if (row) this.ctx.storage.sql.exec("UPDATE account SET used = used + ?, cost_used = cost_used + ? WHERE github_id = ?", reservation.amount, costUsd, row.github_id);
+        if (row) this.#charge(row.github_id, reservation.id, reservation.source, reservation.amount, costUsd, now);
+        else this.ctx.storage.sql.exec("DELETE FROM reservations WHERE id = ?", reservation.id);
       });
       if (row && this.env.DIRECTORY) {
         await this.env.DIRECTORY.getByName("directory").recordRequest({
@@ -335,6 +484,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
           costUsd,
           status: "abandoned",
           latencyMs: null,
+          ...(reservation.paid === 1 ? { paid: true } : {}),
         });
       }
     }
@@ -361,17 +511,29 @@ export class AccountObject extends DurableObject<AccountEnv> {
   }
 
   #allowance(row: AccountRow | undefined, now: number, limits: Limits): Allowance {
-    const reserved = this.ctx.storage.sql.exec<{ total: number | null }>("SELECT SUM(amount) AS total FROM reservations").toArray()[0]?.total ?? 0;
-    const baseTokens = row?.weekly_tokens ?? limits.weeklyTokens;
-    const bonus = Math.max(0, limits.bonusTokens ?? 0);
+    const sql = this.ctx.storage.sql;
+    const reservedBy = (source: Source) => sql.exec<{ total: number | null }>("SELECT SUM(amount) AS total FROM reservations WHERE source = ?", source).toArray()[0]?.total ?? 0;
+    const reserved = reservedBy("weekly");
+    const plan = row ? this.#plan(now) : "free";
+    const billing = this.#billing();
+    const topups = sql.exec<{ left: number | null }>("SELECT SUM(tokens - used) AS left FROM topups WHERE expires_at > ?", now).toArray()[0]?.left ?? 0;
+    const topupTokensLeft = Math.max(0, topups - reservedBy("topup"));
+    const pro = plan === "pro";
+    // Pro replaces the free allowance (no referral bonus: that is free tokens); grants apply to free.
+    const baseTokens = pro ? (limits.proTokensPerWeek ?? limits.weeklyTokens) : (row?.weekly_tokens ?? limits.weeklyTokens);
+    const bonus = pro ? 0 : Math.max(0, limits.bonusTokens ?? 0);
     const tokensPerWeek = baseTokens + bonus;
-    const baseUsd = row?.weekly_usd ?? limits.weeklyUsd ?? null;
+    const baseUsd = pro ? (limits.proUsdPerWeek ?? null) : (row?.weekly_usd ?? limits.weeklyUsd ?? null);
     const usdPerWeek = baseUsd !== null && bonus > 0 && baseTokens > 0 ? Math.round(baseUsd * (tokensPerWeek / baseTokens) * 1e6) / 1e6 : baseUsd;
     const used = row?.used ?? 0;
     const spent = row?.cost_used ?? 0;
     const spendLeft = usdPerWeek === null || spent < usdPerWeek;
     return {
       exists: row !== undefined,
+      plan,
+      topupTokensLeft,
+      proPeriodEnd: billing.periodEnd,
+      proCancelAtPeriodEnd: billing.cancelAtPeriodEnd,
       status: row?.status ?? null,
       isAdmin: row?.is_admin === 1,
       tokensPerWeek,
