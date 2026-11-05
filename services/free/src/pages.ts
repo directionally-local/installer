@@ -12,11 +12,11 @@ export const PRODUCT_NAME = "dl";
  * kind of data collected is named; the privacy policy has the detail.
  */
 const DISCLOSURE = `
-<p class="fine">Free tokens come with usage records: tokens in, cached and out, cost, model and time for each
-request, and Autopilot session events (start and end, turns, tool-call counts, pull requests opened, error codes,
-version, OS and a hash of the repository's remote URL). We never store your prompts, completions, code, file paths
-or file contents. When you first join, we check that your GitHub account has a public repository or a contribution
-in the last year, and don't keep the counts.</p>`;
+<details class="fine disclosure"><summary>Free tokens come with usage records, never your prompts or code. <span>What exactly?</span></summary>
+<p>For each request: tokens in, cached and out, cost, model and time. Session events from dl: start and end, turns,
+tool-call counts, pull requests opened, error codes, version, OS and a hash of the repository's remote URL.
+We never store your prompts, completions, code, file paths or file contents. When you first join, we check that your GitHub
+account has a public repository or a contribution in the last year, and don't keep the counts.</p></details>`;
 
 /** The privacy policy and terms live on the main site, directionallylocal.com (dl.new has copies). */
 export const PRIVACY_URL = "https://directionallylocal.com/privacy/";
@@ -84,6 +84,13 @@ code { font-family: var(--mono); font-size: .92em; }
 .invite p { margin: 0; }
 .invite .link-text { display: block; font: 15px var(--mono); padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); word-break: break-all; }
 .fine, .invite .fine { color: var(--muted); font-size: 13px; line-height: 1.5; text-wrap: pretty; }
+.disclosure { max-width: 46ch; }
+.disclosure summary { cursor: pointer; list-style: none; }
+.disclosure summary::-webkit-details-marker { display: none; }
+.disclosure summary span { text-decoration: underline; text-underline-offset: .2em; white-space: nowrap; }
+.disclosure summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.disclosure[open] summary span { display: none; }
+.disclosure p { margin: .6em 0 0; }
 footer { padding-block: 22px 28px; text-align: center; font: 12.5px var(--mono); color: var(--muted); }
 footer a { color: var(--muted); }
 footer a:hover { color: var(--ink); }
@@ -191,7 +198,7 @@ export function signedInDonePage(message: string, invite?: { link: string; bonus
 <section class="invite">
 <p><strong>Invite friends and you both get +${escapeHtml(shortTokens(invite.bonusTokens))} tokens a week.</strong></p>
 <p>Your invite link: <code class="link-text" style="user-select: all; -webkit-user-select: all; word-break: break-all">${escapeHtml(invite.link)}</code></p>
-<p class="fine">The bonus starts when a friend you invite uses dl on 3 days of a week, and adds up to +${escapeHtml(shortTokens(invite.capTokens))} a week. <code>/invite</code> in Autopilot shows your link any time.</p>
+<p class="fine">The bonus starts when a friend you invite uses dl on 3 days of a week, and adds up to +${escapeHtml(shortTokens(invite.capTokens))} a week. <code>/invite</code> in dl shows your link any time.</p>
 </section>`
     : "";
   return shell(heading, `<h1>${escapeHtml(heading)}</h1>\n<p class="lede">${escapeHtml(message)}</p>${inviteHtml}`);
