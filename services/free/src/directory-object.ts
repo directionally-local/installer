@@ -1380,9 +1380,7 @@ export class DirectoryObject extends DurableObject {
     const data = dashboardData(sql, { now: end, adminIds: policy.adminIds, limits: { weeklyTokens: policy.weeklyTokens, weeklyUsd: policy.perPersonWeeklyUsdCap ?? null } });
     const day = data.installFunnel.days[0]!;
     const week = weekStart(end);
-    // The live totals, less anything after the day reported (the first hour of today).
     const live = this.#spendSync(now);
-    const after = this.#usage(until, Number.MAX_SAFE_INTEGER);
     const weekUsage = this.#usage(week, until);
     const weekPeople = sql
       .exec<{ signups: number; active: number }>(
@@ -1421,10 +1419,7 @@ export class DirectoryObject extends DurableObject {
         active: weekPeople?.active ?? 0,
         usage: weekUsage,
         payments: this.#payments(week, until),
-        cashUsd: weekUsage.freeCashUsd,
-        weeklyCapUsd: policy.globalWeeklyUsdCap,
-        totalUsd: Math.max(0, round(live.totalSpentUsd - after.freeCashUsd)),
-        totalCapUsd: policy.globalTotalUsdCap,
+        creditBudgetUsd: policy.luminalWeeklyCreditUsd,
       },
       credit: { balanceUsd: policy.luminalCreditUsd, leftUsd: Math.max(0, round(policy.luminalCreditUsd - live.creditUsedUsd)) },
       queueWaiting: data.queue.waiting,
@@ -1432,14 +1427,19 @@ export class DirectoryObject extends DurableObject {
     });
   }
 
-  /** Requests and tokens of everyone but admins in [from, until); dollars of free usage only (as spend_weeks counts them). */
+  /**
+   * Requests and tokens of everyone but admins in [from, until), and the Luminal credit free
+   * usage took (as spend_weeks counts it). OpenRouter cash is everyone's, admins and paid
+   * usage included: the free tier runs on Luminal credit alone, so any of it is news.
+   */
   #usage(from: number, until: number): DigestUsage {
     const row = this.ctx.storage.sql
-      .exec<{ requests: number; tokens_in: number | null; cached: number | null; tokens_out: number | null; cash: number | null; credit: number | null }>(
-        `SELECT COUNT(*) AS requests, SUM(prompt_tokens) AS tokens_in, SUM(cached_tokens) AS cached, SUM(completion_tokens) AS tokens_out,
-                SUM(CASE WHEN paid = 0 AND upstream = 'openrouter' THEN cost_usd ELSE 0 END) AS cash,
-                SUM(CASE WHEN paid = 0 AND upstream = 'luminal' THEN credit_usd ELSE 0 END) AS credit
-         FROM requests WHERE is_admin = 0 AND at >= ? AND at < ?`,
+      .exec<{ requests: number | null; tokens_in: number | null; cached: number | null; tokens_out: number | null; cash: number | null; credit: number | null }>(
+        `SELECT SUM(is_admin = 0) AS requests, SUM(CASE WHEN is_admin = 0 THEN prompt_tokens END) AS tokens_in,
+                SUM(CASE WHEN is_admin = 0 THEN cached_tokens END) AS cached, SUM(CASE WHEN is_admin = 0 THEN completion_tokens END) AS tokens_out,
+                SUM(CASE WHEN upstream = 'openrouter' THEN cost_usd ELSE 0 END) AS cash,
+                SUM(CASE WHEN is_admin = 0 AND paid = 0 AND upstream = 'luminal' THEN credit_usd ELSE 0 END) AS credit
+         FROM requests WHERE at >= ? AND at < ?`,
         from,
         until,
       )
@@ -1449,8 +1449,8 @@ export class DirectoryObject extends DurableObject {
       tokensIn: row?.tokens_in ?? 0,
       tokensCached: row?.cached ?? 0,
       tokensOut: row?.tokens_out ?? 0,
-      freeCashUsd: round(row?.cash ?? 0),
       freeCreditUsd: round(row?.credit ?? 0),
+      openRouterUsd: round(row?.cash ?? 0),
     };
   }
 

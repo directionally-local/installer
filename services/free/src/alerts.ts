@@ -215,11 +215,8 @@ export interface DailyDigest {
     active: number;
     usage: DigestUsage;
     payments: { count: number; usd: number };
-    /** Free cash spend that week and since the start, to the end of the day reported: what the weekly and all-time caps count. */
-    cashUsd: number;
-    weeklyCapUsd: number | undefined;
-    totalUsd: number;
-    totalCapUsd: number | undefined;
+    /** The weekly Luminal credit budget for free usage (luminalWeeklyCreditUsd); undefined: none. */
+    creditBudgetUsd: number | undefined;
   };
   /** Luminal credit: the balance and what's left of it now (everyone, since the start). */
   credit: { balanceUsd: number; leftUsd: number };
@@ -233,9 +230,13 @@ export interface DigestUsage {
   tokensIn: number;
   tokensCached: number;
   tokensOut: number;
-  /** Free usage served by OpenRouter (cash) and by Luminal (prepaid credit). */
-  freeCashUsd: number;
+  /** Luminal credit used by free usage (not paid, not admins). */
   freeCreditUsd: number;
+  /**
+   * OpenRouter (cash) spend by everyone, admins and paid usage included. The free tier runs on
+   * Luminal credit alone, so this should be 0; the digest warns when it isn't.
+   */
+  openRouterUsd: number;
 }
 
 function count(value: number): string {
@@ -250,11 +251,13 @@ function payments(value: { count: number; usd: number }): string {
   return value.count === 0 ? "none" : `${dollars(value.usd)} from ${count(value.count)} payment${value.count === 1 ? "" : "s"}`;
 }
 
-function usageLines(usage: DigestUsage, indent: string): string[] {
+/** Requests and tokens, then `credit` (the free credit line), then a warning when OpenRouter cost anything. */
+function usageLines(usage: DigestUsage, indent: string, credit: string): string[] {
   return [
     `${indent}Requests: ${count(usage.requests)}`,
     `${indent}Tokens: ${count(usage.tokensIn)} in (${count(usage.tokensCached)} cached), ${count(usage.tokensOut)} out`,
-    `${indent}Free credit spent: ${dollars(usage.freeCashUsd + usage.freeCreditUsd)} (${dollars(usage.freeCashUsd)} OpenRouter, ${dollars(usage.freeCreditUsd)} Luminal credit)`,
+    `${indent}${credit}`,
+    ...(usage.openRouterUsd > 0 ? [`${indent}OpenRouter spend: ${dollars(usage.openRouterUsd)} (should be $0)`] : []),
   ];
 }
 
@@ -269,7 +272,7 @@ export function dailyDigestAlert(digest: DailyDigest): Alert {
     lines.push(`  ${signups.people.map((person) => `@${person.login} (${signupHowText(person.how)})`).join(", ")}`);
     if (signups.count > signups.people.length) lines.push(`  and ${count(signups.count - signups.people.length)} more`);
   }
-  lines.push(`Active people: ${count(digest.active)}`, ...usageLines(digest.usage, ""));
+  lines.push(`Active people: ${count(digest.active)}`, ...usageLines(digest.usage, "", `Free credit spent: ${dollars(digest.usage.freeCreditUsd)} (Luminal credit)`));
   lines.push(`Luminal credit left: ${dollars(digest.credit.leftUsd)} of ${dollars(digest.credit.balanceUsd)}`);
   lines.push(`Paid: ${payments(digest.payments)}`);
   lines.push(`Installs: ${count(digest.installs.ok)} finished, ${count(digest.installs.failed)} failed`);
@@ -280,9 +283,11 @@ export function dailyDigestAlert(digest: DailyDigest): Alert {
     lines.push(`  Failed at: ${digest.installs.failedSteps.map((step) => `${step.step || "(not said)"} ${count(step.failed)}`).join(", ")}`);
   }
   lines.push("", `This week so far (Mon ${week.start} to ${digest.date}):`);
-  lines.push(`  Sign-ups: ${count(week.signups)}`, `  Active people: ${count(week.active)}`, ...usageLines(week.usage, "  "));
-  lines.push(`  Weekly cap: ${dollars(week.cashUsd)}${week.weeklyCapUsd === undefined ? " (no cap)" : ` of ${dollars(week.weeklyCapUsd)}`} OpenRouter spend`);
-  lines.push(`  All-time cap: ${dollars(week.totalUsd)}${week.totalCapUsd === undefined ? " (no cap)" : ` of ${dollars(week.totalCapUsd)}`}`);
+  const budget =
+    week.creditBudgetUsd === undefined || week.creditBudgetUsd <= 0
+      ? " (no weekly credit budget)"
+      : ` of the ${dollars(week.creditBudgetUsd)} weekly credit budget (${Math.round((week.usage.freeCreditUsd / week.creditBudgetUsd) * 100)}%)`;
+  lines.push(`  Sign-ups: ${count(week.signups)}`, `  Active people: ${count(week.active)}`, ...usageLines(week.usage, "  ", `Free credit spent: ${dollars(week.usage.freeCreditUsd)}${budget}`));
   lines.push(`  Paid: ${payments(week.payments)}`);
   lines.push("", `Queue: ${count(digest.queueWaiting)} waiting`, `Free tokens: ${digest.paused ? "PAUSED (kill switch)" : "on"}`);
   return {

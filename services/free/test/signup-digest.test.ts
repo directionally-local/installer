@@ -150,12 +150,13 @@ describe("daily digest", () => {
     await admit(service, 12, "bob", TUESDAY + 11 * HOUR, { invite: invite!.code, referral: "alice" });
     await admit(service, 13, "dave", DIGEST_AT - 30 * 60_000); // Wednesday 00:30: the next day
     // Requests. The admin's and Wednesday's are left out of the day; the paid one counts as a request, not as free spend.
-    await request(service, ADMIN_ID, TUESDAY + 9 * HOUR, { prompt: 99_999, cached: 0, out: 9_999, costUsd: 9, isAdmin: true });
-    await request(service, 10, TUESDAY - DAY + 2 * HOUR, { prompt: 500, cached: 0, out: 50, costUsd: 1 });
-    await request(service, 11, TUESDAY + 12 * HOUR, { prompt: 1_000, cached: 400, out: 100, costUsd: 0.5 });
+    // Everything on Luminal credit, as at launch (no OpenRouter key).
+    await request(service, ADMIN_ID, TUESDAY + 9 * HOUR, { prompt: 99_999, cached: 0, out: 9_999, costUsd: 9, upstream: "luminal", creditUsd: 9, isAdmin: true });
+    await request(service, 10, TUESDAY - DAY + 2 * HOUR, { prompt: 500, cached: 0, out: 50, costUsd: 1, upstream: "luminal", creditUsd: 1 });
+    await request(service, 11, TUESDAY + 12 * HOUR, { prompt: 1_000, cached: 400, out: 100, costUsd: 0.5, upstream: "luminal", creditUsd: 0.5 });
     await request(service, 12, TUESDAY + 13 * HOUR, { prompt: 2_000, cached: 1_000, out: 200, costUsd: 0.3, upstream: "luminal", creditUsd: 0.25 });
-    await request(service, 12, TUESDAY + 14 * HOUR, { prompt: 300, cached: 0, out: 30, costUsd: 2, paid: true });
-    await request(service, 13, DIGEST_AT - 10 * 60_000, { prompt: 7_777, cached: 0, out: 7, costUsd: 7 });
+    await request(service, 12, TUESDAY + 14 * HOUR, { prompt: 300, cached: 0, out: 30, costUsd: 2, upstream: "luminal", creditUsd: 2, paid: true });
+    await request(service, 13, DIGEST_AT - 10 * 60_000, { prompt: 7_777, cached: 0, out: 7, costUsd: 7, upstream: "luminal", creditUsd: 7 });
     await directory.recordPayment({ id: "pi_1", githubId: 12, kind: "topup", amountCents: 300, at: TUESDAY + 14 * HOUR });
     await directory.recordPayment({ id: "pi_0", githubId: 10, kind: "pro", amountCents: 1000, at: TUESDAY - DAY + 3 * HOUR });
     const day = TUESDAY / DAY;
@@ -188,8 +189,8 @@ describe("daily digest", () => {
         "Active people: 2",
         "Requests: 3",
         "Tokens: 3,300 in (1,400 cached), 330 out",
-        "Free credit spent: $0.75 ($0.50 OpenRouter, $0.25 Luminal credit)",
-        "Luminal credit left: $1,999.75 of $2,000",
+        "Free credit spent: $0.75 (Luminal credit)",
+        "Luminal credit left: $1,980.25 of $2,000",
         "Paid: $3 from 1 payment",
         "Installs: 3 finished, 1 failed",
         "  linux arm64 server: 2 ok, 1 failed",
@@ -201,9 +202,7 @@ describe("daily digest", () => {
         "  Active people: 3",
         "  Requests: 4",
         "  Tokens: 3,800 in (1,400 cached), 380 out",
-        "  Free credit spent: $1.75 ($1.50 OpenRouter, $0.25 Luminal credit)",
-        "  Weekly cap: $1.50 of $250 OpenRouter spend",
-        "  All-time cap: $1.50 of $1,000",
+        "  Free credit spent: $1.75 of the $250 weekly credit budget (1%)",
         "  Paid: $13 from 2 payments",
         "",
         "Queue: 0 waiting",
@@ -239,6 +238,23 @@ describe("daily digest", () => {
     assert.match(text, /\nInstalls: 0 finished, 0 failed\n/);
     assert.match(text, /\nPaid: none\n/);
     assert.match(text, /\nQueue: 0 waiting\nFree tokens: on$/);
+  });
+
+  it("warns when OpenRouter cost anything, which it never should", async () => {
+    const service = await createService({ ALERT_WEBHOOK_URL: "https://alerts.test/hook" });
+    await request(service, 20, TUESDAY + HOUR, { prompt: 10, cached: 0, out: 1, costUsd: 0.4 });
+    await request(service, ADMIN_ID, TUESDAY + 2 * HOUR, { prompt: 10, cached: 0, out: 1, costUsd: 0.1, isAdmin: true });
+    service.calls.webhooks.length = 0;
+    await scheduled(service, DIGEST_AT);
+    const text = texts(service)[0]!;
+    assert.match(text, /\nFree credit spent: \$0 \(Luminal credit\)\nOpenRouter spend: \$0\.50 \(should be \$0\)\n/);
+    assert.match(text, /\n {2}Free credit spent: \$0 of the \$250 weekly credit budget \(0%\)\n {2}OpenRouter spend: \$0\.50 \(should be \$0\)\n/);
+  });
+
+  it("has no OpenRouter line when OpenRouter cost nothing", async () => {
+    const service = await seeded();
+    await scheduled(service, DIGEST_AT);
+    assert.doesNotMatch(decodeEmail(service.calls.emails[0]!.raw).body, /OpenRouter/);
   });
 
   it("lists at most 20 logins and counts the rest", async () => {

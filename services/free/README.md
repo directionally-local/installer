@@ -283,8 +283,12 @@ the Worker or its alerts are broken. Each date's digest is marked in `alerts_sen
 only this cron; the weekly queue needs none (it runs on the first request of the week). The
 numbers come from the dashboard's queries as of the end of that day (sign-ups, active people,
 installs, the queue), the install counts by OS, chip and mode, the request log and the payments.
-Admins are left out; "active" is a request that day (that week, for the week). Free credit spent
-is free usage only (not paid, not admins): OpenRouter cash plus Luminal credit. The dashboard
+Admins are left out; "active" is a request that day (that week, for the week). The launch
+budget is the Luminal credit alone, so the money lines are Luminal credit: free credit spent is
+free usage only (not paid, not admins), credit left is the balance less everyone's use so far,
+and the week's free credit is shown against `luminalWeeklyCreditUsd`. The free tier should never
+spend on OpenRouter; if anyone did (admins and paid usage included), the day and the week each
+get a warning line, `OpenRouter spend: $0.50 (should be $0)`. The dashboard
 link is `<PUBLIC_URL>/admin`, or `https://free.directionallylocal.com/admin` without `PUBLIC_URL`
 (a cron run has no request URL). Serverless Objects' config accepts `triggers`, but its docs
 don't cover cron runs yet, so don't count on the digest off Cloudflare. A sample:
@@ -299,8 +303,8 @@ New sign-ups: 2
 Active people: 2
 Requests: 3
 Tokens: 3,300 in (1,400 cached), 330 out
-Free credit spent: $0.75 ($0.50 OpenRouter, $0.25 Luminal credit)
-Luminal credit left: $1,999.75 of $2,000
+Free credit spent: $0.75 (Luminal credit)
+Luminal credit left: $1,980.25 of $2,000
 Paid: $3 from 1 payment
 Installs: 3 finished, 1 failed
   linux arm64 server: 2 ok, 1 failed
@@ -312,9 +316,7 @@ This week so far (Mon 2026-11-02 to 2026-11-03):
   Active people: 3
   Requests: 4
   Tokens: 3,800 in (1,400 cached), 380 out
-  Free credit spent: $1.75 ($1.50 OpenRouter, $0.25 Luminal credit)
-  Weekly cap: $1.50 of $250 OpenRouter spend
-  All-time cap: $1.50 of $1,000
+  Free credit spent: $1.75 of the $250 weekly credit budget (1%)
   Paid: $13 from 2 payments
 
 Queue: 0 waiting
