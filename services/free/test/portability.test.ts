@@ -98,12 +98,14 @@ describe("free tier portability", () => {
     }
   });
 
-  it("exports only a fetch handler", async () => {
+  it("exports only a fetch handler and the digest's scheduled handler", async () => {
     const index = await read(service, "src/index.ts");
     assert.match(index, /export \{ default \} from "\.\/app\.js";/);
     const source = await read(service, "src/app.ts");
     assert.match(source, /export default createHandler\(\);/);
-    for (const handler of ["scheduled", "queue", "tail", "email", "webSocketMessage", "webSocketClose"]) {
+    // scheduled() only runs the daily digest (a cron trigger, which celld's config accepts too).
+    assert.equal(source.match(/\basync scheduled\s*\(/g)?.length, 1);
+    for (const handler of ["queue", "tail", "email", "webSocketMessage", "webSocketClose"]) {
       assert.doesNotMatch(source, new RegExp(`\\b${handler}\\s*[:(]`), `index.ts defines ${handler}`);
     }
   });
@@ -136,6 +138,7 @@ describe("free tier portability", () => {
     assert.equal(cloudflare.compatibility_date, portable.compatibility_date);
     assert.deepEqual(cloudflare.durable_objects, portable.durable_objects);
     assert.deepEqual(cloudflare.migrations, portable.migrations);
+    assert.deepEqual((cloudflare as { triggers?: unknown }).triggers, (portable as { triggers?: unknown }).triggers);
     assert.ok(Array.isArray(cloudflare.routes), "the Cloudflare config owns the routes");
     assert.equal(cloudflare.workers_dev, false);
   });

@@ -242,7 +242,7 @@ export interface Sql {
 const WEEK_OF_DAY = "(day - ((day + 3) % 7))";
 
 /** Leaves out admins: by id (ADMIN_GITHUB_IDS, bound as a JSON array) and by how they were admitted. */
-function notAdmin(column: string): string {
+export function notAdmin(column: string): string {
   return `${column} NOT IN (SELECT github_id FROM people WHERE admitted_via = 'admin') AND ${column} NOT IN (SELECT value FROM json_each(?))`;
 }
 
@@ -580,21 +580,37 @@ export function installFunnelData(sql: Sql, now: number, admins: string, people:
     if (target) target.active = n;
   }
 
+  const { platforms, failedSteps } = installBreakdown(sql, firstWeekDay, today + 1);
+  return { days: [...days.values()].reverse(), weeks: [...weeks.values()].reverse(), platforms, failedSteps };
+}
+
+/**
+ * Finished installs over UTC days `fromDay` (inclusive) to `untilDay` (exclusive), by OS, chip and
+ * mode (most first), and the steps failed installs stopped at (most first, ten at most). The
+ * dashboard shows the weeks on the page; the daily digest shows one day.
+ */
+export function installBreakdown(
+  sql: Sql,
+  fromDay: number,
+  untilDay: number,
+): Pick<InstallFunnel, "platforms" | "failedSteps"> {
   const platforms = sql
     .exec<{ os: string; arch: string; mode: string; ok: number; failed: number }>(
       `SELECT os, arch, mode, SUM(CASE WHEN result = 'ok' THEN installs ELSE 0 END) AS ok, SUM(CASE WHEN result = 'ok' THEN 0 ELSE installs END) AS failed
-       FROM install_daily WHERE day >= ? GROUP BY os, arch, mode ORDER BY ok + failed DESC, os, arch, mode`,
-      firstWeekDay,
+       FROM install_daily WHERE day >= ? AND day < ? GROUP BY os, arch, mode ORDER BY ok + failed DESC, os, arch, mode`,
+      fromDay,
+      untilDay,
     )
     .toArray();
   const failedSteps = sql
     .exec<{ step: string; failed: number }>(
-      `SELECT failed_step AS step, SUM(installs) AS failed FROM install_daily WHERE day >= ? AND result = 'failed'
+      `SELECT failed_step AS step, SUM(installs) AS failed FROM install_daily WHERE day >= ? AND day < ? AND result = 'failed'
        GROUP BY failed_step ORDER BY failed DESC, failed_step LIMIT 10`,
-      firstWeekDay,
+      fromDay,
+      untilDay,
     )
     .toArray();
-  return { days: [...days.values()].reverse(), weeks: [...weeks.values()].reverse(), platforms, failedSteps };
+  return { platforms, failedSteps };
 }
 
 /** Per upstream, today and this week: counts from `upstream_daily`, percentiles from `upstream_timings`. */

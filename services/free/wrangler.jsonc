@@ -24,6 +24,7 @@
     "REFERRAL_BONUS_CAP": "50000000",
     "ALERT_EMAIL_FROM": "alerts@dl.new"
   },
+  "triggers": { "crons": ["0 1 * * *"] },
   "durable_objects": {
     "bindings": [
       { "name": "AUTH", "class_name": "AuthObject" },

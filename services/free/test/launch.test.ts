@@ -100,7 +100,12 @@ const me = async (service: Service, token: string) => {
 const spenders = new WeakMap<Service, string>();
 async function spendLive(service: Service, usd: number): Promise<void> {
   let token = spenders.get(service);
-  if (!token) spenders.set(service, (token = (await signUp(service, { id: 4242, login: "spender", ip: "192.0.2.250" })).tokens.access_token));
+  if (!token) {
+    spenders.set(service, (token = (await signUp(service, { id: 4242, login: "spender", ip: "192.0.2.250" })).tokens.access_token));
+    // The spender is the first user, which sends its own alert (tested in signup-digest.test.ts).
+    service.calls.webhooks.length = 0;
+    service.calls.emails.length = 0;
+  }
   service.setOpenRouter(() => completion(usage(10, 10, 0, usd)));
   const response = await service.request("POST", "/v1/chat/completions", { token, ip: `10.8.0.${++caller % 250}`, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } });
   assert.equal(response.status, 200, await response.clone().text());
