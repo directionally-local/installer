@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.18.0](https://github.com/directionally-local/installer/compare/v0.17.0...v0.18.0) (2026-11-05)
+
+
+### Features
+
+* dl uninstall works on laptops; a read-only shell rc no longer fails the install ([87fdcf2](https://github.com/directionally-local/installer/commit/87fdcf28318d8a28306e43fc925ff58991b32b0c))
+* dl uninstall works on laptops; a read-only shell rc no longer fails the install ([1e1578c](https://github.com/directionally-local/installer/commit/1e1578c99658fca3b00b78ef8a875a9772f4020b))
+* dl update updates dl, and every update hint says dl update ([19ba2d3](https://github.com/directionally-local/installer/commit/19ba2d3986c50532e245590d002029f09ee30f08))
+* **free:** email fast when Luminal slows people down, and switch upstream from /admin ([5d8ac08](https://github.com/directionally-local/installer/commit/5d8ac081b69728a237d8efedbe55ae627dd56ed2))
+* **free:** POST /v1/feedback emails the owner, with replies going to the person ([ff5433f](https://github.com/directionally-local/installer/commit/ff5433f3d30b8d9f63e9265fb6c3a5a70aa32c2f))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.11.0 ([c79debf](https://github.com/directionally-local/installer/commit/c79debfbb33e35d2d4132ceda3e2cdbf2d68c054))
+
 ## [0.17.0](https://github.com/directionally-local/installer/compare/v0.16.0...v0.17.0) (2026-11-05)
 
 
