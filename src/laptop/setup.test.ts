@@ -17,7 +17,6 @@ import { loadSettings } from "./settings.js";
 import { serverLabel, setupForTasks, setupWizard, type LocalSetup, type SetupDeps, type SetupOptions } from "./setup.js";
 import { createOpener } from "./tunnel.js";
 import { dlVersion } from "../versions.js";
-import { updateCommand } from "../install-method.js";
 
 const GH = `gho_${"a".repeat(36)}`;
 const TOKEN = `aster_laptop_token_${"0".repeat(34)}`;
@@ -176,7 +175,7 @@ describe("dl setup on a laptop", () => {
     assert.equal((await setupWizard(run.deps))?.name, "box", "setup goes on with the server's own dl");
     assert.ok(!server.calls.some((call) => call.command.includes("dl-install.sh")));
     assert.equal(server.dlVersion, "99.0.0");
-    const hint = updateCommand().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const hint = "dl update";
     assert.match(run.text(), new RegExp(`! box runs dl 99\\.0\\.0, newer than this laptop's ${dlVersion().replace(/\./g, "\\.")}\\. Update this laptop: ${hint}\n`));
   });
 

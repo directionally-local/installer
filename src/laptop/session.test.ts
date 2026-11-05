@@ -10,7 +10,6 @@ import assert from "node:assert/strict";
 import { main, splitPassthrough, type MainOptions } from "../cli.js";
 import { PATHS } from "../layout.js";
 import { PAIRED_NAME } from "../local/layout.js";
-import { updateCommand } from "../install-method.js";
 import { ScriptedPrompter } from "../prompt.js";
 import { fakeTunnels, type FakeTunnel } from "../test-support/fake-tunnel.js";
 import { DEFAULT_MODEL, type LaptopIO } from "./commands.js";
@@ -20,8 +19,8 @@ import { autopilotOnPath, bundledAutopilot, openSession, planSession, startHere,
 import { loadSessions, rememberSession } from "./session-store.js";
 import { createOpener, type RemoteOpener } from "./tunnel.js";
 
-/** The update hint for how this dl is installed. */
-const UPDATE = updateCommand().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Every "update dl" hint says dl update, however dl was installed. */
+const UPDATE = "dl update";
 
 const TOKEN = "aster_laptop_token_0000000000000000000000000000000000";
 const NEW_ID = "7c1d2e3f-0000-4000-8000-000000000000";
@@ -821,7 +820,7 @@ describe("dl the first time on a laptop", () => {
     assert.equal(plain.launches[0]!.cwd, dir);
     assert.equal(plain.launches[0]!.env.AUTOPILOT_LAUNCHED_BY, "dl", "Autopilot knows dl started it, so its exit hint says dl -c");
     assert.match(plain.launches[0]!.env.DL_VERSION ?? "", /^\d+\.\d+\.\d+/, "Autopilot shows dl's version, not its own");
-    assert.ok(plain.launches[0]!.env.DL_UPDATE_COMMAND, "and dl's own update command");
+    assert.equal(plain.launches[0]!.env.DL_UPDATE_COMMAND, "dl update", "and dl's own update command, which updates dl however it was installed");
     assert.equal(plain.launches[0]!.env.PATH, process.env.PATH, "the rest of the environment is the person's own");
     assert.deepEqual(setups, [], "no setup wizard: no place, no Docker, no sandbox image, no services");
     assert.deepEqual(prompter.asked, [], "nothing asked: no place, no provider picker, no GitHub token");

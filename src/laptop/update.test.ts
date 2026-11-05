@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { Prompter } from "../prompt.js";
 import { PlainUi } from "../ui.js";
-import { updateCommand } from "../install-method.js";
 import { saveRemote, type RemoteServer } from "./config.js";
 import type { SshExec } from "./ssh.js";
 import {
@@ -20,8 +19,8 @@ import {
 } from "./update.js";
 import { dlVersion, pinnedAutopilotVersion, pinnedHotcellVersion } from "../versions.js";
 
-/** The update hint for how this dl is installed. */
-const UPDATE = updateCommand().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Every "update dl" hint says dl update, however dl was installed. */
+const UPDATE = "dl update";
 
 const roots: string[] = [];
 const previous = process.env.AUTOPILOT_REMOTES_FILE;

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { PAIRED_NAME } from "../local/layout.js";
-import { updateCommand } from "../install-method.js";
+import { DL_UPDATE } from "./self-update.js";
 import { dlVersion } from "../versions.js";
 import { nodeAdvisory } from "../node-advisory.js";
 import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
@@ -166,7 +166,7 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
   const c = palette(io.color === true);
   const autopilot = await (input.autopilot ?? findAutopilot)();
   if (!autopilot) {
-    io.err(`  ${c.red("✗")} The Autopilot that comes with dl isn't installed. Update: ${c.bold(updateCommand())}\n`);
+    io.err(`  ${c.red("✗")} The Autopilot that comes with dl isn't installed. Update: ${c.bold(DL_UPDATE)}\n`);
     return 1;
   }
   const args = [
@@ -195,7 +195,7 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
       // DL_VERSION and DL_UPDATE_COMMAND: Autopilot names dl (not itself) in its header and gives
       // dl's own update command, never npm i -g autopilot-ai, which dl wouldn't use. Set here so a
       // DL_VERSION left over from the install script (its version pin) can't leak through.
-      const env = withReferral({ ...process.env, AUTOPILOT_LAUNCHED_BY: "dl", DL_VERSION: dlVersion(), DL_UPDATE_COMMAND: updateCommand() }, referral);
+      const env = withReferral({ ...process.env, AUTOPILOT_LAUNCHED_BY: "dl", DL_VERSION: dlVersion(), DL_UPDATE_COMMAND: DL_UPDATE }, referral);
       const started = (input.spawn ?? realSpawn)(autopilot.command, args, env, { cwd: input.cwd });
       child = started;
       started.on("exit", (code, signal) => resolve({ code, signal }));
@@ -203,7 +203,7 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
     });
     if (referral) await settleReferral({ env: process.env, ...input.referral });
     if (outcome instanceof Error) {
-      io.err(`  ${c.red("✗")} Couldn't start Autopilot: ${outcome.message}. Update: ${c.bold(updateCommand())}\n`);
+      io.err(`  ${c.red("✗")} Couldn't start Autopilot: ${outcome.message}. Update: ${c.bold(DL_UPDATE)}\n`);
       return 1;
     }
     if (outcome.code !== null) return outcome.code;
@@ -226,7 +226,7 @@ async function startSession(plan: SessionPlan, target: { remote: RemoteServer; r
   // Asked while the tunnel opens; it only matters right before launching.
   const ready = autopilot ? (input.probe ?? supportsAttachRemote)(autopilot).catch(() => false) : Promise.resolve(false);
   const missing = () => {
-    io.err(`  ${c.red("✗")} The Autopilot that comes with dl ${autopilot ? "is too old to open a session" : "isn't installed"}. Update: ${c.bold(updateCommand())}\n`);
+    io.err(`  ${c.red("✗")} The Autopilot that comes with dl ${autopilot ? "is too old to open a session" : "isn't installed"}. Update: ${c.bold(DL_UPDATE)}\n`);
     return 1;
   };
 

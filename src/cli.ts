@@ -12,7 +12,9 @@ import { cancel, connect, describeError, laptopHome, laptopReady, pull, run, run
 import { autopilotAuth, autopilotOnPath, bundledAutopilotVersion, findAutopilot, type AutopilotAuth } from "./laptop/autopilot.js";
 import { FREE_TIER_PROVIDER, freeTierAccount, freeTierLine, type FreeTierAccount } from "./laptop/free-tier.js";
 import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
-import { loadRemotes } from "./laptop/config.js";
+import { loadRemotes, resolveTarget } from "./laptop/config.js";
+import { dlUpdate } from "./laptop/self-update.js";
+import { PAIRED_NAME } from "./local/layout.js";
 import { provider as providerCommand } from "./laptop/provider.js";
 import { model } from "./laptop/settings.js";
 import { openSession, startHere, type SessionInput } from "./laptop/session.js";
@@ -73,7 +75,9 @@ On your laptop:
   dl provider set         pick another provider, key and model in Autopilot's list (--server NAME)
   dl provider github      replace the GitHub token
   dl model [ID]           the model for tasks and sessions on a place (no ID: Autopilot's list)
-  dl update [NAME]        update a place's Autopilot, Hotcell and sandbox image to the versions dl pins
+  dl update               update dl (when npm has a newer one) and the Autopilot it pins, then
+                          the default place (--check: only say whether there's a newer dl)
+  dl update NAME          update a place's Autopilot, Hotcell and sandbox image to the versions dl pins
                           (--wait: wait for running tasks instead of asking)
   run options: --server NAME, -m/--model MODEL, --repo OWNER/NAME, --detach
   dl local status         agents running on this computer: running?, where, how many fit
@@ -180,6 +184,7 @@ export async function main(
         identity: { type: "string" },
         stdin: { type: "boolean" },
         wait: { type: "boolean" },
+        check: { type: "boolean" },
         "base-url": { type: "string" },
         "auth-header": { type: "string" },
         "auth-format": { type: "string" },
@@ -356,14 +361,14 @@ export async function main(
       }
       case "setup":
         return await setUp({ io: laptopIO, terminal, ...(values.identity ? { identityFile: values.identity } : {}) });
-      case "update":
-        return await update(parsed.positionals.slice(1), {
+      case "update": {
+        const updatePlace = (args: string[]) => update(args, {
           ssh: realSshExec,
           prompter: new TtyPrompter(),
           newUi: () => terminal ? new TerminalUi(io.out, undefined, colorOn) : new PlainUi(io.out),
           io: laptopIO,
           interactive: terminal,
-          wait: Boolean(values.wait),
+          wait: Boolean(values.wait) || args.includes("--wait"),
           local: async (updateUi) => {
             const { remote: _remote, ...rest } = await setUpOnThisComputer({ ui: updateUi, prompter: new TtyPrompter() });
             void rest;
@@ -371,6 +376,26 @@ export async function main(
             return status.state ? { autopilot: status.state.autopilotVersion, hotcell: status.state.hotcellVersion } : undefined;
           },
         });
+        // A place named: that place, as always. Otherwise dl itself first, then its pinned
+        // Autopilot, then the default place.
+        if (parsed.positionals[1]) return await updatePlace(parsed.positionals.slice(1));
+        return await dlUpdate({
+          io: laptopIO,
+          check: Boolean(values.check),
+          wait: Boolean(values.wait),
+          defaultPlace: async () => {
+            const remotes = await loadRemotes();
+            if (remotes.length === 0) return { kind: "none" };
+            try {
+              const { remote } = await resolveTarget(undefined);
+              return { kind: "place", name: remote.name, updatable: Boolean(remote.ssh) || remote.name === PAIRED_NAME };
+            } catch (error) {
+              return { kind: "unclear", message: error instanceof Error ? error.message : String(error) };
+            }
+          },
+          updatePlace,
+        });
+      }
       case "connect": {
         const url = parsed.positionals[1];
         if (!url) {

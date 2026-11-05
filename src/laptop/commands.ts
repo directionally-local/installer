@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { promisify } from "node:util";
-import { updateCommand } from "../install-method.js";
+import { DL_UPDATE } from "./self-update.js";
 import { isModelNotPriced } from "../model-prices.js";
 import { palette } from "../ui.js";
 import { RemoteApiError, RemoteClient, TERMINAL_STATUSES, type ModelCatalog, type RemoteConversation, type RemoteEvent } from "./client.js";
@@ -396,7 +396,7 @@ export function laptopReady(info: ReadyHere, io: LaptopIO = processIO): void {
   row("dl", `${info.dl} ${c.dim(`· installed in ${info.installedIn}`)}`);
   row("Autopilot", info.autopilot
     ? `${info.autopilot} ${c.dim(info.bundled === false ? "· the one on your PATH" : "· comes with dl")}`
-    : `${c.yellow("not installed")}   ${c.dim(updateCommand())}`);
+    : `${c.yellow("not installed")}   ${c.dim(DL_UPDATE)}`);
   if (info.autopilot && info.setUp === false) io.out(`  ${c.yellow("!")} ${NOT_SIGNED_IN}\n`);
   else if (info.autopilot && info.freeTier) row("Free tier", info.freeTier);
   io.out("\n");

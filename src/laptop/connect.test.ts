@@ -5,11 +5,10 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseConnectState } from "../provider.js";
-import { updateCommand } from "../install-method.js";
 import { ConnectCancelled, runAutopilotConnect, type ConnectSpawner } from "./connect.js";
 
-/** The update hint for how this dl is installed. */
-const UPDATE = updateCommand().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Every "update dl" hint says dl update, however dl was installed. */
+const UPDATE = "dl update";
 
 let root: string;
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "dl-connect-test-")); });
