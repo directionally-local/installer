@@ -5,6 +5,7 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { PAIRED_NAME } from "../local/layout.js";
 import { updateCommand } from "../install-method.js";
+import { dlVersion } from "../versions.js";
 import { nodeAdvisory } from "../node-advisory.js";
 import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
 import { palette } from "../ui.js";
@@ -191,7 +192,10 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
       // "continue with") name dl's commands and the product, not `autopilot resume ID`.
       // DL_REFERRAL: the invite link's code, from the environment or kept from an earlier run
       // until the free tier sign-in (Autopilot's) credits it. See referral.ts.
-      const env = withReferral({ ...process.env, AUTOPILOT_LAUNCHED_BY: "dl" }, referral);
+      // DL_VERSION and DL_UPDATE_COMMAND: Autopilot names dl (not itself) in its header and gives
+      // dl's own update command, never npm i -g autopilot-ai, which dl wouldn't use. Set here so a
+      // DL_VERSION left over from the install script (its version pin) can't leak through.
+      const env = withReferral({ ...process.env, AUTOPILOT_LAUNCHED_BY: "dl", DL_VERSION: dlVersion(), DL_UPDATE_COMMAND: updateCommand() }, referral);
       const started = (input.spawn ?? realSpawn)(autopilot.command, args, env, { cwd: input.cwd });
       child = started;
       started.on("exit", (code, signal) => resolve({ code, signal }));
