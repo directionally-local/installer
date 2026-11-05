@@ -5,8 +5,10 @@ import { fileURLToPath } from "node:url";
 
 /**
  * How this dl was installed, so an update hint names the command that updates this copy:
- *   script  the install script, as yourself, into ~/.directionallylocal (or DL_HOME)
- *   server  a server: Linux as root, or one `dl up` set up (the install script under sudo)
+ *   script  the install script into ~/.directionallylocal (or DL_HOME): as yourself, or as
+ *           root on Linux, which gets the same plain install (into /root/.directionallylocal)
+ *   server  a Linux machine `dl up` set up (the install script with DL_MODE=server). On it the
+ *           plain `| sudo sh` updates the server, as the script sees dl up's state file
  *   npm     `npm install -g directionallylocal`
  */
 export type InstallMethod = "script" | "server" | "npm";
@@ -39,7 +41,8 @@ export function installMethod(facts: InstallFacts = realFacts()): InstallMethod 
     const homes = [facts.env.DL_HOME, facts.home ? join(facts.home, ".directionallylocal") : undefined].filter(Boolean);
     if (homes.includes(scriptHome) || facts.readFile(join(scriptHome, "bin", "dl"))?.includes(SCRIPT_MARKER)) return "script";
   }
-  if (facts.platform === "linux" && (facts.uid === 0 || facts.readFile(SERVER_STATE) !== undefined)) return "server";
+  // Root alone isn't a server: only a machine dl up set up is.
+  if (facts.platform === "linux" && facts.readFile(SERVER_STATE) !== undefined) return "server";
   return "npm";
 }
 

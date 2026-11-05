@@ -17,7 +17,9 @@ function supportedHost(): boolean {
 
 /**
  * Runs install.sh with every command it calls stubbed on PATH: root, a patched Node, curl
- * present, npm recording its arguments, and `directionallylocal` noting that `up` ran.
+ * present, npm recording its arguments, and `directionallylocal` noting that `up` ran. No
+ * server state file: being root alone isn't a server, so the server path needs DL_MODE=server
+ * or DL_INSTALL_ONLY=1 (or DL_SERVER_STATE naming a file that's there).
  */
 function install(env: Record<string, string>, options: { npmFails?: boolean; dlUpFails?: boolean; counts?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dl-install-"));
@@ -34,7 +36,7 @@ function install(env: Record<string, string>, options: { npmFails?: boolean; dlU
   stub("directionallylocal", `echo "$*" >> "${dir}/up.log"${options.dlUpFails ? "; exit 3" : ""}`);
   try {
     // The anonymous count is off unless a test turns it on (DL_NO_TELEMETRY: "").
-    const result = spawnSync("sh", [SCRIPT], { env: { PATH: `${dir}:/usr/bin:/bin`, DL_NO_TELEMETRY: "1", ...env }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    const result = spawnSync("sh", [SCRIPT], { env: { PATH: `${dir}:/usr/bin:/bin`, DL_NO_TELEMETRY: "1", DL_SERVER_STATE: join(dir, "no-server-state"), ...env }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     const read = (name: string) => existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : undefined;
     return { ...result, npm: read("npm.log"), up: read("up.log"), counts: options.counts ? installCounts(join(dir, "curl.log")) : [] };
   } finally {
@@ -74,7 +76,7 @@ describe("install.sh", () => {
     assert.equal(only.up, undefined, "dl up didn't run");
 
     // Without it, the same install goes on to dl up (so the stubs above are what it calls).
-    const full = install({});
+    const full = install({ DL_MODE: "server" });
     assert.equal(full.status, 0, full.stderr);
     assert.equal(full.up, "up\n");
   });
@@ -252,11 +254,11 @@ describe("install.sh on a laptop", () => {
     assert.equal(result.npm, undefined);
   });
 
-  it("on Linux as a user is a laptop too, and says how to install a server instead", () => {
+  it("on Linux as a user is a laptop too, with no server pitch", () => {
     const result = run({ os: "Linux", shell: "/usr/bin/fish" });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.sudo, undefined);
-    assert.match(result.stdout, /For a server instead, run it as root: curl -fsSL https:\/\/directionallylocal\.run \| sudo sh/);
+    assert.doesNotMatch(result.stdout, /For a server instead|sudo sh/);
     assert.match(result.read(join(result.home, ".config", "fish", "conf.d", "directionallylocal.fish")) ?? "", /set -gx PATH ".*\.directionallylocal\/bin" \$PATH/);
   });
 
@@ -560,46 +562,82 @@ describe("install.sh: the anonymous install count", () => {
     const only = install({ DL_NO_TELEMETRY: "", DL_INSTALL_ONLY: "1" }, { counts: true });
     assert.equal(only.status, 0, only.stderr);
     assert.deepEqual(only.counts.map((count) => count.body), [{ os: "linux", arch: "x64", mode: "server", dlVersion: "0.1.2", result: "ok", via: "run" }]);
-    const full = install({ DL_NO_TELEMETRY: "", DL_INSTALL_VIA: "home" }, { counts: true });
+    const full = install({ DL_NO_TELEMETRY: "", DL_MODE: "server", DL_INSTALL_VIA: "home" }, { counts: true });
     assert.equal(full.up, "up\n");
     assert.deepEqual(full.counts.map((count) => [count.body.result, count.body.via]), [["ok", "home"]]);
-    const up = install({ DL_NO_TELEMETRY: "" }, { dlUpFails: true, counts: true });
+    const up = install({ DL_NO_TELEMETRY: "", DL_MODE: "server" }, { dlUpFails: true, counts: true });
     assert.equal(up.status, 3);
     assert.deepEqual(up.counts.map((count) => [count.body.result, count.body.failedStep]), [["failed", "dl_up"]]);
-    const npm = install({ DL_NO_TELEMETRY: "" }, { npmFails: true, counts: true });
+    const npm = install({ DL_NO_TELEMETRY: "", DL_MODE: "server" }, { npmFails: true, counts: true });
     assert.deepEqual(npm.counts.map((count) => [count.body.result, count.body.failedStep, count.body.dlVersion]), [["failed", "install_dl", ""]]);
-    assert.deepEqual(install({ DO_NOT_TRACK: "1" }, { counts: true }).counts, []);
+    assert.deepEqual(install({ DO_NOT_TRACK: "1", DL_MODE: "server" }, { counts: true }).counts, []);
   });
 });
 
 describe("install.sh: server or laptop", () => {
-  it("root on Linux, the laptop's setup over SSH, or a machine dl up set up is a server; DL_MODE decides when set", { skip: !supportedHost() && "needs Ubuntu or Debian" }, () => {
-    // As root: the server path, as before (install() stubs id as 0).
+  it("root on Linux with no server install gets the coding agent like anyone: into its home, no sudo, counted as a laptop", () => {
+    const result = laptopInstall({ os: "Linux", uid: 0, shell: "/bin/bash", terminal: true, env: { DL_NO_TELEMETRY: "" } });
+    try {
+      assert.equal(result.status, 0, result.stderr);
+      const home = join(result.home, ".directionallylocal");
+      assert.match(result.npm ?? "", new RegExp(`^install -g --prefix ${home}/dl `, "m"), "the plain install, not a global one");
+      assert.equal(result.sudo, undefined, "no sudo");
+      assert.match(result.read(join(result.home, ".bashrc")) ?? "", /export PATH=".*\.directionallylocal\/bin:\$PATH"/);
+      assert.match(result.read(join(result.dir, "started.log")) ?? "", /directionallylocal\.mjs in /, "and starts dl, which opens plain Autopilot");
+      assert.doesNotMatch(result.stdout + result.stderr, /Tailscale|without sudo|For a server instead/);
+      assert.deepEqual(result.counts().map((count) => [count.body.os, count.body.mode, count.body.result]), [["linux", "laptop", "ok"]]);
+    } finally {
+      rmSync(result.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is a server only with DL_MODE=server, DL_INSTALL_ONLY=1 (the laptop's setup over SSH), or on a machine dl up set up", { skip: !supportedHost() && "needs Ubuntu or Debian" }, () => {
+    // Root asking for a server: the server path, as before (install() stubs id as 0).
+    const asked = install({ DL_MODE: "server" });
+    assert.equal(asked.status, 0, asked.stderr);
+    assert.match(asked.npm ?? "", /^install -g --no-audit/m, "a global install, not into a home directory");
+    assert.equal(asked.up, "up\n", "and dl up, which asks for Tailscale and the keys");
     const rooted = install({ DL_INSTALL_ONLY: "1" });
     assert.equal(rooted.status, 0, rooted.stderr);
-    assert.match(rooted.npm ?? "", /^install -g --no-audit/m, "a global install, not into a home directory");
-    // DL_MODE=server as a user: the server path, through sudo, as before this rule.
-    const user = laptopInstall({ os: "Linux", env: { DL_MODE: "server" } });
-    try {
-      assert.equal(user.status, 1, "the stub sudo fails");
-      assert.match(user.sudo ?? "", /^sudo -E npm install -g/m, "the server path, through sudo");
-    } finally {
-      rmSync(user.dir, { recursive: true, force: true });
-    }
-    const viaSetup = laptopInstall({ os: "Linux", env: { DL_INSTALL_ONLY: "1" } });
-    try {
-      assert.match(viaSetup.sudo ?? "", /^sudo -E npm install -g/m, "DL_INSTALL_ONLY=1 (the laptop's setup, over SSH) is always a server");
-    } finally {
-      rmSync(viaSetup.dir, { recursive: true, force: true });
-    }
-    // A user on a Linux machine dl up already set up as a server: the server path too.
+    assert.match(rooted.npm ?? "", /^install -g --no-audit/m);
+    // Root on a machine dl up already set up: re-running the plain line updates that server.
     const state = mkdtempSync(join(tmpdir(), "dl-state-"));
     writeFileSync(join(state, "state.json"), "{}");
-    const serverUser = laptopInstall({ os: "Linux", env: { DL_SERVER_STATE: join(state, "state.json") } });
     try {
-      assert.match(serverUser.sudo ?? "", /^sudo -E npm install -g/m);
+      const existing = install({ DL_SERVER_STATE: join(state, "state.json") });
+      assert.equal(existing.status, 0, existing.stderr);
+      assert.match(existing.npm ?? "", /^install -g --no-audit/m);
+      assert.equal(existing.up, "up\n");
+      // DL_MODE=server as a user: the server path, through sudo.
+      const user = laptopInstall({ os: "Linux", env: { DL_MODE: "server" } });
+      try {
+        assert.equal(user.status, 1, "the stub sudo fails");
+        assert.match(user.sudo ?? "", /^sudo -E npm install -g/m, "the server path, through sudo");
+      } finally {
+        rmSync(user.dir, { recursive: true, force: true });
+      }
+      const viaSetup = laptopInstall({ os: "Linux", env: { DL_INSTALL_ONLY: "1" } });
+      try {
+        assert.match(viaSetup.sudo ?? "", /^sudo -E npm install -g/m, "DL_INSTALL_ONLY=1 (the laptop's setup, over SSH) is always a server");
+      } finally {
+        rmSync(viaSetup.dir, { recursive: true, force: true });
+      }
+      // A user on a Linux machine dl up already set up as a server: the server path too.
+      const serverUser = laptopInstall({ os: "Linux", env: { DL_SERVER_STATE: join(state, "state.json") } });
+      try {
+        assert.match(serverUser.sudo ?? "", /^sudo -E npm install -g/m);
+      } finally {
+        rmSync(serverUser.dir, { recursive: true, force: true });
+      }
+      // DL_MODE=laptop still wins over the state file.
+      const forced = laptopInstall({ os: "Linux", uid: 0, env: { DL_MODE: "laptop", DL_SERVER_STATE: join(state, "state.json") } });
+      try {
+        assert.equal(forced.status, 0, forced.stderr);
+        assert.equal(forced.sudo, undefined);
+      } finally {
+        rmSync(forced.dir, { recursive: true, force: true });
+      }
     } finally {
-      rmSync(serverUser.dir, { recursive: true, force: true });
       rmSync(state, { recursive: true, force: true });
     }
   });

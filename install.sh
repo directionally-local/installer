@@ -3,21 +3,24 @@
 #
 #   curl -fsSL https://directionallylocal.run | sh
 #
-# On a laptop (macOS or Linux, as yourself): installs dl into ~/.directionallylocal with no
-# sudo, and Node.js there too when this one is missing or too old, puts dl on your PATH for
+# On a laptop or any Linux machine (macOS as yourself; Linux as anyone, root included):
+# installs dl into ~/.directionallylocal with no sudo, and Node.js there too when this one is missing or too old, puts dl on your PATH for
 # new shells (and links it into ~/.local/bin or ~/bin when one is already on this shell's
 # PATH, so dl works in this terminal too), and starts dl in the folder you ran it from.
 # Nothing else is set up until you ask for background tasks (dl run, dl setup).
 #
-# On a server (Linux as root, or `| sudo sh`): installs Node.js 24 if needed and the
-# directionallylocal CLI (also `dl`), then runs `dl up`, which asks how to reach this server
-# and for the model key, and sets up Hotcell + Autopilot as services. Safe to run again.
+# A server, only when asked (Ubuntu or Debian):
 #
-# Which one: DL_MODE=server or DL_MODE=laptop decides. Otherwise it's a server when the
-# laptop's setup runs it (DL_INSTALL_ONLY=1), when it runs as root on Linux, or when dl up
-# already set this Linux machine up as a server; anything else is a laptop. That's the same
-# line `dl` itself draws: on a machine without a server install, root gets the server's
-# instructions and everyone else the laptop's.
+#   curl -fsSL https://directionallylocal.run | sudo DL_MODE=server sh
+#
+# installs Node.js 24 if needed and the directionallylocal CLI (also `dl`), then runs `dl up`,
+# which asks how to reach this server and for the model key, and sets up Hotcell + Autopilot
+# as services. Safe to run again.
+#
+# Which one: DL_MODE=server or DL_MODE=laptop decides. Otherwise it's a server only when the
+# laptop's setup runs it (DL_INSTALL_ONLY=1) or when dl up already set this Linux machine up
+# as a server (so re-running it there updates that server, as before); anything else, root
+# included, gets the coding agent. That's the same line `dl` itself draws.
 #
 # Unattended server: export DL_TAILSCALE_AUTH_KEY, DL_PROVIDER + DL_PROVIDER_API_KEY (or DL_OPENROUTER_API_KEY)
 # and DL_GITHUB_TOKEN first.
@@ -34,6 +37,8 @@
 # At the end it sends one anonymous count to free.directionallylocal.com (OS, chip, laptop or server, dl version, ok or the step that failed, which page); no IP or identity is kept, and DL_NO_TELEMETRY=1, DO_NOT_TRACK=1 or CI turns it off.
 set -eu
 
+# DL_HOME_SET: the install goes where DL_HOME says, not into $HOME.
+DL_HOME_SET=${DL_HOME:+1}
 DL_HOME="${DL_HOME:-${HOME:-}/.directionallylocal}"
 
 say() { printf '%s\n' "$*"; }
@@ -289,15 +294,15 @@ node_is_patched() {
   ' 2>/dev/null
 }
 
-# Server or laptop (see the top of this file). DL_SERVER_STATE stands in for dl up's state file in tests.
+# Server or laptop (see the top of this file). Being root doesn't make it a server: only
+# asking for one, or one dl up already set up. DL_SERVER_STATE stands in for dl up's state
+# file in tests.
 install_mode() {
   if [ -n "${DL_MODE:-}" ]; then
     echo "$DL_MODE"
   elif [ "${DL_INSTALL_ONLY:-}" = "1" ]; then
     echo server
-  elif [ "$(uname -s)" != "Linux" ]; then
-    echo laptop
-  elif [ "$(id -u)" -eq 0 ] || [ -e "${DL_SERVER_STATE:-/etc/directionallylocal/state.json}" ]; then
+  elif [ "$(uname -s)" = "Linux" ] && [ -e "${DL_SERVER_STATE:-/etc/directionallylocal/state.json}" ]; then
     echo server
   else
     echo laptop
@@ -498,7 +503,8 @@ bundle_failed() {
   hint "The prebuilt download didn't work ($1); installing with npm instead."
 }
 
-# A laptop: everything under $DL_HOME, as this user; no sudo, no services.
+# A laptop (or any Linux machine, as root too): everything under $DL_HOME, as this user; no
+# sudo, no services.
 laptop_main() {
   case $(uname -s) in
     Darwin) os=darwin ;;
@@ -510,9 +516,23 @@ laptop_main() {
     x86_64|amd64) arch=x64 ;;
     *) fail "Node.js has no build for this CPU ($(uname -m))" ;;
   esac
-  [ "$(id -u)" -ne 0 ] || fail "on a laptop, run it as yourself, without sudo: it installs into your home directory"
+  # On a Mac, root is sudo by mistake. On Linux root is a user like any other (HOME=/root), but
+  # not with someone else's home: a sudo that kept HOME would leave root's files in it.
+  if [ "$(id -u)" -eq 0 ]; then
+    [ "$os" = linux ] || fail "on a laptop, run it as yourself, without sudo: it installs into your home directory"
+    if [ -z "${DL_HOME_SET:-}" ] && [ -d "${HOME:-/}" ] && [ ! -O "${HOME:-/}" ]; then
+      fail "$HOME isn't root's home; run it as yourself, without sudo (or as root: sudo -H sh)"
+    fi
+  fi
   [ -n "${HOME:-}" ] || [ "$DL_HOME" != "/.directionallylocal" ] || fail "HOME isn't set; set it, or DL_HOME=DIR"
   command -v curl >/dev/null 2>&1 || fail "curl is needed"
+  # Minimal images (Amazon Linux's container, for one) can lack them; the downloads are tarballs.
+  { command -v tar && command -v gzip; } >/dev/null 2>&1 || fail "tar and gzip are needed; install them with your package manager (e.g. dnf install tar gzip) and run this again"
+  # Alpine and other musl Linux: Autopilot's terminal renderer, nodejs.org's Node and dl's
+  # bundle are all built for glibc, so the agent can't start there even with the system's Node.
+  if [ "$os" = linux ] && ls /lib/ld-musl-* >/dev/null 2>&1; then
+    fail "Alpine and other musl Linux can't run Autopilot (its terminal renderer is built for glibc); use a glibc distribution such as Ubuntu, Debian, Fedora or Amazon Linux"
+  fi
   mkdir -p "$DL_HOME/bin"
   chmod 700 "$DL_HOME"
 
@@ -570,9 +590,6 @@ laptop_main() {
       # sh and dash have no `source`.
       case $rc in */.profile) fix=". $(tilde "$rc")" ;; *) fix="source $(tilde "$rc")" ;; esac
     fi
-  fi
-  if [ "$os" = linux ]; then
-    say "  For a server instead, run it as root: curl -fsSL https://directionallylocal.run | sudo sh"
   fi
   # Interactive: go straight into dl in this folder (plain Autopilot the first time).
   # (DL_TTY stands in for the terminal in tests.)

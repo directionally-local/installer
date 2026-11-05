@@ -880,11 +880,25 @@ describe("dl the first time on a laptop", () => {
     assert.equal(plain.launches.length, 1);
   });
 
-  it("as root, or without a terminal, says what this is instead", async () => {
-    for (const [options, says] of [[{ root: true }, /isn't set up on this machine/], [{ terminal: false }, /on this computer[\s\S]*dl -c {7}continue the last session there/]] as const) {
+  it("as root with no server install, is plain autopilot too: root gets the coding agent like everyone", async () => {
+    const dir = join(root, "fresh");
+    await mkdir(dir, { recursive: true });
+    const prompter = new ScriptedPrompter({});
+    assert.equal(await inside(dir, () => main([], capture(), laptop(prompter, { root: true }))), 0);
+    assert.deepEqual(plain.launches.map((launch) => launch.args), [AUTOPILOT.args]);
+    assert.equal(await inside(dir, () => main(["-c"], capture(), laptop(undefined, { root: true }))), 0);
+    assert.equal(await inside(dir, () => main(["new"], capture(), laptop(undefined, { root: true }))), 0);
+    assert.deepEqual(plain.launches.map((launch) => launch.args), [AUTOPILOT.args, [...AUTOPILOT.args, "-c"], AUTOPILOT.args]);
+    assert.deepEqual(setups, [], "no server setup, nothing asked");
+    assert.deepEqual(prompter.asked, []);
+  });
+
+  it("without a terminal, says what this is instead", async () => {
+    for (const extra of [{ terminal: false }, { terminal: false, root: true }]) {
       const io = capture();
-      assert.equal(await main([], io, laptop(undefined, options)), 0);
-      assert.match(io.text(), says);
+      assert.equal(await main([], io, laptop(undefined, extra)), 0);
+      assert.match(io.text(), /on this computer[\s\S]*dl -c {7}continue the last session there/);
+      assert.doesNotMatch(io.text(), /isn't set up on this machine/);
       assert.equal(plain.launches.length, 0);
       assert.deepEqual(setups, []);
     }

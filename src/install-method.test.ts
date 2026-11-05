@@ -29,9 +29,16 @@ describe("how dl was installed", () => {
     assert.equal(installMethod(facts({ packageRoot: root }, { "/data/dl/bin/dl": "#!/bin/sh\nexec something-else\n" })), "npm", "not a wrapper of ours");
   });
 
-  it("knows a server: Linux as root, or a machine dl up set up", () => {
-    assert.equal(installMethod(facts({ packageRoot: "/usr/lib/node_modules/directionallylocal", platform: "linux", uid: 0, home: "/root" })), "server");
+  it("knows a server: a Linux machine dl up set up, as root or not", () => {
+    assert.equal(installMethod(facts({ packageRoot: "/usr/lib/node_modules/directionallylocal", platform: "linux", uid: 0, home: "/root" }, { "/etc/directionallylocal/state.json": "{}" })), "server");
     assert.equal(installMethod(facts({ packageRoot: "/usr/lib/node_modules/directionallylocal", platform: "linux", uid: 1000 }, { "/etc/directionallylocal/state.json": "{}" })), "server");
+  });
+
+  it("root on Linux without a server is a plain install like anyone's: the script's update, without sudo", () => {
+    const rootPlain = facts({ packageRoot: "/root/.directionallylocal/dl/lib/node_modules/directionallylocal", platform: "linux", uid: 0, home: "/root" });
+    assert.equal(installMethod(rootPlain), "script");
+    assert.equal(updateCommand(installMethod(rootPlain)), "curl -fsSL https://directionallylocal.run | sh");
+    assert.equal(installMethod(facts({ packageRoot: "/usr/lib/node_modules/directionallylocal", platform: "linux", uid: 0, home: "/root" })), "npm", "npm install -g as root, with no server");
   });
 
   it("otherwise, a global npm install", () => {

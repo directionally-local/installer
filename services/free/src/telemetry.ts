@@ -8,7 +8,7 @@
 
 /**
  * Where a script was served. `run` is directionallylocal.run itself: a laptop and a server get
- * the same script from the same URL (`| sh` or `| sudo sh`), so the split between them comes
+ * the same script from the same URL (`| sh`, or `| sudo DL_MODE=server sh`), so the split between them comes
  * from the install count's `mode`. `private_invite` is dl.new/i/<code>, once it serves a script.
  */
 export const DOWNLOAD_ROUTES = ["home", "invite", "private_invite", "continue", "run"] as const;

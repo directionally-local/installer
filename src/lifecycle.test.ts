@@ -187,10 +187,10 @@ describe("cli", () => {
     assert.doesNotMatch(out, /background coding agents on your own server/i);
     assert.equal(await main(["launch"], io), 2);
     assert.match(err, /Unknown command "launch"/);
-    // On an installed server, bare dl shows the server's overview instead.
+    // A server-only command off a server explains what this is, and how to set up a server.
     out = "";
-    assert.equal(await main([], io, { root: true, serverState: async () => undefined }), 0, "bare dl explains itself, even off a server");
-    assert.match(out, /isn't set up on this machine[\s\S]*run on this computer or on your own server[\s\S]*curl -fsSL https:\/\/directionallylocal\.run \| sudo sh/);
+    assert.equal(await main(["previews"], io, { root: true, serverState: async () => undefined }), 1, "previews explains itself, even off a server");
+    assert.match(out, /isn't set up on this machine[\s\S]*run on this computer or on your own server[\s\S]*curl -fsSL https:\/\/directionallylocal\.run \| sudo DL_MODE=server sh/);
     out = "";
     assert.equal(await main(["use"], io), 0);
     assert.match(out, /Nothing set up yet\. {2}dl/);
@@ -228,7 +228,7 @@ describe("cli", () => {
     assert.match(out, /Directionally Local {2}on this computer\n\n {2}dl {9}\d+\.\d+\.\d+ · installed in \S+\n {2}Autopilot {2}\d+\.\d+\.\d+ · comes with dl\n/);
     assert.match(out, /Start, in a project folder:\n {5}dl {10}a new session with Autopilot in that folder\n {5}dl -c {7}continue the last session there\n/);
     assert.match(out, /Next steps\n {5}dl run "fix the flaky checkout test" {3}a background task that ends in a pull request\n {5}dl setup {4}set up where background tasks run/);
-    assert.match(out, /curl -fsSL https:\/\/directionallylocal\.run \| sudo sh\n/);
+    assert.match(out, /curl -fsSL https:\/\/directionallylocal\.run \| sudo DL_MODE=server sh\n/);
     assert.match(out, /dl connect https:\/\/your-server/);
     // Before Autopilot has a provider (first run not finished): one line says so.
     out = "";
@@ -251,10 +251,11 @@ describe("cli", () => {
       assert.doesNotMatch(out, /Free tier/);
       assert.match(out, /comes with dl\n\n/);
     }
-    // As root, with no server install: the server's instructions, with sudo, as the install script says.
+    // As root, with no server install: the same overview, as the install script gives root the plain install too.
     out = "";
-    assert.equal(await main(["status"], io, { ...laptop, root: true }), 1);
-    assert.match(out, /isn't set up on this machine[\s\S]*\| sudo sh/);
+    assert.equal(await main(["status"], io, { ...laptop, root: true }), 0);
+    assert.match(out, /Directionally Local {2}on this computer\n/);
+    assert.doesNotMatch(out, /isn't set up on this machine/);
     await saveRemote({ name: "box", url: "http://127.0.0.1:9", token: "aster_x", credentialId: "c", expiresAt: "2027-01-01T00:00:00.000Z", addedAt: "2026-10-28T09:00:00.000Z" });
     out = "";
     assert.equal(await main(["status"], io, laptop), 0);
