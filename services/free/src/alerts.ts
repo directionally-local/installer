@@ -444,15 +444,28 @@ function headerValue(value: string): string {
 }
 
 /**
- * A small RFC 5322 message: plain text, UTF-8, base64 body. Enough for an alert; no
- * dependency needed.
+ * A reply address safe to put in a header: printable ASCII with no spaces, exactly one `@`, none
+ * of the characters that mean something in an address header (`<>()[],;:"\\`), at most 254
+ * characters. CR and LF are never allowed, so a value can't start a new header.
  */
-export function mimeMessage(input: { from: string; to: string; subject: string; body: string; now: number; messageId: string }): string {
+export function isHeaderSafeAddress(value: string): boolean {
+  return value.length <= 254 && /^[^\s@<>()[\],;:"\\]+@[^\s@<>()[\],;:"\\]+$/.test(value) && /^[\x21-\x7e]+$/.test(value);
+}
+
+/**
+ * A small RFC 5322 message: plain text, UTF-8, base64 body. Enough for an alert; no
+ * dependency needed. `replyTo` adds a Reply-To header; it must pass `isHeaderSafeAddress`
+ * (a CR or LF, or anything else that could change the header, throws).
+ */
+export function mimeMessage(input: { from: string; to: string; subject: string; body: string; now: number; messageId: string; fromName?: string; replyTo?: string }): string {
+  if (input.replyTo !== undefined && !isHeaderSafeAddress(input.replyTo)) throw new Error("mimeMessage: replyTo isn't a plain email address");
   const domain = input.from.split("@")[1] ?? "dl.new";
   const body = base64(input.body.replace(/\r?\n/g, "\r\n")).replace(/.{1,76}/g, "$&\r\n");
+  const name = (input.fromName ?? "dl free tier").replace(/[^\w .-]/g, "");
   return [
-    `From: dl free tier <${input.from}>`,
+    `From: ${name} <${input.from}>`,
     `To: <${input.to}>`,
+    ...(input.replyTo !== undefined ? [`Reply-To: <${input.replyTo}>`] : []),
     `Subject: ${headerValue(input.subject)}`,
     `Date: ${new Date(input.now).toUTCString().replace("GMT", "+0000")}`,
     `Message-ID: <${input.messageId}@${domain}>`,
@@ -462,6 +475,20 @@ export function mimeMessage(input: { from: string; to: string; subject: string; 
     "",
     body,
   ].join("\r\n");
+}
+
+/**
+ * Sends one plain-text email through the `send_email` binding, from `from` to `to`. Throws
+ * when the binding refuses it; callers decide whether that matters.
+ */
+export async function sendEmail(
+  binding: EmailBinding,
+  input: { from: string; to: string; subject: string; body: string; now: number; fromName?: string; replyTo?: string },
+): Promise<void> {
+  const raw = mimeMessage({ ...input, messageId: crypto.randomUUID() });
+  // Only reached where the binding exists (Cloudflare); the module is never loaded elsewhere.
+  const { EmailMessage } = await import("cloudflare:email"); // portable-exception: optional send_email binding
+  await binding.send(new EmailMessage(input.from, input.to, raw));
 }
 
 export function emailBody(alert: Alert, adminUrl: string): string {
@@ -487,10 +514,7 @@ export async function deliverAlerts(input: {
     const { config } = input;
     if (input.emailBinding && config.alertEmailTo) {
       try {
-        const raw = mimeMessage({ from: config.alertEmailFrom, to: config.alertEmailTo, subject: alert.subject, body: emailBody(alert, input.adminUrl), now: input.now, messageId: crypto.randomUUID() });
-        // Only reached where the binding exists (Cloudflare); the module is never loaded elsewhere.
-        const { EmailMessage } = await import("cloudflare:email"); // portable-exception: optional send_email binding
-        await input.emailBinding.send(new EmailMessage(config.alertEmailFrom, config.alertEmailTo, raw));
+        await sendEmail(input.emailBinding, { from: config.alertEmailFrom, to: config.alertEmailTo, subject: alert.subject, body: emailBody(alert, input.adminUrl), now: input.now });
         reached.push("email");
       } catch (error) {
         console.error("alert email failed", error instanceof Error ? error.message : String(error));

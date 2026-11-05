@@ -127,6 +127,57 @@ Refusals: 400 `invalid_request` (unknown product), 403 `not_invited` / `suspende
 `https://dl.new/billing/success` or `/billing/cancel` (`BILLING_SUCCESS_URL`,
 `BILLING_CANCEL_URL`); the portal returns to `https://dl.new/billing` (`BILLING_PORTAL_RETURN_URL`).
 
+### Feedback (`POST /v1/feedback`; sign-in optional)
+
+Sends one email to the owner (the `ALERT_EMAIL` binding, from `ALERT_EMAIL_FROM` to
+`ALERT_EMAIL_TO`). **Feedback isn't stored**: the message and the reply address go into that
+email and nowhere else (no rows, no logs). The only state it leaves is the rate-limit buckets:
+the person's GitHub id, and a salted hash of the network, with a token count.
+
+```
+POST /v1/feedback
+{"message": "…",                       // required, 1–5,000 characters, sent verbatim
+ "email": "me@example.com",            // optional reply address
+ "client": {"dl": "0.11.0", "autopilot": "3.5.0", "os": "macos", "arch": "arm64", "provider": "free"}}
+→ 200 {"ok": true, "replyTo": "me@example.com"}     // or "replyTo": null: no reply possible by email
+```
+
+- **Sign-in.** Without `Authorization` it's anonymous ("not signed in"). With a free tier
+  access token (or a server key) the email names the GitHub login, id and profile link. A bearer
+  that is sent but invalid or expired is `401 invalid_token`, not sent anonymously: refresh and
+  retry.
+- **Reply address.** The `email` given wins. Otherwise, signed in, the public email on the
+  person's GitHub profile (`GET https://api.github.com/users/<login>`, unauthenticated, 3 s
+  timeout, cached 10 minutes per isolate). A `*@users.noreply.github.com` address is never used.
+  The address becomes the email's `Reply-To`, so replying reaches the person. With none, the
+  email says so and, signed in, to answer through GitHub instead.
+- **Checks.** `email`: one `@`, printable ASCII with no spaces, CR, LF or `<>()[],;:"\`, at most
+  254 characters (`400 invalid_email`). `client`: only `dl`, `autopilot`, `os`, `arch` and
+  `provider` (`"free"` or `"own-key"`) are kept, each at most 40 of `[A-Za-z0-9_.+- ]`; other
+  keys are ignored, a bad value is `400 invalid_request`. A body over 32 KB is `413 too_large`.
+- **Limits.** 10 an hour per network; signed in, also 5 an hour and 20 a day per person
+  (`429 rate_limited` with `retryAfter`).
+- `503 feedback_unavailable` when the service has no email binding or `ALERT_EMAIL_TO`; `502
+  feedback_failed` when sending failed.
+
+`GET /v1/feedback/reply-address` (signed in only) → `{"email": "me@example.com"}` or
+`{"email": null}`: the same public GitHub email lookup, so the client can show where replies will
+go before sending.
+
+The email (subject `dl feedback from @alice`, or `dl feedback (not signed in)`):
+
+```
+dl deck froze when I resized the window.
+
+──────────
+From: @alice (https://github.com/alice), GitHub id 501
+Reply to: alice@example.org (their public GitHub email). Replying to this email reaches them.
+Client: dl 0.11.0, Autopilot 3.5.0, OS macos, Arch arm64, Provider free
+Time: 2026-11-04 12:00:00 UTC
+
+Sent by the free tier service. The message and the reply address aren't stored anywhere.
+```
+
 ## Paid plans (Stripe)
 
 - **Pro**, $10 a month: 100M tokens a week of DeepSeek V4.1 Flash 1017, in place of the free
