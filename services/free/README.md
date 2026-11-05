@@ -113,6 +113,32 @@ For the dl.new invite page. Rate-limited per IP (60 a minute), `cache-control: p
   an admitted, unsuspended account. `login` is the current GitHub login.
 - `404 {"valid": false}` otherwise. Nothing else is returned: no id, usage or dates.
 
+### `GET /v1/status` (public)
+
+Whether a new person gets free tokens right now, so a client can say so before sign-in. No auth,
+`access-control-allow-origin: *`, `cache-control: public, max-age=30`; computed at most once per
+30 s per isolate; rate-limited per network (120 a minute). It never carries amounts or counts.
+
+```json
+{"free": "open", "reason": null, "message": "", "opensAt": null, "updatedAt": "2026-11-04T12:00:00.000Z"}
+{"free": "waitlist", "reason": "weekly_budget", "message": "The free tier is at capacity this week: new sign-ups join a waitlist that opens on Monday 9 November.", "opensAt": "2026-11-09T00:00:00.000Z", "updatedAt": "2026-11-04T12:00:00.000Z"}
+{"free": "paused", "reason": "credit_exhausted", "message": "The free tier is paused: high demand used up this round of free tokens. Bring your own key, or check back soon.", "opensAt": null, "updatedAt": "2026-11-04T12:00:00.000Z"}
+```
+
+The same tests as chat and sign-up, in this order:
+
+- `paused`, `kill_switch`: the env `PAUSED` or the admin's pause.
+- `paused`, `no_upstream`: no upstream may serve (`chooseUpstream` finds none).
+- `paused`, `credit_exhausted`: Luminal serves and its credit is used up.
+- `waitlist`, `weekly_budget`: a new open sign-up would be queued now (`shouldQueue`: free spend at
+  `QUEUE_THRESHOLD` of the weekly cap or weekly Luminal credit budget, or anyone already waiting).
+  `opensAt` is the next weekly admission, Monday 00:00 UTC.
+- `open` otherwise.
+
+`message` is one sentence for display; the two other pauses read "The free tier is paused for now.
+Bring your own key, or check back soon." Invite-only admission (`OPEN_ADMISSION` off) isn't
+reflected: it says whether free tokens flow, not whether sign-up needs a code.
+
 ### Billing (`Authorization: Bearer <access token>`; a server key is refused)
 
 | request | response |

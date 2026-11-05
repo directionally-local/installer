@@ -40,6 +40,7 @@ import { confirmPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO
 import { ALLOWED_MODELS, chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
 import { chooseUpstream } from "./upstream-choice.js";
+import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
 import { meterStream } from "./sse.js";
@@ -117,6 +118,7 @@ const LIMITS = {
   inviteAttemptIp: { capacity: 10, perHour: 10 },
   signupIp: { capacity: 3, perHour: 3 / 24 },
   referralLookupIp: perMinute(60),
+  statusIp: perMinute(120),
   // Download counts come from the dl.new and directionallylocal.run Workers, which share a few
   // Cloudflare addresses, so this one is generous; install counts come from people's machines.
   telemetryDownloadIp: perMinute(600),
@@ -215,6 +217,8 @@ interface Ctx {
   /** What per-IP limits key on: the IPv4 address, or the IPv6 /64 (see network.ts). */
   ipNet: string;
   base: string;
+  /** This isolate's last /v1/status answer (see `status`). */
+  statusCache: { value?: FreeStatus; at: number };
 }
 
 /** The daily digest's cron: 01:00 UTC, 09:00 in Singapore. Must match `triggers.crons` in both wrangler configs. */
@@ -234,6 +238,7 @@ export function createHandler(options: HandlerOptions = {}): {
 } {
   const now = options.now ?? (() => Date.now());
   const fetcher: Fetch = options.fetch ?? ((input, init) => fetch(input, init));
+  const statusCache: Ctx["statusCache"] = { at: 0 };
   return {
     /**
      * Cron triggers. The only one is the daily digest (DIGEST_CRON); the weekly queue needs
@@ -260,7 +265,7 @@ export function createHandler(options: HandlerOptions = {}): {
       }
       const url = new URL(request.url);
       const ip = clientIp(request);
-      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin };
+      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin, statusCache };
       return route(ctx);
     },
   };
@@ -278,6 +283,7 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/v1/token/refresh") return refresh(c);
   if (method === "POST" && path === "/v1/token/revoke") return revoke(c);
   if (path === "/v1/keys" || path.startsWith("/v1/keys/")) return keys(c, path.slice("/v1/keys".length).replace(/^\//, ""), method);
+  if (path === "/v1/status" && (method === "GET" || method === "OPTIONS")) return status(c);
   if (method === "GET" && path === "/v1/me") return me(c);
   if (method === "GET" && path === "/v1/models") return models(c);
   if (method === "POST" && path === "/v1/chat/completions") return chat(c);
@@ -425,6 +431,9 @@ interface Runtime {
   totalUsd: number;
   /** Luminal credit used since the start, by everyone. */
   creditUsedUsd: number;
+  /** Free Luminal credit spend this week, and how many wait: what the queue watches. */
+  weekCreditUsd: number;
+  waiting: number;
   /** The caller's queue place, referral numbers and bonus, when `c.callerId` was set. */
   person?: PersonState;
 }
@@ -442,6 +451,8 @@ function runtime(c: Ctx): Promise<Runtime> {
       weekUsd: gate.weekUsd,
       totalUsd: gate.totalUsd,
       creditUsedUsd: gate.creditUsedUsd,
+      weekCreditUsd: gate.weekCreditUsd,
+      waiting: gate.waiting,
       ...(gate.person ? { person: gate.person } : {}),
     }));
   return c.runtimeState;
@@ -910,6 +921,36 @@ function allowanceView(allowance: Allowance) {
     usdPerWeek: allowance.usdPerWeek,
     spentUsdThisWeek: allowance.spentUsdThisWeek,
   };
+}
+
+const STATUS_TTL_MS = 30_000;
+const STATUS_CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, OPTIONS", "access-control-max-age": "86400" };
+
+/**
+ * GET /v1/status, public: whether a new person gets free tokens, a waitlist or a pause (see
+ * status.ts). Computed at most once per 30 s per isolate; no amounts or counts in it.
+ */
+async function status(c: Ctx): Promise<Response> {
+  if (c.request.method === "OPTIONS") return new Response(null, { status: 204, headers: STATUS_CORS });
+  const retry = await limited(c, `status:ip:${c.ipNet}`, LIMITS.statusIp);
+  if (retry !== undefined) return rateLimited(retry, STATUS_CORS);
+  const now = c.now();
+  if (!c.statusCache.value || now - c.statusCache.at >= STATUS_TTL_MS || now < c.statusCache.at) {
+    const gate = await runtime(c);
+    c.statusCache.value = freeStatus({
+      now,
+      paused: gate.paused,
+      upstream: chooseUpstream(gate.config.primaryUpstream, c.config),
+      creditUsedUsd: gate.creditUsedUsd,
+      luminalCreditUsd: gate.config.luminalCreditUsd,
+      weekUsd: gate.weekUsd,
+      weekCreditUsd: gate.weekCreditUsd,
+      waiting: gate.waiting,
+      policy: policyOf(gate.config),
+    });
+    c.statusCache.at = now;
+  }
+  return json(c.statusCache.value, 200, { ...STATUS_CORS, "cache-control": "public, max-age=30" });
 }
 
 /**
