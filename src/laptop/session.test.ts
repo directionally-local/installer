@@ -820,6 +820,8 @@ describe("dl the first time on a laptop", () => {
     assert.deepEqual(plain.launches[0]!.args, AUTOPILOT.args, "just `autopilot`: its own first run picks the provider");
     assert.equal(plain.launches[0]!.cwd, dir);
     assert.equal(plain.launches[0]!.env.AUTOPILOT_LAUNCHED_BY, "dl", "Autopilot knows dl started it, so its exit hint says dl -c");
+    assert.match(plain.launches[0]!.env.DL_VERSION ?? "", /^\d+\.\d+\.\d+/, "Autopilot shows dl's version, not its own");
+    assert.ok(plain.launches[0]!.env.DL_UPDATE_COMMAND, "and dl's own update command");
     assert.equal(plain.launches[0]!.env.PATH, process.env.PATH, "the rest of the environment is the person's own");
     assert.deepEqual(setups, [], "no setup wizard: no place, no Docker, no sandbox image, no services");
     assert.deepEqual(prompter.asked, [], "nothing asked: no place, no provider picker, no GitHub token");
