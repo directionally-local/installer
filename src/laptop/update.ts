@@ -1,11 +1,9 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { PAIRED_NAME } from "../local/layout.js";
 import type { Prompter } from "../prompt.js";
 import { palette, type Ui } from "../ui.js";
 import { dlVersion, pinnedAutopilotVersion, pinnedHotcellVersion } from "../versions.js";
 import { resolveRemote, type RemoteServer, type SshAccess } from "./config.js";
-import { updateCommand } from "../install-method.js";
+import { DL_UPDATE, latestDlVersion } from "./self-update.js";
 import { ensureServerDl, EventReplayer, INSTALL_URL, type DlRegistry, type UiFactory } from "./remote-install.js";
 import { checkServer, type ServerFacts, type SshExec } from "./ssh.js";
 import { withConnections, type RemoteOpener } from "./tunnel.js";
@@ -31,7 +29,6 @@ export interface ServerVersions {
   hotcell: string;
 }
 
-const execFileAsync = promisify(execFile);
 const STATE_FILE = "/etc/directionallylocal/state.json";
 
 /** Non-root users run the server commands with sudo; checkServer made sure it needs no password. */
@@ -98,16 +95,6 @@ export function behindNotice(server: ServerVersions, latest: ServerVersions): st
  */
 export function pinnedVersions(): ServerVersions {
   return { autopilot: pinnedAutopilotVersion(), hotcell: pinnedHotcellVersion() };
-}
-
-async function npmVersion(pkg: string): Promise<string | undefined> {
-  try {
-    const { stdout } = await execFileAsync("npm", ["view", pkg, "version"], { timeout: 15_000 });
-    const version = stdout.trim();
-    return /^\d+\.\d+\.\d+/.test(version) ? version : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 /** How many tasks are running on a server, or undefined when it can't be asked. */
@@ -249,12 +236,12 @@ async function updateThisComputer(remote: RemoteServer, deps: UpdateDeps, c: Ret
  */
 async function laptopHints(remote: RemoteServer, after: ServerVersions | undefined, deps: UpdateDeps, c: ReturnType<typeof palette>): Promise<void> {
   const here = pinnedAutopilotVersion();
-  const latest = await (deps.latestDl ?? (() => npmVersion("directionallylocal")))().catch(() => undefined);
+  const latest = await (deps.latestDl ?? (() => latestDlVersion()))().catch(() => undefined);
   const behind = latest !== undefined && compareVersions(dlVersion(), latest) < 0;
   if (after && after.autopilot !== here) {
-    deps.io.out(`  ${c.yellow("!")} ${remote.name} runs Autopilot ${after.autopilot}; this laptop's dl bundles ${here}. ${behind ? `Update dl here too:` : "Match them:"} ${c.bold(updateCommand())}\n`);
+    deps.io.out(`  ${c.yellow("!")} ${remote.name} runs Autopilot ${after.autopilot}; this laptop's dl bundles ${here}. ${behind ? `Update dl here too:` : "Match them:"} ${c.bold(DL_UPDATE)}\n`);
   } else if (behind) {
-    deps.io.out(`  ${c.dim(`dl ${latest} is out (this is ${dlVersion()}):`)} ${c.bold(updateCommand())}\n`);
+    deps.io.out(`  ${c.dim(`dl ${latest} is out (this is ${dlVersion()}):`)} ${c.bold(DL_UPDATE)}\n`);
   }
 }
 

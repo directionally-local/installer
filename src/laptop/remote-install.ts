@@ -2,7 +2,7 @@ import { agentCapacity } from "../detect.js";
 import { CELL_MEMORY_MB } from "../layout.js";
 import { OPENROUTER, type ProviderAnswer } from "../provider.js";
 import { PlainUi, type Ui } from "../ui.js";
-import { updateCommand } from "../install-method.js";
+import { DL_UPDATE } from "./self-update.js";
 import { compareSemver, dlVersion } from "../versions.js";
 import type { Need } from "./credentials.js";
 import { shellQuote, type ServerFacts, type SshExec } from "./ssh.js";
@@ -199,7 +199,7 @@ export async function planServerDl(input: {
   if (server !== undefined) {
     const order = compareSemver(server, laptop);
     if (order > 0) {
-      return { action: "keep", reason: "newer", message: `${name} runs dl ${server}, newer than this laptop's ${laptop}. Update this laptop: ${input.update ?? updateCommand()}` };
+      return { action: "keep", reason: "newer", message: `${name} runs dl ${server}, newer than this laptop's ${laptop}. Update this laptop: ${input.update ?? DL_UPDATE}` };
     }
     if (order === 0) return { action: "keep", reason: "same" };
   }
