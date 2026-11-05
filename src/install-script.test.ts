@@ -276,6 +276,26 @@ describe("install.sh on a laptop", () => {
     assert.match(onPath.stdout, /Then type: dl\n$/);
   });
 
+  it("with a startup file it can't write (read-only, Nix, home-manager), still installs and says the line to add", () => {
+    // ZDOTDIR naming a file: no .zshrc can be made under it, for root as well.
+    const blocked = run({ env: { ZDOTDIR: "/dev/null" } });
+    assert.equal(blocked.status, 0, blocked.stderr);
+    assert.ok(existsSync(join(blocked.home, ".directionallylocal", "bin", "dl")), "dl is installed");
+    const line = `export PATH="${join(blocked.home, ".directionallylocal", "bin")}:$PATH"`;
+    assert.ok(blocked.stdout.includes(`Couldn't write to /dev/null/.zshrc`), blocked.stdout);
+    assert.ok(blocked.stdout.includes(`Add this to your shell startup file yourself: ${line}\n`), blocked.stdout);
+    assert.ok(blocked.stdout.includes(`dl isn't on your PATH. To use it, run: ${line}\n`), "and how to use it in this terminal, not a source of a file it never wrote");
+    assert.doesNotMatch(blocked.stdout, /source ~\/\.zshrc|Added dl to your PATH/);
+    assert.equal(blocked.stderr, "");
+
+    const readOnly = run({ home: (home) => { writeFileSync(join(home, ".zshrc"), "# managed elsewhere\n"); chmodSync(join(home, ".zshrc"), 0o444); } });
+    assert.equal(readOnly.status, 0, readOnly.stderr);
+    if (process.getuid?.() !== 0) {
+      assert.equal(readOnly.read(join(readOnly.home, ".zshrc")), "# managed elsewhere\n");
+      assert.match(readOnly.stdout, /Add this to your shell startup file yourself: export PATH=/);
+    }
+  });
+
   it("at a terminal, ends by starting dl in the folder it ran from", () => {
     const result = laptopInstall({ terminal: true });
     cleanup.push(result.dir);

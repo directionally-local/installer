@@ -18,7 +18,7 @@ export const SERVER_UPDATE = "curl -fsSL https://directionallylocal.run | sudo s
 export const NPM_UPDATE = "npm install -g directionallylocal";
 
 /** What the install script writes into DL_HOME/bin/dl. */
-const SCRIPT_MARKER = "Written by the Directionally Local install script.";
+export const SCRIPT_MARKER = "Written by the Directionally Local install script.";
 const SERVER_STATE = "/etc/directionallylocal/state.json";
 
 export interface InstallFacts {
@@ -36,7 +36,7 @@ export function installMethod(facts: InstallFacts = realFacts()): InstallMethod 
   // The install script puts the package at DL_HOME/dl/lib/node_modules/directionallylocal and
   // writes its own wrapper at DL_HOME/bin/dl. DL_HOME isn't set when dl runs, so a custom one
   // is recognised by that wrapper.
-  const scriptHome = facts.packageRoot.match(/^(.*)\/dl\/lib\/node_modules\/directionallylocal\/?$/)?.[1];
+  const scriptHome = scriptHomeOf(facts.packageRoot);
   if (scriptHome !== undefined) {
     const homes = [facts.env.DL_HOME, facts.home ? join(facts.home, ".directionallylocal") : undefined].filter(Boolean);
     if (homes.includes(scriptHome) || facts.readFile(join(scriptHome, "bin", "dl"))?.includes(SCRIPT_MARKER)) return "script";
@@ -44,6 +44,16 @@ export function installMethod(facts: InstallFacts = realFacts()): InstallMethod 
   // Root alone isn't a server: only a machine dl up set up is.
   if (facts.platform === "linux" && facts.readFile(SERVER_STATE) !== undefined) return "server";
   return "npm";
+}
+
+/** The DL_HOME a package root sits in when the install script put it there (DL_HOME/dl/lib/node_modules/directionallylocal). */
+export function scriptHomeOf(packageRoot: string): string | undefined {
+  return packageRoot.match(/^(.*)\/dl\/lib\/node_modules\/directionallylocal\/?$/)?.[1];
+}
+
+/** dl's own package directory (the one with package.json). */
+export function packageRoot(): string {
+  return dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 }
 
 /** The one command that updates this dl, for every "update dl" hint. */
@@ -60,7 +70,7 @@ function cachedMethod(): InstallMethod {
 
 function realFacts(): InstallFacts {
   return {
-    packageRoot: dirname(fileURLToPath(new URL("../package.json", import.meta.url))),
+    packageRoot: packageRoot(),
     env: process.env,
     home: homedir(),
     platform: process.platform,

@@ -201,6 +201,20 @@ export async function installHook(deps: HookCommandDeps): Promise<number> {
   return 0;
 }
 
+/**
+ * dl's hook taken out of `file` without a word (`dl uninstall`): backed up first, as with
+ * `dl claude-code hook remove`. Undefined when it wasn't there or the file can't be used.
+ */
+export async function removeHookQuietly(file: string = claudeSettingsPath(), now: Date = new Date()): Promise<{ backup: string } | undefined> {
+  const current = await readSettings(file).catch(() => undefined);
+  if (!current) return undefined;
+  const next = withoutHook(current.settings);
+  if (next.removed === 0) return undefined;
+  const backup = await backUp(file, now);
+  await writeSettings(file, next.settings);
+  return { backup };
+}
+
 /** `dl claude-code hook remove`. */
 export async function removeHook(deps: HookCommandDeps): Promise<number> {
   const { io } = deps;

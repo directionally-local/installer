@@ -420,14 +420,24 @@ add_to_path() {
     return 0
   fi
   step "Adding dl to your PATH"
-  mkdir -p "$(dirname "$rc")"
-  # The $PATH in these lines is for the shell to expand when it starts, not now.
+  # The $PATH in these lines is for the shell to expand when it starts, not now. `dl uninstall`
+  # takes out exactly these two lines (and the blank one before them).
   # shellcheck disable=SC2016
   case $rc in
-    *.fish) printf '\n# Directionally Local (dl)\nset -gx PATH "%s" $PATH\n' "$DL_HOME/bin" >>"$rc" ;;
-    *) printf '\n# Directionally Local (dl)\nexport PATH="%s:$PATH"\n' "$DL_HOME/bin" >>"$rc" ;;
+    *.fish) line=$(printf 'set -gx PATH "%s" $PATH' "$DL_HOME/bin") ;;
+    *) line=$(printf 'export PATH="%s:$PATH"' "$DL_HOME/bin") ;;
   esac
-  step_done "Added dl to your PATH" "in $rc"
+  if { mkdir -p "$(dirname "$rc")" && printf '\n# Directionally Local (dl)\n%s\n' "$line" >>"$rc"; } 2>/dev/null; then
+    step_done "Added dl to your PATH" "in $rc"
+    return 0
+  fi
+  # A startup file that can't be written (read-only, or managed by Nix or home-manager) doesn't
+  # fail the install: dl is installed, the person adds the line. From here on it's as with
+  # DL_NO_MODIFY_PATH=1, so the end says how to use dl in this terminal too.
+  if [ -n "$FANCY" ]; then printf '\r\033[2K'; fi
+  say "  Couldn't write to $(tilde "$rc"), so dl isn't on your PATH in new terminals yet."
+  remind "Add this to your shell startup file yourself: $line"
+  DL_NO_MODIFY_PATH=1
 }
 
 # DL_REFERRAL as the free tier service takes it: a GitHub login, lowercased. Fails for anything else.
