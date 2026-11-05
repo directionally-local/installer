@@ -177,6 +177,7 @@ describe("Checkout and the portal", () => {
     assert.equal(form.customer_creation, "always");
     assert.equal(form["payment_intent_data[metadata][github_id]"], "100");
     assert.equal(form["automatic_tax[enabled]"], "true");
+    assert.equal(form.success_url, "https://dl.new/billing/success?product=topup", "the success page says tokens were added, not Pro");
 
     await deliver(svc, "checkout.session.completed", topupSession(100));
     await svc.request("POST", "/v1/billing/checkout", { token: access, body: { product: "topup" } });

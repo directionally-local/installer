@@ -66,7 +66,8 @@ export function checkoutParams(input: { product: Product; config: StripeConfig; 
   return {
     mode: product === "pro" ? "subscription" : "payment",
     line_items: [{ price, quantity: 1 }],
-    success_url: config.successUrl,
+    // dl.new's success page says "You're on Pro." or, for a top-up, "50M tokens added."
+    success_url: product === "topup" ? `${config.successUrl}${config.successUrl.includes("?") ? "&" : "?"}product=topup` : config.successUrl,
     cancel_url: config.cancelUrl,
     client_reference_id: String(input.githubId),
     metadata,
