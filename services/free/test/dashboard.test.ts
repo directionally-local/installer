@@ -180,10 +180,14 @@ describe("admin dashboard page", () => {
     const nonce = /style-src 'nonce-([0-9a-f]+)'/.exec(csp)![1];
     const html = await response.text();
     assert.ok(html.includes(`<style nonce="${nonce}">`));
-    assert.doesNotMatch(html, /<script|\sstyle="|<link|@import|url\(/i);
-    assert.doesNotMatch(html, /(?:src|href)="(?:https?:)?\/\//i);
+    // Fonts and the logo come from dl.new, and nothing else from anywhere.
+    assert.match(csp, /font-src https:\/\/dl\.new;/);
+    assert.match(csp, /img-src https:\/\/dl\.new;/);
+    assert.doesNotMatch(html, /<script|\sstyle="|<link|@import/i);
+    for (const [, url] of html.matchAll(/url\("([^"]+)"\)/g)) assert.match(url!, /^https:\/\/dl\.new\/fonts\//);
+    for (const [, url] of html.matchAll(/(?:src|href)="((?:https?:)?\/\/[^"]*)"/gi)) assert.match(url!, /^https:\/\/dl\.new\//);
     assert.match(html, /name="viewport"/);
-    assert.match(html, /color-scheme: light dark/);
+    assert.match(html, /prefers-color-scheme: dark/);
     assert.equal(response.headers.get("cache-control"), "no-store");
   });
 });
@@ -422,8 +426,13 @@ describe("admin dashboard privacy", () => {
   const FORBIDDEN = ["props", "session_id", "type", "model", "status", "received_at", "latency_ms", "note", "code_hash", "device_id", "old_value", "new_value", "changed_by_login"];
   const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_timings", "download_daily", "install_daily"]);
 
+  // The abuse section reads network hashes, device ids, status and the admin log on purpose:
+  // its queries carry ABUSE_QUERY_TAG and are held to ABUSE_COLUMNS instead.
+  const CONTENT = ["props", "session_id", "type", "model", "received_at", "latency_ms", "note", "code_hash"];
+
   it("reads only allowed tables and columns", async () => {
     const { DASHBOARD_COLUMNS } = await import("../src/dashboard-data.js");
+    const { ABUSE_COLUMNS, ABUSE_QUERY_TAG } = await import("../src/abuse.js");
     const service = await createService();
     const cookie = await adminCookie(service);
     const { state } = directoryEntry(service);
@@ -436,10 +445,12 @@ describe("admin dashboard privacy", () => {
       statements.push(query);
       return prepare(query);
     }) as typeof db.prepare;
-    // Where node:sqlite has it, SQLite itself reports each column read.
+    // Where node:sqlite has it, SQLite itself reports each column read (while preparing, so a
+    // read belongs to the statement being prepared).
     const reads: string[] = [];
+    const abuseReads: string[] = [];
     db.setAuthorizer?.((action, table, column) => {
-      if (action === SQLITE_READ) reads.push(`${table}.${column}`);
+      if (action === SQLITE_READ) (statements.at(-1)?.startsWith(ABUSE_QUERY_TAG) ? abuseReads : reads).push(`${table}.${column}`);
       return SQLITE_OK;
     });
     try {
@@ -451,22 +462,27 @@ describe("admin dashboard privacy", () => {
     }
 
     assert.ok(statements.length > 0);
+    assert.ok(statements.some((statement) => statement.startsWith(ABUSE_QUERY_TAG)));
     for (const statement of statements) {
-      const code = statement.replace(/'[^']*'/g, "''");
-      for (const word of FORBIDDEN) assert.doesNotMatch(code, new RegExp(`\\b${word}\\b`, "i"), `${word} in: ${statement}`);
+      const abuse = statement.startsWith(ABUSE_QUERY_TAG);
+      const code = statement.replace(/'[^']*'/g, "''").replace(/\/\*.*?\*\//g, "");
+      for (const word of abuse ? CONTENT : FORBIDDEN) assert.doesNotMatch(code, new RegExp(`\\b${word}\\b`, "i"), `${word} in: ${statement}`);
       const ctes = new Set([...code.matchAll(/\b(\w+)\s+AS\s*\(/gi)].map((match) => match[1]!.toLowerCase()));
       for (const match of code.matchAll(/\b(?:FROM|JOIN)\s+(\w+)/gi)) {
         const table = match[1]!.toLowerCase();
-        assert.ok(TABLES.has(table) || ctes.has(table), `table ${table} in: ${statement}`);
+        assert.ok((abuse ? table in ABUSE_COLUMNS || table === "json_each" : TABLES.has(table)) || ctes.has(table), `table ${table} in: ${statement}`);
       }
     }
     if (db.setAuthorizer) {
       assert.ok(reads.length > 0);
-      const allowed = new Set(Object.entries({ ...DASHBOARD_COLUMNS, json_each: ["value"] }).flatMap(([table, columns]) => [...columns, ""].map((column) => `${table}.${column}`)));
-      for (const read of new Set(reads)) {
-        const [table] = read.split(".");
-        if (table === "null" || table === "undefined") continue; // subquery and CTE columns
-        assert.ok(allowed.has(read), `reads ${read}`);
+      const allowedIn = (columns: Readonly<Record<string, readonly string[]>>) =>
+        new Set(Object.entries({ ...columns, json_each: ["value"] }).flatMap(([table, list]) => [...list, ""].map((column) => `${table}.${column}`)));
+      for (const [list, allowed] of [[reads, allowedIn(DASHBOARD_COLUMNS)], [abuseReads, allowedIn(ABUSE_COLUMNS)]] as const) {
+        for (const read of new Set(list)) {
+          const [table] = read.split(".");
+          if (table === "null" || table === "undefined") continue; // subquery and CTE columns
+          assert.ok(allowed.has(read), `reads ${read}`);
+        }
       }
     }
   });

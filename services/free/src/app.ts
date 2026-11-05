@@ -1,5 +1,5 @@
 import type { DurableObjectNamespace } from "cloudflare:workers";
-import { randomToken, sha256Hex } from "../../shared/src/auth.js";
+import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.js";
 import { githubAuthorizeUrl, githubContributionsLastYear, githubSignInFromCode, githubUserFromCode, type Fetch } from "../../shared/src/github.js";
 import { hmacKey, signJwt, verifyJwt } from "../../shared/src/jwt.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
@@ -7,7 +7,7 @@ import { MAX_SERVER_KEYS, parseServerKey, type AccountObject, type Allowance, ty
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
-import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, PersonState, RequestRecord } from "./directory-object.js";
+import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, PersonState, PersonStatus, RequestRecord } from "./directory-object.js";
 import { createCheckout, createPortal, githubIdFrom, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
 import { deliverAlerts, pauseAlert, type Alert, type EmailBinding } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
@@ -18,6 +18,7 @@ import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, sign
 import { cleanBatch } from "./events.js";
 import { cleanDownload, cleanInstall, MAX_TELEMETRY_BYTES } from "./telemetry.js";
 import {
+  BLOCKED_MESSAGE,
   DEVICE_TAKEN_MESSAGE,
   INVALID_INVITE_MESSAGE,
   isSignInRefusal,
@@ -468,6 +469,11 @@ async function isPaused(c: Ctx): Promise<boolean> {
   return c.config.paused || (await runtime(c)).paused;
 }
 
+/** The 403 a blocked account gets on chat, refresh, keys and sign-in polling. */
+function blockedError(headers: Record<string, string> = {}): Response {
+  return apiError(403, "blocked", BLOCKED_MESSAGE, {}, headers);
+}
+
 function pausedError(headers: Record<string, string> = {}): Response {
   return apiError(503, "service_paused", PAUSED_MESSAGE, { reason: "paused", pausedForEveryone: true, resetsAt: null }, headers);
 }
@@ -516,6 +522,7 @@ async function deviceToken(c: Ctx): Promise<Response> {
     return apiError(400, reason, signInRefusal(reason, config.minGithubAccountAgeDays).message, { reason });
   }
   if (result.status === "denied" && reason === "service_paused") return apiError(400, "service_paused", PAUSED_MESSAGE, { reason: "paused" });
+  if (result.status === "denied" && reason === "blocked") return apiError(403, "blocked", BLOCKED_MESSAGE, { reason: "blocked" });
   const [errorCode, message] = POLL_MESSAGES[result.status];
   const detail = result.status === "denied" && reason === "device_taken" ? DEVICE_TAKEN_MESSAGE : undefined;
   return apiError(400, errorCode, detail ?? message, {
@@ -531,6 +538,9 @@ async function refresh(c: Ctx): Promise<Response> {
   const token = body?.refresh_token;
   const invalid = () => apiError(401, "invalid_grant", "The refresh token is invalid, expired or already used. Sign in again.");
   if (typeof token !== "string" || !token) return invalid();
+  // A blocked account's refresh token stays unused (no rotation), so an unblock lets it work again.
+  const family = await auth(c).familyOf(token);
+  if (family && (await directory(c).getPerson(family.githubId))?.status === "blocked") return blockedError();
   const rotated = await auth(c).rotate(token, c.now());
   if (!rotated) return invalid();
   return tokenResponse(c, rotated, rotated.refreshToken, rotated.family);
@@ -610,6 +620,8 @@ async function keys(c: Ctx, rest: string, method: string): Promise<Response> {
         return apiError(409, "key_name_taken", "This account already has a server key with that name.");
       case "suspended":
         return apiError(403, "suspended", "This account is suspended from the free tier.");
+      case "blocked":
+        return blockedError();
       case "not_invited":
         return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
     }
@@ -822,6 +834,9 @@ async function admitAndFinish(
     case "device_taken":
       await auth(c).decide(deviceRef, "denied", identity, c.now(), result.reason);
       return donePage("Can't sign in", DEVICE_TAKEN_MESSAGE, 403);
+    case "blocked":
+      await auth(c).decide(deviceRef, "denied", identity, c.now(), result.reason);
+      return donePage("Account blocked", BLOCKED_MESSAGE, 403);
   }
 }
 
@@ -946,6 +961,7 @@ async function billingCheckout(c: Ctx): Promise<Response> {
   const person = account(c, identity.githubId);
   const allowance = await person.allowance(c.now(), limitsFor((await runtime(c)).config));
   if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
+  if (allowance.status === "blocked") return blockedError();
   if (allowance.status === "suspended") return apiError(403, "suspended", "This account is suspended from the free tier.");
   if (product === "pro" && allowance.plan === "pro") return apiError(409, "already_pro", "This account already has Pro. Manage it from the billing portal.");
   const billing = await person.billing();
@@ -1156,6 +1172,7 @@ async function chat(c: Ctx): Promise<Response> {
   if (c.config.paused) return pausedError(quotaHeaders(await person.allowance(c.now(), limitsFor(c.config))));
   c.callerId = identity.githubId;
   const gate = await runtime(c);
+  if (gate.person?.blocked) return blockedError();
   const limits = limitsFor(gate.config, gate.person?.bonusTokens);
   const link = linkFor(gate.config, gate.person);
   const headers = async () => quotaHeaders(await person.allowance(c.now(), limits));
@@ -1230,6 +1247,7 @@ async function chat(c: Ctx): Promise<Response> {
       const resetsAt = new Date(reservation.allowance.resetsAt).toISOString();
       return apiError(402, "quota_exceeded", quotaMessage(reservation.reason, resetsAt, reservation.allowance.plan), { resetsAt, reason: reservation.reason, offers: offers(gate.config), referralLink: link }, quota);
     }
+    if (reservation.code === "blocked") return blockedError(quota);
     if (reservation.code === "suspended") return apiError(403, "suspended", "This account is suspended from the free tier.", {}, quota);
     return apiError(403, "not_invited", "This GitHub account isn't on the free tier.", {}, quota);
   }
@@ -1627,7 +1645,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     return json({ people: rows });
   }
 
-  const match = /^people\/(\d+)(?:\/(suspend|unsuspend|grant|revoke-tokens))?$/.exec(rest);
+  const match = /^people\/(\d+)(?:\/(suspend|unsuspend|block|unblock|grant|revoke-tokens))?$/.exec(rest);
   if (match) {
     const githubId = Number(match[1]);
     const action = match[2];
@@ -1650,6 +1668,10 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       if (!(await directory(c).setPersonStatus(githubId, status))) return apiError(404, "not_found", "No such person.");
       await account(c, githubId).setStatus(status);
       return json({ githubId, status });
+    }
+    if ((action === "block" || action === "unblock") && method === "POST") {
+      const status = await setBlocked(c, githubId, action === "block", actor);
+      return status ? json({ githubId, status }) : apiError(404, "not_found", "No such person.");
     }
     if (action === "grant" && method === "POST") {
       const body = (await readJson(c)) ?? {};
@@ -1674,6 +1696,18 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     }
   }
   return apiError(404, "not_found", `${method} /admin/${rest} isn't a route.`);
+}
+
+/**
+ * Blocks or unblocks a person (people.status and the account's copy), logged in the config log.
+ * Blocked: chat, refresh and server keys answer 403 "blocked", and sign-in is refused. Unblocking
+ * sets the status back to active. Returns the new status, or undefined for no such person.
+ */
+async function setBlocked(c: Ctx, githubId: number, blocked: boolean, actor: { githubId: number; login: string; now: number }): Promise<PersonStatus | undefined> {
+  const status: PersonStatus = blocked ? "blocked" : "active";
+  if (!(await directory(c).setPersonStatus(githubId, status, actor))) return undefined;
+  await account(c, githubId).setStatus(status);
+  return status;
 }
 
 function nullableWhole(value: unknown): number | null | undefined | "invalid" {
@@ -1730,7 +1764,8 @@ async function adminMetrics(c: Ctx): Promise<Response> {
 // with a session id) in an HttpOnly, Secure, SameSite=Strict, __Host- cookie. It can't be used
 // as a bearer token, and a bearer token can't be used as it. Every request checks the id is
 // still an admin and the session wasn't signed out. Pages only read, cross-site requests carry
-// no Strict cookie, and sign-out (the one POST) also requires a same-origin request.
+// no Strict cookie, and the POSTs (sign-out, and block/unblock from the abuse section) also
+// require a same-origin request; block/unblock also carry a CSRF token bound to the session.
 
 function adminCookie(value: string, maxAge: number): string {
   return `${ADMIN_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
@@ -1762,9 +1797,31 @@ function sameOrigin(c: Ctx): boolean {
   return c.request.headers.get("sec-fetch-site") === "same-origin";
 }
 
+/** The CSRF token for the dashboard's forms: a keyed hash of the admin session's id. */
+function adminCsrf(c: Ctx, session: AdminSession): Promise<string> {
+  return sha256Hex(`admin-csrf:${c.config.tokenSigningKey}:${session.sid}`);
+}
+
+/** POST /admin/dashboard/people/:id/(block|unblock): a form on the dashboard, then back to it. */
+async function adminWebPersonAction(c: Ctx, githubId: number, action: "block" | "unblock"): Promise<Response> {
+  const session = await adminSession(c);
+  if (!session) return deniedPage("Signed out", "Sign in to the dashboard again, then retry.", 401);
+  const form = await readForm(c);
+  if (!sameOrigin(c) || !timingSafeEqual(form.get("csrf") ?? "", await adminCsrf(c, session))) {
+    return deniedPage("Not changed", "Block and unblock only from the dashboard itself.", 403);
+  }
+  const retry = await limited(c, `admin:gh:${session.githubId}`, LIMITS.apiPerson);
+  if (retry !== undefined) return rateLimited(retry);
+  const status = await setBlocked(c, githubId, action === "block", { githubId: session.githubId, login: session.login, now: c.now() });
+  if (!status) return deniedPage("No such person", `No free tier account has GitHub id ${githubId}.`, 404);
+  return new Response(null, { status: 303, headers: { location: "/admin#abuse", "cache-control": "no-store" } });
+}
+
 async function adminWeb(c: Ctx, path: string, method: string): Promise<Response> {
   if (path === "/admin/signin" && method === "GET") return adminSignIn(c);
   if (path === "/admin/signout" && method === "POST") return adminSignOut(c);
+  const personAction = /^\/admin\/dashboard\/people\/(\d{1,15})\/(block|unblock)$/.exec(path);
+  if (personAction && method === "POST") return adminWebPersonAction(c, Number(personAction[1]), personAction[2] as "block" | "unblock");
   const csv = /^\/admin\/dashboard\/([a-z-]+)\.csv$/.exec(path)?.[1];
   if (method !== "GET" || (path !== "/admin" && (csv === undefined || !isCsvTable(csv)))) {
     return apiError(404, "not_found", `${method} ${c.url.pathname} isn't a route.`);
@@ -1772,6 +1829,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
 
   let identity: Identity;
   let viaCookie = false;
+  let csrf: string | undefined;
   if (c.request.headers.has("authorization")) {
     const caller = await authenticate(c);
     if (caller instanceof Response) return caller;
@@ -1786,6 +1844,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     }
     identity = session;
     viaCookie = true;
+    csrf = await adminCsrf(c, session);
   }
   const retry = await limited(c, `admin:gh:${identity.githubId}`, LIMITS.apiPerson);
   if (retry !== undefined) return rateLimited(retry);
@@ -1794,7 +1853,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
   const { config, paused } = await runtime(c);
   const weekParam = c.url.searchParams.get("week");
   const topWeek = weekParam && /^\d{4}-\d{2}-\d{2}$/.test(weekParam) ? Date.parse(`${weekParam}T00:00:00Z`) : Number.NaN;
-  const [data, spend] = await Promise.all([
+  const [data, spend, abuse] = await Promise.all([
     directory(c).dashboard({
       now,
       adminIds: [...c.config.adminGithubIds],
@@ -1803,6 +1862,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
       ...(Number.isFinite(topWeek) ? { topWeek } : {}),
     }),
     directory(c).spend(now),
+    csv === undefined ? directory(c).abuse({ now, adminIds: [...c.config.adminGithubIds] }) : undefined,
   ]);
   const view: SpendView = {
     weekUsd: spend.spentUsd,
@@ -1822,6 +1882,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     queueThreshold: config.queueThreshold,
     primaryUpstream: config.primaryUpstream,
     luminalConfigured: c.config.luminalApiKey !== undefined,
+    serving: chooseUpstream(config.primaryUpstream, c.config) ?? "none",
     creditUsd: config.luminalCreditUsd,
     creditUsedUsd: spend.creditUsedUsd,
     creditWeekUsd: spend.creditWeekUsd,
@@ -1829,7 +1890,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     weeklyCreditUsd: config.luminalWeeklyCreditUsd ?? null,
   };
   if (csv !== undefined && isCsvTable(csv)) return dashboardCsv(csv, data, view);
-  return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie });
+  return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie, ...(abuse ? { abuse } : {}), ...(csrf ? { csrf } : {}) });
 }
 
 async function adminSignIn(c: Ctx): Promise<Response> {

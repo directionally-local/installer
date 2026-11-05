@@ -13,6 +13,7 @@
  *   cohort_full                   MAX_ACTIVE_USERS people are already in
  *   too_many_signups              too many new accounts from one network today
  *   access_denied                 cancelled in the browser; reason "device_taken" when the device holds another account's grant
+ *   blocked                       an admin blocked the account (HTTP 403 on chat, refresh and keys; sign-in refused)
  *   service_paused                the owner paused the free tier (reason "paused")
  *   global_weekly_budget_reached  this week's global USD cap is used up (resetsAt: when it resumes)
  *   global_total_budget_reached   the total USD cap is used up (resetsAt: null; resumes only if the owner raises it)
@@ -64,6 +65,8 @@ export function signInRefusal(code: SignInRefusal, minAccountAgeDays: number): {
       };
   }
 }
+
+export const BLOCKED_MESSAGE = "This account is blocked from the free tier. Contact contact@directionallylocal.com.";
 
 export const DEVICE_TAKEN_MESSAGE = "This device already has a free allowance under another GitHub account; sign in with that account instead.";
 export const INVALID_INVITE_MESSAGE = "That invite code isn't valid or was already used.";

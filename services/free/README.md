@@ -635,13 +635,19 @@ lists, `413` over 1 KB, `429` when rate-limited.
 `GET /admin` is a server-rendered page for admins: weekly active developers (3+ days and any
 day, last 8 weeks), cohort retention (weeks 1, 2 and 4 after sign-up), cost per person per week
 (total, median, mean, and the top 10 of any week), who reached their token or dollar allowance
-this week and last (and on which day), and global spend against the effective caps with the
-pause and admission state. Each table has a CSV at `/admin/dashboard/<table>.csv`
+this week and last (and on which day), and the budget with the pause and admission state. The
+page wears the dl.new brand: its fonts and logo load from `https://dl.new` (the page's CSP allows
+`font-src` and `img-src` from there and nothing else; still no scripts). Each table has a CSV at `/admin/dashboard/<table>.csv`
 (`spend`, `weekly-active`, `retention`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`,
 `queue`, `referrals`, `funnel`, `install-funnel`, `installs`, `paid`, `upstreams`).
 
-At the top: a red banner when free spend is at 80% or more of either cap, and the all-time spend
-against the all-time cap ($1,000). Then the queue (waiting now, the longest wait, how many this
+At the top: the **budget, which is the Luminal credit**: credit used and left of
+`luminalCreditUsd` ($2,000), this week's free credit against `luminalWeeklyCreditUsd` ($250), and
+where the queue starts (`queueThreshold` of the weekly credit budget) with when this week's pace
+would reach it. A red banner shows at 80% of either. The OpenRouter cash caps
+(`globalWeeklyUsdCap`, `globalTotalUsdCap`) aren't shown as a budget; they still apply to
+OpenRouter spend, and the state line says so if one stops free tokens. Then the **abuse
+section** (below), the queue (waiting now, the longest wait, how many this
 Monday let in and the forecast behind it), referrals (links used, sign-ups via referral, how many
 became weekly active, bonus tokens a week granted this week), paid plans (active Pro
 subscribers, top-ups this week and month, revenue before tax this week and month, and what paid
@@ -652,13 +658,29 @@ then the funnel per sign-up week and in all (sign-ups → first request → week
 first two steps are [anonymous counts](#install-counts) and can't be joined to people. Counts
 only, no content.
 
-**Upstreams** (after global spend): the Luminal credit gauge (used against `luminalCreditUsd`),
-this week's free credit against the weekly credit budget, which upstream is serving, and per
+**Upstreams** (after the abuse section): which upstream is serving, and per
 upstream for today and this week: requests, errors, median and p90 time to first token, median
 time to first byte, cache-hit share (cached over prompt tokens), credit and cash. These count
 admin requests too, since they measure the upstream. The red banner also shows at 80% of the
 credit. CSV: `upstreams`.
 
+**Abuse:** accounts sharing a network hash with other accounts (grouped, with login, sign-up
+time, when each was first seen on the network, and this week's requests, tokens and credit),
+sign-ins refused with `device_taken` in the last 7 days (who tried, the shortened device id, who
+holds its grant, how many times; recorded in the Directory's `device_refusals`), referral pairs
+stopped as `same_network`, the top 25 users this week (with how many accounts share a network
+with each), blocked accounts, and the GitHub activity check's daily outcomes. Each person has a
+**Block** button (Unblock once blocked). Then an **admin log**: the config log, newest first,
+which records settings, pause, block and unblock.
+
+- **Block:** `POST /admin/people/:id/block` and `/unblock` (admin bearer token), or the
+  dashboard's form, which posts to `/admin/dashboard/people/:id/block|unblock` and needs the
+  session cookie, a same-origin request and a CSRF token bound to the session. It sets the
+  person's status to `blocked` (unblock: `active`) and logs it (`person_status:<id>:<login>`).
+  Blocked: chat requests, token refresh and server-key creation answer 403 `blocked` ("This
+  account is blocked from the free tier. Contact contact@directionallylocal.com."), and sign-in
+  is refused on the page and at `POST /v1/device/token` (403 `blocked`). Unblocking restores all
+  of it; refresh tokens aren't used up while blocked. `suspend` stays as it was.
 - **Admins are left out of every number:** anyone in `ADMIN_GITHUB_IDS` and anyone admitted as
   an admin.
 - **What it reads:** only `daily_activity`, a per-person per-day roll-up of request and event
@@ -668,7 +690,9 @@ credit. CSV: `upstreams`.
   and `upstream_timings` (counts, tokens, dollars and milliseconds per upstream, no person), and
   for the install funnel `download_daily` and `install_daily` (anonymous counts). No model, event type or properties,
   session ids, prompts or code. A test runs
-  the dashboard under an SQLite authorizer that allows only those columns.
+  the dashboard under an SQLite authorizer that allows only those columns. The abuse section
+  and the admin log also read network hashes, device ids, `people.status`, `device_refusals`,
+  `github_checks_daily` and `config_log`, held to their own list (`ABUSE_COLUMNS` in abuse.ts).
 - **The roll-up** is kept up to date with each request and event, and built once from the
   existing log the first time this version starts.
 - **Reached the allowance** means charged tokens at 99% of the token allowance (the last
