@@ -37,6 +37,10 @@ There is one account per GitHub user, keyed on the numeric GitHub id.
   refresh, invite attempts, the API, referral lookups, telemetry, admin sign-in) keys an IPv6
   address by its /64, since one host can rotate through its whole /64; an IPv4 address (and an
   IPv4-mapped IPv6 address, `::ffff:1.2.3.4`) is its own network. `src/network.ts`.
+- **Per-network limits are generous for shared networks** (an office, a classroom, a meetup):
+  the API 600 requests a minute, refresh 600 an hour, device codes 60 an hour and their polling
+  720 a minute, since each signed-in person is limited too (60 requests a minute). Sign-ups (3 a
+  day) and invite attempts (10 an hour) stay tight.
 
 ## API contract for the open launch
 
@@ -245,8 +249,7 @@ one. So do the kill switch (pause and resume), the queue starting (its first que
 an OpenRouter host failing more than 20% of at least 20 requests over the last hour (once, until
 it recovers). With Luminal: credit used crossing **50%, 80% and 100%** of `luminalCreditUsd`
 (once each per balance, so raising the balance re-arms them), the pause when the credit is used up
-(once per balance), and Luminal failing more than 20% of at least 20 requests over the last hour
-(429, 5xx, timeouts, unreachable, failed streams; once, until it recovers). Messages:
+(once per balance), and Luminal slowing people down (below). Messages:
 
 ```
 dl free tier: $200 of the $250 weekly cap used (80%). Resets Mon 00:00 UTC.
@@ -256,8 +259,51 @@ dl free tier: the queue started ($200 of the $250 weekly cap used). New sign-ups
 dl free tier: OpenRouter host <slug> failed 9 of 40 requests in the last hour (23%). New requests avoid it while it keeps failing.
 dl free tier: $1,600 of the $2,000 Luminal credit used (80%).
 dl free tier: requests are refused with upstream_credit_exhausted: $2,000.12 of the $2,000 Luminal credit is used. Top up and raise luminalCreditUsd (POST /admin/config), or switch primaryUpstream to "openrouter".
-dl free tier: Luminal failed 5 of 20 requests in the last hour (25%). Clients retry on their own; nothing switches upstream automatically.
 ```
+
+**Luminal slowing people down.** Each Luminal request's outcome is logged (`luminal_outcomes`,
+an hour kept, and `requests.upstream_outcome`): `ok`, `rate_limited` (Luminal's 429), `error`
+(5xx, unreachable, the service's key refused, an error body, a stream failing part way) or
+`timeout` (no response headers before `luminalFirstByteTimeoutSeconds`). Over a rolling 10
+minutes, when at least 10 requests had 10% or more rate limited or failed, or 3 different people
+got a rate limit or a failure, the owner gets an email at once, and at most one more every 30
+minutes while it lasts. It ends with one email, when the 10 minutes fall under 2% (with at least
+10 requests) or nothing failed for 30 minutes after the last email. Admin requests count: they
+are real traffic. Every request checks, whoever serves it, so after a switch to OpenRouter the
+OpenRouter traffic is what ends it; with no Luminal requests in those 30 minutes the last email
+says the alert is cleared, not that Luminal is fine. Dedupe is in `alerts_sent`:
+`luminal-slow:open` while it lasts, `luminal-slow:alert:<30-minute bucket>` per email,
+`luminal-slow:recovered:<opened at>` once per slow-down. This replaced the hourly "Luminal failed
+more than 20% of 20 requests" alert, so one incident sends one set of emails.
+
+```
+Subject: dl free tier: Luminal is slowing people down (20% of requests in 10 min)
+
+dl free tier: Luminal is slowing people down. 8 of 40 Luminal requests in the last 10 minutes were rate limited or failed (20%).
+
+Rate limited (Luminal 429): 5
+Errors (5xx, unreachable, refused key, failed streams): 2
+Timeouts (no first byte in time): 1
+People affected: 4
+Serving now: Luminal
+
+To switch to OpenRouter: open https://free.directionallylocal.com/admin#upstream → Upstream → OpenRouter (it spends OpenRouter credit until you switch back)
+
+Admin requests count here: they're real traffic.
+```
+
+```
+Subject: dl free tier: Luminal back to normal
+
+dl free tier: Luminal is back to normal, 47 minutes after the first slow-down email. 0 of 52 Luminal requests failed or were rate limited in the last 10 minutes (0%).
+
+Serving now: Luminal.
+```
+
+With OpenRouter serving and nothing sent to Luminal for 30 minutes, the subject is instead
+`dl free tier: Luminal alert cleared (no Luminal requests in 30 min)`, with the link to switch
+back. Without `OPENROUTER_API_KEY` the slow-down email says the switch isn't possible until it
+is set.
 
 **First user.** The first person admitted who isn't an admin (open admission or an invite; an
 admin signing in doesn't count) sends one message, ever: the `first-signup` key in
@@ -449,7 +495,8 @@ Chat requests go to one upstream, the runtime setting `primaryUpstream`:
   fields (`provider`, `usage`, `models`, `route`, `transforms`, `plugins`, `session_id`,
   `max_tokens`) removed. Free, Pro and admin requests all go there.
 - **`openrouter`**: the OpenRouter request below, unchanged, with its filters and host avoidance.
-  This is a manual switch (`POST /admin/config {"primaryUpstream": "openrouter"}`).
+  This is a manual switch: **Serve from: Luminal / OpenRouter** in the dashboard's Upstreams
+  section (`/admin#upstream`), or `POST /admin/config {"primaryUpstream": "openrouter"}`.
 
 Without `LUMINAL_API_KEY`, OpenRouter serves whatever the setting says. Set the key with
 `wrangler secret put LUMINAL_API_KEY`; it is never logged or shown by the admin API.
@@ -658,7 +705,12 @@ then the funnel per sign-up week and in all (sign-ups → first request → week
 first two steps are [anonymous counts](#install-counts) and can't be joined to people. Counts
 only, no content.
 
-**Upstreams** (after the abuse section): which upstream is serving, and per
+**Serving from** (under the heading): the upstream serving now, with a link to the switch.
+
+**Upstreams** (after the abuse section, `#upstream`): which upstream is serving, the **Serve
+from: Luminal / OpenRouter** buttons (a form posting to `/admin/dashboard/upstream` with the
+session's CSRF token and a same-origin check, like Block; it sets the `primaryUpstream` override,
+logged in the admin log; an upstream without its key can't be chosen), and per
 upstream for today and this week: requests, errors, median and p90 time to first token, median
 time to first byte, cache-hit share (cached over prompt tokens), credit and cash. These count
 admin requests too, since they measure the upstream. The red banner also shows at 80% of the

@@ -5,7 +5,7 @@ import type { DownloadCount, InstallCount } from "./telemetry.js";
 import { abuseData, type AbuseData } from "./abuse.js";
 import { dashboardData, installBreakdown, notAdmin, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
-import { creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, queueStartedAlert, totalSpendAlert, upstreamErrorAlert, weeklySpendAlert, type Alert, type DigestUsage, type SignupHow } from "./alerts.js";
+import { creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
 import { creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type ReferralOutcome } from "./referrals.js";
@@ -94,6 +94,11 @@ export interface RequestRecord {
   ttftMs?: number | null;
   /** The upstream failed the request (429, 5xx, a timeout, a network error or a failed stream). */
   upstreamError?: boolean;
+  /**
+   * What the upstream gave, for the slow-down alert: a 429 apart from errors and timeouts.
+   * Unset: "error" with `upstreamError`, else "ok".
+   */
+  upstreamOutcome?: UpstreamOutcome;
 }
 
 /**
@@ -390,14 +395,17 @@ const SCHEMA = [
      ttft_ms  INTEGER
    )`,
   `CREATE INDEX IF NOT EXISTS upstream_timings_at ON upstream_timings (at)`,
-  // Per upstream per minute, for the Luminal error-rate alert; rows older than two hours go.
-  `CREATE TABLE IF NOT EXISTS upstream_minutes (
-     minute   INTEGER NOT NULL,
-     upstream TEXT NOT NULL,
-     requests INTEGER NOT NULL,
-     errors   INTEGER NOT NULL,
-     PRIMARY KEY (minute, upstream)
-   ) WITHOUT ROWID`,
+  // Per Luminal request, for the slow-down alert: when, who (to count people hit, admins
+  // included) and the outcome (ok, rate_limited, error, timeout). Rows older than an hour go.
+  `CREATE TABLE IF NOT EXISTS luminal_outcomes (
+     id        INTEGER PRIMARY KEY AUTOINCREMENT,
+     at        INTEGER NOT NULL,
+     github_id INTEGER NOT NULL,
+     outcome   TEXT NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS luminal_outcomes_at ON luminal_outcomes (at)`,
+  // The hourly per-minute counts the old Luminal error-rate alert used; the slow-down alert replaced it.
+  `DROP TABLE IF EXISTS upstream_minutes`,
   // The install funnel's anonymous counts (telemetry.ts): per UTC day and allowlisted values,
   // how many install scripts were served and how many installs finished. Nothing per person.
   `CREATE TABLE IF NOT EXISTS download_daily (
@@ -448,6 +456,7 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["requests", "ttfb_ms", "INTEGER"],
   ["requests", "ttft_ms", "INTEGER"],
   ["requests", "upstream_error", "INTEGER NOT NULL DEFAULT 0"],
+  ["requests", "upstream_outcome", "TEXT"],
   ["spend_weeks", "credit_usd", "REAL NOT NULL DEFAULT 0"],
   ["spend_weeks", "free_credit_usd", "REAL NOT NULL DEFAULT 0"],
   ["daily_activity", "credit_usd", "REAL NOT NULL DEFAULT 0"],
@@ -1077,16 +1086,18 @@ export class DirectoryObject extends DurableObject {
 
   /**
    * Logs one request. With the effective settings (`policy`), also returns the alerts it
-   * triggered: free spend crossing a threshold of either cap, or the host's failure rate over
-   * the last hour passing 20%. Each one is marked sent here, so it fires once.
+   * triggered: free spend crossing a threshold of either cap, the host's failure rate over
+   * the last hour passing 20%, or Luminal slowing people down (or back to normal), which
+   * needs `serving` for the email. Each one is marked sent here, so it fires once.
    */
-  async recordRequest(record: RequestRecord, policy?: Policy): Promise<Alert[]> {
+  async recordRequest(record: RequestRecord, policy?: Policy, serving?: ServingContext): Promise<Alert[]> {
     const alerts: Alert[] = [];
+    const outcome: UpstreamOutcome = record.upstreamOutcome ?? (record.upstreamError ? "error" : "ok");
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         `INSERT INTO requests (github_id, is_admin, at, model, prompt_tokens, completion_tokens, cached_tokens, charged_tokens, cost_usd, status, latency_ms, paid,
-                               upstream, credit_usd, ttfb_ms, ttft_ms, upstream_error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                               upstream, credit_usd, ttfb_ms, ttft_ms, upstream_error, upstream_outcome)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         record.githubId,
         record.isAdmin ? 1 : 0,
         record.at,
@@ -1104,6 +1115,7 @@ export class DirectoryObject extends DurableObject {
         record.ttfbMs ?? null,
         record.ttftMs ?? null,
         record.upstreamError ? 1 : 0,
+        outcome,
       );
       const admin = record.isAdmin ? 1 : 0;
       // Three buckets: admins; paid usage (Pro, top-ups); and free usage, the only one the caps count.
@@ -1164,19 +1176,15 @@ export class DirectoryObject extends DurableObject {
         this.ctx.storage.sql.exec("INSERT INTO upstream_timings (at, upstream, ttfb_ms, ttft_ms) VALUES (?, ?, ?, ?)", record.at, upstream, record.ttfbMs ?? null, record.ttftMs ?? null);
         this.ctx.storage.sql.exec("DELETE FROM upstream_timings WHERE at < ?", record.at - TIMINGS_MAX_AGE_MS);
       }
-      const minute = Math.floor(record.at / 60_000);
-      this.ctx.storage.sql.exec(
-        `INSERT INTO upstream_minutes (minute, upstream, requests, errors) VALUES (?, ?, 1, ?)
-         ON CONFLICT (minute, upstream) DO UPDATE SET requests = requests + 1, errors = errors + excluded.errors`,
-        minute,
-        upstream,
-        record.upstreamError ? 1 : 0,
-      );
-      this.ctx.storage.sql.exec("DELETE FROM upstream_minutes WHERE minute < ?", minute - 120);
-      if (policy && upstream === "luminal") {
-        const errorAlert = this.#upstreamAlert(upstream, record.at);
-        if (errorAlert) alerts.push(errorAlert);
-        if (credit > 0) alerts.push(...this.#creditAlerts(record.at, policy));
+      if (upstream === "luminal") {
+        this.ctx.storage.sql.exec("INSERT INTO luminal_outcomes (at, github_id, outcome) VALUES (?, ?, ?)", record.at, record.githubId, outcome);
+        if (policy && credit > 0) alerts.push(...this.#creditAlerts(record.at, policy));
+      }
+      // Every request checks, whoever served it: after a switch to OpenRouter, OpenRouter's
+      // traffic is what notices the 30 quiet minutes that end a slow-down.
+      if (policy && serving) {
+        const slow = this.#luminalSlowAlert(record.at, serving);
+        if (slow) alerts.push(slow);
       }
       if (record.host) {
         const failed = record.hostFailure ? 1 : 0;
@@ -1282,20 +1290,50 @@ export class DirectoryObject extends DurableObject {
     return creditPausedAlert(this.#spendSync(now).creditUsedUsd, balance);
   }
 
-  /** An upstream failing more than 20% of at least 20 requests in the last hour: alert once until it recovers. */
-  #upstreamAlert(upstream: Upstream, now: number): Alert | undefined {
-    const since = Math.floor((now - HOST_WINDOW_MS) / 60_000);
+  /** Luminal's outcomes since `since` (exclusive), admins included. */
+  #luminalWindow(since: number): LuminalWindow {
     const row = this.ctx.storage.sql
-      .exec<{ requests: number | null; errors: number | null }>("SELECT SUM(requests) AS requests, SUM(errors) AS errors FROM upstream_minutes WHERE upstream = ? AND minute > ?", upstream, since)
-      .toArray()[0];
-    const requests = row?.requests ?? 0;
-    const errors = row?.errors ?? 0;
-    const key = `upstream:${upstream}`;
-    if (requests >= HOST_MIN_REQUESTS && errors / requests > HOST_FAILURE_RATE) {
-      return this.#markAlert(key, now) ? upstreamErrorAlert(upstream, errors, requests) : undefined;
+      .exec<{ requests: number; rate_limited: number | null; errors: number | null; timeouts: number | null; people: number }>(
+        `SELECT COUNT(*) AS requests,
+                SUM(outcome = 'rate_limited') AS rate_limited, SUM(outcome = 'error') AS errors, SUM(outcome = 'timeout') AS timeouts,
+                COUNT(DISTINCT CASE WHEN outcome != 'ok' THEN github_id END) AS people
+         FROM luminal_outcomes WHERE at > ?`,
+        since,
+      )
+      .one();
+    return { requests: row.requests, rateLimited: row.rate_limited ?? 0, errors: row.errors ?? 0, timeouts: row.timeouts ?? 0, people: row.people };
+  }
+
+  /**
+   * Luminal slowing people down, over the last 10 minutes: 10% or more of at least 10 requests
+   * rate limited or failed, or 3 people hit. One email, then at most one more every 30
+   * minutes while it lasts; then one "back to normal" when the window is under 2% (with at
+   * least 10 requests) or nothing failed for 30 minutes after the last email. The incident is
+   * the `luminal-slow:open` key (its time is when it opened); each email is a key with a
+   * 30-minute bucket, and the recovery is keyed by the incident.
+   */
+  #luminalSlowAlert(now: number, serving: ServingContext): Alert | undefined {
+    const sql = this.ctx.storage.sql;
+    sql.exec("DELETE FROM luminal_outcomes WHERE at <= ?", now - 3_600_000);
+    sql.exec("DELETE FROM alerts_sent WHERE key LIKE 'luminal-slow:%:%' AND at < ?", now - DAY_MS);
+    const window = this.#luminalWindow(now - SLOW_WINDOW_MS);
+    const opened = sql.exec<{ at: number }>("SELECT at FROM alerts_sent WHERE key = 'luminal-slow:open'").toArray()[0]?.at;
+    if (luminalSlow(window)) {
+      const last = sql.exec<{ at: number | null }>("SELECT MAX(at) AS at FROM alerts_sent WHERE key LIKE 'luminal-slow:alert:%'").one().at;
+      if (opened !== undefined && last !== null && now - last < SLOW_REPEAT_MS) return undefined;
+      if (!this.#markAlert(`luminal-slow:alert:${Math.floor(now / SLOW_REPEAT_MS)}`, now)) return undefined;
+      if (opened === undefined) this.#markAlert("luminal-slow:open", now);
+      return luminalSlowAlert(window, serving);
     }
-    if (requests >= HOST_MIN_REQUESTS) this.ctx.storage.sql.exec("DELETE FROM alerts_sent WHERE key = ?", key);
-    return undefined;
+    if (opened === undefined) return undefined;
+    const last = sql.exec<{ at: number | null }>("SELECT MAX(at) AS at FROM alerts_sent WHERE key LIKE 'luminal-slow:alert:%'").one().at ?? opened;
+    const quiet = this.#luminalWindow(now - SLOW_QUIET_MS);
+    const recovered =
+      (window.requests >= SLOW_MIN_REQUESTS && failuresOf(window) / window.requests < SLOW_RECOVERED_SHARE) || (now - last >= SLOW_QUIET_MS && failuresOf(quiet) === 0);
+    if (!recovered) return undefined;
+    sql.exec("DELETE FROM alerts_sent WHERE key = 'luminal-slow:open'");
+    if (!this.#markAlert(`luminal-slow:recovered:${opened}`, now)) return undefined;
+    return luminalRecoveredAlert({ window, quietRequests: quiet.requests, openedAt: opened, now }, serving);
   }
 
   /** The queue-started alert for an admission that queued the first person. */

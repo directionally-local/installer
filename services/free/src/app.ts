@@ -9,7 +9,7 @@ import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
 import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, PersonState, PersonStatus, RequestRecord } from "./directory-object.js";
 import { createCheckout, createPortal, githubIdFrom, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
-import { deliverAlerts, pauseAlert, type Alert, type EmailBinding } from "./alerts.js";
+import { deliverAlerts, pauseAlert, type Alert, type EmailBinding, type ServingContext, type UpstreamOutcome } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
 import { normalizeReferralCode, referralLink } from "./referrals.js";
 import { networkOf, rateLimitNetwork } from "./network.js";
@@ -102,13 +102,17 @@ const CALLBACK_PATH = "/device/callback";
 const LEGACY_ADMIN_CALLBACK_PATH = "/device/callback/admin";
 
 const perMinute = (n: number): Limit => ({ capacity: n, perHour: n * 60 });
+// Per-network limits (an IPv4 address or an IPv6 /64) are generous: an office, a classroom or
+// a meetup shares one address, and requests are already limited per signed-in person. Sign-ups
+// and invite attempts stay tight.
 const LIMITS = {
   apiPerson: perMinute(60),
-  apiIp: perMinute(60),
-  deviceCodeIp: { capacity: 10, perHour: 10 },
+  apiIp: perMinute(600),
+  deviceCodeIp: { capacity: 60, perHour: 60 },
   adminSignInIp: { capacity: 10, perHour: 10 },
-  pollIp: perMinute(120),
-  refreshIp: { capacity: 60, perHour: 60 },
+  // Device-code polling, every 5 s per sign-in in progress: raised with deviceCodeIp.
+  pollIp: perMinute(720),
+  refreshIp: { capacity: 600, perHour: 600 },
   inviteAttemptIp: { capacity: 10, perHour: 10 },
   signupIp: { capacity: 3, perHour: 3 / 24 },
   referralLookupIp: perMinute(60),
@@ -439,6 +443,15 @@ function runtime(c: Ctx): Promise<Runtime> {
 /** Sends alerts by email and/or webhook; never fails the request. */
 async function alert(c: Ctx, alerts: readonly Alert[]): Promise<void> {
   await deliver(c, alerts);
+}
+
+/** Who serves now and where to switch, for the Luminal slow-down emails. */
+function servingContext(c: Ctx, config: FreeConfig): ServingContext {
+  return {
+    serving: chooseUpstream(config.primaryUpstream, c.config) ?? "none",
+    openRouterConfigured: c.config.openRouterApiKey !== undefined,
+    switchUrl: `${c.base}/admin#upstream`,
+  };
 }
 
 /** `alert` without a request: for cron runs too. */
@@ -1278,7 +1291,7 @@ async function chat(c: Ctx): Promise<Response> {
   const settle = async (
     usage: Usage | undefined,
     status: string,
-    options: { chargeNothing?: boolean; host?: string; failure?: HostFailure; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean } = {},
+    options: { chargeNothing?: boolean; host?: string; failure?: HostFailure; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean; outcome?: UpstreamOutcome } = {},
   ) => {
     const { chargeNothing = false, host, failure } = options;
     if (host && failure && cooldownMs > 0) await hosts(c).markHostFailing(host, c.now());
@@ -1307,8 +1320,9 @@ async function chat(c: Ctx): Promise<Response> {
       ttfbMs: options.ttfbMs ?? null,
       ttftMs: options.ttftMs ?? null,
       ...(options.upstreamError ? { upstreamError: true } : {}),
+      ...(options.outcome ? { upstreamOutcome: options.outcome } : {}),
     };
-    await alert(c, await directory(c).recordRequest(record, policyOf(gate.config)));
+    await alert(c, await directory(c).recordRequest(record, policyOf(gate.config), servingContext(c, gate.config)));
     return settled.allowance;
   };
 
@@ -1350,7 +1364,7 @@ async function chat(c: Ctx): Promise<Response> {
     const host = response.status >= 500 ? hostOf(parseJson(text)) : undefined;
     const failure: HostFailure | undefined = host ? { kind: "http_5xx", upstreamStatus: response.status } : undefined;
     const upstreamError = response.status === 429 || response.status >= 500;
-    const allowance = await settle(undefined, "upstream_error", { chargeNothing: true, ttfbMs, upstreamError, ...(host ? { host } : {}), ...(failure ? { failure } : {}) });
+    const allowance = await settle(undefined, "upstream_error", { chargeNothing: true, ttfbMs, upstreamError, ...(response.status === 429 ? { outcome: "rate_limited" as const } : {}), ...(host ? { host } : {}), ...(failure ? { failure } : {}) });
     const quota = quotaHeaders(allowance);
     if (response.status === 429) {
       const retryAfter = Math.max(1, Number(response.headers.get("retry-after")) || 10);
@@ -1401,7 +1415,7 @@ async function chat(c: Ctx): Promise<Response> {
 type Settle = (
   usage: Usage | undefined,
   status: string,
-  options?: { chargeNothing?: boolean; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean },
+  options?: { chargeNothing?: boolean; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean; outcome?: UpstreamOutcome },
 ) => Promise<Allowance>;
 
 /**
@@ -1432,8 +1446,8 @@ async function luminalChat(
   if (stream) payload.stream_options = { include_usage: true };
   else delete payload.stream_options;
 
-  const transient = async (status: 429 | 503, code: string, message: string, retryAfterHeader: string | null, record: { status: string; ttfbMs?: number }) => {
-    const allowance = await settle(undefined, record.status, { chargeNothing: true, upstreamError: true, ...(record.ttfbMs !== undefined ? { ttfbMs: record.ttfbMs } : {}) });
+  const transient = async (status: 429 | 503, code: string, message: string, retryAfterHeader: string | null, record: { status: string; outcome: UpstreamOutcome; ttfbMs?: number }) => {
+    const allowance = await settle(undefined, record.status, { chargeNothing: true, upstreamError: true, outcome: record.outcome, ...(record.ttfbMs !== undefined ? { ttfbMs: record.ttfbMs } : {}) });
     const retryAfter = Math.max(1, Math.ceil(Number(retryAfterHeader)) || DEFAULT_RETRY_AFTER_S);
     return apiError(status, code, message, { retryAfter, retryable: true, upstream: "luminal" }, { ...quotaHeaders(allowance), "retry-after": String(retryAfter) });
   };
@@ -1451,16 +1465,16 @@ async function luminalChat(
       input.timeoutSeconds * 1000,
     );
   } catch {
-    return transient(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, null, { status: "upstream_unreachable" });
+    return transient(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, null, { status: "upstream_unreachable", outcome: "error" });
   }
-  if (response === "timeout") return transient(503, "upstream_timeout", UPSTREAM_TIMEOUT_MESSAGE, null, { status: "upstream_timeout" });
+  if (response === "timeout") return transient(503, "upstream_timeout", UPSTREAM_TIMEOUT_MESSAGE, null, { status: "upstream_timeout", outcome: "timeout" });
   const ttfbMs = c.now() - started;
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     const retryAfter = response.headers.get("retry-after");
-    if (response.status === 429) return transient(429, "upstream_busy", UPSTREAM_BUSY_MESSAGE, retryAfter, { status: "upstream_busy", ttfbMs });
-    if (response.status >= 500) return transient(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, retryAfter, { status: "upstream_error", ttfbMs });
+    if (response.status === 429) return transient(429, "upstream_busy", UPSTREAM_BUSY_MESSAGE, retryAfter, { status: "upstream_busy", outcome: "rate_limited", ttfbMs });
+    if (response.status >= 500) return transient(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, retryAfter, { status: "upstream_error", outcome: "error", ttfbMs });
     // A 4xx: the request itself (400), or the service's key or account (401, 402, 403).
     const ours = response.status === 401 || response.status === 402 || response.status === 403;
     const allowance = await settle(undefined, "upstream_error", { chargeNothing: true, ttfbMs, ...(ours ? { upstreamError: true } : {}) });
@@ -1764,8 +1778,9 @@ async function adminMetrics(c: Ctx): Promise<Response> {
 // with a session id) in an HttpOnly, Secure, SameSite=Strict, __Host- cookie. It can't be used
 // as a bearer token, and a bearer token can't be used as it. Every request checks the id is
 // still an admin and the session wasn't signed out. Pages only read, cross-site requests carry
-// no Strict cookie, and the POSTs (sign-out, and block/unblock from the abuse section) also
-// require a same-origin request; block/unblock also carry a CSRF token bound to the session.
+// no Strict cookie, and the POSTs (sign-out, block/unblock from the abuse section, and the
+// "Serve from" upstream switch) also require a same-origin request; block/unblock and the
+// upstream switch also carry a CSRF token bound to the session.
 
 function adminCookie(value: string, maxAge: number): string {
   return `${ADMIN_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
@@ -1817,9 +1832,35 @@ async function adminWebPersonAction(c: Ctx, githubId: number, action: "block" | 
   return new Response(null, { status: 303, headers: { location: "/admin#abuse", "cache-control": "no-store" } });
 }
 
+/**
+ * POST /admin/dashboard/upstream: the dashboard's "Serve from" switch. Sets the primaryUpstream
+ * override (logged in the admin log like any setting), then back to the dashboard. Refused when
+ * the chosen upstream has no key, since it couldn't serve.
+ */
+async function adminWebUpstream(c: Ctx): Promise<Response> {
+  const session = await adminSession(c);
+  if (!session) return deniedPage("Signed out", "Sign in to the dashboard again, then retry.", 401);
+  const form = await readForm(c);
+  if (!sameOrigin(c) || !timingSafeEqual(form.get("csrf") ?? "", await adminCsrf(c, session))) {
+    return deniedPage("Not changed", "Switch the upstream only from the dashboard itself.", 403);
+  }
+  const retry = await limited(c, `admin:gh:${session.githubId}`, LIMITS.apiPerson);
+  if (retry !== undefined) return rateLimited(retry);
+  const choice = form.get("upstream");
+  if (choice !== "luminal" && choice !== "openrouter") return deniedPage("Not changed", "Choose Luminal or OpenRouter.", 400);
+  const key = choice === "luminal" ? c.config.luminalApiKey : c.config.openRouterApiKey;
+  if (!key) {
+    const secret = choice === "luminal" ? "LUMINAL_API_KEY" : "OPENROUTER_API_KEY";
+    return deniedPage("Not changed", `The service has no ${secret}, so ${choice === "luminal" ? "Luminal" : "OpenRouter"} can't serve. Set the secret first.`, 409);
+  }
+  await directory(c).updateOverrides([{ key: "primaryUpstream", value: choice }], { githubId: session.githubId, login: session.login, now: c.now() });
+  return new Response(null, { status: 303, headers: { location: "/admin#upstream", "cache-control": "no-store" } });
+}
+
 async function adminWeb(c: Ctx, path: string, method: string): Promise<Response> {
   if (path === "/admin/signin" && method === "GET") return adminSignIn(c);
   if (path === "/admin/signout" && method === "POST") return adminSignOut(c);
+  if (path === "/admin/dashboard/upstream" && method === "POST") return adminWebUpstream(c);
   const personAction = /^\/admin\/dashboard\/people\/(\d{1,15})\/(block|unblock)$/.exec(path);
   if (personAction && method === "POST") return adminWebPersonAction(c, Number(personAction[1]), personAction[2] as "block" | "unblock");
   const csv = /^\/admin\/dashboard\/([a-z-]+)\.csv$/.exec(path)?.[1];
@@ -1883,6 +1924,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     primaryUpstream: config.primaryUpstream,
     luminalConfigured: c.config.luminalApiKey !== undefined,
     serving: chooseUpstream(config.primaryUpstream, c.config) ?? "none",
+    openRouterConfigured: c.config.openRouterApiKey !== undefined,
     creditUsd: config.luminalCreditUsd,
     creditUsedUsd: spend.creditUsedUsd,
     creditWeekUsd: spend.creditWeekUsd,

@@ -5,9 +5,11 @@ import type { AlertKind, FreeConfig } from "./config.js";
  * per threshold per week) and of the all-time cap (once per threshold, ever), the kill switch,
  * the queue starting, an OpenRouter host failing more than 20% of its requests over the
  * last hour, Luminal credit used crossing 50%, 80% and 100% of the balance (once each per
- * balance), Luminal-served usage pausing because the credit ran out, and Luminal failing more
- * than 20% of at least 20 requests over the last hour, and the sign-up GitHub activity check
- * letting people through because GitHub didn't answer (5 times in a UTC day, once a day).
+ * balance), Luminal-served usage pausing because the credit ran out, Luminal slowing people
+ * down (10% or more of at least 10 requests rate limited or failed over the last 10 minutes,
+ * or 3 people hit by it; at most every 30 minutes, then once when it's back to normal), and
+ * the sign-up GitHub activity check letting people through because GitHub didn't answer (5
+ * times in a UTC day, once a day).
  * Also two notes that aren't warnings: the first person admitted who isn't an admin (once,
  * ever), and a daily digest of the previous UTC day, sent by the 01:00 UTC cron trigger even
  * when every number is zero, so it doubles as a heartbeat (once per date).
@@ -146,12 +148,122 @@ export function githubCheckErrorAlert(errors: number): Alert {
   };
 }
 
-export function upstreamErrorAlert(upstream: string, errors: number, requests: number): Alert {
-  const rate = `${Math.round((errors / requests) * 100)}%`;
-  const name = upstream === "luminal" ? "Luminal" : upstream === "openrouter" ? "OpenRouter" : upstream;
+// ─── Luminal slowing people down ─────────────────────────────────────────────
+
+/**
+ * What one request got from its upstream: an answer (`ok`, which includes a 400 for the
+ * request itself), a 429 (`rate_limited`), or a failure: `error` (5xx, unreachable, the
+ * service's key refused, an error body, a stream that failed part way) or `timeout` (no
+ * response headers before the first-byte timeout). Timeouts are errors, counted apart.
+ */
+export type UpstreamOutcome = "ok" | "rate_limited" | "error" | "timeout";
+
+/** The rolling window the Luminal slow-down alert looks at. */
+export const SLOW_WINDOW_MS = 10 * 60_000;
+/** It fires when at least this many requests in the window… */
+export const SLOW_MIN_REQUESTS = 10;
+/** …had this share or more rate limited or failed… */
+export const SLOW_FAILURE_SHARE = 0.1;
+/** …or when this many different people got a rate limit or a failure in the window. */
+export const SLOW_PEOPLE = 3;
+/** At most one slow-down email this often while it lasts. */
+export const SLOW_REPEAT_MS = 30 * 60_000;
+/** Back to normal: under this share with at least SLOW_MIN_REQUESTS in the window… */
+export const SLOW_RECOVERED_SHARE = 0.02;
+/** …or no failure at all for this long after the last slow-down email. */
+export const SLOW_QUIET_MS = 30 * 60_000;
+
+/** Luminal's last 10 minutes, admins included. */
+export interface LuminalWindow {
+  requests: number;
+  rateLimited: number;
+  errors: number;
+  timeouts: number;
+  /** Different people (GitHub ids) who got a rate limit, an error or a timeout. */
+  people: number;
+}
+
+/** Who serves free requests now, and whether the service could switch to OpenRouter. */
+export interface ServingContext {
+  serving: "luminal" | "openrouter" | "none";
+  openRouterConfigured: boolean;
+  /** The dashboard's upstream switch: <base>/admin#upstream. */
+  switchUrl: string;
+}
+
+export function failuresOf(window: LuminalWindow): number {
+  return window.rateLimited + window.errors + window.timeouts;
+}
+
+/** Whether Luminal is slowing people down, by the rate or by the people. */
+export function luminalSlow(window: LuminalWindow): boolean {
+  const failures = failuresOf(window);
+  return (window.requests >= SLOW_MIN_REQUESTS && failures / window.requests >= SLOW_FAILURE_SHARE - 1e-9) || window.people >= SLOW_PEOPLE;
+}
+
+function servingName(serving: ServingContext["serving"]): string {
+  return serving === "luminal" ? "Luminal" : serving === "openrouter" ? "OpenRouter" : "none (no upstream key)";
+}
+
+function share(part: number, whole: number): string {
+  return whole > 0 ? `${Math.round((part / whole) * 100)}%` : "0%";
+}
+
+export function luminalSlowAlert(window: LuminalWindow, context: ServingContext): Alert {
+  const failures = failuresOf(window);
+  const rate = share(failures, window.requests);
+  const action =
+    context.serving === "openrouter"
+      ? `OpenRouter is serving already, so new requests don't go to Luminal; these failures came before the switch. To switch back later: open ${context.switchUrl} → Upstream → Luminal.`
+      : context.openRouterConfigured
+        ? `To switch to OpenRouter: open ${context.switchUrl} → Upstream → OpenRouter (it spends OpenRouter credit until you switch back)`
+        : `Switching to OpenRouter isn't possible: the service has no OPENROUTER_API_KEY. Set it (wrangler secret put OPENROUTER_API_KEY), then open ${context.switchUrl} → Upstream → OpenRouter.`;
   return {
-    subject: `dl free tier: ${name} failing (${rate})`,
-    text: `dl free tier: ${name} failed ${errors} of ${requests} requests in the last hour (${rate}). Clients retry on their own; nothing switches upstream automatically.`,
+    subject: `dl free tier: Luminal is slowing people down (${rate} of requests in 10 min)`,
+    text: [
+      `dl free tier: Luminal is slowing people down. ${failures} of ${window.requests} Luminal requests in the last 10 minutes were rate limited or failed (${rate}).`,
+      "",
+      `Rate limited (Luminal 429): ${window.rateLimited}`,
+      `Errors (5xx, unreachable, refused key, failed streams): ${window.errors}`,
+      `Timeouts (no first byte in time): ${window.timeouts}`,
+      `People affected: ${window.people}`,
+      `Serving now: ${servingName(context.serving)}`,
+      "",
+      action,
+      "",
+      "Admin requests count here: they're real traffic.",
+    ].join("\n"),
+    footer: "Sent by the free tier service at most once every 30 minutes while Luminal keeps failing, then one email when it's back to normal. Counts only.",
+  };
+}
+
+/**
+ * The slow-down is over: the window is under 2% with enough requests, or nothing failed for
+ * 30 minutes after the last email. With no Luminal requests at all in that time (OpenRouter
+ * serving, or nobody using it), it doesn't claim Luminal recovered: nobody tried it.
+ */
+export function luminalRecoveredAlert(input: { window: LuminalWindow; quietRequests: number; openedAt: number; now: number }, context: ServingContext): Alert {
+  const { window } = input;
+  const minutes = Math.max(1, Math.round((input.now - input.openedAt) / 60_000));
+  const untried = window.requests < SLOW_MIN_REQUESTS && input.quietRequests === 0;
+  const evidence =
+    window.requests >= SLOW_MIN_REQUESTS
+      ? `${failuresOf(window)} of ${window.requests} Luminal requests failed or were rate limited in the last 10 minutes (${share(failuresOf(window), window.requests)}).`
+      : untried
+        ? "No requests went to Luminal in the last 30 minutes, so nothing failed, but nothing tested it either."
+        : `No Luminal request failed or was rate limited in the last 30 minutes (${input.quietRequests} requests).`;
+  const back =
+    context.serving === "openrouter"
+      ? ` It spends OpenRouter credit until you switch back: open ${context.switchUrl} → Upstream → Luminal.`
+      : "";
+  return {
+    subject: untried ? "dl free tier: Luminal alert cleared (no Luminal requests in 30 min)" : "dl free tier: Luminal back to normal",
+    text: [
+      `dl free tier: ${untried ? "the Luminal slow-down alert is cleared" : "Luminal is back to normal"}, ${minutes} minutes after the first slow-down email. ${evidence}`,
+      "",
+      `Serving now: ${servingName(context.serving)}.${back}`,
+    ].join("\n"),
+    footer: "Sent once per slow-down, when it ends. Counts only.",
   };
 }
 
