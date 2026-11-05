@@ -27,15 +27,19 @@ const STYLE = `
   button { font: inherit; padding: 0.5rem 1rem; }
 `;
 
-/** A complete page. `body` is trusted HTML; interpolate values with `escapeHtml` first. */
-export function page(input: { title: string; body: string; status?: number }): Response {
+/**
+ * A complete page. `body` is trusted HTML; interpolate values with `escapeHtml` first. A page
+ * with its own look passes `style` (replacing the plain default) and, if it loads fonts or
+ * images from elsewhere, a `csp` that still allows no scripts.
+ */
+export function page(input: { title: string; body: string; status?: number; style?: string; csp?: string }): Response {
   const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(input.title)}</title>
-<style>${STYLE}</style>
+<style>${input.style ?? STYLE}</style>
 </head>
 <body>
 ${input.body}
@@ -46,7 +50,7 @@ ${input.body}
     status: input.status ?? 200,
     headers: {
       "content-type": "text/html; charset=utf-8",
-      "content-security-policy": DEFAULT_CSP,
+      "content-security-policy": input.csp ?? DEFAULT_CSP,
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
       "x-content-type-options": "nosniff",

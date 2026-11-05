@@ -83,7 +83,7 @@ describe("browser sign-in", () => {
     const flow = await startBrowserFlow(service.request, { id: ADMIN_ID, login: "Owner" });
     assert.match(flow.page, /Signed in as Owner\. Return to your terminal; you can close this tab\./);
     assert.match(flow.page, /<strong>Invite friends and you both get \+10M tokens a week\.<\/strong>/);
-    assert.match(flow.page, /Your invite link: <code style="user-select: all;[^"]*">https:\/\/dl\.new\/r\/owner<\/code>/);
+    assert.match(flow.page, /Your invite link: <code class="link-text" style="user-select: all;[^"]*">https:\/\/dl\.new\/r\/owner<\/code>/);
     assert.match(flow.page, /up to \+50M a week/);
     assert.doesNotMatch(flow.page, /<script|<button/, "the CSP allows no scripts, so no Copy button");
     // The same link /v1/me gives.
@@ -106,9 +106,17 @@ describe("browser sign-in", () => {
     const html = await page.text();
     assert.equal(page.status, 200);
     assert.match(html, new RegExp(issued.user_code));
-    assert.match(html, /Directionally Local, free/);
-    assert.match(html, /never store your prompts, completions, code, file paths or file\s+contents/);
-    assert.match(page.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+    assert.match(html, /<h1>Sign in to dl<\/h1>/);
+    assert.match(html, /<title>Confirm sign-in · dl<\/title>/);
+    assert.match(html, /Continue with GitHub/);
+    assert.match(html, /This isn't my code/);
+    assert.match(html, /never store your prompts, completions, code, file paths\s+or file contents/);
+    assert.match(html, /href="https:\/\/directionallylocal\.com\/privacy\/"/);
+    assert.doesNotMatch(html, /<script/);
+    const csp = page.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /default-src 'none'/);
+    assert.match(csp, /font-src https:\/\/dl\.new;/);
+    assert.doesNotMatch(csp, /script-src/);
   });
 
   it("links the privacy policy and terms on the sign-in pages", async () => {
