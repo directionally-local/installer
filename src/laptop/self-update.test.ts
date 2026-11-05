@@ -68,7 +68,13 @@ describe("npm's latest dl", () => {
     const hang = ((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
     })) as typeof fetch;
-    await assert.rejects(() => latestDlVersion(hang, 20), /npm didn't answer in 0 s/);
+    // AbortSignal.timeout's timer doesn't keep the process alive on its own; this one does.
+    const alive = setTimeout(() => {}, 5_000);
+    try {
+      await assert.rejects(() => latestDlVersion(hang, 20), /npm didn't answer in 0 s/);
+    } finally {
+      clearTimeout(alive);
+    }
   });
 });
 
