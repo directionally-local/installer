@@ -162,7 +162,8 @@ describe("config", () => {
     assert.throws(() => readFreeConfig({ ...BASE_ENV, TOKEN_SIGNING_KEY: "short" }), ConfigError);
     assert.throws(() => readFreeConfig({ ...BASE_ENV, ADMIN_GITHUB_IDS: "octocat" }), ConfigError);
     assert.throws(() => readFreeConfig({ ...BASE_ENV, PAUSED: "maybe" }), ConfigError);
-    assert.throws(() => readFreeConfig({ ...BASE_ENV, OPENROUTER_API_KEY: "" }), /OPENROUTER_API_KEY/);
+    // No OpenRouter key is allowed: then the service never calls OpenRouter.
+    assert.equal(readFreeConfig({ ...BASE_ENV, OPENROUTER_API_KEY: "" }).openRouterApiKey, undefined);
   });
 
   it("reads the OpenRouter routing settings", () => {

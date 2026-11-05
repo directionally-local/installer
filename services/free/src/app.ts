@@ -37,6 +37,7 @@ import {
 import { confirmPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
 import { ALLOWED_MODELS, chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
+import { chooseUpstream } from "./upstream-choice.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
 import { meterStream } from "./sse.js";
@@ -1144,7 +1145,9 @@ async function chat(c: Ctx): Promise<Response> {
 
   if (gate.paused) return pausedError(await headers());
   // Which upstream serves: the setting, unless Luminal has no key. Never switched mid-request.
-  const upstream: Upstream = gate.config.primaryUpstream === "luminal" && c.config.luminalApiKey ? "luminal" : "openrouter";
+  const upstream = chooseUpstream(gate.config.primaryUpstream, c.config);
+  // No upstream the service may use: never fall back to anything else.
+  if (!upstream) return apiError(503, "upstream_unavailable", "Free tokens are unavailable right now. Try again later, or use your own key: /provider.", { reason: "no_upstream" }, await headers());
   if (upstream === "luminal" && gate.creditUsedUsd >= gate.config.luminalCreditUsd) {
     // The credit is used up: free and Pro usage pause (admins too) until it is topped up.
     const paused = await directory(c).creditPausedAlert(gate.config.luminalCreditUsd, c.now());
@@ -1509,7 +1512,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       paid: { usd: spend.paidUsd, tokens: spend.paidTokens, requests: spend.paidRequests },
       upstream: {
         primary: config.primaryUpstream,
-        serving: config.primaryUpstream === "luminal" && c.config.luminalApiKey ? "luminal" : "openrouter",
+        serving: chooseUpstream(config.primaryUpstream, c.config) ?? "none",
         luminalConfigured: c.config.luminalApiKey !== undefined,
       },
       luminalCredit: {

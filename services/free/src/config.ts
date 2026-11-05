@@ -9,7 +9,8 @@ import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type
 export class ConfigError extends Error {}
 
 export interface FreeConfig {
-  openRouterApiKey: string;
+  /** Optional: without it the service never calls OpenRouter (Luminal serves, or nothing does). */
+  openRouterApiKey: string | undefined;
   githubClientId: string;
   githubClientSecret: string;
   tokenSigningKey: string;
@@ -211,7 +212,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
   const signingKey = required(env, "TOKEN_SIGNING_KEY");
   if (new TextEncoder().encode(signingKey).length < 32) throw new ConfigError("TOKEN_SIGNING_KEY must be at least 32 bytes.");
   return {
-    openRouterApiKey: required(env, "OPENROUTER_API_KEY"),
+    openRouterApiKey: text(env.OPENROUTER_API_KEY),
     githubClientId: required(env, "GITHUB_CLIENT_ID"),
     githubClientSecret: required(env, "GITHUB_CLIENT_SECRET"),
     tokenSigningKey: signingKey,
