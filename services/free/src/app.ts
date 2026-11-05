@@ -9,10 +9,11 @@ import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
 import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, PersonState, PersonStatus, RequestRecord } from "./directory-object.js";
 import { createCheckout, createPortal, githubIdFrom, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
-import { deliverAlerts, pauseAlert, type Alert, type EmailBinding, type ServingContext, type UpstreamOutcome } from "./alerts.js";
+import { deliverAlerts, pauseAlert, sendEmail, type Alert, type EmailBinding, type ServingContext, type UpstreamOutcome } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
 import { normalizeReferralCode, referralLink } from "./referrals.js";
 import { networkOf, rateLimitNetwork } from "./network.js";
+import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, type Sender } from "./feedback.js";
 import { apiError, json } from "./errors.js";
 import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, type SpendView } from "./dashboard-page.js";
 import { cleanBatch } from "./events.js";
@@ -120,6 +121,10 @@ const LIMITS = {
   // Cloudflare addresses, so this one is generous; install counts come from people's machines.
   telemetryDownloadIp: perMinute(600),
   telemetryInstallIp: { capacity: 20, perHour: 20 },
+  // Feedback is an email to the owner: a few at a time is plenty.
+  feedbackPersonHour: { capacity: 5, perHour: 5 },
+  feedbackPersonDay: { capacity: 20, perHour: 20 / 24 },
+  feedbackIp: { capacity: 10, perHour: 10 },
 } satisfies Record<string, Limit>;
 
 export interface Env {
@@ -277,6 +282,8 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "GET" && path === "/v1/models") return models(c);
   if (method === "POST" && path === "/v1/chat/completions") return chat(c);
   if (method === "POST" && path === "/v1/events") return events(c);
+  if (method === "POST" && path === "/v1/feedback") return feedback(c);
+  if (method === "GET" && path === "/v1/feedback/reply-address") return feedbackReplyAddress(c);
   if (method === "POST" && path === "/v1/telemetry/download") return telemetry(c, "download");
   if (method === "POST" && path === "/v1/telemetry/install") return telemetry(c, "install");
   if (method === "GET" && path.startsWith("/v1/referrals/")) return referralLookup(c, path.slice("/v1/referrals/".length));
@@ -1138,6 +1145,86 @@ async function events(c: Ctx): Promise<Response> {
   const cleaned = cleanBatch(body, c.now());
   const accepted = await directory(c).recordEvents(identity.githubId, cleaned, c.now());
   return json({ accepted }, 202);
+}
+
+// ─── Feedback ───────────────────────────────────────────────────────────────
+
+/**
+ * POST /v1/feedback {message, email?, client?} → {ok: true, replyTo}: one email to the owner
+ * (ALERT_EMAIL to ALERT_EMAIL_TO), Reply-To the person when an address is known: the one they
+ * gave, else their public GitHub email. Sign-in is optional; a bearer that is sent must be
+ * valid (401 otherwise, so the client can refresh). Nothing is stored: not the message, not the
+ * address. Limits: 10 an hour per network; signed in, also 5 an hour and 20 a day per person.
+ */
+async function feedback(c: Ctx): Promise<Response> {
+  let sender: Sender | undefined;
+  if (c.request.headers.has("authorization")) {
+    const identity = await authenticate(c, { keys: true });
+    if (identity instanceof Response) return identity;
+    sender = { login: identity.login, githubId: identity.githubId };
+  }
+  if (Number(c.request.headers.get("content-length") ?? 0) > MAX_FEEDBACK_BYTES) return apiError(413, "too_large", "Feedback is at most 5,000 characters.");
+  const text = await c.request.text();
+  if (new TextEncoder().encode(text).length > MAX_FEEDBACK_BYTES) return apiError(413, "too_large", "Feedback is at most 5,000 characters.");
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = undefined;
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return apiError(400, "invalid_request", "Send {message, email?, client?} as JSON.");
+  const parsed = parseFeedback(body as Record<string, unknown>);
+  if (!parsed.ok) return apiError(400, parsed.code, parsed.message);
+  const { alertEmailTo, alertEmailFrom } = c.config;
+  const binding = c.env.ALERT_EMAIL;
+  if (!binding || !alertEmailTo) return apiError(503, "feedback_unavailable", "Feedback can't be sent from this service right now.");
+
+  // The network's key is a salted hash, so the address isn't kept even in the rate limiter.
+  const net = await sha256Hex(`feedback:${c.config.tokenSigningKey}:${c.ipNet}`);
+  const buckets: Array<[string, Limit]> = [[`feedback:ip:${net}`, LIMITS.feedbackIp]];
+  if (sender) buckets.push([`feedback:gh:${sender.githubId}:hour`, LIMITS.feedbackPersonHour], [`feedback:gh:${sender.githubId}:day`, LIMITS.feedbackPersonDay]);
+  // Check every bucket before spending any, so a refusal by one doesn't use up the others.
+  let retry = 0;
+  for (const [key, limit] of buckets) {
+    const outcome = await c.env.RATE_LIMITER.getByName(key).check(key, limit, 1, c.now());
+    if (!outcome.allowed) retry = Math.max(retry, outcome.retryAfterSeconds);
+  }
+  if (retry > 0) return rateLimited(retry);
+  for (const [key, limit] of buckets) await c.env.RATE_LIMITER.getByName(key).spend(key, limit, 1, c.now());
+
+  const { message, email, client } = parsed.value;
+  const looked = email === undefined && sender ? await publicGithubEmail(sender.login, c.fetch, c.now()) : null;
+  const replyTo = email ?? looked;
+  const mail = feedbackEmail({ message, sender, replyTo, replySource: email ? "given" : looked ? "github" : undefined, client, at: c.now() });
+  try {
+    await sendEmail(binding, {
+      from: alertEmailFrom,
+      to: alertEmailTo,
+      fromName: "dl feedback",
+      subject: mail.subject,
+      body: mail.body,
+      now: c.now(),
+      ...(replyTo ? { replyTo } : {}),
+    });
+  } catch (error) {
+    // The error only: never the message or the address.
+    console.error("feedback email failed", error instanceof Error ? error.name : "error");
+    return apiError(502, "feedback_failed", "The feedback couldn't be sent. Try again in a minute.");
+  }
+  return json({ ok: true, replyTo: replyTo ?? null });
+}
+
+/**
+ * GET /v1/feedback/reply-address → {email}: the public email on the signed-in person's GitHub
+ * profile (null when there's none), so the client can say where replies will go before sending.
+ */
+async function feedbackReplyAddress(c: Ctx): Promise<Response> {
+  const identity = await authenticate(c, { keys: true });
+  if (identity instanceof Response) return identity;
+  const guarded = await apiGuard(c, identity);
+  if (guarded) return guarded;
+  const email = await publicGithubEmail(identity.login, c.fetch, c.now());
+  return json({ email });
 }
 
 /**

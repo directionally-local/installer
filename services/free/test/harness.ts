@@ -151,6 +151,8 @@ export interface Service {
     githubTokens: Array<{ code: string; redirect_uri?: string }>;
     /** Contribution lookups on GitHub's GraphQL API, by login. */
     githubGraphql: string[];
+    /** Unauthenticated profile reads (GET https://api.github.com/users/<login>): login and headers. */
+    githubProfiles: Array<{ login: string; headers: Record<string, string> }>;
     /** Posts to ALERT_WEBHOOK_URL (any URL on alerts.test, discord.com, hooks.slack.com or api.telegram.org). */
     webhooks: Array<{ url: string; body: Record<string, unknown> }>;
     /** Messages sent through the fake ALERT_EMAIL binding (with `email: true`). */
@@ -161,6 +163,8 @@ export interface Service {
   /** Answers calls to api.stripe.com (default: a Checkout or portal session with a URL). */
   setStripe(handler: (path: string, form: URLSearchParams) => Response | Promise<Response>): void;
   setOpenRouter(handler: OpenRouterHandler): void;
+  /** Answers GET https://api.github.com/users/<login> (default: a profile with no public email). */
+  setGithubProfile(handler: (login: string) => Response | Promise<Response>): void;
   /** Answers calls to Luminal (default: a completion with Luminal-shaped usage, no cost). */
   setLuminal(handler: OpenRouterHandler): void;
   request(method: string, path: string, options?: { body?: unknown; token?: string; headers?: Record<string, string>; form?: Record<string, string>; ip?: string }): Promise<Response>;
@@ -236,7 +240,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
     ...namespaces,
   };
   const clock = { now: NOW };
-  const calls: Service["calls"] = { openRouter: [], luminal: [], githubTokens: [], githubGraphql: [], webhooks: [], emails: [], stripe: [] };
+  const calls: Service["calls"] = { openRouter: [], luminal: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [] };
   let stripe = (path: string, _form?: URLSearchParams): Response | Promise<Response> =>
     path === "/v1/checkout/sessions"
       ? Response.json({ id: `cs_test_${calls.stripe.length}`, url: `https://checkout.stripe.com/c/pay/cs_test_${calls.stripe.length}` })
@@ -249,6 +253,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
     };
   }
   let openRouter: OpenRouterHandler = () => completion(usage(100, 10));
+  let githubProfile = (login: string): Response | Promise<Response> => Response.json({ login, email: null });
   let luminal: OpenRouterHandler = () => completion(luminalUsage(100, 10));
 
   const fetcher = async (input: string, init: RequestInit = {}): Promise<Response> => {
@@ -263,6 +268,11 @@ export async function createService(vars: Record<string, string> = {}, options: 
       const token = new Headers(init.headers).get("authorization")?.replace("Bearer token-for-", "") ?? "";
       const user = JSON.parse(decodeURIComponent(token)) as GitHubUserFixture;
       return Response.json({ id: user.id, login: user.login, created_at: user.createdAt ?? "2015-01-01T00:00:00Z", public_repos: user.publicRepos ?? 1, followers: 0 });
+    }
+    if (url.startsWith("https://api.github.com/users/")) {
+      const login = decodeURIComponent(url.slice("https://api.github.com/users/".length));
+      calls.githubProfiles.push({ login, headers: Object.fromEntries(new Headers(init.headers).entries()) });
+      return githubProfile(login);
     }
     if (url === "https://api.github.com/graphql") {
       const token = new Headers(init.headers).get("authorization")?.replace("Bearer token-for-", "") ?? "";
@@ -335,6 +345,9 @@ export async function createService(vars: Record<string, string> = {}, options: 
     calls,
     setOpenRouter: (next) => {
       openRouter = next;
+    },
+    setGithubProfile: (next) => {
+      githubProfile = next;
     },
     setLuminal: (next) => {
       luminal = next;
