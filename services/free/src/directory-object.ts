@@ -2,9 +2,9 @@ import { DurableObject, type DurableObjectState } from "cloudflare:workers";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
-import { dashboardData, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
+import { dashboardData, installBreakdown, notAdmin, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
-import { creditAlert, creditPausedAlert, crossed, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, queueStartedAlert, totalSpendAlert, upstreamErrorAlert, weeklySpendAlert, type Alert } from "./alerts.js";
+import { creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, queueStartedAlert, totalSpendAlert, upstreamErrorAlert, weeklySpendAlert, type Alert, type DigestUsage, type SignupHow } from "./alerts.js";
 import type { Upstream } from "./config.js";
 import { creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type ReferralOutcome } from "./referrals.js";
@@ -25,7 +25,16 @@ import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
  */
 
 export type AdmitResult =
-  | { ok: true; created: boolean; via: "existing" | "admin" | "open" | "invite"; queued: boolean; queueStarted: boolean; referralCode: string }
+  | {
+      ok: true;
+      created: boolean;
+      via: "existing" | "admin" | "open" | "invite";
+      queued: boolean;
+      queueStarted: boolean;
+      referralCode: string;
+      /** Set once, ever: this was the first person admitted who isn't an admin. */
+      firstSignup?: Alert;
+    }
   | { ok: false; reason: "needs_invite" | "invalid_invite" | "cohort_full" | "device_taken" };
 
 /** One logged change to a runtime setting or the kill switch. */
@@ -554,7 +563,8 @@ export class DirectoryObject extends DurableObject {
             queueStarted = waiting === 0;
           }
         }
-        return { ok: true, created, via, queued, queueStarted, referralCode };
+        const firstSignup = created && (via === "open" || via === "invite") ? this.#firstSignupAlert(input.githubId, input.login, via, queued, input.policy?.adminIds ?? [], input.now) : undefined;
+        return { ok: true, created, via, queued, queueStarted, referralCode, ...(firstSignup ? { firstSignup } : {}) };
       };
       const existing = sql.exec<PersonRow>("SELECT * FROM people WHERE github_id = ?", input.githubId).toArray()[0];
       if (existing) {
@@ -586,6 +596,21 @@ export class DirectoryObject extends DurableObject {
       );
       return admitted("invite", true);
     });
+  }
+
+  /**
+   * The first-user alert, for a person just admitted by open admission or an invite. The key is
+   * marked on the first such admission and never again, so it can't send twice; when people
+   * were admitted before this alert existed, it is marked without sending.
+   */
+  #firstSignupAlert(githubId: number, login: string, via: "open" | "invite", queued: boolean, adminIds: readonly number[], now: number): Alert | undefined {
+    if (!this.#markAlert("first-signup", now)) return undefined;
+    const sql = this.ctx.storage.sql;
+    const others =
+      sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM people WHERE github_id != ? AND ${notAdmin("github_id")}`, githubId, JSON.stringify([...adminIds])).toArray()[0]?.n ?? 0;
+    if (others > 0) return undefined;
+    const referral = sql.exec("SELECT 1 FROM referrals WHERE referred_id = ? AND outcome = 'ok'", githubId).toArray().length > 0;
+    return firstSignupAlert({ login, how: { via, referral }, at: now, queued });
   }
 
   // ─── Referrals ────────────────────────────────────────────────────────────
@@ -1335,6 +1360,106 @@ export class DirectoryObject extends DurableObject {
       data.referrals.peopleWithBonus = granted.size;
     }
     return data;
+  }
+
+  /**
+   * The daily digest for the UTC day before `now` (the cron runs at 01:00 UTC), or undefined
+   * when that day's digest was already sent: a retried or doubled cron run never sends twice.
+   * The numbers come from the dashboard's queries (as of the end of that day), the weekly spend
+   * and the request log; admins are left out. `envPaused` is the PAUSED var.
+   */
+  async dailyDigest(now: number, envPolicy: Policy, envPaused: boolean): Promise<Alert | undefined> {
+    const policy = this.#policy(envPolicy);
+    const until = Math.floor(now / DAY_MS) * DAY_MS;
+    const from = until - DAY_MS;
+    const date = isoDay(from);
+    if (!this.#markAlert(`digest:${date}`, now)) return undefined;
+    const sql = this.ctx.storage.sql;
+    const end = until - 1;
+    const admins = JSON.stringify([...policy.adminIds]);
+    const data = dashboardData(sql, { now: end, adminIds: policy.adminIds, limits: { weeklyTokens: policy.weeklyTokens, weeklyUsd: policy.perPersonWeeklyUsdCap ?? null } });
+    const day = data.installFunnel.days[0]!;
+    const week = weekStart(end);
+    // The live totals, less anything after the day reported (the first hour of today).
+    const live = this.#spendSync(now);
+    const after = this.#usage(until, Number.MAX_SAFE_INTEGER);
+    const weekUsage = this.#usage(week, until);
+    const weekPeople = sql
+      .exec<{ signups: number; active: number }>(
+        `SELECT (SELECT COUNT(*) FROM people WHERE admitted_at >= ? AND admitted_at < ? AND ${notAdmin("github_id")}) AS signups,
+                (SELECT COUNT(DISTINCT github_id) FROM daily_activity WHERE day >= ? AND day < ? AND requests > 0 AND ${notAdmin("github_id")}) AS active`,
+        week,
+        until,
+        admins,
+        week / DAY_MS,
+        until / DAY_MS,
+        admins,
+      )
+      .toArray()[0];
+    const people = sql
+      .exec<{ login: string; admitted_via: string; referral: number }>(
+        `SELECT p.login AS login, p.admitted_via AS admitted_via, EXISTS (SELECT 1 FROM referrals r WHERE r.referred_id = p.github_id AND r.outcome = 'ok') AS referral
+         FROM people p WHERE p.admitted_at >= ? AND p.admitted_at < ? AND ${notAdmin("p.github_id")} ORDER BY p.admitted_at, p.github_id LIMIT ?`,
+        from,
+        until,
+        admins,
+        DIGEST_MAX_LOGINS,
+      )
+      .toArray()
+      .map((row) => ({ login: row.login, how: { via: row.admitted_via === "open" ? "open" : "invite", referral: row.referral === 1 } satisfies SignupHow }));
+    const { platforms, failedSteps } = installBreakdown(sql, from / DAY_MS, until / DAY_MS);
+    return dailyDigestAlert({
+      date,
+      signups: { count: day.signedUp, people },
+      active: day.active,
+      usage: this.#usage(from, until),
+      payments: this.#payments(from, until),
+      installs: { ok: day.installsOk, failed: day.installsFailed, platforms, failedSteps },
+      week: {
+        start: isoDay(week),
+        signups: weekPeople?.signups ?? 0,
+        active: weekPeople?.active ?? 0,
+        usage: weekUsage,
+        payments: this.#payments(week, until),
+        cashUsd: weekUsage.freeCashUsd,
+        weeklyCapUsd: policy.globalWeeklyUsdCap,
+        totalUsd: Math.max(0, round(live.totalSpentUsd - after.freeCashUsd)),
+        totalCapUsd: policy.globalTotalUsdCap,
+      },
+      credit: { balanceUsd: policy.luminalCreditUsd, leftUsd: Math.max(0, round(policy.luminalCreditUsd - live.creditUsedUsd)) },
+      queueWaiting: data.queue.waiting,
+      paused: envPaused || this.#paused(),
+    });
+  }
+
+  /** Requests and tokens of everyone but admins in [from, until); dollars of free usage only (as spend_weeks counts them). */
+  #usage(from: number, until: number): DigestUsage {
+    const row = this.ctx.storage.sql
+      .exec<{ requests: number; tokens_in: number | null; cached: number | null; tokens_out: number | null; cash: number | null; credit: number | null }>(
+        `SELECT COUNT(*) AS requests, SUM(prompt_tokens) AS tokens_in, SUM(cached_tokens) AS cached, SUM(completion_tokens) AS tokens_out,
+                SUM(CASE WHEN paid = 0 AND upstream = 'openrouter' THEN cost_usd ELSE 0 END) AS cash,
+                SUM(CASE WHEN paid = 0 AND upstream = 'luminal' THEN credit_usd ELSE 0 END) AS credit
+         FROM requests WHERE is_admin = 0 AND at >= ? AND at < ?`,
+        from,
+        until,
+      )
+      .toArray()[0];
+    return {
+      requests: row?.requests ?? 0,
+      tokensIn: row?.tokens_in ?? 0,
+      tokensCached: row?.cached ?? 0,
+      tokensOut: row?.tokens_out ?? 0,
+      freeCashUsd: round(row?.cash ?? 0),
+      freeCreditUsd: round(row?.credit ?? 0),
+    };
+  }
+
+  /** Payments in [from, until): how many, and revenue before tax in USD. */
+  #payments(from: number, until: number): { count: number; usd: number } {
+    const row = this.ctx.storage.sql
+      .exec<{ n: number; cents: number | null }>("SELECT COUNT(*) AS n, SUM(amount_cents) AS cents FROM payments WHERE at >= ? AND at < ?", from, until)
+      .toArray()[0];
+    return { count: row?.n ?? 0, usd: (row?.cents ?? 0) / 100 };
   }
 
   /** Admin analytics over whole UTC days `from`..`to` (inclusive), computed from the stored records. */

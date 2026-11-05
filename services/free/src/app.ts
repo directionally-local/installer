@@ -206,10 +206,39 @@ interface Ctx {
   base: string;
 }
 
-export function createHandler(options: HandlerOptions = {}): { fetch(request: Request, env: Env): Promise<Response> } {
+/** The daily digest's cron: 01:00 UTC, 09:00 in Singapore. Must match `triggers.crons` in both wrangler configs. */
+export const DIGEST_CRON = "0 1 * * *";
+/** Where the digest's dashboard link points when PUBLIC_URL isn't set (a cron run has no request URL). */
+const DEFAULT_PUBLIC_URL = "https://free.directionallylocal.com";
+
+/** What a cron trigger hands the Worker: the cron expression that fired and when it was due. */
+export interface ScheduledController {
+  cron: string;
+  scheduledTime: number;
+}
+
+export function createHandler(options: HandlerOptions = {}): {
+  fetch(request: Request, env: Env): Promise<Response>;
+  scheduled(controller: ScheduledController, env: Env): Promise<void>;
+} {
   const now = options.now ?? (() => Date.now());
   const fetcher: Fetch = options.fetch ?? ((input, init) => fetch(input, init));
   return {
+    /**
+     * Cron triggers. The only one is the daily digest (DIGEST_CRON); the weekly queue needs
+     * none, it runs on the first request of the week. Never throws for an unknown cron.
+     */
+    async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+      if (controller.cron !== DIGEST_CRON) {
+        console.error("scheduled: unknown cron", controller.cron);
+        return;
+      }
+      const config = readFreeConfig(env as unknown as Record<string, unknown>);
+      // The time it was due, so a late or retried run still reports the day before 01:00 UTC.
+      const at = Number.isFinite(controller.scheduledTime) ? controller.scheduledTime : now();
+      const digest = await env.DIRECTORY.getByName("directory").dailyDigest(at, policyOf(config), config.paused);
+      if (digest) await deliver({ config, env, fetch: fetcher, base: config.publicUrl ?? DEFAULT_PUBLIC_URL, now }, [digest]);
+    },
     async fetch(request: Request, env: Env): Promise<Response> {
       let config: FreeConfig;
       try {
@@ -407,6 +436,11 @@ function runtime(c: Ctx): Promise<Runtime> {
 
 /** Sends alerts by email and/or webhook; never fails the request. */
 async function alert(c: Ctx, alerts: readonly Alert[]): Promise<void> {
+  await deliver(c, alerts);
+}
+
+/** `alert` without a request: for cron runs too. */
+async function deliver(c: Pick<Ctx, "config" | "env" | "fetch" | "base" | "now">, alerts: readonly Alert[]): Promise<void> {
   if (alerts.length === 0) return;
   await deliverAlerts({ alerts, config: c.config, emailBinding: c.env.ALERT_EMAIL, fetch: c.fetch, adminUrl: `${c.base}/admin`, now: c.now() });
 }
@@ -760,6 +794,7 @@ async function admitAndFinish(
     await account(c, identity.githubId).activate({ githubId: identity.githubId, login: identity.login, isAdmin, now: c.now() });
     await auth(c).decide(deviceRef, "approved", identity, c.now());
     if (result.queueStarted) await alert(c, [await directory(c).queueStartedAlert(c.now(), policyOf(c.config))]);
+    if (result.firstSignup) await alert(c, [result.firstSignup]);
     const queued = result.queued ? ` ${QUEUED_SIGNED_IN}` : "";
     const invite =
       config.referralBonusTokens > 0

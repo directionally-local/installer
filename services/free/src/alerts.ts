@@ -8,7 +8,10 @@ import type { AlertKind, FreeConfig } from "./config.js";
  * balance), Luminal-served usage pausing because the credit ran out, and Luminal failing more
  * than 20% of at least 20 requests over the last hour, and the sign-up GitHub activity check
  * letting people through because GitHub didn't answer (5 times in a UTC day, once a day).
- * Counts and dollars only.
+ * Also two notes that aren't warnings: the first person admitted who isn't an admin (once,
+ * ever), and a daily digest of the previous UTC day, sent by the 01:00 UTC cron trigger even
+ * when every number is zero, so it doubles as a heartbeat (once per date).
+ * Counts and dollars only, plus GitHub logins in those two.
  *
  * ALERT_WEBHOOK_URL picks the format from its host, or ALERT_WEBHOOK_KIND sets it:
  *
@@ -77,6 +80,8 @@ export function percentOf(threshold: number): string {
 export interface Alert {
   subject: string;
   text: string;
+  /** The email's last line, when "once per threshold" isn't true of this alert. */
+  footer?: string;
 }
 
 export function weeklySpendAlert(spentUsd: number, capUsd: number, threshold: number): Alert {
@@ -150,6 +155,143 @@ export function upstreamErrorAlert(upstream: string, errors: number, requests: n
   };
 }
 
+// ─── First sign-up and the daily digest ──────────────────────────────────────
+
+/** "2026-11-04 12:00 UTC (20:00 Singapore)". Singapore is UTC+8 all year. */
+export function utcAndSingapore(at: number): string {
+  const utc = new Date(at).toISOString();
+  const sgt = new Date(at + 8 * 3_600_000).toISOString();
+  return `${utc.slice(0, 10)} ${utc.slice(11, 16)} UTC (${sgt.slice(11, 16)} Singapore${sgt.slice(0, 10) === utc.slice(0, 10) ? "" : `, ${sgt.slice(0, 10)}`})`;
+}
+
+/** How someone got in: open admission or an invite code, and whether they came by a referral link. */
+export interface SignupHow {
+  via: "open" | "invite";
+  referral: boolean;
+}
+
+export function signupHowText(how: SignupHow): string {
+  const base = how.via === "open" ? "open admission" : "invite code";
+  return how.referral ? `referral link, ${base}` : base;
+}
+
+/** The first person admitted who isn't an admin. Sent once, ever. */
+export function firstSignupAlert(input: { login: string; how: SignupHow; at: number; queued: boolean }): Alert {
+  return {
+    subject: `dl free tier: your first user, @${input.login}`,
+    text: [
+      `dl free tier: your first user, @${input.login}.`,
+      "",
+      `Login: @${input.login} (https://github.com/${input.login})`,
+      `How they got in: ${signupHowText(input.how)}`,
+      `Time: ${utcAndSingapore(input.at)}`,
+      `Free tokens: ${input.queued ? "waiting in the queue until Monday's admission" : "available now"}`,
+    ].join("\n"),
+    footer: "Sent once, ever: for the first person admitted who isn't an admin.",
+  };
+}
+
+/** The daily digest's numbers: one UTC day, and its Monday-to-Sunday week up to the end of that day. Admins left out. */
+export interface DailyDigest {
+  /** The UTC day reported, YYYY-MM-DD. */
+  date: string;
+  signups: { count: number; people: Array<{ login: string; how: SignupHow }> };
+  /** People with a request that day. */
+  active: number;
+  usage: DigestUsage;
+  /** Payments that day: revenue before tax. */
+  payments: { count: number; usd: number };
+  installs: {
+    ok: number;
+    failed: number;
+    platforms: Array<{ os: string; arch: string; mode: string; ok: number; failed: number }>;
+    failedSteps: Array<{ step: string; failed: number }>;
+  };
+  week: {
+    /** The Monday, YYYY-MM-DD. */
+    start: string;
+    signups: number;
+    /** People with a request that week. */
+    active: number;
+    usage: DigestUsage;
+    payments: { count: number; usd: number };
+    /** Free cash spend that week and since the start, to the end of the day reported: what the weekly and all-time caps count. */
+    cashUsd: number;
+    weeklyCapUsd: number | undefined;
+    totalUsd: number;
+    totalCapUsd: number | undefined;
+  };
+  /** Luminal credit: the balance and what's left of it now (everyone, since the start). */
+  credit: { balanceUsd: number; leftUsd: number };
+  queueWaiting: number;
+  paused: boolean;
+}
+
+/** Requests and tokens of people who aren't admins; dollars of free usage only. */
+export interface DigestUsage {
+  requests: number;
+  tokensIn: number;
+  tokensCached: number;
+  tokensOut: number;
+  /** Free usage served by OpenRouter (cash) and by Luminal (prepaid credit). */
+  freeCashUsd: number;
+  freeCreditUsd: number;
+}
+
+function count(value: number): string {
+  return value.toLocaleString("en-US");
+}
+
+function weekday(date: string): string {
+  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(`${date}T00:00:00Z`).getUTCDay()]!;
+}
+
+function payments(value: { count: number; usd: number }): string {
+  return value.count === 0 ? "none" : `${dollars(value.usd)} from ${count(value.count)} payment${value.count === 1 ? "" : "s"}`;
+}
+
+function usageLines(usage: DigestUsage, indent: string): string[] {
+  return [
+    `${indent}Requests: ${count(usage.requests)}`,
+    `${indent}Tokens: ${count(usage.tokensIn)} in (${count(usage.tokensCached)} cached), ${count(usage.tokensOut)} out`,
+    `${indent}Free credit spent: ${dollars(usage.freeCashUsd + usage.freeCreditUsd)} (${dollars(usage.freeCashUsd)} OpenRouter, ${dollars(usage.freeCreditUsd)} Luminal credit)`,
+  ];
+}
+
+/** At most this many logins in the digest; the rest are counted. */
+export const DIGEST_MAX_LOGINS = 20;
+
+/** The daily digest. Sent every day, zeros included: it doubles as a heartbeat. */
+export function dailyDigestAlert(digest: DailyDigest): Alert {
+  const { signups, week } = digest;
+  const lines = [`dl free tier: daily digest for ${weekday(digest.date)} ${digest.date} (UTC). Admins left out.`, "", `New sign-ups: ${count(signups.count)}`];
+  if (signups.people.length > 0) {
+    lines.push(`  ${signups.people.map((person) => `@${person.login} (${signupHowText(person.how)})`).join(", ")}`);
+    if (signups.count > signups.people.length) lines.push(`  and ${count(signups.count - signups.people.length)} more`);
+  }
+  lines.push(`Active people: ${count(digest.active)}`, ...usageLines(digest.usage, ""));
+  lines.push(`Luminal credit left: ${dollars(digest.credit.leftUsd)} of ${dollars(digest.credit.balanceUsd)}`);
+  lines.push(`Paid: ${payments(digest.payments)}`);
+  lines.push(`Installs: ${count(digest.installs.ok)} finished, ${count(digest.installs.failed)} failed`);
+  for (const platform of digest.installs.platforms) {
+    lines.push(`  ${platform.os} ${platform.arch} ${platform.mode}: ${count(platform.ok)} ok, ${count(platform.failed)} failed`);
+  }
+  if (digest.installs.failedSteps.length > 0) {
+    lines.push(`  Failed at: ${digest.installs.failedSteps.map((step) => `${step.step || "(not said)"} ${count(step.failed)}`).join(", ")}`);
+  }
+  lines.push("", `This week so far (Mon ${week.start} to ${digest.date}):`);
+  lines.push(`  Sign-ups: ${count(week.signups)}`, `  Active people: ${count(week.active)}`, ...usageLines(week.usage, "  "));
+  lines.push(`  Weekly cap: ${dollars(week.cashUsd)}${week.weeklyCapUsd === undefined ? " (no cap)" : ` of ${dollars(week.weeklyCapUsd)}`} OpenRouter spend`);
+  lines.push(`  All-time cap: ${dollars(week.totalUsd)}${week.totalCapUsd === undefined ? " (no cap)" : ` of ${dollars(week.totalCapUsd)}`}`);
+  lines.push(`  Paid: ${payments(week.payments)}`);
+  lines.push("", `Queue: ${count(digest.queueWaiting)} waiting`, `Free tokens: ${digest.paused ? "PAUSED (kill switch)" : "on"}`);
+  return {
+    subject: `dl free tier: daily, ${digest.date}: ${count(signups.count)} new, ${count(digest.active)} active`,
+    text: lines.join("\n"),
+    footer: "Sent by the free tier service every day at 01:00 UTC (09:00 Singapore), even when nothing happened. Counts and dollars only.",
+  };
+}
+
 /**
  * The highest threshold newly crossed, or undefined. `sent` holds the thresholds already
  * alerted; every threshold at or below the highest crossed one is marked, so a jump from 40%
@@ -206,7 +348,8 @@ export function mimeMessage(input: { from: string; to: string; subject: string; 
 }
 
 export function emailBody(alert: Alert, adminUrl: string): string {
-  return `${alert.text}\n\nAdmin dashboard: ${adminUrl}\n\nSent by the free tier service once per threshold. Counts and dollars only.\n`;
+  const footer = alert.footer ?? "Sent by the free tier service once per threshold. Counts and dollars only.";
+  return `${alert.text}\n\nAdmin dashboard: ${adminUrl}\n\n${footer}\n`;
 }
 
 /**

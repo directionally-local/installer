@@ -25,6 +25,7 @@
     "ALERT_EMAIL_FROM": "alerts@dl.new"
   },
   "send_email": [{ "name": "ALERT_EMAIL" }],
+  "triggers": { "crons": ["0 1 * * *"] },
   "durable_objects": {
     "bindings": [
       { "name": "AUTH", "class_name": "AuthObject" },

@@ -259,6 +259,72 @@ dl free tier: requests are refused with upstream_credit_exhausted: $2,000.12 of 
 dl free tier: Luminal failed 5 of 20 requests in the last hour (25%). Clients retry on their own; nothing switches upstream automatically.
 ```
 
+**First user.** The first person admitted who isn't an admin (open admission or an invite; an
+admin signing in doesn't count) sends one message, ever: the `first-signup` key in
+`alerts_sent` is set on that admission, so it can't send twice. Where people were admitted before
+this alert existed, the key is set on the next admission without sending.
+
+```
+Subject: dl free tier: your first user, @alice
+
+dl free tier: your first user, @alice.
+
+Login: @alice (https://github.com/alice)
+How they got in: open admission          (or: invite code; referral link, open admission; …)
+Time: 2026-11-04 12:00 UTC (20:00 Singapore)
+Free tokens: available now               (or: waiting in the queue until Monday's admission)
+```
+
+**Daily digest.** A cron trigger, `0 1 * * *` (01:00 UTC, 09:00 Singapore; `triggers.crons` in
+both wrangler configs), runs the Worker's `scheduled()` handler, which sends a digest of the
+previous UTC day. It goes out on a quiet day too, with zeros: no digest by 09:30 Singapore means
+the Worker or its alerts are broken. Each date's digest is marked in `alerts_sent`
+(`digest:<date>`), so a retried or doubled cron run never sends it twice. `scheduled()` handles
+only this cron; the weekly queue needs none (it runs on the first request of the week). The
+numbers come from the dashboard's queries as of the end of that day (sign-ups, active people,
+installs, the queue), the install counts by OS, chip and mode, the request log and the payments.
+Admins are left out; "active" is a request that day (that week, for the week). Free credit spent
+is free usage only (not paid, not admins): OpenRouter cash plus Luminal credit. The dashboard
+link is `<PUBLIC_URL>/admin`, or `https://free.directionallylocal.com/admin` without `PUBLIC_URL`
+(a cron run has no request URL). Serverless Objects' config accepts `triggers`, but its docs
+don't cover cron runs yet, so don't count on the digest off Cloudflare. A sample:
+
+```
+Subject: dl free tier: daily, 2026-11-03: 2 new, 2 active
+
+dl free tier: daily digest for Tue 2026-11-03 (UTC). Admins left out.
+
+New sign-ups: 2
+  @alice (open admission), @bob (referral link, invite code)
+Active people: 2
+Requests: 3
+Tokens: 3,300 in (1,400 cached), 330 out
+Free credit spent: $0.75 ($0.50 OpenRouter, $0.25 Luminal credit)
+Luminal credit left: $1,999.75 of $2,000
+Paid: $3 from 1 payment
+Installs: 3 finished, 1 failed
+  linux arm64 server: 2 ok, 1 failed
+  darwin arm64 laptop: 1 ok, 0 failed
+  Failed at: dl_up 1
+
+This week so far (Mon 2026-11-02 to 2026-11-03):
+  Sign-ups: 3
+  Active people: 3
+  Requests: 4
+  Tokens: 3,800 in (1,400 cached), 380 out
+  Free credit spent: $1.75 ($1.50 OpenRouter, $0.25 Luminal credit)
+  Weekly cap: $1.50 of $250 OpenRouter spend
+  All-time cap: $1.50 of $1,000
+  Paid: $13 from 2 payments
+
+Queue: 0 waiting
+Free tokens: PAUSED (kill switch)
+
+Admin dashboard: https://free.directionallylocal.com/admin
+```
+
+At most 20 logins are listed; the rest are counted (`and 3 more`).
+
 **Email (primary).** The Cloudflare config binds `send_email` as `ALERT_EMAIL`. Each alert is a
 small plain-text RFC 5322 message from `ALERT_EMAIL_FROM` (`alerts@dl.new`) to `ALERT_EMAIL_TO`.
 The subject is the short line (`dl free tier: 80% of the $250 weekly cap used`); the body is the
