@@ -138,6 +138,8 @@ export interface Gate {
   creditUsedUsd: number;
   /** Free Luminal credit spend this week (no admins, no paid usage): what the queue watches in credit mode. */
   weekCreditUsd: number;
+  /** People waiting in the queue for free tokens. */
+  waiting: number;
   overrides: Overrides;
   person?: PersonState;
 }
@@ -968,6 +970,7 @@ export class DirectoryObject extends DurableObject {
       totalUsd: spend.totalSpentUsd,
       creditUsedUsd: spend.creditUsedUsd,
       weekCreditUsd: spend.freeCreditWeekUsd,
+      waiting: this.#waitingCount(),
       overrides,
       ...(policy && githubId !== undefined ? { person: this.#personState(githubId, now, policy) } : {}),
     };
