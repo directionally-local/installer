@@ -41,13 +41,14 @@ export interface ServerKeyView {
 
 export type CreateKeyResult =
   | { ok: true; key: string; view: ServerKeyView }
-  | { ok: false; code: "not_invited" | "suspended" | "key_limit_reached" | "key_name_taken" };
+  | { ok: false; code: "not_invited" | "suspended" | "blocked" | "key_limit_reached" | "key_name_taken" };
 
 export interface AccountEnv {
   DIRECTORY?: DurableObjectNamespace<DirectoryObject>;
 }
 
-export type AccountStatus = "active" | "suspended";
+/** "blocked": an admin blocked the account for abuse (stronger than a suspension: no refresh, no sign-in). */
+export type AccountStatus = "active" | "suspended" | "blocked";
 
 export type Plan = "free" | "pro";
 /** Where a request's tokens come from: the weekly allowance (free or Pro), or top-ups. */
@@ -76,7 +77,7 @@ export interface Allowance {
 
 export type ReserveResult =
   | { ok: true; reservationId: string; amount: number; maxTokens: number; source: Source; paid: boolean; allowance: Allowance }
-  | { ok: false; code: "not_invited" | "suspended"; allowance: Allowance }
+  | { ok: false; code: "not_invited" | "suspended" | "blocked"; allowance: Allowance }
   | { ok: false; code: "quota_exceeded"; reason: "tokens" | "spend"; allowance: Allowance };
 
 /** Caps a call applies; per-person overrides set by an admin win over these. */
@@ -212,6 +213,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const row = this.#current(input.now);
     const before = this.#allowance(row, input.now, input.limits);
     if (!row) return { ok: false, code: "not_invited", allowance: before };
+    if (row.status === "blocked") return { ok: false, code: "blocked", allowance: before };
     if (row.status === "suspended") return { ok: false, code: "suspended", allowance: before };
     // The weekly allowance first (free or Pro), then top-ups.
     const spendReached = before.usdPerWeek !== null && before.spentUsdThisWeek >= before.usdPerWeek;
@@ -410,6 +412,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
   async createKey(input: { name: string; now: number }): Promise<CreateKeyResult> {
     const row = this.#row();
     if (!row) return { ok: false, code: "not_invited" };
+    if (row.status === "blocked") return { ok: false, code: "blocked" };
     if (row.status === "suspended") return { ok: false, code: "suspended" };
     const sql = this.ctx.storage.sql;
     const count = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM server_keys").toArray()[0]?.n ?? 0;

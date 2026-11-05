@@ -600,12 +600,16 @@ describe("spend alerts", () => {
 });
 
 describe("dashboard additions", () => {
-  it("shows the all-time spend, the red banner at 80%, the queue, referrals and the funnel", async () => {
+  it("shows the credit budget, when the queue starts, the queue, referrals and the funnel", async () => {
     const { service } = await openService();
     const cookie = await adminCookie(service);
     let html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
     assert.doesNotMatch(html, /class="banner"/);
-    assert.match(html, /All-time free cash spend<b>\$0 <span class="muted">of \$1000<\/span>/);
+    // The budget is the Luminal credit; the OpenRouter cash caps aren't shown as one.
+    assert.match(html, /Luminal credit used<b>\$0 <span class="muted">of \$2,000<\/span>/);
+    assert.match(html, /Credit this week<b>\$0 <span class="muted">of \$250<\/span>/);
+    assert.match(html, /Queue starts at<b>\$200 <span class="muted">80% of \$250<\/span>/);
+    assert.doesNotMatch(html, /cash spend|weekly cap used|all-time cap/i);
 
     const referrer = await signUp(service, { id: 100, login: "ref", ip: "198.51.100.1" });
     await signUp(service, { id: 101, login: "pal", ip: "198.51.100.2", referral: "ref" });
@@ -616,7 +620,8 @@ describe("dashboard additions", () => {
     void referrer;
 
     html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
-    assert.match(html, /<p class="banner" role="alert">82% of the \$250 weekly cap used \(\$205\)\.<\/p>/);
+    assert.doesNotMatch(html, /class="banner"/);
+    assert.match(html, /Queue starts at<b>[^<]*<span[^>]*>[^<]*<\/span><\/b><span class="note">On: 1 waiting\./);
     assert.match(html, /Waiting now<b>1<\/b>/);
     assert.match(html, /Links used<b>1<\/b>/);
     assert.match(html, /Sign-ups via referral<b>1<\/b><span class="note">1 became weekly active/);

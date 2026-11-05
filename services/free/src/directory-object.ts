@@ -2,6 +2,7 @@ import { DurableObject, type DurableObjectState } from "cloudflare:workers";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
+import { abuseData, type AbuseData } from "./abuse.js";
 import { dashboardData, installBreakdown, notAdmin, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
 import { creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, queueStartedAlert, totalSpendAlert, upstreamErrorAlert, weeklySpendAlert, type Alert, type DigestUsage, type SignupHow } from "./alerts.js";
@@ -35,7 +36,7 @@ export type AdmitResult =
       /** Set once, ever: this was the first person admitted who isn't an admin. */
       firstSignup?: Alert;
     }
-  | { ok: false; reason: "needs_invite" | "invalid_invite" | "cohort_full" | "device_taken" };
+  | { ok: false; reason: "needs_invite" | "invalid_invite" | "cohort_full" | "device_taken" | "blocked" };
 
 /** One logged change to a runtime setting or the kill switch. */
 export interface ConfigChange {
@@ -48,10 +49,13 @@ export interface ConfigChange {
   changedAt: string;
 }
 
+/** "blocked" is an admin's abuse block: no requests, no refresh, no new sign-in. */
+export type PersonStatus = "active" | "suspended" | "blocked";
+
 export interface PersonRow {
   github_id: number;
   login: string;
-  status: "active" | "suspended";
+  status: PersonStatus;
   admitted_at: number;
   admitted_via: string;
 }
@@ -116,6 +120,8 @@ export interface PersonState {
   queue: QueuePlace | null;
   bonusTokens: number;
   referral: { code: string; joined: number; activeThisWeek: number } | null;
+  /** An admin blocked this account (people.status "blocked"). */
+  blocked: boolean;
 }
 
 export interface Gate {
@@ -317,6 +323,17 @@ const SCHEMA = [
      PRIMARY KEY (github_id, net_hash)
    ) WITHOUT ROWID`,
   `CREATE INDEX IF NOT EXISTS person_networks_net ON person_networks (net_hash)`,
+  // Sign-ins refused with device_taken: the device already holds another account's grant. For
+  // the dashboard's abuse section: when, who tried, the device id and who holds it.
+  `CREATE TABLE IF NOT EXISTS device_refusals (
+     id        INTEGER PRIMARY KEY AUTOINCREMENT,
+     at        INTEGER NOT NULL,
+     github_id INTEGER NOT NULL,
+     login     TEXT NOT NULL,
+     device_id TEXT NOT NULL,
+     holder_id INTEGER NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS device_refusals_at ON device_refusals (at)`,
   // Per OpenRouter host per minute, for the failure-rate alert; rows older than two hours go.
   `CREATE TABLE IF NOT EXISTS host_minutes (
      minute   INTEGER NOT NULL,
@@ -543,7 +560,17 @@ export class DirectoryObject extends DurableObject {
     return this.ctx.storage.transactionSync((): AdmitResult => {
       if (input.clientDeviceId) {
         const holder = sql.exec<{ github_id: number }>("SELECT github_id FROM devices WHERE device_id = ?", input.clientDeviceId).toArray()[0];
-        if (holder && holder.github_id !== input.githubId) return { ok: false, reason: "device_taken" };
+        if (holder && holder.github_id !== input.githubId) {
+          sql.exec(
+            "INSERT INTO device_refusals (at, github_id, login, device_id, holder_id) VALUES (?, ?, ?, ?, ?)",
+            input.now,
+            input.githubId,
+            input.login,
+            input.clientDeviceId,
+            holder.github_id,
+          );
+          return { ok: false, reason: "device_taken" };
+        }
       }
       const admitted = (via: "existing" | "admin" | "open" | "invite", created: boolean): AdmitResult => {
         if (input.clientDeviceId) sql.exec("INSERT OR IGNORE INTO devices (device_id, github_id) VALUES (?, ?)", input.clientDeviceId, input.githubId);
@@ -568,6 +595,8 @@ export class DirectoryObject extends DurableObject {
       };
       const existing = sql.exec<PersonRow>("SELECT * FROM people WHERE github_id = ?", input.githubId).toArray()[0];
       if (existing) {
+        // A blocked account can't sign in again (admins unblock it from the dashboard).
+        if (existing.status === "blocked") return { ok: false, reason: "blocked" };
         sql.exec("UPDATE people SET login = ? WHERE github_id = ?", input.login, input.githubId);
         return admitted("existing", false);
       }
@@ -786,8 +815,8 @@ export class DirectoryObject extends DurableObject {
 
   #personState(githubId: number, now: number, policy: Policy): PersonState {
     const sql = this.ctx.storage.sql;
-    const person = sql.exec<{ login: string }>("SELECT login FROM people WHERE github_id = ?", githubId).toArray()[0];
-    if (!person) return { queue: null, bonusTokens: 0, referral: null };
+    const person = sql.exec<{ login: string; status: string }>("SELECT login, status FROM people WHERE github_id = ?", githubId).toArray()[0];
+    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false };
     const code = this.#ensureCode(githubId, person.login, now);
     const counting = countingPairs(sql, this.#pairs(githubId), now);
     const joined = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ? AND outcome = 'ok'", githubId).toArray()[0]?.n ?? 0;
@@ -795,6 +824,7 @@ export class DirectoryObject extends DurableObject {
       queue: this.#place(githubId, now, policy),
       bonusTokens: bonuses(counting, policy).get(githubId) ?? 0,
       referral: { code, joined, activeThisWeek: counting.filter((pair) => pair.referrer === githubId).length },
+      blocked: person.status === "blocked",
     };
   }
 
@@ -833,10 +863,24 @@ export class DirectoryObject extends DurableObject {
     return row ? { ...row } : undefined;
   }
 
-  async setPersonStatus(githubId: number, status: "active" | "suspended"): Promise<boolean> {
-    const found = this.ctx.storage.sql.exec("SELECT 1 FROM people WHERE github_id = ?", githubId).toArray().length > 0;
-    if (found) this.ctx.storage.sql.exec("UPDATE people SET status = ? WHERE github_id = ?", status, githubId);
-    return found;
+  /**
+   * Sets a person's status; false when there is no such person. With `actor`, a change is
+   * logged in the config log (key `person_status:<github id>:<login>`), which the dashboard shows.
+   */
+  async setPersonStatus(githubId: number, status: PersonStatus, actor?: { githubId: number; login: string; now: number }): Promise<boolean> {
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const found = sql.exec<{ login: string; status: string }>("SELECT login, status FROM people WHERE github_id = ?", githubId).toArray()[0];
+      if (!found) return false;
+      sql.exec("UPDATE people SET status = ? WHERE github_id = ?", status, githubId);
+      if (actor && found.status !== status) this.#log(`person_status:${githubId}:${found.login}`, found.status, status, actor);
+      return true;
+    });
+  }
+
+  /** The dashboard's abuse section (see abuse.ts). Admins are left out. */
+  async abuse(input: { now: number; adminIds: number[] }): Promise<AbuseData> {
+    return abuseData(this.ctx.storage.sql, input);
   }
 
   // ─── Kill switch, runtime settings and spend ─────────────────────────────

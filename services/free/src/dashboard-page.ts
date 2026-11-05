@@ -1,15 +1,17 @@
 import { escapeHtml } from "../../shared/src/html.js";
 import { DOWNLOAD_ROUTES } from "./telemetry.js";
 import { COHORT_WEEKS, FUNNEL_DAYS, REGULAR_DAYS, RETENTION_OFFSETS, TOKEN_LIMIT_SHARE, WEEKS_SHOWN, type DashboardData, type InstallFunnelRow } from "./dashboard-data.js";
-import { PRODUCT_NAME } from "./pages.js";
+import { ABUSE_DAYS, type AbuseData, type AbusePerson } from "./abuse.js";
+import { BRAND_ORIGIN, BRAND_TOKENS, PRODUCT_NAME } from "./pages.js";
 import { isoDay } from "./week.js";
 
 /**
- * The admin dashboard as server-rendered HTML, plus a CSV of each table. No scripts, no
- * external fonts or images, no inline `style` attributes: the one stylesheet carries a
- * per-response nonce, so the page works under `default-src 'none'`. Colours are the system
- * colours (`Canvas`, `CanvasText`, …), so light and dark follow the device. Charts are small
- * inline SVGs with presentation attributes and a `<title>` per bar for the value.
+ * The admin dashboard as server-rendered HTML, plus a CSV of each table. No scripts and no
+ * inline `style` attributes: the one stylesheet carries a per-response nonce, so the page works
+ * under `default-src 'none'`. It wears the dl.new brand (tokens, Bricolage/Geist/Geist Mono and
+ * the logo, loaded from dl.new and nothing else), light and dark following the device. Charts
+ * are small inline SVGs with presentation attributes and a `<title>` per bar for the value.
+ * The only forms are sign-out and block/unblock, which post back here with a CSRF token.
  */
 
 /** Global spend, caps and admission, for the first section. */
@@ -34,6 +36,8 @@ export interface SpendView {
   /** The upstream setting, and whether Luminal has a key (without one, OpenRouter serves). */
   primaryUpstream: "luminal" | "openrouter";
   luminalConfigured: boolean;
+  /** Who serves free requests now (chooseUpstream); "none" when no upstream key is set, so requests get 503 no_upstream. */
+  serving: "luminal" | "openrouter" | "none";
   /** Luminal credit: the balance, used since the start, used this week (all, and free usage only). */
   creditUsd: number;
   creditUsedUsd: number;
@@ -56,7 +60,7 @@ export function isCsvTable(name: string): name is CsvTable {
 /** Security headers every dashboard response carries. `nonce` allows the one stylesheet. */
 export function dashboardHeaders(nonce?: string): Record<string, string> {
   return {
-    "content-security-policy": `default-src 'none'; style-src ${nonce ? `'nonce-${nonce}'` : "'none'"}; img-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
+    "content-security-policy": `default-src 'none'; style-src ${nonce ? `'nonce-${nonce}'` : "'none'"}; img-src ${nonce ? BRAND_ORIGIN : "'none'"}; font-src ${nonce ? BRAND_ORIGIN : "'none'"}; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
     "cache-control": "no-store",
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
@@ -64,45 +68,75 @@ export function dashboardHeaders(nonce?: string): Record<string, string> {
   };
 }
 
-const STYLE = `
-:root { color-scheme: light dark; --ink: CanvasText; --bg: Canvas; --muted: GrayText; --accent: #2f6fdb;
-  --line: color-mix(in srgb, CanvasText 18%, Canvas); --soft: color-mix(in srgb, var(--accent) 35%, Canvas); }
-@supports (color: AccentColor) { :root { --accent: AccentColor; } }
+/** The dl.new tokens, laid out dense: summary tiles first, then tables. */
+const STYLE = `${BRAND_TOKENS}
+:root { --soft: color-mix(in srgb, var(--ink) 22%, var(--surface)); --warn: var(--accent); }
 * { box-sizing: border-box; }
-body { margin: 0 auto; max-width: 64rem; padding: 1rem; font: 15px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--ink); }
-header { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: baseline; justify-content: space-between; }
-h1 { font-size: 1.3rem; margin: 0.5rem 0; }
-h2 { font-size: 1.1rem; margin: 2rem 0 0.5rem; }
-h3 { font-size: 0.95rem; margin: 1.25rem 0 0.4rem; }
-section { border-top: 1px solid var(--line); }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; min-height: 100vh; color: var(--ink); font: 14px/1.45 var(--body); -webkit-font-smoothing: antialiased;
+  background-color: var(--bg);
+  background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 40px 40px; background-position: center top;
+  padding: 0 max(16px, env(safe-area-inset-right, 0px)) 48px max(16px, env(safe-area-inset-left, 0px));
+}
+.page { max-width: 84rem; margin: 0 auto; }
+a { color: inherit; text-underline-offset: 3px; }
+a:hover { color: var(--accent); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+header.top { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; padding: 16px 0 14px; border-bottom: 1px solid var(--line); }
+.mark { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; }
+.mark img { width: 28px; height: 28px; border-radius: 7px; }
+.mark span { font: 700 17px var(--display); letter-spacing: -.01em; }
+.mark .tag { font: 500 11px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; background: var(--surface); }
+.who { color: var(--muted); display: inline-flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+.who strong { color: var(--ink); font-weight: 600; }
+h1 { font: 700 26px/1.1 var(--display); letter-spacing: -.02em; margin: 18px 0 4px; }
+h2 { font: 700 18px/1.2 var(--display); letter-spacing: -.01em; margin: 0; }
+h3 { font: 600 13px var(--body); margin: 16px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+section { margin-top: 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
+.lede { margin: 0 0 4px; color: var(--muted); }
 .muted, figcaption, .note { color: var(--muted); }
-.note { font-size: 0.85rem; }
-.head { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; align-items: baseline; justify-content: space-between; }
-.scroll { overflow-x: auto; }
+.note { font-size: 12.5px; margin: 8px 0 0; }
+.head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; justify-content: space-between; margin: 0 0 10px; }
+.head a { font: 500 12px var(--mono); }
+.scroll { overflow-x: auto; margin-top: 10px; }
 table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
-th, td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
-th:first-child, td:first-child { text-align: left; }
-th { font-weight: 600; font-size: 0.85rem; }
+th, td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; vertical-align: top; }
+td { font-family: var(--mono); font-size: 12.5px; }
+th { font: 600 11.5px var(--body); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+th:first-child, td:first-child { text-align: left; padding-left: 0; }
 td.l, th.l { text-align: left; }
-tr.sel td { font-weight: 600; }
-a { color: LinkText; }
-button { font: inherit; padding: 0.3rem 0.8rem; }
-form { display: inline; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 0.75rem; }
-.tile { border: 1px solid var(--line); border-radius: 6px; padding: 0.6rem 0.75rem; }
-.tile b { display: block; font-size: 1.35rem; font-variant-numeric: tabular-nums; }
-.state { font-weight: 600; }
+tbody tr:last-child td { border-bottom: 0; }
+tr.sel td { font-weight: 700; }
+tr.group td { border-top: 2px solid var(--line); }
+button { font: 500 12.5px var(--body); padding: 4px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+button:hover { border-color: var(--ink); }
+button.danger { border-color: var(--accent); color: var(--accent); }
+button.danger:hover { background: var(--accent); color: var(--on-ink); }
+form { display: inline; margin: 0; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 10px; }
+.tile { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: grid; gap: 4px; align-content: start; color: var(--muted); font-size: 12.5px; }
+.tile b { display: block; color: var(--ink); font: 600 22px/1.15 var(--mono); letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.tile b .muted { font-size: 13px; font-weight: 500; }
+.tile .note { margin: 0; }
+.tile.lead { border-color: var(--ink); }
+.state { font-family: var(--display) !important; font-size: 17px !important; }
+.status { font: 600 10.5px var(--mono); text-transform: uppercase; letter-spacing: .05em; padding: 1px 5px; border-radius: 5px; border: 1px solid var(--line); color: var(--muted); }
+.status.blocked { border-color: var(--accent); color: var(--accent); }
 svg { display: block; width: 100%; height: auto; max-height: 14rem; }
-svg text { fill: var(--muted); font: 11px system-ui, sans-serif; }
-.bar { fill: var(--accent); }
+svg text { fill: var(--muted); font: 11px var(--mono); }
+.bar { fill: var(--ink); }
 .bar-soft { fill: var(--soft); }
+.bar-warn { fill: var(--warn); }
 .track { fill: var(--line); }
 .axis { stroke: var(--line); stroke-width: 1; }
-.key { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 2px; vertical-align: -0.1rem; margin-right: 0.3rem; background: var(--accent); }
+.key { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 2px; vertical-align: -0.1rem; margin-right: 0.3rem; background: var(--ink); }
 .key.soft { background: var(--soft); }
-.banner { background: #b3261e; color: #fff; border-radius: 6px; padding: 0.6rem 0.9rem; margin: 0.75rem 0; font-weight: 600; }
-.alltime { border: 2px solid var(--line); border-radius: 8px; padding: 0.75rem 1rem; margin: 0.75rem 0; }
-.alltime b { display: block; font-size: 2rem; font-variant-numeric: tabular-nums; }
+.banner { background: var(--accent); color: #fff; border-radius: 10px; padding: 10px 14px; margin: 14px 0 0; font-weight: 600; }
+.signin { max-width: 28rem; margin: 10vh auto 0; text-align: center; display: grid; gap: 14px; justify-items: center; }
+.signin .btn { display: inline-flex; padding: 12px 20px; border-radius: 12px; background: var(--ink); color: var(--on-ink); text-decoration: none; font-weight: 600; }
+[role="alert"] { margin: 0; }
 `;
 
 export function nonce(): string {
@@ -121,21 +155,32 @@ ${head}<title>${escapeHtml(title)}</title>
 <style nonce="${styleNonce}">${STYLE}</style>
 </head>
 <body>
+<div class="page">
 ${body}
+</div>
 </body>
 </html>
 `;
   return new Response(html, { status, headers: { "content-type": "text/html; charset=utf-8", ...dashboardHeaders(styleNonce), ...headers } });
 }
 
+/** The dl mark (logo from dl.new) and an "admin" tag; `extra` goes on the right. */
+function markHeader(extra = ""): string {
+  return `<header class="top"><a class="mark" href="/admin"><img src="${BRAND_ORIGIN}/logo-64.webp" alt="" width="28" height="28"><span>${escapeHtml(PRODUCT_NAME)}</span><span class="tag">admin</span></a>${extra}</header>`;
+}
+const MARK_HEADER = markHeader();
+
 /** Signed out: one link that starts GitHub sign-in. */
 export function signInPage(message?: string, status = 200): Response {
   return shell(
     `Admin · ${PRODUCT_NAME}`,
-    `<h1>${escapeHtml(PRODUCT_NAME)}: admin</h1>
+    `${MARK_HEADER}
+<main class="signin">
+<h1>${escapeHtml(PRODUCT_NAME)}: admin</h1>
 ${message ? `<p role="alert"><strong>${escapeHtml(message)}</strong></p>` : ""}
-<p>The usage dashboard is for admins. Sign in with the GitHub account listed as an admin.</p>
-<p><a href="/admin/signin">Sign in with GitHub</a></p>`,
+<p class="lede">The usage dashboard is for admins. Sign in with the GitHub account listed as an admin.</p>
+<p><a class="btn" href="/admin/signin">Sign in with GitHub</a></p>
+</main>`,
     status,
   );
 }
@@ -148,8 +193,11 @@ ${message ? `<p role="alert"><strong>${escapeHtml(message)}</strong></p>` : ""}
 export function signedInPage(login: string, headers: Record<string, string>): Response {
   return shell(
     `Signed in · ${PRODUCT_NAME}`,
-    `<h1>${escapeHtml(PRODUCT_NAME)}: admin</h1>
-<p>Signed in as <strong>${escapeHtml(login)}</strong>. <a href="/admin">Open the dashboard</a>.</p>`,
+    `${MARK_HEADER}
+<main class="signin">
+<h1>${escapeHtml(PRODUCT_NAME)}: admin</h1>
+<p>Signed in as <strong>${escapeHtml(login)}</strong>. <a href="/admin">Open the dashboard</a>.</p>
+</main>`,
     200,
     headers,
     `<meta http-equiv="refresh" content="0;url=/admin">\n`,
@@ -157,7 +205,7 @@ export function signedInPage(login: string, headers: Record<string, string>): Re
 }
 
 export function deniedPage(heading: string, message: string, status: number, headers: Record<string, string> = {}): Response {
-  return shell(`${heading} · ${PRODUCT_NAME}`, `<h1>${escapeHtml(heading)}</h1>\n<p>${escapeHtml(message)}</p>\n<p><a href="/admin">Back</a></p>`, status, headers);
+  return shell(`${heading} · ${PRODUCT_NAME}`, `${MARK_HEADER}\n<main class="signin">\n<h1>${escapeHtml(heading)}</h1>\n<p>${escapeHtml(message)}</p>\n<p><a href="/admin">Back</a></p>\n</main>`, status, headers);
 }
 
 // ─── Formatting ───────────────────────────────────────────────────────────
@@ -169,7 +217,7 @@ const weekday = (ms: number) => `${WEEKDAYS[new Date(ms).getUTCDay()]} ${isoDay(
 function usd(value: number | null): string {
   if (value === null) return "–";
   if (value === 0) return "$0";
-  if (value >= 100) return `$${value.toFixed(0)}`;
+  if (value >= 100) return `$${Math.round(value).toLocaleString("en-US")}`;
   if (value >= 1) return `$${value.toFixed(2)}`;
   return `$${value.toFixed(3)}`;
 }
@@ -281,46 +329,186 @@ const STEP_LABELS: Record<string, string> = {
 
 const short = (ms: number) => isoDay(ms).slice(5);
 
+// ─── Abuse ────────────────────────────────────────────────────────────────
+
+/** Block (or Unblock, when blocked) for one person; nothing without a CSRF token (bearer views). */
+function actionForm(person: AbusePerson, csrf: string | undefined): string {
+  if (!csrf || person.status === null) return "";
+  const blocked = person.status === "blocked";
+  return `<form method="post" action="/admin/dashboard/people/${person.githubId}/${blocked ? "unblock" : "block"}"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button type="submit"${blocked ? "" : ` class="danger"`}>${blocked ? "Unblock" : "Block"}</button></form>`;
+}
+
+function statusChip(status: string | null): string {
+  if (status === null || status === "active") return "";
+  return ` <span class="status ${status === "blocked" ? "blocked" : ""}">${escapeHtml(status)}</span>`;
+}
+
+/** Login (or #id), with a chip when not active. */
+function personCell(person: AbusePerson): string {
+  return `${who(person.login, person.githubId)}${statusChip(person.status)}`;
+}
+
+function when(ms: number | null): string {
+  return ms === null ? "–" : escapeHtml(new Date(ms).toISOString().slice(0, 16).replace("T", " "));
+}
+
+/** A config-log key as the admin log shows it. */
+function logKey(key: string): string {
+  const person = /^person_status:(\d+):(.*)$/.exec(key);
+  return person ? `status of ${escapeHtml(person[2])} <span class="muted">#${person[1]}</span>` : escapeHtml(key);
+}
+
+function logValue(value: unknown): string {
+  return escapeHtml(typeof value === "string" ? value : JSON.stringify(value));
+}
+
+function abuseSection(abuse: AbuseData, csrf: string | undefined): string {
+  const today = abuse.githubChecks[0];
+  const usageCells = (person: AbusePerson) => `<td>${count(person.weekRequests)}</td><td>${tokens(person.weekTokens)}</td><td>${usd(person.weekCreditUsd)}</td>`;
+  const clusterRows = abuse.clusters.flatMap((cluster) =>
+    cluster.members.map(
+      (member, index) =>
+        `<tr${index === 0 ? ` class="group"` : ""}><td class="l">${index === 0 ? `<code>${escapeHtml(cluster.net)}</code> <span class="muted">${cluster.members.length} accounts</span>` : ""}</td><td class="l">${personCell(member)}</td><td>${member.githubId}</td><td>${when(member.admittedAt)}</td><td>${when(member.seenAt)}</td>${usageCells(member)}<td class="l">${actionForm(member, csrf)}</td></tr>`,
+    ),
+  );
+  const refusalRows = abuse.deviceRefusals.map(
+    (row) =>
+      `<tr><td>${when(row.at)}</td><td class="l">${personCell(row.person)}</td><td class="l"><code>${escapeHtml(row.device)}</code></td><td class="l">${personCell(row.holder)}</td><td>${count(row.attempts)}</td><td class="l">${actionForm(row.person, csrf)} ${actionForm(row.holder, csrf)}</td></tr>`,
+  );
+  const referralRows = abuse.sameNetworkReferrals.map(
+    (row) => `<tr><td>${when(row.at)}</td><td class="l">${personCell(row.referrer)}</td><td class="l">${personCell(row.referred)}</td><td class="l">${actionForm(row.referrer, csrf)} ${actionForm(row.referred, csrf)}</td></tr>`,
+  );
+  const topRows = abuse.topUsers.map(
+    (row) =>
+      `<tr><td class="l">${personCell(row)}</td><td>${row.githubId}</td><td>${count(row.weekRequests)}</td><td>${tokens(row.weekTokens)}</td><td>${usd(row.weekCostUsd)}</td><td>${usd(row.weekCreditUsd)}</td><td>${row.activeDays}</td><td>${row.sharedWith > 0 ? `<strong>${row.sharedWith}</strong>` : "0"}</td><td class="l">${actionForm(row, csrf)}</td></tr>`,
+  );
+  const blockedRows = abuse.blocked.map((row) => `<tr><td class="l">${personCell(row)}</td><td>${row.githubId}</td><td>${when(row.admittedAt)}</td><td class="l">${actionForm(row, csrf)}</td></tr>`);
+  const checkRows = abuse.githubChecks.map((row) => `<tr><td>${escapeHtml(weekday(row.day))}</td><td>${count(row.contributions)}</td><td>${count(row.none)}</td><td>${count(row.error)}</td></tr>`);
+  const empty = (columns: number, text: string) => `<tr><td colspan="${columns}" class="l muted">${escapeHtml(text)}</td></tr>`;
+  return `<section id="abuse">
+<div class="head"><h2>Abuse</h2><span class="muted">Admins left out. Device refusals and checks: last ${ABUSE_DAYS} days.</span></div>
+<div class="tiles">
+<div class="tile">Shared networks<b>${count(abuse.clusterCount)}</b><span class="note">${count(abuse.clusteredAccounts)} accounts sign in from a network another account also uses.</span></div>
+<div class="tile">Second-account device sign-ins<b>${count(abuse.deviceRefusalCount)}</b><span class="note">Refused with device_taken: the device already holds another account's grant.</span></div>
+<div class="tile">Same-network referrals<b>${count(abuse.sameNetworkReferralCount)}</b><span class="note">Referral sign-ups from the referrer's own network; they earn no bonus.</span></div>
+<div class="tile">Blocked<b>${count(abuse.blocked.length)}</b><span class="note">No requests, no token refresh, no new sign-in.</span></div>
+<div class="tile">GitHub check today<b>${today ? `${count(today.none)} <span class="muted">none</span>` : "0"}</b><span class="note">${today ? `${count(today.contributions)} passed on contributions, ${count(today.error)} let through on a GitHub error.` : "No contribution lookups today."}</span></div>
+</div>
+<h3>Accounts sharing a network</h3>
+<div class="scroll"><table>
+<thead><tr><th class="l">Network</th><th class="l">GitHub login</th><th>GitHub id</th><th>Signed up (UTC)</th><th>First on network</th><th>Requests</th><th>Tokens</th><th>Credit</th><th class="l"></th></tr></thead>
+<tbody>
+${clusterRows.length === 0 ? empty(9, "No network is shared by two accounts.") : clusterRows.join("\n")}
+</tbody></table></div>
+<h3>Devices that tried a second account</h3>
+<div class="scroll"><table>
+<thead><tr><th>When (UTC)</th><th class="l">Tried to sign in</th><th class="l">Device</th><th class="l">Holds the grant</th><th>Refusals, ${ABUSE_DAYS} days</th><th class="l"></th></tr></thead>
+<tbody>
+${refusalRows.length === 0 ? empty(6, "No device_taken refusals.") : refusalRows.join("\n")}
+</tbody></table></div>
+<h3>Referral pairs on the same network</h3>
+<div class="scroll"><table>
+<thead><tr><th>Signed up (UTC)</th><th class="l">Referrer</th><th class="l">Referred</th><th class="l"></th></tr></thead>
+<tbody>
+${referralRows.length === 0 ? empty(4, "No referral pair shares a network.") : referralRows.join("\n")}
+</tbody></table></div>
+<h3>Top users this week</h3>
+<div class="scroll"><table>
+<thead><tr><th class="l">GitHub login</th><th>GitHub id</th><th>Requests</th><th>Tokens</th><th>Cost</th><th>Credit</th><th>Days active</th><th>Shares a network with</th><th class="l"></th></tr></thead>
+<tbody>
+${topRows.length === 0 ? empty(9, "No requests this week.") : topRows.join("\n")}
+</tbody></table></div>
+<h3>Blocked accounts</h3>
+<div class="scroll"><table>
+<thead><tr><th class="l">GitHub login</th><th>GitHub id</th><th>Signed up (UTC)</th><th class="l"></th></tr></thead>
+<tbody>
+${blockedRows.length === 0 ? empty(4, "Nobody is blocked.") : blockedRows.join("\n")}
+</tbody></table></div>
+<h3>GitHub activity check, per day</h3>
+<div class="scroll"><table>
+<thead><tr><th>Day (UTC)</th><th>Passed on contributions</th><th>None (sent to invite)</th><th>Error (let through)</th></tr></thead>
+<tbody>
+${checkRows.length === 0 ? empty(4, "No contribution lookups.") : checkRows.join("\n")}
+</tbody></table></div>
+<p class="note">Networks are keyed hashes of the sign-in address (IPv4, or the IPv6 /64), shortened: shared office, campus and mobile networks show up too, so check usage and sign-up times before blocking. Tokens, cost and credit are this week's, since Monday 00:00 UTC. Block ends free-tier use at once: requests and token refresh get a 403 that names the contact address, and the account can't sign in again until it is unblocked. Each block and unblock is in the admin log.</p>
+</section>`;
+}
+
+function adminLogSection(abuse: AbuseData): string {
+  return `<section id="log">
+<div class="head"><h2>Admin log</h2><span class="muted">Settings, pause and block changes, newest first</span></div>
+<div class="scroll"><table>
+<thead><tr><th>When (UTC)</th><th class="l">By</th><th class="l">Change</th><th class="l">From</th><th class="l">To</th></tr></thead>
+<tbody>
+${
+  abuse.adminLog.length === 0
+    ? `<tr><td colspan="5" class="l muted">No changes yet.</td></tr>`
+    : abuse.adminLog.map((row) => `<tr><td>${when(row.at)}</td><td class="l">${escapeHtml(row.byLogin)}</td><td class="l">${logKey(row.key)}</td><td class="l">${logValue(row.oldValue)}</td><td class="l">${logValue(row.newValue)}</td></tr>`).join("\n")
+}
+</tbody></table></div>
+</section>`;
+}
+
 // ─── The page ─────────────────────────────────────────────────────────────
 
-export function dashboardPage(input: { data: DashboardData; spend: SpendView; login: string; signOut: boolean }): Response {
+/** When this week's free credit spend would reach the queue's start, at this week's pace so far. */
+function queueStart(spend: SpendView, data: DashboardData): { startUsd: number | null; text: string } {
+  const startUsd = spend.weeklyCreditUsd === null ? null : spend.queueThreshold * spend.weeklyCreditUsd;
+  if (data.queue.waiting > 0) return { startUsd, text: `On: ${count(data.queue.waiting)} waiting. New open sign-ups join the line.` };
+  if (startUsd === null) return { startUsd, text: "No weekly credit budget, so credit never starts the queue." };
+  if (spend.freeCreditWeekUsd >= startUsd) return { startUsd, text: "On: new open sign-ups wait for free tokens." };
+  const left = `${usd(startUsd - spend.freeCreditWeekUsd)} of free credit to go.`;
+  const elapsed = data.now - data.currentWeek;
+  if (spend.freeCreditWeekUsd <= 0 || elapsed < 3_600_000) return { startUsd, text: `${left} Too early in the week for a pace.` };
+  const at = data.currentWeek + (elapsed * startUsd) / spend.freeCreditWeekUsd;
+  return {
+    startUsd,
+    text: at < spend.resetsAt ? `${left} At this week's pace: ${weekday(at)} ${new Date(at).toISOString().slice(11, 16)} UTC.` : `${left} Not this week at this week's pace.`,
+  };
+}
+
+export function dashboardPage(input: { data: DashboardData; spend: SpendView; login: string; signOut: boolean; abuse?: AbuseData; csrf?: string }): Response {
   const { data, spend } = input;
   const currentWeek = data.currentWeek;
   const thisOrDate = (week: number) => (week === currentWeek ? `${day(week)} (this week)` : day(week));
 
+  // The launch budget is the Luminal credit. The OpenRouter cash caps still exist in config and
+  // still stop free tokens if OpenRouter spend reaches them, so the state says so when they do,
+  // but they aren't shown as a budget.
   const weeklyCapReached = spend.weeklyCapUsd !== null && spend.weekUsd >= spend.weeklyCapUsd;
-  const luminalServing = spend.primaryUpstream === "luminal" && spend.luminalConfigured;
+  const luminalServing = spend.serving === "luminal";
   const creditShare = spend.creditUsd > 0 ? spend.creditUsedUsd / spend.creditUsd : spend.creditUsedUsd > 0 ? 1 : 0;
   const creditOut = luminalServing && spend.creditUsedUsd >= spend.creditUsd;
   const totalCapReached = spend.totalCapUsd !== null && spend.totalUsd >= spend.totalCapUsd;
   const state = spend.paused
     ? `Paused for everyone${spend.pausedByEnv ? " (PAUSED in env)" : " (admin switch)"}`
-    : creditOut
+    : spend.serving === "none"
+      ? "Not serving: no upstream key (503 no_upstream)"
+      : creditOut
       ? "Paused: Luminal credit used up (upstream_credit_exhausted)"
       : totalCapReached
-      ? "Free tokens stopped: total budget reached"
+      ? "Free tokens stopped: OpenRouter all-time cap reached"
       : weeklyCapReached
-        ? `Free tokens stopped until ${weekday(spend.resetsAt)}: weekly budget reached`
+        ? `Free tokens stopped until ${weekday(spend.resetsAt)}: OpenRouter weekly cap reached`
         : "Serving";
 
-  const weekShare = spend.weeklyCapUsd !== null && spend.weeklyCapUsd > 0 ? spend.weekUsd / spend.weeklyCapUsd : 0;
-  const totalShare = spend.totalCapUsd !== null && spend.totalCapUsd > 0 ? spend.totalUsd / spend.totalCapUsd : 0;
+  const weekCreditShare = spend.weeklyCreditUsd !== null && spend.weeklyCreditUsd > 0 ? spend.freeCreditWeekUsd / spend.weeklyCreditUsd : 0;
   const warnings = [
-    ...(weekShare >= BANNER_SHARE ? [`${percent(weekShare)} of the ${cap(spend.weeklyCapUsd)} weekly cap used (${usd(spend.weekUsd)}).`] : []),
-    ...(totalShare >= BANNER_SHARE ? [`${percent(totalShare)} of the ${cap(spend.totalCapUsd)} all-time cap used (${usd(spend.totalUsd)}).`] : []),
     ...(creditShare >= BANNER_SHARE ? [`${percent(creditShare)} of the ${usd(spend.creditUsd)} Luminal credit used (${usd(spend.creditUsedUsd)}).`] : []),
+    ...(weekCreditShare >= BANNER_SHARE ? [`${percent(weekCreditShare)} of this week's ${usd(spend.weeklyCreditUsd)} credit budget used (${usd(spend.freeCreditWeekUsd)}).`] : []),
   ];
   const banner = warnings.length > 0 ? `<p class="banner" role="alert">${warnings.map(escapeHtml).join(" ")}</p>` : "";
-  const allTime = `<div class="alltime">All-time free cash spend<b>${usd(spend.totalUsd)} <span class="muted">of ${escapeHtml(cap(spend.totalCapUsd))}</span></b>${meter(spend.totalUsd, spend.totalCapUsd, "all-time spend against the all-time cap")}<span class="note">${spend.totalCapUsd === null ? "No all-time cap." : `${usd(Math.max(0, spend.totalCapUsd - spend.totalUsd))} left. Free tokens stop at the cap.`}</span></div>`;
+  const queue = queueStart(spend, data);
 
-  const spendSection = `<section>
-<div class="head"><h2>Global spend</h2>${csvLink("spend")}</div>
+  const budgetSection = `<section id="budget">
+<div class="head"><h2>Budget: Luminal credit</h2>${csvLink("spend")}</div>
 <div class="tiles">
-<div class="tile">This week, since ${escapeHtml(day(currentWeek))}<b>${usd(spend.weekUsd)} <span class="muted">of ${escapeHtml(cap(spend.weeklyCapUsd))}</span></b>${meter(spend.weekUsd, spend.weeklyCapUsd, "weekly spend against the weekly cap")}<span class="note">Resets ${escapeHtml(weekday(spend.resetsAt))} 00:00 UTC</span></div>
-<div class="tile">Since the start<b>${usd(spend.totalUsd)} <span class="muted">of ${escapeHtml(cap(spend.totalCapUsd))}</span></b>${meter(spend.totalUsd, spend.totalCapUsd, "total spend against the total cap")}<span class="note">Admin use, not counted: ${usd(spend.adminWeekUsd)} this week, ${usd(spend.adminTotalUsd)} in all</span></div>
-<div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">Admission: ${spend.openAdmission ? `open (old enough GitHub accounts${spend.requireGithubActivity ? " with a public repo or a contribution in the last year" : ""}); ${count(data.people.admitted)} admitted, no cap while open` : `invite-only; ${count(data.people.admitted)} of ${count(spend.maxActiveUsers)} admitted`}. GitHub activity check: ${spend.requireGithubActivity ? "on" : "off"}. Queue starts at ${escapeHtml(percent(spend.queueThreshold))} of the weekly cap. Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} a week.</span></div>
+<div class="tile lead">Luminal credit used<b>${usd(spend.creditUsedUsd)} <span class="muted">of ${usd(spend.creditUsd)}</span></b>${meter(spend.creditUsedUsd, spend.creditUsd, "Luminal credit used against the balance")}<span class="note">${usd(Math.max(0, spend.creditUsd - spend.creditUsedUsd))} left. Luminal-served usage pauses at the balance.</span></div>
+<div class="tile lead">Credit this week<b>${usd(spend.freeCreditWeekUsd)} <span class="muted">of ${escapeHtml(cap(spend.weeklyCreditUsd))}</span></b>${meter(spend.freeCreditWeekUsd, spend.weeklyCreditUsd, "free credit this week against the weekly credit budget")}<span class="note">Free usage since ${escapeHtml(day(currentWeek))}; ${usd(spend.creditWeekUsd)} with admins and paid plans. Resets ${escapeHtml(weekday(spend.resetsAt))} 00:00 UTC.</span></div>
+<div class="tile lead">Queue starts at<b>${queue.startUsd === null ? "–" : usd(queue.startUsd)}${spend.weeklyCreditUsd === null ? "" : ` <span class="muted">${escapeHtml(percent(spend.queueThreshold))} of ${usd(spend.weeklyCreditUsd)}</span>`}</b><span class="note">${escapeHtml(queue.text)}${spend.serving === "openrouter" ? " Luminal isn't serving, so the queue watches OpenRouter spend instead." : ""}</span></div>
+<div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">Admission: ${spend.openAdmission ? `open (old enough GitHub accounts${spend.requireGithubActivity ? " with a public repo or a contribution in the last year" : ""}); ${count(data.people.admitted)} admitted, no cap while open` : `invite-only; ${count(data.people.admitted)} of ${count(spend.maxActiveUsers)} admitted`}. GitHub activity check: ${spend.requireGithubActivity ? "on" : "off"}. Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} a week.</span></div>
 </div>
-<p class="note">Caps are the effective values, with admin overrides applied.</p>
+<p class="note">Effective values, with admin overrides applied. Credit is Luminal's prepaid credit at its list prices; admins count against it.</p>
 </section>`;
 
   const upstreamRow = (row: DashboardData["upstreams"][number]) =>
@@ -330,17 +518,20 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
 <tbody>
 ${data.upstreams.filter((row) => row.window === window).map(upstreamRow).join("\n")}
 </tbody></table></div>`;
-  const serving = luminalServing ? "Luminal" : spend.primaryUpstream === "luminal" ? "OpenRouter (no LUMINAL_API_KEY)" : "OpenRouter";
+  const serving =
+    spend.serving === "luminal"
+      ? "Luminal"
+      : spend.serving === "openrouter"
+        ? spend.primaryUpstream === "luminal" ? "OpenRouter (no LUMINAL_API_KEY)" : "OpenRouter"
+        : "None (no LUMINAL_API_KEY or OPENROUTER_API_KEY)";
   const upstreamSection = `<section>
 <div class="head"><h2>Upstreams</h2>${csvLink("upstreams")}</div>
 <div class="tiles">
-<div class="tile">Luminal credit used<b>${usd(spend.creditUsedUsd)} <span class="muted">of ${usd(spend.creditUsd)}</span></b>${meter(spend.creditUsedUsd, spend.creditUsd, "Luminal credit used against the balance")}<span class="note">${usd(Math.max(0, spend.creditUsd - spend.creditUsedUsd))} left. Luminal-served usage pauses at the balance.</span></div>
-<div class="tile">Credit this week<b>${usd(spend.freeCreditWeekUsd)} <span class="muted">of ${escapeHtml(cap(spend.weeklyCreditUsd))}</span></b>${meter(spend.freeCreditWeekUsd, spend.weeklyCreditUsd, "free credit this week against the weekly credit budget")}<span class="note">Free usage; ${usd(spend.creditWeekUsd)} with admins and paid plans. The queue starts at ${escapeHtml(percent(spend.queueThreshold))} of the weekly credit budget.</span></div>
-<div class="tile">Serving<b class="state">${escapeHtml(serving)}</b><span class="note">primaryUpstream: ${escapeHtml(spend.primaryUpstream)}. No automatic switch between upstreams.</span></div>
+<div class="tile">Serving<b class="state">${escapeHtml(serving)}</b><span class="note">primaryUpstream: ${escapeHtml(spend.primaryUpstream)}. ${spend.serving === "none" ? "Free requests get 503 no_upstream until a key is set." : "OpenRouter serves only when it has a key; no automatic switch mid-request."}</span></div>
 </div>
 ${upstreamTable("today")}
 ${upstreamTable("week")}
-<p class="note">Admins included. TTFT: time to the first content chunk (text, reasoning or a tool call); TTFB: time to the response headers. Errors: 429, 5xx, timeouts, unreachable and failed streams. Credit is Luminal's prepaid credit at its list prices; cash is OpenRouter's reported cost, the only spend the caps count.</p>
+<p class="note">Admins included. TTFT: time to the first content chunk (text, reasoning or a tool call); TTFB: time to the response headers. Errors: 429, 5xx, timeouts, unreachable and failed streams. Credit is Luminal's prepaid credit at its list prices; cash is OpenRouter's reported cost, when OpenRouter serves.</p>
 </section>`;
 
   const activeSection = `<section>
@@ -537,15 +728,17 @@ ${data.funnel
 <p class="note">The same people followed from the week they signed up. Weekly active: requests on ${REGULAR_DAYS} or more days of some Monday–Sunday week. Admins left out.</p>
 </section>`;
 
-  const header = `<header>
-<h1>${escapeHtml(PRODUCT_NAME)}: admin</h1>
-<span class="muted">Signed in as <strong>${escapeHtml(input.login)}</strong>${
-    input.signOut ? ` · <form method="post" action="/admin/signout"><button type="submit">Sign out</button></form>` : ""
-  }</span>
-</header>
-<p class="note">${count(data.people.admitted)} people admitted, ${count(data.people.activeThisWeek)} active this week. Admins are left out of every number. Updated ${escapeHtml(new Date(data.now).toISOString().slice(0, 16).replace("T", " "))} UTC. Counts, tokens, cost and times only.</p>`;
+  const header = `${markHeader(
+    `<span class="who">Signed in as <strong>${escapeHtml(input.login)}</strong>${
+      input.signOut ? `<form method="post" action="/admin/signout"><button type="submit">Sign out</button></form>` : ""
+    }</span>`,
+  )}
+<h1>Free tier</h1>
+<p class="lede">${count(data.people.admitted)} people admitted, ${count(data.people.activeThisWeek)} active this week. Admins are left out of every number but the credit. Updated ${escapeHtml(new Date(data.now).toISOString().slice(0, 16).replace("T", " "))} UTC. Counts, tokens, cost and times only.</p>`;
 
-  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, allTime, spendSection, upstreamSection, queueSection, referralSection, paidSection, funnelSection, activeSection, retentionSection, costSection, limitsSection].join("\n"));
+  const abuse = input.abuse ? abuseSection(input.abuse, input.csrf) : "";
+  const log = input.abuse ? adminLogSection(input.abuse) : "";
+  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, budgetSection, abuse, upstreamSection, queueSection, referralSection, paidSection, funnelSection, activeSection, retentionSection, costSection, limitsSection, log].join("\n"));
 }
 
 // ─── CSV ──────────────────────────────────────────────────────────────────
