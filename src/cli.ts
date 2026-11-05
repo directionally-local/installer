@@ -30,6 +30,7 @@ import { TtyPrompter, type Prompter } from "./prompt.js";
 import { readState as readInstallState, type InstallState } from "./state.js";
 import { DryRunSystem, RealSystem, type System } from "./system.js";
 import { uninstall } from "./uninstall.js";
+import { laptopUninstall } from "./laptop/uninstall.js";
 import { JsonUi, PlainUi, TerminalUi, palette, type Ui } from "./ui.js";
 import { previewCommand, previewsCommand } from "./preview.js";
 import { needs, parseAccessMode, parseProvidedAnswers, up } from "./up.js";
@@ -82,6 +83,10 @@ On your laptop:
   run options: --server NAME, -m/--model MODEL, --repo OWNER/NAME, --detach
   dl local status         agents running on this computer: running?, where, how many fit
   dl local uninstall [--purge]   stop and remove them (--purge also deletes keys and data)
+  dl uninstall [--purge] [--yes]   remove dl from this computer: signs out of the free tier, takes
+                          dl's lines out of your shell startup files (backups kept), deletes
+                          ~/.directionallylocal and dl's settings (--purge also Autopilot's
+                          settings, sign-ins and history; projects' .autopilot folders stay)
 
 On the server:
   dl                      what this is, whether it's healthy, laptops, and runs
@@ -142,6 +147,8 @@ export interface MainOptions {
   autopilotAuth?: () => Promise<AutopilotAuth | undefined>;
   /** The free tier account (`dl status`, when Autopilot uses the free tier); reads Autopilot's sign-in and GET /v1/me unless replaced. */
   freeTierAccount?: () => Promise<FreeTierAccount | undefined>;
+  /** `dl uninstall` on a server and on a laptop; the real ones unless replaced. */
+  uninstall?: { server?: typeof uninstall; laptop?: typeof laptopUninstall };
 }
 
 export async function main(
@@ -191,6 +198,7 @@ export async function main(
         "no-local-changes": { type: "boolean" },
         continue: { type: "boolean", short: "c" },
         "from-claude-code": { type: "boolean" },
+        yes: { type: "boolean", short: "y" },
       },
     });
   } catch (error) {
@@ -535,9 +543,21 @@ export async function main(
       }
       case "local":
         return await localCommand(parsed.positionals.slice(1), { purge: Boolean(values.purge) }, io, colors, ui);
-      case "uninstall":
-        await uninstall(system, { purge: Boolean(values.purge) });
-        return 0;
+      case "uninstall": {
+        // A machine dl up set up uninstalls the server; anything else (root included) is a laptop.
+        if (await readState(system)) {
+          await (options.uninstall?.server ?? uninstall)(system, { purge: Boolean(values.purge) });
+          return 0;
+        }
+        const stdin = options.stdin ?? process.stdin;
+        const prompter = options.prompter ?? new TtyPrompter();
+        return await (options.uninstall?.laptop ?? laptopUninstall)({
+          io: laptopIO,
+          purge: Boolean(values.purge),
+          yes: Boolean(values.yes),
+          ...(terminal && stdin.isTTY === true ? { confirm: async (question: string) => /^y(es)?$/i.test((await prompter.text(question)).trim()) } : {}),
+        });
+      }
       default:
         io.err(`Unknown command "${command}".\n\n${HELP()}`);
         return 2;
