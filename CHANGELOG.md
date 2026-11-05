@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.19.0](https://github.com/directionally-local/installer/compare/v0.18.1...v0.19.0) (2026-11-05)
+
+
+### Features
+
+* **free:** a public /v1/status says whether new users get free tokens, a waitlist, or a pause ([0cce1b9](https://github.com/directionally-local/installer/commit/0cce1b9ca27b5bd3dd5a6d0f9140f1570126a205))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.13.0 ([e7a2648](https://github.com/directionally-local/installer/commit/e7a26480ae83db18ab0901a26495343872858820))
+* **deps:** install Autopilot 3.13.0 ([74e7175](https://github.com/directionally-local/installer/commit/74e71755eb58187b68d0e9986dfa0d84a9014702))
+
 ## [0.18.1](https://github.com/directionally-local/installer/compare/v0.18.0...v0.18.1) (2026-11-05)
 
 
