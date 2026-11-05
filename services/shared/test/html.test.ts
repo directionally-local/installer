@@ -28,6 +28,12 @@ describe("page", () => {
     assert.match(html, /<h1>Hi<\/h1>/);
   });
 
+  it("takes a page's own style and CSP", async () => {
+    const response = page({ title: "t", body: "", style: "body{color:red}", csp: "default-src 'none'" });
+    assert.equal(response.headers.get("content-security-policy"), "default-src 'none'");
+    assert.match(await response.text(), /<style>body\{color:red\}<\/style>/);
+  });
+
   it("keeps the CSP free of scripts and frames", () => {
     assert.match(DEFAULT_CSP, /default-src 'none'/);
     assert.match(DEFAULT_CSP, /frame-ancestors 'none'/);
