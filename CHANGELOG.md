@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0](https://github.com/directionally-local/installer/compare/v0.16.0...v0.17.0) (2026-11-05)
+
+
+### Features
+
+* **install:** root gets the coding agent like everyone; the server setup only with DL_MODE=server ([574ed19](https://github.com/directionally-local/installer/commit/574ed1921690d5f45e8a4b3bc03f193d0b1bcf52))
+* **install:** root gets the coding agent like everyone; the server setup only with DL_MODE=server ([01b91e8](https://github.com/directionally-local/installer/commit/01b91e87c8ae3bf033303badeaaf3199810159d7))
+
 ## [0.16.0](https://github.com/directionally-local/installer/compare/v0.15.0...v0.16.0) (2026-11-05)
 
 
