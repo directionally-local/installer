@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.15.0](https://github.com/directionally-local/installer/compare/v0.14.0...v0.15.0) (2026-11-05)
+
+
+### Features
+
+* **free:** dl brand for the sign-in pages ([58930d9](https://github.com/directionally-local/installer/commit/58930d96aa7b5eb1d8cb18a598eb2a52184904a0))
+* **free:** dl brand for the sign-in pages ([e40f065](https://github.com/directionally-local/installer/commit/e40f065d3106f78e034fc21f70c7c1350e3d1ceb))
+* **free:** key per-IP limits on the IPv6 /64 and require some GitHub activity ([5a309cf](https://github.com/directionally-local/installer/commit/5a309cf68d7159f808eb88a4366b8f48ba90806d))
+* **free:** the consent notice is one line with the full list a click away, and says dl ([363e037](https://github.com/directionally-local/installer/commit/363e037c47274182a624c79cc6b20ded7eca4353))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.10.0, and tell it dl's version and update command ([87a1000](https://github.com/directionally-local/installer/commit/87a10008dfa647334804f664463d4178b7603090))
+* **deps:** install Autopilot 3.10.0, and tell it dl's version and update command ([f6170e7](https://github.com/directionally-local/installer/commit/f6170e7b9f1069ba491fa65fed6ef4540c0d7490))
+* **deps:** install Autopilot 3.9.0 ([3677e0a](https://github.com/directionally-local/installer/commit/3677e0a46da7e249f8abceeeeb897aa133f98447))
+* **free:** a top-up's checkout returns to the success page with product=topup ([2de6642](https://github.com/directionally-local/installer/commit/2de66424a9d170fb0f6d3e4fd8d3c5e6264b7c44))
+* **free:** a top-up's checkout returns with product=topup ([f8c01d2](https://github.com/directionally-local/installer/commit/f8c01d27badbd18dfe5a7a3e8898a19d5239f3f7))
+
 ## [0.14.0](https://github.com/directionally-local/installer/compare/v0.13.0...v0.14.0) (2026-11-04)
 
 
