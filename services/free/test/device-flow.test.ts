@@ -19,7 +19,7 @@ describe("device code", () => {
 
   it("rate-limits code requests per IP", async () => {
     const service = await createService();
-    for (let index = 0; index < 10; index++) assert.equal((await service.request("POST", "/v1/device/code", { body: {} })).status, 200);
+    for (let index = 0; index < 60; index++) assert.equal((await service.request("POST", "/v1/device/code", { body: {} })).status, 200);
     const limited = await service.request("POST", "/v1/device/code", { body: {} });
     assert.equal(limited.status, 429);
     const body = (await limited.json()) as { error: { code: string; retryAfter: number } };

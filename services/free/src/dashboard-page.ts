@@ -11,7 +11,8 @@ import { isoDay } from "./week.js";
  * under `default-src 'none'`. It wears the dl.new brand (tokens, Bricolage/Geist/Geist Mono and
  * the logo, loaded from dl.new and nothing else), light and dark following the device. Charts
  * are small inline SVGs with presentation attributes and a `<title>` per bar for the value.
- * The only forms are sign-out and block/unblock, which post back here with a CSRF token.
+ * The only forms are sign-out, block/unblock and the "Serve from" upstream switch; the last
+ * two post back here with a CSRF token.
  */
 
 /** Global spend, caps and admission, for the first section. */
@@ -38,6 +39,8 @@ export interface SpendView {
   luminalConfigured: boolean;
   /** Who serves free requests now (chooseUpstream); "none" when no upstream key is set, so requests get 503 no_upstream. */
   serving: "luminal" | "openrouter" | "none";
+  /** Whether the service has an OPENROUTER_API_KEY, so the switch to OpenRouter can work. */
+  openRouterConfigured: boolean;
   /** Luminal credit: the balance, used since the start, used this week (all, and free usage only). */
   creditUsd: number;
   creditUsedUsd: number;
@@ -133,6 +136,10 @@ svg text { fill: var(--muted); font: 11px var(--mono); }
 .axis { stroke: var(--line); stroke-width: 1; }
 .key { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 2px; vertical-align: -0.1rem; margin-right: 0.3rem; background: var(--ink); }
 .key.soft { background: var(--soft); }
+.serving { margin: 12px 0 0; padding: 10px 14px; border: 1px solid var(--ink); border-radius: 10px; background: var(--surface); display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.serving strong { font: 700 17px var(--display); }
+.switch { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+button.on { background: var(--ink); color: var(--on-ink); border-color: var(--ink); cursor: default; }
 .banner { background: var(--accent); color: #fff; border-radius: 10px; padding: 10px 14px; margin: 14px 0 0; font-weight: 600; }
 .signin { max-width: 28rem; margin: 10vh auto 0; text-align: center; display: grid; gap: 14px; justify-items: center; }
 .signin .btn { display: inline-flex; padding: 12px 20px; border-radius: 12px; background: var(--ink); color: var(--on-ink); text-decoration: none; font-weight: 600; }
@@ -331,6 +338,21 @@ const short = (ms: number) => isoDay(ms).slice(5);
 
 // ─── Abuse ────────────────────────────────────────────────────────────────
 
+/**
+ * "Serve from: Luminal / OpenRouter": one button per upstream, the current one pressed. Only
+ * with a CSRF token (a browser session); an upstream without a key can't be chosen.
+ */
+function upstreamSwitch(spend: SpendView, csrf: string | undefined): string {
+  if (!csrf) return "";
+  const button = (upstream: "luminal" | "openrouter", label: string, configured: boolean) => {
+    if (spend.primaryUpstream === upstream) return `<button type="button" class="on" disabled aria-pressed="true">${label}</button>`;
+    if (!configured) return `<button type="button" disabled title="No ${upstream === "luminal" ? "LUMINAL" : "OPENROUTER"}_API_KEY">${label}</button>`;
+    return `<form method="post" action="/admin/dashboard/upstream"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="upstream" value="${upstream}"><button type="submit"${upstream === "openrouter" ? ` class="danger"` : ""}>${label}</button></form>`;
+  };
+  return `<div class="switch"><span>Serve from:</span>${button("luminal", "Luminal", spend.luminalConfigured)}${button("openrouter", "OpenRouter", spend.openRouterConfigured)}</div>
+<p class="note">Takes effect on the next request; nothing switches back on its own. OpenRouter spends OpenRouter credit (cash) until you switch back.${spend.openRouterConfigured ? "" : " OpenRouter can't be chosen: the service has no OPENROUTER_API_KEY."} Each switch is in the admin log.</p>`;
+}
+
 /** Block (or Unblock, when blocked) for one person; nothing without a CSRF token (bearer views). */
 function actionForm(person: AbusePerson, csrf: string | undefined): string {
   if (!csrf || person.status === null) return "";
@@ -524,11 +546,12 @@ ${data.upstreams.filter((row) => row.window === window).map(upstreamRow).join("\
       : spend.serving === "openrouter"
         ? spend.primaryUpstream === "luminal" ? "OpenRouter (no LUMINAL_API_KEY)" : "OpenRouter"
         : "None (no LUMINAL_API_KEY or OPENROUTER_API_KEY)";
-  const upstreamSection = `<section>
+  const upstreamSection = `<section id="upstream">
 <div class="head"><h2>Upstreams</h2>${csvLink("upstreams")}</div>
 <div class="tiles">
-<div class="tile">Serving<b class="state">${escapeHtml(serving)}</b><span class="note">primaryUpstream: ${escapeHtml(spend.primaryUpstream)}. ${spend.serving === "none" ? "Free requests get 503 no_upstream until a key is set." : "OpenRouter serves only when it has a key; no automatic switch mid-request."}</span></div>
+<div class="tile lead">Serving<b class="state">${escapeHtml(serving)}</b><span class="note">primaryUpstream: ${escapeHtml(spend.primaryUpstream)}. ${spend.serving === "none" ? "Free requests get 503 no_upstream until a key is set." : "OpenRouter serves only when it has a key; no automatic switch mid-request."}</span></div>
 </div>
+${upstreamSwitch(spend, input.csrf)}
 ${upstreamTable("today")}
 ${upstreamTable("week")}
 <p class="note">Admins included. TTFT: time to the first content chunk (text, reasoning or a tool call); TTFB: time to the response headers. Errors: 429, 5xx, timeouts, unreachable and failed streams. Credit is Luminal's prepaid credit at its list prices; cash is OpenRouter's reported cost, when OpenRouter serves.</p>
@@ -734,6 +757,7 @@ ${data.funnel
     }</span>`,
   )}
 <h1>Free tier</h1>
+<p class="serving">Serving from <strong>${escapeHtml(serving)}</strong> <a href="#upstream">Switch upstream</a></p>
 <p class="lede">${count(data.people.admitted)} people admitted, ${count(data.people.activeThisWeek)} active this week. Admins are left out of every number but the credit. Updated ${escapeHtml(new Date(data.now).toISOString().slice(0, 16).replace("T", " "))} UTC. Counts, tokens, cost and times only.</p>`;
 
   const abuse = input.abuse ? abuseSection(input.abuse, input.csrf) : "";

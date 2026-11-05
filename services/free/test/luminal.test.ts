@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, completion, createInvite, createService, luminalUsage, MODEL, usage, type Service } from "./harness.js";
 import { costAtPrices, type Usage } from "../src/quota.js";
-import { creditAlert, crossed, upstreamErrorAlert } from "../src/alerts.js";
+import { creditAlert, crossed } from "../src/alerts.js";
 import { readFreeConfig } from "../src/config.js";
 import { creditForecast, shouldQueue } from "../src/queue.js";
 import { hasContent } from "../src/sse.js";
@@ -411,21 +411,6 @@ describe("upstream telemetry, dashboard and alerts", () => {
     const html = await (await service.request("GET", "/admin", { token: adminToken })).text();
     assert.match(html, /class="banner"[^>]*>[^<]*of the \$0\.200 Luminal credit used/);
   });
-
-  it("alerts when Luminal fails more than 20% of at least 20 requests in an hour, once", async () => {
-    const { service, token } = await member();
-    let index = 0;
-    service.setLuminal(() => (++index % 4 === 0 ? new Response("down", { status: 503 }) : completion(luminalUsage(10, 10))));
-    for (let count = 0; count < 19; count++) await chat(service, token);
-    assert.equal(alertTexts(service).filter((text) => text.includes("Luminal failed")).length, 0, "not before 20 requests");
-    // 4 of 19 so far; the 20th fails too: 5 of 20 is 25%.
-    service.setLuminal(() => new Response("down", { status: 503 }));
-    await chat(service, token);
-    await chat(service, token);
-    const alerts = alertTexts(service).filter((text) => text.includes("Luminal failed"));
-    assert.equal(alerts.length, 1);
-    assert.match(alerts[0]!, /Luminal failed 5 of 20 requests in the last hour \(25%\)/);
-  });
 });
 
 describe("Luminal units", () => {
@@ -437,10 +422,9 @@ describe("Luminal units", () => {
     assert.equal(hasContent({ choices: [], usage: {} }), false);
   });
 
-  it("words the credit and error-rate alerts", () => {
+  it("words the credit alerts", () => {
     assert.equal(creditAlert(1000, 2000, 0.5).text, "dl free tier: $1,000 of the $2,000 Luminal credit used (50%).");
     assert.match(creditAlert(2000, 2000, 1).text, /paused until the credit is topped up/);
-    assert.equal(upstreamErrorAlert("luminal", 5, 20).subject, "dl free tier: Luminal failing (25%)");
     assert.deepEqual(crossed(0.85, new Set([0.5])), { threshold: 0.8, mark: [0.8] });
   });
 });

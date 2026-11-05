@@ -89,7 +89,7 @@ describe("per-network limits", () => {
   it("rate-limits device codes per IPv6 /64", async () => {
     const service = await createService();
     const codes = async (ip: string) => (await service.request("POST", "/v1/device/code", { body: {}, ip })).status;
-    for (let i = 0; i < 10; i++) assert.equal(await codes(`2001:db8:9:9::${(i + 1).toString(16)}`), 200);
+    for (let i = 0; i < 60; i++) assert.equal(await codes(`2001:db8:9:9::${(i + 1).toString(16)}`), 200);
     assert.equal(await codes("2001:db8:9:9:1234::1"), 429);
     assert.equal(await codes("2001:db8:9:a::1"), 200);
   });
