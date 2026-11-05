@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.16.0](https://github.com/directionally-local/installer/compare/v0.15.0...v0.16.0) (2026-11-05)
+
+
+### Features
+
+* **free:** admin in the dl brand, credit-only budget, abuse section with block ([c6fa1f1](https://github.com/directionally-local/installer/commit/c6fa1f104255407979a46ab0085b04ebbed6ac66))
+* **free:** admin in the dl brand, credit-only budget, abuse section with block ([b221151](https://github.com/directionally-local/installer/commit/b2211511eb06177e2f19675446ce9af3b732bb81))
+* **free:** email the first sign-up and a daily digest ([e34326c](https://github.com/directionally-local/installer/commit/e34326c7a67a38ecff644e064fd558696e683845))
+* **free:** email the first sign-up and a daily digest ([dc09b43](https://github.com/directionally-local/installer/commit/dc09b431a7924caa083eaff46f8d4ece024db59f))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.10.1 ([b3dbfea](https://github.com/directionally-local/installer/commit/b3dbfeafd66b49edc2fd4b252b2f0801597e8925))
+* **deps:** install Autopilot 3.10.1 ([984b2a8](https://github.com/directionally-local/installer/commit/984b2a828f49f704b8be105e436b54eff26cd9ee))
+* **free:** digest money lines in Luminal credit only ([b2fba25](https://github.com/directionally-local/installer/commit/b2fba25d8d937692604de7e253f9173e1c087035))
+* **free:** the free tier calls OpenRouter only if the service has an OpenRouter key ([df0d5ef](https://github.com/directionally-local/installer/commit/df0d5eff5f7ceaf30fd3296597e87b0d77e27642))
+* **free:** the free tier calls OpenRouter only if the service has an OpenRouter key ([89201cf](https://github.com/directionally-local/installer/commit/89201cf6512e87b6631e877d4d55baa781baa860))
+
 ## [0.15.0](https://github.com/directionally-local/installer/compare/v0.14.0...v0.15.0) (2026-11-05)
 
 
