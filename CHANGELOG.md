@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.1](https://github.com/directionally-local/installer/compare/v0.18.0...v0.18.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.12.0 ([7d7c8aa](https://github.com/directionally-local/installer/commit/7d7c8aa1eb46ccbd03b7d0cc6357d6696db51a04))
+
 ## [0.18.0](https://github.com/directionally-local/installer/compare/v0.17.0...v0.18.0) (2026-11-05)
 
 
