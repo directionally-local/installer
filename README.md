@@ -125,7 +125,7 @@ Run options: `--server NAME`, `-m/--model MODEL`, `--repo OWNER/NAME`, `--detach
 
 ### On the server
 
-Run these as root. `dl` on its own shows what this is, whether it's healthy, the connected laptops, and the runs.
+On a machine set up with `DL_MODE=server` (or `dl up`), run these as root. `dl` on its own shows what this is, whether it's healthy, the connected laptops, and the runs.
 
 | Command | What it does |
 | --- | --- |
@@ -150,17 +150,27 @@ The laptop's setup drives the server over SSH with `dl up --access ssh --answers
 
 ## The one-line install
 
-For a laptop or a server:
+For the coding agent, on a laptop or any Linux machine, as yourself or as root:
 
 ```sh
 curl -fsSL https://directionallylocal.run | sh
 ```
 
-**On a laptop** (macOS or Linux, as yourself), it installs `dl` into `~/.directionallylocal` with no sudo: it uses your Node.js when it's new enough (22.23.4+, 24.22.1+ or 26.12.1+), and otherwise downloads Node.js 24 from nodejs.org into the same folder, checked against its published SHA-256, for `dl` alone (your shell's `node` stays as it is). It adds `~/.directionallylocal/bin` to your PATH in your shell's startup file (`.zshrc`, `.bashrc` or `.bash_profile`, fish's `conf.d`, else `.profile`) and starts `dl` in the folder you ran it from. A piped script can't change the PATH of the shell you ran it from, so when `~/.local/bin` or `~/bin` is already on that PATH it also links `dl` there, and `dl` works in the same terminal; otherwise it says the one line to run (for example `source ~/.bashrc`), again when you leave that first `dl`. New terminals always have it. `dl` itself comes as one prebuilt bundle for your platform (macOS or Linux, Apple Silicon/arm64 or x64; dl, its exact dependencies and that platform's binaries, built by the release workflow from the npm package) from `https://directionallylocal.run/dl/`, checked against its SHA-256; when there's none for your computer, or it fails, the script installs with npm instead. While it runs, the script shows what it's downloading, how big it is and how far along. `DL_NO_START=1` skips starting `dl`, `DL_NO_MODIFY_PATH=1` leaves your startup file alone, `DL_NO_BUNDLE=1` uses npm, and `DL_HOME=DIR` installs somewhere else. `DL_REFERRAL=CODE` (set by invite links, `curl -fsSL https://dl.new/r/CODE | sh`) is a GitHub username: it's passed to `dl`, which passes it to Autopilot for the free tier sign-in, and it's kept in `~/.config/directionallylocal/pending-referral` until that sign-in succeeds, so signing in on a later run still credits the invite. `dl local uninstall --purge` keeps `dl` itself.
+For a server that runs background tasks in sandboxes (Ubuntu or Debian), ask for it:
 
-**On a server** (Ubuntu or Debian, as root: `curl -fsSL https://directionallylocal.run | sudo sh`), it installs Node.js if needed, installs `directionallylocal` globally, and runs `dl up`. The laptop's setup uses the same script to bootstrap a server over SSH, with `DL_INSTALL_ONLY=1` and the laptop's own `dl` version in `DL_VERSION`.
+```sh
+curl -fsSL https://directionallylocal.run | sudo DL_MODE=server sh
+```
 
-Which one it is: a server when it runs as root on Linux, when the laptop's setup runs it (`DL_INSTALL_ONLY=1`), or on a Linux machine `dl up` has already set up; anything else is a laptop. That's the line `dl` itself draws: on a machine with no server install, root gets the server's instructions and everyone else the laptop's. `DL_MODE=server` or `DL_MODE=laptop` overrides it.
+(As root, `curl -fsSL https://directionallylocal.run | DL_MODE=server sh` is the same. Put `DL_MODE=server` after `sudo`: sudo drops variables set before it.)
+
+Any glibc Linux works for the coding agent (Ubuntu, Debian, Fedora, Arch, Amazon Linux; minimal images need `tar` and `gzip`). Alpine and other musl Linux can't run Autopilot's terminal renderer, so the script stops there with a one-line message.
+
+**On a laptop** (macOS as yourself; Linux as anyone, root included: root's install goes into `/root/.directionallylocal`, and `dl` opens plain Autopilot as it does for everyone), it installs `dl` into `~/.directionallylocal` with no sudo: it uses your Node.js when it's new enough (22.23.4+, 24.22.1+ or 26.12.1+), and otherwise downloads Node.js 24 from nodejs.org into the same folder, checked against its published SHA-256, for `dl` alone (your shell's `node` stays as it is). It adds `~/.directionallylocal/bin` to your PATH in your shell's startup file (`.zshrc`, `.bashrc` or `.bash_profile`, fish's `conf.d`, else `.profile`) and starts `dl` in the folder you ran it from. A piped script can't change the PATH of the shell you ran it from, so when `~/.local/bin` or `~/bin` is already on that PATH it also links `dl` there, and `dl` works in the same terminal; otherwise it says the one line to run (for example `source ~/.bashrc`), again when you leave that first `dl`. New terminals always have it. `dl` itself comes as one prebuilt bundle for your platform (macOS or Linux, Apple Silicon/arm64 or x64; dl, its exact dependencies and that platform's binaries, built by the release workflow from the npm package) from `https://directionallylocal.run/dl/`, checked against its SHA-256; when there's none for your computer, or it fails, the script installs with npm instead. While it runs, the script shows what it's downloading, how big it is and how far along. `DL_NO_START=1` skips starting `dl`, `DL_NO_MODIFY_PATH=1` leaves your startup file alone, `DL_NO_BUNDLE=1` uses npm, and `DL_HOME=DIR` installs somewhere else. `DL_REFERRAL=CODE` (set by invite links, `curl -fsSL https://dl.new/r/CODE | sh`) is a GitHub username: it's passed to `dl`, which passes it to Autopilot for the free tier sign-in, and it's kept in `~/.config/directionallylocal/pending-referral` until that sign-in succeeds, so signing in on a later run still credits the invite. `dl local uninstall --purge` keeps `dl` itself.
+
+**On a server** (Ubuntu or Debian: `curl -fsSL https://directionallylocal.run | sudo DL_MODE=server sh`), it installs Node.js if needed, installs `directionallylocal` globally, and runs `dl up`. The laptop's setup uses the same script to bootstrap a server over SSH, with `DL_INSTALL_ONLY=1` and the laptop's own `dl` version in `DL_VERSION`.
+
+Which one it is: a server only with `DL_MODE=server`, when the laptop's setup runs it (`DL_INSTALL_ONLY=1`), or on a Linux machine `dl up` has already set up (so re-running the plain line there updates that server, as before); anything else, root included, gets the coding agent. It never asks. That's the line `dl` itself draws: with no server install, bare `dl` is plain Autopilot for root too. `DL_MODE=laptop` gives the plain install even on a server.
 
 When it ends, either way, it sends one anonymous count to the free tier service, in the background: OS (`darwin` or `linux`), chip (`arm64` or `x64`), laptop or server, the `dl` version, ok or the step that failed, and which page it came from (`DL_INSTALL_VIA`, set by dl.new's scripts). No IP address or identity is kept. `DL_NO_TELEMETRY=1`, `DO_NOT_TRACK=1` or a `CI` variable turns it off. The install pages count scripts served the same way (see `services/free/README.md`, "Install counts").
 

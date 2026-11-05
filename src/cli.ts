@@ -319,20 +319,21 @@ export async function main(
             if (values.server || (await loadRemotes()).length > 0) {
               const code = await openSession(input, laptopIO);
               if (code !== undefined) return code;
-            } else if (!isRoot()) {
-              // A laptop with nothing set up: plain Autopilot, with nothing to install or answer
-              // first. The sandbox stack waits until background tasks are asked for (dl run).
+            } else {
+              // A laptop with nothing set up (or root on a Linux machine with no server install,
+              // which is the same plain install): plain Autopilot, with nothing to install or
+              // answer first. The sandbox stack waits until background tasks are asked for (dl run).
               return await startHere(input, laptopIO);
             }
           }
           // A laptop connected to places gets its own overview (`dl status` shows it from anywhere);
           // otherwise, what this is and how to start.
-          // What Autopilot here uses, asked once and only when it's shown (never as root).
-          const local = (!command || command === "status") && !isRoot() ? localAutopilot(options) : undefined;
+          // What Autopilot here uses, asked once and only when it's shown.
+          const local = !command || command === "status" ? localAutopilot(options) : undefined;
           if ((!command || command === "status") && await laptopHome(laptopIO, undefined, undefined, { ssh: realSshExec, local: localVersions }, local?.then((state) => state.freeTier))) return 0;
           // A laptop with no places is still set up: plain dl runs Autopilot here. Say what's
-          // installed and how to start. (Root on a machine without a server install gets the
-          // server's instructions instead, as the install script draws the same line.)
+          // installed and how to start. Root without a server install is the same: the install
+          // script gives it the plain install too, and a server only with DL_MODE=server.
           if (local) {
             const { setUp, freeTier } = await local;
             laptopReady({ ...(await readyHere()), ...(setUp === undefined ? {} : { setUp }), ...(freeTier ? { freeTier } : {}) }, laptopIO);
@@ -386,7 +387,7 @@ export async function main(
           return 2;
         }
         // A laptop with nowhere to send tasks: ask where they should run, set that up, then go on.
-        if (!values.server && (await loadRemotes()).length === 0 && terminal && !isRoot()) {
+        if (!values.server && (await loadRemotes()).length === 0 && terminal) {
           // Not from a GitHub repository: say so before asking anything or installing.
           if (!values.repo) await detectGitHubRepository(process.cwd());
           const code = await setupForTasks({ io: laptopIO, terminal, setUp, ...(options.prompter ? { prompter: options.prompter } : {}) });
@@ -421,7 +422,7 @@ export async function main(
       case "new": {
         // An alias of bare dl for a release: a new conversation, the old one keeps running.
         if ((await loadRemotes()).length === 0) {
-          if (terminal && !isRoot() && !values.server) return await startHere(sessionInput(values, passthrough, { continue: false }), laptopIO);
+          if (terminal && !values.server) return await startHere(sessionInput(values, passthrough, { continue: false }), laptopIO);
           io.err(`  dl new starts a new session in a terminal: dl\n`);
           return 1;
         }
@@ -542,8 +543,8 @@ const NOT_A_SERVER = (c: ReturnType<typeof palette>) => `
   ${c.dim("Background tasks that end in a pull request (asks where they run):")}
      dl run "fix the flaky checkout test"      ${c.dim("or")}  dl setup
 
-  ${c.dim("Or on a server (as root, on Ubuntu or Debian):")}
-     curl -fsSL https://directionallylocal.run | sudo sh
+  ${c.dim("Or set up a server for background tasks (Ubuntu or Debian):")}
+     curl -fsSL https://directionallylocal.run | sudo DL_MODE=server sh
 
   ${c.dim("Already have one? Connect this laptop to it:")}
      dl connect https://your-server
