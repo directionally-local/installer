@@ -27,7 +27,7 @@ export const DL_UPDATE = "dl update";
 export const SELF_DONE_ENV = "DL_UPDATE_SELF_DONE";
 
 /** The install script, when the command doesn't say (remote-install.ts has the same; not imported, as it imports this). */
-const INSTALL_URL = "https://directionallylocal.run";
+const INSTALL_URL = "https://dl.new/install.sh";
 const REGISTRY_LATEST = "https://registry.npmjs.org/directionallylocal/latest";
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 /** How many of the installer's last lines a failure shows. */

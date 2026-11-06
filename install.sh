@@ -1,7 +1,7 @@
 #!/bin/sh
 # Directionally Local: one-line install, for a laptop or a server.
 #
-#   curl -fsSL https://directionallylocal.run | sh
+#   curl -fsSL https://dl.new | sh
 #
 # On a laptop or any Linux machine (macOS as yourself; Linux as anyone, root included):
 # installs dl into ~/.directionallylocal with no sudo, and Node.js there too when this one is missing or too old, puts dl on your PATH for
@@ -11,7 +11,7 @@
 #
 # A server, only when asked (Ubuntu or Debian):
 #
-#   curl -fsSL https://directionallylocal.run | sudo DL_MODE=server sh
+#   curl -fsSL https://dl.new/install.sh | sudo DL_MODE=server sh
 #
 # installs Node.js 24 if needed and the directionallylocal CLI (also `dl`), then runs `dl up`,
 # which asks how to reach this server and for the model key, and sets up Hotcell + Autopilot
@@ -28,7 +28,7 @@
 # Pin a version: DL_VERSION=0.1.0. Install from a local tarball: DL_PACKAGE=/path/to.tgz.
 # Laptop: DL_HOME=DIR installs somewhere else; DL_NO_START=1 doesn't start dl at the end;
 # DL_NO_MODIFY_PATH=1 leaves your shell's startup file alone; DL_NO_BUNDLE=1 installs dl with
-# npm instead of the prebuilt bundle (one download from directionallylocal.run/dl/, checked
+# npm instead of the prebuilt bundle (one download from dl.new/dl/, checked
 # against its SHA-256; npm is also what's used when there's no bundle for this computer).
 # Invite links (curl -fsSL https://dl.new/r/CODE | sh) set DL_REFERRAL=CODE, a GitHub login:
 # it's passed on to dl, which passes it to Autopilot for the free tier sign-in. On a laptop it's
@@ -469,7 +469,7 @@ install_bundle() {
   if [ -n "${DL_PACKAGE:-}" ] || [ "${DL_NO_BUNDLE:-}" = "1" ]; then return 1; fi
   # Built against glibc: Alpine and other musl Linux use npm.
   if [ "$os" = linux ] && ls /lib/ld-musl-* >/dev/null 2>&1; then return 1; fi
-  bundles="${DL_BUNDLES:-https://directionallylocal.run/dl}"
+  bundles="${DL_BUNDLES:-https://dl.new/dl}"
   list=$(curl -fsSL "$bundles/${DL_VERSION:-latest}/dl-bundles.txt" 2>/dev/null) || return 1
   # Lines of PLATFORM FILE SHA256 BYTES NODE_MAJOR; a bundle's native parts are built for one
   # major version of Node.js, so it's used only with that one.

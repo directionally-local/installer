@@ -589,7 +589,7 @@ const NOT_A_SERVER = (c: ReturnType<typeof palette>) => `
      dl run "fix the flaky checkout test"      ${c.dim("or")}  dl setup
 
   ${c.dim("Or set up a server for background tasks (Ubuntu or Debian):")}
-     curl -fsSL https://directionallylocal.run | sudo DL_MODE=server sh
+     curl -fsSL https://dl.new/install.sh | sudo DL_MODE=server sh
 
   ${c.dim("Already have one? Connect this laptop to it:")}
      dl connect https://your-server
