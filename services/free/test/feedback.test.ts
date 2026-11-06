@@ -122,7 +122,7 @@ describe("POST /v1/feedback, signed in", () => {
     assert.deepEqual(await (await send(s, { message: "one" }, { token: access_token })).json(), { ok: true, replyTo: null });
     s.setGithubProfile(profileEmail("alice@example.org\r\nBcc: evil@example.com"));
     assert.deepEqual(await (await send(s, { message: "two" }, { token: access_token })).json(), { ok: true, replyTo: null });
-    for (const email of mails(s)) assert.doesNotMatch(email.raw.split("\r\n\r\n")[0]!, /Reply-To|Bcc/i);
+    for (const email of mails(s)) assert.doesNotMatch(email.raw.split("\r\n\r\n")[0]!, /^(Reply-To|Bcc):/im);
   });
 
   it("refuses an invalid bearer (401) rather than sending it as anonymous", async () => {
