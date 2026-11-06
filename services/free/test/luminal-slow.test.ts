@@ -251,6 +251,22 @@ describe("switching upstream from /admin", () => {
     assert.equal((await config()).effective.primaryUpstream, "luminal");
   });
 
+  it("accepts a form post whose Origin the browser hid as null, and still refuses a cross-site one", async () => {
+    const { service } = await setup();
+    const cookie = await adminCookie(service);
+    const csrf = csrfOf(await (await service.request("GET", "/admin", { headers: { cookie } })).text());
+    const post = (headers: Record<string, string>) =>
+      service.request("POST", "/admin/dashboard/upstream", { headers: { cookie, ...headers }, form: { upstream: "openrouter", csrf } });
+
+    const accepted = await post({ origin: "null", "sec-fetch-site": "same-origin" });
+    assert.equal(accepted.status, 303);
+    assert.equal(accepted.headers.get("location"), "/admin#upstream");
+
+    const refused = await post({ origin: "null", "sec-fetch-site": "cross-site" });
+    assert.equal(refused.status, 403);
+    assert.match(await refused.text(), /only from the dashboard itself/);
+  });
+
   it("refuses OpenRouter when the service has no OpenRouter key", async () => {
     const { service } = await setup({ OPENROUTER_API_KEY: "" });
     const cookie = await adminCookie(service);

@@ -1936,7 +1936,10 @@ async function adminSession(c: Ctx): Promise<AdminSession | undefined> {
 /** Whether a state-changing browser request came from this site's own page. */
 function sameOrigin(c: Ctx): boolean {
   const origin = c.request.headers.get("origin");
-  if (origin !== null) return origin === new URL(c.base).origin || origin === c.url.origin;
+  // `Origin: null` is what a browser sends when the page's referrer policy hides it (the
+  // dashboard sends `no-referrer`). Treat it like a missing Origin and fall back to Fetch
+  // Metadata, which the browser still sets for the form POST.
+  if (origin !== null && origin !== "null") return origin === new URL(c.base).origin || origin === c.url.origin;
   return c.request.headers.get("sec-fetch-site") === "same-origin";
 }
 
