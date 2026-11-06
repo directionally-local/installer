@@ -15,8 +15,9 @@ const DISCLOSURE = `
 <details class="fine disclosure"><summary>Free tokens come with usage records, never your prompts or code. <span>What exactly?</span></summary>
 <p>For each request: tokens in, cached and out, cost, model and time. Session events from dl: start and end, turns,
 tool-call counts, pull requests opened, error codes, version, OS and a hash of the repository's remote URL.
-We never store your prompts, completions, code, file paths or file contents. When you first join, we check that your GitHub
-account has a public repository or a contribution in the last year, and don't keep the counts.</p></details>`;
+We never store your prompts, completions, code, file paths or file contents. When you sign in, we read your GitHub account's age,
+public repository, follower and contribution counts (numbers only) to set your level, and ask for a contact email,
+prefilled from your GitHub account.</p></details>`;
 
 /** The privacy policy and terms live on the main site, directionallylocal.com (dl.new has copies). */
 export const PRIVACY_URL = "https://directionallylocal.com/privacy/";
@@ -77,6 +78,11 @@ form { display: grid; gap: 12px; width: 100%; margin: 0; }
 .actions { display: grid; gap: 6px; width: 100%; }
 input[type="text"], input:not([type]) { font: 500 20px var(--mono); letter-spacing: .04em; text-align: center; text-transform: uppercase; width: 100%; height: 52px; padding: 0 14px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
 input::placeholder { color: var(--muted); opacity: .6; }
+input[type="email"] { font: 500 17px var(--sans, inherit); width: 100%; height: 52px; padding: 0 14px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.field { display: grid; gap: 6px; text-align: left; }
+.field > span { font-size: 14px; color: var(--muted); }
+.check { display: flex; gap: 10px; align-items: flex-start; text-align: left; font-size: 15px; line-height: 1.4; }
+.check input { width: 18px; height: 18px; margin-top: 2px; flex: none; accent-color: var(--accent); }
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; width: 100%; min-height: 52px; padding: 0 20px; border-radius: 12px; border: 1px solid var(--ink); background: var(--ink); color: var(--on-ink); font: 600 16px var(--body); text-decoration: none; cursor: pointer; }
 .btn:hover { opacity: .9; }
 .link { background: none; border: 0; padding: 10px; color: var(--muted); font: 15px var(--body); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; justify-self: center; }
@@ -175,6 +181,47 @@ ${alertHtml(error)}<p class="lede">Signed in as <strong>${escapeHtml(login)}</st
 </div>
 ${DISCLOSURE}`,
     error ? 400 : 200,
+  );
+}
+
+/** What the details step shows a Starter account: its line, and whether to offer the invite field. */
+export interface DetailsStarter {
+  /** The honest sentence: what Starter gets, why, and the ways up (admission.ts `starterLine`). */
+  line: string;
+}
+
+/**
+ * The sign-in step after GitHub: a contact email (prefilled from GitHub's primary verified
+ * address), an opt-in for product updates, and, for a Starter account, an optional invite code
+ * that unlocks Full. One form, one button.
+ */
+export function detailsPage(
+  ticket: string,
+  login: string,
+  options: { email?: string; updates?: boolean; starter?: DetailsStarter; error?: string } = {},
+): Response {
+  const starter = options.starter
+    ? `
+  <p class="fine" style="text-align:left">${escapeHtml(options.starter.line)}</p>
+  <label class="field"><span>Invite code (optional): unlocks GPT-6 and the full allowance</span>
+    <input name="invite_code" aria-label="Invite code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="DL-XXXX-XXXX">
+  </label>`
+    : "";
+  return shell(
+    "Almost done",
+    `<h1>One last step</h1>
+${alertHtml(options.error)}<p class="lede">Signed in as <strong>${escapeHtml(login)}</strong>. Where can we reach you?</p>
+<form method="post" action="/device/details" class="actions" style="display:grid;gap:14px">
+  <input type="hidden" name="ticket" value="${escapeHtml(ticket)}">
+  <label class="field"><span>Email</span>
+    <input type="email" name="email" aria-label="Email" autocomplete="email" maxlength="254" required value="${escapeHtml(options.email ?? "")}">
+  </label>
+  <p class="fine" style="text-align:left">Only about your free tier: limits, changes, and replies to your feedback.</p>
+  <label class="check"><input type="checkbox" name="updates" value="1"${options.updates ? " checked" : ""}> Also send me occasional dl updates</label>${starter}
+  <button class="btn" type="submit">Continue</button>
+</form>
+${DISCLOSURE}`,
+    options.error ? 400 : 200,
   );
 }
 

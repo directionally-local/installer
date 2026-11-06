@@ -27,12 +27,17 @@ export interface GitHubOAuthApp {
   clientSecret: string;
 }
 
-/** The URL that starts sign-in. No scopes: the public profile is all we read. */
-export function githubAuthorizeUrl(app: Pick<GitHubOAuthApp, "clientId">, redirectUri: string, state: string): string {
+/**
+ * The URL that starts sign-in. Without `scope` it asks for nothing beyond the public profile;
+ * the free tier's sign-in passes `user:email` (read-only email addresses) to prefill the
+ * contact email it asks for.
+ */
+export function githubAuthorizeUrl(app: Pick<GitHubOAuthApp, "clientId">, redirectUri: string, state: string, scope?: string): string {
   const url = new URL("https://github.com/login/oauth/authorize");
   url.searchParams.set("client_id", app.clientId);
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("state", state);
+  if (scope) url.searchParams.set("scope", scope);
   url.searchParams.set("allow_signup", "true");
   return url.toString();
 }
@@ -82,6 +87,40 @@ export async function githubSignInFromCode(
     user: { id: user.id, login: user.login, createdAt: Number.isFinite(createdAt) ? createdAt : undefined, publicRepos },
     accessToken: token.access_token,
   };
+}
+
+/**
+ * The signed-in account's primary verified email, read with its own token (needs the
+ * `user:email` scope). Falls back to any verified address; undefined when there is none, the
+ * token lacks the scope, or GitHub doesn't answer in time. Never throws.
+ */
+export async function githubPrimaryEmail(accessToken: string, fetcher: Fetch, userAgent = "directionallylocal", timeoutMs = 5000): Promise<string | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetcher("https://api.github.com/user/emails", {
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${accessToken}`,
+        "user-agent": userAgent,
+        "x-github-api-version": "2022-11-28",
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) return undefined;
+    const body = (await response.json().catch(() => [])) as unknown;
+    if (!Array.isArray(body)) return undefined;
+    const emails = body.filter(
+      (entry): entry is { email: string; primary?: unknown; verified?: unknown } =>
+        typeof entry === "object" && entry !== null && typeof (entry as { email?: unknown }).email === "string",
+    );
+    const usable = emails.filter((entry) => entry.verified === true && !entry.email.endsWith("@users.noreply.github.com"));
+    return (usable.find((entry) => entry.primary === true) ?? usable[0])?.email;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** The public profile fields the free tier re-reads weekly for a Starter account. */

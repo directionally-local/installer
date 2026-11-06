@@ -128,6 +128,8 @@ export const ADMIN_ID = 1;
 export interface GitHubUserFixture {
   id: number;
   login: string;
+  /** The primary verified email /user/emails reports (default `<login>@example.com`; null: none). */
+  email?: string | null;
   createdAt?: string;
   /** `public_repos` on GitHub's /user (default 3: a Full account). */
   publicRepos?: number;
@@ -289,6 +291,12 @@ export async function createService(vars: Record<string, string> = {}, options: 
       const user = JSON.parse(decodeURIComponent(token)) as GitHubUserFixture;
       return Response.json({ id: user.id, login: user.login, created_at: user.createdAt ?? "2015-01-01T00:00:00Z", public_repos: user.publicRepos ?? 3, followers: 0 });
     }
+    if (url === "https://api.github.com/user/emails") {
+      const token = new Headers(init.headers).get("authorization")?.replace("Bearer token-for-", "") ?? "";
+      const user = JSON.parse(decodeURIComponent(token)) as GitHubUserFixture;
+      const email = user.email === undefined ? `${user.login.toLowerCase()}@example.com` : user.email;
+      return Response.json(email === null ? [] : [{ email, primary: true, verified: true, visibility: "private" }]);
+    }
     if (url.startsWith("https://api.github.com/users/")) {
       const login = decodeURIComponent(url.slice("https://api.github.com/users/".length));
       calls.githubProfiles.push({ login, headers: Object.fromEntries(new Headers(init.headers).entries()) });
@@ -359,7 +367,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
   };
 
   const signIn: Service["signIn"] = async (user, options = {}) => {
-    const flow = await startBrowserFlow(request, user, options.deviceId);
+    const flow = await startBrowserFlow(request, user, options.deviceId, options.invite ? { invite: options.invite } : {});
     if (flow.page.includes('name="invite_code"')) {
       if (!options.invite) throw new Error(`${user.login} needs an invite`);
       const ticket = /name="ticket" value="([^"]+)"/.exec(flow.page)![1]!;
@@ -401,11 +409,16 @@ export async function createService(vars: Record<string, string> = {}, options: 
   };
 }
 
-/** Runs the CLI's code request and the browser up to the page after GitHub. */
+/**
+ * Runs the CLI's code request and the browser up to the page after GitHub. The details step
+ * (email, and an invite code for Starter) is filled in and sent unless `stopAtDetails`: the
+ * prefilled email, the updates box as given, and `invite` when the page has an invite field.
+ */
 export async function startBrowserFlow(
   request: Service["request"],
   user: GitHubUserFixture,
   deviceId?: string,
+  options: { stopAtDetails?: boolean; invite?: string; email?: string; updates?: boolean } = {},
 ): Promise<{ deviceCode: string; userCode: string; page: string; status: number }> {
   const codeResponse = await request("POST", "/v1/device/code", { body: deviceId ? { device_id: deviceId } : {} });
   const issued = (await codeResponse.json()) as { device_code: string; user_code: string };
@@ -413,7 +426,29 @@ export async function startBrowserFlow(
   const callback = await request("GET", `/device/callback?code=${encodeURIComponent(JSON.stringify(user))}&state=${encodeURIComponent(state)}`, {
     headers: { cookie },
   });
-  return { deviceCode: issued.device_code, userCode: issued.user_code, page: await callback.text(), status: callback.status };
+  let page = await callback.text();
+  let status = callback.status;
+  if (!options.stopAtDetails && page.includes('action="/device/details"')) {
+    const done = await submitDetails(request, page, options);
+    page = done.page;
+    status = done.status;
+  }
+  return { deviceCode: issued.device_code, userCode: issued.user_code, page, status };
+}
+
+/** Sends the details step's form from its page: the prefilled email unless `email` is given. */
+export async function submitDetails(
+  request: Service["request"],
+  page: string,
+  options: { invite?: string; email?: string; updates?: boolean } = {},
+): Promise<{ page: string; status: number }> {
+  const ticket = /name="ticket" value="([^"]+)"/.exec(page)![1]!;
+  const prefilled = /name="email"[^>]*value="([^"]*)"/.exec(page)?.[1] ?? "";
+  const form: Record<string, string> = { ticket, email: options.email ?? (prefilled || "someone@example.com") };
+  if (options.updates) form.updates = "1";
+  if (options.invite && page.includes('name="invite_code"')) form.invite_code = options.invite;
+  const response = await request("POST", "/device/details", { form });
+  return { page: await response.text(), status: response.status };
 }
 
 export async function authorize(request: Service["request"], userCode: string): Promise<{ state: string; cookie: string; location: string }> {

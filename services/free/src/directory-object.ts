@@ -71,6 +71,12 @@ export interface PersonRow {
   restricted_contributions: number | null;
   /** When the signals were last read (Unix ms). */
   signals_at: number | null;
+  /** The contact email given at sign-in (prefilled from GitHub's primary verified email). */
+  email: string | null;
+  /** 1 when the person ticked "send me dl updates"; 0 when they didn't; null before they were asked. */
+  email_updates: number | null;
+  /** When the email was last given (Unix ms). */
+  email_at: number | null;
 }
 
 export interface RequestRecord {
@@ -142,6 +148,8 @@ export interface PersonState {
   blocked: boolean;
   /** "full" or "starter": what the account may use. */
   level: Level;
+  /** Why the level is what it is (qualifies, account_too_new, network_limit, invite, admin). */
+  levelReason: LevelReason | null;
   /** The GitHub signals last read, as numbers only; null until the first read. */
   signals: {
     accountAgeDays: number | null;
@@ -504,6 +512,10 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["people", "contributions", "INTEGER"],
   ["people", "restricted_contributions", "INTEGER"],
   ["people", "signals_at", "INTEGER"],
+  // The contact email from the sign-in step, and whether the person wants product updates.
+  ["people", "email", "TEXT"],
+  ["people", "email_updates", "INTEGER"],
+  ["people", "email_at", "INTEGER"],
   ["daily_activity", "credit_usd", "REAL NOT NULL DEFAULT 0"],
 ];
 
@@ -660,6 +672,16 @@ export class DirectoryObject extends DurableObject {
         // A blocked account can't sign in again (admins unblock it from the dashboard).
         if (existing.status === "blocked") return { ok: false, reason: "blocked" };
         sql.exec("UPDATE people SET login = ? WHERE github_id = ?", input.login, input.githubId);
+        // A Starter account that signs in again with an invite code redeems it for Full. A Full
+        // account's code is left unused for someone else.
+        let redeemed = false;
+        if (inviteHash && existing.level !== "full") {
+          const invite = sql.exec<{ id: number; used_by: number | null }>("SELECT id, used_by FROM invites WHERE code_hash = ?", inviteHash).toArray()[0];
+          if (!invite || invite.used_by !== null) return { ok: false, reason: "invalid_invite" };
+          sql.exec("UPDATE invites SET used_by = ?, used_at = ? WHERE id = ?", input.githubId, input.now, invite.id);
+          sql.exec("UPDATE people SET level = 'full', level_reason = 'invite' WHERE github_id = ?", input.githubId);
+          redeemed = true;
+        }
         if (sig) {
           sql.exec(
             "UPDATE people SET account_age_days = ?, public_repos = ?, followers = ?, contributions = ?, restricted_contributions = ?, signals_at = ? WHERE github_id = ?",
@@ -671,8 +693,8 @@ export class DirectoryObject extends DurableObject {
             input.now,
             input.githubId,
           );
-          // An admin's own choice of level stands until they change it.
-          if (existing.level_reason !== "admin") sql.exec("UPDATE people SET level = ?, level_reason = ? WHERE github_id = ?", level, reason, input.githubId);
+          // An admin's own choice of level, and a redeemed invite, stand until an admin changes them.
+          if (!redeemed && existing.level_reason !== "admin" && existing.level_reason !== "invite") sql.exec("UPDATE people SET level = ?, level_reason = ? WHERE github_id = ?", level, reason, input.githubId);
         }
         return admitted("existing", false);
       }
@@ -915,15 +937,16 @@ export class DirectoryObject extends DurableObject {
         login: string;
         status: string;
         level: Level;
+        level_reason: LevelReason | null;
         account_age_days: number | null;
         public_repos: number | null;
         followers: number | null;
         contributions: number | null;
         restricted_contributions: number | null;
         signals_at: number | null;
-      }>("SELECT login, status, level, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at FROM people WHERE github_id = ?", githubId)
+      }>("SELECT login, status, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at FROM people WHERE github_id = ?", githubId)
       .toArray()[0];
-    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false, level: "full", signals: null };
+    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false, level: "full", levelReason: null, signals: null };
     const code = this.#ensureCode(githubId, person.login, now);
     const counting = countingPairs(sql, this.#pairs(githubId), now);
     const joined = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ? AND outcome = 'ok'", githubId).toArray()[0]?.n ?? 0;
@@ -933,6 +956,7 @@ export class DirectoryObject extends DurableObject {
       referral: { code, joined, activeThisWeek: counting.filter((pair) => pair.referrer === githubId).length },
       blocked: person.status === "blocked",
       level: person.level ?? "full",
+      levelReason: person.level_reason ?? null,
       signals:
         person.signals_at === null
           ? null
@@ -975,6 +999,17 @@ export class DirectoryObject extends DurableObject {
 
   async listPeople(): Promise<PersonRow[]> {
     return this.ctx.storage.sql.exec<PersonRow>("SELECT * FROM people ORDER BY admitted_at").toArray().map((row) => ({ ...row }));
+  }
+
+  /**
+   * Stores the contact email from the sign-in step and the updates choice. Only for a person
+   * already admitted; false when there is none. The address is trimmed and kept as given.
+   */
+  async setEmail(githubId: number, email: string, updates: boolean, now: number): Promise<boolean> {
+    const sql = this.ctx.storage.sql;
+    if (sql.exec("SELECT 1 FROM people WHERE github_id = ?", githubId).toArray().length === 0) return false;
+    sql.exec("UPDATE people SET email = ?, email_updates = ?, email_at = ? WHERE github_id = ?", email.trim(), updates ? 1 : 0, now, githubId);
+    return true;
   }
 
   async getPerson(githubId: number): Promise<PersonRow | undefined> {

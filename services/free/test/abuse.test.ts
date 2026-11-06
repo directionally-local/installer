@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, authorize, createService, errorCode, MODEL, type Service, type Tokens } from "./harness.js";
+import { ADMIN_ID, authorize, createService, errorCode, MODEL, type Service, type Tokens, submitDetails } from "./harness.js";
 
 const OLD = "2015-01-01T00:00:00Z";
 const BLOCKED = "This account is blocked from the free tier. Contact contact@directionallylocal.com.";
@@ -11,8 +11,10 @@ async function signUp(service: Service, user: { id: number; login: string }, opt
   const issued = (await (await request("POST", "/v1/device/code", { body: options.deviceId ? { device_id: options.deviceId } : {} })).json()) as { device_code: string; user_code: string };
   const { state, cookie } = await authorize(request, issued.user_code);
   const callback = await request("GET", `/device/callback?code=${encodeURIComponent(JSON.stringify({ createdAt: OLD, ...user }))}&state=${encodeURIComponent(state)}`, { headers: { cookie } });
-  const page = await callback.text();
-  return { page, status: callback.status, poll: await request("POST", "/v1/device/token", { body: { device_code: issued.device_code } }) };
+  let page = await callback.text();
+  let status = callback.status;
+  if (page.includes('action="/device/details"')) ({ page, status } = await submitDetails(request, page));
+  return { page, status, poll: await request("POST", "/v1/device/token", { body: { device_code: issued.device_code } }) };
 }
 
 async function tokensFor(service: Service, user: { id: number; login: string }, options: { ip: string; deviceId?: string }): Promise<Tokens> {
@@ -214,7 +216,8 @@ describe("abuse section", () => {
     const request: Service["request"] = (method, path, more = {}) => service.request(method, path, { ...more, ip: "198.51.100.40" });
     const issued = (await (await request("POST", "/v1/device/code", { body: { referral_code: "ref" } })).json()) as { device_code: string; user_code: string };
     const { state, cookie } = await authorize(request, issued.user_code);
-    await request("GET", `/device/callback?code=${encodeURIComponent(JSON.stringify({ id: 101, login: "pal", createdAt: OLD }))}&state=${encodeURIComponent(state)}`, { headers: { cookie } });
+    const palPage = await (await request("GET", `/device/callback?code=${encodeURIComponent(JSON.stringify({ id: 101, login: "pal", createdAt: OLD }))}&state=${encodeURIComponent(state)}`, { headers: { cookie } })).text();
+    await submitDetails(request, palPage);
 
     const abuse = await service.directory().abuse({ now: service.clock.now, adminIds: [ADMIN_ID] });
     assert.equal(abuse.sameNetworkReferralCount, 1);

@@ -112,6 +112,9 @@ export const FREE_MODELS: readonly FreeModel[] = [
 /** The model a request gets when it doesn't name one, and the one the pickers lead with. */
 export const DEFAULT_MODEL = "gpt-6-luna";
 
+/** The DeepSeek model: the only one a Starter account may use, and every GPT-6 model's fallback. */
+export const DEEPSEEK_MODEL = "deepseek/deepseek-v4.1-flash-1017";
+
 export const ALLOWED_MODELS: readonly string[] = FREE_MODELS.map((model) => model.id);
 
 export function modelById(id: unknown): FreeModel | undefined {

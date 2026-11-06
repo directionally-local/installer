@@ -1,6 +1,6 @@
 import type { DurableObjectNamespace } from "cloudflare:workers";
 import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.js";
-import { githubAuthorizeUrl, githubPublicProfile, githubSignInFromCode, githubUserFromCode, type Fetch } from "../../shared/src/github.js";
+import { githubAuthorizeUrl, githubPrimaryEmail, githubPublicProfile, githubSignInFromCode, githubUserFromCode, type Fetch } from "../../shared/src/github.js";
 import { githubSignals } from "../../shared/src/github-signals.js";
 import { hmacKey, signJwt, verifyJwt } from "../../shared/src/jwt.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
@@ -37,9 +37,9 @@ import {
   weeklyBudgetMessage,
   type SignInRefusal,
 } from "./messages.js";
-import { confirmPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
+import { confirmPage, detailsPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
-import { ALLOWED_MODELS, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, modelById, type FreeModel, type Pool } from "./models.js";
+import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, modelById, type FreeModel, type Pool } from "./models.js";
 import { levelFor, levelReason, starterLine, type GithubSignals, type Level, type LevelReason, type LevelThresholds } from "./admission.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
 import { chooseUpstream, providerConfigured } from "./upstream-choice.js";
@@ -307,6 +307,7 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/device/deny") return deviceDeny(c);
   if (method === "POST" && path === "/device/invite") return deviceInvite(c);
   if (method === "POST" && path === "/device/no-invite") return deviceNoInvite(c);
+  if (method === "POST" && path === "/device/details") return deviceDetails(c);
   if (method === "GET" && path === LEGACY_ADMIN_CALLBACK_PATH) return adminCallback(c, LEGACY_ADMIN_CALLBACK_PATH);
 
   if (path === "/admin" || path === "/admin/signin" || path === "/admin/signout" || path.startsWith("/admin/dashboard/")) return adminWeb(c, path, method);
@@ -752,7 +753,8 @@ async function deviceAuthorize(c: Ctx): Promise<Response> {
   const ref = normalizeReferralCode(c.url.searchParams.get("ref") ?? undefined);
   const begun = userCode ? await auth(c).beginOAuth(userCode, c.now(), ref) : undefined;
   if (!begun) return enterCodePage("That code is unknown, used or expired. Start sign-in again in your terminal.");
-  const location = githubAuthorizeUrl({ clientId: c.config.githubClientId }, `${c.base}/device/callback`, begun.state);
+  // `user:email` (read-only) prefills the contact email the next step asks for.
+  const location = githubAuthorizeUrl({ clientId: c.config.githubClientId }, `${c.base}/device/callback`, begun.state, SIGN_IN_SCOPE);
   return new Response(null, {
     status: 302,
     headers: {
@@ -808,7 +810,87 @@ async function deviceCallback(c: Ctx): Promise<Response> {
 
   const identity: Identity = { githubId: user.id, login: user.login };
   const level = await readSignals(c, user, signIn.accessToken);
+  const person = await directory(c).getPerson(user.id);
+  // The details step: the contact email, asked once, and an invite field for a Starter account. A
+  // returning Full account that already gave an email goes straight through.
+  if (person?.status !== "blocked") {
+    const starter = effectiveLevel(person, level) === "starter";
+    if (!person?.email || starter) {
+      const email = person?.email ?? (await githubPrimaryEmail(signIn.accessToken, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS));
+      const details: SignInDetails = { level };
+      const issued = await auth(c).decide(claimed.deviceRef, "needs_details", identity, c.now(), undefined, JSON.stringify(details));
+      return detailsPage(issued.ticket ?? "", identity.login, {
+        ...(email ? { email } : {}),
+        updates: person?.email_updates === 1,
+        ...(starter ? { starter: await starterDetails(c) } : {}),
+      });
+    }
+  }
   return admitAndFinish(c, claimed.deviceRef, claimed.clientDeviceId, identity, undefined, undefined, undefined, claimed.referralCode ?? undefined, level);
+}
+
+/** The GitHub scope device sign-in asks for: read-only email addresses, to prefill the contact email. */
+const SIGN_IN_SCOPE = "user:email";
+
+/** What the callback carries to the details step on the device code. */
+interface SignInDetails {
+  level: SignInLevel;
+}
+
+function parseDetails(raw: string | null): SignInDetails {
+  try {
+    const parsed = JSON.parse(raw ?? "") as SignInDetails;
+    if (parsed && typeof parsed === "object" && parsed.level && (parsed.level.level === "full" || parsed.level.level === "starter")) return parsed;
+  } catch {
+    // Fall through: an unreadable step is treated as a plain Full sign-in.
+  }
+  return { level: { level: "full", levelReason: "qualifies" } };
+}
+
+/** The level this sign-in will leave the account at: an admin's choice or a redeemed invite stands. */
+function effectiveLevel(person: { level: Level; level_reason: LevelReason | null } | undefined, signIn: SignInLevel): Level {
+  if (person && (person.level_reason === "admin" || person.level_reason === "invite")) return person.level;
+  return signIn.level;
+}
+
+async function starterDetails(c: Ctx): Promise<{ line: string }> {
+  const { config } = await runtime(c);
+  return { line: starterLine(levelThresholds(config), config.starterWeeklyTokens) };
+}
+
+/** A plausible address: one @, a dot in the domain, no spaces, at most 254 characters. */
+function validEmail(value: string): boolean {
+  return value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+/**
+ * POST /device/details: the step after GitHub. Saves the contact email and the updates choice,
+ * and redeems an invite code when a Starter account gives one, then finishes sign-in.
+ */
+async function deviceDetails(c: Ctx): Promise<Response> {
+  const form = await readForm(c);
+  const ticket = form.get("ticket") ?? "";
+  const found = ticket ? await auth(c).ticket(ticket, c.now(), "needs_details") : undefined;
+  if (!found) return donePage("Sign-in expired", "This step expired. Start sign-in again in your terminal.", 400);
+  const details = parseDetails(found.details);
+  const person = await directory(c).getPerson(found.githubId);
+  const starter = effectiveLevel(person, details.level) === "starter" ? await starterDetails(c) : undefined;
+  const email = (form.get("email") ?? "").trim();
+  const updates = form.get("updates") === "1";
+  const inviteCode = starter ? (form.get("invite_code") ?? "").trim() || undefined : undefined;
+  const again = (error: string) => detailsPage(ticket, found.login, { email, updates, ...(starter ? { starter } : {}), error });
+  if (!validEmail(email)) return again("Enter an email address we can reach you at.");
+  if (inviteCode) {
+    const retry = await limited(c, `invite:ip:${c.ipNet}`, LIMITS.inviteAttemptIp);
+    if (retry !== undefined) return again(`Too many invite attempts. Try again in ${Math.ceil(retry / 60)} minutes, or leave the code empty.`);
+  }
+  const level: SignInLevel = inviteCode ? { ...details.level, level: "full", levelReason: "invite" } : details.level;
+  const response = await admitAndFinish(c, found.deviceRef, found.clientDeviceId, found, inviteCode, undefined, ticket, found.referralCode ?? undefined, level, {
+    onInvalidInvite: () => again("That invite code isn't valid or was already used. Check it, or leave it empty to continue on Starter."),
+  });
+  // Saved for anyone admitted (new or returning); a refusal leaves nothing to save it on.
+  await directory(c).setEmail(found.githubId, email, updates, c.now());
+  return response;
 }
 
 const GITHUB_USER_AGENT = "directionallylocal-free";
@@ -845,7 +927,10 @@ async function recheckStarter(c: Ctx, identity: Identity, config: FreeConfig): P
   const person = await directory(c).getPerson(identity.githubId);
   if (!person || person.level !== "starter" || person.level_reason === "admin") return false;
   const week = weekStart(c.now());
-  if (person.signals_at !== null && person.signals_at >= week) return false;
+  // A network-limited account is re-checked soon after sign-in (it may already qualify on its
+  // own signals), then on the weekly cadence.
+  const since = person.level_reason === "network_limit" ? c.now() - 60 * 60_000 : week;
+  if (person.signals_at !== null && person.signals_at >= since) return false;
   const profile = await githubPublicProfile(identity.login, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS);
   if (!profile) return false;
   const signals: GithubSignals = {
@@ -914,6 +999,7 @@ async function admitAndFinish(
   ticket?: string,
   referralCode?: string,
   signIn?: SignInLevel,
+  options: { onInvalidInvite?: () => Response } = {},
 ): Promise<Response> {
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
   const { config } = await runtime(c);
@@ -921,9 +1007,12 @@ async function admitAndFinish(
   const openEligible = config.openAdmission && inviteCode === undefined;
   const signupLimit = { capacity: config.networkSignupsPerDay, perHour: config.networkSignupsPerDay / 24 };
   const signupsLeft = openEligible ? (await c.env.RATE_LIMITER.getByName(signupKey).check(signupKey, signupLimit, 1, c.now())).allowed : true;
-  // Beyond the network's daily sign-ups, the account still gets in, as Starter.
-  const level: Level = signIn && !signupsLeft ? "starter" : (signIn?.level ?? "full");
-  const levelReason: LevelReason = signIn && !signupsLeft ? "network_limit" : (signIn?.levelReason ?? "qualifies");
+  // Beyond the network's daily sign-ups, a non-qualifying account still gets in, as Starter.
+  // An account that already qualifies for Full on its own signals stays Full: a shared office,
+  // campus or conference network must not downgrade real developers.
+  const networkLimited = signIn !== undefined && !signupsLeft && signIn.level !== "full";
+  const level: Level = networkLimited ? "starter" : (signIn?.level ?? "full");
+  const levelReason: LevelReason = networkLimited ? "network_limit" : (signIn?.levelReason ?? "qualifies");
   const result = await directory(c).admit({
     githubId: identity.githubId,
     login: identity.login,
@@ -966,6 +1055,7 @@ async function admitAndFinish(
       return invitePage(issued.ticket ?? "", identity.login, undefined, intro);
     }
     case "invalid_invite":
+      if (options.onInvalidInvite) return options.onInvalidInvite();
       return invitePage(ticket ?? "", identity.login, INVALID_INVITE_MESSAGE, intro);
     case "cohort_full":
       return refuse("cohort_full", "not_invited", 403);
@@ -1084,6 +1174,10 @@ async function me(c: Ctx): Promise<Response> {
     status: allowance.status,
     /** "full" or "starter": what this account may use. */
     level: person?.level ?? "full",
+    /** Why the level is what it is, so a client can explain without guessing. */
+    levelReason: person?.levelReason ?? null,
+    /** The thresholds a Full account must clear, from the effective config. */
+    thresholds: levelThresholds(config),
     /** The GitHub signals the level came from, as numbers only. */
     signals: person?.signals ?? null,
     allowance: queue ? { ...view, remaining: 0 } : view,
@@ -1475,21 +1569,16 @@ async function chat(c: Ctx): Promise<Response> {
     return apiError(400, "model_not_allowed", `The free tier serves ${ALLOWED_MODELS.join(", ")} only.`, { allowed: [...ALLOWED_MODELS] }, await headers());
   }
   const requested = modelById(body.model)!;
-  // Starter accounts get DeepSeek only: GPT-6 needs Full.
-  if (level === "starter" && requested.provider !== "luminal") {
-    return apiError(
-      403,
-      "starter_model_not_allowed",
-      starterLine(levelThresholds(gate.config), gate.config.starterWeeklyTokens),
-      { level: "starter", models: ["deepseek/deepseek-v4.1-flash-1017"] },
-      await headers(),
-    );
-  }
+  // Starter accounts get DeepSeek only: GPT-6 needs Full. Rather than refuse the request (a
+  // Starter's first prompt would fail), serve it on DeepSeek and say so with
+  // `x-dl-fallback: starter`; the client explains the level once.
+  const starterFallback = level === "starter" && requested.provider !== "luminal";
+  const effective = starterFallback ? modelById(DEEPSEEK_MODEL)! : requested;
 
   if (gate.paused) return pausedError(await headers());
   // Which model actually serves: the requested one when its provider has a key and credit left,
   // else its fallback (GPT-6 Luna → DeepSeek). Never another model.
-  const serving = servingModel(requested, gate, gate.config);
+  const serving = servingModel(effective, gate, gate.config);
   if (!serving) {
     if (providerExhausted(requested.provider, gate.config, gate)) {
       // The credit is used up: free and Pro usage pause (admins too) until it is topped up.
@@ -1530,7 +1619,7 @@ async function chat(c: Ctx): Promise<Response> {
   const promptEstimate = estimatePromptTokens(bodyBytes);
   // The requested model’s pool pays for the request, even when its fallback serves it: someone
   // who asks for Sol spends Sol’s allowance, not Luna’s.
-  const pool = requested.pool;
+  const pool = effective.pool;
   const reserveFor = (pool: Pool) =>
     person.reserve({ pool, promptEstimate, requestedMaxTokens: requestedMax, limits: { ...limits, freeBlocked: freeBlock !== undefined }, now: c.now() });
   const reservation = await reserveFor(pool);
@@ -1625,6 +1714,12 @@ async function chat(c: Ctx): Promise<Response> {
   };
 
   const response = await attempt(serving.model, serving.provider, reservation);
+  if (starterFallback) {
+    // A Starter asked for GPT-6: DeepSeek served it. Distinct from the OpenAI-failure value.
+    const outHeaders = new Headers(response.headers);
+    outHeaders.set("x-dl-fallback", "starter");
+    return new Response(response.body, { status: response.status, headers: outHeaders });
+  }
   if (!serving.fallback) return response;
   // The requested model's provider couldn't serve it, so its fallback did: say which.
   const outHeaders = new Headers(response.headers);
@@ -2109,6 +2204,8 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
             restrictedContributions: person.restricted_contributions,
             checkedAt: person.signals_at === null ? null : new Date(person.signals_at).toISOString(),
           },
+          // The contact email from the sign-in step, and whether they asked for product updates.
+          contact: { address: person.email ?? null, updates: person.email_updates === null ? null : person.email_updates === 1 },
           networks: await directory(c).networkCount(person.github_id),
           allowance: allowanceView(allowance),
           serverKeys: await account(c, person.github_id).keyCount(),

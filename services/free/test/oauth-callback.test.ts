@@ -43,7 +43,8 @@ describe("the shared OAuth callback", () => {
     const response = await service.request("GET", `/device/callback?code=${code({ id: ADMIN_ID, login: "owner" })}&state=${state}`, { headers: { cookie } });
     assert.equal(response.status, 200);
     assert.ok(!hasAdminSession(response));
-    assert.match(await response.text(), /signed in/);
+    // A first device sign-in stops at the details step (contact email) before it finishes.
+    assert.match(await response.text(), /action="\/device\/details"/);
   });
 
   it("won't finish a device sign-in with a device state presented as an admin one", async () => {

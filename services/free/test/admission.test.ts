@@ -32,8 +32,8 @@ async function service(mode: Mode): Promise<{ service: Service; admin: string }>
   return { service, admin };
 }
 
-async function attempt(service: Service, admin: string, createdAt: string, invite: Invite, id = 100): Promise<Outcome> {
-  const flow = await startBrowserFlow(service.request, { id, login: `user${id}`, createdAt });
+async function attempt(service: Service, admin: string, createdAt: string, invite: Invite, id = 100, publicRepos?: number): Promise<Outcome> {
+  const flow = await startBrowserFlow(service.request, { id, login: `user${id}`, createdAt, ...(publicRepos !== undefined ? { publicRepos } : {}) });
   const poll = async () => service.request("POST", "/v1/device/token", { body: { device_code: flow.deviceCode } });
   const via = async () => {
     const people = (await (await service.request("GET", "/admin/people", { token: admin })).json()) as { people: Array<{ githubId: number; admittedVia: string; level: string }> };
@@ -59,6 +59,12 @@ async function attempt(service: Service, admin: string, createdAt: string, invit
     return { admitted: true, ...(await via()), askedForInvite };
   }
   return { admitted: false, askedForInvite, inviteError: /role="alert"><strong>([^<]+)</.exec(page)?.[1] };
+}
+
+async function level(service: Service, admin: string, githubId: number): Promise<{ level: string; reason: string | null } | undefined> {
+  const body = (await (await service.request("GET", "/admin/people", { token: admin })).json()) as { people: Array<{ githubId: number; level: string; levelReason: string | null }> };
+  const row = body.people.find((person) => person.githubId === githubId);
+  return row ? { level: row.level, reason: row.levelReason } : undefined;
 }
 
 describe("admission matrix", () => {
@@ -122,10 +128,32 @@ describe("open admission", () => {
 
   it("gives accounts past the network's daily sign-ups Starter, not a refusal", async () => {
     const { service: svc, admin } = await service("env");
-    for (let id = 100; id < 103; id++) assert.equal((await attempt(svc, admin, OLD, "none", id)).admitted, true);
-    const limited = await attempt(svc, admin, OLD, "none", 103);
+    for (let id = 100; id < 103; id++) assert.equal((await attempt(svc, admin, NEW, "none", id, 0)).admitted, true);
+    const limited = await attempt(svc, admin, NEW, "none", 103, 0);
     assert.equal(limited.admitted, true, "still gets in");
-    assert.equal(limited.level, "starter", "but as Starter");
+    assert.equal((await level(svc, admin, 103))?.level, "starter", "but as Starter");
+  });
+
+  it("keeps a qualifying account Full even past the network's daily sign-ups", async () => {
+    const { service: svc, admin } = await service("env");
+    for (let id = 100; id < 105; id++) {
+      assert.equal((await attempt(svc, admin, OLD, "none", id, 3)).admitted, true);
+      assert.equal((await level(svc, admin, id))?.level, "full", `account ${id}`);
+    }
+  });
+
+  it("flags non-qualifying accounts past the network's daily sign-ups as network_limit", async () => {
+    const { service: svc, admin } = await service("env");
+    for (let id = 100; id < 103; id++) {
+      assert.equal((await attempt(svc, admin, NEW, "none", id, 0)).admitted, true);
+      const row = await level(svc, admin, id);
+      assert.equal(row?.level, "starter");
+      assert.notEqual(row?.reason, "network_limit", "within the limit: its own reason");
+    }
+    for (let id = 103; id < 105; id++) {
+      assert.equal((await attempt(svc, admin, NEW, "none", id, 0)).admitted, true);
+      assert.deepEqual(await level(svc, admin, id), { level: "starter", reason: "network_limit" });
+    }
   });
 
   it("goes back to the env value when the override is cleared", async () => {
