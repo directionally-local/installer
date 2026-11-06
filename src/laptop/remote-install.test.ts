@@ -13,8 +13,8 @@ const box = { target: "box" };
 
 describe("installing over SSH", () => {
   it("bootstraps with install.sh, under sudo -n when not root", () => {
-    assert.equal(bootstrapCommand(root, undefined, "0.10.1"), "curl -fsSL 'https://directionallylocal.run' -o /tmp/dl-install.sh && DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh /tmp/dl-install.sh");
-    assert.equal(bootstrapCommand(sudoer, undefined, "0.10.1"), "curl -fsSL 'https://directionallylocal.run' -o /tmp/dl-install.sh && sudo -n env DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh /tmp/dl-install.sh");
+    assert.equal(bootstrapCommand(root, undefined, "0.10.1"), "curl -fsSL 'https://dl.new/install.sh' -o /tmp/dl-install.sh && DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh /tmp/dl-install.sh");
+    assert.equal(bootstrapCommand(sudoer, undefined, "0.10.1"), "curl -fsSL 'https://dl.new/install.sh' -o /tmp/dl-install.sh && sudo -n env DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh /tmp/dl-install.sh");
   });
 
   it("installs this laptop's own dl version on the server, never npm's latest", async () => {
@@ -28,7 +28,7 @@ describe("installing over SSH", () => {
   });
 
   it("installs npm's latest only when told to, with no DL_VERSION", () => {
-    assert.equal(bootstrapCommand(root, undefined, null), "curl -fsSL 'https://directionallylocal.run' -o /tmp/dl-install.sh && DL_INSTALL_ONLY=1 sh /tmp/dl-install.sh");
+    assert.equal(bootstrapCommand(root, undefined, null), "curl -fsSL 'https://dl.new/install.sh' -o /tmp/dl-install.sh && DL_INSTALL_ONLY=1 sh /tmp/dl-install.sh");
   });
 
   it("reads the server's dl version, and nothing when it has no dl", async () => {
@@ -46,10 +46,10 @@ describe("installing over SSH", () => {
     const published: DlRegistry = { has: async () => true, latest: async () => "0.10.1" };
     const unpublished: DlRegistry = { has: async () => false, latest: async () => "0.10.1" };
     const offline: DlRegistry = { has: async () => undefined, latest: async () => undefined };
-    const plan = (server: string | undefined, laptop: string, registry = published) => planServerDl({ name: "box", server, laptop, registry, update: "curl -fsSL https://directionallylocal.run | sh" });
+    const plan = (server: string | undefined, laptop: string, registry = published) => planServerDl({ name: "box", server, laptop, registry, update: "curl -fsSL https://dl.new/install.sh | sh" });
 
     it("leaves a newer server as it is and says how to update this laptop", async () => {
-      assert.deepEqual(await plan("0.11.0", "0.10.1"), { action: "keep", reason: "newer", message: "box runs dl 0.11.0, newer than this laptop's 0.10.1. Update this laptop: curl -fsSL https://directionallylocal.run | sh" });
+      assert.deepEqual(await plan("0.11.0", "0.10.1"), { action: "keep", reason: "newer", message: "box runs dl 0.11.0, newer than this laptop's 0.10.1. Update this laptop: curl -fsSL https://dl.new/install.sh | sh" });
       assert.equal((await plan("0.10.10", "0.10.9")).action, "keep", "numeric, not lexicographic");
       assert.equal((await plan("1.0.0", "1.0.0-rc.2")).action, "keep", "a release is newer than its pre-release");
       assert.equal((await plan("1.0.0-rc.10", "1.0.0-rc.2")).action, "keep", "pre-release numbers compare as numbers");
@@ -83,7 +83,7 @@ describe("installing over SSH", () => {
         version: null,
         message: "This laptop's dl 0.10.2-dev.0 isn't on npm (a development build?), so box gets npm's latest dl instead.",
       });
-      assert.deepEqual(await plan("0.11.0", "0.10.2-dev.0", unpublished), { action: "keep", reason: "newer", message: "box runs dl 0.11.0, newer than this laptop's 0.10.2-dev.0. Update this laptop: curl -fsSL https://directionallylocal.run | sh" }, "a newer server is left alone either way");
+      assert.deepEqual(await plan("0.11.0", "0.10.2-dev.0", unpublished), { action: "keep", reason: "newer", message: "box runs dl 0.11.0, newer than this laptop's 0.10.2-dev.0. Update this laptop: curl -fsSL https://dl.new/install.sh | sh" }, "a newer server is left alone either way");
     });
 
     it("runs the install script only when the plan says so", async () => {

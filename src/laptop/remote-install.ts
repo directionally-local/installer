@@ -26,7 +26,7 @@ export interface ServerAnswers {
   githubToken?: string;
 }
 
-export const INSTALL_URL = "https://directionallylocal.run";
+export const INSTALL_URL = "https://dl.new/install.sh";
 
 /** A fresh Ui for each checklist: a TerminalUi redraws only the last plan it drew. */
 export type UiFactory = () => Ui;

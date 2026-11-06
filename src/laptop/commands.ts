@@ -407,7 +407,7 @@ export function laptopReady(info: ReadyHere, io: LaptopIO = processIO): void {
   io.out(`     ${c.bold('dl run "fix the flaky checkout test"')}   ${c.dim("a background task that ends in a pull request")}\n`);
   io.out(`     ${c.bold("dl setup")}    ${c.dim("set up where background tasks run: your own server, or this computer")}\n\n`);
   io.out(`  ${c.dim("A server of your own (on Ubuntu or Debian):")}\n`);
-  io.out(`     curl -fsSL https://directionallylocal.run | sudo DL_MODE=server sh\n`);
+  io.out(`     curl -fsSL https://dl.new/install.sh | sudo DL_MODE=server sh\n`);
   io.out(`  ${c.dim("Already have one? Connect this laptop to it:")}\n`);
   io.out(`     dl connect https://your-server\n\n`);
 }

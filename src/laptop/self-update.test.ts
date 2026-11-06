@@ -84,7 +84,7 @@ describe("the installer dl update runs", () => {
     assert.equal(run.command, "sh");
     assert.deepEqual(run.args, ["-s"]);
     assert.equal(run.script, true);
-    assert.equal(run.url, "https://directionallylocal.run");
+    assert.equal(run.url, "https://dl.new/install.sh");
     assert.deepEqual(run.env, { DL_MODE: "laptop", DL_VERSION: "0.17.0", DL_NO_START: "1", DL_NO_MODIFY_PATH: "1", DL_HOME: "/home/ada/.directionallylocal" });
   });
 
@@ -163,15 +163,15 @@ describe("dl update", () => {
     const lines = Array.from({ length: 20 }, (_, index) => `line ${index + 1}`);
     const { io, deps, reruns } = harness({ latest: async () => "0.17.0", lines, code: 1 });
     assert.equal(await dlUpdate(deps), 1);
-    assert.match(io.stderr(), /✗ Updating dl to 0\.17\.0 failed \(sh exited with 1\)\. Its last lines:\n {4}line 6\n[\s\S]* {4}line 20\n {2}By hand: curl -fsSL https:\/\/directionallylocal\.run \| DL_VERSION=0\.17\.0 sh\n/);
+    assert.match(io.stderr(), /✗ Updating dl to 0\.17\.0 failed \(sh exited with 1\)\. Its last lines:\n {4}line 6\n[\s\S]* {4}line 20\n {2}By hand: curl -fsSL https:\/\/dl\.new\/install\.sh \| DL_VERSION=0\.17\.0 sh\n/);
     assert.doesNotMatch(io.stderr(), /line 5\n/, "only the last lines");
     assert.deepEqual(reruns, []);
   });
 
   it("fails when the install script can't be fetched", async () => {
-    const { io, deps, runs } = harness({ latest: async () => "0.17.0", fetchScript: async () => { throw new Error("https://directionallylocal.run answered 502"); } });
+    const { io, deps, runs } = harness({ latest: async () => "0.17.0", fetchScript: async () => { throw new Error("https://dl.new/install.sh answered 502"); } });
     assert.equal(await dlUpdate(deps), 1);
-    assert.match(io.stderr(), /Couldn't get the install script: https:\/\/directionallylocal\.run answered 502/);
+    assert.match(io.stderr(), /Couldn't get the install script: https:\/\/dl\.new\/install\.sh answered 502/);
     assert.deepEqual(runs, []);
   });
 

@@ -190,7 +190,7 @@ describe("cli", () => {
     // A server-only command off a server explains what this is, and how to set up a server.
     out = "";
     assert.equal(await main(["previews"], io, { root: true, serverState: async () => undefined }), 1, "previews explains itself, even off a server");
-    assert.match(out, /isn't set up on this machine[\s\S]*run on this computer or on your own server[\s\S]*curl -fsSL https:\/\/directionallylocal\.run \| sudo DL_MODE=server sh/);
+    assert.match(out, /isn't set up on this machine[\s\S]*run on this computer or on your own server[\s\S]*curl -fsSL https:\/\/dl\.new\/install\.sh \| sudo DL_MODE=server sh/);
     out = "";
     assert.equal(await main(["use"], io), 0);
     assert.match(out, /Nothing set up yet\. {2}dl/);
@@ -228,7 +228,7 @@ describe("cli", () => {
     assert.match(out, /Directionally Local {2}on this computer\n\n {2}dl {9}\d+\.\d+\.\d+ · installed in \S+\n {2}Autopilot {2}\d+\.\d+\.\d+ · comes with dl\n/);
     assert.match(out, /Start, in a project folder:\n {5}dl {10}a new session with Autopilot in that folder\n {5}dl -c {7}continue the last session there\n/);
     assert.match(out, /Next steps\n {5}dl run "fix the flaky checkout test" {3}a background task that ends in a pull request\n {5}dl setup {4}set up where background tasks run/);
-    assert.match(out, /curl -fsSL https:\/\/directionallylocal\.run \| sudo DL_MODE=server sh\n/);
+    assert.match(out, /curl -fsSL https:\/\/dl\.new\/install\.sh \| sudo DL_MODE=server sh\n/);
     assert.match(out, /dl connect https:\/\/your-server/);
     // Before Autopilot has a provider (first run not finished): one line says so.
     out = "";

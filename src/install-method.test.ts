@@ -37,7 +37,7 @@ describe("how dl was installed", () => {
   it("root on Linux without a server is a plain install like anyone's: the script's update, without sudo", () => {
     const rootPlain = facts({ packageRoot: "/root/.directionallylocal/dl/lib/node_modules/directionallylocal", platform: "linux", uid: 0, home: "/root" });
     assert.equal(installMethod(rootPlain), "script");
-    assert.equal(updateCommand(installMethod(rootPlain)), "curl -fsSL https://directionallylocal.run | sh");
+    assert.equal(updateCommand(installMethod(rootPlain)), "curl -fsSL https://dl.new/install.sh | sh");
     assert.equal(installMethod(facts({ packageRoot: "/usr/lib/node_modules/directionallylocal", platform: "linux", uid: 0, home: "/root" })), "npm", "npm install -g as root, with no server");
   });
 
@@ -51,8 +51,8 @@ describe("how dl was installed", () => {
     assert.equal(updateCommand("script"), SCRIPT_UPDATE);
     assert.equal(updateCommand("server"), SERVER_UPDATE);
     assert.equal(updateCommand("npm"), NPM_UPDATE);
-    assert.equal(SCRIPT_UPDATE, "curl -fsSL https://directionallylocal.run | sh");
-    assert.equal(SERVER_UPDATE, "curl -fsSL https://directionallylocal.run | sudo sh");
+    assert.equal(SCRIPT_UPDATE, "curl -fsSL https://dl.new/install.sh | sh");
+    assert.equal(SERVER_UPDATE, "curl -fsSL https://dl.new/install.sh | sudo sh");
     assert.equal(NPM_UPDATE, "npm install -g directionallylocal");
   });
 });

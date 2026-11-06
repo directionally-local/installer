@@ -13,8 +13,8 @@ import { fileURLToPath } from "node:url";
  */
 export type InstallMethod = "script" | "server" | "npm";
 
-export const SCRIPT_UPDATE = "curl -fsSL https://directionallylocal.run | sh";
-export const SERVER_UPDATE = "curl -fsSL https://directionallylocal.run | sudo sh";
+export const SCRIPT_UPDATE = "curl -fsSL https://dl.new/install.sh | sh";
+export const SERVER_UPDATE = "curl -fsSL https://dl.new/install.sh | sudo sh";
 export const NPM_UPDATE = "npm install -g directionallylocal";
 
 /** What the install script writes into DL_HOME/bin/dl. */
