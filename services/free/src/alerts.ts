@@ -166,6 +166,8 @@ export const SLOW_MIN_REQUESTS = 10;
 export const SLOW_FAILURE_SHARE = 0.1;
 /** …or when this many different people got a rate limit or a failure in the window. */
 export const SLOW_PEOPLE = 3;
+/** And never on fewer than this many failures: one slow reply at low traffic isn't an incident. */
+export const SLOW_MIN_FAILURES = 3;
 /** At most one slow-down email this often while it lasts. */
 export const SLOW_REPEAT_MS = 30 * 60_000;
 /** Back to normal: under this share with at least SLOW_MIN_REQUESTS in the window… */
@@ -198,6 +200,7 @@ export function failuresOf(window: LuminalWindow): number {
 /** Whether Luminal is slowing people down, by the rate or by the people. */
 export function luminalSlow(window: LuminalWindow): boolean {
   const failures = failuresOf(window);
+  if (failures < SLOW_MIN_FAILURES) return false;
   return (window.requests >= SLOW_MIN_REQUESTS && failures / window.requests >= SLOW_FAILURE_SHARE - 1e-9) || window.people >= SLOW_PEOPLE;
 }
 

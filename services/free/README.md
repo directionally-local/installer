@@ -342,7 +342,7 @@ dl free tier: requests are refused with upstream_credit_exhausted: $2,000.12 of 
 an hour kept, and `requests.upstream_outcome`): `ok`, `rate_limited` (Luminal's 429), `error`
 (5xx, unreachable, the service's key refused, an error body, a stream failing part way) or
 `timeout` (no response headers before `luminalFirstByteTimeoutSeconds`). Over a rolling 10
-minutes, when at least 10 requests had 10% or more rate limited or failed, or 3 different people
+minutes, with at least 3 failures, when at least 10 requests had 10% or more rate limited or failed, or 3 different people
 got a rate limit or a failure, the owner gets an email at once, and at most one more every 30
 minutes while it lasts. It ends with one email, when the 10 minutes fall under 2% (with at least
 10 requests) or nothing failed for 30 minutes after the last email. Admin requests count: they
