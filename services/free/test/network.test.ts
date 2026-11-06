@@ -70,9 +70,10 @@ describe("per-network limits", () => {
     for (const [i, ip] of ["2001:db8:1:2::1", "2001:db8:1:2::2", "2001:db8:1:2:ffff::3"].entries()) {
       assert.match((await signUp(service, 100 + i, ip)).page, /signed in/i);
     }
+    // The fourth from the same /64 still gets in, as Starter.
     const fourth = await signUp(service, 103, "2001:db8:1:2:abcd:ef01:2345:6789");
-    assert.equal(fourth.status, 429);
-    assert.match(fourth.page, /Too many/);
+    assert.equal(fourth.status, 200);
+    assert.match(fourth.page, /signed in/i);
     // Another /64 is another network.
     assert.match((await signUp(service, 104, "2001:db8:1:3::1")).page, /signed in/i);
   });
@@ -82,7 +83,7 @@ describe("per-network limits", () => {
     for (const [i, ip] of ["198.51.100.1", "::ffff:198.51.100.1", "198.51.100.1"].entries()) {
       assert.match((await signUp(service, 200 + i, ip)).page, /signed in/i);
     }
-    assert.equal((await signUp(service, 203, "::ffff:c633:6401")).status, 429);
+    assert.equal((await signUp(service, 203, "::ffff:c633:6401")).status, 200, "still gets in, as Starter");
     assert.match((await signUp(service, 204, "198.51.100.2")).page, /signed in/i);
   });
 

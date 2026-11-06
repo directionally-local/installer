@@ -2,6 +2,7 @@ import { DurableObject, type DurableObjectNamespace, type DurableObjectState } f
 import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.js";
 import type { DirectoryObject } from "./directory-object.js";
 import { DEFAULT_MODEL, POOLS, POOL_TOKENS, type Pool } from "./models.js";
+import type { Level } from "./admission.js";
 import { costOf, planReservation } from "./quota.js";
 import { weekEnd, weekStart } from "./week.js";
 
@@ -108,6 +109,13 @@ export interface Limits {
    * their requests can use top-ups only. Pro is unaffected.
    */
   freeBlocked?: boolean;
+  /**
+   * "starter" caps the Luna pool at `starterTokens` and zeroes Sol and Astra, so a Starter
+   * account gets DeepSeek only. Pro is unaffected.
+   */
+  level?: Level;
+  /** A Starter account's weekly tokens (STARTER_WEEKLY_TOKENS). */
+  starterTokens?: number;
 }
 
 export interface BillingState {
@@ -600,13 +608,20 @@ export class AccountObject extends DurableObject<AccountEnv> {
     for (const pool of POOLS) {
       const used = sql.exec<{ used: number }>("SELECT used FROM pool_usage WHERE week_start = ? AND pool = ?", start, pool).toArray()[0]?.used ?? 0;
       const reserved = sql.exec<{ total: number | null }>("SELECT SUM(amount) AS total FROM reservations WHERE pool = ? AND source = 'weekly'", pool).toArray()[0]?.total ?? 0;
+      // A Starter account gets DeepSeek only: the Luna pool at the Starter grant, nothing else.
+      // Pro replaces the level, as it replaces the free allowance.
+      const starter = limits.level === "starter" && plan !== "pro";
       const base =
         pool === "luna"
           ? plan === "pro"
             ? (limits.proTokensPerWeek ?? limits.weeklyTokens)
-            : (row?.weekly_tokens ?? limits.weeklyTokens)
-          : POOL_TOKENS[pool];
-      const tokensPerWeek = pool === "luna" ? base + bonus : base;
+            : starter
+              ? (limits.starterTokens ?? 5_000_000)
+              : (row?.weekly_tokens ?? limits.weeklyTokens)
+          : starter
+            ? 0
+            : POOL_TOKENS[pool];
+      const tokensPerWeek = pool === "luna" && !starter ? base + bonus : base;
       out[pool] = { tokensPerWeek, usedThisWeek: used, reserved, remaining: Math.max(0, tokensPerWeek - used - reserved) };
     }
     return out;

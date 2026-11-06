@@ -38,6 +38,32 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
   so the $20 per-person cap leaves room for a much less cache-friendly week.
 - Any other model or provider needs the person’s own key (`model_not_allowed`).
 
+## Account levels
+
+Every account is `full` or `starter`. The point is to make account farming unprofitable
+without turning away real developers.
+
+- **Full**: the account is at least `FULL_MIN_ACCOUNT_AGE_DAYS` (90) days old **and** has
+  `FULL_MIN_PUBLIC_REPOS` (3) public repositories **or** `FULL_MIN_CONTRIBUTIONS` (50)
+  contributions in the last year (private ones count when the person shows them).
+- **Starter**: everyone else. DeepSeek only, `STARTER_WEEKLY_TOKENS` (5M) tokens a week, no
+  GPT-6. Asking for a GPT-6 model is a 403 `starter_model_not_allowed` with an honest
+  sentence: what Starter gets, why, and the three ways up (keep using GitHub, an invite code,
+  your own key). Starter accounts are admitted, never refused.
+- **Signals** are read at sign-in with the token sign-in already has (no new scopes): account
+  age and public repositories from `/user`, then one GraphQL call for followers, contributions
+  and `restrictedContributionsCount`. Only the numbers and when they were read are stored:
+  never repository names or contents. If GitHub can't answer, the account gets Full (fail open)
+  and the failure is counted.
+- **Promotion**: at sign-in, weekly from the public profile (promote only, once per person per
+  week), with an invite code, or by an admin. An admin can also demote or block; their choice
+  stands until they change it.
+- **Network cap**: at most `NETWORK_SIGNUPS_PER_DAY` (3) new sign-ins per network per day.
+  Beyond that the account still gets in, as Starter.
+- **Existing users** are re-checked lazily on their next request; nobody is cut off mid-session.
+- **Admin**: `GET /admin/people` shows each person's level, signals and network count, and
+  takes `?level=starter` and `?shared=1`. `POST /admin/people/:id/level {level}` sets it.
+
 ## Admission
 
 There is one account per GitHub user, keyed on the numeric GitHub id.

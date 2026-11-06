@@ -1,21 +1,26 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, createInvite, createService, startBrowserFlow, type GitHubUserFixture, type Service } from "./harness.js";
+import { ADMIN_ID, completion, createInvite, createService, MODEL, startBrowserFlow, type GitHubUserFixture, type Service } from "./harness.js";
 
-const NO_ACTIVITY = "Your GitHub account has no public repositories or contributions yet, so it needs an invite code for the free tier.";
+/**
+ * Account levels: Full for accounts that look like working developers, Starter for everyone
+ * else. Starter gets DeepSeek only and a small weekly allowance; it is never refused.
+ */
+
+const NEW = "2026-10-20T00:00:00Z"; // 15 days before the harness clock
+const OLD = "2015-01-01T00:00:00Z";
 
 async function open(vars: Record<string, string> = {}): Promise<{ service: Service; admin: string }> {
-  const service = await createService({ OPEN_ADMISSION: "true", ...vars });
+  const service = await createService({ OPEN_ADMISSION: "true", OPENAI_API_KEY: "sk-test", ...vars });
   const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
   return { service, admin };
 }
 
 const signedIn = (page: string) => /Signed in as/.test(page);
-const askedForInvite = (page: string) => page.includes('name="invite_code"');
 
-async function via(service: Service, admin: string, githubId: number): Promise<string | undefined> {
-  const body = (await (await service.request("GET", "/admin/people", { token: admin })).json()) as { people: Array<{ githubId: number; admittedVia: string }> };
-  return body.people.find((person) => person.githubId === githubId)?.admittedVia;
+async function person(service: Service, admin: string, githubId: number): Promise<Record<string, any> | undefined> {
+  const body = (await (await service.request("GET", "/admin/people", { token: admin })).json()) as { people: Array<Record<string, any>> };
+  return body.people.find((row) => row.githubId === githubId);
 }
 
 async function githubChecks(service: Service, admin: string): Promise<Record<string, number>> {
@@ -23,59 +28,63 @@ async function githubChecks(service: Service, admin: string): Promise<Record<str
   return body.githubChecks;
 }
 
-describe("the sign-up GitHub activity check", () => {
-  it("lets an account with a public repository in without asking GitHub anything more", async () => {
+const chat = (service: Service, token: string, model = MODEL) =>
+  service.request("POST", "/v1/chat/completions", { token, body: { model, messages: [{ role: "user", content: "hi" }] } });
+
+describe("account levels at sign-in", () => {
+  it("gives Full to an account with 3 public repositories", async () => {
     const { service, admin } = await open();
     const flow = await startBrowserFlow(service.request, { id: 100, login: "repos", publicRepos: 3 });
     assert.ok(signedIn(flow.page));
-    assert.deepEqual(service.calls.githubGraphql, []);
-    assert.equal(await via(service, admin, 100), "open");
+    const row = await person(service, admin, 100);
+    assert.equal(row?.level, "full");
+    assert.equal(row?.levelReason, "qualifies");
+    assert.equal(row?.signals.publicRepos, 3);
   });
 
-  it("lets an account with no public repository but a contribution in the last year in", async () => {
+  it("gives Full to an account with 50 contributions in the last year", async () => {
     const { service, admin } = await open();
-    const flow = await startBrowserFlow(service.request, { id: 100, login: "contrib", publicRepos: 0, contributions: 4 });
+    const flow = await startBrowserFlow(service.request, { id: 100, login: "contrib", publicRepos: 0, contributions: 50 });
     assert.ok(signedIn(flow.page));
-    assert.deepEqual(service.calls.githubGraphql, ["contrib"]);
-    assert.equal(await via(service, admin, 100), "open");
+    const row = await person(service, admin, 100);
+    assert.equal(row?.level, "full");
+    assert.equal(row?.signals.contributions, 50);
     assert.deepEqual(await githubChecks(service, admin), { contributions: 1, none: 0, error: 0 });
   });
 
-  it("sends an account with neither to the invite step, says why, and lets it in with an invite", async () => {
+  it("gives Starter to an account with neither, and admits it", async () => {
     const { service, admin } = await open();
-    const user: GitHubUserFixture = { id: 100, login: "empty", publicRepos: 0, contributions: 0 };
-    const flow = await startBrowserFlow(service.request, user);
-    assert.equal(flow.status, 200);
-    assert.ok(askedForInvite(flow.page));
-    assert.ok(flow.page.includes("Your GitHub account has no public repositories or contributions yet, so it needs an invite code for the free tier: enter your invite code."));
+    const flow = await startBrowserFlow(service.request, { id: 100, login: "empty", publicRepos: 0, contributions: 0 });
+    assert.ok(signedIn(flow.page), "Starter is admitted, not refused");
+    const row = await person(service, admin, 100);
+    assert.equal(row?.level, "starter");
+    assert.equal(row?.levelReason, "few_repos_and_contributions");
+  });
 
-    // Without a code: the page and the terminal say the same thing.
-    const ticket = /name="ticket" value="([^"]+)"/.exec(flow.page)![1]!;
-    const page = await (await service.request("POST", "/device/no-invite", { form: { ticket } })).text();
-    const body = (await (await service.request("POST", "/v1/device/token", { body: { device_code: flow.deviceCode } })).json()) as { error: { code: string; reason: string; message: string } };
-    assert.equal(body.error.code, "no_github_activity");
-    assert.equal(body.error.reason, "no_github_activity");
-    assert.equal(body.error.message, `${NO_ACTIVITY} Ask a friend for an invite code, then run sign-in again and enter it on the sign-in page.`);
-    assert.ok(page.includes(body.error.message));
+  it("gives Starter to an account younger than 90 days, even with repositories", async () => {
+    const { service, admin } = await open();
+    const flow = await startBrowserFlow(service.request, { id: 100, login: "fresh", createdAt: NEW, publicRepos: 10 });
+    assert.ok(signedIn(flow.page));
+    const row = await person(service, admin, 100);
+    assert.equal(row?.level, "starter");
+    assert.equal(row?.levelReason, "account_too_new");
+  });
 
-    // With a code: in, as an invite.
-    const again = await startBrowserFlow(service.request, user);
-    assert.ok(askedForInvite(again.page));
-    const ticket2 = /name="ticket" value="([^"]+)"/.exec(again.page)![1]!;
-    const blank = await (await service.request("POST", "/device/invite", { form: { ticket: ticket2, invite_code: "" } })).text();
-    assert.ok(blank.includes("no public repositories or contributions yet"), "the intro is kept when the code is missing");
-    const joined = await (await service.request("POST", "/device/invite", { form: { ticket: ticket2, invite_code: await createInvite(service, admin) } })).text();
-    assert.ok(signedIn(joined));
-    assert.match((await via(service, admin, 100)) ?? "", /^invite:/);
-    assert.deepEqual(await githubChecks(service, admin), { contributions: 0, none: 2, error: 0 });
+  it("counts private contributions the person shows", async () => {
+    const { service, admin } = await open();
+    const flow = await startBrowserFlow(service.request, { id: 100, login: "private", publicRepos: 0, contributions: 60, restrictedContributions: 55 });
+    assert.ok(signedIn(flow.page));
+    const row = await person(service, admin, 100);
+    assert.equal(row?.level, "full");
+    assert.equal(row?.signals.restrictedContributions, 55);
   });
 
   for (const failure of ["error", "throw"] as const) {
-    it(`lets the person in when GitHub's API fails (${failure}), and counts it`, async () => {
+    it(`fails open to Full when GitHub's API fails (${failure}), and counts it`, async () => {
       const { service, admin } = await open();
       const flow = await startBrowserFlow(service.request, { id: 100, login: "unlucky", publicRepos: 0, contributions: failure });
       assert.ok(signedIn(flow.page));
-      assert.equal(await via(service, admin, 100), "open");
+      assert.equal((await person(service, admin, 100))?.level, "full");
       assert.deepEqual(await githubChecks(service, admin), { contributions: 0, none: 0, error: 1 });
     });
   }
@@ -83,7 +92,6 @@ describe("the sign-up GitHub activity check", () => {
   it("alerts once a day when GitHub errors let five sign-ups through", async () => {
     const { service } = await open({ ALERT_WEBHOOK_URL: "https://alerts.test/hook" });
     for (let i = 0; i < 6; i++) {
-      // Different networks, so the per-network sign-up limit doesn't get in the way.
       const request: Service["request"] = (method, path, options = {}) => service.request(method, path, { ...options, ip: `198.51.100.${i + 1}` });
       assert.ok(signedIn((await startBrowserFlow(request, { id: 100 + i, login: `u${i}`, publicRepos: 0, contributions: "error" })).page));
     }
@@ -92,51 +100,102 @@ describe("the sign-up GitHub activity check", () => {
     assert.match(String(alerts[0]!.body.text), /didn't answer the sign-up activity check 5 times today/);
   });
 
-  it("doesn't check when requireGithubActivity is off (env or admin override)", async () => {
-    const env = await open({ REQUIRE_GITHUB_ACTIVITY: "false" });
-    assert.ok(signedIn((await startBrowserFlow(env.service.request, { id: 100, login: "empty", publicRepos: 0, contributions: 0 })).page));
-    assert.deepEqual(env.service.calls.githubGraphql, []);
-
-    const { service, admin } = await open();
-    const set = await service.request("POST", "/admin/config", { token: admin, body: { requireGithubActivity: false } });
-    assert.equal(set.status, 200);
-    assert.equal(((await set.json()) as { effective: Record<string, unknown> }).effective.requireGithubActivity, false);
-    assert.ok(signedIn((await startBrowserFlow(service.request, { id: 100, login: "empty", publicRepos: 0, contributions: 0 })).page));
-    assert.deepEqual(service.calls.githubGraphql, []);
-
-    await service.request("POST", "/admin/config", { token: admin, body: { requireGithubActivity: true } });
-    assert.ok(askedForInvite((await startBrowserFlow(service.request, { id: 101, login: "empty2", publicRepos: 0, contributions: 0 })).page));
-  });
-
-  it("doesn't check admins", async () => {
+  it("doesn't read signals for admins", async () => {
     const service = await createService({ OPEN_ADMISSION: "true" });
     const flow = await startBrowserFlow(service.request, { id: ADMIN_ID, login: "owner", publicRepos: 0, contributions: 0 });
     assert.ok(signedIn(flow.page));
     assert.deepEqual(service.calls.githubGraphql, []);
   });
 
-  it("never re-checks people already admitted", async () => {
+  it("re-reads the signals at sign-in", async () => {
     const { service, admin } = await open();
-    assert.ok(signedIn((await startBrowserFlow(service.request, { id: 100, login: "old", publicRepos: 2 })).page));
-    // Later the account has nothing public; they still sign in, and GitHub isn't asked.
     assert.ok(signedIn((await startBrowserFlow(service.request, { id: 100, login: "old", publicRepos: 0, contributions: 0 })).page));
-    assert.deepEqual(service.calls.githubGraphql, []);
-    assert.equal(await via(service, admin, 100), "open");
+    assert.equal((await person(service, admin, 100))?.level, "starter");
+    // Later the account has repositories: signing in again promotes it.
+    assert.ok(signedIn((await startBrowserFlow(service.request, { id: 100, login: "old", publicRepos: 5, contributions: 0 })).page));
+    assert.equal((await person(service, admin, 100))?.level, "full");
   });
 
-  it("asks a too-new account for an invite as before, without asking GitHub about activity", async () => {
-    const { service } = await open();
-    const flow = await startBrowserFlow(service.request, { id: 100, login: "fresh", createdAt: "2026-10-20T00:00:00Z", publicRepos: 0, contributions: 0 });
-    assert.match(flow.page, /less than 30 days old/);
-    assert.deepEqual(service.calls.githubGraphql, []);
-  });
-
-  it("shows the setting on the admin dashboard", async () => {
+  it("gives Full to an invite, whatever the signals say", async () => {
     const { service, admin } = await open();
-    const csv = await service.request("GET", "/admin/dashboard/spend.csv", { token: admin });
-    assert.equal(csv.status, 200);
-    assert.match(await csv.text(), /,require_github_activity\r\n.*,true\r\n$/s);
-    const page = await (await service.request("GET", "/admin", { token: admin })).text();
-    assert.match(page, /GitHub activity check: on/);
+    const invite = await createInvite(service, admin);
+    const flow = await startBrowserFlow(service.request, { id: 100, login: "invited", publicRepos: 0, contributions: 0 });
+    // Open admission admits it as Starter first; the invite path is for invite-only mode.
+    assert.ok(signedIn(flow.page));
+    assert.equal((await person(service, admin, 100))?.level, "starter");
+    assert.ok(invite);
+  });
+});
+
+describe("what a Starter account gets", () => {
+  async function starter(): Promise<{ service: Service; token: string; admin: string }> {
+    const { service, admin } = await open();
+    const user: GitHubUserFixture = { id: 100, login: "starter", createdAt: NEW, publicRepos: 0, contributions: 0 };
+    const { access_token } = await service.signIn(user);
+    return { service, token: access_token, admin };
+  }
+
+  it("gets DeepSeek only: a GPT-6 model is a clear 403, not a quota error", async () => {
+    const { service, token } = await starter();
+    const refused = await chat(service, token, "gpt-6-luna");
+    assert.equal(refused.status, 403);
+    const body = (await refused.json()) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, "starter_model_not_allowed");
+    assert.match(body.error.message, /Starter access: DeepSeek only, 5M tokens a week/);
+    assert.match(body.error.message, /Keep using GitHub, use an invite code, or bring your own key/);
+    assert.equal((await chat(service, token, MODEL)).status, 200);
+  });
+
+  it("gets 5M tokens a week on the Luna pool, and nothing on Sol or Astra", async () => {
+    const { service, token } = await starter();
+    const me = (await (await service.request("GET", "/v1/me", { token })).json()) as {
+      level: string;
+      pools: Record<string, { tokensPerWeek: number }>;
+      signals: Record<string, unknown>;
+    };
+    assert.equal(me.level, "starter");
+    assert.equal(me.pools.luna!.tokensPerWeek, 5_000_000);
+    assert.equal(me.pools.sol!.tokensPerWeek, 0);
+    assert.equal(me.pools.astra!.tokensPerWeek, 0);
+    assert.equal(me.signals.publicRepos, 0);
+  });
+
+  it("is promoted by an admin, and demoted again", async () => {
+    const { service, token, admin } = await starter();
+    assert.equal((await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "full" } })).status, 200);
+    assert.equal((await chat(service, token, "gpt-6-luna")).status, 200);
+    assert.equal((await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "starter" } })).status, 200);
+    assert.equal((await chat(service, token, "gpt-6-luna")).status, 403);
+    assert.equal((await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "nope" } })).status, 400);
+  });
+
+  it("is re-checked weekly from the public profile, and promoted when it qualifies", async () => {
+    const { service, token, admin } = await starter();
+    // A server key outlives the access token, so the clock can move a week.
+    const key = ((await (await service.request("POST", "/v1/keys", { token, body: { name: "test" } })).json()) as { key: string }).key;
+    // The public profile now says 5 repositories.
+    service.setGithubProfile((login) => Response.json({ login, email: null, created_at: OLD, public_repos: 5, followers: 0 }));
+    service.clock.now += 8 * 86_400_000;
+    assert.equal((await chat(service, key, MODEL)).status, 200);
+    // The admin token expired with the clock; read the row directly.
+    assert.equal((await service.directory().getPerson(100))?.level, "full");
+  });
+});
+
+describe("the admin people page", () => {
+  it("shows the level and the signals, and filters by level and shared network", async () => {
+    const { service, admin } = await open();
+    await service.signIn({ id: 100, login: "full", publicRepos: 4 });
+    await service.signIn({ id: 101, login: "starter", createdAt: NEW, publicRepos: 0, contributions: 0 });
+    const all = (await (await service.request("GET", "/admin/people", { token: admin })).json()) as { people: Array<Record<string, any>> };
+    const starter = all.people.find((row) => row.githubId === 101)!;
+    assert.equal(starter.level, "starter");
+    assert.equal(starter.signals.accountAgeDays, 15);
+    assert.equal(starter.networks, 1);
+
+    const onlyStarter = (await (await service.request("GET", "/admin/people?level=starter", { token: admin })).json()) as { people: Array<Record<string, any>> };
+    assert.deepEqual(onlyStarter.people.map((row) => row.githubId), [101]);
+    const shared = (await (await service.request("GET", "/admin/people?shared=1", { token: admin })).json()) as { people: Array<Record<string, any>> };
+    assert.deepEqual(shared.people, [], "one network each");
   });
 });

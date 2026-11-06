@@ -35,6 +35,16 @@ export interface FreeConfig {
   perPersonWeeklyUsdCap: number | undefined;
   /** GitHub accounts younger than this need an invite code even when admission is open. */
   minGithubAccountAgeDays: number;
+  /** Full access needs an account at least this old (FULL_MIN_ACCOUNT_AGE_DAYS). */
+  fullMinAccountAgeDays: number;
+  /** ... and at least this many public repositories (FULL_MIN_PUBLIC_REPOS) ... */
+  fullMinPublicRepos: number;
+  /** ... or this many contributions in the last year (FULL_MIN_CONTRIBUTIONS). */
+  fullMinContributions: number;
+  /** A Starter account's weekly tokens (STARTER_WEEKLY_TOKENS): DeepSeek only. */
+  starterWeeklyTokens: number;
+  /** New sign-ins one network gets a day before the rest are Starter (NETWORK_SIGNUPS_PER_DAY). */
+  networkSignupsPerDay: number;
   /**
    * Open admission: GitHub accounts at least `minGithubAccountAgeDays` old get in without an
    * invite code (still within `maxActiveUsers`). Off by default: invite-only for everyone.
@@ -168,6 +178,11 @@ export const DEFAULTS = {
   globalTotalUsdCap: 7000,
   perPersonWeeklyUsdCap: 20,
   minGithubAccountAgeDays: 30,
+  fullMinAccountAgeDays: 90,
+  fullMinPublicRepos: 3,
+  fullMinContributions: 50,
+  starterWeeklyTokens: 5_000_000,
+  networkSignupsPerDay: 3,
   openAdmission: false,
   requireGithubActivity: true,
   /**
@@ -240,6 +255,11 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     globalTotalUsdCap: usd(env.GLOBAL_TOTAL_USD_CAP, DEFAULTS.globalTotalUsdCap, "GLOBAL_TOTAL_USD_CAP"),
     perPersonWeeklyUsdCap: usd(env.PER_PERSON_WEEKLY_USD_CAP, DEFAULTS.perPersonWeeklyUsdCap, "PER_PERSON_WEEKLY_USD_CAP"),
     minGithubAccountAgeDays: whole(env.MIN_GITHUB_ACCOUNT_AGE_DAYS, DEFAULTS.minGithubAccountAgeDays, "MIN_GITHUB_ACCOUNT_AGE_DAYS"),
+    fullMinAccountAgeDays: whole(env.FULL_MIN_ACCOUNT_AGE_DAYS, DEFAULTS.fullMinAccountAgeDays, "FULL_MIN_ACCOUNT_AGE_DAYS"),
+    fullMinPublicRepos: whole(env.FULL_MIN_PUBLIC_REPOS, DEFAULTS.fullMinPublicRepos, "FULL_MIN_PUBLIC_REPOS"),
+    fullMinContributions: whole(env.FULL_MIN_CONTRIBUTIONS, DEFAULTS.fullMinContributions, "FULL_MIN_CONTRIBUTIONS"),
+    starterWeeklyTokens: whole(env.STARTER_WEEKLY_TOKENS, DEFAULTS.starterWeeklyTokens, "STARTER_WEEKLY_TOKENS"),
+    networkSignupsPerDay: whole(env.NETWORK_SIGNUPS_PER_DAY, DEFAULTS.networkSignupsPerDay, "NETWORK_SIGNUPS_PER_DAY"),
     openAdmission: flag(env.OPEN_ADMISSION, DEFAULTS.openAdmission, "OPEN_ADMISSION"),
     requireGithubActivity: flag(env.REQUIRE_GITHUB_ACTIVITY, DEFAULTS.requireGithubActivity, "REQUIRE_GITHUB_ACTIVITY"),
     countCachedTokens: flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS"),

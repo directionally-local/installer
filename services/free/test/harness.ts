@@ -129,8 +129,12 @@ export interface GitHubUserFixture {
   id: number;
   login: string;
   createdAt?: string;
-  /** `public_repos` on GitHub's /user (default 1). */
+  /** `public_repos` on GitHub's /user (default 3: a Full account). */
   publicRepos?: number;
+  /** Followers on the GraphQL viewer (default 0). */
+  followers?: number;
+  /** Private contributions the person shows (default 0). */
+  restrictedContributions?: number;
   /**
    * What GitHub's GraphQL API answers for the last year's contributions (default 0):
    * a count, "error" (HTTP 502) or "throw" (the fetch itself fails).
@@ -283,7 +287,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
     if (url === "https://api.github.com/user") {
       const token = new Headers(init.headers).get("authorization")?.replace("Bearer token-for-", "") ?? "";
       const user = JSON.parse(decodeURIComponent(token)) as GitHubUserFixture;
-      return Response.json({ id: user.id, login: user.login, created_at: user.createdAt ?? "2015-01-01T00:00:00Z", public_repos: user.publicRepos ?? 1, followers: 0 });
+      return Response.json({ id: user.id, login: user.login, created_at: user.createdAt ?? "2015-01-01T00:00:00Z", public_repos: user.publicRepos ?? 3, followers: 0 });
     }
     if (url.startsWith("https://api.github.com/users/")) {
       const login = decodeURIComponent(url.slice("https://api.github.com/users/".length));
@@ -294,10 +298,20 @@ export async function createService(vars: Record<string, string> = {}, options: 
       const token = new Headers(init.headers).get("authorization")?.replace("Bearer token-for-", "") ?? "";
       const user = JSON.parse(decodeURIComponent(token)) as GitHubUserFixture;
       calls.githubGraphql.push(user.login);
-      assert.match(String(init.body), /viewer \{ contributionsCollection \{ contributionCalendar \{ totalContributions/);
+      assert.match(String(init.body), /viewer \{ followers \{ totalCount \} contributionsCollection \{ restrictedContributionsCount contributionCalendar \{ totalContributions/);
       if (user.contributions === "throw") throw new TypeError("fetch failed");
       if (user.contributions === "error") return Response.json({ message: "Server Error" }, { status: 502 });
-      return Response.json({ data: { viewer: { contributionsCollection: { contributionCalendar: { totalContributions: user.contributions ?? 0 } } } } });
+      return Response.json({
+        data: {
+          viewer: {
+            followers: { totalCount: user.followers ?? 0 },
+            contributionsCollection: {
+              restrictedContributionsCount: user.restrictedContributions ?? 0,
+              contributionCalendar: { totalContributions: user.contributions ?? 0 },
+            },
+          },
+        },
+      });
     }
     if (url === "https://openrouter.ai/api/v1/chat/completions") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;

@@ -25,6 +25,16 @@ export const RUNTIME_SETTINGS = {
   maxActiveUsers: { kind: "count", env: "MAX_ACTIVE_USERS" },
   /** Accounts old enough get in without an invite. */
   openAdmission: { kind: "flag", env: "OPEN_ADMISSION" },
+  /** Full access needs an account at least this many days old. */
+  fullMinAccountAgeDays: { kind: "count", env: "FULL_MIN_ACCOUNT_AGE_DAYS" },
+  /** ... and at least this many public repositories ... */
+  fullMinPublicRepos: { kind: "count", env: "FULL_MIN_PUBLIC_REPOS" },
+  /** ... or this many contributions in the last year. */
+  fullMinContributions: { kind: "count", env: "FULL_MIN_CONTRIBUTIONS" },
+  /** A Starter account's weekly tokens (DeepSeek only). */
+  starterWeeklyTokens: { kind: "tokens", env: "STARTER_WEEKLY_TOKENS" },
+  /** New sign-ins one network gets a day before the rest are Starter. */
+  networkSignupsPerDay: { kind: "count", env: "NETWORK_SIGNUPS_PER_DAY" },
   /** New accounts need a public repo or a contribution in the last year to skip the invite. */
   requireGithubActivity: { kind: "flag", env: "REQUIRE_GITHUB_ACTIVITY" },
   /** Cached prompt tokens' weight against the token allowance, 0 to 1. */
