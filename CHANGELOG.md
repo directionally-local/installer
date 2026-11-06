@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.20.0](https://github.com/directionally-local/installer/compare/v0.19.1...v0.20.0) (2026-11-06)
+
+
+### Features
+
+* **free:** account levels make farming unprofitable without turning away developers ([0418a5b](https://github.com/directionally-local/installer/commit/0418a5ba9b4afc8d6a7c3f3c7a95b064d2bac2ee))
+* **free:** OpenAI is the default provider, with DeepSeek as the fallback ([e28a6e0](https://github.com/directionally-local/installer/commit/e28a6e0c6bc96e0f991f860e447ba9c5f91682d0))
+* **free:** OpenAI is the default provider, with DeepSeek as the fallback ([c4f064f](https://github.com/directionally-local/installer/commit/c4f064fc879e27849551692f11e3a8ce687eb6ae))
+* **free:** sign-in asks for a contact email, and Starter can redeem an invite ([905d735](https://github.com/directionally-local/installer/commit/905d73541091c9f8e0b69f46ad3d7041bc6be9cb))
+* **free:** Starter accounts are served, not refused ([5b63266](https://github.com/directionally-local/installer/commit/5b63266ed736ecbf83e16f0bf277aa8926d170f4))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.14.0 ([85ce6ba](https://github.com/directionally-local/installer/commit/85ce6bae93b0adec09e4be799f6fe4eedd546ce6))
+* **free:** Sol and Astra fall back to DeepSeek too, and the cap is $20 ([f9908f1](https://github.com/directionally-local/installer/commit/f9908f1668f88dfee156efb56b889f649834b181))
+* **free:** the dashboard's Block and "Serve from" buttons work again ([869621c](https://github.com/directionally-local/installer/commit/869621c7d4237cf780c6071559c62a82aea88498))
+* **free:** the dashboard's Block and "Serve from" buttons work again ([8739562](https://github.com/directionally-local/installer/commit/8739562e55b353a44babf05765d9ddef9542b902))
+* **free:** the Luminal slow-down email needs at least 3 failures ([15afb30](https://github.com/directionally-local/installer/commit/15afb30f8a663e7e203c17a9c6f1751c74e0f42f))
+* **free:** the Luminal slow-down email needs at least 3 failures ([8a2d3c4](https://github.com/directionally-local/installer/commit/8a2d3c4e37a320aca43d8b22c325a38463dc00fe))
+
 ## [0.19.1](https://github.com/directionally-local/installer/compare/v0.19.0...v0.19.1) (2026-11-06)
 
 
