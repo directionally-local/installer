@@ -15,6 +15,8 @@ export interface FreeStatus {
   /** When the waitlist next admits (Monday 00:00 UTC); null unless `free` is "waitlist". */
   opensAt: string | null;
   updatedAt: string;
+  /** Each model the free tier serves and whether it can serve right now. No amounts or counts. */
+  models: Array<{ id: string; available: boolean }>;
 }
 
 export const STATUS_PAUSED_MESSAGE = "The free tier is paused for now. Bring your own key, or check back soon.";
@@ -45,15 +47,19 @@ export function freeStatus(input: {
   weekCreditUsd: number;
   waiting: number;
   policy: Policy;
+  /** Each model and whether it can serve now (its provider has a key and credit left). */
+  models: Array<{ id: string; available: boolean }>;
 }): FreeStatus {
   const updatedAt = new Date(input.now).toISOString();
-  const paused = (reason: FreeReason, message: string): FreeStatus => ({ free: "paused", reason, message, opensAt: null, updatedAt });
+  const models = input.models;
+  const paused = (reason: FreeReason, message: string): FreeStatus => ({ free: "paused", reason, message, opensAt: null, updatedAt, models });
   if (input.paused) return paused("kill_switch", STATUS_PAUSED_MESSAGE);
   if (!input.upstream) return paused("no_upstream", STATUS_PAUSED_MESSAGE);
-  if (input.upstream === "luminal" && input.creditUsedUsd >= input.luminalCreditUsd) return paused("credit_exhausted", STATUS_CREDIT_MESSAGE);
+  // Every model's provider is out of credit: nothing can serve.
+  if (models.length > 0 && models.every((model) => !model.available)) return paused("credit_exhausted", STATUS_CREDIT_MESSAGE);
   if (shouldQueue({ weekUsd: input.weekUsd, weekCreditUsd: input.weekCreditUsd, queueLength: input.waiting, policy: input.policy })) {
     const opensAt = weekEnd(input.now);
-    return { free: "waitlist", reason: "weekly_budget", message: waitlistMessage(opensAt), opensAt: new Date(opensAt).toISOString(), updatedAt };
+    return { free: "waitlist", reason: "weekly_budget", message: waitlistMessage(opensAt), opensAt: new Date(opensAt).toISOString(), updatedAt, models };
   }
-  return { free: "open", reason: null, message: "", opensAt: null, updatedAt };
+  return { free: "open", reason: null, message: "", opensAt: null, updatedAt, models };
 }

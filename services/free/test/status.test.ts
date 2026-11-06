@@ -4,7 +4,20 @@ import type { DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, createService, NOW, type Service } from "./harness.js";
 import { weekStart } from "../src/week.js";
 
-type Status = { free: string; reason: string | null; message: string; opensAt: string | null; updatedAt: string };
+type Status = {
+  free: string;
+  reason: string | null;
+  message: string;
+  opensAt: string | null;
+  updatedAt: string;
+  models: Array<{ id: string; available: boolean }>;
+};
+
+/** The status without its per-model list, for the assertions about the tier as a whole. */
+function core(body: Status): Omit<Status, "models"> {
+  const { models: _models, ...rest } = body;
+  return rest;
+}
 
 function db(service: Service): DatabaseSync {
   service.directory();
@@ -24,14 +37,18 @@ async function get(service: Service): Promise<{ response: Response; body: Status
   return { response, body: JSON.parse(text) as Status, text };
 }
 
-/** Only these keys, and no digits outside the two timestamps. */
+/** Only these keys, and no digits outside the two timestamps and the model ids. */
 function assertNoNumbers(text: string, body: Status): void {
-  assert.deepEqual(Object.keys(body).sort(), ["free", "message", "opensAt", "reason", "updatedAt"]);
-  const stripped = text.replace(/"(opensAt|updatedAt)":"[^"]*"/g, "").replace(/opens on \w+ \d{1,2} \w+/, "");
+  assert.deepEqual(Object.keys(body).sort(), ["free", "message", "models", "opensAt", "reason", "updatedAt"]);
+  const stripped = text
+    .replace(/"(opensAt|updatedAt)":"[^"]*"/g, "")
+    .replace(/"models":\[[^\]]*\]/g, "")
+    .replace(/opens on \w+ \d{1,2} \w+/, "");
   assert.doesNotMatch(stripped, /\d/, `numbers leaked: ${text}`);
 }
 
-const LUMINAL = { LUMINAL_API_KEY: "lum-test", PRIMARY_UPSTREAM: "luminal", LUMINAL_CREDIT_USD: "1000", LUMINAL_WEEKLY_CREDIT_USD: "250", OPEN_ADMISSION: "true" };
+// No OpenRouter key: with one, DeepSeek would still serve through it and nothing would pause.
+const LUMINAL = { LUMINAL_API_KEY: "lum-test", PRIMARY_UPSTREAM: "luminal", LUMINAL_CREDIT_USD: "1000", LUMINAL_WEEKLY_CREDIT_USD: "250", OPEN_ADMISSION: "true", OPENROUTER_API_KEY: "" };
 
 describe("GET /v1/status", () => {
   it("is open with no auth, cacheable for 30 s, CORS for anyone, no numbers", async () => {
@@ -40,7 +57,14 @@ describe("GET /v1/status", () => {
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "public, max-age=30");
     assert.equal(response.headers.get("access-control-allow-origin"), "*");
-    assert.deepEqual(body, { free: "open", reason: null, message: "", opensAt: null, updatedAt: new Date(NOW).toISOString() });
+    assert.deepEqual(core(body), { free: "open", reason: null, message: "", opensAt: null, updatedAt: new Date(NOW).toISOString() });
+    // Only DeepSeek can serve: the harness has an OpenRouter key and no OpenAI or Luminal one.
+    assert.deepEqual(body.models, [
+      { id: "gpt-6-luna", available: false },
+      { id: "gpt-6.1-sol", available: false },
+      { id: "gpt-6-astra", available: false },
+      { id: "deepseek/deepseek-v4.1-flash-1017", available: true },
+    ]);
     assertNoNumbers(text, body);
     const preflight = await service.request("OPTIONS", "/v1/status");
     assert.equal(preflight.status, 204);
@@ -55,7 +79,7 @@ describe("GET /v1/status", () => {
     const service = await createService({ OPEN_ADMISSION: "true", GLOBAL_WEEKLY_USD_CAP: "250" });
     seedSpend(service, { usd: 200 });
     const { body, text } = await get(service);
-    assert.deepEqual(body, {
+    assert.deepEqual(core(body), {
       free: "waitlist",
       reason: "weekly_budget",
       message: "The free tier is at capacity this week: new sign-ups join a waitlist that opens on Monday 9 November.",
@@ -85,20 +109,21 @@ describe("GET /v1/status", () => {
     const service = await createService(LUMINAL);
     seedSpend(service, { creditUsd: 1000 });
     const { body, text } = await get(service);
-    assert.deepEqual(body, {
+    assert.deepEqual(core(body), {
       free: "paused",
       reason: "credit_exhausted",
       message: "The free tier is paused: high demand used up this round of free tokens. Bring your own key, or check back soon.",
       opensAt: null,
       updatedAt: new Date(NOW).toISOString(),
     });
+    assert.ok(body.models.every((model) => !model.available));
     assertNoNumbers(text, body);
   });
 
   it("paused by the env kill switch and by the admin's", async () => {
     const env = await createService({ PAUSED: "true" });
     const { body } = await get(env);
-    assert.deepEqual(body, { free: "paused", reason: "kill_switch", message: "The free tier is paused for now. Bring your own key, or check back soon.", opensAt: null, updatedAt: new Date(NOW).toISOString() });
+    assert.deepEqual(core(body), { free: "paused", reason: "kill_switch", message: "The free tier is paused for now. Bring your own key, or check back soon.", opensAt: null, updatedAt: new Date(NOW).toISOString() });
 
     const service = await createService();
     const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;

@@ -27,7 +27,7 @@ export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd", "paid_cost_usd", "credit_usd"],
   people: ["github_id", "login", "admitted_at", "admitted_via"],
   grants: ["github_id", "weekly_tokens", "weekly_usd"],
-  spend_weeks: ["week_start", "usd", "tokens", "requests", "admin_usd", "admin_tokens", "admin_requests", "paid_usd", "paid_tokens", "paid_requests", "credit_usd", "free_credit_usd"],
+  spend_weeks: ["week_start", "usd", "tokens", "requests", "admin_usd", "admin_tokens", "admin_requests", "paid_usd", "paid_tokens", "paid_requests", "credit_usd", "free_credit_usd", "openai_credit_usd", "openai_free_credit_usd"],
   upstream_daily: ["day", "upstream", "requests", "errors", "prompt_tokens", "cached_tokens", "cash_usd", "credit_usd"],
   upstream_timings: ["at", "upstream", "ttfb_ms", "ttft_ms"],
   settings: ["key", "value"],
@@ -157,7 +157,7 @@ export interface PaidView {
 
 /** One upstream over one window (today, UTC, or this Monday-to-Sunday week). Admins included. */
 export interface UpstreamStats {
-  upstream: "luminal" | "openrouter";
+  upstream: "openai" | "luminal" | "openrouter";
   window: "today" | "week";
   requests: number;
   /** Requests the upstream failed: 429, 5xx, a timeout, a network error or a failed stream. */
@@ -172,7 +172,7 @@ export interface UpstreamStats {
   creditUsd: number;
 }
 
-export const UPSTREAM_NAMES = ["luminal", "openrouter"] as const;
+export const UPSTREAM_NAMES = ["openai", "luminal", "openrouter"] as const;
 
 export interface FunnelRow {
   /** Monday of the sign-up week; null for the all-time row. */

@@ -28,15 +28,20 @@ describe("runtime settings (units)", () => {
     assert.equal(next.globalWeeklyUsdCap, undefined);
     assert.equal(next.perPersonWeeklyUsdCap, 2);
     assert.equal(next.openAdmission, true);
-    assert.equal(next.globalTotalUsdCap, 1000, "untouched settings keep the env value");
+    assert.equal(next.globalTotalUsdCap, 7000, "untouched settings keep the env value");
     assert.deepEqual(settingsView(config), {
       weeklyTokens: 50_000_000,
-      perPersonWeeklyUsdCap: 5,
-      globalWeeklyUsdCap: 250,
-      globalTotalUsdCap: 1000,
+      perPersonWeeklyUsdCap: 20,
+      globalWeeklyUsdCap: 2000,
+      globalTotalUsdCap: 7000,
       maxActiveUsers: 50,
       openAdmission: false,
       requireGithubActivity: true,
+      fullMinAccountAgeDays: 90,
+      fullMinPublicRepos: 3,
+      fullMinContributions: 50,
+      starterWeeklyTokens: 5_000_000,
+      networkSignupsPerDay: 3,
       cachedTokenWeight: 0.02,
       openRouterProviderOrder: [],
       openRouterQuantizations: ["fp8", "mxfp8", "fp16", "bf16", "fp32"],
@@ -46,7 +51,10 @@ describe("runtime settings (units)", () => {
       queueReferralPlaces: 25,
       referralBonusTokens: 10_000_000,
       referralBonusCap: 50_000_000,
-      primaryUpstream: "luminal",
+      primaryUpstream: "openai",
+      openaiCreditUsd: 5000,
+      openaiWeeklyCreditUsd: 2000,
+      openaiFirstByteTimeoutSeconds: 30,
       luminalCreditUsd: 2000,
       luminalWeeklyCreditUsd: 250,
       luminalFirstByteTimeoutSeconds: 30,
@@ -110,7 +118,7 @@ describe("admin config", () => {
     await service.request("POST", "/admin/config", { token: admin, body: { weeklyTokens: null, perPersonWeeklyUsdCap: null } });
     const back = await allowance(service, token);
     assert.equal(back.tokensPerWeek, 50_000_000);
-    assert.equal(back.usdPerWeek, 5);
+    assert.equal(back.usdPerWeek, 20);
   });
 
   it("a per-person grant still wins over the runtime default", async () => {
@@ -136,7 +144,7 @@ describe("admin config", () => {
     assert.equal((await chat(service, token)).status, 200);
 
     const spend = (await (await service.request("GET", "/admin/spend", { token: admin })).json()) as { caps: Record<string, number | null> };
-    assert.deepEqual(spend.caps, { globalWeeklyUsd: null, globalTotalUsd: 100, perPersonWeeklyUsd: 5, weeklyTokens: 50_000_000 });
+    assert.deepEqual(spend.caps, { globalWeeklyUsd: null, globalTotalUsd: 100, perPersonWeeklyUsd: 20, weeklyTokens: 50_000_000 });
   });
 
   it("validates input and changes nothing on a bad request", async () => {

@@ -34,13 +34,15 @@ export interface SpendView {
   perPersonWeeklyUsd: number | null;
   /** Share of the weekly cap at which sign-ups queue. */
   queueThreshold: number;
-  /** The upstream setting, and whether Luminal has a key (without one, OpenRouter serves). */
-  primaryUpstream: "luminal" | "openrouter";
+  /** The provider setting, and whether each provider has a key. */
+  primaryUpstream: "openai" | "luminal" | "openrouter";
   luminalConfigured: boolean;
   /** Who serves free requests now (chooseUpstream); "none" when no upstream key is set, so requests get 503 no_upstream. */
-  serving: "luminal" | "openrouter" | "none";
+  serving: "openai" | "luminal" | "openrouter" | "none";
   /** Whether the service has an OPENROUTER_API_KEY, so the switch to OpenRouter can work. */
   openRouterConfigured: boolean;
+  /** Whether the service has an OPENAI_API_KEY. */
+  openaiConfigured: boolean;
   /** Luminal credit: the balance, used since the start, used this week (all, and free usage only). */
   creditUsd: number;
   creditUsedUsd: number;
@@ -344,13 +346,14 @@ const short = (ms: number) => isoDay(ms).slice(5);
  */
 function upstreamSwitch(spend: SpendView, csrf: string | undefined): string {
   if (!csrf) return "";
-  const button = (upstream: "luminal" | "openrouter", label: string, configured: boolean) => {
+  const secret = { openai: "OPENAI_API_KEY", luminal: "LUMINAL_API_KEY", openrouter: "OPENROUTER_API_KEY" } as const;
+  const button = (upstream: "openai" | "luminal" | "openrouter", label: string, configured: boolean) => {
     if (spend.primaryUpstream === upstream) return `<button type="button" class="on" disabled aria-pressed="true">${label}</button>`;
-    if (!configured) return `<button type="button" disabled title="No ${upstream === "luminal" ? "LUMINAL" : "OPENROUTER"}_API_KEY">${label}</button>`;
+    if (!configured) return `<button type="button" disabled title="No ${secret[upstream]}">${label}</button>`;
     return `<form method="post" action="/admin/dashboard/upstream"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="upstream" value="${upstream}"><button type="submit"${upstream === "openrouter" ? ` class="danger"` : ""}>${label}</button></form>`;
   };
-  return `<div class="switch"><span>Serve from:</span>${button("luminal", "Luminal", spend.luminalConfigured)}${button("openrouter", "OpenRouter", spend.openRouterConfigured)}</div>
-<p class="note">Takes effect on the next request; nothing switches back on its own. OpenRouter spends OpenRouter credit (cash) until you switch back.${spend.openRouterConfigured ? "" : " OpenRouter can't be chosen: the service has no OPENROUTER_API_KEY."} Each switch is in the admin log.</p>`;
+  return `<div class="switch"><span>Serve from:</span>${button("openai", "OpenAI", spend.openaiConfigured)}${button("luminal", "Luminal", spend.luminalConfigured)}${button("openrouter", "OpenRouter", spend.openRouterConfigured)}</div>
+<p class="note">Takes effect on the next request; nothing switches back on its own. OpenAI is the default; a model's own provider serves it, and GPT-6 Luna falls back to DeepSeek on Luminal when OpenAI fails or its credit runs out. OpenRouter spends OpenRouter credit (cash) until you switch back.${spend.openRouterConfigured ? "" : " OpenRouter can't be chosen: the service has no OPENROUTER_API_KEY."} Each switch is in the admin log.</p>`;
 }
 
 /** Block (or Unblock, when blocked) for one person; nothing without a CSRF token (bearer views). */
@@ -534,22 +537,24 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
 </section>`;
 
   const upstreamRow = (row: DashboardData["upstreams"][number]) =>
-    `<tr><td>${row.upstream === "luminal" ? "Luminal" : "OpenRouter"}</td><td>${count(row.requests)}</td><td>${count(row.errors)}${row.requests > 0 ? ` <span class="muted">(${percent(row.errors / row.requests)})</span>` : ""}</td><td>${ms(row.medianTtftMs)}</td><td>${ms(row.p90TtftMs)}</td><td>${ms(row.medianTtfbMs)}</td><td>${row.cacheHitShare === null ? "–" : percent(row.cacheHitShare)}</td><td>${usd(row.creditUsd)}</td><td>${usd(row.cashUsd)}</td></tr>`;
+    `<tr><td>${row.upstream === "openai" ? "OpenAI" : row.upstream === "luminal" ? "Luminal" : "OpenRouter"}</td><td>${count(row.requests)}</td><td>${count(row.errors)}${row.requests > 0 ? ` <span class="muted">(${percent(row.errors / row.requests)})</span>` : ""}</td><td>${ms(row.medianTtftMs)}</td><td>${ms(row.p90TtftMs)}</td><td>${ms(row.medianTtfbMs)}</td><td>${row.cacheHitShare === null ? "–" : percent(row.cacheHitShare)}</td><td>${usd(row.creditUsd)}</td><td>${usd(row.cashUsd)}</td></tr>`;
   const upstreamTable = (window: "today" | "week") => `<div class="scroll"><table>
 <thead><tr><th>${window === "today" ? "Today (UTC)" : `This week, since ${escapeHtml(day(currentWeek))}`}</th><th>Requests</th><th>Errors</th><th>TTFT median</th><th>TTFT p90</th><th>TTFB median</th><th>Cache hits</th><th>Credit</th><th>Cash</th></tr></thead>
 <tbody>
 ${data.upstreams.filter((row) => row.window === window).map(upstreamRow).join("\n")}
 </tbody></table></div>`;
   const serving =
-    spend.serving === "luminal"
-      ? "Luminal"
-      : spend.serving === "openrouter"
-        ? spend.primaryUpstream === "luminal" ? "OpenRouter (no LUMINAL_API_KEY)" : "OpenRouter"
-        : "None (no LUMINAL_API_KEY or OPENROUTER_API_KEY)";
+    spend.serving === "openai"
+      ? "OpenAI"
+      : spend.serving === "luminal"
+        ? "Luminal"
+        : spend.serving === "openrouter"
+          ? spend.primaryUpstream === "luminal" ? "OpenRouter (no LUMINAL_API_KEY)" : "OpenRouter"
+          : "None (no OPENAI_API_KEY, LUMINAL_API_KEY or OPENROUTER_API_KEY)";
   const upstreamSection = `<section id="upstream">
 <div class="head"><h2>Upstreams</h2>${csvLink("upstreams")}</div>
 <div class="tiles">
-<div class="tile lead">Serving<b class="state">${escapeHtml(serving)}</b><span class="note">primaryUpstream: ${escapeHtml(spend.primaryUpstream)}. ${spend.serving === "none" ? "Free requests get 503 no_upstream until a key is set." : "OpenRouter serves only when it has a key; no automatic switch mid-request."}</span></div>
+<div class="tile lead">Serving<b class="state">${escapeHtml(serving)}</b><span class="note">primaryUpstream: ${escapeHtml(spend.primaryUpstream)}. ${spend.serving === "none" ? "Free requests get 503 no_upstream until a key is set." : "A model's own provider serves it; GPT-6 Luna falls back to DeepSeek when OpenAI fails."}</span></div>
 </div>
 ${upstreamSwitch(spend, input.csrf)}
 ${upstreamTable("today")}

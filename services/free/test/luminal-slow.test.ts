@@ -20,7 +20,7 @@ const slowEmails = (service: Service) => emails(service).filter((email) => SLOW.
 const luminalEmails = (service: Service) => emails(service).filter((email) => email.subject.includes("Luminal") && !email.subject.includes("credit"));
 
 async function setup(vars: Record<string, string> = {}) {
-  const service = await createService({ LUMINAL_API_KEY: "lum-test-key", ALERT_EMAIL_TO: "owner@example.com", LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS: "0.05", ...vars }, { email: true });
+  const service = await createService({ LUMINAL_API_KEY: "lum-test-key", PRIMARY_UPSTREAM: "luminal", ALERT_EMAIL_TO: "owner@example.com", LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS: "0.05", ...vars }, { email: true });
   const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
   const people: string[] = [];
   // Three: sign-ups from one address are limited to three.

@@ -1,3 +1,5 @@
+import { isFreeModelId } from "./models.js";
+
 /**
  * Reserve-then-settle arithmetic. Before forwarding, a request reserves its prompt estimate
  * plus its output cap; the forwarded `max_tokens` is clamped so the reservation covers the
@@ -5,7 +7,7 @@
  * or kept whole when it reported nothing.
  */
 
-export const ALLOWED_MODELS = ["deepseek/deepseek-v4.1-flash-1017"] as const;
+export { ALLOWED_MODELS } from "./models.js";
 
 /** The most output tokens one request may ask for. */
 export const MAX_OUTPUT_TOKENS = 32_768;
@@ -19,8 +21,8 @@ export const BYTES_PER_TOKEN_ESTIMATE = 2;
 /** Charged when the provider reports no cost (USD per million tokens, deliberately high). */
 export const FALLBACK_USD_PER_MILLION_TOKENS = 1;
 
-export function isAllowedModel(model: unknown): model is (typeof ALLOWED_MODELS)[number] {
-  return typeof model === "string" && (ALLOWED_MODELS as readonly string[]).includes(model);
+export function isAllowedModel(model: unknown): model is string {
+  return isFreeModelId(model);
 }
 
 export function estimatePromptTokens(bodyBytes: number): number {

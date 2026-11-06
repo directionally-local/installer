@@ -25,6 +25,16 @@ export const RUNTIME_SETTINGS = {
   maxActiveUsers: { kind: "count", env: "MAX_ACTIVE_USERS" },
   /** Accounts old enough get in without an invite. */
   openAdmission: { kind: "flag", env: "OPEN_ADMISSION" },
+  /** Full access needs an account at least this many days old. */
+  fullMinAccountAgeDays: { kind: "count", env: "FULL_MIN_ACCOUNT_AGE_DAYS" },
+  /** ... and at least this many public repositories ... */
+  fullMinPublicRepos: { kind: "count", env: "FULL_MIN_PUBLIC_REPOS" },
+  /** ... or this many contributions in the last year. */
+  fullMinContributions: { kind: "count", env: "FULL_MIN_CONTRIBUTIONS" },
+  /** A Starter account's weekly tokens (DeepSeek only). */
+  starterWeeklyTokens: { kind: "tokens", env: "STARTER_WEEKLY_TOKENS" },
+  /** New sign-ins one network gets a day before the rest are Starter. */
+  networkSignupsPerDay: { kind: "count", env: "NETWORK_SIGNUPS_PER_DAY" },
   /** New accounts need a public repo or a contribution in the last year to skip the invite. */
   requireGithubActivity: { kind: "flag", env: "REQUIRE_GITHUB_ACTIVITY" },
   /** Cached prompt tokens' weight against the token allowance, 0 to 1. */
@@ -45,8 +55,14 @@ export const RUNTIME_SETTINGS = {
   referralBonusTokens: { kind: "tokens", env: "REFERRAL_BONUS_TOKENS" },
   /** The most referral bonus tokens one person gets a week. */
   referralBonusCap: { kind: "tokens", env: "REFERRAL_BONUS_CAP" },
-  /** "luminal" or "openrouter": which upstream serves chat requests. No automatic switch. */
+  /** "openai", "luminal" or "openrouter": which provider serves by default. */
   primaryUpstream: { kind: "upstream", env: "PRIMARY_UPSTREAM" },
+  /** Prepaid OpenAI credit, USD; raise it after a top-up. */
+  openaiCreditUsd: { kind: "amount", env: "OPENAI_CREDIT_USD" },
+  /** Free OpenAI credit a week the queue protects, USD; "none" for no weekly credit budget. */
+  openaiWeeklyCreditUsd: { kind: "usd", env: "OPENAI_WEEKLY_CREDIT_USD" },
+  /** Seconds to wait for OpenAI's first byte before falling back. */
+  openaiFirstByteTimeoutSeconds: { kind: "seconds", env: "OPENAI_FIRST_BYTE_TIMEOUT_SECONDS" },
   /** Prepaid Luminal credit, USD; raise it after a top-up. */
   luminalCreditUsd: { kind: "amount", env: "LUMINAL_CREDIT_USD" },
   /** Free Luminal credit a week the queue protects, USD; "none" for no weekly credit budget. */
@@ -117,7 +133,7 @@ const RULES: Record<Kind, string> = {
   quantizations: 'a list of OpenRouter quantization levels, e.g. ["fp8", "bf16"], or [] for no filter',
   dataCollection: '"deny" or "allow"',
   minutes: `a whole number of minutes, 0 to ${MAX_HOST_COOLDOWN_MINUTES} (0 turns it off)`,
-  upstream: '"luminal" or "openrouter"',
+  upstream: '"openai", "luminal" or "openrouter"',
   amount: `a number of dollars, 0 to ${MAX_USD}`,
   seconds: `a number of seconds, more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS}`,
 };

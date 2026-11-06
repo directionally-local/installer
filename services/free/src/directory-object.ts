@@ -7,9 +7,10 @@ import { dashboardData, installBreakdown, notAdmin, type DashboardData, type Das
 import type { CleanEvent } from "./events.js";
 import { creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
-import { creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
+import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
+import { qualifiesForFull, type GithubSignals, type Level, type LevelReason, type LevelThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 
 /**
@@ -58,6 +59,18 @@ export interface PersonRow {
   status: PersonStatus;
   admitted_at: number;
   admitted_via: string;
+  /** "full" or "starter" (see admission.ts). */
+  level: Level;
+  /** Why the level is what it is: qualifies, account_too_new, few_repos_and_contributions, network_limit, invite, admin. */
+  level_reason: LevelReason | null;
+  /** The GitHub signals last read, as numbers only. Null until the first read. */
+  account_age_days: number | null;
+  public_repos: number | null;
+  followers: number | null;
+  contributions: number | null;
+  restricted_contributions: number | null;
+  /** When the signals were last read (Unix ms). */
+  signals_at: number | null;
 }
 
 export interface RequestRecord {
@@ -127,6 +140,17 @@ export interface PersonState {
   referral: { code: string; joined: number; activeThisWeek: number } | null;
   /** An admin blocked this account (people.status "blocked"). */
   blocked: boolean;
+  /** "full" or "starter": what the account may use. */
+  level: Level;
+  /** The GitHub signals last read, as numbers only; null until the first read. */
+  signals: {
+    accountAgeDays: number | null;
+    publicRepos: number | null;
+    followers: number | null;
+    contributions: number | null;
+    restrictedContributions: number | null;
+    checkedAt: number | null;
+  } | null;
 }
 
 export interface Gate {
@@ -138,6 +162,9 @@ export interface Gate {
   creditUsedUsd: number;
   /** Free Luminal credit spend this week (no admins, no paid usage): what the queue watches in credit mode. */
   weekCreditUsd: number;
+  /** OpenAI credit used by everyone since the start, and free OpenAI spend this week. */
+  openaiCreditUsedUsd: number;
+  openaiWeekCreditUsd: number;
   /** People waiting in the queue for free tokens. */
   waiting: number;
   overrides: Overrides;
@@ -177,6 +204,10 @@ export interface SpendSummary {
   creditUsedUsd: number;
   creditWeekUsd: number;
   freeCreditWeekUsd: number;
+  /** OpenAI credit, the same three numbers. */
+  openaiCreditUsedUsd: number;
+  openaiCreditWeekUsd: number;
+  openaiFreeCreditWeekUsd: number;
 }
 
 const ACTIVITY = `(SELECT github_id, at FROM requests UNION ALL SELECT github_id, at FROM events)`;
@@ -461,6 +492,18 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["requests", "upstream_outcome", "TEXT"],
   ["spend_weeks", "credit_usd", "REAL NOT NULL DEFAULT 0"],
   ["spend_weeks", "free_credit_usd", "REAL NOT NULL DEFAULT 0"],
+  // OpenAI's prepaid credit, kept apart from Luminal's.
+  ["spend_weeks", "openai_credit_usd", "REAL NOT NULL DEFAULT 0"],
+  ["spend_weeks", "openai_free_credit_usd", "REAL NOT NULL DEFAULT 0"],
+  // Account levels (admission.ts): the level, why, and the GitHub signals as numbers only.
+  ["people", "level", "TEXT NOT NULL DEFAULT 'full'"],
+  ["people", "level_reason", "TEXT"],
+  ["people", "account_age_days", "INTEGER"],
+  ["people", "public_repos", "INTEGER"],
+  ["people", "followers", "INTEGER"],
+  ["people", "contributions", "INTEGER"],
+  ["people", "restricted_contributions", "INTEGER"],
+  ["people", "signals_at", "INTEGER"],
   ["daily_activity", "credit_usd", "REAL NOT NULL DEFAULT 0"],
 ];
 
@@ -563,6 +606,10 @@ export class DirectoryObject extends DurableObject {
     networkHash?: string | undefined;
     /** The effective settings; without them nobody is queued. */
     policy?: Policy;
+    /** The GitHub signals read at sign-in, and the level they give. */
+    signals?: GithubSignals;
+    level?: Level;
+    levelReason?: LevelReason;
     now: number;
   }): Promise<AdmitResult> {
     const inviteHash = input.inviteCode ? await sha256Hex(normalizeInviteCode(input.inviteCode)) : undefined;
@@ -583,6 +630,10 @@ export class DirectoryObject extends DurableObject {
           return { ok: false, reason: "device_taken" };
         }
       }
+      const level = input.level ?? "full";
+      const reason = input.levelReason ?? "qualifies";
+      const sig = input.signals;
+      const levelValues = [level, reason, sig?.accountAgeDays ?? null, sig?.publicRepos ?? null, sig?.followers ?? null, sig?.contributions ?? null, sig?.restrictedContributions ?? null, sig ? input.now : null] as const;
       const admitted = (via: "existing" | "admin" | "open" | "invite", created: boolean): AdmitResult => {
         if (input.clientDeviceId) sql.exec("INSERT OR IGNORE INTO devices (device_id, github_id) VALUES (?, ?)", input.clientDeviceId, input.githubId);
         const referralCode = this.#ensureCode(input.githubId, input.login, input.now);
@@ -609,10 +660,30 @@ export class DirectoryObject extends DurableObject {
         // A blocked account can't sign in again (admins unblock it from the dashboard).
         if (existing.status === "blocked") return { ok: false, reason: "blocked" };
         sql.exec("UPDATE people SET login = ? WHERE github_id = ?", input.login, input.githubId);
+        if (sig) {
+          sql.exec(
+            "UPDATE people SET account_age_days = ?, public_repos = ?, followers = ?, contributions = ?, restricted_contributions = ?, signals_at = ? WHERE github_id = ?",
+            sig.accountAgeDays,
+            sig.publicRepos,
+            sig.followers,
+            sig.contributions,
+            sig.restrictedContributions,
+            input.now,
+            input.githubId,
+          );
+          // An admin's own choice of level stands until they change it.
+          if (existing.level_reason !== "admin") sql.exec("UPDATE people SET level = ?, level_reason = ? WHERE github_id = ?", level, reason, input.githubId);
+        }
         return admitted("existing", false);
       }
       if (input.isAdmin) {
-        sql.exec("INSERT INTO people (github_id, login, status, admitted_at, admitted_via) VALUES (?, ?, 'active', ?, 'admin')", input.githubId, input.login, input.now);
+        sql.exec(
+          "INSERT INTO people (github_id, login, status, admitted_at, admitted_via, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at) VALUES (?, ?, 'active', ?, 'admin', ?, ?, ?, ?, ?, ?, ?, ?)",
+          input.githubId,
+          input.login,
+          input.now,
+          ...levelValues,
+        );
         return admitted("admin", true);
       }
       if (input.inviteOnly !== false) {
@@ -620,19 +691,32 @@ export class DirectoryObject extends DurableObject {
         if (active >= input.maxActive) return { ok: false, reason: "cohort_full" };
       }
       if (input.openAdmission && !input.accountTooNew) {
-        sql.exec("INSERT INTO people (github_id, login, status, admitted_at, admitted_via) VALUES (?, ?, 'active', ?, 'open')", input.githubId, input.login, input.now);
+        sql.exec(
+          "INSERT INTO people (github_id, login, status, admitted_at, admitted_via, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at) VALUES (?, ?, 'active', ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)",
+          input.githubId,
+          input.login,
+          input.now,
+          ...levelValues,
+        );
         return admitted("open", true);
       }
       if (!inviteHash) return { ok: false, reason: "needs_invite" };
       const invite = sql.exec<{ id: number; used_by: number | null }>("SELECT id, used_by FROM invites WHERE code_hash = ?", inviteHash).toArray()[0];
       if (!invite || invite.used_by !== null) return { ok: false, reason: "invalid_invite" };
       sql.exec("UPDATE invites SET used_by = ?, used_at = ? WHERE id = ?", input.githubId, input.now, invite.id);
+      // An invite is the owner's own choice: it always gives Full, whatever the signals say.
       sql.exec(
-        "INSERT INTO people (github_id, login, status, admitted_at, admitted_via) VALUES (?, ?, 'active', ?, ?)",
+        "INSERT INTO people (github_id, login, status, admitted_at, admitted_via, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at) VALUES (?, ?, 'active', ?, ?, 'full', 'invite', ?, ?, ?, ?, ?, ?)",
         input.githubId,
         input.login,
         input.now,
         `invite:${invite.id}`,
+        sig?.accountAgeDays ?? null,
+        sig?.publicRepos ?? null,
+        sig?.followers ?? null,
+        sig?.contributions ?? null,
+        sig?.restrictedContributions ?? null,
+        sig ? input.now : null,
       );
       return admitted("invite", true);
     });
@@ -826,8 +910,20 @@ export class DirectoryObject extends DurableObject {
 
   #personState(githubId: number, now: number, policy: Policy): PersonState {
     const sql = this.ctx.storage.sql;
-    const person = sql.exec<{ login: string; status: string }>("SELECT login, status FROM people WHERE github_id = ?", githubId).toArray()[0];
-    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false };
+    const person = sql
+      .exec<{
+        login: string;
+        status: string;
+        level: Level;
+        account_age_days: number | null;
+        public_repos: number | null;
+        followers: number | null;
+        contributions: number | null;
+        restricted_contributions: number | null;
+        signals_at: number | null;
+      }>("SELECT login, status, level, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at FROM people WHERE github_id = ?", githubId)
+      .toArray()[0];
+    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false, level: "full", signals: null };
     const code = this.#ensureCode(githubId, person.login, now);
     const counting = countingPairs(sql, this.#pairs(githubId), now);
     const joined = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ? AND outcome = 'ok'", githubId).toArray()[0]?.n ?? 0;
@@ -836,6 +932,18 @@ export class DirectoryObject extends DurableObject {
       bonusTokens: bonuses(counting, policy).get(githubId) ?? 0,
       referral: { code, joined, activeThisWeek: counting.filter((pair) => pair.referrer === githubId).length },
       blocked: person.status === "blocked",
+      level: person.level ?? "full",
+      signals:
+        person.signals_at === null
+          ? null
+          : {
+              accountAgeDays: person.account_age_days,
+              publicRepos: person.public_repos,
+              followers: person.followers,
+              contributions: person.contributions,
+              restrictedContributions: person.restricted_contributions,
+              checkedAt: person.signals_at,
+            },
     };
   }
 
@@ -885,6 +993,50 @@ export class DirectoryObject extends DurableObject {
       if (!found) return false;
       sql.exec("UPDATE people SET status = ? WHERE github_id = ?", status, githubId);
       if (actor && found.status !== status) this.#log(`person_status:${githubId}:${found.login}`, found.status, status, actor);
+      return true;
+    });
+  }
+
+  /**
+   * Re-reads a person's signals and promotes a Starter account to Full when they now qualify.
+   * Never demotes, and never overrides an admin's own choice of level. Returns the level after.
+   */
+  async recheckLevel(githubId: number, signals: GithubSignals, thresholds: LevelThresholds, now: number): Promise<Level | undefined> {
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const row = sql.exec<{ level: Level; level_reason: string | null }>("SELECT level, level_reason FROM people WHERE github_id = ?", githubId).toArray()[0];
+      if (!row) return undefined;
+      sql.exec(
+        "UPDATE people SET account_age_days = ?, public_repos = ?, followers = ?, contributions = ?, restricted_contributions = ?, signals_at = ? WHERE github_id = ?",
+        signals.accountAgeDays,
+        signals.publicRepos,
+        signals.followers,
+        signals.contributions,
+        signals.restrictedContributions,
+        now,
+        githubId,
+      );
+      if (row.level === "starter" && row.level_reason !== "admin" && qualifiesForFull(signals, thresholds)) {
+        sql.exec("UPDATE people SET level = 'full', level_reason = 'qualifies' WHERE github_id = ?", githubId);
+        return "full";
+      }
+      return row.level;
+    });
+  }
+
+  /** How many distinct networks this person has signed in from (for the admin page). */
+  async networkCount(githubId: number): Promise<number> {
+    return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM person_networks WHERE github_id = ?", githubId).toArray()[0]?.n ?? 0;
+  }
+
+  /** An admin sets a person's level; it stands until they change it again. False for no such person. */
+  async setLevel(githubId: number, level: Level, actor: { githubId: number; login: string; now: number }): Promise<boolean> {
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const found = sql.exec<{ login: string; level: Level }>("SELECT login, level FROM people WHERE github_id = ?", githubId).toArray()[0];
+      if (!found) return false;
+      sql.exec("UPDATE people SET level = ?, level_reason = 'admin' WHERE github_id = ?", level, githubId);
+      if (found.level !== level) this.#log(`person_level:${githubId}:${found.login}`, found.level, level, actor);
       return true;
     });
   }
@@ -970,6 +1122,8 @@ export class DirectoryObject extends DurableObject {
       totalUsd: spend.totalSpentUsd,
       creditUsedUsd: spend.creditUsedUsd,
       weekCreditUsd: spend.freeCreditWeekUsd,
+      openaiCreditUsedUsd: spend.openaiCreditUsedUsd,
+      openaiWeekCreditUsd: spend.openaiFreeCreditWeekUsd,
       waiting: this.#waitingCount(),
       overrides,
       ...(policy && githubId !== undefined ? { person: this.#personState(githubId, now, policy) } : {}),
@@ -1015,10 +1169,14 @@ export class DirectoryObject extends DurableObject {
       paid_requests: number;
       credit_usd: number;
       free_credit_usd: number;
+      openai_credit_usd: number;
+      openai_free_credit_usd: number;
     };
     const row = this.ctx.storage.sql.exec<Row>("SELECT * FROM spend_weeks WHERE week_start = ?", start).toArray()[0];
     const total = this.ctx.storage.sql
-      .exec<{ usd: number | null; admin_usd: number | null; credit_usd: number | null }>("SELECT SUM(usd) AS usd, SUM(admin_usd) AS admin_usd, SUM(credit_usd) AS credit_usd FROM spend_weeks")
+      .exec<{ usd: number | null; admin_usd: number | null; credit_usd: number | null; openai_credit_usd: number | null }>(
+        "SELECT SUM(usd) AS usd, SUM(admin_usd) AS admin_usd, SUM(credit_usd) AS credit_usd, SUM(openai_credit_usd) AS openai_credit_usd FROM spend_weeks",
+      )
       .toArray()[0];
     return {
       weekStart: start,
@@ -1037,6 +1195,9 @@ export class DirectoryObject extends DurableObject {
       creditUsedUsd: round(total?.credit_usd ?? 0),
       creditWeekUsd: round(row?.credit_usd ?? 0),
       freeCreditWeekUsd: round(row?.free_credit_usd ?? 0),
+      openaiCreditUsedUsd: round(total?.openai_credit_usd ?? 0),
+      openaiCreditWeekUsd: round(row?.openai_credit_usd ?? 0),
+      openaiFreeCreditWeekUsd: round(row?.openai_free_credit_usd ?? 0),
     };
   }
 
@@ -1129,15 +1290,17 @@ export class DirectoryObject extends DurableObject {
       const upstream: Upstream = record.upstream ?? "openrouter";
       const cash = upstream === "openrouter" ? record.costUsd : 0;
       const credit = upstream === "luminal" ? (record.creditUsd ?? 0) : 0;
+      const openaiCredit = upstream === "openai" ? (record.creditUsd ?? 0) : 0;
       this.ctx.storage.sql.exec(
-        `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests, paid_usd, paid_tokens, paid_requests, credit_usd, free_credit_usd)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests, paid_usd, paid_tokens, paid_requests, credit_usd, free_credit_usd, openai_credit_usd, openai_free_credit_usd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(week_start) DO UPDATE SET
            usd = usd + excluded.usd, tokens = tokens + excluded.tokens, requests = requests + excluded.requests,
            admin_usd = admin_usd + excluded.admin_usd, admin_tokens = admin_tokens + excluded.admin_tokens,
            admin_requests = admin_requests + excluded.admin_requests,
            paid_usd = paid_usd + excluded.paid_usd, paid_tokens = paid_tokens + excluded.paid_tokens, paid_requests = paid_requests + excluded.paid_requests,
-           credit_usd = credit_usd + excluded.credit_usd, free_credit_usd = free_credit_usd + excluded.free_credit_usd`,
+           credit_usd = credit_usd + excluded.credit_usd, free_credit_usd = free_credit_usd + excluded.free_credit_usd,
+           openai_credit_usd = openai_credit_usd + excluded.openai_credit_usd, openai_free_credit_usd = openai_free_credit_usd + excluded.openai_free_credit_usd`,
         weekStart(record.at),
         free ? cash : 0,
         free ? record.chargedTokens : 0,
@@ -1150,6 +1313,8 @@ export class DirectoryObject extends DurableObject {
         paid ? 1 : 0,
         credit,
         free ? credit : 0,
+        openaiCredit,
+        free ? openaiCredit : 0,
       );
       if (!admin) {
         // cost_usd here is what the allowance was charged (OpenRouter prices), for cost per person.
@@ -1181,8 +1346,9 @@ export class DirectoryObject extends DurableObject {
       }
       if (upstream === "luminal") {
         this.ctx.storage.sql.exec("INSERT INTO luminal_outcomes (at, github_id, outcome) VALUES (?, ?, ?)", record.at, record.githubId, outcome);
-        if (policy && credit > 0) alerts.push(...this.#creditAlerts(record.at, policy));
+        if (policy && credit > 0) alerts.push(...this.#creditAlerts(record.at, policy, "luminal"));
       }
+      if (upstream === "openai" && policy && openaiCredit > 0) alerts.push(...this.#creditAlerts(record.at, policy, "openai"));
       // Every request checks, whoever served it: after a switch to OpenRouter, OpenRouter's
       // traffic is what notices the 30 quiet minutes that end a slow-down.
       if (policy && serving) {
@@ -1272,25 +1438,27 @@ export class DirectoryObject extends DurableObject {
     return undefined;
   }
 
-  /** Luminal credit used crossing 50%, 80% and 100% of the balance: once each per balance (a new balance re-arms them). */
-  #creditAlerts(now: number, policy: Policy): Alert[] {
-    const balance = policy.luminalCreditUsd;
+  /** A provider's credit crossing 50%, 80% and 100% of its balance: once each per balance (a new balance re-arms them). */
+  #creditAlerts(now: number, policy: Policy, provider: "luminal" | "openai" = "luminal"): Alert[] {
+    const balance = provider === "openai" ? policy.openaiCreditUsd : policy.luminalCreditUsd;
     if (balance <= 0) return [];
-    const prefix = `credit:${balance}:`;
-    const used = this.#spendSync(now).creditUsedUsd;
+    const prefix = `credit:${provider}:${balance}:`;
+    const spend = this.#spendSync(now);
+    const used = provider === "openai" ? spend.openaiCreditUsedUsd : spend.creditUsedUsd;
     const hit = crossed(used / balance, this.#sentThresholds(prefix));
     if (!hit) return [];
     for (const threshold of hit.mark) this.#markAlert(`${prefix}${threshold}`, now);
-    return [creditAlert(used, balance, hit.threshold)];
+    return [creditAlert(used, balance, hit.threshold, provider === "openai" ? "OpenAI" : "Luminal")];
   }
 
   /**
    * The alert for Luminal-served usage pausing because the credit ran out: once per balance.
    * Undefined when it was already sent.
    */
-  async creditPausedAlert(balance: number, now: number): Promise<Alert | undefined> {
-    if (!this.#markAlert(`credit-paused:${balance}`, now)) return undefined;
-    return creditPausedAlert(this.#spendSync(now).creditUsedUsd, balance);
+  async creditPausedAlert(balance: number, now: number, provider: "luminal" | "openai" = "luminal"): Promise<Alert | undefined> {
+    if (!this.#markAlert(`credit-paused:${provider}:${balance}`, now)) return undefined;
+    const spend = this.#spendSync(now);
+    return creditPausedAlert(provider === "openai" ? spend.openaiCreditUsedUsd : spend.creditUsedUsd, balance, provider === "openai" ? "OpenAI" : "Luminal");
   }
 
   /** Luminal's outcomes since `since` (exclusive), admins included. */
@@ -1343,8 +1511,10 @@ export class DirectoryObject extends DurableObject {
   async queueStartedAlert(now: number, envPolicy: Policy): Promise<Alert> {
     const policy = this.#policy(envPolicy);
     const spend = this.#spendSync(now);
-    if (creditMode(policy) && policy.luminalWeeklyCreditUsd !== undefined && spend.freeCreditWeekUsd >= policy.queueThreshold * policy.luminalWeeklyCreditUsd) {
-      return queueStartedAlert(spend.freeCreditWeekUsd, policy.luminalWeeklyCreditUsd, "credit");
+    const budget = creditBudget(policy);
+    const weekCredit = budget.balanceUsd === policy.openaiCreditUsd && policy.openaiConfigured ? spend.openaiFreeCreditWeekUsd : spend.freeCreditWeekUsd;
+    if (creditMode(policy) && budget.weeklyUsd !== undefined && weekCredit >= policy.queueThreshold * budget.weeklyUsd) {
+      return queueStartedAlert(weekCredit, budget.weeklyUsd, "credit");
     }
     return queueStartedAlert(spend.spentUsd, policy.globalWeeklyUsdCap);
   }

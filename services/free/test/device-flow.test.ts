@@ -216,18 +216,13 @@ describe("browser sign-in", () => {
     await service.signIn({ id: 100, login: "alice" });
   });
 
-  it("asks GitHub accounts younger than MIN_GITHUB_ACCOUNT_AGE_DAYS for an invite, and reports account_too_new without one", async () => {
+  it("admits a GitHub account younger than MIN_GITHUB_ACCOUNT_AGE_DAYS as Starter, without asking for an invite", async () => {
     const service = await createService({ OPEN_ADMISSION: "true" });
     const flow = await startBrowserFlow(service.request, { id: 100, login: "fresh", createdAt: "2026-10-20T00:00:00Z" });
     assert.equal(flow.status, 200);
-    assert.match(flow.page, /less than 30 days old/);
-    const ticket = /name="ticket" value="([^"]+)"/.exec(flow.page)![1]!;
-    const page = await (await service.request("POST", "/device/no-invite", { form: { ticket } })).text();
+    assert.match(flow.page, /signed in/i);
     const response = await service.request("POST", "/v1/device/token", { body: { device_code: flow.deviceCode } });
-    const body = (await response.json()) as { error: { code: string; reason: string; message: string } };
-    assert.equal(body.error.code, "account_too_new");
-    assert.match(body.error.message, /less than 30 days old, so it needs an invite code/);
-    assert.ok(page.includes(body.error.message));
+    assert.equal(response.status, 200);
   });
 
   it("gives one grant per device", async () => {

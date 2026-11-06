@@ -113,7 +113,7 @@ describe("first sign-up email", () => {
   });
 
   it("says referral when the first user came by a referral link, and that they wait in the queue", async () => {
-    const service = await createService({ OPEN_ADMISSION: "true", ALERT_WEBHOOK_URL: "https://alerts.test/hook" });
+    const service = await createService({ OPEN_ADMISSION: "true", ALERT_WEBHOOK_URL: "https://alerts.test/hook", GLOBAL_WEEKLY_USD_CAP: "250" });
     await service.signIn({ id: ADMIN_ID, login: "owner" });
     // Free spend at the queue threshold: the first open sign-up waits.
     await request(service, 900, NOW - HOUR, { prompt: 1, cached: 0, out: 1, costUsd: 210 });

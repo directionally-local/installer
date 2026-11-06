@@ -44,11 +44,32 @@ export interface Policy {
   luminalConfigured: boolean;
   luminalCreditUsd: number;
   luminalWeeklyCreditUsd: number | undefined;
+  /** OPENAI_API_KEY is set. */
+  openaiConfigured: boolean;
+  openaiCreditUsd: number;
+  openaiWeeklyCreditUsd: number | undefined;
 }
 
-/** Whether Luminal serves requests, so the queue and alerts watch its credit. */
-export function creditMode(policy: Pick<Policy, "primaryUpstream" | "luminalConfigured">): boolean {
-  return policy.primaryUpstream === "luminal" && policy.luminalConfigured;
+/** Whether a prepaid-credit provider serves requests, so the queue and alerts watch its credit. */
+export function creditMode(policy: Pick<Policy, "primaryUpstream" | "luminalConfigured"> & Partial<Pick<Policy, "openaiConfigured">>): boolean {
+  // A credit provider serves when the primary is one and has a key, or when the primary has no
+  // key and the other credit provider does (the same choice creditBudget makes).
+  if (policy.primaryUpstream === "openai") return policy.openaiConfigured === true || policy.luminalConfigured === true;
+  if (policy.primaryUpstream === "luminal") return policy.luminalConfigured === true || policy.openaiConfigured === true;
+  return false;
+}
+
+/**
+ * The credit balance and weekly budget the queue watches: the primary provider's when it has
+ * a key, else whichever credit provider does (OpenAI first, then Luminal).
+ */
+export function creditBudget(
+  policy: Pick<Policy, "primaryUpstream" | "openaiConfigured" | "luminalConfigured" | "openaiCreditUsd" | "openaiWeeklyCreditUsd" | "luminalCreditUsd" | "luminalWeeklyCreditUsd">,
+): { balanceUsd: number; weeklyUsd: number | undefined } {
+  if (policy.primaryUpstream === "openai" && policy.openaiConfigured) return { balanceUsd: policy.openaiCreditUsd, weeklyUsd: policy.openaiWeeklyCreditUsd };
+  if (policy.primaryUpstream === "luminal" && policy.luminalConfigured) return { balanceUsd: policy.luminalCreditUsd, weeklyUsd: policy.luminalWeeklyCreditUsd };
+  if (policy.openaiConfigured) return { balanceUsd: policy.openaiCreditUsd, weeklyUsd: policy.openaiWeeklyCreditUsd };
+  return { balanceUsd: policy.luminalCreditUsd, weeklyUsd: policy.luminalWeeklyCreditUsd };
 }
 
 export function policyOf(config: FreeConfig): Policy {
@@ -66,6 +87,9 @@ export function policyOf(config: FreeConfig): Policy {
     luminalConfigured: config.luminalApiKey !== undefined,
     luminalCreditUsd: config.luminalCreditUsd,
     luminalWeeklyCreditUsd: config.luminalWeeklyCreditUsd,
+    openaiConfigured: config.openaiApiKey !== undefined,
+    openaiCreditUsd: config.openaiCreditUsd,
+    openaiWeeklyCreditUsd: config.openaiWeeklyCreditUsd,
   };
 }
 
@@ -106,14 +130,19 @@ export function forecast(input: {
 export function creditForecast(input: {
   lastWeekCreditUsd: number;
   lastWeekActives: number;
-  policy: Pick<Policy, "queueThreshold" | "perPersonWeeklyUsdCap" | "luminalCreditUsd" | "luminalWeeklyCreditUsd">;
+  policy: Pick<Policy, "queueThreshold" | "perPersonWeeklyUsdCap" | "luminalCreditUsd" | "luminalWeeklyCreditUsd"> & Partial<Pick<Policy, "primaryUpstream" | "openaiCreditUsd" | "openaiWeeklyCreditUsd">>;
   creditUsedUsd: number;
 }): Forecast {
   const { policy } = input;
+  const budget = creditBudget({
+    ...policy,
+    openaiCreditUsd: policy.openaiCreditUsd ?? 0,
+    openaiWeeklyCreditUsd: policy.openaiWeeklyCreditUsd,
+  } as Policy);
   return forecast({
     lastWeekUsd: input.lastWeekCreditUsd,
     lastWeekActives: input.lastWeekActives,
-    policy: { globalWeeklyUsdCap: policy.luminalWeeklyCreditUsd, globalTotalUsdCap: policy.luminalCreditUsd, queueThreshold: policy.queueThreshold, perPersonWeeklyUsdCap: policy.perPersonWeeklyUsdCap },
+    policy: { globalWeeklyUsdCap: budget.weeklyUsd, globalTotalUsdCap: budget.balanceUsd, queueThreshold: policy.queueThreshold, perPersonWeeklyUsdCap: policy.perPersonWeeklyUsdCap },
     totalSpentUsd: input.creditUsedUsd,
   });
 }
@@ -124,15 +153,26 @@ export function shouldQueue(input: {
   /** This week's free Luminal credit spend; only counts in credit mode. */
   weekCreditUsd?: number;
   queueLength: number;
-  policy: Pick<Policy, "globalWeeklyUsdCap" | "queueThreshold"> & Partial<Pick<Policy, "primaryUpstream" | "luminalConfigured" | "luminalWeeklyCreditUsd">>;
+  policy: Pick<Policy, "globalWeeklyUsdCap" | "queueThreshold"> &
+    Partial<Pick<Policy, "primaryUpstream" | "luminalConfigured" | "luminalWeeklyCreditUsd" | "luminalCreditUsd" | "openaiConfigured" | "openaiWeeklyCreditUsd" | "openaiCreditUsd">>;
 }): boolean {
   if (input.queueLength > 0) return true;
   const { policy } = input;
   const cap = policy.globalWeeklyUsdCap;
   if (cap !== undefined && input.weekUsd >= policy.queueThreshold * cap) return true;
-  const credit = policy.luminalWeeklyCreditUsd;
-  const inCreditMode = policy.primaryUpstream !== undefined && creditMode({ primaryUpstream: policy.primaryUpstream, luminalConfigured: policy.luminalConfigured === true });
-  return inCreditMode && credit !== undefined && (input.weekCreditUsd ?? 0) >= policy.queueThreshold * credit;
+  if (policy.primaryUpstream === undefined) return false;
+  const inCreditMode = creditMode({ primaryUpstream: policy.primaryUpstream, luminalConfigured: policy.luminalConfigured === true, openaiConfigured: policy.openaiConfigured === true });
+  if (!inCreditMode) return false;
+  const budget = creditBudget({
+    primaryUpstream: policy.primaryUpstream,
+    openaiConfigured: policy.openaiConfigured === true,
+    luminalConfigured: policy.luminalConfigured === true,
+    openaiCreditUsd: policy.openaiCreditUsd ?? 0,
+    openaiWeeklyCreditUsd: policy.openaiWeeklyCreditUsd,
+    luminalCreditUsd: policy.luminalCreditUsd ?? 0,
+    luminalWeeklyCreditUsd: policy.luminalWeeklyCreditUsd,
+  });
+  return budget.weeklyUsd !== undefined && (input.weekCreditUsd ?? 0) >= policy.queueThreshold * budget.weeklyUsd;
 }
 
 export interface Waiting {

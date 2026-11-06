@@ -14,6 +14,8 @@ interface Outcome {
   code?: string;
   /** How the person got in, from the admin listing. */
   via?: string;
+  /** The level they got: "full" or "starter". */
+  level?: string;
   /** The invite page asked for a code. */
   askedForInvite: boolean;
   /** The invite page's error after an invalid code. */
@@ -34,13 +36,14 @@ async function attempt(service: Service, admin: string, createdAt: string, invit
   const flow = await startBrowserFlow(service.request, { id, login: `user${id}`, createdAt });
   const poll = async () => service.request("POST", "/v1/device/token", { body: { device_code: flow.deviceCode } });
   const via = async () => {
-    const people = (await (await service.request("GET", "/admin/people", { token: admin })).json()) as { people: Array<{ githubId: number; admittedVia: string }> };
-    return people.people.find((person) => person.githubId === id)?.admittedVia;
+    const people = (await (await service.request("GET", "/admin/people", { token: admin })).json()) as { people: Array<{ githubId: number; admittedVia: string; level: string }> };
+    const row = people.people.find((person) => person.githubId === id);
+    return { via: row?.admittedVia, level: row?.level };
   };
   const askedForInvite = flow.page.includes('name="invite_code"');
   if (!askedForInvite) {
     const response = await poll();
-    if (response.status === 200) return { admitted: true, via: await via(), askedForInvite };
+    if (response.status === 200) return { admitted: true, ...(await via()), askedForInvite };
     return { admitted: false, code: ((await response.json()) as { error: { code: string } }).error.code, askedForInvite };
   }
   const ticket = /name="ticket" value="([^"]+)"/.exec(flow.page)![1]!;
@@ -53,7 +56,7 @@ async function attempt(service: Service, admin: string, createdAt: string, invit
   const page = await (await service.request("POST", "/device/invite", { form: { ticket, invite_code: code } })).text();
   if (page.includes("signed in")) {
     assert.equal((await poll()).status, 200);
-    return { admitted: true, via: await via(), askedForInvite };
+    return { admitted: true, ...(await via()), askedForInvite };
   }
   return { admitted: false, askedForInvite, inviteError: /role="alert"><strong>([^<]+)</.exec(page)?.[1] };
 }
@@ -65,16 +68,16 @@ describe("admission matrix", () => {
     ["off", "old", "none", { admitted: false, askedForInvite: true, code: "invite_required" }],
     ["off", "old", "valid", { admitted: true, askedForInvite: true }],
     ["off", "old", "invalid", { admitted: false, askedForInvite: true, inviteError: "That invite code isn&#39;t valid or was already used." }],
-    ["off", "new", "none", { admitted: false, askedForInvite: true, code: "account_too_new" }],
+    ["off", "new", "none", { admitted: false, askedForInvite: true, code: "invite_required" }],
     ["off", "new", "valid", { admitted: true, askedForInvite: true }],
     ["off", "new", "invalid", { admitted: false, askedForInvite: true, inviteError: "That invite code isn&#39;t valid or was already used." }],
-    // On (env or admin override): old enough accounts walk in; new ones still need an invite.
+    // On (env or admin override): everyone walks in; the level decides the allowance.
     ...(["env", "override"] as const).flatMap((mode): Array<[Mode, "old" | "new", Invite, Partial<Outcome>]> => [
-      [mode, "old", "none", { admitted: true, askedForInvite: false, via: "open" }],
-      [mode, "old", "valid", { admitted: true, askedForInvite: false, via: "open" }],
-      [mode, "new", "none", { admitted: false, askedForInvite: true, code: "account_too_new" }],
-      [mode, "new", "valid", { admitted: true, askedForInvite: true }],
-      [mode, "new", "invalid", { admitted: false, askedForInvite: true, inviteError: "That invite code isn&#39;t valid or was already used." }],
+      [mode, "old", "none", { admitted: true, askedForInvite: false, via: "open", level: "full" }],
+      [mode, "old", "valid", { admitted: true, askedForInvite: false, via: "open", level: "full" }],
+      [mode, "new", "none", { admitted: true, askedForInvite: false, via: "open", level: "starter" }],
+      [mode, "new", "valid", { admitted: true, askedForInvite: false, via: "open", level: "starter" }],
+      [mode, "new", "invalid", { admitted: true, askedForInvite: false, via: "open", level: "starter" }],
     ]),
   ];
 
@@ -117,11 +120,12 @@ describe("open admission", () => {
     assert.equal(people.people.length, 2, "the owner and one person");
   });
 
-  it("limits new accounts per network, then says so", async () => {
+  it("gives accounts past the network's daily sign-ups Starter, not a refusal", async () => {
     const { service: svc, admin } = await service("env");
     for (let id = 100; id < 103; id++) assert.equal((await attempt(svc, admin, OLD, "none", id)).admitted, true);
     const limited = await attempt(svc, admin, OLD, "none", 103);
-    assert.deepEqual([limited.admitted, limited.code], [false, "too_many_signups"]);
+    assert.equal(limited.admitted, true, "still gets in");
+    assert.equal(limited.level, "starter", "but as Starter");
   });
 
   it("goes back to the env value when the override is cleared", async () => {

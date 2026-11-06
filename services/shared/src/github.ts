@@ -84,6 +84,42 @@ export async function githubSignInFromCode(
   };
 }
 
+/** The public profile fields the free tier re-reads weekly for a Starter account. */
+export interface GitHubPublicProfile {
+  createdAt: number | undefined;
+  publicRepos: number | undefined;
+  followers: number | undefined;
+}
+
+/**
+ * An account's public profile, unauthenticated: age, public repositories and followers. Used
+ * for the weekly Starter re-check, where the person's own token isn't available. Undefined
+ * when GitHub doesn't answer or the profile isn't there.
+ */
+export async function githubPublicProfile(login: string, fetcher: Fetch, userAgent = "directionallylocal", timeoutMs = 5000): Promise<GitHubPublicProfile | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetcher(`https://api.github.com/users/${encodeURIComponent(login)}`, {
+      headers: { accept: "application/vnd.github+json", "user-agent": userAgent, "x-github-api-version": "2022-11-28" },
+      signal: controller.signal,
+    });
+    if (!response.ok) return undefined;
+    const body = (await response.json().catch(() => ({}))) as { created_at?: unknown; public_repos?: unknown; followers?: unknown };
+    const createdAt = typeof body.created_at === "string" ? Date.parse(body.created_at) : Number.NaN;
+    const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined);
+    return {
+      createdAt: Number.isFinite(createdAt) ? createdAt : undefined,
+      publicRepos: count(body.public_repos),
+      followers: count(body.followers),
+    };
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
 const CONTRIBUTIONS_QUERY = "query { viewer { contributionsCollection { contributionCalendar { totalContributions } } } }";
 

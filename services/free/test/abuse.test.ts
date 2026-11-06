@@ -227,7 +227,7 @@ describe("budget tiles and the serving upstream", () => {
   it("shows the upstream chooseUpstream picks, and none sensibly", async () => {
     const none = await createService({ OPENROUTER_API_KEY: "" });
     const html = await dashboard(none, await adminCookie(none));
-    assert.match(html, /Serving<b class="state">None \(no LUMINAL_API_KEY or OPENROUTER_API_KEY\)<\/b>/);
+    assert.match(html, /Serving<b class="state">None \(no OPENAI_API_KEY, LUMINAL_API_KEY or OPENROUTER_API_KEY\)<\/b>/);
     assert.match(html, /State<b class="state">Not serving: no upstream key \(503 no_upstream\)<\/b>/);
     assert.doesNotMatch(html, /queue watches OpenRouter spend/);
 

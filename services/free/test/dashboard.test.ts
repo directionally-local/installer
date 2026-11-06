@@ -311,8 +311,8 @@ describe("admin dashboard numbers", () => {
     const { service, cookie } = await scenario();
     const [row] = await csv(service, cookie, "spend");
     assert.equal(Number(row!.week_usd), 6);
-    assert.equal(row!.weekly_cap_usd, "250");
-    assert.equal(row!.total_cap_usd, "1000");
+    assert.equal(row!.weekly_cap_usd, "2000");
+    assert.equal(row!.total_cap_usd, "7000");
     assert.ok(Number(row!.admin_week_usd) > 100);
     assert.equal(row!.paused, "false");
     assert.equal(row!.admitted, "3");

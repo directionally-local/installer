@@ -123,18 +123,19 @@ export function hostFailureAlert(host: string, failures: number, requests: numbe
   };
 }
 
-export function creditAlert(usedUsd: number, balanceUsd: number, threshold: number): Alert {
-  const end = threshold >= 1 ? " Free and Pro usage is paused until the credit is topped up and LUMINAL_CREDIT_USD raised." : "";
+export function creditAlert(usedUsd: number, balanceUsd: number, threshold: number, provider = "Luminal"): Alert {
+  const end = threshold >= 1 ? ` Free and Pro usage on ${provider} is paused until the credit is topped up and its credit setting raised.` : "";
   return {
-    subject: `dl free tier: ${percentOf(threshold)} of the ${dollars(balanceUsd)} Luminal credit used`,
-    text: `dl free tier: ${dollars(usedUsd)} of the ${dollars(balanceUsd)} Luminal credit used (${percentOf(threshold)}).${end}`,
+    subject: `dl free tier: ${percentOf(threshold)} of the ${dollars(balanceUsd)} ${provider} credit used`,
+    text: `dl free tier: ${dollars(usedUsd)} of the ${dollars(balanceUsd)} ${provider} credit used (${percentOf(threshold)}).${end}`,
   };
 }
 
-export function creditPausedAlert(usedUsd: number, balanceUsd: number): Alert {
+export function creditPausedAlert(usedUsd: number, balanceUsd: number, provider = "Luminal"): Alert {
+  const setting = provider === "OpenAI" ? "openaiCreditUsd" : "luminalCreditUsd";
   return {
-    subject: "dl free tier: paused, Luminal credit used up",
-    text: `dl free tier: requests are refused with upstream_credit_exhausted: ${dollars(usedUsd)} of the ${dollars(balanceUsd)} Luminal credit is used. Top up and raise luminalCreditUsd (POST /admin/config), or switch primaryUpstream to "openrouter".`,
+    subject: `dl free tier: ${provider} credit used up`,
+    text: `dl free tier: ${provider}-served requests are refused with upstream_credit_exhausted: ${dollars(usedUsd)} of the ${dollars(balanceUsd)} ${provider} credit is used. Top up and raise ${setting} (POST /admin/config).`,
   };
 }
 
@@ -187,7 +188,7 @@ export interface LuminalWindow {
 
 /** Who serves free requests now, and whether the service could switch to OpenRouter. */
 export interface ServingContext {
-  serving: "luminal" | "openrouter" | "none";
+  serving: "openai" | "luminal" | "openrouter" | "none";
   openRouterConfigured: boolean;
   /** The dashboard's upstream switch: <base>/admin#upstream. */
   switchUrl: string;
