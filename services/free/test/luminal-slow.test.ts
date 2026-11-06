@@ -85,18 +85,18 @@ describe("Luminal slowing people down", () => {
 
   it("emails once for a 429 burst, with the counts, the people, who serves and the switch link", async () => {
     const { service, people, admin } = await setup();
-    // 8 fine, then 2 rate limited, one for the admin: 2 of 10 is 20%.
-    script(service, [ok, ok, ok, ok, ok, ok, ok, ok, busy, busy]);
+    // 7 fine, then 3 rate limited, the last for the admin: 3 of 10 is 30%.
+    script(service, [ok, ok, ok, ok, ok, ok, ok, busy, busy, busy]);
     for (let index = 0; index < 8; index++) await chat(service, people[0]!);
     await chat(service, people[0]!);
     assert.equal(slowEmails(service).length, 0, "not before 10 requests");
     await chat(service, admin);
     const sent = slowEmails(service);
     assert.equal(sent.length, 1);
-    assert.equal(sent[0]!.subject, "dl free tier: Luminal is slowing people down (20% of requests in 10 min)");
+    assert.equal(sent[0]!.subject, "dl free tier: Luminal is slowing people down (30% of requests in 10 min)");
     const body = sent[0]!.body;
-    assert.match(body, /2 of 10 Luminal requests in the last 10 minutes were rate limited or failed \(20%\)/);
-    assert.match(body, /Rate limited \(Luminal 429\): 2\n/);
+    assert.match(body, /3 of 10 Luminal requests in the last 10 minutes were rate limited or failed \(30%\)/);
+    assert.match(body, /Rate limited \(Luminal 429\): 3\n/);
     assert.match(body, /Errors \(5xx, unreachable, refused key, failed streams\): 0\n/);
     assert.match(body, /Timeouts \(no first byte in time\): 0\n/);
     assert.match(body, /People affected: 2\n/);
@@ -196,8 +196,11 @@ describe("Luminal slowing people down", () => {
   });
 
   it("words the email when OpenRouter can't be switched to", () => {
-    const window = { requests: 10, rateLimited: 2, errors: 0, timeouts: 0, people: 1 };
+    const window = { requests: 10, rateLimited: 3, errors: 0, timeouts: 0, people: 1 };
     assert.equal(luminalSlow(window), true);
+    // One or two slow replies at low traffic aren't an incident, even at 10%+ or from 3 people.
+    assert.equal(luminalSlow({ requests: 10, rateLimited: 0, errors: 0, timeouts: 1, people: 1 }), false);
+    assert.equal(luminalSlow({ requests: 10, rateLimited: 2, errors: 0, timeouts: 0, people: 3 }), false);
     assert.equal(luminalSlow({ ...window, rateLimited: 0 }), false);
     const alert = luminalSlowAlert(window, { serving: "luminal", openRouterConfigured: false, switchUrl: "https://free.test/admin#upstream" });
     assert.match(alert.text, /Switching to OpenRouter isn't possible: the service has no OPENROUTER_API_KEY/);
