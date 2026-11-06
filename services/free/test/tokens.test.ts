@@ -58,7 +58,7 @@ describe("tokens", () => {
 });
 
 describe("account", () => {
-  it("returns the allowance and the one model", async () => {
+  it("returns the allowance and every free model", async () => {
     const service = await createService();
     const { access_token } = await service.signIn({ id: ADMIN_ID, login: "owner" });
     const response = await service.request("GET", "/v1/me", { token: access_token });
@@ -69,10 +69,15 @@ describe("account", () => {
     assert.equal(body.allowance.usedThisWeek, 0);
     assert.equal(body.allowance.remaining, 50_000_000);
     assert.equal(body.allowance.resetsAt, "2026-11-09T00:00:00.000Z");
-    assert.deepEqual(body.models, ["deepseek/deepseek-v4.1-flash-1017"]);
+    assert.deepEqual(body.models, ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "deepseek/deepseek-v4.1-flash-1017"]);
 
     const models = (await (await service.request("GET", "/v1/models", { token: access_token })).json()) as { object: string; data: Array<{ id: string; object: string }> };
     assert.equal(models.object, "list");
-    assert.deepEqual(models.data.map((model) => [model.id, model.object]), [["deepseek/deepseek-v4.1-flash-1017", "model"]]);
+    assert.deepEqual(models.data.map((model) => [model.id, model.object]), [
+      ["gpt-6-luna", "model"],
+      ["gpt-6.1-sol", "model"],
+      ["gpt-6-astra", "model"],
+      ["deepseek/deepseek-v4.1-flash-1017", "model"],
+    ]);
   });
 });

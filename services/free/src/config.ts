@@ -26,7 +26,11 @@ export interface FreeConfig {
   globalWeeklyUsdCap: number | undefined;
   /** USD across everyone but admins, for the whole experiment. Undefined means no total stop. */
   globalTotalUsdCap: number | undefined;
-  /** A person's week ends at `weeklyTokens` or at this much real cost, whichever comes first. */
+  /**
+   * A person's week ends at their pool's tokens or at this much real cost, whichever comes
+   * first. Set high enough that the token pools are the limit, not this: a person who uses
+   * every pool costs about $55 a week at list prices.
+   */
   perPersonWeeklyUsdCap: number | undefined;
   /** GitHub accounts younger than this need an invite code even when admission is open. */
   minGithubAccountAgeDays: number;
@@ -92,11 +96,20 @@ export interface FreeConfig {
   /** Pro's weekly dollar ceiling (PRO_WEEKLY_USD_CAP); undefined (the default) means tokens only. */
   proWeeklyUsdCap: number | undefined;
   /**
-   * Which upstream serves chat requests (PRIMARY_UPSTREAM): "luminal" (the default) or
-   * "openrouter". There is no automatic switch between them: a Luminal error goes back to
-   * the client as a transient error. Without LUMINAL_API_KEY, OpenRouter serves.
+   * Which provider serves chat requests first (PRIMARY_UPSTREAM): "openai" (the default),
+   * "luminal" or "openrouter". A model's own provider always wins: this only decides what
+   * happens when the model's provider has no key. OpenAI failures fall back to DeepSeek on
+   * Luminal (see models.ts `fallback`); Luminal failures go back to the client as transient.
    */
   primaryUpstream: Upstream;
+  /** OpenAI's API key (OPENAI_API_KEY, a secret). Never logged. */
+  openaiApiKey: string | undefined;
+  /** Seconds to wait for OpenAI's response headers before falling back (OPENAI_FIRST_BYTE_TIMEOUT_SECONDS). */
+  openaiFirstByteTimeoutSeconds: number;
+  /** Prepaid OpenAI credit, USD (OPENAI_CREDIT_USD). At or past it, OpenAI-served usage falls back. */
+  openaiCreditUsd: number;
+  /** Free OpenAI credit a week the queue protects (OPENAI_WEEKLY_CREDIT_USD); undefined: no weekly budget. */
+  openaiWeeklyCreditUsd: number | undefined;
   /** Luminal's API key (LUMINAL_API_KEY, a secret). Never logged. */
   luminalApiKey: string | undefined;
   /** Seconds to wait for Luminal's response headers before answering a transient 503 (LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS). */
@@ -119,8 +132,8 @@ export interface FreeConfig {
   publicUrl: string | undefined;
 }
 
-export type Upstream = "luminal" | "openrouter";
-export const UPSTREAMS: readonly Upstream[] = ["luminal", "openrouter"];
+export type Upstream = "openai" | "luminal" | "openrouter";
+export const UPSTREAMS: readonly Upstream[] = ["openai", "luminal", "openrouter"];
 
 /** USD per million tokens. Cached is the price of a cached prompt token; reasoning is billed as output. */
 export interface Prices {
@@ -150,9 +163,9 @@ export const DEFAULTS = {
   weeklyTokens: 50_000_000,
   maxActiveUsers: 50,
   countCachedTokens: true,
-  globalWeeklyUsdCap: 250,
-  globalTotalUsdCap: 1000,
-  perPersonWeeklyUsdCap: 5,
+  globalWeeklyUsdCap: 2000,
+  globalTotalUsdCap: 7000,
+  perPersonWeeklyUsdCap: 60,
   minGithubAccountAgeDays: 30,
   openAdmission: false,
   requireGithubActivity: true,
@@ -186,7 +199,10 @@ export const DEFAULTS = {
   billingSuccessUrl: "https://dl.new/billing/success",
   billingCancelUrl: "https://dl.new/billing/cancel",
   billingPortalReturnUrl: "https://dl.new/billing",
-  primaryUpstream: "luminal" as Upstream,
+  primaryUpstream: "openai" as Upstream,
+  openaiFirstByteTimeoutSeconds: 30,
+  openaiCreditUsd: 5000,
+  openaiWeeklyCreditUsd: 2000,
   luminalFirstByteTimeoutSeconds: 30,
   /** https://luminal.com/pricing, 2026-11-04. */
   luminalPrices: { input: 0.1425, cached: 0.0029, output: 0.57 } as Prices,
@@ -263,8 +279,12 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     },
     proWeeklyUsdCap: text(env.PRO_WEEKLY_USD_CAP) === undefined ? undefined : usd(env.PRO_WEEKLY_USD_CAP, 0, "PRO_WEEKLY_USD_CAP"),
     primaryUpstream: upstream(env.PRIMARY_UPSTREAM),
+    openaiApiKey: text(env.OPENAI_API_KEY),
+    openaiFirstByteTimeoutSeconds: timeoutSeconds(env.OPENAI_FIRST_BYTE_TIMEOUT_SECONDS, DEFAULTS.openaiFirstByteTimeoutSeconds, "OPENAI_FIRST_BYTE_TIMEOUT_SECONDS"),
+    openaiCreditUsd: amount(env.OPENAI_CREDIT_USD, DEFAULTS.openaiCreditUsd, "OPENAI_CREDIT_USD"),
+    openaiWeeklyCreditUsd: usd(env.OPENAI_WEEKLY_CREDIT_USD, DEFAULTS.openaiWeeklyCreditUsd, "OPENAI_WEEKLY_CREDIT_USD"),
     luminalApiKey: text(env.LUMINAL_API_KEY),
-    luminalFirstByteTimeoutSeconds: timeoutSeconds(env.LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS),
+    luminalFirstByteTimeoutSeconds: timeoutSeconds(env.LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS, DEFAULTS.luminalFirstByteTimeoutSeconds, "LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS"),
     luminalPrices: prices(env, "LUMINAL_PRICE", DEFAULTS.luminalPrices),
     openRouterPrices: prices(env, "OPENROUTER_PRICE", DEFAULTS.openRouterPrices),
     luminalCreditUsd: amount(env.LUMINAL_CREDIT_USD, DEFAULTS.luminalCreditUsd, "LUMINAL_CREDIT_USD"),
@@ -403,15 +423,15 @@ function upstream(value: unknown): Upstream {
   const raw = text(value)?.toLowerCase();
   if (raw === undefined) return DEFAULTS.primaryUpstream;
   if ((UPSTREAMS as readonly string[]).includes(raw)) return raw as Upstream;
-  throw new ConfigError(`PRIMARY_UPSTREAM must be "luminal" or "openrouter" (got "${raw}").`);
+  throw new ConfigError(`PRIMARY_UPSTREAM must be "openai", "luminal" or "openrouter" (got "${raw}").`);
 }
 
-function timeoutSeconds(value: unknown): number {
+function timeoutSeconds(value: unknown, fallback: number, name: string): number {
   const raw = text(value);
-  if (raw === undefined) return DEFAULTS.luminalFirstByteTimeoutSeconds;
+  if (raw === undefined) return fallback;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > MAX_FIRST_BYTE_TIMEOUT_SECONDS) {
-    throw new ConfigError(`LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS must be more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS} (got "${raw}").`);
+    throw new ConfigError(`${name} must be more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS} (got "${raw}").`);
   }
   return parsed;
 }

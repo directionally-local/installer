@@ -148,6 +148,8 @@ export interface Service {
     openRouter: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     /** Calls to Luminal's chat completions (a fake: nothing leaves the process). */
     luminal: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
+    /** Calls to OpenAI's chat completions (a fake: nothing leaves the process). */
+    openai: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     githubTokens: Array<{ code: string; redirect_uri?: string }>;
     /** Contribution lookups on GitHub's GraphQL API, by login. */
     githubGraphql: string[];
@@ -167,6 +169,8 @@ export interface Service {
   setGithubProfile(handler: (login: string) => Response | Promise<Response>): void;
   /** Answers calls to Luminal (default: a completion with Luminal-shaped usage, no cost). */
   setLuminal(handler: OpenRouterHandler): void;
+  /** Answers calls to OpenAI (default: a completion with OpenAI-shaped usage, no cost). */
+  setOpenAI(handler: OpenRouterHandler): void;
   request(method: string, path: string, options?: { body?: unknown; token?: string; headers?: Record<string, string>; form?: Record<string, string>; ip?: string }): Promise<Response>;
   signIn(user: GitHubUserFixture, options?: { invite?: string; deviceId?: string }): Promise<Tokens>;
   directory(): any;
@@ -189,6 +193,17 @@ export function usage(prompt: number, completion: number, cached = 0, cost = 0.0
 /** A usage object the way Luminal reports it: cached tokens, but no cost. */
 export function luminalUsage(prompt: number, completion: number, cached = 0): Record<string, unknown> {
   return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion, prompt_tokens_details: { cached_tokens: cached } };
+}
+
+/** A usage object the way OpenAI reports it: cached tokens, no cost (the service prices it). */
+export function openaiUsage(prompt: number, completion: number, cached = 0): Record<string, unknown> {
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+    prompt_tokens_details: { cached_tokens: cached, cache_write_tokens: 0, audio_tokens: 0 },
+    completion_tokens_details: { reasoning_tokens: 0, audio_tokens: 0 },
+  };
 }
 
 export function completion(usageObject: Record<string, unknown> | undefined): Response {
@@ -240,7 +255,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
     ...namespaces,
   };
   const clock = { now: NOW };
-  const calls: Service["calls"] = { openRouter: [], luminal: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [] };
+  const calls: Service["calls"] = { openRouter: [], luminal: [], openai: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [] };
   let stripe = (path: string, _form?: URLSearchParams): Response | Promise<Response> =>
     path === "/v1/checkout/sessions"
       ? Response.json({ id: `cs_test_${calls.stripe.length}`, url: `https://checkout.stripe.com/c/pay/cs_test_${calls.stripe.length}` })
@@ -255,6 +270,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
   let openRouter: OpenRouterHandler = () => completion(usage(100, 10));
   let githubProfile = (login: string): Response | Promise<Response> => Response.json({ login, email: null });
   let luminal: OpenRouterHandler = () => completion(luminalUsage(100, 10));
+  let openai: OpenRouterHandler = () => completion(openaiUsage(100, 10));
 
   const fetcher = async (input: string, init: RequestInit = {}): Promise<Response> => {
     const url = String(input);
@@ -292,6 +308,11 @@ export async function createService(vars: Record<string, string> = {}, options: 
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       calls.luminal.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
       return luminal(body, init);
+    }
+    if (url === "https://api.openai.com/v1/chat/completions") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      calls.openai.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
+      return openai(body, init);
     }
     if (url.startsWith("https://api.stripe.com/")) {
       const path = new URL(url).pathname;
@@ -351,6 +372,9 @@ export async function createService(vars: Record<string, string> = {}, options: 
     },
     setLuminal: (next) => {
       luminal = next;
+    },
+    setOpenAI: (next) => {
+      openai = next;
     },
     setStripe: (next) => {
       stripe = next as never;

@@ -1,7 +1,8 @@
 import { DurableObject, type DurableObjectNamespace, type DurableObjectState } from "cloudflare:workers";
 import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.js";
 import type { DirectoryObject } from "./directory-object.js";
-import { ALLOWED_MODELS, costOf, planReservation } from "./quota.js";
+import { DEFAULT_MODEL, POOLS, POOL_TOKENS, type Pool } from "./models.js";
+import { costOf, planReservation } from "./quota.js";
 import { weekEnd, weekStart } from "./week.js";
 
 /**
@@ -54,6 +55,14 @@ export type Plan = "free" | "pro";
 /** Where a request's tokens come from: the weekly allowance (free or Pro), or top-ups. */
 export type Source = "weekly" | "topup";
 
+/** One weekly token allowance: what a model's tokens come from. */
+export interface PoolAllowance {
+  tokensPerWeek: number;
+  usedThisWeek: number;
+  reserved: number;
+  remaining: number;
+}
+
 export interface Allowance {
   exists: boolean;
   plan: Plan;
@@ -73,6 +82,8 @@ export interface Allowance {
   spentUsdThisWeek: number;
   /** Unix ms. */
   resetsAt: number;
+  /** Every pool's allowance, so a client can show what each model has left. */
+  pools: Record<Pool, PoolAllowance>;
 }
 
 export type ReserveResult =
@@ -164,6 +175,14 @@ const SCHEMA = [
      cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
      state_at             INTEGER NOT NULL DEFAULT 0
    )`,
+  // Per pool per week: the tokens each model's allowance has spent. The account's `used` stays
+  // the total, for the dollar cap and the dashboards.
+  `CREATE TABLE IF NOT EXISTS pool_usage (
+     week_start INTEGER NOT NULL,
+     pool       TEXT NOT NULL,
+     used       INTEGER NOT NULL,
+     PRIMARY KEY (week_start, pool)
+   ) WITHOUT ROWID`,
   // Top-ups: tokens bought once, used after the weekly allowance runs out, until they expire.
   `CREATE TABLE IF NOT EXISTS topups (
      id         TEXT PRIMARY KEY,
@@ -183,6 +202,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
       const columns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('reservations')").toArray().map((column) => column.name);
       if (!columns.includes("source")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN source TEXT NOT NULL DEFAULT 'weekly'");
       if (!columns.includes("paid")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN paid INTEGER NOT NULL DEFAULT 0");
+      // Reservations made before pools were all against the one model's allowance.
+      if (!columns.includes("pool")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN pool TEXT NOT NULL DEFAULT 'luna'");
     });
   }
 
@@ -200,8 +221,9 @@ export class AccountObject extends DurableObject<AccountEnv> {
     );
   }
 
-  async allowance(now: number, limits: Limits): Promise<Allowance> {
-    return this.#allowance(this.#current(now), now, limits);
+  /** The allowance for one pool (default: the shared Luna/DeepSeek one), with every pool's detail. */
+  async allowance(now: number, limits: Limits, pool: Pool = "luna"): Promise<Allowance> {
+    return this.#allowance(this.#current(now), now, limits, pool);
   }
 
   /**
@@ -209,9 +231,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
    * case). The spend cap is checked against settled cost, so it can be passed by at most the
    * cost of the requests in flight when it's reached.
    */
-  async reserve(input: { promptEstimate: number; requestedMaxTokens: number | undefined; limits: Limits; now: number }): Promise<ReserveResult> {
+  async reserve(input: { pool?: Pool; promptEstimate: number; requestedMaxTokens: number | undefined; limits: Limits; now: number }): Promise<ReserveResult> {
+    const pool = input.pool ?? "luna";
     const row = this.#current(input.now);
-    const before = this.#allowance(row, input.now, input.limits);
+    const before = this.#allowance(row, input.now, input.limits, pool);
     if (!row) return { ok: false, code: "not_invited", allowance: before };
     if (row.status === "blocked") return { ok: false, code: "blocked", allowance: before };
     if (row.status === "suspended") return { ok: false, code: "suspended", allowance: before };
@@ -229,17 +252,18 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const reservationId = crypto.randomUUID();
     const expiresAt = input.now + RESERVATION_TTL_MS;
     this.ctx.storage.sql.exec(
-      "INSERT INTO reservations (id, amount, created_at, expires_at, source, paid) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO reservations (id, amount, created_at, expires_at, source, paid, pool) VALUES (?, ?, ?, ?, ?, ?, ?)",
       reservationId,
       plan.amount,
       input.now,
       expiresAt,
       source,
       paid ? 1 : 0,
+      pool,
     );
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm === null || alarm > expiresAt) await this.ctx.storage.setAlarm(expiresAt);
-    return { ok: true, reservationId, amount: plan.amount, maxTokens: plan.maxTokens, source, paid, allowance: this.#allowance(row, input.now, input.limits) };
+    return { ok: true, reservationId, amount: plan.amount, maxTokens: plan.maxTokens, source, paid, allowance: this.#allowance(row, input.now, input.limits, pool) };
   }
 
   /**
@@ -249,22 +273,28 @@ export class AccountObject extends DurableObject<AccountEnv> {
    */
   async settle(input: { reservationId: string; charged: number | undefined; costUsd: number | undefined; limits: Limits; now: number }): Promise<{ charged: number; costUsd: number; paid: boolean; allowance: Allowance }> {
     const reservation = this.ctx.storage.sql
-      .exec<{ amount: number; source: Source; paid: number }>("SELECT amount, source, paid FROM reservations WHERE id = ?", input.reservationId)
+      .exec<{ amount: number; source: Source; paid: number; pool: Pool }>("SELECT amount, source, paid, pool FROM reservations WHERE id = ?", input.reservationId)
       .toArray()[0];
     const row = this.#current(input.now);
     if (!reservation || !row) return { charged: 0, costUsd: 0, paid: false, allowance: this.#allowance(row, input.now, input.limits) };
     const charged = input.charged ?? reservation.amount;
     const costUsd = input.costUsd ?? costOf(undefined, charged);
-    this.ctx.storage.transactionSync(() => this.#charge(row.github_id, input.reservationId, reservation.source, charged, costUsd, input.now));
-    return { charged, costUsd, paid: reservation.paid === 1, allowance: this.#allowance(this.#current(input.now), input.now, input.limits) };
+    this.ctx.storage.transactionSync(() => this.#charge(row.github_id, input.reservationId, reservation.source, reservation.pool, charged, costUsd, input.now));
+    return { charged, costUsd, paid: reservation.paid === 1, allowance: this.#allowance(this.#current(input.now), input.now, input.limits, reservation.pool) };
   }
 
   /** Replaces a reservation with its charge: to the week's counters, or to top-ups, earliest expiry first. */
-  #charge(githubId: number, reservationId: string, source: Source, charged: number, costUsd: number, now: number): void {
+  #charge(githubId: number, reservationId: string, source: Source, pool: Pool, charged: number, costUsd: number, now: number): void {
     const sql = this.ctx.storage.sql;
     sql.exec("DELETE FROM reservations WHERE id = ?", reservationId);
     if (source === "weekly") {
       sql.exec("UPDATE account SET used = used + ?, cost_used = cost_used + ? WHERE github_id = ?", charged, costUsd, githubId);
+      sql.exec(
+        "INSERT INTO pool_usage (week_start, pool, used) VALUES (?, ?, ?) ON CONFLICT(week_start, pool) DO UPDATE SET used = used + excluded.used",
+        weekStart(now),
+        pool,
+        charged,
+      );
       return;
     }
     let left = charged;
@@ -376,7 +406,15 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const sql = this.ctx.storage.sql;
     if (input.tokensPerWeek !== undefined) sql.exec("UPDATE account SET weekly_tokens = ? WHERE github_id = ?", input.tokensPerWeek, row.github_id);
     if (input.usdPerWeek !== undefined) sql.exec("UPDATE account SET weekly_usd = ? WHERE github_id = ?", input.usdPerWeek, row.github_id);
-    if (input.usedThisWeek !== undefined) sql.exec("UPDATE account SET used = ? WHERE github_id = ?", input.usedThisWeek, row.github_id);
+    if (input.usedThisWeek !== undefined) {
+      sql.exec("UPDATE account SET used = ? WHERE github_id = ?", input.usedThisWeek, row.github_id);
+      // The Luna pool is the one the weekly grant covers, so its counter is what the admin set.
+      sql.exec(
+        "INSERT INTO pool_usage (week_start, pool, used) VALUES (?, 'luna', ?) ON CONFLICT(week_start, pool) DO UPDATE SET used = excluded.used",
+        weekStart(input.now),
+        input.usedThisWeek,
+      );
+    }
     if (input.spentUsdThisWeek !== undefined) sql.exec("UPDATE account SET cost_used = ? WHERE github_id = ?", input.spentUsdThisWeek, row.github_id);
     return this.#allowance(this.#current(input.now), input.now, input.limits);
   }
@@ -466,12 +504,12 @@ export class AccountObject extends DurableObject<AccountEnv> {
   async sweep(now: number): Promise<number> {
     const row = this.#current(now);
     const stale = this.ctx.storage.sql
-      .exec<{ id: string; amount: number; created_at: number; source: Source; paid: number }>("SELECT id, amount, created_at, source, paid FROM reservations WHERE expires_at <= ?", now)
+      .exec<{ id: string; amount: number; created_at: number; source: Source; paid: number; pool: Pool }>("SELECT id, amount, created_at, source, paid, pool FROM reservations WHERE expires_at <= ?", now)
       .toArray();
     for (const reservation of stale) {
       const costUsd = costOf(undefined, reservation.amount);
       this.ctx.storage.transactionSync(() => {
-        if (row) this.#charge(row.github_id, reservation.id, reservation.source, reservation.amount, costUsd, now);
+        if (row) this.#charge(row.github_id, reservation.id, reservation.source, reservation.pool, reservation.amount, costUsd, now);
         else this.ctx.storage.sql.exec("DELETE FROM reservations WHERE id = ?", reservation.id);
       });
       if (row && this.env.DIRECTORY) {
@@ -479,7 +517,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
           githubId: row.github_id,
           isAdmin: row.is_admin === 1,
           at: reservation.created_at,
-          model: ALLOWED_MODELS[0],
+          model: DEFAULT_MODEL,
           promptTokens: 0,
           completionTokens: 0,
           cachedTokens: 0,
@@ -508,27 +546,27 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const start = weekStart(now);
     if (row.week_start < start) {
       this.ctx.storage.sql.exec("UPDATE account SET week_start = ?, used = 0, cost_used = 0 WHERE github_id = ?", start, row.github_id);
+      this.ctx.storage.sql.exec("DELETE FROM pool_usage WHERE week_start < ?", start);
       return { ...row, week_start: start, used: 0, cost_used: 0 };
     }
     return row;
   }
 
-  #allowance(row: AccountRow | undefined, now: number, limits: Limits): Allowance {
+  #allowance(row: AccountRow | undefined, now: number, limits: Limits, pool: Pool = "luna"): Allowance {
     const sql = this.ctx.storage.sql;
     const reservedBy = (source: Source) => sql.exec<{ total: number | null }>("SELECT SUM(amount) AS total FROM reservations WHERE source = ?", source).toArray()[0]?.total ?? 0;
-    const reserved = reservedBy("weekly");
     const plan = row ? this.#plan(now) : "free";
     const billing = this.#billing();
     const topups = sql.exec<{ left: number | null }>("SELECT SUM(tokens - used) AS left FROM topups WHERE expires_at > ?", now).toArray()[0]?.left ?? 0;
     const topupTokensLeft = Math.max(0, topups - reservedBy("topup"));
     const pro = plan === "pro";
     // Pro replaces the free allowance (no referral bonus: that is free tokens); grants apply to free.
-    const baseTokens = pro ? (limits.proTokensPerWeek ?? limits.weeklyTokens) : (row?.weekly_tokens ?? limits.weeklyTokens);
     const bonus = pro ? 0 : Math.max(0, limits.bonusTokens ?? 0);
-    const tokensPerWeek = baseTokens + bonus;
+    const pools = this.#pools(row, now, limits, plan, bonus);
+    const mine = pools[pool];
     const baseUsd = pro ? (limits.proUsdPerWeek ?? null) : (row?.weekly_usd ?? limits.weeklyUsd ?? null);
-    const usdPerWeek = baseUsd !== null && bonus > 0 && baseTokens > 0 ? Math.round(baseUsd * (tokensPerWeek / baseTokens) * 1e6) / 1e6 : baseUsd;
-    const used = row?.used ?? 0;
+    // The referral bonus grows the dollar allowance in the same proportion as the Luna pool.
+    const usdPerWeek = baseUsd !== null && bonus > 0 && mine.tokensPerWeek > bonus ? Math.round(baseUsd * (mine.tokensPerWeek / (mine.tokensPerWeek - bonus)) * 1e6) / 1e6 : baseUsd;
     const spent = row?.cost_used ?? 0;
     const spendLeft = usdPerWeek === null || spent < usdPerWeek;
     return {
@@ -539,13 +577,38 @@ export class AccountObject extends DurableObject<AccountEnv> {
       proCancelAtPeriodEnd: billing.cancelAtPeriodEnd,
       status: row?.status ?? null,
       isAdmin: row?.is_admin === 1,
-      tokensPerWeek,
-      usedThisWeek: used,
-      reserved,
-      remaining: row && spendLeft ? Math.max(0, tokensPerWeek - used - reserved) : 0,
+      tokensPerWeek: mine.tokensPerWeek,
+      usedThisWeek: mine.usedThisWeek,
+      reserved: mine.reserved,
+      remaining: row && spendLeft ? mine.remaining : 0,
       usdPerWeek,
       spentUsdThisWeek: Math.round(spent * 1e6) / 1e6,
       resetsAt: weekEnd(now),
+      pools,
     };
+  }
+
+  /**
+   * Every pool's allowance this week. The Luna pool is the one the weekly grant and the
+   * referral bonus apply to (it is the free tier's default model); Sol and Astra keep their
+   * own fixed grants. Pro's weekly tokens replace the Luna grant, as before.
+   */
+  #pools(row: AccountRow | undefined, now: number, limits: Limits, plan: Plan, bonus: number): Record<Pool, PoolAllowance> {
+    const sql = this.ctx.storage.sql;
+    const start = weekStart(now);
+    const out = {} as Record<Pool, PoolAllowance>;
+    for (const pool of POOLS) {
+      const used = sql.exec<{ used: number }>("SELECT used FROM pool_usage WHERE week_start = ? AND pool = ?", start, pool).toArray()[0]?.used ?? 0;
+      const reserved = sql.exec<{ total: number | null }>("SELECT SUM(amount) AS total FROM reservations WHERE pool = ? AND source = 'weekly'", pool).toArray()[0]?.total ?? 0;
+      const base =
+        pool === "luna"
+          ? plan === "pro"
+            ? (limits.proTokensPerWeek ?? limits.weeklyTokens)
+            : (row?.weekly_tokens ?? limits.weeklyTokens)
+          : POOL_TOKENS[pool];
+      const tokensPerWeek = pool === "luna" ? base + bonus : base;
+      out[pool] = { tokensPerWeek, usedThisWeek: used, reserved, remaining: Math.max(0, tokensPerWeek - used - reserved) };
+    }
+    return out;
   }
 }

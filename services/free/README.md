@@ -1,12 +1,39 @@
 # Free managed tier service
 
 A portable Worker with Durable Objects (SQLite) that gives signed-in people a weekly allowance of
-`deepseek/deepseek-v4.1-flash-1017`, served by Luminal on prepaid credit (or by OpenRouter, by an
-admin switch; see [Upstreams](#upstreams-luminal-and-openrouter)). Sign-in is GitHub by device code. The
+GPT-6 Luna, GPT-6.1 Sol and GPT-6 Astra (OpenAI) and DeepSeek V4.1 Flash 1017 (Luminal). OpenAI is
+the default provider; DeepSeek is the automatic fallback for Luna and stays selectable by hand. Each
+provider has its own prepaid credit pool, and each model tier its own weekly token pool (see
+[Providers, models and pools](#providers-models-and-pools)). Sign-in is GitHub by device code. The
 contract is in `src/app.ts`, and the refusal sentences are in `src/messages.ts`.
 
 A sign-in code lasts 15 minutes (`expires_in: 900`), long enough to open the link on a phone
 and sign in to GitHub there. The terminal polls every 5 seconds.
+
+## Providers, models and pools
+
+| model id | provider | wire id | weekly pool | USD per Mtok (input / cached / output) |
+|---|---|---|---|---|
+| `gpt-6-luna` (default) | OpenAI | `gpt-6-luna` | `luna`, 50M | 0.10 / 0.01 / 0.50 |
+| `gpt-6.1-sol` | OpenAI | `gpt-6.1-sol` | `sol`, 10M | 2 / 0.10 / 10 |
+| `gpt-6-astra` | OpenAI | `gpt-6-astra` | `astra`, 3M | 10 / 1 / 50 |
+| `deepseek/deepseek-v4.1-flash-1017` | Luminal | `deepseek-ai/DeepSeek-V4.1-Flash-1017` | `luna`, 50M | 0.035 / 0.006 / 0.315 |
+
+- **One pool per tier.** GPT-6 Luna and DeepSeek share the `luna` pool, so switching between them
+  (by hand or by the fallback) doesn’t hand anyone a second allowance. Sol and Astra have their own.
+- **Fallback.** GPT-6 Luna is served by OpenAI first. On a 429, a 5xx, a network error, no response
+  before `OPENAI_FIRST_BYTE_TIMEOUT_SECONDS`, or OpenAI’s credit running out, the same request is
+  retried once on DeepSeek/Luminal, and the response carries
+  `x-dl-fallback: deepseek/deepseek-v4.1-flash-1017`. Sol and Astra have no fallback: a failure is a
+  transient 503. DeepSeek picked by hand goes straight to Luminal.
+- **Separate credit pools.** OpenAI’s `OPENAI_CREDIT_USD` ($5,000) and Luminal’s
+  `LUMINAL_CREDIT_USD` ($2,000) are tracked apart (`/admin/spend` shows both). A provider at or past
+  its balance stops serving; Luna then falls back to the other provider.
+- **Prices.** `prices` is what the person’s weekly dollar allowance is charged; `creditPrices` is
+  what the provider’s credit is charged (they differ for DeepSeek, whose Luminal list price is
+  higher than what OpenRouter billed us for the same model). OpenAI reports no cost, so its
+  requests are priced at list.
+- Any other model or provider needs the person’s own key (`model_not_allowed`).
 
 ## Admission
 
@@ -51,9 +78,16 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
 ```jsonc
 {
   "login": "alice", "githubId": 123, "status": "active",
-  "allowance": { "tokensPerWeek": 60000000, "usedThisWeek": 0, "remaining": 60000000,
-                 "resetsAt": "2026-11-09T00:00:00.000Z", "usdPerWeek": 6, "spentUsdThisWeek": 0 },
-  "models": ["deepseek/deepseek-v4.1-flash-1017"],
+  "allowance": { "tokensPerWeek": 50000000, "usedThisWeek": 0, "remaining": 50000000,
+                 "resetsAt": "2026-11-09T00:00:00.000Z", "usdPerWeek": 60, "spentUsdThisWeek": 0 },
+  "pools": {                            // one weekly token pool per model tier
+    "luna":  { "tokensPerWeek": 50000000, "usedThisWeek": 0, "remaining": 50000000,
+                 "resetsAt": "2026-11-09T00:00:00.000Z",
+                 "models": ["gpt-6-luna", "deepseek/deepseek-v4.1-flash-1017"] },
+    "sol":   { "tokensPerWeek": 10000000, "usedThisWeek": 0, "remaining": 10000000, "resetsAt": "…", "models": ["gpt-6.1-sol"] },
+    "astra": { "tokensPerWeek": 3000000,  "usedThisWeek": 0, "remaining": 3000000,  "resetsAt": "…", "models": ["gpt-6-astra"] }
+  },
+  "models": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "deepseek/deepseek-v4.1-flash-1017"],
   "plan": "free",                       // "free" | "pro"
   "topupTokensLeft": 0,                 // unexpired top-up tokens not yet used
   "pro": null,                          // or { "periodEnd": ISO string | null, "cancelAtPeriodEnd": false }
@@ -516,9 +550,9 @@ with who made it and when.
 | setting | env | default |
 |---|---|---|
 | `weeklyTokens` | `WEEKLY_TOKENS` | 50,000,000 |
-| `perPersonWeeklyUsdCap` | `PER_PERSON_WEEKLY_USD_CAP` | 5 |
-| `globalWeeklyUsdCap` | `GLOBAL_WEEKLY_USD_CAP` | 250 |
-| `globalTotalUsdCap` | `GLOBAL_TOTAL_USD_CAP` | 1000 |
+| `perPersonWeeklyUsdCap` | `PER_PERSON_WEEKLY_USD_CAP` | 60 |
+| `globalWeeklyUsdCap` | `GLOBAL_WEEKLY_USD_CAP` | 2000 |
+| `globalTotalUsdCap` | `GLOBAL_TOTAL_USD_CAP` | 7000 |
 | `maxActiveUsers` | `MAX_ACTIVE_USERS` (invite-only only) | 50 |
 | `openAdmission` | `OPEN_ADMISSION` | false |
 | `requireGithubActivity` | `REQUIRE_GITHUB_ACTIVITY` | true |
@@ -527,7 +561,10 @@ with who made it and when.
 | `queueReferralPlaces` | `QUEUE_REFERRAL_PLACES` | 25 |
 | `referralBonusTokens` | `REFERRAL_BONUS_TOKENS` | 10,000,000 |
 | `referralBonusCap` | `REFERRAL_BONUS_CAP` | 50,000,000 |
-| `primaryUpstream` | `PRIMARY_UPSTREAM` | `luminal` (`openrouter` is the manual switch) |
+| `primaryUpstream` | `PRIMARY_UPSTREAM` | `openai` (`luminal` and `openrouter` are manual switches) |
+| `openaiCreditUsd` | `OPENAI_CREDIT_USD` | 5000 |
+| `openaiWeeklyCreditUsd` | `OPENAI_WEEKLY_CREDIT_USD` | 2000; `none` for no weekly credit budget |
+| `openaiFirstByteTimeoutSeconds` | `OPENAI_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
 | `luminalCreditUsd` | `LUMINAL_CREDIT_USD` | 2000 |
 | `luminalWeeklyCreditUsd` | `LUMINAL_WEEKLY_CREDIT_USD` | 250; `none` for no weekly credit budget |
 | `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
@@ -536,7 +573,7 @@ Env only: `REFERRAL_LINK_BASE` (`https://dl.new/r/`), the offers above, `ALERT_E
 `ALERT_EMAIL_FROM` (`alerts@dl.new`), `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_KIND`,
 `ALERT_TELEGRAM_CHAT_ID`, the prices `LUMINAL_PRICE_INPUT`, `LUMINAL_PRICE_CACHED`,
 `LUMINAL_PRICE_OUTPUT`, `OPENROUTER_PRICE_INPUT`, `OPENROUTER_PRICE_CACHED`,
-`OPENROUTER_PRICE_OUTPUT`, and the secret `LUMINAL_API_KEY`.
+`OPENROUTER_PRICE_OUTPUT`, and the secrets `OPENAI_API_KEY` and `LUMINAL_API_KEY`.
 
 ```sh
 # Read the effective values, the env values, the overrides and the change log

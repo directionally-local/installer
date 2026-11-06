@@ -7,7 +7,7 @@ import { dashboardData, installBreakdown, notAdmin, type DashboardData, type Das
 import type { CleanEvent } from "./events.js";
 import { creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
-import { creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
+import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
@@ -138,6 +138,9 @@ export interface Gate {
   creditUsedUsd: number;
   /** Free Luminal credit spend this week (no admins, no paid usage): what the queue watches in credit mode. */
   weekCreditUsd: number;
+  /** OpenAI credit used by everyone since the start, and free OpenAI spend this week. */
+  openaiCreditUsedUsd: number;
+  openaiWeekCreditUsd: number;
   /** People waiting in the queue for free tokens. */
   waiting: number;
   overrides: Overrides;
@@ -177,6 +180,10 @@ export interface SpendSummary {
   creditUsedUsd: number;
   creditWeekUsd: number;
   freeCreditWeekUsd: number;
+  /** OpenAI credit, the same three numbers. */
+  openaiCreditUsedUsd: number;
+  openaiCreditWeekUsd: number;
+  openaiFreeCreditWeekUsd: number;
 }
 
 const ACTIVITY = `(SELECT github_id, at FROM requests UNION ALL SELECT github_id, at FROM events)`;
@@ -461,6 +468,9 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["requests", "upstream_outcome", "TEXT"],
   ["spend_weeks", "credit_usd", "REAL NOT NULL DEFAULT 0"],
   ["spend_weeks", "free_credit_usd", "REAL NOT NULL DEFAULT 0"],
+  // OpenAI's prepaid credit, kept apart from Luminal's.
+  ["spend_weeks", "openai_credit_usd", "REAL NOT NULL DEFAULT 0"],
+  ["spend_weeks", "openai_free_credit_usd", "REAL NOT NULL DEFAULT 0"],
   ["daily_activity", "credit_usd", "REAL NOT NULL DEFAULT 0"],
 ];
 
@@ -970,6 +980,8 @@ export class DirectoryObject extends DurableObject {
       totalUsd: spend.totalSpentUsd,
       creditUsedUsd: spend.creditUsedUsd,
       weekCreditUsd: spend.freeCreditWeekUsd,
+      openaiCreditUsedUsd: spend.openaiCreditUsedUsd,
+      openaiWeekCreditUsd: spend.openaiFreeCreditWeekUsd,
       waiting: this.#waitingCount(),
       overrides,
       ...(policy && githubId !== undefined ? { person: this.#personState(githubId, now, policy) } : {}),
@@ -1015,10 +1027,14 @@ export class DirectoryObject extends DurableObject {
       paid_requests: number;
       credit_usd: number;
       free_credit_usd: number;
+      openai_credit_usd: number;
+      openai_free_credit_usd: number;
     };
     const row = this.ctx.storage.sql.exec<Row>("SELECT * FROM spend_weeks WHERE week_start = ?", start).toArray()[0];
     const total = this.ctx.storage.sql
-      .exec<{ usd: number | null; admin_usd: number | null; credit_usd: number | null }>("SELECT SUM(usd) AS usd, SUM(admin_usd) AS admin_usd, SUM(credit_usd) AS credit_usd FROM spend_weeks")
+      .exec<{ usd: number | null; admin_usd: number | null; credit_usd: number | null; openai_credit_usd: number | null }>(
+        "SELECT SUM(usd) AS usd, SUM(admin_usd) AS admin_usd, SUM(credit_usd) AS credit_usd, SUM(openai_credit_usd) AS openai_credit_usd FROM spend_weeks",
+      )
       .toArray()[0];
     return {
       weekStart: start,
@@ -1037,6 +1053,9 @@ export class DirectoryObject extends DurableObject {
       creditUsedUsd: round(total?.credit_usd ?? 0),
       creditWeekUsd: round(row?.credit_usd ?? 0),
       freeCreditWeekUsd: round(row?.free_credit_usd ?? 0),
+      openaiCreditUsedUsd: round(total?.openai_credit_usd ?? 0),
+      openaiCreditWeekUsd: round(row?.openai_credit_usd ?? 0),
+      openaiFreeCreditWeekUsd: round(row?.openai_free_credit_usd ?? 0),
     };
   }
 
@@ -1129,15 +1148,17 @@ export class DirectoryObject extends DurableObject {
       const upstream: Upstream = record.upstream ?? "openrouter";
       const cash = upstream === "openrouter" ? record.costUsd : 0;
       const credit = upstream === "luminal" ? (record.creditUsd ?? 0) : 0;
+      const openaiCredit = upstream === "openai" ? (record.creditUsd ?? 0) : 0;
       this.ctx.storage.sql.exec(
-        `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests, paid_usd, paid_tokens, paid_requests, credit_usd, free_credit_usd)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests, paid_usd, paid_tokens, paid_requests, credit_usd, free_credit_usd, openai_credit_usd, openai_free_credit_usd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(week_start) DO UPDATE SET
            usd = usd + excluded.usd, tokens = tokens + excluded.tokens, requests = requests + excluded.requests,
            admin_usd = admin_usd + excluded.admin_usd, admin_tokens = admin_tokens + excluded.admin_tokens,
            admin_requests = admin_requests + excluded.admin_requests,
            paid_usd = paid_usd + excluded.paid_usd, paid_tokens = paid_tokens + excluded.paid_tokens, paid_requests = paid_requests + excluded.paid_requests,
-           credit_usd = credit_usd + excluded.credit_usd, free_credit_usd = free_credit_usd + excluded.free_credit_usd`,
+           credit_usd = credit_usd + excluded.credit_usd, free_credit_usd = free_credit_usd + excluded.free_credit_usd,
+           openai_credit_usd = openai_credit_usd + excluded.openai_credit_usd, openai_free_credit_usd = openai_free_credit_usd + excluded.openai_free_credit_usd`,
         weekStart(record.at),
         free ? cash : 0,
         free ? record.chargedTokens : 0,
@@ -1150,6 +1171,8 @@ export class DirectoryObject extends DurableObject {
         paid ? 1 : 0,
         credit,
         free ? credit : 0,
+        openaiCredit,
+        free ? openaiCredit : 0,
       );
       if (!admin) {
         // cost_usd here is what the allowance was charged (OpenRouter prices), for cost per person.
@@ -1181,8 +1204,9 @@ export class DirectoryObject extends DurableObject {
       }
       if (upstream === "luminal") {
         this.ctx.storage.sql.exec("INSERT INTO luminal_outcomes (at, github_id, outcome) VALUES (?, ?, ?)", record.at, record.githubId, outcome);
-        if (policy && credit > 0) alerts.push(...this.#creditAlerts(record.at, policy));
+        if (policy && credit > 0) alerts.push(...this.#creditAlerts(record.at, policy, "luminal"));
       }
+      if (upstream === "openai" && policy && openaiCredit > 0) alerts.push(...this.#creditAlerts(record.at, policy, "openai"));
       // Every request checks, whoever served it: after a switch to OpenRouter, OpenRouter's
       // traffic is what notices the 30 quiet minutes that end a slow-down.
       if (policy && serving) {
@@ -1272,25 +1296,27 @@ export class DirectoryObject extends DurableObject {
     return undefined;
   }
 
-  /** Luminal credit used crossing 50%, 80% and 100% of the balance: once each per balance (a new balance re-arms them). */
-  #creditAlerts(now: number, policy: Policy): Alert[] {
-    const balance = policy.luminalCreditUsd;
+  /** A provider's credit crossing 50%, 80% and 100% of its balance: once each per balance (a new balance re-arms them). */
+  #creditAlerts(now: number, policy: Policy, provider: "luminal" | "openai" = "luminal"): Alert[] {
+    const balance = provider === "openai" ? policy.openaiCreditUsd : policy.luminalCreditUsd;
     if (balance <= 0) return [];
-    const prefix = `credit:${balance}:`;
-    const used = this.#spendSync(now).creditUsedUsd;
+    const prefix = `credit:${provider}:${balance}:`;
+    const spend = this.#spendSync(now);
+    const used = provider === "openai" ? spend.openaiCreditUsedUsd : spend.creditUsedUsd;
     const hit = crossed(used / balance, this.#sentThresholds(prefix));
     if (!hit) return [];
     for (const threshold of hit.mark) this.#markAlert(`${prefix}${threshold}`, now);
-    return [creditAlert(used, balance, hit.threshold)];
+    return [creditAlert(used, balance, hit.threshold, provider === "openai" ? "OpenAI" : "Luminal")];
   }
 
   /**
    * The alert for Luminal-served usage pausing because the credit ran out: once per balance.
    * Undefined when it was already sent.
    */
-  async creditPausedAlert(balance: number, now: number): Promise<Alert | undefined> {
-    if (!this.#markAlert(`credit-paused:${balance}`, now)) return undefined;
-    return creditPausedAlert(this.#spendSync(now).creditUsedUsd, balance);
+  async creditPausedAlert(balance: number, now: number, provider: "luminal" | "openai" = "luminal"): Promise<Alert | undefined> {
+    if (!this.#markAlert(`credit-paused:${provider}:${balance}`, now)) return undefined;
+    const spend = this.#spendSync(now);
+    return creditPausedAlert(provider === "openai" ? spend.openaiCreditUsedUsd : spend.creditUsedUsd, balance, provider === "openai" ? "OpenAI" : "Luminal");
   }
 
   /** Luminal's outcomes since `since` (exclusive), admins included. */
@@ -1343,8 +1369,10 @@ export class DirectoryObject extends DurableObject {
   async queueStartedAlert(now: number, envPolicy: Policy): Promise<Alert> {
     const policy = this.#policy(envPolicy);
     const spend = this.#spendSync(now);
-    if (creditMode(policy) && policy.luminalWeeklyCreditUsd !== undefined && spend.freeCreditWeekUsd >= policy.queueThreshold * policy.luminalWeeklyCreditUsd) {
-      return queueStartedAlert(spend.freeCreditWeekUsd, policy.luminalWeeklyCreditUsd, "credit");
+    const budget = creditBudget(policy);
+    const weekCredit = budget.balanceUsd === policy.openaiCreditUsd && policy.openaiConfigured ? spend.openaiFreeCreditWeekUsd : spend.freeCreditWeekUsd;
+    if (creditMode(policy) && budget.weeklyUsd !== undefined && weekCredit >= policy.queueThreshold * budget.weeklyUsd) {
+      return queueStartedAlert(weekCredit, budget.weeklyUsd, "credit");
     }
     return queueStartedAlert(spend.spentUsd, policy.globalWeeklyUsdCap);
   }

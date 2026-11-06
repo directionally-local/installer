@@ -144,9 +144,12 @@ describe("config", () => {
     const config = readFreeConfig(BASE_ENV);
     assert.equal(config.weeklyTokens, 50_000_000);
     assert.equal(config.maxActiveUsers, 50);
-    assert.equal(config.globalWeeklyUsdCap, 250);
-    assert.equal(config.globalTotalUsdCap, 1000);
-    assert.equal(config.perPersonWeeklyUsdCap, 5);
+    assert.equal(config.globalWeeklyUsdCap, 2000);
+    assert.equal(config.globalTotalUsdCap, 7000);
+    assert.equal(config.perPersonWeeklyUsdCap, 60);
+    assert.equal(config.primaryUpstream, "openai");
+    assert.equal(config.openaiCreditUsd, 5000);
+    assert.equal(config.luminalCreditUsd, 2000);
     assert.equal(config.minGithubAccountAgeDays, 30);
     assert.equal(config.countCachedTokens, true);
     assert.equal(config.paused, false);

@@ -45,8 +45,14 @@ export const RUNTIME_SETTINGS = {
   referralBonusTokens: { kind: "tokens", env: "REFERRAL_BONUS_TOKENS" },
   /** The most referral bonus tokens one person gets a week. */
   referralBonusCap: { kind: "tokens", env: "REFERRAL_BONUS_CAP" },
-  /** "luminal" or "openrouter": which upstream serves chat requests. No automatic switch. */
+  /** "openai", "luminal" or "openrouter": which provider serves by default. */
   primaryUpstream: { kind: "upstream", env: "PRIMARY_UPSTREAM" },
+  /** Prepaid OpenAI credit, USD; raise it after a top-up. */
+  openaiCreditUsd: { kind: "amount", env: "OPENAI_CREDIT_USD" },
+  /** Free OpenAI credit a week the queue protects, USD; "none" for no weekly credit budget. */
+  openaiWeeklyCreditUsd: { kind: "usd", env: "OPENAI_WEEKLY_CREDIT_USD" },
+  /** Seconds to wait for OpenAI's first byte before falling back. */
+  openaiFirstByteTimeoutSeconds: { kind: "seconds", env: "OPENAI_FIRST_BYTE_TIMEOUT_SECONDS" },
   /** Prepaid Luminal credit, USD; raise it after a top-up. */
   luminalCreditUsd: { kind: "amount", env: "LUMINAL_CREDIT_USD" },
   /** Free Luminal credit a week the queue protects, USD; "none" for no weekly credit budget. */
@@ -117,7 +123,7 @@ const RULES: Record<Kind, string> = {
   quantizations: 'a list of OpenRouter quantization levels, e.g. ["fp8", "bf16"], or [] for no filter',
   dataCollection: '"deny" or "allow"',
   minutes: `a whole number of minutes, 0 to ${MAX_HOST_COOLDOWN_MINUTES} (0 turns it off)`,
-  upstream: '"luminal" or "openrouter"',
+  upstream: '"openai", "luminal" or "openrouter"',
   amount: `a number of dollars, 0 to ${MAX_USD}`,
   seconds: `a number of seconds, more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS}`,
 };
