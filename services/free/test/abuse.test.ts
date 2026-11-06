@@ -86,6 +86,27 @@ describe("blocking a person", () => {
     assert.equal((await signUp(service, { id: 100, login: "alice" }, { ip: "198.51.100.12" })).poll.status, 200);
   });
 
+  it("accepts a form post whose Origin the browser hid as null, and still refuses a cross-site one", async () => {
+    const { service } = await setup();
+    const bob = await tokensFor(service, { id: 101, login: "bob" }, { ip: "198.51.100.20" });
+    assert.equal((await chat(service, bob.access_token)).status, 200);
+    const cookie = await adminCookie(service);
+    const csrf = csrfOf(await dashboard(service, cookie));
+    const form = (headers: Record<string, string>) =>
+      service.request("POST", "/admin/dashboard/people/101/block", { headers: { cookie, ...headers }, form: { csrf } });
+
+    // The dashboard sends `referrer-policy: no-referrer`, so the browser sends `Origin: null`;
+    // Fetch Metadata still says same-origin, so the block goes through.
+    const accepted = await form({ origin: "null", "sec-fetch-site": "same-origin" });
+    assert.equal(accepted.status, 303);
+    assert.equal((await service.directory().getPerson(101)).status, "blocked");
+
+    // A cross-site page that also hides its Origin is still refused.
+    const refused = await form({ origin: "null", "sec-fetch-site": "cross-site" });
+    assert.equal(refused.status, 403);
+    assert.match(await refused.text(), /only from the dashboard itself/);
+  });
+
   it("is admin-only over the API, and 404s for nobody", async () => {
     const { service, admin } = await setup();
     const alice = await tokensFor(service, { id: 100, login: "alice" }, { ip: "198.51.100.10" });
