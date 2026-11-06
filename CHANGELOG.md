@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/directionally-local/installer/compare/v0.19.0...v0.19.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* everything a user's machine fetches or runs goes through dl.new ([0bdaa3e](https://github.com/directionally-local/installer/commit/0bdaa3e8613ef6e7c2b886b7cc2e3b0ad3d738cd))
+
 ## [0.19.0](https://github.com/directionally-local/installer/compare/v0.18.1...v0.19.0) (2026-11-05)
 
 
