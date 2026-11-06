@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, authorize, completion, createService, MODEL, NOW, usage, type Service, type Tokens } from "./harness.js";
+import { ADMIN_ID, authorize, completion, createService, MODEL, NOW, usage, type Service, type Tokens, submitDetails } from "./harness.js";
 import { etaAt, forecast, queueOrder, shouldQueue, waitText } from "../src/queue.js";
 import { codeFor, normalizeReferralCode } from "../src/referrals.js";
 import { networkOf } from "../src/network.js";
@@ -56,7 +56,8 @@ async function signUp(
     ({ state, cookie } = await authorize(request, issued.user_code));
   }
   const callback = await request("GET", `/device/callback?code=${encodeURIComponent(JSON.stringify({ createdAt: OLD, ...user }))}&state=${encodeURIComponent(state)}`, { headers: { cookie } });
-  const page = await callback.text();
+  let page = await callback.text();
+  if (page.includes('action="/device/details"')) ({ page } = await submitDetails(request, page));
   const token = await request("POST", "/v1/device/token", { body: { device_code: issued.device_code } });
   assert.equal(token.status, 200, `${user.login}: ${page}`);
   const tokens = (await token.json()) as Tokens;

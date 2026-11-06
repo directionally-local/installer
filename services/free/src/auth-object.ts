@@ -24,7 +24,7 @@ const LEGACY_ADMIN_MARKER = "admin-dashboard";
 /** What a GitHub round trip is for: finishing a device code, or an admin dashboard sign-in. */
 export type OAuthPurpose = "device" | "admin";
 
-export type DeviceStatus = "pending" | "needs_invite" | "approved" | "denied" | "not_invited" | "consumed";
+export type DeviceStatus = "pending" | "needs_invite" | "needs_details" | "approved" | "denied" | "not_invited" | "consumed";
 
 export type PollResult =
   | { status: "pending" | "slow_down" | "expired" | "denied" | "not_invited"; interval: number; reason?: string }
@@ -49,6 +49,8 @@ interface DeviceRow {
   ticket_hash: string | null;
   reason: string | null;
   referral_code: string | null;
+  /** The sign-in step's carried state (GitHub signals, prefilled email) as JSON, for `needs_details`. */
+  details_json: string | null;
 }
 
 interface RefreshRow {
@@ -101,6 +103,7 @@ export class AuthObject extends DurableObject {
       for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
       this.#migrateOAuthPurpose();
       this.#migrateReferralCode();
+      this.#migrateDetails();
     });
   }
 
@@ -222,7 +225,8 @@ export class AuthObject extends DurableObject {
   }
 
   /**
-   * Records what happened in the browser. `needs_invite` returns a ticket for the invite form,
+   * Records what happened in the browser. `needs_invite` and `needs_details` return a ticket
+   * for that step's form (`details` is carried to it as JSON),
    * which only the browser that finished the GitHub round trip has.
    */
   async decide(
@@ -231,18 +235,20 @@ export class AuthObject extends DurableObject {
     identity: Identity | undefined,
     now: number,
     reason?: string,
+    details?: string,
   ): Promise<{ ticket?: string }> {
     const device = this.#byHash(deviceRef);
     if (!device || device.expires_at <= now) return {};
     let ticket: string | undefined;
-    if (outcome === "needs_invite") ticket = randomToken();
+    if (outcome === "needs_invite" || outcome === "needs_details") ticket = randomToken();
     this.ctx.storage.sql.exec(
-      "UPDATE device_codes SET status = ?, github_id = COALESCE(?, github_id), login = COALESCE(?, login), ticket_hash = ?, reason = ? WHERE device_hash = ?",
+      "UPDATE device_codes SET status = ?, github_id = COALESCE(?, github_id), login = COALESCE(?, login), ticket_hash = ?, reason = ?, details_json = ? WHERE device_hash = ?",
       outcome,
       identity?.githubId ?? null,
       identity?.login ?? null,
       ticket ? await sha256Hex(ticket) : null,
       reason ?? null,
+      outcome === "needs_details" ? (details ?? null) : null,
       deviceRef,
     );
     return ticket ? { ticket } : {};
@@ -251,16 +257,32 @@ export class AuthObject extends DurableObject {
   /** Cancels a pending code from the browser page; `reason` tells the terminal why. */
   async deny(userCode: string, now: number, reason?: string): Promise<boolean> {
     const row = this.#byUserCode(userCode);
-    if (!row || row.expires_at <= now || (row.status !== "pending" && row.status !== "needs_invite")) return false;
+    if (!row || row.expires_at <= now || (row.status !== "pending" && row.status !== "needs_invite" && row.status !== "needs_details")) return false;
     this.ctx.storage.sql.exec("UPDATE device_codes SET status = 'denied', ticket_hash = NULL, reason = ? WHERE device_hash = ?", reason ?? null, row.device_hash);
     return true;
   }
 
-  /** The device and person behind an invite-step ticket, and why an invite was asked for. */
-  async ticket(ticket: string, now: number): Promise<(Identity & { deviceRef: string; clientDeviceId: string | null; reason: string | null; referralCode: string | null }) | undefined> {
+  /**
+   * The device and person behind a step's ticket, and why the step was asked for. `step` is
+   * the step the form belongs to: an invite ticket can't finish the details step, nor the
+   * other way round.
+   */
+  async ticket(
+    ticket: string,
+    now: number,
+    step: "needs_invite" | "needs_details" = "needs_invite",
+  ): Promise<(Identity & { deviceRef: string; clientDeviceId: string | null; reason: string | null; referralCode: string | null; details: string | null }) | undefined> {
     const row = this.ctx.storage.sql.exec<DeviceRow>("SELECT * FROM device_codes WHERE ticket_hash = ?", await sha256Hex(ticket)).toArray()[0];
-    if (!row || row.expires_at <= now || row.status !== "needs_invite" || row.github_id === null || row.login === null) return undefined;
-    return { deviceRef: row.device_hash, githubId: row.github_id, login: row.login, clientDeviceId: row.client_device_id, reason: row.reason, referralCode: row.referral_code };
+    if (!row || row.expires_at <= now || row.status !== step || row.github_id === null || row.login === null) return undefined;
+    return {
+      deviceRef: row.device_hash,
+      githubId: row.github_id,
+      login: row.login,
+      clientDeviceId: row.client_device_id,
+      reason: row.reason,
+      referralCode: row.referral_code,
+      details: row.details_json ?? null,
+    };
   }
 
   /** The CLI's poll (RFC 8628 §3.4–3.5), including `slow_down`. Approved codes pay out once. */
@@ -371,6 +393,12 @@ export class AuthObject extends DurableObject {
       sql.exec("ALTER TABLE oauth_states ADD COLUMN purpose TEXT NOT NULL DEFAULT 'device'");
       sql.exec("UPDATE oauth_states SET purpose = 'admin' WHERE device_hash = ?", LEGACY_ADMIN_MARKER);
     });
+  }
+
+  /** Adds `device_codes.details_json` to databases created before it existed. */
+  #migrateDetails(): void {
+    const columns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('device_codes')").toArray();
+    if (!columns.some((column) => column.name === "details_json")) this.ctx.storage.sql.exec("ALTER TABLE device_codes ADD COLUMN details_json TEXT");
   }
 
   /** Adds `device_codes.referral_code` to databases created before it existed. */
