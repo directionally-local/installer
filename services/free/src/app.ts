@@ -39,8 +39,8 @@ import {
 } from "./messages.js";
 import { confirmPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
-import { ALLOWED_MODELS, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, modelById, type FreeModel, type Pool } from "./models.js";
-import { levelFor, levelReason, starterLine, type GithubSignals, type Level, type LevelReason, type LevelThresholds } from "./admission.js";
+import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, modelById, type FreeModel, type Pool } from "./models.js";
+import { levelFor, levelReason, type GithubSignals, type Level, type LevelReason, type LevelThresholds } from "./admission.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
 import { chooseUpstream, providerConfigured } from "./upstream-choice.js";
 import { freeStatus, type FreeStatus } from "./status.js";
@@ -845,7 +845,10 @@ async function recheckStarter(c: Ctx, identity: Identity, config: FreeConfig): P
   const person = await directory(c).getPerson(identity.githubId);
   if (!person || person.level !== "starter" || person.level_reason === "admin") return false;
   const week = weekStart(c.now());
-  if (person.signals_at !== null && person.signals_at >= week) return false;
+  // A network-limited account is re-checked soon after sign-in (it may already qualify on its
+  // own signals), then on the weekly cadence.
+  const since = person.level_reason === "network_limit" ? c.now() - 60 * 60_000 : week;
+  if (person.signals_at !== null && person.signals_at >= since) return false;
   const profile = await githubPublicProfile(identity.login, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS);
   if (!profile) return false;
   const signals: GithubSignals = {
@@ -921,9 +924,12 @@ async function admitAndFinish(
   const openEligible = config.openAdmission && inviteCode === undefined;
   const signupLimit = { capacity: config.networkSignupsPerDay, perHour: config.networkSignupsPerDay / 24 };
   const signupsLeft = openEligible ? (await c.env.RATE_LIMITER.getByName(signupKey).check(signupKey, signupLimit, 1, c.now())).allowed : true;
-  // Beyond the network's daily sign-ups, the account still gets in, as Starter.
-  const level: Level = signIn && !signupsLeft ? "starter" : (signIn?.level ?? "full");
-  const levelReason: LevelReason = signIn && !signupsLeft ? "network_limit" : (signIn?.levelReason ?? "qualifies");
+  // Beyond the network's daily sign-ups, a non-qualifying account still gets in, as Starter.
+  // An account that already qualifies for Full on its own signals stays Full: a shared office,
+  // campus or conference network must not downgrade real developers.
+  const networkLimited = signIn !== undefined && !signupsLeft && signIn.level !== "full";
+  const level: Level = networkLimited ? "starter" : (signIn?.level ?? "full");
+  const levelReason: LevelReason = networkLimited ? "network_limit" : (signIn?.levelReason ?? "qualifies");
   const result = await directory(c).admit({
     githubId: identity.githubId,
     login: identity.login,
@@ -1084,6 +1090,10 @@ async function me(c: Ctx): Promise<Response> {
     status: allowance.status,
     /** "full" or "starter": what this account may use. */
     level: person?.level ?? "full",
+    /** Why the level is what it is, so a client can explain without guessing. */
+    levelReason: person?.levelReason ?? null,
+    /** The thresholds a Full account must clear, from the effective config. */
+    thresholds: levelThresholds(config),
     /** The GitHub signals the level came from, as numbers only. */
     signals: person?.signals ?? null,
     allowance: queue ? { ...view, remaining: 0 } : view,
@@ -1475,21 +1485,16 @@ async function chat(c: Ctx): Promise<Response> {
     return apiError(400, "model_not_allowed", `The free tier serves ${ALLOWED_MODELS.join(", ")} only.`, { allowed: [...ALLOWED_MODELS] }, await headers());
   }
   const requested = modelById(body.model)!;
-  // Starter accounts get DeepSeek only: GPT-6 needs Full.
-  if (level === "starter" && requested.provider !== "luminal") {
-    return apiError(
-      403,
-      "starter_model_not_allowed",
-      starterLine(levelThresholds(gate.config), gate.config.starterWeeklyTokens),
-      { level: "starter", models: ["deepseek/deepseek-v4.1-flash-1017"] },
-      await headers(),
-    );
-  }
+  // Starter accounts get DeepSeek only: GPT-6 needs Full. Rather than refuse the request (a
+  // Starter's first prompt would fail), serve it on DeepSeek and say so with
+  // `x-dl-fallback: starter`; the client explains the level once.
+  const starterFallback = level === "starter" && requested.provider !== "luminal";
+  const effective = starterFallback ? modelById(DEEPSEEK_MODEL)! : requested;
 
   if (gate.paused) return pausedError(await headers());
   // Which model actually serves: the requested one when its provider has a key and credit left,
   // else its fallback (GPT-6 Luna → DeepSeek). Never another model.
-  const serving = servingModel(requested, gate, gate.config);
+  const serving = servingModel(effective, gate, gate.config);
   if (!serving) {
     if (providerExhausted(requested.provider, gate.config, gate)) {
       // The credit is used up: free and Pro usage pause (admins too) until it is topped up.
@@ -1530,7 +1535,7 @@ async function chat(c: Ctx): Promise<Response> {
   const promptEstimate = estimatePromptTokens(bodyBytes);
   // The requested model’s pool pays for the request, even when its fallback serves it: someone
   // who asks for Sol spends Sol’s allowance, not Luna’s.
-  const pool = requested.pool;
+  const pool = effective.pool;
   const reserveFor = (pool: Pool) =>
     person.reserve({ pool, promptEstimate, requestedMaxTokens: requestedMax, limits: { ...limits, freeBlocked: freeBlock !== undefined }, now: c.now() });
   const reservation = await reserveFor(pool);
@@ -1625,6 +1630,12 @@ async function chat(c: Ctx): Promise<Response> {
   };
 
   const response = await attempt(serving.model, serving.provider, reservation);
+  if (starterFallback) {
+    // A Starter asked for GPT-6: DeepSeek served it. Distinct from the OpenAI-failure value.
+    const outHeaders = new Headers(response.headers);
+    outHeaders.set("x-dl-fallback", "starter");
+    return new Response(response.body, { status: response.status, headers: outHeaders });
+  }
   if (!serving.fallback) return response;
   // The requested model's provider couldn't serve it, so its fallback did: say which.
   const outHeaders = new Headers(response.headers);

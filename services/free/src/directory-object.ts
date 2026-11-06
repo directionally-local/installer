@@ -142,6 +142,8 @@ export interface PersonState {
   blocked: boolean;
   /** "full" or "starter": what the account may use. */
   level: Level;
+  /** Why the level is what it is (qualifies, account_too_new, network_limit, invite, admin). */
+  levelReason: LevelReason | null;
   /** The GitHub signals last read, as numbers only; null until the first read. */
   signals: {
     accountAgeDays: number | null;
@@ -915,15 +917,16 @@ export class DirectoryObject extends DurableObject {
         login: string;
         status: string;
         level: Level;
+        level_reason: LevelReason | null;
         account_age_days: number | null;
         public_repos: number | null;
         followers: number | null;
         contributions: number | null;
         restricted_contributions: number | null;
         signals_at: number | null;
-      }>("SELECT login, status, level, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at FROM people WHERE github_id = ?", githubId)
+      }>("SELECT login, status, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at FROM people WHERE github_id = ?", githubId)
       .toArray()[0];
-    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false, level: "full", signals: null };
+    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false, level: "full", levelReason: null, signals: null };
     const code = this.#ensureCode(githubId, person.login, now);
     const counting = countingPairs(sql, this.#pairs(githubId), now);
     const joined = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ? AND outcome = 'ok'", githubId).toArray()[0]?.n ?? 0;
@@ -933,6 +936,7 @@ export class DirectoryObject extends DurableObject {
       referral: { code, joined, activeThisWeek: counting.filter((pair) => pair.referrer === githubId).length },
       blocked: person.status === "blocked",
       level: person.level ?? "full",
+      levelReason: person.level_reason ?? null,
       signals:
         person.signals_at === null
           ? null
