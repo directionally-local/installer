@@ -21,18 +21,21 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
 
 - **One pool per tier.** GPT-6 Luna and DeepSeek share the `luna` pool, so switching between them
   (by hand or by the fallback) doesn’t hand anyone a second allowance. Sol and Astra have their own.
-- **Fallback.** GPT-6 Luna is served by OpenAI first. On a 429, a 5xx, a network error, no response
-  before `OPENAI_FIRST_BYTE_TIMEOUT_SECONDS`, or OpenAI’s credit running out, the same request is
-  retried once on DeepSeek/Luminal, and the response carries
-  `x-dl-fallback: deepseek/deepseek-v4.1-flash-1017`. Sol and Astra have no fallback: a failure is a
-  transient 503. DeepSeek picked by hand goes straight to Luminal.
+- **Fallback.** Every OpenAI model is served by OpenAI first. On a 429, a 5xx, a network error,
+  no response before `OPENAI_FIRST_BYTE_TIMEOUT_SECONDS`, or OpenAI’s credit running out, the same
+  request is retried once on DeepSeek/Luminal, and the response carries
+  `x-dl-fallback: deepseek/deepseek-v4.1-flash-1017`. The requested model’s pool pays for it, so
+  someone who asks for Sol spends Sol’s allowance, not Luna’s. DeepSeek picked by hand goes
+  straight to Luminal.
 - **Separate credit pools.** OpenAI’s `OPENAI_CREDIT_USD` ($5,000) and Luminal’s
   `LUMINAL_CREDIT_USD` ($2,000) are tracked apart (`/admin/spend` shows both). A provider at or past
-  its balance stops serving; Luna then falls back to the other provider.
+  its balance stops serving; its models then fall back to the other provider.
 - **Prices.** `prices` is what the person’s weekly dollar allowance is charged; `creditPrices` is
   what the provider’s credit is charged (they differ for DeepSeek, whose Luminal list price is
   higher than what OpenRouter billed us for the same model). OpenAI reports no cost, so its
-  requests are priced at list.
+  requests are priced at list. At the mix the free tier actually sees (95% of input tokens
+  cached, output under 1% of all tokens) a person who uses every pool costs about $9.35 a week,
+  so the $20 per-person cap leaves room for a much less cache-friendly week.
 - Any other model or provider needs the person’s own key (`model_not_allowed`).
 
 ## Admission
@@ -550,7 +553,7 @@ with who made it and when.
 | setting | env | default |
 |---|---|---|
 | `weeklyTokens` | `WEEKLY_TOKENS` | 50,000,000 |
-| `perPersonWeeklyUsdCap` | `PER_PERSON_WEEKLY_USD_CAP` | 60 |
+| `perPersonWeeklyUsdCap` | `PER_PERSON_WEEKLY_USD_CAP` | 20 |
 | `globalWeeklyUsdCap` | `GLOBAL_WEEKLY_USD_CAP` | 2000 |
 | `globalTotalUsdCap` | `GLOBAL_TOTAL_USD_CAP` | 7000 |
 | `maxActiveUsers` | `MAX_ACTIVE_USERS` (invite-only only) | 50 |

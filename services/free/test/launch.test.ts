@@ -277,11 +277,11 @@ describe("open sign-up and the queue", () => {
     // avg = 200 / 11 ≈ 18.18; budget 200 → floor(11) − 11 = 0. Too expensive: nobody new.
     assert.notEqual((await me(service, queued[0]!.access_token)).queue, null);
 
-    // Next week nobody spent anything: the fallback estimate ($60, the per-person cap) applies,
-    // 200 / 60 − 0 = 3.
+    // Next week nobody spent anything: the fallback estimate ($20, the per-person cap) applies,
+    // 200 / 20 − 0 = 10.
     service.clock.now = NEXT_MONDAY + WEEK + 60_000;
-    for (const token of queued.slice(0, 3)) assert.equal((await me(service, token.access_token)).queue, null);
-    assert.equal((await me(service, queued[3]!.access_token)).queue.position, 1);
+    for (const token of queued.slice(0, 10)) assert.equal((await me(service, token.access_token)).queue, null);
+    assert.equal((await me(service, queued[10]!.access_token)).queue.position, 1);
     service.setOpenRouter(() => completion(usage(10, 10)));
     assert.equal((await chat(service, queued[0]!.access_token)).status, 200);
   });
@@ -350,8 +350,8 @@ describe("referrals", () => {
     assert.equal(body.referral.bonusTokensPerWeek, 10_000_000);
     assert.equal(body.referral.activeThisWeek, 1);
     assert.equal(body.allowance.tokensPerWeek, 60_000_000);
-    // The dollar allowance grows with the bonus: $60 × 60M/50M.
-    assert.equal(body.allowance.usdPerWeek, 72);
+    // The dollar allowance grows with the bonus: $20 × 60M/50M.
+    assert.equal(body.allowance.usdPerWeek, 24);
     const pal2 = await me(service, friend2.tokens.access_token);
     assert.equal(pal2.referral.bonusTokensPerWeek, 10_000_000);
     assert.equal(pal2.allowance.tokensPerWeek, 60_000_000);

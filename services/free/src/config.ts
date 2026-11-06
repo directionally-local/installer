@@ -28,8 +28,9 @@ export interface FreeConfig {
   globalTotalUsdCap: number | undefined;
   /**
    * A person's week ends at their pool's tokens or at this much real cost, whichever comes
-   * first. Set high enough that the token pools are the limit, not this: a person who uses
-   * every pool costs about $55 a week at list prices.
+   * first. At the mix the free tier actually sees (95% of input tokens cached, output under
+   * 1% of all tokens) a person who uses every pool costs about $9.35 a week at list prices,
+   * so $20 leaves room for a much less cache-friendly week before the cap binds.
    */
   perPersonWeeklyUsdCap: number | undefined;
   /** GitHub accounts younger than this need an invite code even when admission is open. */
@@ -165,7 +166,7 @@ export const DEFAULTS = {
   countCachedTokens: true,
   globalWeeklyUsdCap: 2000,
   globalTotalUsdCap: 7000,
-  perPersonWeeklyUsdCap: 60,
+  perPersonWeeklyUsdCap: 20,
   minGithubAccountAgeDays: 30,
   openAdmission: false,
   requireGithubActivity: true,

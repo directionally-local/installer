@@ -491,8 +491,8 @@ function providerCredit(provider: Upstream, config: FreeConfig): number {
 
 /**
  * The model and provider that serve: the requested model on its own provider when that has a
- * key and credit, else its fallback (GPT-6 Luna → DeepSeek on Luminal). DeepSeek can also be
- * served by OpenRouter, the old upstream, when Luminal has no key. Undefined when nothing can.
+ * key and credit, else its fallback (any OpenAI model → DeepSeek on Luminal). DeepSeek can also
+ * be served by OpenRouter, the old upstream, when Luminal has no key. Undefined when nothing can.
  */
 function servingModel(
   requested: FreeModel,
@@ -1458,9 +1458,12 @@ async function chat(c: Ctx): Promise<Response> {
 
   const requestedMax = numberOrUndefined(body.max_tokens) ?? numberOrUndefined(body.max_completion_tokens);
   const promptEstimate = estimatePromptTokens(bodyBytes);
-  const reserveFor = (model: FreeModel) =>
-    person.reserve({ pool: model.pool, promptEstimate, requestedMaxTokens: requestedMax, limits: { ...limits, freeBlocked: freeBlock !== undefined }, now: c.now() });
-  const reservation = await reserveFor(serving.model);
+  // The requested model’s pool pays for the request, even when its fallback serves it: someone
+  // who asks for Sol spends Sol’s allowance, not Luna’s.
+  const pool = requested.pool;
+  const reserveFor = (pool: Pool) =>
+    person.reserve({ pool, promptEstimate, requestedMaxTokens: requestedMax, limits: { ...limits, freeBlocked: freeBlock !== undefined }, now: c.now() });
+  const reservation = await reserveFor(pool);
   if (!reservation.ok) {
     const quota = quotaHeaders(reservation.allowance);
     if (reservation.code === "quota_exceeded") {
@@ -1534,7 +1537,7 @@ async function chat(c: Ctx): Promise<Response> {
       const retry =
         backup && providerReady(backup.provider, gate.config, gate)
           ? async (): Promise<Response> => {
-              const again = await reserveFor(backup);
+              const again = await reserveFor(pool);
               if (!again.ok) return apiError(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, { retryable: true }, quotaHeaders(again.allowance));
               const response = await attempt(backup, backup.provider, again);
               // Tell the client which model actually answered, so it can say so.
@@ -1778,8 +1781,8 @@ async function luminalChat(
 
 /**
  * One request to OpenAI, the default provider. On a 429, a 5xx, a network error or no response
- * before the first-byte timeout, it retries once on the model's fallback (GPT-6 Luna → DeepSeek
- * on Luminal) when the caller gave one. A 4xx about the request itself is passed through.
+ * before the first-byte timeout, it retries once on the model's fallback (DeepSeek on Luminal)
+ * when the caller gave one. A 4xx about the request itself is passed through.
  */
 async function openaiChat(
   c: Ctx,

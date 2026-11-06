@@ -76,6 +76,7 @@ export const FREE_MODELS: readonly FreeModel[] = [
     maxOutputTokens: 128_000,
     vision: true,
     reasoning: true,
+    fallback: "deepseek/deepseek-v4.1-flash-1017",
   },
   {
     id: "gpt-6-astra",
@@ -88,6 +89,7 @@ export const FREE_MODELS: readonly FreeModel[] = [
     maxOutputTokens: 128_000,
     vision: true,
     reasoning: true,
+    fallback: "deepseek/deepseek-v4.1-flash-1017",
   },
   {
     id: "deepseek/deepseek-v4.1-flash-1017",

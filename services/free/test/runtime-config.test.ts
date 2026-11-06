@@ -31,7 +31,7 @@ describe("runtime settings (units)", () => {
     assert.equal(next.globalTotalUsdCap, 7000, "untouched settings keep the env value");
     assert.deepEqual(settingsView(config), {
       weeklyTokens: 50_000_000,
-      perPersonWeeklyUsdCap: 60,
+      perPersonWeeklyUsdCap: 20,
       globalWeeklyUsdCap: 2000,
       globalTotalUsdCap: 7000,
       maxActiveUsers: 50,
@@ -113,7 +113,7 @@ describe("admin config", () => {
     await service.request("POST", "/admin/config", { token: admin, body: { weeklyTokens: null, perPersonWeeklyUsdCap: null } });
     const back = await allowance(service, token);
     assert.equal(back.tokensPerWeek, 50_000_000);
-    assert.equal(back.usdPerWeek, 60);
+    assert.equal(back.usdPerWeek, 20);
   });
 
   it("a per-person grant still wins over the runtime default", async () => {
@@ -139,7 +139,7 @@ describe("admin config", () => {
     assert.equal((await chat(service, token)).status, 200);
 
     const spend = (await (await service.request("GET", "/admin/spend", { token: admin })).json()) as { caps: Record<string, number | null> };
-    assert.deepEqual(spend.caps, { globalWeeklyUsd: null, globalTotalUsd: 100, perPersonWeeklyUsd: 60, weeklyTokens: 50_000_000 });
+    assert.deepEqual(spend.caps, { globalWeeklyUsd: null, globalTotalUsd: 100, perPersonWeeklyUsd: 20, weeklyTokens: 50_000_000 });
   });
 
   it("validates input and changes nothing on a bad request", async () => {

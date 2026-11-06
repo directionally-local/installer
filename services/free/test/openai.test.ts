@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ADMIN_ID, completion, createService, errorCode, MODEL, NOW, openaiUsage, usage, type Service } from "./harness.js";
+import { ADMIN_ID, completion, createService, errorCode, luminalUsage, MODEL, NOW, openaiUsage, usage, type Service } from "./harness.js";
 
 /**
  * OpenAI as the default provider: GPT-6 Luna first, DeepSeek on Luminal as the automatic
@@ -93,14 +93,18 @@ describe("OpenAI as the default provider", () => {
     assert.equal(response.headers.get("x-dl-fallback"), DEEPSEEK);
   });
 
-  it("has no fallback for Sol or Astra: a failure is a transient 503", async () => {
+  it("falls back for Sol and Astra too, and charges their own pool", async () => {
     const { service, token } = await member(BOTH);
     service.setOpenAI(() => new Response("down", { status: 503 }));
+    service.setLuminal(() => completion(luminalUsage(1000, 1000, 0)));
     const response = await chat(service, token, { model: SOL });
-    assert.equal(response.status, 503);
-    assert.equal(await errorCode(response), "upstream_unavailable");
-    assert.equal(service.calls.luminal.length, 0);
-    assert.equal(response.headers.get("x-dl-fallback"), null);
+    assert.equal(response.status, 200);
+    assert.equal(service.calls.luminal.length, 1);
+    assert.equal(response.headers.get("x-dl-fallback"), DEEPSEEK);
+    // The person asked for Sol, so Sol's pool paid, not Luna's.
+    const body = await me(service, token);
+    assert.equal(body.pools.sol!.usedThisWeek, 2000);
+    assert.equal(body.pools.luna!.usedThisWeek, 0);
   });
 
   it("serves DeepSeek on Luminal when it is picked by hand", async () => {
@@ -175,13 +179,13 @@ describe("status and models", () => {
       { id: DEEPSEEK, available: false },
     ]);
 
-    // OpenAI out of credit: Luna still serves through DeepSeek, Sol and Astra don't.
+    // OpenAI out of credit: every OpenAI model still serves through DeepSeek.
     const spent = await createService({ ...BOTH, OPENAI_CREDIT_USD: "0", OPENROUTER_API_KEY: "" });
     const after = (await (await spent.request("GET", "/v1/status")).json()) as { models: Array<{ id: string; available: boolean }> };
     assert.deepEqual(after.models, [
       { id: LUNA, available: true },
-      { id: SOL, available: false },
-      { id: ASTRA, available: false },
+      { id: SOL, available: true },
+      { id: ASTRA, available: true },
       { id: DEEPSEEK, available: true },
     ]);
   });

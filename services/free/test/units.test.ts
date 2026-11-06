@@ -146,7 +146,7 @@ describe("config", () => {
     assert.equal(config.maxActiveUsers, 50);
     assert.equal(config.globalWeeklyUsdCap, 2000);
     assert.equal(config.globalTotalUsdCap, 7000);
-    assert.equal(config.perPersonWeeklyUsdCap, 60);
+    assert.equal(config.perPersonWeeklyUsdCap, 20);
     assert.equal(config.primaryUpstream, "openai");
     assert.equal(config.openaiCreditUsd, 5000);
     assert.equal(config.luminalCreditUsd, 2000);

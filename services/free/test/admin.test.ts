@@ -73,7 +73,7 @@ describe("admin endpoints", () => {
     await service.request("POST", "/admin/people/100/grant", { token: adminToken, body: { tokensPerWeek: null, usdPerWeek: null } });
     const me = (await (await service.request("GET", "/v1/me", { token })).json()) as { allowance: { tokensPerWeek: number; usdPerWeek: number } };
     assert.equal(me.allowance.tokensPerWeek, 50_000_000);
-    assert.equal(me.allowance.usdPerWeek, 60);
+    assert.equal(me.allowance.usdPerWeek, 20);
     assert.equal((await service.request("POST", "/admin/people/100/grant", { token: adminToken, body: { tokensPerWeek: -1 } })).status, 400);
   });
 
@@ -82,7 +82,7 @@ describe("admin endpoints", () => {
     const body = (await (await service.request("GET", "/admin/spend", { token: adminToken })).json()) as Record<string, unknown>;
     assert.equal(body.weekStart, "2026-11-02T00:00:00.000Z");
     assert.equal(body.spentUsd, 0);
-    assert.deepEqual(body.caps, { globalWeeklyUsd: 2000, globalTotalUsd: 7000, perPersonWeeklyUsd: 60, weeklyTokens: 50_000_000 });
+    assert.deepEqual(body.caps, { globalWeeklyUsd: 2000, globalTotalUsd: 7000, perPersonWeeklyUsd: 20, weeklyTokens: 50_000_000 });
     assert.equal(body.paused, false);
   });
 });
