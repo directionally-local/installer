@@ -1,9 +1,10 @@
 import { DurableObject, type DurableObjectNamespace, type DurableObjectState } from "cloudflare:workers";
 import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.js";
 import type { DirectoryObject } from "./directory-object.js";
-import { DEFAULT_MODEL, POOLS, POOL_TOKENS, type Pool } from "./models.js";
+import { DEFAULT_MODEL, POOLS, POOL_TOKENS, creditPrices, modelById, type Pool } from "./models.js";
+import type { Upstream } from "./config.js";
 import type { Level } from "./admission.js";
-import { costOf, planReservation } from "./quota.js";
+import { costAtPrices, costOf, planReservation } from "./quota.js";
 import { weekEnd, weekStart } from "./week.js";
 
 /**
@@ -212,6 +213,11 @@ export class AccountObject extends DurableObject<AccountEnv> {
       if (!columns.includes("paid")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN paid INTEGER NOT NULL DEFAULT 0");
       // Reservations made before pools were all against the one model's allowance.
       if (!columns.includes("pool")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN pool TEXT NOT NULL DEFAULT 'luna'");
+      // What an abandoned reservation is recorded and charged as: the provider and model that
+      // were serving it, and the prompt's estimated size. Null on reservations made before.
+      if (!columns.includes("provider")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN provider TEXT");
+      if (!columns.includes("model")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN model TEXT");
+      if (!columns.includes("prompt_estimate")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN prompt_estimate INTEGER");
     });
   }
 
@@ -239,7 +245,16 @@ export class AccountObject extends DurableObject<AccountEnv> {
    * case). The spend cap is checked against settled cost, so it can be passed by at most the
    * cost of the requests in flight when it's reached.
    */
-  async reserve(input: { pool?: Pool; promptEstimate: number; requestedMaxTokens: number | undefined; limits: Limits; now: number }): Promise<ReserveResult> {
+  async reserve(input: {
+    pool?: Pool;
+    promptEstimate: number;
+    requestedMaxTokens: number | undefined;
+    limits: Limits;
+    now: number;
+    /** The provider and model serving the request, for the record if it is abandoned. */
+    provider?: Upstream;
+    model?: string;
+  }): Promise<ReserveResult> {
     const pool = input.pool ?? "luna";
     const row = this.#current(input.now);
     const before = this.#allowance(row, input.now, input.limits, pool);
@@ -260,7 +275,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const reservationId = crypto.randomUUID();
     const expiresAt = input.now + RESERVATION_TTL_MS;
     this.ctx.storage.sql.exec(
-      "INSERT INTO reservations (id, amount, created_at, expires_at, source, paid, pool) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO reservations (id, amount, created_at, expires_at, source, paid, pool, provider, model, prompt_estimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       reservationId,
       plan.amount,
       input.now,
@@ -268,6 +283,9 @@ export class AccountObject extends DurableObject<AccountEnv> {
       source,
       paid ? 1 : 0,
       pool,
+      input.provider ?? null,
+      input.model ?? null,
+      Math.max(0, Math.round(input.promptEstimate)),
     );
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm === null || alarm > expiresAt) await this.ctx.storage.setAlarm(expiresAt);
@@ -504,7 +522,13 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return { githubId: row.github_id, login: row.login };
   }
 
-  /** Charges reservations that outlived any request in full, and logs them as abandoned. */
+  /**
+   * Settles reservations that outlived any request, and logs them as abandoned. That happens
+   * when the caller hangs up before the upstream answers: Workers stops the handler there, so
+   * it never settles. The upstream most likely read the prompt, so the charge is the prompt's
+   * estimated size at the serving model's prices, never the whole reservation (which counts
+   * the output the person never got). The record names the provider that was serving it.
+   */
   async alarm(): Promise<void> {
     await this.sweep(Date.now());
   }
@@ -512,12 +536,22 @@ export class AccountObject extends DurableObject<AccountEnv> {
   async sweep(now: number): Promise<number> {
     const row = this.#current(now);
     const stale = this.ctx.storage.sql
-      .exec<{ id: string; amount: number; created_at: number; source: Source; paid: number; pool: Pool }>("SELECT id, amount, created_at, source, paid, pool FROM reservations WHERE expires_at <= ?", now)
+      .exec<{ id: string; amount: number; created_at: number; source: Source; paid: number; pool: Pool; provider: Upstream | null; model: string | null; prompt_estimate: number | null }>(
+        "SELECT id, amount, created_at, source, paid, pool, provider, model, prompt_estimate FROM reservations WHERE expires_at <= ?",
+        now,
+      )
       .toArray();
     for (const reservation of stale) {
-      const costUsd = costOf(undefined, reservation.amount);
+      const model = modelById(reservation.model ?? DEFAULT_MODEL);
+      const charged = Math.min(reservation.amount, reservation.prompt_estimate ?? reservation.amount);
+      const usage = { promptTokens: charged, completionTokens: 0, cachedTokens: 0, costUsd: undefined };
+      const costUsd = model ? costAtPrices(usage, model.prices) : costOf(undefined, charged);
+      // Reservations made before the provider was kept were all served on Luminal or OpenAI
+      // (OpenRouter served nothing by then): never record them as OpenRouter cash.
+      const provider: Upstream = reservation.provider ?? (model?.provider === "openai" ? "openai" : "luminal");
+      const creditUsd = provider !== "openrouter" && model ? costAtPrices(usage, creditPrices(model)) : 0;
       this.ctx.storage.transactionSync(() => {
-        if (row) this.#charge(row.github_id, reservation.id, reservation.source, reservation.pool, reservation.amount, costUsd, now);
+        if (row) this.#charge(row.github_id, reservation.id, reservation.source, reservation.pool, charged, costUsd, now);
         else this.ctx.storage.sql.exec("DELETE FROM reservations WHERE id = ?", reservation.id);
       });
       if (row && this.env.DIRECTORY) {
@@ -525,14 +559,16 @@ export class AccountObject extends DurableObject<AccountEnv> {
           githubId: row.github_id,
           isAdmin: row.is_admin === 1,
           at: reservation.created_at,
-          model: DEFAULT_MODEL,
-          promptTokens: 0,
+          model: model?.id ?? DEFAULT_MODEL,
+          promptTokens: charged,
           completionTokens: 0,
           cachedTokens: 0,
-          chargedTokens: reservation.amount,
+          chargedTokens: charged,
           costUsd,
           status: "abandoned",
           latencyMs: null,
+          upstream: provider,
+          creditUsd,
           ...(reservation.paid === 1 ? { paid: true } : {}),
         });
       }
