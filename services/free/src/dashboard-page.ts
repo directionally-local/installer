@@ -1,7 +1,7 @@
 import { escapeHtml } from "../../shared/src/html.js";
 import { DOWNLOAD_ROUTES } from "./telemetry.js";
 import { COHORT_WEEKS, FUNNEL_DAYS, REGULAR_DAYS, RETENTION_OFFSETS, TOKEN_LIMIT_SHARE, WEEKS_SHOWN, type DashboardData, type InstallFunnelRow } from "./dashboard-data.js";
-import { ABUSE_DAYS, type AbuseData, type AbusePerson } from "./abuse.js";
+import { ABUSE_DAYS, type AbuseData, type AbusePerson, type SimpleData } from "./abuse.js";
 import { BRAND_ORIGIN, BRAND_TOKENS, PRODUCT_NAME } from "./pages.js";
 import { isoDay } from "./week.js";
 
@@ -13,6 +13,10 @@ import { isoDay } from "./week.js";
  * are small inline SVGs with presentation attributes and a `<title>` per bar for the value.
  * The only forms are sign-out, block/unblock and the "Serve from" upstream switch; the last
  * two post back here with a CSRF token.
+ *
+ * Two views: the full one (the default, every table) and a simple one at /admin?view=simple,
+ * four cards readable at a glance (sign-ups, growth, tokens per person, red flags), mostly
+ * inline SVG charts. Switching is a plain link: no scripts.
  */
 
 /** Global spend, caps and admission, for the first section. */
@@ -50,6 +54,8 @@ export interface SpendView {
   freeCreditWeekUsd: number;
   /** The weekly credit budget the queue protects; null for none. */
   weeklyCreditUsd: number | null;
+  /** A Starter account's weekly tokens. */
+  starterWeeklyTokens: number;
 }
 
 /** The red banner shows at this share of either cap. */
@@ -146,13 +152,16 @@ button.on { background: var(--ink); color: var(--on-ink); border-color: var(--in
 .signin { max-width: 28rem; margin: 10vh auto 0; text-align: center; display: grid; gap: 14px; justify-items: center; }
 .signin .btn { display: inline-flex; padding: 12px 20px; border-radius: 12px; background: var(--ink); color: var(--on-ink); text-decoration: none; font-weight: 600; }
 [role="alert"] { margin: 0; }
+.views { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.views a { font: 500 12px var(--body); padding: 2px 9px; border-radius: 6px; text-decoration: none; color: var(--muted); }
+.views a[aria-current="page"] { background: var(--ink); color: var(--on-ink); }
 `;
 
 export function nonce(): string {
   return [...crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function shell(title: string, body: string, status = 200, headers: Record<string, string> = {}, head = ""): Response {
+function shell(title: string, body: string, status = 200, headers: Record<string, string> = {}, head = "", style = STYLE): Response {
   const styleNonce = nonce();
   const html = `<!doctype html>
 <html lang="en">
@@ -161,12 +170,10 @@ function shell(title: string, body: string, status = 200, headers: Record<string
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 ${head}<title>${escapeHtml(title)}</title>
-<style nonce="${styleNonce}">${STYLE}</style>
+<style nonce="${styleNonce}">${style}</style>
 </head>
 <body>
-<div class="page">
-${body}
-</div>
+${style === STYLE ? `<div class="page">\n${body}\n</div>` : body}
 </body>
 </html>
 `;
@@ -492,20 +499,16 @@ function queueStart(spend: SpendView, data: DashboardData): { startUsd: number |
   };
 }
 
-export function dashboardPage(input: { data: DashboardData; spend: SpendView; login: string; signOut: boolean; abuse?: AbuseData; csrf?: string }): Response {
-  const { data, spend } = input;
-  const currentWeek = data.currentWeek;
-  const thisOrDate = (week: number) => (week === currentWeek ? `${day(week)} (this week)` : day(week));
-
+/** "Serving", or why free requests aren't served. */
+function freeTierState(spend: SpendView): string {
   // The launch budget is the Luminal credit. The OpenRouter cash caps still exist in config and
   // still stop free tokens if OpenRouter spend reaches them, so the state says so when they do,
   // but they aren't shown as a budget.
   const weeklyCapReached = spend.weeklyCapUsd !== null && spend.weekUsd >= spend.weeklyCapUsd;
   const luminalServing = spend.serving === "luminal";
-  const creditShare = spend.creditUsd > 0 ? spend.creditUsedUsd / spend.creditUsd : spend.creditUsedUsd > 0 ? 1 : 0;
   const creditOut = luminalServing && spend.creditUsedUsd >= spend.creditUsd;
   const totalCapReached = spend.totalCapUsd !== null && spend.totalUsd >= spend.totalCapUsd;
-  const state = spend.paused
+  return spend.paused
     ? `Paused for everyone${spend.pausedByEnv ? " (PAUSED in env)" : " (admin switch)"}`
     : spend.serving === "none"
       ? "Not serving: no upstream key (503 no_upstream)"
@@ -516,12 +519,41 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
       : weeklyCapReached
         ? `Free tokens stopped until ${weekday(spend.resetsAt)}: OpenRouter weekly cap reached`
         : "Serving";
+}
 
+/** The red banner's sentences: the Luminal credit, or this week's credit budget, past BANNER_SHARE. */
+function creditWarnings(spend: SpendView): string[] {
+  const creditShare = spend.creditUsd > 0 ? spend.creditUsedUsd / spend.creditUsd : spend.creditUsedUsd > 0 ? 1 : 0;
   const weekCreditShare = spend.weeklyCreditUsd !== null && spend.weeklyCreditUsd > 0 ? spend.freeCreditWeekUsd / spend.weeklyCreditUsd : 0;
-  const warnings = [
+  return [
     ...(creditShare >= BANNER_SHARE ? [`${percent(creditShare)} of the ${usd(spend.creditUsd)} Luminal credit used (${usd(spend.creditUsedUsd)}).`] : []),
     ...(weekCreditShare >= BANNER_SHARE ? [`${percent(weekCreditShare)} of this week's ${usd(spend.weeklyCreditUsd)} credit budget used (${usd(spend.freeCreditWeekUsd)}).`] : []),
   ];
+}
+
+/** Who serves now, as the dashboard names it. */
+function servingName(spend: SpendView): string {
+  return spend.serving === "openai"
+    ? "OpenAI"
+    : spend.serving === "luminal"
+      ? "Luminal"
+      : spend.serving === "openrouter"
+        ? spend.primaryUpstream === "luminal" ? "OpenRouter (no LUMINAL_API_KEY)" : "OpenRouter"
+        : "None (no OPENAI_API_KEY, LUMINAL_API_KEY or OPENROUTER_API_KEY)";
+}
+
+/** The Simple / Full switch: two links, the current one marked. */
+function viewToggle(current: "simple" | "full"): string {
+  const link = (view: "simple" | "full", label: string) => `<a href="/admin?view=${view}"${current === view ? ` aria-current="page"` : ""}>${label}</a>`;
+  return `<nav class="views" aria-label="Dashboard view">${link("simple", "Simple")}${link("full", "Full")}</nav>`;
+}
+
+export function dashboardPage(input: { data: DashboardData; spend: SpendView; login: string; signOut: boolean; abuse?: AbuseData; csrf?: string }): Response {
+  const { data, spend } = input;
+  const currentWeek = data.currentWeek;
+  const thisOrDate = (week: number) => (week === currentWeek ? `${day(week)} (this week)` : day(week));
+  const state = freeTierState(spend);
+  const warnings = creditWarnings(spend);
   const banner = warnings.length > 0 ? `<p class="banner" role="alert">${warnings.map(escapeHtml).join(" ")}</p>` : "";
   const queue = queueStart(spend, data);
 
@@ -543,14 +575,7 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
 <tbody>
 ${data.upstreams.filter((row) => row.window === window).map(upstreamRow).join("\n")}
 </tbody></table></div>`;
-  const serving =
-    spend.serving === "openai"
-      ? "OpenAI"
-      : spend.serving === "luminal"
-        ? "Luminal"
-        : spend.serving === "openrouter"
-          ? spend.primaryUpstream === "luminal" ? "OpenRouter (no LUMINAL_API_KEY)" : "OpenRouter"
-          : "None (no OPENAI_API_KEY, LUMINAL_API_KEY or OPENROUTER_API_KEY)";
+  const serving = servingName(spend);
   const upstreamSection = `<section id="upstream">
 <div class="head"><h2>Upstreams</h2>${csvLink("upstreams")}</div>
 <div class="tiles">
@@ -650,7 +675,7 @@ ${(() => {
 </tbody></table></div>
 </section>`;
 
-  const limitsSection = `<section>
+  const limitsSection = `<section id="limits">
 <div class="head"><h2>Who hit the limit</h2>${csvLink("limits")}</div>
 <div class="scroll"><table>
 <thead><tr><th>Week of</th><th class="l">GitHub login</th><th class="l">Reached on</th><th class="l">Allowance</th><th>Tokens used</th><th>Cost</th></tr></thead>
@@ -757,7 +782,7 @@ ${data.funnel
 </section>`;
 
   const header = `${markHeader(
-    `<span class="who">Signed in as <strong>${escapeHtml(input.login)}</strong>${
+    `<span class="who">${viewToggle("full")}Signed in as <strong>${escapeHtml(input.login)}</strong>${
       input.signOut ? `<form method="post" action="/admin/signout"><button type="submit">Sign out</button></form>` : ""
     }</span>`,
   )}
@@ -768,6 +793,271 @@ ${data.funnel
   const abuse = input.abuse ? abuseSection(input.abuse, input.csrf) : "";
   const log = input.abuse ? adminLogSection(input.abuse) : "";
   return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, budgetSection, abuse, upstreamSection, queueSection, referralSection, paidSection, funnelSection, activeSection, retentionSection, costSection, limitsSection, log].join("\n"));
+}
+
+// ─── The simple view ──────────────────────────────────────────────────────
+
+/**
+ * The simple view's stylesheet: a desktop admin app's cards (white panels with a 1px border,
+ * 10px radius, bold numbers over small muted labels) in the dl tokens, light and dark. Charts
+ * come in two drawings, wide and narrow, so their text stays the same size on a phone.
+ */
+const SIMPLE_STYLE = `${BRAND_TOKENS}
+:root {
+  --k-bg: #F9FAFB; --k-card: #FFFFFF; --k-text: #111827; --k-muted: #6B7280; --k-faint: #9CA3AF; --k-border: #E5E7EB; --k-axis: #D1D5DB;
+  --k-shadow: 0 1px 2px 0 rgb(0 0 0 / .04); --k-up: #047857; --k-down: #B91C1C; --k-flag: #B45309; --k-flag-bg: rgba(245, 158, 11, .1);
+  --k-ok: #047857; --k-ok-bg: rgba(16, 185, 129, .1); --k-stop: #B91C1C; --k-stop-bg: rgba(239, 68, 68, .09);
+  --c-1: #2A78D6; --c-2: #EB6834;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --k-bg: #0B0E12; --k-card: #161A21; --k-text: #E6E9EE; --k-muted: #8A919E; --k-faint: #646B78; --k-border: #262B34; --k-axis: #3A404B;
+    --k-shadow: none; --k-up: #34D399; --k-down: #F87171; --k-flag: #FBBF24; --k-flag-bg: rgba(251, 191, 36, .1);
+    --k-ok: #34D399; --k-ok-bg: rgba(52, 211, 153, .12); --k-stop: #F87171; --k-stop-bg: rgba(248, 113, 113, .12);
+    --c-1: #3987E5; --c-2: #D95926;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; min-height: 100vh; background: var(--k-bg); color: var(--k-text); font: 14px/1.5 var(--body); -webkit-font-smoothing: antialiased; }
+a { color: inherit; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.bar { background: var(--k-card); border-bottom: 1px solid var(--k-border); }
+.bar > div { max-width: 80rem; margin: 0 auto; padding: 14px 32px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; margin-right: auto; }
+.logo { width: 34px; height: 34px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 8%, transparent); display: grid; place-items: center; flex: none; }
+.logo img { width: 22px; height: 22px; border-radius: 6px; display: block; }
+.brand b { font: 600 16px var(--mono); }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 600; }
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pill.open { color: var(--k-ok); background: var(--k-ok-bg); }
+.pill.paused { color: var(--k-stop); background: var(--k-stop-bg); }
+.views { display: flex; gap: 4px; background: var(--k-bg); border: 1px solid var(--k-border); border-radius: 8px; padding: 3px; }
+.views a { padding: 5px 13px; border-radius: 6px; font-size: 13px; font-weight: 500; color: var(--k-muted); text-decoration: none; }
+.views a[aria-current="page"] { background: var(--accent); color: #FFFFFF; }
+.bar form { margin: 0; }
+.out { padding: 6px 10px; border-radius: 8px; border: 1px solid var(--k-border); background: transparent; color: var(--k-muted); font: 500 13px var(--body); cursor: pointer; }
+.out:hover { color: var(--k-text); }
+main { max-width: 80rem; margin: 0 auto; padding: 28px 32px 48px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+.card { background: var(--k-card); border: 1px solid var(--k-border); border-radius: 10px; padding: 24px; box-shadow: var(--k-shadow); min-width: 0; }
+.span2 { grid-column: span 2; }
+h2 { font-size: 15px; font-weight: 600; color: var(--k-muted); margin: 0 0 12px; }
+.big { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 16px; }
+.big b { font-size: 34px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.big span { font-size: 13px; color: var(--k-muted); }
+.growth { display: grid; gap: 20px; }
+.growth div { display: flex; flex-direction: column; gap: 2px; }
+.growth b { font-size: 34px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 8px; }
+.growth .l { font-size: 13px; font-weight: 500; }
+.growth .s { font-size: 12px; color: var(--k-faint); }
+.up { color: var(--k-up); }
+.down { color: var(--k-down); }
+.flat { color: var(--k-muted); }
+.arrow { font-size: 20px; }
+svg.chart { display: block; width: 100%; height: auto; overflow: visible; }
+svg.chart.narrow { display: none; }
+svg.chart text { fill: var(--k-muted); font: 11px var(--body); font-variant-numeric: tabular-nums; }
+svg.chart text.v { fill: var(--k-text); font-weight: 600; }
+svg.chart text.who { fill: var(--k-text); font-size: 12px; }
+svg.chart .axis { stroke: var(--k-axis); stroke-width: 1; }
+svg.chart .hit { fill: transparent; }
+svg.chart g:hover .hit { fill: color-mix(in srgb, var(--k-text) 5%, transparent); }
+svg.chart .c1 { fill: var(--c-1); }
+svg.chart .c2 { fill: var(--c-2); }
+.legend { display: flex; gap: 16px; margin: 0 0 12px; font-size: 12px; color: var(--k-muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.legend i.c1 { background: var(--c-1); }
+.legend i.c2 { background: var(--c-2); }
+.flags { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.flags li { display: flex; gap: 10px; align-items: baseline; padding: 9px 12px; border-radius: 8px; background: var(--k-flag-bg); font-size: 13.5px; line-height: 1.35; }
+.flags li::before { content: "!"; flex: none; width: 16px; height: 16px; border-radius: 50%; background: var(--k-flag); color: var(--k-card); font: 700 11px/16px var(--body); text-align: center; transform: translateY(2px); }
+.flags a { text-decoration: none; }
+.flags a:hover { text-decoration: underline; }
+.none { color: var(--k-muted); margin: 0; }
+.empty { color: var(--k-muted); margin: 8px 0 0; }
+@media (max-width: 1100px) { main { grid-template-columns: minmax(0, 1fr); } .span2 { grid-column: auto; } .growth { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 760px) {
+  .bar > div { padding: 12px 16px; }
+  main { padding: 16px 16px 40px; gap: 14px; }
+  .card { padding: 18px; }
+  .big b, .growth b { font-size: 28px; }
+  svg.chart.wide { display: none; }
+  svg.chart.narrow { display: block; }
+}
+`;
+
+/** A bar's path: square at the baseline, 3px rounded at the far end. */
+function barPath(x: number, y: number, width: number, height: number, horizontal = false): string {
+  const r = Math.min(3, horizontal ? width : height, horizontal ? height / 2 : width / 2);
+  if (horizontal) return `M${x.toFixed(1)} ${y.toFixed(1)}h${(width - r).toFixed(1)}a${r} ${r} 0 0 1 ${r} ${r}v${(height - 2 * r).toFixed(1)}a${r} ${r} 0 0 1 -${r} ${r}h-${(width - r).toFixed(1)}z`;
+  return `M${x.toFixed(1)} ${(y + height).toFixed(1)}v-${(height - r).toFixed(1)}a${r} ${r} 0 0 1 ${r} -${r}h${(width - 2 * r).toFixed(1)}a${r} ${r} 0 0 1 ${r} ${r}v${(height - r).toFixed(1)}z`;
+}
+
+/** Sign-ups per day, oldest first: thin columns, a value on the largest and on today, a title on each. */
+function signupChart(days: Array<{ day: number; n: number }>, width: number, kind: "wide" | "narrow"): string {
+  const height = 150;
+  const top = 18;
+  const bottom = 20;
+  const plot = height - top - bottom;
+  const max = Math.max(1, ...days.map((row) => row.n));
+  const slot = width / Math.max(1, days.length);
+  const barWidth = Math.min(kind === "wide" ? 14 : 10, slot * 0.55);
+  const largest = days.reduce((best, row, index) => (row.n > (days[best]?.n ?? -1) ? index : best), 0);
+  const last = days.length - 1;
+  const parts = days.map((row, index) => {
+    const x = index * slot + (slot - barWidth) / 2;
+    const h = (row.n / max) * plot;
+    const label = (index === largest && row.n > 0) || index === last;
+    const when = index === last ? "Today" : weekday(row.day);
+    return `<g><title>${escapeHtml(`${when}: ${row.n} sign-up${row.n === 1 ? "" : "s"}`)}</title><rect class="hit" x="${(index * slot).toFixed(1)}" y="0" width="${slot.toFixed(1)}" height="${height - bottom}"></rect>${
+      h > 0 ? `<path class="c1" d="${barPath(x, top + plot - h, barWidth, h)}"></path>` : ""
+    }${label ? `<text class="v" x="${(x + barWidth / 2).toFixed(1)}" y="${(top + plot - h - 5).toFixed(1)}" text-anchor="middle">${count(row.n)}</text>` : ""}</g>`;
+  });
+  const first = days[0];
+  const axisLabels = `${first ? `<text x="0" y="${height - 4}">${escapeHtml(short(first.day))}</text>` : ""}<text x="${width}" y="${height - 4}" text-anchor="end">today</text>`;
+  return `<svg class="chart ${kind}" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="New sign-ups per day, last ${days.length} days">
+<line class="axis" x1="0" x2="${width}" y1="${top + plot + 0.5}" y2="${top + plot + 0.5}"></line>
+${parts.join("\n")}
+${axisLabels}
+</svg>`;
+}
+
+/** Tokens this week per person, most first: one thin bar per login, coloured by level. */
+function tokenChart(rows: SimpleData["topTokens"], width: number, kind: "wide" | "narrow"): string {
+  const rowHeight = 24;
+  const labelWidth = kind === "wide" ? 140 : 96;
+  const right = 48;
+  const barHeight = 10;
+  const max = Math.max(1, ...rows.map((row) => row.tokens));
+  const plot = width - labelWidth - right;
+  const height = rows.length * rowHeight;
+  const chars = kind === "wide" ? 20 : 13;
+  const parts = rows.map((row, index) => {
+    const y = index * rowHeight;
+    const w = Math.max(2, (row.tokens / max) * plot);
+    const name = row.login ?? `#${row.githubId}`;
+    const shown = name.length > chars ? `${name.slice(0, chars - 1)}…` : name;
+    const level = row.level === "starter" ? "Starter" : "Full";
+    return `<g><title>${escapeHtml(`${name}: ${tokens(row.tokens)} tokens this week (${level})`)}</title><rect class="hit" x="0" y="${y}" width="${width}" height="${rowHeight}"></rect><text class="who" x="${labelWidth - 10}" y="${y + rowHeight / 2 + 4}" text-anchor="end">${escapeHtml(shown)}</text><path class="${row.level === "starter" ? "c2" : "c1"}" d="${barPath(labelWidth, y + (rowHeight - barHeight) / 2, w, barHeight, true)}"></path>${
+      index === 0 ? `<text class="v" x="${(labelWidth + w + 6).toFixed(1)}" y="${y + rowHeight / 2 + 4}">${escapeHtml(tokens(row.tokens))}</text>` : ""
+    }</g>`;
+  });
+  return `<svg class="chart ${kind}" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="Tokens used this week per person, top ${rows.length}">
+<line class="axis" x1="${labelWidth - 0.5}" x2="${labelWidth - 0.5}" y1="0" y2="${height}"></line>
+${parts.join("\n")}
+</svg>`;
+}
+
+/** Week-over-week change: "+25%", or "—" when the week before had none (never "Infinity%"). */
+export function growth(current: number, previous: number): { text: string; trend: "up" | "down" | "flat" } {
+  if (previous <= 0) return { text: "—", trend: "flat" };
+  const share = (current - previous) / previous;
+  const rounded = Math.round(share * 100);
+  if (rounded === 0) return { text: "0%", trend: "flat" };
+  return { text: `${rounded > 0 ? "+" : "−"}${Math.abs(rounded).toLocaleString("en-US")}%`, trend: rounded > 0 ? "up" : "down" };
+}
+
+/** "kenji, mara and 2 more". */
+function names(list: string[]): string {
+  return list.length <= 3 ? list.join(", ") : `${list.slice(0, 3).join(", ")} and ${list.length - 3} more`;
+}
+
+/** At most five one-line red flags from numbers the data already has; empty when nothing stands out. */
+export function redFlags(data: DashboardData, spend: SpendView, simple: SimpleData, abuse: AbuseData | undefined): Array<{ text: string; href: string }> {
+  const flags: Array<{ text: string; href: string }> = [];
+  const label = (login: string | null, id: number) => login ?? `#${id}`;
+  // At or near the weekly cap: who reached it (with per-person grants), and who is past 80% of their level's tokens.
+  const hits = data.limitHits.filter((hit) => hit.weekStart === data.currentWeek);
+  const hitIds = new Set(hits.map((hit) => hit.githubId));
+  const allowance = (level: string | null) => (level === "starter" ? spend.starterWeeklyTokens : spend.weeklyTokens);
+  const near = simple.topTokens.filter((row) => !hitIds.has(row.githubId) && row.tokens >= BANNER_SHARE * allowance(row.level));
+  const capped = [...hits.map((hit) => label(hit.login, hit.githubId)), ...near.map((row) => label(row.login, row.githubId))];
+  if (capped.length > 0) flags.push({ text: `Near weekly cap: ${names(capped)}`, href: "/admin?view=full#limits" });
+  // Starter accounts using a lot: half their week or more, not already listed at the cap.
+  const busyStarters = simple.topTokens.filter((row) => row.level === "starter" && !hitIds.has(row.githubId) && !near.includes(row) && row.tokens >= 0.5 * spend.starterWeeklyTokens);
+  if (busyStarters.length > 0) flags.push({ text: `Busy Starter: ${names(busyStarters.map((row) => `${label(row.login, row.githubId)} (${tokens(row.tokens)})`))}`, href: "/admin?view=full#abuse" });
+  if (abuse && abuse.clusterCount > 0) {
+    flags.push({ text: `${count(abuse.clusteredAccounts)} accounts share ${abuse.clusterCount === 1 ? "a network" : `${count(abuse.clusterCount)} networks`}`, href: "/admin?view=full#abuse" });
+  }
+  if (simple.bursts.length > 0) {
+    const burst = simple.bursts[0]!;
+    flags.push({ text: `Burst: ${count(burst.accounts)} sign-ups, one network, ${WEEKDAYS[new Date(burst.day).getUTCDay()]} ${short(burst.day)}${simple.bursts.length > 1 ? ` (+${simple.bursts.length - 1} more)` : ""}`, href: "/admin?view=full#abuse" });
+  }
+  if (simple.failing.length > 0) {
+    flags.push({
+      text: `Failing requests: ${names(simple.failing.map((row) => `${label(row.login, row.githubId)} (${count(row.failed)}/${count(row.requests)})`))}`,
+      href: "/admin?view=full#upstream",
+    });
+  }
+  return flags.slice(0, 5);
+}
+
+/**
+ * GET /admin?view=simple: four cards readable in a few seconds. Sign-ups per day with the total,
+ * week-over-week growth, tokens this week per person by level, and red flags when there are any.
+ * The header carries the Simple / Full switch and whether the free tier is open.
+ */
+export function simpleDashboardPage(input: { data: DashboardData; spend: SpendView; signOut: boolean; simple: SimpleData; abuse?: AbuseData }): Response {
+  const { data, spend, simple } = input;
+  const open = freeTierState(spend) === "Serving";
+
+  const header = `<header class="bar"><div>
+<a class="brand" href="/admin?view=simple"><span class="logo"><img src="${BRAND_ORIGIN}/logo-64.webp" alt="" width="22" height="22"></span><b>${escapeHtml(PRODUCT_NAME)} admin</b></a>
+<span class="pill ${open ? "open" : "paused"}" title="${escapeHtml(freeTierState(spend))}">Free tier ${open ? "open" : "paused"}</span>
+${viewToggle("simple")}
+${input.signOut ? `<form method="post" action="/admin/signout"><button type="submit" class="out">Sign out</button></form>` : ""}
+</div></header>`;
+
+  // installFunnel.days is newest first; the chart reads oldest first.
+  const days = [...data.installFunnel.days].reverse().map((row) => ({ day: row.start, n: row.signedUp }));
+  const lastFortnight = days.reduce((sum, row) => sum + row.n, 0);
+  const signups = `<section class="card span2" id="signups" aria-label="Sign-ups">
+<h2>Sign-ups</h2>
+<p class="big"><b>${count(data.people.admitted)}</b><span>so far · ${count(lastFortnight)} in ${days.length} days</span></p>
+${signupChart(days, 800, "wide")}
+${signupChart(days, 320, "narrow")}
+</section>`;
+
+  // Sign-ups: the last 7 days against the 7 before. Weekly active: the last full week against the one before.
+  const newest = data.installFunnel.days;
+  const sum = (rows: typeof newest) => rows.reduce((total, row) => total + row.signedUp, 0);
+  const signupsNow = sum(newest.slice(0, 7));
+  const signupsBefore = sum(newest.slice(7, 14));
+  const weeks = data.weeklyActive;
+  const activeNow = weeks[weeks.length - 2]?.active ?? 0;
+  const activeBefore = weeks[weeks.length - 3]?.active ?? 0;
+  const arrow = { up: "▲", down: "▼", flat: "" } as const;
+  const stat = (name: string, now: number, before: number, span: string) => {
+    const change = growth(now, before);
+    return `<div><span class="l">${escapeHtml(name)}</span><b class="${change.trend}">${change.trend === "flat" ? "" : `<span class="arrow" aria-hidden="true">${arrow[change.trend]}</span>`}${escapeHtml(change.text)}</b><span class="s">${count(now)} vs ${count(before)}, ${escapeHtml(span)}</span></div>`;
+  };
+  const growthCard = `<section class="card" id="growth" aria-label="Growth">
+<h2>Week over week</h2>
+<div class="growth">
+${stat("Sign-ups", signupsNow, signupsBefore, "last 7 days")}
+${stat("Weekly active people", activeNow, activeBefore, "last full week")}
+</div>
+</section>`;
+
+  const tokenCard = `<section class="card span2" id="tokens" aria-label="Tokens per person">
+<h2>Tokens this week, per person</h2>
+${
+  simple.topTokens.length === 0
+    ? `<p class="empty">No tokens used this week.</p>`
+    : `<div class="legend"><span><i class="c1"></i>Full</span><span><i class="c2"></i>Starter</span></div>
+${tokenChart(simple.topTokens, 800, "wide")}
+${tokenChart(simple.topTokens, 320, "narrow")}`
+}
+</section>`;
+
+  const flags = redFlags(data, spend, simple, input.abuse);
+  const flagCard = `<section class="card" id="flags" aria-label="Red flags">
+<h2>Red flags</h2>
+${flags.length === 0 ? `<p class="none">No red flags.</p>` : `<ul class="flags">\n${flags.map((flag) => `<li><a href="${flag.href}">${escapeHtml(flag.text)}</a></li>`).join("\n")}\n</ul>`}
+</section>`;
+
+  return shell(`Admin · ${PRODUCT_NAME}`, `${header}\n<main>\n${signups}\n${growthCard}\n${tokenCard}\n${flagCard}\n</main>`, 200, {}, "", SIMPLE_STYLE);
 }
 
 // ─── CSV ──────────────────────────────────────────────────────────────────

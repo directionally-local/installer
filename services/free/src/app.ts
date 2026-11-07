@@ -16,7 +16,7 @@ import { normalizeReferralCode, referralLink } from "./referrals.js";
 import { networkOf, rateLimitNetwork } from "./network.js";
 import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, type Sender } from "./feedback.js";
 import { apiError, json } from "./errors.js";
-import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, type SpendView } from "./dashboard-page.js";
+import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, simpleDashboardPage, type SpendView } from "./dashboard-page.js";
 import { cleanBatch } from "./events.js";
 import { cleanDownload, cleanInstall, MAX_TELEMETRY_BYTES } from "./telemetry.js";
 import {
@@ -2468,9 +2468,11 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
 
   const now = c.now();
   const { config, paused } = await runtime(c);
+  // The simple view is opt-in; anything else is the full view, as before.
+  const simple = csv === undefined && c.url.searchParams.get("view") === "simple";
   const weekParam = c.url.searchParams.get("week");
   const topWeek = weekParam && /^\d{4}-\d{2}-\d{2}$/.test(weekParam) ? Date.parse(`${weekParam}T00:00:00Z`) : Number.NaN;
-  const [data, spend, abuse] = await Promise.all([
+  const [data, spend, abuse, simpleData] = await Promise.all([
     directory(c).dashboard({
       now,
       adminIds: [...c.config.adminGithubIds],
@@ -2480,6 +2482,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     }),
     directory(c).spend(now),
     csv === undefined ? directory(c).abuse({ now, adminIds: [...c.config.adminGithubIds] }) : undefined,
+    simple ? directory(c).simple({ now, adminIds: [...c.config.adminGithubIds] }) : undefined,
   ]);
   const view: SpendView = {
     weekUsd: spend.spentUsd,
@@ -2507,8 +2510,10 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     creditWeekUsd: spend.creditWeekUsd,
     freeCreditWeekUsd: spend.freeCreditWeekUsd,
     weeklyCreditUsd: config.luminalWeeklyCreditUsd ?? null,
+    starterWeeklyTokens: config.starterWeeklyTokens,
   };
   if (csv !== undefined && isCsvTable(csv)) return dashboardCsv(csv, data, view);
+  if (simpleData) return simpleDashboardPage({ data, spend: view, signOut: viaCookie, simple: simpleData, ...(abuse ? { abuse } : {}) });
   return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie, ...(abuse ? { abuse } : {}), ...(csrf ? { csrf } : {}) });
 }
 
