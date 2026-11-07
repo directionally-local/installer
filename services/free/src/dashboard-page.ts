@@ -412,7 +412,7 @@ function abuseSection(abuse: AbuseData, csrf: string | undefined): string {
   );
   const topRows = abuse.topUsers.map(
     (row) =>
-      `<tr><td class="l">${personCell(row)}</td><td>${row.githubId}</td><td>${count(row.weekRequests)}</td><td>${tokens(row.weekTokens)}</td><td>${usd(row.weekCostUsd)}</td><td>${usd(row.weekCreditUsd)}</td><td>${row.activeDays}</td><td>${row.sharedWith > 0 ? `<strong>${row.sharedWith}</strong>` : "0"}</td><td class="l">${actionForm(row, csrf)}</td></tr>`,
+      `<tr><td class="l">${personCell(row)}</td><td>${row.githubId}</td><td>${count(row.weekRequests)}</td><td>${tokens(row.weekTokens)}</td><td>${usd(row.weekCostUsd)}</td><td>${usd(row.weekCreditUsd)}</td><td>${row.activeDays}</td><td>${row.weekRequests > 0 && row.weekSessions === 0 ? `<strong>0</strong>` : count(row.weekSessions)}</td><td>${row.sharedWith > 0 ? `<strong>${row.sharedWith}</strong>` : "0"}</td><td class="l">${actionForm(row, csrf)}</td></tr>`,
   );
   const blockedRows = abuse.blocked.map((row) => `<tr><td class="l">${personCell(row)}</td><td>${row.githubId}</td><td>${when(row.admittedAt)}</td><td class="l">${actionForm(row, csrf)}</td></tr>`);
   const checkRows = abuse.githubChecks.map((row) => `<tr><td>${escapeHtml(weekday(row.day))}</td><td>${count(row.contributions)}</td><td>${count(row.none)}</td><td>${count(row.error)}</td></tr>`);
@@ -446,9 +446,9 @@ ${referralRows.length === 0 ? empty(4, "No referral pair shares a network.") : r
 </tbody></table></div>
 <h3>Top users this week</h3>
 <div class="scroll"><table>
-<thead><tr><th class="l">GitHub login</th><th>GitHub id</th><th>Requests</th><th>Tokens</th><th>Cost</th><th>Credit</th><th>Days active</th><th>Shares a network with</th><th class="l"></th></tr></thead>
+<thead><tr><th class="l">GitHub login</th><th>GitHub id</th><th>Requests</th><th>Tokens</th><th>Cost</th><th>Credit</th><th>Days active</th><th>dl sessions this week</th><th>Shares a network with</th><th class="l"></th></tr></thead>
 <tbody>
-${topRows.length === 0 ? empty(9, "No requests this week.") : topRows.join("\n")}
+${topRows.length === 0 ? empty(10, "No requests this week.") : topRows.join("\n")}
 </tbody></table></div>
 <h3>Blocked accounts</h3>
 <div class="scroll"><table>
@@ -462,7 +462,7 @@ ${blockedRows.length === 0 ? empty(4, "Nobody is blocked.") : blockedRows.join("
 <tbody>
 ${checkRows.length === 0 ? empty(4, "No contribution lookups.") : checkRows.join("\n")}
 </tbody></table></div>
-<p class="note">Networks are keyed hashes of the sign-in address (IPv4, or the IPv6 /64), shortened: shared office, campus and mobile networks show up too, so check usage and sign-up times before blocking. Tokens, cost and credit are this week's, since Monday 00:00 UTC. Block ends free-tier use at once: requests and token refresh get a 403 that names the contact address, and the account can't sign in again until it is unblocked. Each block and unblock is in the admin log.</p>
+<p class="note">Networks are keyed hashes of the sign-in address (IPv4, or the IPv6 /64), shortened: shared office, campus and mobile networks show up too, so check usage and sign-up times before blocking. Tokens, cost and credit are this week's, since Monday 00:00 UTC. dl sessions: distinct sessions in the events Autopilot sent this week; requests with no sessions usually mean the free token is used from another tool. Block ends free-tier use at once: requests and token refresh get a 403 that names the contact address, and the account can't sign in again until it is unblocked. Each block and unblock is in the admin log.</p>
 </section>`;
 }
 
@@ -974,6 +974,10 @@ export function redFlags(data: DashboardData, spend: SpendView, simple: SimpleDa
   const near = simple.topTokens.filter((row) => !hitIds.has(row.githubId) && row.tokens >= BANNER_SHARE * allowance(row.level));
   const capped = [...hits.map((hit) => label(hit.login, hit.githubId)), ...near.map((row) => label(row.login, row.githubId))];
   if (capped.length > 0) flags.push({ text: `Near weekly cap: ${names(capped)}`, href: "/admin?view=full#limits" });
+  // Free tokens used from another tool: requests, but not one session event from Autopilot.
+  if (simple.outsideDl.length > 0) {
+    flags.push({ text: `Used outside dl: ${names(simple.outsideDl.map((row) => `${label(row.login, row.githubId)} (${count(row.requests)} requests, 0 dl sessions)`))}`, href: "/admin?view=full#abuse" });
+  }
   // Starter accounts using a lot: half their week or more, not already listed at the cap.
   const busyStarters = simple.topTokens.filter((row) => row.level === "starter" && !hitIds.has(row.githubId) && !near.includes(row) && row.tokens >= 0.5 * spend.starterWeeklyTokens);
   if (busyStarters.length > 0) flags.push({ text: `Busy Starter: ${names(busyStarters.map((row) => `${label(row.login, row.githubId)} (${tokens(row.tokens)})`))}`, href: "/admin?view=full#abuse" });

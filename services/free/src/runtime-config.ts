@@ -71,6 +71,8 @@ export const RUNTIME_SETTINGS = {
   luminalFirstByteTimeoutSeconds: { kind: "seconds", env: "LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS" },
   /** Emails to users (user-emails.ts) on or off; they also need RESEND_API_KEY. */
   userEmails: { kind: "flag", env: "USER_EMAILS" },
+  /** Free tokens inside dl only: chat requests without session events are refused (app.ts). */
+  dlOnly: { kind: "flag", env: "DL_ONLY" },
 } as const;
 
 export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;

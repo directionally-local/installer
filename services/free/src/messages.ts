@@ -68,6 +68,9 @@ export function signInRefusal(code: SignInRefusal, minAccountAgeDays: number): {
 
 export const BLOCKED_MESSAGE = "This account is blocked from the free tier. Contact contact@directionallylocal.com.";
 
+/** The dl-only refusal (code dl_only): free tokens were used from another tool. */
+export const DL_ONLY_MESSAGE = "Free tokens work inside dl only. Run dl to keep using them, or use your own API key in any tool.";
+
 export const DEVICE_TAKEN_MESSAGE = "This device already has a free allowance under another GitHub account; sign in with that account instead.";
 export const INVALID_INVITE_MESSAGE = "That invite code isn't valid or was already used.";
 

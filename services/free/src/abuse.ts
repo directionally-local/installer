@@ -9,10 +9,11 @@ import { DAY_MS, weekStart } from "./week.js";
  *                     from; two accounts sharing one is a cluster
  *   device_refusals   sign-ins refused with device_taken (the device holds another account's grant)
  *   referrals         referral pairs stopped as same_network
- *   daily_activity    this week's requests, charged tokens, cost and credit per person
+ *   daily_activity    per person per day: requests, charged tokens, cost, credit, events and dl sessions
  *   github_checks_daily  the sign-up GitHub activity check's daily outcomes
  *   people            login, status (blocked) and sign-up time
  *   config_log        the admin log, where blocks and unblocks are written
+ *   requests          chat requests, for failures and free use outside dl
  *
  * Network hashes are keyed with the signing key and shown shortened: they group accounts, they
  * don't reveal an address. Admins are left out of every list. Counts, times and who only;
@@ -23,10 +24,10 @@ export const ABUSE_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   person_networks: ["github_id", "net_hash", "first_at"],
   device_refusals: ["id", "at", "github_id", "login", "device_id", "holder_id"],
   referrals: ["referred_id", "referrer_id", "outcome", "at"],
-  daily_activity: ["day", "github_id", "requests", "charged_tokens", "cost_usd", "credit_usd"],
+  daily_activity: ["day", "github_id", "requests", "charged_tokens", "cost_usd", "credit_usd", "events", "sessions"],
   github_checks_daily: ["day", "outcome", "n"],
   people: ["github_id", "login", "status", "admitted_at", "admitted_via", "level"],
-  requests: ["github_id", "at", "is_admin", "status"],
+  requests: ["github_id", "at", "is_admin", "status", "paid", "via_key"],
   config_log: ["id", "key", "old_value", "new_value", "changed_by", "changed_by_login", "changed_at"],
 };
 
@@ -46,6 +47,8 @@ export interface AbusePerson {
   weekTokens: number;
   weekCostUsd: number;
   weekCreditUsd: number;
+  /** dl sessions this week: new session ids in the session events Autopilot sent. */
+  weekSessions: number;
 }
 
 export interface NetworkCluster {
@@ -125,12 +128,47 @@ export interface SimpleData {
   failing: Array<{ githubId: number; login: string | null; requests: number; failed: number }>;
   /** In the last BURST_DAYS days: a network that BURST_MIN or more new accounts were first seen on in one UTC day. */
   bursts: Array<{ net: string; day: number; accounts: number }>;
+  /**
+   * In the last OUTSIDE_DL_DAYS days: OUTSIDE_DL_MIN_REQUESTS or more free chat requests with a
+   * sign-in token, and not one session event (counted by UTC day, from the first day the window touches).
+   */
+  outsideDl: Array<{ githubId: number; login: string | null; requests: number }>;
 }
 
 export const FAILING_MIN = 10;
 export const FAILING_SHARE = 0.3;
 export const BURST_MIN = 3;
 export const BURST_DAYS = 7;
+/** The red flag "Used outside dl": this many free chat requests in OUTSIDE_DL_DAYS days, and no session event. */
+export const OUTSIDE_DL_MIN_REQUESTS = 10;
+export const OUTSIDE_DL_DAYS = 7;
+
+/**
+ * Free tokens work inside dl only (the runtime setting `dlOnly`): Autopilot always sends session
+ * events while the free tier is its provider, so an account whose sign-in token made at least
+ * DL_ONLY_MIN_REQUESTS free chat requests in the last DL_ONLY_WINDOW_MS, with no session event
+ * arriving in that time, is using the token in another tool. Autopilot batches events for a few
+ * seconds, so a real session's first requests come before its first event; the threshold leaves
+ * room for that. Requests with a server key (dl's server mode), admins' and paid ones aren't counted.
+ */
+export const DL_ONLY_MIN_REQUESTS = 20;
+export const DL_ONLY_WINDOW_MS = DAY_MS;
+
+/** Free sign-in-token chat requests: the ones the dl-only checks count. */
+const counted = (prefix = "") => `${prefix}is_admin = 0 AND ${prefix}paid = 0 AND ${prefix}via_key = 0`;
+
+/**
+ * True when `githubId` used free tokens outside dl in the last DL_ONLY_WINDOW_MS (see above).
+ * Two indexed reads: any event since (stops at the first), then the request count.
+ */
+export function outsideDl(store: Sql, githubId: number, now: number): boolean {
+  const since = now - DL_ONLY_WINDOW_MS;
+  const sent = store.exec("SELECT 1 FROM events WHERE github_id = ? AND received_at >= ? LIMIT 1", githubId, since).toArray().length > 0;
+  if (sent) return false;
+  const requests =
+    store.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM requests WHERE github_id = ? AND at >= ? AND ${counted()}`, githubId, since).toArray()[0]?.n ?? 0;
+  return requests >= DL_ONLY_MIN_REQUESTS;
+}
 
 /** Every query here starts with this comment, so a test can hold them to `ABUSE_COLUMNS`. */
 export const ABUSE_QUERY_TAG = "/* abuse */";
@@ -147,7 +185,7 @@ export function abuseData(store: Sql, input: { now: number; adminIds: readonly n
     const wanted = [...new Set(ids)].filter((id) => !people.has(id));
     if (wanted.length === 0) return;
     const list = JSON.stringify(wanted);
-    for (const id of wanted) people.set(id, { githubId: id, login: null, status: null, admittedAt: null, weekRequests: 0, weekTokens: 0, weekCostUsd: 0, weekCreditUsd: 0 });
+    for (const id of wanted) people.set(id, { githubId: id, login: null, status: null, admittedAt: null, weekRequests: 0, weekTokens: 0, weekCostUsd: 0, weekCreditUsd: 0, weekSessions: 0 });
     for (const row of sql
       .exec<{ github_id: number; login: string; status: string; admitted_at: number }>(
         "SELECT github_id, login, status, admitted_at FROM people WHERE github_id IN (SELECT value FROM json_each(?))",
@@ -157,14 +195,14 @@ export function abuseData(store: Sql, input: { now: number; adminIds: readonly n
       Object.assign(people.get(row.github_id)!, { login: row.login, status: row.status, admittedAt: row.admitted_at });
     }
     for (const row of sql
-      .exec<{ github_id: number; requests: number; tokens: number; cost: number; credit: number }>(
-        `SELECT github_id, SUM(requests) AS requests, SUM(charged_tokens) AS tokens, SUM(cost_usd) AS cost, SUM(credit_usd) AS credit
+      .exec<{ github_id: number; requests: number; tokens: number; cost: number; credit: number; sessions: number }>(
+        `SELECT github_id, SUM(requests) AS requests, SUM(charged_tokens) AS tokens, SUM(cost_usd) AS cost, SUM(credit_usd) AS credit, SUM(sessions) AS sessions
          FROM daily_activity WHERE day >= ? AND github_id IN (SELECT value FROM json_each(?)) GROUP BY github_id`,
         weekDay,
         list,
       )
       .toArray()) {
-      Object.assign(people.get(row.github_id)!, { weekRequests: row.requests, weekTokens: row.tokens, weekCostUsd: row.cost, weekCreditUsd: row.credit });
+      Object.assign(people.get(row.github_id)!, { weekRequests: row.requests, weekTokens: row.tokens, weekCostUsd: row.cost, weekCreditUsd: row.credit, weekSessions: row.sessions });
     }
   };
   const person = (id: number) => people.get(id)!;
@@ -328,5 +366,19 @@ export function simpleData(store: Sql, input: { now: number; adminIds: readonly 
     )
     .toArray()
     .map((row) => ({ net: row.net_hash.slice(0, 10), day: row.day * DAY_MS, accounts: row.n }));
-  return { topTokens, failing, bursts };
+  const outsideDl = sql
+    .exec<{ github_id: number; login: string | null; n: number }>(
+      `SELECT r.github_id AS github_id, p.login AS login, COUNT(*) AS n
+       FROM requests r LEFT JOIN people p ON p.github_id = r.github_id
+       WHERE r.at >= ? AND ${counted("r.")} AND ${notAdmin("r.github_id")}
+         AND NOT EXISTS (SELECT 1 FROM daily_activity d WHERE d.github_id = r.github_id AND d.day >= ? AND d.events > 0)
+       GROUP BY r.github_id HAVING COUNT(*) >= ? ORDER BY n DESC, r.github_id LIMIT 5`,
+      input.now - OUTSIDE_DL_DAYS * DAY_MS,
+      admins,
+      Math.floor((input.now - OUTSIDE_DL_DAYS * DAY_MS) / DAY_MS),
+      OUTSIDE_DL_MIN_REQUESTS,
+    )
+    .toArray()
+    .map((row) => ({ githubId: row.github_id, login: row.login, requests: row.n }));
+  return { topTokens, failing, bursts, outsideDl };
 }

@@ -2,7 +2,7 @@ import { DurableObject, type DurableObjectState } from "cloudflare:workers";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
-import { abuseData, simpleData, type AbuseData, type SimpleData } from "./abuse.js";
+import { abuseData, outsideDl, simpleData, type AbuseData, type SimpleData } from "./abuse.js";
 import { dashboardData, installBreakdown, notAdmin, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
 import { creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
@@ -122,6 +122,8 @@ export interface RequestRecord {
    * Unset: "error" with `upstreamError`, else "ok".
    */
   upstreamOutcome?: UpstreamOutcome;
+  /** Sent with a server key (dlk_, dl's server mode) rather than a sign-in's access token. */
+  viaKey?: boolean;
 }
 
 /**
@@ -163,6 +165,11 @@ export interface PersonState {
     restrictedContributions: number | null;
     checkedAt: number | null;
   } | null;
+  /**
+   * Free tokens used outside dl (see `outsideDl` in abuse.ts): in the last 24 hours, at least
+   * DL_ONLY_MIN_REQUESTS free chat requests with a sign-in token and no session event at all.
+   */
+  outsideDl: boolean;
 }
 
 export interface Gate {
@@ -288,6 +295,9 @@ const SCHEMA = [
    )`,
   `CREATE INDEX IF NOT EXISTS events_at ON events (at)`,
   `CREATE INDEX IF NOT EXISTS events_type ON events (type, github_id)`,
+  // A person's events by when they arrived (the dl-only check, on each chat request), and by session.
+  `CREATE INDEX IF NOT EXISTS events_person ON events (github_id, received_at)`,
+  `CREATE INDEX IF NOT EXISTS events_session ON events (github_id, session_id)`,
   `CREATE TABLE IF NOT EXISTS spend_weeks (
      week_start     INTEGER PRIMARY KEY,
      usd            REAL NOT NULL,
@@ -539,6 +549,10 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   // Set by the unsubscribe link in emails to users.
   ["people", "email_stop", "INTEGER NOT NULL DEFAULT 0"],
   ["daily_activity", "credit_usd", "REAL NOT NULL DEFAULT 0"],
+  // Requests sent with a server key (dl's server mode): the dl-only check leaves them out.
+  ["requests", "via_key", "INTEGER NOT NULL DEFAULT 0"],
+  // dl sessions: distinct session ids in a person's events, counted on the day of the first one.
+  ["daily_activity", "sessions", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 /** Timings older than this are dropped: the dashboard shows today and this week. */
@@ -555,18 +569,22 @@ export class DirectoryObject extends DurableObject {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
+      const added = new Set<string>();
       for (const [table, column, definition] of ADDED_COLUMNS) {
         const columns = this.ctx.storage.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray();
-        if (!columns.some((existing) => existing.name === column)) this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        if (columns.some((existing) => existing.name === column)) continue;
+        this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        added.add(`${table}.${column}`);
       }
-      this.#backfillDailyActivity();
+      const rebuilt = this.#backfillDailyActivity();
+      if (rebuilt || added.has("daily_activity.sessions")) this.#backfillSessions();
     });
   }
 
-  /** Builds `daily_activity` from the request log and events once, the first time this code runs. */
-  #backfillDailyActivity(): void {
+  /** Builds `daily_activity` from the request log and events once, the first time this code runs. True when it did. */
+  #backfillDailyActivity(): boolean {
     const sql = this.ctx.storage.sql;
-    if (sql.exec("SELECT 1 FROM settings WHERE key = ?", ROLLUP_READY).toArray().length > 0) return;
+    if (sql.exec("SELECT 1 FROM settings WHERE key = ?", ROLLUP_READY).toArray().length > 0) return false;
     this.ctx.storage.transactionSync(() => {
       sql.exec("DELETE FROM daily_activity");
       sql.exec(
@@ -586,14 +604,29 @@ export class DirectoryObject extends DurableObject {
       );
       sql.exec("INSERT INTO settings (key, value) VALUES (?, '1')", ROLLUP_READY);
     });
+    return true;
+  }
+
+  /** Counts the sessions already in `events` into `daily_activity.sessions`, once, when the column is added. */
+  #backfillSessions(): void {
+    this.ctx.storage.sql.exec(
+      `UPDATE daily_activity SET sessions = (
+         SELECT COUNT(*) FROM (SELECT github_id, MIN(at) AS first_at FROM events WHERE session_id IS NOT NULL GROUP BY github_id, session_id) s
+         WHERE s.github_id = daily_activity.github_id AND s.first_at / ${DAY_MS} = daily_activity.day)
+       WHERE events > 0`,
+    );
   }
 
   /** Free tokens and cost go in `charged_tokens` and `cost_usd`; paid cost in `paid_cost_usd`. */
-  #addActivity(githubId: number, at: number, change: { requests: number; events: number; chargedTokens: number; costUsd: number; paidCostUsd?: number; creditUsd?: number }): void {
+  #addActivity(
+    githubId: number,
+    at: number,
+    change: { requests: number; events: number; chargedTokens: number; costUsd: number; paidCostUsd?: number; creditUsd?: number; sessions?: number },
+  ): void {
     this.ctx.storage.sql.exec(
-      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd, paid_cost_usd, credit_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd, paid_cost_usd, credit_usd, sessions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (day, github_id) DO UPDATE SET
-         requests = requests + excluded.requests, events = events + excluded.events,
+         requests = requests + excluded.requests, events = events + excluded.events, sessions = sessions + excluded.sessions,
          charged_tokens = charged_tokens + excluded.charged_tokens, cost_usd = cost_usd + excluded.cost_usd,
          paid_cost_usd = paid_cost_usd + excluded.paid_cost_usd, credit_usd = credit_usd + excluded.credit_usd`,
       Math.floor(at / DAY_MS),
@@ -604,6 +637,7 @@ export class DirectoryObject extends DurableObject {
       change.costUsd,
       change.paidCostUsd ?? 0,
       change.creditUsd ?? 0,
+      change.sessions ?? 0,
     );
   }
 
@@ -968,7 +1002,7 @@ export class DirectoryObject extends DurableObject {
         signals_at: number | null;
       }>("SELECT login, status, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at FROM people WHERE github_id = ?", githubId)
       .toArray()[0];
-    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false, level: "full", levelReason: null, signals: null };
+    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false, level: "full", levelReason: null, signals: null, outsideDl: false };
     const code = this.#ensureCode(githubId, person.login, now);
     const counting = countingPairs(sql, this.#pairs(githubId), now);
     const joined = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ? AND outcome = 'ok'", githubId).toArray()[0]?.n ?? 0;
@@ -990,6 +1024,7 @@ export class DirectoryObject extends DurableObject {
               restrictedContributions: person.restricted_contributions,
               checkedAt: person.signals_at,
             },
+      outsideDl: outsideDl(sql, githubId, now),
     };
   }
 
@@ -1017,6 +1052,16 @@ export class DirectoryObject extends DurableObject {
       .exec<{ id: number; note: string | null; created_at: number; used_by: number | null; used_at: number | null }>("SELECT * FROM invites ORDER BY id")
       .toArray()
       .map((row) => ({ id: row.id, note: row.note, createdAt: row.created_at, usedBy: row.used_by, usedAt: row.used_at }));
+  }
+
+  /** dl sessions this week (since Monday 00:00 UTC) per person: new session ids in their events. */
+  async weekSessions(now: number): Promise<Map<number, number>> {
+    return new Map(
+      this.ctx.storage.sql
+        .exec<{ github_id: number; n: number }>("SELECT github_id, SUM(sessions) AS n FROM daily_activity WHERE day >= ? GROUP BY github_id", weekStart(now) / DAY_MS)
+        .toArray()
+        .map((row) => [row.github_id, row.n]),
+    );
   }
 
   async listPeople(): Promise<PersonRow[]> {
@@ -1437,8 +1482,8 @@ export class DirectoryObject extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         `INSERT INTO requests (github_id, is_admin, at, model, prompt_tokens, completion_tokens, cached_tokens, charged_tokens, cost_usd, status, latency_ms, paid,
-                               upstream, credit_usd, ttfb_ms, ttft_ms, upstream_error, upstream_outcome)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                               upstream, credit_usd, ttfb_ms, ttft_ms, upstream_error, upstream_outcome, via_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         record.githubId,
         record.isAdmin ? 1 : 0,
         record.at,
@@ -1457,6 +1502,7 @@ export class DirectoryObject extends DurableObject {
         record.ttftMs ?? null,
         record.upstreamError ? 1 : 0,
         outcome,
+        record.viaKey ? 1 : 0,
       );
       const admin = record.isAdmin ? 1 : 0;
       // Three buckets: admins; paid usage (Pro, top-ups); and free usage, the only one the caps count.
@@ -1701,6 +1747,9 @@ export class DirectoryObject extends DurableObject {
     let accepted = 0;
     this.ctx.storage.transactionSync(() => {
       for (const event of events) {
+        // A session id this person hasn't sent before is a new dl session.
+        const newSession =
+          event.sessionId !== null && this.ctx.storage.sql.exec("SELECT 1 FROM events WHERE github_id = ? AND session_id = ? LIMIT 1", githubId, event.sessionId).toArray().length === 0;
         const inserted = this.ctx.storage.sql
           .exec(
             `INSERT INTO events (github_id, id, type, session_id, at, props, received_at) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1715,7 +1764,7 @@ export class DirectoryObject extends DurableObject {
           )
           .toArray();
         accepted += inserted.length;
-        if (inserted.length > 0) this.#addActivity(githubId, event.at, { requests: 0, events: 1, chargedTokens: 0, costUsd: 0 });
+        if (inserted.length > 0) this.#addActivity(githubId, event.at, { requests: 0, events: 1, chargedTokens: 0, costUsd: 0, sessions: newSession ? 1 : 0 });
       }
     });
     return accepted;

@@ -151,6 +151,11 @@ export interface FreeConfig {
   userEmails: boolean;
   /** Send them to admins too (USER_EMAILS_TO_ADMINS), for testing. Off by default. */
   userEmailsToAdmins: boolean;
+  /**
+   * Free tokens work inside dl (Autopilot) only (DL_ONLY, default on); also a runtime setting.
+   * A free-plan account that sends chat requests but no session events is refused (app.ts).
+   */
+  dlOnly: boolean;
 }
 
 export type Upstream = "openai" | "luminal" | "openrouter";
@@ -195,6 +200,7 @@ export const DEFAULTS = {
   networkSignupsPerDay: 3,
   openAdmission: false,
   requireGithubActivity: true,
+  dlOnly: true,
   /**
    * OpenRouter's cache-read price over its input price for deepseek/deepseek-v4.1-flash-1017,
    * from https://openrouter.ai/api/v1/models on 2026-11-03: input $0.30/M, cache read
@@ -329,6 +335,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     emailReplyTo: emailAddress(env.EMAIL_REPLY_TO, "EMAIL_REPLY_TO") ?? DEFAULTS.emailReplyTo,
     userEmails: flag(env.USER_EMAILS, true, "USER_EMAILS"),
     userEmailsToAdmins: flag(env.USER_EMAILS_TO_ADMINS, false, "USER_EMAILS_TO_ADMINS"),
+    dlOnly: flag(env.DL_ONLY, DEFAULTS.dlOnly, "DL_ONLY"),
   };
 }
 
