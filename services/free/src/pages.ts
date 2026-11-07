@@ -216,12 +216,27 @@ ${alertHtml(options.error)}<p class="lede">Signed in as <strong>${escapeHtml(log
   <label class="field"><span>Email</span>
     <input type="email" name="email" aria-label="Email" autocomplete="email" maxlength="254" required value="${escapeHtml(options.email ?? "")}">
   </label>
-  <p class="fine" style="text-align:left">Only about your free tier: limits, changes, and replies to your feedback.</p>
+  <p class="fine" style="text-align:left">Only about your free tier: getting started, limits, changes, and replies to your feedback. Every email has a link to stop them.</p>
   <label class="check"><input type="checkbox" name="updates" value="1"${options.updates ? " checked" : ""}> Also send me occasional dl updates</label>${starter}
   <button class="btn" type="submit">Continue</button>
 </form>
 ${DISCLOSURE}`,
     options.error ? 400 : 200,
+  );
+}
+
+/**
+ * The unsubscribe link's page: one button that stops emails to users. `action` is the same
+ * signed URL, which also takes a one-click POST from the mail app (List-Unsubscribe-Post).
+ */
+export function emailStopPage(action: string): Response {
+  return shell(
+    "Stop emails",
+    `<h1>Stop these emails?</h1>
+<p class="lede">You won't get any more emails from dl about getting started or your weekly tokens.</p>
+<form method="post" action="${escapeHtml(action)}">
+  <button class="btn" type="submit">Stop emails</button>
+</form>`,
   );
 }
 

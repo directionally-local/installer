@@ -597,12 +597,14 @@ with who made it and when.
 | `luminalCreditUsd` | `LUMINAL_CREDIT_USD` | 2000 |
 | `luminalWeeklyCreditUsd` | `LUMINAL_WEEKLY_CREDIT_USD` | 250; `none` for no weekly credit budget |
 | `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
+| `userEmails` | `USER_EMAILS` | true (sends only with `RESEND_API_KEY`) |
 
 Env only: `REFERRAL_LINK_BASE` (`https://dl.new/r/`), the offers above, `ALERT_EMAIL_TO`,
 `ALERT_EMAIL_FROM` (`alerts@dl.new`), `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_KIND`,
 `ALERT_TELEGRAM_CHAT_ID`, the prices `LUMINAL_PRICE_INPUT`, `LUMINAL_PRICE_CACHED`,
 `LUMINAL_PRICE_OUTPUT`, `OPENROUTER_PRICE_INPUT`, `OPENROUTER_PRICE_CACHED`,
-`OPENROUTER_PRICE_OUTPUT`, and the secrets `OPENAI_API_KEY` and `LUMINAL_API_KEY`.
+`OPENROUTER_PRICE_OUTPUT`, `EMAIL_FROM`, `EMAIL_REPLY_TO`, `USER_EMAILS_TO_ADMINS`, and the
+secrets `OPENAI_API_KEY`, `LUMINAL_API_KEY` and `RESEND_API_KEY`.
 
 ```sh
 # Read the effective values, the env values, the overrides and the change log
@@ -613,6 +615,44 @@ curl -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json'
   -d '{"weeklyTokens": 60000000, "globalWeeklyUsdCap": 300, "openAdmission": null}' \
   https://free.example.com/admin/config
 ```
+
+## Emails to users
+
+Four plain-text emails to the people on the free tier, sent through Resend
+(`POST https://api.resend.com/emails`). The copy is in `src/user-emails.ts`; when each goes
+out is in `src/user-email-send.ts`.
+
+| email | when |
+|---|---|
+| welcome | right after a new sign-up gives their email on the details step |
+| didn't start | daily run: admitted 24 to 72 hours ago, no request yet |
+| most of the week used | the request whose settlement takes the week past 80% of a pool's tokens or of the weekly dollar cap; once a week |
+| gone quiet | daily run: requests on 2 or more days, none in the last 7 |
+
+Only to people with an email who haven't pressed stop; never to admins (unless
+`USER_EMAILS_TO_ADMINS=true`, for testing); at most one email per person per UTC day; each
+kind once per person, the weekly one once per week. Nobody still waiting in the queue gets the
+welcome or the didn't-start email. Every send is recorded in the Directory's `user_emails`
+table before Resend is called, and Resend gets an `Idempotency-Key`, so nothing goes twice
+across retries or deploys. A failed send is retried once, by the next daily run (01:00 UTC);
+failures are logged as counts only.
+
+Each email ends with a stop link, `/email/stop?u=<github id>&t=<hmac>` (an HMAC of the id with
+`TOKEN_SIGNING_KEY`), and carries `List-Unsubscribe` and `List-Unsubscribe-Post` headers for the
+same URL. GET shows a page with one button; POST (the button, or a mail app's one-click) sets
+`people.email_stop`.
+
+| env | default |
+|---|---|
+| `RESEND_API_KEY` (secret) | unset: nothing is sent and nothing fails |
+| `EMAIL_FROM` | `sina <sina@directionallylocal.com>` |
+| `EMAIL_REPLY_TO` | `contact@directionallylocal.com` |
+| `USER_EMAILS` (also the runtime setting `userEmails`) | true |
+| `USER_EMAILS_TO_ADMINS` | false |
+
+Before anything is delivered, `directionallylocal.com` must be verified in Resend (its SPF and
+DKIM DNS records). To stop every email without a deploy:
+`POST /admin/config {"userEmails": false}`.
 
 ## What counts against the weekly allowance
 

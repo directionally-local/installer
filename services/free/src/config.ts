@@ -141,6 +141,16 @@ export interface FreeConfig {
   paused: boolean;
   /** The public origin for links, when the request's own origin isn't it (behind a proxy). */
   publicUrl: string | undefined;
+  /** Resend's API key (RESEND_API_KEY, a secret) for emails to users. Without it none are sent. Never logged. */
+  resendApiKey: string | undefined;
+  /** The sender of emails to users (EMAIL_FROM), name and address. */
+  emailFrom: string;
+  /** Where replies to them go (EMAIL_REPLY_TO). */
+  emailReplyTo: string;
+  /** Emails to users on or off (USER_EMAILS, default on); also a runtime setting. Needs `resendApiKey`. */
+  userEmails: boolean;
+  /** Send them to admins too (USER_EMAILS_TO_ADMINS), for testing. Off by default. */
+  userEmailsToAdmins: boolean;
 }
 
 export type Upstream = "openai" | "luminal" | "openrouter";
@@ -232,6 +242,8 @@ export const DEFAULTS = {
   openRouterPrices: { input: 0.035, cached: 0.006, output: 0.315 } as Prices,
   luminalCreditUsd: 2000,
   luminalWeeklyCreditUsd: 250,
+  emailFrom: "sina <sina@directionallylocal.com>",
+  emailReplyTo: "contact@directionallylocal.com",
 } as const;
 
 /** The longest first-byte wait for Luminal, in seconds. */
@@ -312,6 +324,11 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     luminalWeeklyCreditUsd: usd(env.LUMINAL_WEEKLY_CREDIT_USD, DEFAULTS.luminalWeeklyCreditUsd, "LUMINAL_WEEKLY_CREDIT_USD"),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
+    resendApiKey: text(env.RESEND_API_KEY),
+    emailFrom: sender(env.EMAIL_FROM) ?? DEFAULTS.emailFrom,
+    emailReplyTo: emailAddress(env.EMAIL_REPLY_TO, "EMAIL_REPLY_TO") ?? DEFAULTS.emailReplyTo,
+    userEmails: flag(env.USER_EMAILS, true, "USER_EMAILS"),
+    userEmailsToAdmins: flag(env.USER_EMAILS_TO_ADMINS, false, "USER_EMAILS_TO_ADMINS"),
   };
 }
 
@@ -382,6 +399,16 @@ function emailAddress(value: unknown, name: string): string | undefined {
   const raw = text(value);
   if (raw === undefined) return undefined;
   if (!/^[^\s@<>"(),;:]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(raw)) throw new ConfigError(`${name} must be one email address (got "${raw}").`);
+  return raw;
+}
+
+/** "name <address>" or a bare address, one line. */
+function sender(value: unknown): string | undefined {
+  const raw = text(value);
+  if (raw === undefined) return undefined;
+  if (!/^([^<>\r\n"]*<[^\s@<>"(),;:]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}>|[^\s@<>"(),;:]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})$/.test(raw)) {
+    throw new ConfigError(`EMAIL_FROM must be "name <address>" or one email address (got "${raw}").`);
+  }
   return raw;
 }
 
