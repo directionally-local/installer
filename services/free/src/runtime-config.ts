@@ -69,6 +69,8 @@ export const RUNTIME_SETTINGS = {
   luminalWeeklyCreditUsd: { kind: "usd", env: "LUMINAL_WEEKLY_CREDIT_USD" },
   /** Seconds to wait for Luminal's first byte before a transient 503. */
   luminalFirstByteTimeoutSeconds: { kind: "seconds", env: "LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS" },
+  /** Emails to users (user-emails.ts) on or off; they also need RESEND_API_KEY. */
+  userEmails: { kind: "flag", env: "USER_EMAILS" },
 } as const;
 
 export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;

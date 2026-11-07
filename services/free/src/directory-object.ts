@@ -12,6 +12,8 @@ import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type Ref
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
 import { qualifiesForFull, type GithubSignals, type Level, type LevelReason, type LevelThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
+import type { UserEmailClaim } from "./user-email-send.js";
+import type { UserEmailKind } from "./user-emails.js";
 
 /**
  * Who is in, and what they used. One object (`getByName("directory")`): admissions, invite
@@ -77,6 +79,8 @@ export interface PersonRow {
   email_updates: number | null;
   /** When the email was last given (Unix ms). */
   email_at: number | null;
+  /** 1 once the person pressed stop on an email's unsubscribe link: no more user emails. */
+  email_stop: number;
 }
 
 export interface RequestRecord {
@@ -476,6 +480,22 @@ const SCHEMA = [
      n       INTEGER NOT NULL,
      PRIMARY KEY (day, outcome)
    ) WITHOUT ROWID`,
+  // Emails to users (user-email-send.ts): one row per person, kind and period ('' for once
+  // ever, the week's Monday for week_80). `status` is pending (claimed, being sent), sent or
+  // failed; a failed one is retried once (`attempts` 2 at most). `day` is the UTC day of the
+  // latest attempt, for the one-a-day cap. No content, no address.
+  `CREATE TABLE IF NOT EXISTS user_emails (
+     github_id  INTEGER NOT NULL,
+     kind       TEXT NOT NULL,
+     period     TEXT NOT NULL,
+     status     TEXT NOT NULL,
+     attempts   INTEGER NOT NULL,
+     day        INTEGER NOT NULL,
+     claimed_at INTEGER NOT NULL,
+     sent_at    INTEGER,
+     PRIMARY KEY (github_id, kind, period)
+   ) WITHOUT ROWID`,
+  `CREATE INDEX IF NOT EXISTS user_emails_status ON user_emails (status)`,
   `CREATE TABLE IF NOT EXISTS subscriptions (
      github_id  INTEGER PRIMARY KEY,
      state      TEXT NOT NULL,
@@ -516,6 +536,8 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["people", "email", "TEXT"],
   ["people", "email_updates", "INTEGER"],
   ["people", "email_at", "INTEGER"],
+  // Set by the unsubscribe link in emails to users.
+  ["people", "email_stop", "INTEGER NOT NULL DEFAULT 0"],
   ["daily_activity", "credit_usd", "REAL NOT NULL DEFAULT 0"],
 ];
 
@@ -1009,6 +1031,121 @@ export class DirectoryObject extends DurableObject {
     const sql = this.ctx.storage.sql;
     if (sql.exec("SELECT 1 FROM people WHERE github_id = ?", githubId).toArray().length === 0) return false;
     sql.exec("UPDATE people SET email = ?, email_updates = ?, email_at = ? WHERE github_id = ?", email.trim(), updates ? 1 : 0, now, githubId);
+    return true;
+  }
+
+  // ─── Emails to users (user-email-send.ts) ─────────────────────────────────
+
+  /**
+   * Reserves one email to a person, or undefined when it mustn't go: no such active person, no
+   * email, stop pressed, an admin (unless `includeAdmins`), this kind and period already sent or
+   * being sent, one already sent or being sent today, or (with `retry` only) a failed attempt
+   * that may be tried once more. Atomic, so two runs can't both claim it.
+   */
+  async claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean }): Promise<UserEmailClaim | undefined> {
+    const sql = this.ctx.storage.sql;
+    const day = Math.floor(input.now / DAY_MS);
+    return this.ctx.storage.transactionSync((): UserEmailClaim | undefined => {
+      const person = sql
+        .exec<{ email: string | null; email_stop: number; status: string; admitted_via: string }>(
+          "SELECT email, email_stop, status, admitted_via FROM people WHERE github_id = ?",
+          input.githubId,
+        )
+        .toArray()[0];
+      if (!person || person.status !== "active" || !person.email || person.email_stop === 1) return undefined;
+      if (!input.includeAdmins && (person.admitted_via === "admin" || input.adminIds.includes(input.githubId))) return undefined;
+      const existing = sql
+        .exec<{ status: string; attempts: number }>("SELECT status, attempts FROM user_emails WHERE github_id = ? AND kind = ? AND period = ?", input.githubId, input.kind, input.period)
+        .toArray()[0];
+      if (existing && (existing.status !== "failed" || !input.retry || existing.attempts >= 2)) return undefined;
+      if (!existing && input.retry) return undefined;
+      // Welcome and "didn't start" wait while the person waits in the queue for free tokens.
+      if ((input.kind === "welcome" || input.kind === "didnt_start") && sql.exec("SELECT 1 FROM queue WHERE github_id = ? AND admitted_at IS NULL", input.githubId).toArray().length > 0) return undefined;
+      const today = sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND day = ? AND status IN ('pending', 'sent') LIMIT 1", input.githubId, day).toArray();
+      if (today.length > 0) return undefined;
+      sql.exec(
+        `INSERT INTO user_emails (github_id, kind, period, status, attempts, day, claimed_at) VALUES (?, ?, ?, 'pending', 1, ?, ?)
+         ON CONFLICT (github_id, kind, period) DO UPDATE SET status = 'pending', attempts = attempts + 1, day = excluded.day, claimed_at = excluded.claimed_at`,
+        input.githubId,
+        input.kind,
+        input.period,
+        day,
+        input.now,
+      );
+      return { githubId: input.githubId, email: person.email, kind: input.kind, period: input.period };
+    });
+  }
+
+  /** Marks a claimed email sent, or failed (retried once by the next daily run). */
+  async finishUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; ok: boolean; now: number }): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "UPDATE user_emails SET status = ?, sent_at = ? WHERE github_id = ? AND kind = ? AND period = ? AND status = 'pending'",
+      input.ok ? "sent" : "failed",
+      input.ok ? input.now : null,
+      input.githubId,
+      input.kind,
+      input.period,
+    );
+  }
+
+  /**
+   * Who the daily run may email: failed sends to try once more (week_80 only within its week),
+   * people admitted 24 to 72 hours ago with no request (not still waiting in the queue: they
+   * can't use free tokens yet), and people with requests on 2 or more UTC days and none in the
+   * last 7. `claimUserEmail` still checks everything else. A claim left pending for an hour
+   * (the run died mid-send) counts as a failed attempt first.
+   */
+  async userEmailCandidates(now: number): Promise<{
+    retries: Array<{ githubId: number; kind: UserEmailKind; period: string }>;
+    didntStart: number[];
+    goneQuiet: number[];
+  }> {
+    const sql = this.ctx.storage.sql;
+    sql.exec("UPDATE user_emails SET status = 'failed' WHERE status = 'pending' AND claimed_at < ?", now - 3_600_000);
+    const week = String(weekStart(now));
+    const retries = sql
+      .exec<{ github_id: number; kind: UserEmailKind; period: string }>(
+        "SELECT github_id, kind, period FROM user_emails WHERE status = 'failed' AND attempts < 2 AND (kind != 'week_80' OR period = ?) ORDER BY claimed_at",
+        week,
+      )
+      .toArray()
+      .map((row) => ({ githubId: row.github_id, kind: row.kind, period: row.period }));
+    const ids = (rows: Array<{ github_id: number }>) => rows.map((row) => row.github_id);
+    const didntStart = ids(
+      sql
+        .exec<{ github_id: number }>(
+          `SELECT p.github_id FROM people p LEFT JOIN queue q ON q.github_id = p.github_id
+           WHERE p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0
+             AND NOT (q.github_id IS NOT NULL AND q.admitted_at IS NULL)
+             AND COALESCE(q.admitted_at, p.admitted_at) > ? AND COALESCE(q.admitted_at, p.admitted_at) <= ?
+             AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.github_id = p.github_id)
+           ORDER BY p.github_id`,
+          now - 72 * 3_600_000,
+          now - 24 * 3_600_000,
+        )
+        .toArray(),
+    );
+    const goneQuiet = ids(
+      sql
+        .exec<{ github_id: number }>(
+          `SELECT p.github_id FROM people p
+           JOIN (SELECT github_id, COUNT(DISTINCT at / ${DAY_MS}) AS days, MAX(at) AS last FROM requests GROUP BY github_id) r ON r.github_id = p.github_id
+           WHERE p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0 AND r.days >= 2 AND r.last < ?
+             AND NOT EXISTS (SELECT 1 FROM user_emails e WHERE e.github_id = p.github_id AND e.kind = 'gone_quiet' AND e.claimed_at > ?)
+           ORDER BY p.github_id`,
+          now - 7 * DAY_MS,
+          now - 30 * DAY_MS,
+        )
+        .toArray(),
+    );
+    return { retries, didntStart, goneQuiet };
+  }
+
+  /** The unsubscribe link: no more emails to this person. False when there is no such person. */
+  async setEmailStop(githubId: number): Promise<boolean> {
+    const sql = this.ctx.storage.sql;
+    if (sql.exec("SELECT 1 FROM people WHERE github_id = ?", githubId).toArray().length === 0) return false;
+    sql.exec("UPDATE people SET email_stop = 1 WHERE github_id = ?", githubId);
     return true;
   }
 

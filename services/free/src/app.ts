@@ -37,7 +37,7 @@ import {
   weeklyBudgetMessage,
   type SignInRefusal,
 } from "./messages.js";
-import { confirmPage, detailsPage, donePage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
+import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
 import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, modelById, type FreeModel, type Pool } from "./models.js";
 import { levelFor, levelReason, starterLine, type GithubSignals, type Level, type LevelReason, type LevelThresholds } from "./admission.js";
@@ -48,6 +48,8 @@ import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./rout
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
 import { meterStream } from "./sse.js";
 import { DAY_MS, isoDay, weekEnd, weekStart } from "./week.js";
+import { deliverUserEmail, EMAIL_STOP_BASE, logUserEmails, userEmailsOn, verifyStopToken, weekMostlyUsed, type UserEmailStore } from "./user-email-send.js";
+import type { UserEmailKind } from "./user-emails.js";
 
 /**
  * The free managed tier's HTTP surface: device-flow sign-in with GitHub, the account and
@@ -190,6 +192,12 @@ export interface Env {
   OPENROUTER_PRICE_OUTPUT?: string;
   LUMINAL_CREDIT_USD?: string;
   LUMINAL_WEEKLY_CREDIT_USD?: string;
+  /** A secret: Resend's API key for emails to users. Without it none are sent. Never logged. */
+  RESEND_API_KEY?: string;
+  EMAIL_FROM?: string;
+  EMAIL_REPLY_TO?: string;
+  USER_EMAILS?: string;
+  USER_EMAILS_TO_ADMINS?: string;
   /** Cloudflare's send_email binding for alert email; optional (absent off Cloudflare). */
   ALERT_EMAIL?: EmailBinding;
   AUTH: DurableObjectNamespace<AuthObject>;
@@ -203,6 +211,8 @@ export interface HandlerOptions {
   now?: () => number;
   /** Outbound fetch (OpenRouter and GitHub), for tests. */
   fetch?: Fetch;
+  /** The pause between emails to users in the daily run (Resend allows 2 requests a second); tests set 0. */
+  emailGapMs?: number;
 }
 
 interface Ctx {
@@ -258,6 +268,11 @@ export function createHandler(options: HandlerOptions = {}): {
       const at = Number.isFinite(controller.scheduledTime) ? controller.scheduledTime : now();
       const digest = await env.DIRECTORY.getByName("directory").dailyDigest(at, policyOf(config), config.paused);
       if (digest) await deliver({ config, env, fetch: fetcher, base: config.publicUrl ?? DEFAULT_PUBLIC_URL, now }, [digest]);
+      try {
+        await scheduledUserEmails(env, config, fetcher, now(), options.emailGapMs ?? 600);
+      } catch (error) {
+        console.error("user emails (daily): run failed", error instanceof Error ? error.name : "error");
+      }
     },
     async fetch(request: Request, env: Env): Promise<Response> {
       let config: FreeConfig;
@@ -308,6 +323,7 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/device/invite") return deviceInvite(c);
   if (method === "POST" && path === "/device/no-invite") return deviceNoInvite(c);
   if (method === "POST" && path === "/device/details") return deviceDetails(c);
+  if ((method === "GET" || method === "POST") && path === "/email/stop") return emailStop(c, method);
   if (method === "GET" && path === LEGACY_ADMIN_CALLBACK_PATH) return adminCallback(c, LEGACY_ADMIN_CALLBACK_PATH);
 
   if (path === "/admin" || path === "/admin/signin" || path === "/admin/signout" || path.startsWith("/admin/dashboard/")) return adminWeb(c, path, method);
@@ -572,6 +588,78 @@ function blockedError(headers: Record<string, string> = {}): Response {
 
 function pausedError(headers: Record<string, string> = {}): Response {
   return apiError(503, "service_paused", PAUSED_MESSAGE, { reason: "paused", pausedForEveryone: true, resetsAt: null }, headers);
+}
+
+// ─── Emails to users (user-email-send.ts) ────────────────────────────────────
+
+/** Sends one email to a user if it should go. Never throws and never fails the request. */
+async function userEmail(c: Ctx, config: FreeConfig, kind: UserEmailKind, githubId: number, period: string): Promise<void> {
+  if (!userEmailsOn(config)) return;
+  const outcome = await deliverUserEmail({
+    store: directory(c) as unknown as UserEmailStore,
+    fetch: c.fetch,
+    config,
+    signingKey: await signingKey(c.config),
+    base: c.config.publicUrl ?? EMAIL_STOP_BASE,
+    kind,
+    githubId,
+    period,
+    now: c.now(),
+  });
+  logUserEmails(kind, [outcome]);
+}
+
+/**
+ * The daily run's emails: last run's failures once more, then "didn't start" and "gone quiet".
+ * The runtime setting `userEmails` applies (the admin overrides are read here, as a request would).
+ */
+async function scheduledUserEmails(env: Env, envConfig: FreeConfig, fetcher: Fetch, now: number, gapMs: number): Promise<void> {
+  if (!envConfig.resendApiKey) return;
+  const store = env.DIRECTORY.getByName("directory");
+  const config = applyOverrides(envConfig, await store.overrides());
+  if (!userEmailsOn(config)) return;
+  const candidates = await store.userEmailCandidates(now);
+  const jobs: Array<{ kind: UserEmailKind; githubId: number; period: string; retry?: boolean }> = [
+    ...candidates.retries.map((job) => ({ ...job, retry: true })),
+    ...candidates.didntStart.map((githubId) => ({ kind: "didnt_start" as const, githubId, period: "" })),
+    ...candidates.goneQuiet.map((githubId) => ({ kind: "gone_quiet" as const, githubId, period: "" })),
+  ];
+  const key = await signingKey(config);
+  const outcomes: Array<"sent" | "failed" | "skipped"> = [];
+  for (const job of jobs.slice(0, MAX_DAILY_USER_EMAILS)) {
+    const outcome = await deliverUserEmail({
+      store: store as unknown as UserEmailStore,
+      fetch: fetcher,
+      config,
+      signingKey: key,
+      base: config.publicUrl ?? EMAIL_STOP_BASE,
+      ...job,
+      now,
+    });
+    outcomes.push(outcome);
+    if (outcome !== "skipped" && gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
+  }
+  logUserEmails("daily", outcomes);
+}
+
+/** At most this many emails to users per daily run; the rest wait a day. */
+const MAX_DAILY_USER_EMAILS = 300;
+
+/**
+ * GET /email/stop?u=<github id>&t=<hmac>: a page with one button. POST (the button, or a mail
+ * app's one-click List-Unsubscribe-Post) stops every email to users for that person. The HMAC
+ * uses the token signing key, so a link can't be made for someone else.
+ */
+async function emailStop(c: Ctx, method: string): Promise<Response> {
+  const raw = c.url.searchParams.get("u") ?? "";
+  const githubId = /^[1-9][0-9]{0,15}$/.test(raw) ? Number(raw) : NaN;
+  const token = c.url.searchParams.get("t") ?? "";
+  if (!Number.isSafeInteger(githubId) || !(await verifyStopToken(await signingKey(c.config), githubId, token))) {
+    return donePage("Link not valid", "This link isn't valid. Use the link at the bottom of the email.", 400);
+  }
+  if (method === "GET") return emailStopPage(`/email/stop?u=${githubId}&t=${encodeURIComponent(token)}`);
+  await directory(c).setEmailStop(githubId);
+  return donePage("Emails stopped", "You won't get these emails from dl again. You can close this tab.");
 }
 
 // ─── Sign-in: the CLI side ──────────────────────────────────────────────────
@@ -889,7 +977,10 @@ async function deviceDetails(c: Ctx): Promise<Response> {
     onInvalidInvite: () => again("That invite code isn't valid or was already used. Check it, or leave it empty to continue on Starter."),
   });
   // Saved for anyone admitted (new or returning); a refusal leaves nothing to save it on.
-  await directory(c).setEmail(found.githubId, email, updates, c.now());
+  const saved = await directory(c).setEmail(found.githubId, email, updates, c.now());
+  // The welcome email, for a new sign-up only: nobody was in the Directory before this step.
+  // Not for someone still waiting in line for free tokens: the Directory checks.
+  if (saved && !person) await userEmail(c, (await runtime(c)).config, "welcome", found.githubId, "");
   return response;
 }
 
@@ -1693,6 +1784,10 @@ async function chat(c: Ctx): Promise<Response> {
       ...(options.outcome ? { upstreamOutcome: options.outcome } : {}),
     };
     await alert(c, await directory(c).recordRequest(record, policyOf(gate.config), servingContext(c, gate.config)));
+    // Most of the week's free tokens used: one email a week, on the settlement that crossed 80%.
+    if (!settled.paid && !isAdmin && userEmailsOn(gate.config) && weekMostlyUsed(settled.allowance)) {
+      await userEmail(c, gate.config, "week_80", identity.githubId, String(weekStart(c.now())));
+    }
     return settled.allowance;
   };
 

@@ -167,7 +167,11 @@ export interface Service {
     emails: Array<{ from: string; to: string; raw: string }>;
     /** Calls to api.stripe.com: path, form body (decoded) and headers. */
     stripe: Array<{ path: string; form: URLSearchParams; headers: Record<string, string> }>;
+    /** Calls to Resend (https://api.resend.com/emails): JSON body and headers. Nothing leaves the process. */
+    resend: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
   };
+  /** Answers calls to Resend (default: 200 with an id). */
+  setResend(handler: (body: Record<string, unknown>) => Response | Promise<Response>): void;
   /** Answers calls to api.stripe.com (default: a Checkout or portal session with a URL). */
   setStripe(handler: (path: string, form: URLSearchParams) => Response | Promise<Response>): void;
   setOpenRouter(handler: OpenRouterHandler): void;
@@ -261,7 +265,8 @@ export async function createService(vars: Record<string, string> = {}, options: 
     ...namespaces,
   };
   const clock = { now: NOW };
-  const calls: Service["calls"] = { openRouter: [], luminal: [], openai: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [] };
+  const calls: Service["calls"] = { openRouter: [], luminal: [], openai: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [], resend: [] };
+  let resend = (_body: Record<string, unknown>): Response | Promise<Response> => Response.json({ id: `email-${calls.resend.length}` });
   let stripe = (path: string, _form?: URLSearchParams): Response | Promise<Response> =>
     path === "/v1/checkout/sessions"
       ? Response.json({ id: `cs_test_${calls.stripe.length}`, url: `https://checkout.stripe.com/c/pay/cs_test_${calls.stripe.length}` })
@@ -336,6 +341,11 @@ export async function createService(vars: Record<string, string> = {}, options: 
       calls.openai.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
       return openai(body, init);
     }
+    if (url === "https://api.resend.com/emails") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      calls.resend.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
+      return resend(body);
+    }
     if (url.startsWith("https://api.stripe.com/")) {
       const path = new URL(url).pathname;
       const form = new URLSearchParams(String(init.body));
@@ -349,7 +359,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
     throw new Error(`unexpected fetch ${url}`);
   };
 
-  const handler = createHandler({ now: () => clock.now, fetch: fetcher as never });
+  const handler = createHandler({ now: () => clock.now, fetch: fetcher as never, emailGapMs: 0 });
 
   const request: Service["request"] = async (method, path, options = {}) => {
     const headers = new Headers(options.headers);
@@ -400,6 +410,9 @@ export async function createService(vars: Record<string, string> = {}, options: 
     },
     setStripe: (next) => {
       stripe = next as never;
+    },
+    setResend: (next) => {
+      resend = next;
     },
     request,
     signIn,
