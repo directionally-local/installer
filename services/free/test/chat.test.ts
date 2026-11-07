@@ -267,15 +267,17 @@ describe("chat completions", () => {
     assert.equal((await me(service, token)).usedThisWeek, 0);
   });
 
-  it("charges reservations whose request never came back", async () => {
+  it("charges reservations whose request never came back for their prompt, not the whole reservation", async () => {
     const { service, token } = await member();
     const person = service.account(100);
     const reserved = await person.reserve({ promptEstimate: 100, requestedMaxTokens: 400, limits: { weeklyTokens: 50_000_000, weeklyUsd: 5 }, now: service.clock.now });
     assert.equal(reserved.ok, true);
     assert.equal(await person.sweep(service.clock.now + 31 * 60_000), 1);
-    assert.equal((await me(service, token)).usedThisWeek, 500);
+    // The prompt estimate (100), not the reservation (100 + 400 of output never delivered).
+    assert.equal((await me(service, token)).usedThisWeek, 100);
     const spend = await service.directory().spend(service.clock.now);
     assert.equal(spend.requests, 1);
+    assert.equal(spend.spentUsd, 0, "an abandoned request is never OpenRouter cash");
   });
 });
 

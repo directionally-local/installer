@@ -1620,9 +1620,17 @@ async function chat(c: Ctx): Promise<Response> {
   // The requested model’s pool pays for the request, even when its fallback serves it: someone
   // who asks for Sol spends Sol’s allowance, not Luna’s.
   const pool = effective.pool;
-  const reserveFor = (pool: Pool) =>
-    person.reserve({ pool, promptEstimate, requestedMaxTokens: requestedMax, limits: { ...limits, freeBlocked: freeBlock !== undefined }, now: c.now() });
-  const reservation = await reserveFor(pool);
+  const reserveFor = (pool: Pool, serves: { model: FreeModel; provider: Upstream }) =>
+    person.reserve({
+      pool,
+      promptEstimate,
+      requestedMaxTokens: requestedMax,
+      limits: { ...limits, freeBlocked: freeBlock !== undefined },
+      now: c.now(),
+      provider: serves.provider,
+      model: serves.model.id,
+    });
+  const reservation = await reserveFor(pool, serving);
   if (!reservation.ok) {
     const quota = quotaHeaders(reservation.allowance);
     if (reservation.code === "quota_exceeded") {
@@ -1696,7 +1704,7 @@ async function chat(c: Ctx): Promise<Response> {
       const retry =
         backup && providerReady(backup.provider, gate.config, gate)
           ? async (): Promise<Response> => {
-              const again = await reserveFor(pool);
+              const again = await reserveFor(pool, { model: backup, provider: backup.provider });
               if (!again.ok) return apiError(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, { retryable: true }, quotaHeaders(again.allowance));
               const response = await attempt(backup, backup.provider, again);
               // Tell the client which model actually answered, so it can say so.
