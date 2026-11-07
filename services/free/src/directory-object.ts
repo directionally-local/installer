@@ -2,7 +2,7 @@ import { DurableObject, type DurableObjectState } from "cloudflare:workers";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
-import { abuseData, type AbuseData } from "./abuse.js";
+import { abuseData, simpleData, type AbuseData, type SimpleData } from "./abuse.js";
 import { dashboardData, installBreakdown, notAdmin, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
 import { creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
@@ -1079,6 +1079,11 @@ export class DirectoryObject extends DurableObject {
   /** The dashboard's abuse section (see abuse.ts). Admins are left out. */
   async abuse(input: { now: number; adminIds: number[] }): Promise<AbuseData> {
     return abuseData(this.ctx.storage.sql, input);
+  }
+
+  /** The simple dashboard's per-person numbers (see abuse.ts). Admins are left out. */
+  async simple(input: { now: number; adminIds: number[] }): Promise<SimpleData> {
+    return simpleData(this.ctx.storage.sql, input);
   }
 
   // ─── Kill switch, runtime settings and spend ─────────────────────────────

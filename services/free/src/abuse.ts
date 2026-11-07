@@ -25,7 +25,8 @@ export const ABUSE_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   referrals: ["referred_id", "referrer_id", "outcome", "at"],
   daily_activity: ["day", "github_id", "requests", "charged_tokens", "cost_usd", "credit_usd"],
   github_checks_daily: ["day", "outcome", "n"],
-  people: ["github_id", "login", "status", "admitted_at", "admitted_via"],
+  people: ["github_id", "login", "status", "admitted_at", "admitted_via", "level"],
+  requests: ["github_id", "at", "is_admin", "status"],
   config_log: ["id", "key", "old_value", "new_value", "changed_by", "changed_by_login", "changed_at"],
 };
 
@@ -112,6 +113,24 @@ function parse(value: string | null): unknown {
     return value;
   }
 }
+
+/** The simple view's token chart: this many people at most. */
+export const TOP_TOKEN_USERS = 15;
+
+/** The simple view's per-person numbers: who used the most tokens, who fails a lot, sign-up bursts. */
+export interface SimpleData {
+  /** This week's charged tokens per person, most first, cut to TOP_TOKEN_USERS. */
+  topTokens: Array<{ githubId: number; login: string | null; level: string | null; tokens: number }>;
+  /** This week: people with at least FAILING_MIN failed or abandoned requests, a FAILING_SHARE of theirs or more. */
+  failing: Array<{ githubId: number; login: string | null; requests: number; failed: number }>;
+  /** In the last BURST_DAYS days: a network that BURST_MIN or more new accounts were first seen on in one UTC day. */
+  bursts: Array<{ net: string; day: number; accounts: number }>;
+}
+
+export const FAILING_MIN = 10;
+export const FAILING_SHARE = 0.3;
+export const BURST_MIN = 3;
+export const BURST_DAYS = 7;
 
 /** Every query here starts with this comment, so a test can hold them to `ABUSE_COLUMNS`. */
 export const ABUSE_QUERY_TAG = "/* abuse */";
@@ -264,4 +283,50 @@ export function abuseData(store: Sql, input: { now: number; adminIds: readonly n
     githubChecks: [...checks.values()],
     adminLog,
   };
+}
+
+/**
+ * The simple view's numbers. Read with the abuse tag (requests.status, network hashes), held to
+ * ABUSE_COLUMNS; admins left out. Counts and who only.
+ */
+export function simpleData(store: Sql, input: { now: number; adminIds: readonly number[] }): SimpleData {
+  const sql: Sql = { exec: (query, ...bindings) => store.exec(`${ABUSE_QUERY_TAG} ${query}`, ...bindings) };
+  const admins = JSON.stringify([...input.adminIds]);
+  const week = weekStart(input.now);
+  const topTokens = sql
+    .exec<{ github_id: number; login: string | null; level: string | null; tokens: number }>(
+      `SELECT d.github_id AS github_id, p.login AS login, p.level AS level, SUM(d.charged_tokens) AS tokens
+       FROM daily_activity d LEFT JOIN people p ON p.github_id = d.github_id
+       WHERE d.day >= ? AND ${notAdmin("d.github_id")} GROUP BY d.github_id HAVING SUM(d.charged_tokens) > 0
+       ORDER BY tokens DESC, d.github_id LIMIT ?`,
+      week / DAY_MS,
+      admins,
+      TOP_TOKEN_USERS,
+    )
+    .toArray()
+    .map((row) => ({ githubId: row.github_id, login: row.login, level: row.level, tokens: row.tokens }));
+  const failing = sql
+    .exec<{ github_id: number; login: string | null; n: number; failed: number }>(
+      `SELECT r.github_id AS github_id, p.login AS login, COUNT(*) AS n, SUM(r.status != 'ok') AS failed
+       FROM requests r LEFT JOIN people p ON p.github_id = r.github_id
+       WHERE r.at >= ? AND r.is_admin = 0 AND ${notAdmin("r.github_id")} GROUP BY r.github_id
+       HAVING SUM(r.status != 'ok') >= ? AND SUM(r.status != 'ok') >= ? * COUNT(*) ORDER BY failed DESC, r.github_id LIMIT 5`,
+      week,
+      admins,
+      FAILING_MIN,
+      FAILING_SHARE,
+    )
+    .toArray()
+    .map((row) => ({ githubId: row.github_id, login: row.login, requests: row.n, failed: row.failed }));
+  const bursts = sql
+    .exec<{ net_hash: string; day: number; n: number }>(
+      `SELECT net_hash, first_at / ${DAY_MS} AS day, COUNT(*) AS n FROM person_networks
+       WHERE first_at >= ? AND ${notAdmin("github_id")} GROUP BY net_hash, first_at / ${DAY_MS} HAVING COUNT(*) >= ? ORDER BY n DESC, day DESC LIMIT 5`,
+      input.now - BURST_DAYS * DAY_MS,
+      admins,
+      BURST_MIN,
+    )
+    .toArray()
+    .map((row) => ({ net: row.net_hash.slice(0, 10), day: row.day * DAY_MS, accounts: row.n }));
+  return { topTokens, failing, bursts };
 }

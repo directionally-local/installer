@@ -307,6 +307,73 @@ describe("admin dashboard numbers", () => {
     assert.match(html, /Tue 2026-11-03/);
   });
 
+  it("has a simple view: sign-ups, growth, tokens per person and red flags as charts, with the toggle", async () => {
+    const { service, cookie } = await scenario();
+    const response = await service.request("GET", "/admin?view=simple", { headers: { cookie } });
+    assert.equal(response.status, 200);
+    const csp = response.headers.get("content-security-policy")!;
+    assert.match(csp, /default-src 'none'/);
+    assert.doesNotMatch(csp, /unsafe-inline|script-src/);
+    const html = await response.text();
+    assert.doesNotMatch(html, /<script|\sstyle="|<link|@import/i);
+    assert.match(html, /prefers-color-scheme: dark/);
+    // The toggle, Simple current; the free tier's state as a pill.
+    assert.match(html, /<nav class="views" aria-label="Dashboard view"><a href="\/admin\?view=simple" aria-current="page">Simple<\/a><a href="\/admin\?view=full">Full<\/a><\/nav>/);
+    assert.match(html, /class="pill open"[^>]*>Free tier open</);
+    // The four cards, and nothing from the full view's tables.
+    for (const id of ["signups", "growth", "tokens", "flags"]) assert.match(html, new RegExp(`<section class="card[^"]*" id="${id}"`));
+    assert.doesNotMatch(html, /<table|<form method="post" action="\/admin\/dashboard/);
+    // Sign-ups: 3 people so far (admins left out), one bar per day for 14 days, in two drawings.
+    assert.match(html, /<p class="big"><b>3<\/b>/);
+    assert.equal([...html.matchAll(/<title>[^<]*sign-ups?<\/title>/g)].length, 28);
+    assert.match(html, /<title>Today: 0 sign-ups<\/title>/);
+    // Tokens per person: carol and alice, coloured by level, never the admin.
+    assert.match(html, /<title>carol: 995\.0k tokens this week \(Full\)<\/title>/);
+    assert.match(html, /<title>alice: 2\.0k tokens this week \(Full\)<\/title>/);
+    assert.match(html, /<i class="c1"><\/i>Full<\/span><span><i class="c2"><\/i>Starter/);
+    assert.doesNotMatch(html, /owner: /);
+    // Red flags: alice and carol reached their allowance this week; the line links to the full view's table.
+    assert.match(html, /<li><a href="\/admin\?view=full#limits">Near weekly cap: alice, carol<\/a><\/li>/);
+    // Growth: carol signed up 9 days ago and nobody since; weekly active people had no full week before.
+    assert.match(html, /<b class="down"><span class="arrow" aria-hidden="true">▼<\/span>−100%<\/b><span class="s">0 vs 1, last 7 days/);
+    assert.doesNotMatch(html, /Infinity|NaN/);
+
+    const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    await service.request("POST", "/admin/pause", { token: adminToken });
+    assert.match(await (await service.request("GET", "/admin?view=simple", { headers: { cookie } })).text(), /class="pill paused"[^>]*>Free tier paused</);
+  });
+
+  it("shows growth as — when the week before was zero, never Infinity%", async () => {
+    const { growth } = await import("../src/dashboard-page.js");
+    assert.deepEqual(growth(5, 0), { text: "—", trend: "flat" });
+    assert.deepEqual(growth(0, 0), { text: "—", trend: "flat" });
+    assert.deepEqual(growth(15, 12), { text: "+25%", trend: "up" });
+    assert.deepEqual(growth(9, 12), { text: "−25%", trend: "down" });
+    assert.deepEqual(growth(12, 12), { text: "0%", trend: "flat" });
+  });
+
+  it("says there are no red flags when there are none", async () => {
+    const service = await createService();
+    const html = await (await service.request("GET", "/admin?view=simple", { headers: { cookie: await adminCookie(service) } })).text();
+    assert.match(html, /<p class="none">No red flags\.<\/p>/);
+    assert.match(html, /No tokens used this week\./);
+  });
+
+  it("keeps the full view as the default, unchanged but for the toggle", async () => {
+    const { service, cookie } = await scenario();
+    const page = async (path: string) => (await (await service.request("GET", path, { headers: { cookie } })).text()).replace(/nonce="[0-9a-f]+"/, 'nonce=""');
+    const full = await page("/admin");
+    assert.equal(await page("/admin?view=full"), full);
+    assert.equal(await page("/admin?view=something-else"), full);
+    assert.match(full, /<span class="who"><nav class="views" aria-label="Dashboard view"><a href="\/admin\?view=simple">Simple<\/a><a href="\/admin\?view=full" aria-current="page">Full<\/a><\/nav>Signed in as/);
+    // Every section of the full view is still there, in order.
+    const headings = [...full.matchAll(/<h2>([^<]+)<\/h2>/g)].map((match) => match[1]);
+    assert.deepEqual(headings.slice(0, 3), ["Budget: Luminal credit", "Abuse", "Upstreams"]);
+    for (const heading of ["Queue for free tokens", "Referrals", "Paid plans", "Funnel", "Weekly active developers", "Cohort retention", "Cost per user per week", "Who hit the limit", "Admin log"]) assert.ok(headings.includes(heading), heading);
+    assert.match(full, /<form method="post" action="\/admin\/dashboard\/people\/100\/block">/);
+    assert.doesNotMatch(full, /class="card/);
+  });
+
   it("shows global spend against the caps, with admins kept apart", async () => {
     const { service, cookie } = await scenario();
     const [row] = await csv(service, cookie, "spend");
@@ -455,6 +522,7 @@ describe("admin dashboard privacy", () => {
     });
     try {
       assert.equal((await service.request("GET", "/admin", { headers: { cookie } })).status, 200);
+      assert.equal((await service.request("GET", "/admin?view=simple", { headers: { cookie } })).status, 200);
       for (const table of ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"]) await csv(service, cookie, table);
     } finally {
       db.prepare = prepare;
@@ -547,6 +615,7 @@ describe("admin dashboard speed", () => {
     };
     const html = await time("page", "/admin");
     await time("page again", "/admin");
+    const simple = await time("simple", "/admin?view=simple");
     for (const table of ["weekly-active", "retention", "weekly-cost", "top-cost", "limits"]) await time(`${table}.csv`, `/admin/dashboard/${table}.csv`);
 
     const rows = (db.prepare("SELECT COUNT(*) AS n FROM daily_activity").get() as { n: number }).n;
@@ -557,5 +626,7 @@ describe("admin dashboard speed", () => {
     assert.match(html, /dev-\d+/);
     assert.ok(timings.page! < 2000, `page took ${timings.page} ms`);
     assert.ok(timings["page again"]! < 2000);
+    assert.ok(timings.simple! < 2000, `simple view took ${timings.simple} ms`);
+    assert.match(simple, /tokens this week/);
   });
 });
