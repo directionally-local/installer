@@ -564,6 +564,7 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `upstream_busy` | chat (429, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `upstream_unavailable` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `upstream_timeout` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
+| `dl_only` | chat (403) | none |
 | `not_invited` | API, and older sign-ins | none |
 
 The two global budget codes mean "free tokens are paused for everyone, and your own key still
@@ -598,6 +599,7 @@ with who made it and when.
 | `luminalWeeklyCreditUsd` | `LUMINAL_WEEKLY_CREDIT_USD` | 250; `none` for no weekly credit budget |
 | `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
 | `userEmails` | `USER_EMAILS` | true (sends only with `RESEND_API_KEY`) |
+| `dlOnly` | `DL_ONLY` | true (free tokens inside dl only; see below) |
 
 Env only: `REFERRAL_LINK_BASE` (`https://dl.new/r/`), the offers above, `ALERT_EMAIL_TO`,
 `ALERT_EMAIL_FROM` (`alerts@dl.new`), `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_KIND`,
@@ -916,6 +918,22 @@ which records settings, pause, block and unblock.
   account is blocked from the free tier. Contact contact@directionallylocal.com."), and sign-in
   is refused on the page and at `POST /v1/device/token` (403 `blocked`). Unblocking restores all
   of it; refresh tokens aren't used up while blocked. `suspend` stays as it was.
+- **Free tokens inside dl only (`dlOnly`, on by default):** Autopilot always sends session
+  events (`POST /v1/events`) while the free tier is its provider, so a sign-in token used from
+  another tool sends requests and no events. A chat request from a free-plan account is
+  refused with 403 `dl_only` ("Free tokens work inside dl only. Run dl to keep using them, or
+  use your own API key in any tool.") when, in the last 24 hours, the account made at least 20
+  free chat requests with a sign-in token and no session event arrived. Autopilot batches
+  events for a few seconds, so a real session's first requests come before its first event:
+  the threshold leaves room for that. Not counted and never refused: admins, requests with a
+  server key (`dlk_`, dl's server mode) and paid usage (Pro and top-ups; a refused free account
+  with a top-up is served from it). The check reads the caller's events and request log in the
+  Directory read every chat request already makes; the only new write is a `via_key` flag on the
+  request row it already inserts. Switch it off with `POST /admin/config {"dlOnly": false}`.
+  The simple view's red flags show **Used outside dl** for an account with at least 10 such
+  requests and no session event in the last 7 days (events counted by UTC day); the full view's
+  top users table and `GET /admin/people` (`dlSessionsThisWeek`) show dl sessions this week,
+  the distinct session ids in each person's events, counted in `daily_activity.sessions`.
 - **Admins are left out of every number:** anyone in `ADMIN_GITHUB_IDS` and anyone admitted as
   an admin.
 - **What it reads:** only `daily_activity`, a per-person per-day roll-up of request and event

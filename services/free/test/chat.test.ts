@@ -239,7 +239,8 @@ describe("chat completions", () => {
   });
 
   it("rate-limits each person to 60 requests a minute", async () => {
-    const { service, token } = await member();
+    // 60 requests without Autopilot's session events would hit dl_only first (dl-only.test.ts).
+    const { service, token } = await member({ DL_ONLY: "false" });
     for (let index = 0; index < 60; index++) assert.equal((await chat(service, token)).status, 200);
     const limited = await chat(service, token);
     assert.equal(limited.status, 429);

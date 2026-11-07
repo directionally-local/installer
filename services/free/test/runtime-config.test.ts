@@ -59,6 +59,7 @@ describe("runtime settings (units)", () => {
       luminalWeeklyCreditUsd: 250,
       luminalFirstByteTimeoutSeconds: 30,
       userEmails: true,
+      dlOnly: true,
     });
   });
 

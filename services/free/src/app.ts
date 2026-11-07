@@ -22,6 +22,7 @@ import { cleanDownload, cleanInstall, MAX_TELEMETRY_BYTES } from "./telemetry.js
 import {
   BLOCKED_MESSAGE,
   DEVICE_TAKEN_MESSAGE,
+  DL_ONLY_MESSAGE,
   INVALID_INVITE_MESSAGE,
   isSignInRefusal,
   CREDIT_EXHAUSTED_MESSAGE,
@@ -198,6 +199,7 @@ export interface Env {
   EMAIL_REPLY_TO?: string;
   USER_EMAILS?: string;
   USER_EMAILS_TO_ADMINS?: string;
+  DL_ONLY?: string;
   /** Cloudflare's send_email binding for alert email; optional (absent off Cloudflare). */
   ALERT_EMAIL?: EmailBinding;
   AUTH: DurableObjectNamespace<AuthObject>;
@@ -1683,28 +1685,34 @@ async function chat(c: Ctx): Promise<Response> {
   // global cap reached. Pro and top-ups still work; the reservation decides which applies.
   const place = isAdmin ? null : (gate.person?.queue ?? null);
   const { globalTotalUsdCap: total, globalWeeklyUsdCap: weekly } = gate.config;
+  // Free tokens work inside dl only: a sign-in token that made many requests in the last day
+  // while Autopilot sent no session event is in another tool (abuse.ts). Server keys (dl's server
+  // mode) are left out; like the blocks below, Pro and top-ups still work.
+  const outsideDl = gate.config.dlOnly && identity.via !== "key" && gate.person?.outsideDl === true;
   const freeBlock: (() => Promise<Response>) | undefined = isAdmin
     ? undefined
-    : place
-      ? async () =>
-          apiError(
-            402,
-            "free_tier_queued",
-            queuedMessage(place.position, waitText(place.etaAt, c.now())),
-            { position: place.position, etaAt: new Date(place.etaAt).toISOString(), offers: offers(gate.config), referralLink: link },
-            await headers(),
-          )
-      : total !== undefined && gate.totalUsd >= total
-        ? async () => apiError(503, "global_total_budget_reached", TOTAL_BUDGET_MESSAGE, { reason: "total_budget", pausedForEveryone: true, resetsAt: null }, await headers())
-        : weekly !== undefined && gate.weekUsd >= weekly
-          ? async () => {
-              // The global caps read as a pause for everyone, with when it ends; a person's own key still works.
-              const resumes = weekEnd(c.now());
-              const resetsAt = new Date(resumes).toISOString();
-              const retryAfter = String(Math.max(1, Math.ceil((resumes - c.now()) / 1000)));
-              return apiError(503, "global_weekly_budget_reached", weeklyBudgetMessage(resetsAt), { reason: "weekly_budget", pausedForEveryone: true, resetsAt }, { ...(await headers()), "retry-after": retryAfter });
-            }
-          : undefined;
+    : outsideDl
+      ? async () => apiError(403, "dl_only", DL_ONLY_MESSAGE, {}, await headers())
+      : place
+        ? async () =>
+            apiError(
+              402,
+              "free_tier_queued",
+              queuedMessage(place.position, waitText(place.etaAt, c.now())),
+              { position: place.position, etaAt: new Date(place.etaAt).toISOString(), offers: offers(gate.config), referralLink: link },
+              await headers(),
+            )
+        : total !== undefined && gate.totalUsd >= total
+          ? async () => apiError(503, "global_total_budget_reached", TOTAL_BUDGET_MESSAGE, { reason: "total_budget", pausedForEveryone: true, resetsAt: null }, await headers())
+          : weekly !== undefined && gate.weekUsd >= weekly
+            ? async () => {
+                // The global caps read as a pause for everyone, with when it ends; a person's own key still works.
+                const resumes = weekEnd(c.now());
+                const resetsAt = new Date(resumes).toISOString();
+                const retryAfter = String(Math.max(1, Math.ceil((resumes - c.now()) / 1000)));
+                return apiError(503, "global_weekly_budget_reached", weeklyBudgetMessage(resetsAt), { reason: "weekly_budget", pausedForEveryone: true, resetsAt }, { ...(await headers()), "retry-after": retryAfter });
+              }
+            : undefined;
 
   const requestedMax = numberOrUndefined(body.max_tokens) ?? numberOrUndefined(body.max_completion_tokens);
   const promptEstimate = estimatePromptTokens(bodyBytes);
@@ -1782,6 +1790,7 @@ async function chat(c: Ctx): Promise<Response> {
       ttftMs: options.ttftMs ?? null,
       ...(options.upstreamError ? { upstreamError: true } : {}),
       ...(options.outcome ? { upstreamOutcome: options.outcome } : {}),
+      ...(identity.via === "key" ? { viaKey: true } : {}),
     };
     await alert(c, await directory(c).recordRequest(record, policyOf(gate.config), servingContext(c, gate.config)));
     // Most of the week's free tokens used: one email a week, on the settlement that crossed 80%.
@@ -2287,6 +2296,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     const levelFilter = c.url.searchParams.get("level");
     const sharedOnly = c.url.searchParams.get("shared") === "1";
     const people = await directory(c).listPeople();
+    const sessions = await directory(c).weekSessions(now);
     const rows = await Promise.all(
       people.map(async (person) => {
         const allowance = await account(c, person.github_id).allowance(now, limitsFor(config, 0, person.level));
@@ -2312,6 +2322,8 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
           networks: await directory(c).networkCount(person.github_id),
           allowance: allowanceView(allowance),
           serverKeys: await account(c, person.github_id).keyCount(),
+          // Distinct dl sessions (from Autopilot's session events) since Monday 00:00 UTC.
+          dlSessionsThisWeek: sessions.get(person.github_id) ?? 0,
         };
       }),
     );
