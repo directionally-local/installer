@@ -18,6 +18,14 @@ updates:
       - dependency-name: hotcell
     # Raise the pin itself, not just the lockfile.
     versioning-strategy: increase
+    # Dependabot waits 3 days before it considers a new version, even with no
+    # cooldown configured. These are our own packages, released several times a
+    # day, so every new version stayed "too new" and no pin bump was ever
+    # opened. Take them as soon as they're published.
+    cooldown:
+      exclude:
+        - autopilot-ai
+        - hotcell
     groups:
       own-packages:
         patterns: ["autopilot-ai", "hotcell"]
