@@ -7,9 +7,11 @@ import { configureThisComputer } from "../local/keys.js";
 import { setUpOnThisComputer, type LocalAnswers, type LocalNeed } from "../local/setup.js";
 import { localUnsupported } from "../local/check.js";
 import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
-import { describeProvider, providerAnswer, type ConnectResult, type ProviderAnswer } from "../provider.js";
+import { defaultApiKeyEnv, describeProvider, providerAnswer, type ConnectResult, type ProviderAnswer } from "../provider.js";
 import { palette, PlainUi, TerminalUi, type Ui } from "../ui.js";
+import { createFreeTierServerKey, readAutopilotProvider, type AutopilotProvider, type ServerKeyResult } from "./autopilot-provider.js";
 import type { LaptopIO } from "./commands.js";
+import { FREE_TIER_PROVIDER } from "./free-tier.js";
 import { loadRemotes, loadRemotesFile, normalizeServerUrl, REMOTE_NAME_RE, remotesPath, resolveTarget, saveRemote, setDefaultRemote, type RemoteServer, type SshAccess } from "./config.js";
 import { ConnectCancelled, runAutopilotConnect } from "./connect.js";
 import { confirm, githubToken, type KeyPlace, type KeySources, type Need } from "./credentials.js";
@@ -57,6 +59,10 @@ export interface SetupDeps {
   localConfigure?: LocalConfigure;
   /** Autopilot's provider + model picker (`autopilot connect`); the real one unless replaced. */
   connect?: (options: { modelOnly?: boolean }) => Promise<ConnectResult>;
+  /** What Autopilot already has chosen, to reuse instead of opening its picker; read from its config unless replaced. */
+  autopilotProvider?: () => Promise<AutopilotProvider | undefined>;
+  /** Creates a free tier server key for a place; the real service unless replaced. */
+  createServerKey?: (origin: string, accessToken: string, name: string) => Promise<ServerKeyResult>;
   /** Opens the session the user lands in once a place is ready; nothing after the Ready line otherwise. */
   openSession?: (remote: RemoteServer) => Promise<number | undefined>;
   /** `dl setup --identity FILE`: the private key to use, instead of trying the ones in ~/.ssh. */
@@ -196,8 +202,8 @@ async function setUpServer(deps: SetupDeps): Promise<RemoteServer> {
 
 /**
  * What the place still lacks, gathered and stored in one pass: the provider, key and model
- * from Autopilot's own picker (it runs in this terminal and configures the user's `autopilot`
- * too), then the GitHub token. The model stays here, as the place's; the key goes to the place.
+ * (reused from Autopilot when it already has them, else from its own picker), then the GitHub
+ * token. The model stays here, as the place's; the key goes to the place.
  */
 async function gatherAndStore(deps: SetupDeps, needs: readonly Need[], placeName: string, place: KeyPlace, store: (answers: ServerAnswers) => Promise<void>): Promise<void> {
   const ui = deps.newUi();
@@ -210,16 +216,23 @@ async function gatherAndStore(deps: SetupDeps, needs: readonly Need[], placeName
   const answers: ServerAnswers = {};
   if (wanted.includes("provider")) {
     deps.write("\n");
-    let chosen: ConnectResult;
-    try {
-      chosen = await (deps.connect ?? ((options) => runAutopilotConnect(options)))({});
-    } catch (error) {
-      if (error instanceof ConnectCancelled) throw new PromptCancelled();
-      throw error;
+    const reused = await reuseProvider(deps, placeName);
+    if (reused) {
+      answers.provider = reused.answer;
+      if (reused.model) await saveModel(reused.model, deps.settingsFile, placeName);
+      ui.line("info", "Provider", reused.line);
+    } else {
+      let chosen: ConnectResult;
+      try {
+        chosen = await (deps.connect ?? ((options) => runAutopilotConnect(options)))({});
+      } catch (error) {
+        if (error instanceof ConnectCancelled) throw new PromptCancelled();
+        throw error;
+      }
+      answers.provider = providerAnswer(chosen);
+      await saveModel(chosen.model, deps.settingsFile, placeName);
+      ui.line("done", "Provider", `${describeProvider({ id: chosen.provider, name: chosen.name }, chosen.model)} · key stays on ${place}`);
     }
-    answers.provider = providerAnswer(chosen);
-    await saveModel(chosen.model, deps.settingsFile, placeName);
-    ui.line("done", "Provider", `${describeProvider({ id: chosen.provider, name: chosen.name }, chosen.model)} · key stays on ${place}`);
   }
   if (wanted.includes("github")) {
     answers.githubToken = await githubToken({ ui, prompter: deps.prompter, sources: deps.sources, place });
@@ -235,6 +248,45 @@ async function gatherAndStore(deps: SetupDeps, needs: readonly Need[], placeName
   }
   ui.done("keys", [answers.provider ? describeProvider({ id: answers.provider.id, ...(answers.provider.name ? { name: answers.provider.name } : {}) }) : undefined, answers.githubToken ? "GitHub" : undefined].filter(Boolean).join(" · "));
   ui.finish();
+}
+
+/**
+ * Autopilot's own provider, key and model, reused instead of asking again. The free tier's
+ * one-hour access token is never copied: a server key is made for the place instead. Returns
+ * undefined (and the picker opens) when Autopilot has nothing to hand over, or the free tier
+ * can't make a key.
+ */
+async function reuseProvider(deps: SetupDeps, placeName: string): Promise<{ answer: ProviderAnswer; model?: string; line: string } | undefined> {
+  if (!deps.autopilotProvider) return undefined;
+  const found = await deps.autopilotProvider().catch(() => undefined);
+  if (!found) return undefined;
+  if (found.kind === "free-tier") {
+    const created = await (deps.createServerKey ?? createFreeTierServerKey)(found.origin, found.accessToken, placeName)
+      .catch((error): ServerKeyResult => ({ problem: error instanceof Error ? error.message : String(error) }));
+    if ("problem" in created) {
+      deps.newUi().line("info", "Provider", `Couldn't reuse your free tier account (${created.problem}); asking instead.`);
+      return undefined;
+    }
+    return {
+      answer: { id: FREE_TIER_PROVIDER, name: "Directionally Local", baseUrl: `${found.origin}/v1`, apiKey: created.key, apiKeyEnv: defaultApiKeyEnv(FREE_TIER_PROVIDER) },
+      ...(found.model ? { model: found.model } : {}),
+      line: "Using your free tier account from Autopilot. Change: dl provider",
+    };
+  }
+  const result = found.result;
+  return {
+    answer: {
+      id: result.provider,
+      name: result.name,
+      baseUrl: result.baseUrl,
+      apiKey: result.apiKey,
+      apiKeyEnv: result.apiKeyEnv,
+      ...(result.authHeader ? { authHeader: result.authHeader } : {}),
+      ...(result.authFormat ? { authFormat: result.authFormat } : {}),
+    },
+    ...(result.model ? { model: result.model } : {}),
+    line: `Using your ${result.name}${result.apiKey === null ? "" : " key"} from Autopilot. Change: dl provider`,
+  };
 }
 
 /** A model saved under a provisional place name follows the place to its final name. */
@@ -543,6 +595,8 @@ export async function setup(options: SetupOptions): Promise<number> {
       installUrl: process.env.DL_INSTALL_URL || INSTALL_URL,
       localSetup: options.localSetup ?? ((input) => setUpOnThisComputer(input)),
       localConfigure: options.localConfigure ?? ((answers) => configureThisComputer(answers)),
+      autopilotProvider: () => readAutopilotProvider({ env: process.env, readFile: (path) => readFile(path, "utf8").catch(() => undefined) }),
+      createServerKey: (origin, accessToken, name) => createFreeTierServerKey(origin, accessToken, name, { fetch: globalThis.fetch }),
       ...(identityFile ? { identityFile } : {}),
       interactive: terminal && process.stdin.isTTY === true,
       ...(options.place ? { place: options.place } : {}),

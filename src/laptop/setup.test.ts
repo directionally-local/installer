@@ -80,6 +80,8 @@ function deps(server: FakeSshServer, answers: Record<string, string>, extra: Par
     remotesFile: join(root, "remotes.json"),
     settingsFile: join(root, "config.json"),
     connect: async (options) => { connects.push(options); return DEEPSEEK; },
+    // Nothing chosen in Autopilot by default: the picker runs, as before.
+    autopilotProvider: async () => undefined,
     openSession: async (remote) => { sessions.push(remote); return 0; },
     // The same on every machine the tests run on (Windows has its own test).
     platform: "linux",
@@ -481,6 +483,74 @@ describe("dl setup on a laptop", () => {
       assert.equal(await setupForTasks({ io, terminal: true, prompter: never, platform: "win32", setUp }), 0);
       assert.deepEqual(never.asked, []);
       assert.equal(chosen[3]!.place, "server");
+    });
+  });
+
+  describe("reusing the provider Autopilot already has", () => {
+    const REUSED = { kind: "provider" as const, result: { provider: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com", apiKey: "sk-deepseek-secretsecret", apiKeyEnv: "DEEPSEEK_API_KEY", keyRequired: true, model: "deepseek-v4-pro" } };
+
+    it("reuses a provider with a key without opening the picker, and says so in one line", async () => {
+      const server = new FakeSshServer();
+      const run = deps(server, { Where: "2", Server: "1", "GitHub CLI": "" }, { autopilotProvider: async () => REUSED });
+      await setupWizard(run.deps);
+      assert.deepEqual(run.connects, [], "Autopilot's picker isn't run");
+      assert.ok(run.ui.events.includes("line info Provider | Using your DeepSeek key from Autopilot. Change: dl provider"), run.ui.events.join("\n"));
+      assert.deepEqual(server.answers.at(-1), { provider: WIRE_DEEPSEEK, githubToken: GH });
+      assert.deepEqual((await loadSettings(join(root, "config.json"))).placeModels, { box: "deepseek-v4-pro" });
+      for (const call of server.calls) assert.ok(!call.command.includes(REUSED.result.apiKey), "the key never appears in a command line");
+    });
+
+    it("reuses a keyless provider without asking, and the line has no 'key'", async () => {
+      const server = new FakeSshServer();
+      server.installed = true;
+      server.keys.add("github");
+      const run = deps(server, { Where: "2", Server: "1" }, {
+        autopilotProvider: async () => ({ kind: "provider", result: { provider: "ollama", name: "Ollama", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null, apiKeyEnv: null, keyRequired: false, model: "qwen3:32b" } }),
+      });
+      await setupWizard(run.deps);
+      assert.deepEqual(run.connects, []);
+      assert.ok(run.ui.events.includes("line info Provider | Using your Ollama from Autopilot. Change: dl provider"));
+      assert.deepEqual(server.answers.at(-1), { provider: { id: "ollama", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null, apiKeyEnv: null } });
+      assert.deepEqual((await loadSettings(join(root, "config.json"))).placeModels, { box: "qwen3:32b" });
+    });
+
+    it("makes a server key for the free tier instead of copying the one-hour access token", async () => {
+      const server = new FakeSshServer();
+      const created: Array<{ origin: string; token: string; name: string }> = [];
+      const run = deps(server, { Where: "2", Server: "1", "GitHub CLI": "" }, {
+        autopilotProvider: async () => ({ kind: "free-tier", origin: "https://free.example.com", accessToken: "access-token", model: "gpt-6-luna" }),
+        createServerKey: async (origin, token, name) => { created.push({ origin, token, name }); return { key: "dlk_583231_ab_secret" }; },
+      });
+      await setupWizard(run.deps);
+      assert.deepEqual(run.connects, []);
+      assert.deepEqual(created, [{ origin: "https://free.example.com", token: "access-token", name: "box" }]);
+      assert.ok(run.ui.events.includes("line info Provider | Using your free tier account from Autopilot. Change: dl provider"));
+      assert.deepEqual(server.answers.at(-1), {
+        provider: { id: "directionally-local", baseUrl: "https://free.example.com/v1", apiKey: "dlk_583231_ab_secret", apiKeyEnv: "DIRECTIONALLY_LOCAL_API_KEY" },
+        githubToken: GH,
+      });
+      assert.deepEqual((await loadSettings(join(root, "config.json"))).placeModels, { box: "gpt-6-luna" });
+      for (const call of server.calls) assert.ok(!call.command.includes("access-token"), "the access token never reaches the server");
+    });
+
+    it("says why the free tier couldn't make a key, then falls back to the picker", async () => {
+      const server = new FakeSshServer();
+      const run = deps(server, { Where: "2", Server: "1", "GitHub CLI": "" }, {
+        autopilotProvider: async () => ({ kind: "free-tier", origin: "https://free.example.com", accessToken: "access-token" }),
+        createServerKey: async () => ({ problem: "the free tier's server-key limit is reached" }),
+      });
+      await setupWizard(run.deps);
+      assert.ok(run.ui.events.includes("line info Provider | Couldn't reuse your free tier account (the free tier's server-key limit is reached); asking instead."), run.ui.events.join("\n"));
+      assert.deepEqual(run.connects, [{}], "the picker opens as before");
+      assert.deepEqual(server.answers.at(-1), { provider: WIRE_DEEPSEEK, githubToken: GH });
+    });
+
+    it("opens the picker when Autopilot has nothing chosen yet", async () => {
+      const server = new FakeSshServer();
+      const run = deps(server, { Where: "2", Server: "1", "GitHub CLI": "" }, { autopilotProvider: async () => undefined });
+      await setupWizard(run.deps);
+      assert.deepEqual(run.connects, [{}]);
+      assert.ok(run.ui.events.includes("line done Provider | DeepSeek · deepseek-v4-pro · key stays on your server"));
     });
   });
 });
