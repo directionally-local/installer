@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.21.0](https://github.com/directionally-local/installer/compare/v0.20.0...v0.21.0) (2026-11-08)
+
+
+### Features
+
+* **free:** a simple admin view, readable at a glance ([74bd4fc](https://github.com/directionally-local/installer/commit/74bd4fca6c3be46c0643dc7686a4d1ee1ccdf20a))
+* **free:** a simple admin view, readable at a glance ([56119f3](https://github.com/directionally-local/installer/commit/56119f38ca54d327f2fbd6f7831448a777bcb1ef))
+* **free:** emails to users through Resend ([ecb6167](https://github.com/directionally-local/installer/commit/ecb616731a46ef7b248b602411ad9369b9e9214b))
+* **free:** free tokens inside dl only ([62f359d](https://github.com/directionally-local/installer/commit/62f359dbb001e9a914934042c8bf6d574d355a18))
+* **free:** free tokens inside dl only ([a39a72c](https://github.com/directionally-local/installer/commit/a39a72c9ba60de6392a7986d7df6664047708858))
+
+
+### Bug Fixes
+
+* **deps:** bump autopilot-ai ([#169](https://github.com/directionally-local/installer/issues/169)) ([89aeebf](https://github.com/directionally-local/installer/commit/89aeebf7d1d8bd62438ad35cc07b431cf731bb8d))
+* **deps:** install Autopilot 3.15.0 ([a82f2e5](https://github.com/directionally-local/installer/commit/a82f2e55c877459837c1daf03459a93c32a54bb0))
+* **free:** a request the caller hung up on is no longer OpenRouter cash or a full charge ([74fb285](https://github.com/directionally-local/installer/commit/74fb2855287024aece1de9bef328c2e6297285cc))
+* **free:** a second session of the same sign-in isn't signed out when it refreshes late ([751a498](https://github.com/directionally-local/installer/commit/751a498a4f11b3e760810fe0b1e9bc5c1c77ecf6))
+
 ## [0.20.0](https://github.com/directionally-local/installer/compare/v0.19.1...v0.20.0) (2026-11-06)
 
 
