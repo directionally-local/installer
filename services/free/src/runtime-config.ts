@@ -1,4 +1,5 @@
 import { MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, UPSTREAMS, type FreeConfig } from "./config.js";
+import { isEmailBlocklistEntry } from "./email-guard.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
 /**
@@ -35,6 +36,10 @@ export const RUNTIME_SETTINGS = {
   starterWeeklyTokens: { kind: "tokens", env: "STARTER_WEEKLY_TOKENS" },
   /** New sign-ins one network gets a day before the rest are Starter. */
   networkSignupsPerDay: { kind: "count", env: "NETWORK_SIGNUPS_PER_DAY" },
+  /** Inboxes and domains that can't sign up for the free tier. */
+  blockedEmails: { kind: "emails", env: "BLOCKED_EMAILS" },
+  /** New accounts a day from one company or custom email domain. */
+  domainSignupsPerDay: { kind: "count", env: "DOMAIN_SIGNUPS_PER_DAY" },
   /** New accounts need a public repo or a contribution in the last year to skip the invite. */
   requireGithubActivity: { kind: "flag", env: "REQUIRE_GITHUB_ACTIVITY" },
   /** Cached prompt tokens' weight against the token allowance, 0 to 1. */
@@ -110,6 +115,8 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "boolean" ? value : "invalid";
     case "weight":
       return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : "invalid";
+    case "emails":
+      return Array.isArray(value) && value.length <= 500 && value.every(isEmailBlocklistEntry) ? value.map((v) => v.trim().toLowerCase()) : "invalid";
     case "slugs":
       return Array.isArray(value) && isProviderSlugList(value) ? value.map((slug) => slug.toLowerCase()) : "invalid";
     case "quantizations":
@@ -133,6 +140,7 @@ const RULES: Record<Kind, string> = {
   usd: `a number of dollars, 0 to ${MAX_USD}, or "none" for no cap`,
   flag: "true or false",
   weight: "a number from 0 to 1",
+  emails: 'a list of up to 500 inboxes or domains, e.g. ["name@gmail.com", "@example.com"], or [] for none',
   slugs: 'a list of up to 10 OpenRouter provider slugs, e.g. ["deepinfra", "novita"], or [] for none',
   quantizations: 'a list of OpenRouter quantization levels, e.g. ["fp8", "bf16"], or [] for no filter',
   dataCollection: '"deny" or "allow"',

@@ -42,6 +42,8 @@ describe("runtime settings (units)", () => {
       fullMinContributions: 50,
       starterWeeklyTokens: 5_000_000,
       networkSignupsPerDay: 3,
+      blockedEmails: [],
+      domainSignupsPerDay: 5,
       cachedTokenWeight: 0.02,
       openRouterProviderOrder: [],
       openRouterQuantizations: ["fp8", "mxfp8", "fp16", "bf16", "fp32"],
