@@ -1,0 +1,59 @@
+name: bump autopilot
+
+# Opens the `fix(deps): install Autopilot X` PR as soon as a new autopilot-ai is on npm, instead
+# of waiting for Dependabot's daily run. Autopilot's release workflow pings this repo right after
+# it publishes (repository_dispatch "autopilot-released"); a 30-minute check and the "Run
+# workflow" button catch anything the ping missed. deps-automerge.yml merges the PR once CI
+# passes on it, and the fix(deps) commit makes release-please update the dl release PR.
+on:
+  repository_dispatch:
+    types: [autopilot-released]
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: bump-autopilot
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # Pushed and opened with the PAT, so CI runs on the PR and the merge triggers release-please.
+          token: ${{ secrets.DEPS_BOT_TOKEN || github.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Open the bump PR when npm has a newer autopilot-ai
+        env:
+          GH_TOKEN: ${{ secrets.DEPS_BOT_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          latest=$(npm view --prefer-online autopilot-ai version)
+          current=$(node -p "require('./package.json').dependencies['autopilot-ai']")
+          echo "npm: $latest, pinned: $current"
+          newer=$(node -e "const [a,b]=process.argv.slice(1).map(v=>v.split('.').map(Number));for(let i=0;i<3;i++){if(a[i]!==b[i]){console.log(a[i]>b[i]?'yes':'no');process.exit(0)}}console.log('no')" "$latest" "$current")
+          if [ "$newer" != "yes" ]; then echo "Nothing to do."; exit 0; fi
+          branch="deps/autopilot-$latest"
+          if gh pr list -R "$REPO" --head "$branch" --state open --json number --jq '.[0].number' | grep -q .; then
+            echo "A PR for $latest is already open."; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          npm install "autopilot-ai@$latest" --save-exact --ignore-scripts --package-lock-only --no-audit --no-fund
+          git add package.json package-lock.json
+          git commit -m "fix(deps): install Autopilot $latest"
+          git push --force -u origin "$branch"
+          gh pr create -R "$REPO" --head "$branch" --base main \
+            --title "fix(deps): install Autopilot $latest" \
+            --body "Pins autopilot-ai $latest, published to npm. Opened by the bump autopilot workflow; it merges itself once CI passes."
