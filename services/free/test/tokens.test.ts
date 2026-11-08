@@ -14,18 +14,32 @@ describe("tokens", () => {
     assert.equal(second.token_type, "Bearer");
     assert.equal((await service.request("GET", "/v1/me", { token: second.access_token })).status, 200);
 
-    const reused = await service.request("POST", "/v1/token/refresh", { body: { refresh_token: first.refresh_token } });
-    assert.equal(reused.status, 401);
-    assert.equal(await errorCode(reused), "invalid_grant");
     assert.equal((await service.request("POST", "/v1/token/refresh", { body: { refresh_token: second.refresh_token } })).status, 200);
+  });
+
+  it("lets a second session of the same sign-in refresh with the old token for a few minutes", async () => {
+    const service = await createService();
+    const first = await service.signIn({ id: ADMIN_ID, login: "owner" });
+    // Session A rotates; session B still holds the old token and refreshes 2.5 minutes later.
+    const a = (await (await service.request("POST", "/v1/token/refresh", { body: { refresh_token: first.refresh_token } })).json()) as typeof first;
+    service.clock.now += 150_000;
+    const late = await service.request("POST", "/v1/token/refresh", { body: { refresh_token: first.refresh_token } });
+    assert.equal(late.status, 200, "the slower session isn't signed out");
+    const b = (await late.json()) as typeof first;
+    assert.notEqual(b.refresh_token, a.refresh_token);
+    // Both sessions keep working.
+    assert.equal((await service.request("POST", "/v1/token/refresh", { body: { refresh_token: a.refresh_token } })).status, 200);
+    assert.equal((await service.request("POST", "/v1/token/refresh", { body: { refresh_token: b.refresh_token } })).status, 200);
   });
 
   it("revokes the whole family when a rotated token is replayed later", async () => {
     const service = await createService();
     const first = await service.signIn({ id: ADMIN_ID, login: "owner" });
     const second = (await (await service.request("POST", "/v1/token/refresh", { body: { refresh_token: first.refresh_token } })).json()) as typeof first;
-    service.clock.now += 60_000;
-    assert.equal((await service.request("POST", "/v1/token/refresh", { body: { refresh_token: first.refresh_token } })).status, 401);
+    service.clock.now += 6 * 60_000;
+    const replay = await service.request("POST", "/v1/token/refresh", { body: { refresh_token: first.refresh_token } });
+    assert.equal(replay.status, 401);
+    assert.equal(await errorCode(replay), "invalid_grant");
     assert.equal((await service.request("POST", "/v1/token/refresh", { body: { refresh_token: second.refresh_token } })).status, 401, "theft detected: the family is gone");
   });
 
