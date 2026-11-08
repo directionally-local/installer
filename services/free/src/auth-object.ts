@@ -15,7 +15,13 @@ export const DEVICE_CODE_TTL_MS = 15 * 60_000;
 export const POLL_INTERVAL_S = 5;
 export const REFRESH_TTL_MS = 30 * 86_400_000;
 /** A rotated refresh token used again within this window is a retry, not theft. */
-export const REFRESH_REUSE_GRACE_MS = 30_000;
+/**
+ * How long a rotated refresh token still works. Two sessions on one machine share one sign-in,
+ * and the slower one may present the old token minutes after the other rotated it. Within this
+ * window that gets a new token in the same sign-in; after it, the replay is treated as theft and
+ * the whole sign-in is revoked.
+ */
+export const REFRESH_REUSE_GRACE_MS = 5 * 60_000;
 const OAUTH_STATE_TTL_MS = 600_000;
 const POLL_TOLERANCE_MS = 250;
 /** Earlier admin rows carried this in `device_hash`; the purpose column replaced it. */
@@ -316,8 +322,14 @@ export class AuthObject extends DurableObject {
     const row = this.ctx.storage.sql.exec<RefreshRow>("SELECT * FROM refresh_tokens WHERE token_hash = ?", tokenHash).toArray()[0];
     if (!row) return undefined;
     if (row.used_at !== null) {
-      if (now - row.used_at > REFRESH_REUSE_GRACE_MS) this.ctx.storage.sql.exec("DELETE FROM refresh_tokens WHERE family = ?", row.family);
-      return undefined;
+      if (now - row.used_at > REFRESH_REUSE_GRACE_MS) {
+        this.ctx.storage.sql.exec("DELETE FROM refresh_tokens WHERE family = ?", row.family);
+        return undefined;
+      }
+      // Another session of this sign-in rotated it moments ago: give this one its own new token.
+      if (row.expires_at <= now) return undefined;
+      const next = await this.#issueRefresh({ githubId: row.github_id, login: row.login }, row.family, now);
+      return { githubId: row.github_id, login: row.login, refreshToken: next, family: row.family };
     }
     if (row.expires_at <= now) {
       this.ctx.storage.sql.exec("DELETE FROM refresh_tokens WHERE token_hash = ?", tokenHash);
