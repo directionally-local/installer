@@ -17,8 +17,10 @@ jobs:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
-      startsWith(github.event.workflow_run.head_branch, 'dependabot/npm_and_yarn/')
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      ((github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+        startsWith(github.event.workflow_run.head_branch, 'dependabot/npm_and_yarn/')) ||
+       startsWith(github.event.workflow_run.head_branch, 'deps/autopilot-'))
     runs-on: ubuntu-latest
     steps:
       - name: Merge if the PR only bumps autopilot-ai
@@ -33,8 +35,12 @@ jobs:
           SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          pr=$(gh pr list -R "$REPO" --head "$BRANCH" --state open --json number,author --jq '.[] | select(.author.login == "app/dependabot" or .author.login == "dependabot[bot]") | .number' | head -n1)
-          if [ -z "$pr" ]; then echo "No open Dependabot PR for $BRANCH"; exit 0; fi
+          # Dependabot's PRs, and the bump autopilot workflow's (deps/autopilot-*, from this repo).
+          case "$BRANCH" in
+            deps/autopilot-*) pr=$(gh pr list -R "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number // empty') ;;
+            *) pr=$(gh pr list -R "$REPO" --head "$BRANCH" --state open --json number,author --jq '.[] | select(.author.login == "app/dependabot" or .author.login == "dependabot[bot]") | .number' | head -n1) ;;
+          esac
+          if [ -z "$pr" ]; then echo "No open bump PR for $BRANCH"; exit 0; fi
           files=$(gh pr view "$pr" -R "$REPO" --json files --jq '.files[].path' | sort -u | tr '\n' ' ')
           for f in $files; do
             case "$f" in package.json|package-lock.json) ;; *) echo "PR #$pr touches $f; leaving it for review"; exit 0 ;; esac
