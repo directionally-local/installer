@@ -1,4 +1,5 @@
 import { DurableObject, type DurableObjectState } from "cloudflare:workers";
+import { normalizeEmail } from "./email-guard.js";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
@@ -546,6 +547,8 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["people", "email", "TEXT"],
   ["people", "email_updates", "INTEGER"],
   ["people", "email_at", "INTEGER"],
+  // The inbox the contact email delivers to (email-guard.ts normalizeEmail): one free account each.
+  ["people", "email_norm", "TEXT"],
   // Set by the unsubscribe link in emails to users.
   ["people", "email_stop", "INTEGER NOT NULL DEFAULT 0"],
   ["daily_activity", "credit_usd", "REAL NOT NULL DEFAULT 0"],
@@ -1075,8 +1078,38 @@ export class DirectoryObject extends DurableObject {
   async setEmail(githubId: number, email: string, updates: boolean, now: number): Promise<boolean> {
     const sql = this.ctx.storage.sql;
     if (sql.exec("SELECT 1 FROM people WHERE github_id = ?", githubId).toArray().length === 0) return false;
-    sql.exec("UPDATE people SET email = ?, email_updates = ?, email_at = ? WHERE github_id = ?", email.trim(), updates ? 1 : 0, now, githubId);
+    sql.exec(
+      "UPDATE people SET email = ?, email_norm = ?, email_updates = ?, email_at = ? WHERE github_id = ?",
+      email.trim(),
+      normalizeEmail(email),
+      updates ? 1 : 0,
+      now,
+      githubId,
+    );
     return true;
+  }
+
+  /** Whether another account already gave this inbox (normalized) as its contact email. */
+  async emailInUse(normalized: string, githubId: number): Promise<boolean> {
+    this.#backfillEmailNorm();
+    return this.ctx.storage.sql.exec("SELECT 1 FROM people WHERE email_norm = ? AND github_id != ? LIMIT 1", normalized, githubId).toArray().length > 0;
+  }
+
+  /** Accounts admitted since `since` whose contact email is on this domain. */
+  async domainSignupsSince(domain: string, since: number): Promise<number> {
+    this.#backfillEmailNorm();
+    return (
+      this.ctx.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM people WHERE email_norm LIKE ? AND admitted_at >= ?", `%@${domain}`, since)
+        .toArray()[0]?.n ?? 0
+    );
+  }
+
+  /** Fills email_norm for people who gave an email before it existed. Cheap once done. */
+  #backfillEmailNorm(): void {
+    const sql = this.ctx.storage.sql;
+    const rows = sql.exec<{ github_id: number; email: string }>("SELECT github_id, email FROM people WHERE email IS NOT NULL AND email_norm IS NULL").toArray();
+    for (const row of rows) sql.exec("UPDATE people SET email_norm = ? WHERE github_id = ?", normalizeEmail(row.email), row.github_id);
   }
 
   // ─── Emails to users (user-email-send.ts) ─────────────────────────────────

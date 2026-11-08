@@ -41,6 +41,7 @@ import {
 import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
 import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, modelById, type FreeModel, type Pool } from "./models.js";
+import { emailBlocked, emailDomain, normalizeEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
 import { levelFor, levelReason, starterLine, type GithubSignals, type Level, type LevelReason, type LevelThresholds } from "./admission.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
 import { chooseUpstream, providerConfigured } from "./upstream-choice.js";
@@ -948,6 +949,10 @@ async function starterDetails(c: Ctx): Promise<{ line: string }> {
   return { line: starterLine(levelThresholds(config), config.starterWeeklyTokens) };
 }
 
+const EMAIL_BLOCKED_MESSAGE = "This email can't be used for the free tier. Use your own API key instead, or write to contact@directionallylocal.com.";
+const EMAIL_IN_USE_MESSAGE = "This email is already used by another dl account. Each person gets one free account.";
+const DOMAIN_LIMIT_MESSAGE = "Too many new free accounts from this email domain today. Try again tomorrow, or write to contact@directionallylocal.com.";
+
 /** A plausible address: one @, a dot in the domain, no spaces, at most 254 characters. */
 function validEmail(value: string): boolean {
   return value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
@@ -970,6 +975,17 @@ async function deviceDetails(c: Ctx): Promise<Response> {
   const inviteCode = starter ? (form.get("invite_code") ?? "").trim() || undefined : undefined;
   const again = (error: string) => detailsPage(ticket, found.login, { email, updates, ...(starter ? { starter } : {}), error });
   if (!validEmail(email)) return again("Enter an email address we can reach you at.");
+  // One free account per inbox, no blocked inboxes or domains, and a daily cap per company domain.
+  const { config: guard } = await runtime(c);
+  const inbox = normalizeEmail(email);
+  if (!c.config.adminGithubIds.has(found.githubId)) {
+    if (emailBlocked(inbox, guard.blockedEmails)) return again(EMAIL_BLOCKED_MESSAGE);
+    if (await directory(c).emailInUse(inbox, found.githubId)) return again(EMAIL_IN_USE_MESSAGE);
+    const domain = emailDomain(inbox);
+    if (!person && !PUBLIC_EMAIL_DOMAINS.has(domain) && (await directory(c).domainSignupsSince(domain, c.now() - DAY_MS)) >= guard.domainSignupsPerDay) {
+      return again(DOMAIN_LIMIT_MESSAGE);
+    }
+  }
   if (inviteCode) {
     const retry = await limited(c, `invite:ip:${c.ipNet}`, LIMITS.inviteAttemptIp);
     if (retry !== undefined) return again(`Too many invite attempts. Try again in ${Math.ceil(retry / 60)} minutes, or leave the code empty.`);

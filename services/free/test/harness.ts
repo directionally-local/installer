@@ -261,6 +261,8 @@ export async function createService(vars: Record<string, string> = {}, options: 
     GITHUB_CLIENT_SECRET: "gh-secret",
     TOKEN_SIGNING_KEY: SIGNING_KEY,
     ADMIN_GITHUB_IDS: String(ADMIN_ID),
+    // Tests sign many accounts up from @example.com; the per-domain daily cap has its own tests.
+    DOMAIN_SIGNUPS_PER_DAY: "100000",
     ...vars,
     ...namespaces,
   };
@@ -299,7 +301,8 @@ export async function createService(vars: Record<string, string> = {}, options: 
     if (url === "https://api.github.com/user/emails") {
       const token = new Headers(init.headers).get("authorization")?.replace("Bearer token-for-", "") ?? "";
       const user = JSON.parse(decodeURIComponent(token)) as GitHubUserFixture;
-      const email = user.email === undefined ? `${user.login.toLowerCase()}@example.com` : user.email;
+      // One inbox per test account (the sign-up refuses a second account on the same inbox).
+      const email = user.email === undefined ? `${user.login.toLowerCase()}.${user.id}@example.com` : user.email;
       return Response.json(email === null ? [] : [{ email, primary: true, verified: true, visibility: "private" }]);
     }
     if (url.startsWith("https://api.github.com/users/")) {

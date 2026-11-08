@@ -285,7 +285,7 @@ describe("emails to users: switches and failures", () => {
     const again = (await s.signIn({ id: ADMIN_ID, login: "owner" })).access_token; // the clock moved on
     assert.equal((await s.request("POST", "/admin/config", { token: again, body: { userEmails: null } })).status, 200);
     await startBrowserFlow(s.request, { id: 704, login: "vic" });
-    assert.deepEqual(sentTo(s), ["vic@example.com"]);
+    assert.deepEqual(sentTo(s), ["vic.704@example.com"]);
   });
 
   it("doesn't fail the sign-in when Resend fails, retries once on the next daily run, then gives up", async () => {

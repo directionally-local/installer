@@ -45,6 +45,10 @@ export interface FreeConfig {
   starterWeeklyTokens: number;
   /** New sign-ins one network gets a day before the rest are Starter (NETWORK_SIGNUPS_PER_DAY). */
   networkSignupsPerDay: number;
+  /** Inboxes (`name@domain`) and domains (`@domain`) that can't sign up (BLOCKED_EMAILS, comma-separated). */
+  blockedEmails: string[];
+  /** New accounts a day from one company or custom email domain; public providers are exempt (DOMAIN_SIGNUPS_PER_DAY). */
+  domainSignupsPerDay: number;
   /**
    * Open admission: GitHub accounts at least `minGithubAccountAgeDays` old get in without an
    * invite code (still within `maxActiveUsers`). Off by default: invite-only for everyone.
@@ -198,6 +202,8 @@ export const DEFAULTS = {
   fullMinContributions: 50,
   starterWeeklyTokens: 5_000_000,
   networkSignupsPerDay: 3,
+  blockedEmails: [],
+  domainSignupsPerDay: 5,
   openAdmission: false,
   requireGithubActivity: true,
   dlOnly: true,
@@ -278,6 +284,8 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     fullMinContributions: whole(env.FULL_MIN_CONTRIBUTIONS, DEFAULTS.fullMinContributions, "FULL_MIN_CONTRIBUTIONS"),
     starterWeeklyTokens: whole(env.STARTER_WEEKLY_TOKENS, DEFAULTS.starterWeeklyTokens, "STARTER_WEEKLY_TOKENS"),
     networkSignupsPerDay: whole(env.NETWORK_SIGNUPS_PER_DAY, DEFAULTS.networkSignupsPerDay, "NETWORK_SIGNUPS_PER_DAY"),
+    blockedEmails: env.BLOCKED_EMAILS === undefined ? [...DEFAULTS.blockedEmails] : String(env.BLOCKED_EMAILS).split(",").map((v) => v.trim()).filter(Boolean),
+    domainSignupsPerDay: whole(env.DOMAIN_SIGNUPS_PER_DAY, DEFAULTS.domainSignupsPerDay, "DOMAIN_SIGNUPS_PER_DAY"),
     openAdmission: flag(env.OPEN_ADMISSION, DEFAULTS.openAdmission, "OPEN_ADMISSION"),
     requireGithubActivity: flag(env.REQUIRE_GITHUB_ACTIVITY, DEFAULTS.requireGithubActivity, "REQUIRE_GITHUB_ACTIVITY"),
     countCachedTokens: flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS"),
