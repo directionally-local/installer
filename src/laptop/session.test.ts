@@ -17,6 +17,7 @@ import { loadRemotes, saveRemote, type RemoteServer } from "./config.js";
 import type { SetupOptions } from "./setup.js";
 import { autopilotOnPath, bundledAutopilot, openSession, planSession, startHere, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput, type SessionSpawner } from "./session.js";
 import { loadSessions, rememberSession } from "./session-store.js";
+import { loadSettings, placeModel } from "./settings.js";
 import { createOpener, type RemoteOpener } from "./tunnel.js";
 
 /** Every "update dl" hint says dl update, however dl was installed. */
@@ -40,6 +41,8 @@ class FakeApi {
   readonly conversations = new Map<string, string>();
   /** Conversation ID -> the run it's working on, for the ones that are live. */
   readonly activeRuns = new Map<string, string>();
+  /** Conversation ID -> its model, for the ones /model switched from the server's default. */
+  readonly conversationModels = new Map<string, string>();
   readonly requests: string[] = [];
   private server: Server | undefined;
   url = "";
@@ -70,7 +73,7 @@ class FakeApi {
     if (path === "/api/v1/conversations") return send(200, { conversations: [] });
     const id = decodeURIComponent(path.replace(/^\/api\/v1\/conversations\//, ""));
     const status = this.conversations.get(id);
-    if (status) return send(200, { conversationId: id, workspaceId: "default", model: DEFAULT_MODEL, status, activeRunId: this.activeRuns.get(id) ?? null, lastEventId: 1, createdAt: "", updatedAt: "", kind: id.startsWith("c") ? "chat" : "code", ...(id.startsWith("c") ? {} : { repository: "me/app" }) });
+    if (status) return send(200, { conversationId: id, workspaceId: "default", model: this.conversationModels.get(id) ?? DEFAULT_MODEL, status, activeRunId: this.activeRuns.get(id) ?? null, lastEventId: 1, createdAt: "", updatedAt: "", kind: id.startsWith("c") ? "chat" : "code", ...(id.startsWith("c") ? {} : { repository: "me/app" }) });
     send(404, { error: { code: "not_found", message: "No such conversation" } });
   }
 }
@@ -96,6 +99,8 @@ class FakeAutopilot {
   readonly children: Array<EventEmitter & SessionChild & { signals: string[] }> = [];
   code = 0;
   hold = false;
+  /** The model /model switches to during the session (set between launches to simulate it). */
+  switchTo: string | undefined;
   tunnels: FakeTunnel[] = [];
   private codeCount = 0;
   private chatCount = 0;
@@ -138,6 +143,10 @@ class FakeAutopilot {
       const chat = args.includes("--kind") && flag("--kind") === "chat";
       const id = args.includes("--conversation") ? flag("--conversation")! : this.nextId(chat);
       this.api.conversations.set(id, "ready");
+      // The conversation runs on the model it was created with until /model switches it.
+      const launchModel = args.includes("--model") ? flag("--model") : undefined;
+      if (launchModel) this.api.conversationModels.set(id, launchModel);
+      if (this.switchTo) this.api.conversationModels.set(id, this.switchTo);
       await writeFile(flag("--state-file")!, JSON.stringify(chat ? { conversationId: id } : { conversationId: id, branch: `aster/${id.slice(0, 8)}`, repository: flag("--repo") ?? "me/app" }));
       if (!this.hold) child.emit("exit", this.code, null);
     })();
@@ -276,6 +285,35 @@ describe("dl inside a project", () => {
     const dir = await checkout();
     assert.equal(await session({ cwd: dir }, capture()), 0);
     assert.equal(flag(autopilot.launches[0]!.args, "--model"), "moonshotai/kimi-k2.6", "the server's default, not a hard-coded id");
+  });
+
+  it("remembers a model switched to inside a session, and the next one starts on it", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    autopilot.switchTo = "01-ai/yi-large";
+    assert.equal(await session({ cwd: dir }, capture()), 0);
+    assert.equal(flag(autopilot.launches[0]!.args, "--model"), DEFAULT_MODEL);
+    assert.deepEqual((await loadSettings()).placeModels, { "dl-test": "01-ai/yi-large" }, "the /model switch is the place's model now");
+
+    // The next session (reading dl's settings, as the real placeModel does) starts on it.
+    autopilot.switchTo = undefined;
+    assert.equal(await session({ cwd: dir, placeModel: (name) => placeModel(name) }, capture()), 0);
+    assert.equal(flag(autopilot.launches[1]!.args, "--model"), "01-ai/yi-large");
+    assert.deepEqual((await loadSettings()).placeModels, { "dl-test": "01-ai/yi-large" }, "unchanged without a switch");
+
+    // Resuming a conversation and switching there remembers too.
+    const resumed = capture();
+    autopilot.switchTo = DEFAULT_MODEL;
+    assert.equal(await session({ cwd: dir, continue: true }, resumed), 0);
+    assert.deepEqual((await loadSettings()).placeModels, { "dl-test": DEFAULT_MODEL });
+  });
+
+  it("a model named with -m is used for that session only, not remembered", { timeout: 30_000 }, async () => {
+    await saveRemote(place("dl-test", api.url));
+    const dir = await checkout();
+    assert.equal(await session({ cwd: dir, model: "01-ai/yi-large" }, capture()), 0);
+    assert.equal(flag(autopilot.launches[0]!.args, "--model"), "01-ai/yi-large");
+    assert.deepEqual((await loadSettings()).placeModels, undefined, "-m stays a one-off");
   });
 
   it("asks before sending local changes that look like a key, and starts from the base commit", { timeout: 30_000 }, async () => {

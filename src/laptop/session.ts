@@ -13,7 +13,7 @@ import { findAutopilot, supportsAttachRemote, type AutopilotCommand } from "./au
 import { RemoteApiError, type RemoteClient, type RemoteConversation } from "./client.js";
 import { describeError, pickModel, type LaptopIO } from "./commands.js";
 import { referralForAutopilot, settleReferral, withReferral, type ReferralOptions } from "./referral.js";
-import { placeModel } from "./settings.js";
+import { placeModel, saveModel } from "./settings.js";
 import { recordLastUsed, resolveTarget, type RemoteServer, type TargetReason } from "./config.js";
 import { detectGitHubRepository, snapshotWorkingTree, type WorkingTreeSnapshot } from "./git.js";
 import { describeSecretLocation, findLikelyProviderSecret, type SecretMatch } from "./secrets.js";
@@ -253,12 +253,18 @@ async function startSession(plan: SessionPlan, target: { remote: RemoteServer; r
       // Bare `dl` always starts a new conversation; `dl -c` reopens the latest here.
       let remembered = input.continue ? await latestSession(key, file) : undefined;
       if (input.continue && !remembered) note("No earlier session here; starting a new one.");
+      // The model the conversation starts on: dl's pick for a new one, the conversation's own for
+      // a reopened one. Compared against the model it ends on, so a /model switch in the session
+      // becomes the place's model for next time.
+      let startModel: string | undefined;
       if (remembered) {
-        const alive = await step(conversationAlive(client, remembered.conversationId));
-        if (!alive) {
+        const existing = await step(findConversation(client, remembered.conversationId));
+        if (!existing) {
           await forgetSession(remembered.conversationId, file);
           note(`The last ${plan.kind === "code" ? `conversation for ${subject}` : "chat"} on ${remote.name} is gone; starting a new one.`);
           remembered = undefined;
+        } else {
+          startModel = existing.model;
         }
       }
       // Starting a new one: say when an earlier session here is still live, so nobody thinks
@@ -300,6 +306,7 @@ async function startSession(plan: SessionPlan, target: { remote: RemoteServer; r
           const workspace = workspaces[0];
           if (!workspace) throw new Error(`${remote.name} has no workspace this laptop can use`);
           const model = pickModel(catalog, input.model, preferred);
+          startModel = model;
           // Creation flags only: attach-remote refuses them next to --conversation.
           args.push(...(plan.kind === "chat" ? ["--kind", "chat"] : []), "--workspace", workspace.id, "--model", model);
           if (snapshot) {
@@ -349,6 +356,12 @@ async function startSession(plan: SessionPlan, target: { remote: RemoteServer; r
         }).finally(() => clearInterval(poll));
         await save().catch(() => {});
         if (outcome instanceof Error) return missing();
+        // A model switched with /model inside the session is the place's model from now on, so
+        // the next session (and dl run) uses it instead of falling back to the default.
+        if (saved && startModel) {
+          const ended = await client.getConversation(saved).catch(() => undefined);
+          if (ended?.model && ended.model !== startModel) await saveModel(ended.model, undefined, remote.name).catch(() => undefined);
+        }
         if (outcome.code === 2) return missing();
         // attach-remote's own code for "the patch holds a key": it already said where.
         if (outcome.code === 3) {
@@ -398,12 +411,13 @@ async function askAboutLocalSecret(match: SecretMatch, snapshot: WorkingTreeSnap
   }
 }
 
-/** Whether a remembered conversation still exists on the place. */
-async function conversationAlive(client: RemoteClient, conversationId: string): Promise<boolean> {
+/** A remembered conversation, if it still exists on the place (destroyed and gone both count as not). */
+async function findConversation(client: RemoteClient, conversationId: string): Promise<RemoteConversation | undefined> {
   try {
-    return (await client.getConversation(conversationId)).status !== "destroyed";
+    const conversation = await client.getConversation(conversationId);
+    return conversation.status === "destroyed" ? undefined : conversation;
   } catch (error) {
-    if (error instanceof RemoteApiError && (error.status === 404 || error.status === 410)) return false;
+    if (error instanceof RemoteApiError && (error.status === 404 || error.status === 410)) return undefined;
     throw error;
   }
 }
