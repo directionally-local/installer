@@ -17,6 +17,7 @@ import { dlUpdate } from "./laptop/self-update.js";
 import { PAIRED_NAME } from "./local/layout.js";
 import { provider as providerCommand } from "./laptop/provider.js";
 import { model } from "./laptop/settings.js";
+import { modelCommand as gpuModelCommand } from "./model-command.js";
 import { openSession, startHere, type SessionInput } from "./laptop/session.js";
 import { detectGitHubRepository } from "./laptop/git.js";
 import { preview as laptopPreview } from "./laptop/preview.js";
@@ -76,6 +77,10 @@ On your laptop:
   dl provider set         pick another provider, key and model in Autopilot's list (--server NAME)
   dl provider github      replace the GitHub token
   dl model [ID]           the model for tasks and sessions on a place (no ID: Autopilot's list)
+  dl model up [MODEL]     serve a curated vLLM model on this machine's Nvidia GPU (--dry-run: plan only)
+  dl model update [MODEL] smoke-test a replacement before switching (--dry-run: plan only)
+  dl model rollback       restore the previous deployment and provider
+  dl model status         running model, GPU memory, and last smoke tests
   dl update               update dl (when npm has a newer one) and the Autopilot it pins, then
                           the default place (--check: only say whether there's a newer dl)
   dl update NAME          update a place's Autopilot, Hotcell and sandbox image to the versions dl pins
@@ -496,8 +501,14 @@ export async function main(
         return await servers(parsed.positionals.slice(1), laptopIO);
       case "use":
         return await use(parsed.positionals.slice(1), laptopIO);
-      case "model":
+      case "model": {
+        const [action, ...args] = parsed.positionals.slice(1);
+        if (action === "up" || action === "update" || action === "rollback" || action === "status") {
+          if (values.server) { io.err("dl model deployment commands run on this machine; omit --server.\n"); return 2; }
+          return await gpuModelCommand(action, args, { system, ui: terminal && !values["dry-run"] ? new TerminalUi(io.out, undefined, colorOn) : new PlainUi(io.out), prompter: options.prompter ?? new TtyPrompter(), interactive: terminal });
+        }
         return await model(parsed.positionals.slice(1), { io: laptopIO, terminal, ...(values.server ? { server: values.server } : {}) });
+      }
       case "runs":
         // On a server, its runs; on a laptop, the tasks it sent.
         if (!(await readState(system))) {

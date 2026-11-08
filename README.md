@@ -118,7 +118,8 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl servers` | Where agents run. `dl servers rename OLD NEW`, `dl servers remove NAME`. |
 | `dl use [NAME]` | Where tasks and bare `dl` go without `--server`. With no name, shows it. |
 | `dl provider` | The provider and GitHub token on each place. `dl provider set` picks another provider, key and model in Autopilot's list; `dl provider github` replaces the GitHub token. `--server NAME` picks the place. `dl keys` is the same command. |
-| `dl model [ID]` | The model for tasks and sessions on a place. With no ID, Autopilot's own model picker. |
+| `dl model [ID]` | The model for tasks and sessions on a place. With no ID, Autopilot's own model picker. For a model served on this machine's GPU, see `dl model up` below. |
+| `dl model up` / `update` / `rollback` / `status` | Serve a curated open model on this machine's Nvidia GPU with vLLM, test it, and point Autopilot at it. See [On your own GPUs](#on-your-own-gpus). |
 | `dl update` | Update `dl` itself when npm has a newer one (the install script or npm, however it was installed; `--check` only reports), make sure the Autopilot it pins is installed, then update the default place as `dl update NAME` does. |
 | `dl update NAME` | Update a place's Autopilot, Hotcell and sandbox image to the versions `dl` pins. A server over SSH (its `dl` first), this computer in place. `--wait` waits for running tasks instead of asking; with no terminal it waits anyway. |
 | `dl local status` | Agents running on this computer: running?, where, how many fit. |
@@ -126,6 +127,28 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl uninstall [--purge] [--yes]` | Remove dl from this computer. Lists what it will remove and asks first (`--yes` doesn't ask; with no terminal it needs `--yes`). Signs out of the free tier, stops agents set up with `dl setup` on this computer, takes dl's hook out of Claude Code's settings, removes the two lines the install script added to your shell startup file (keeping a `.dl-uninstall.bak` copy), the `dl` links in `~/.local/bin` and `~/bin` that point into `~/.directionallylocal`, `~/.config/directionallylocal`, and `~/.directionallylocal` itself (or `DL_HOME`). `--purge` also removes Autopilot's settings, sign-ins and history (`~/.config/autopilot`, `~/.local/share/autopilot`, `~/.local/state/autopilot`); projects' `.autopilot` folders stay. |
 
 Run options: `--server NAME`, `-m/--model MODEL`, `--repo OWNER/NAME`, `--detach`.
+
+### On your own GPUs
+
+`dl model` can serve a curated open model on this machine's Nvidia GPU with vLLM in Docker, then point Autopilot at it. It needs an Nvidia driver, Docker, and nvidia-container-toolkit; `dl model up` checks all three and says what's missing.
+
+| Command | What it does |
+| --- | --- |
+| `dl model up [MODEL] [--dry-run]` | Detect the GPU, list only catalog models that fit, ask for context length and port (8000), start `vllm/vllm-openai` as `dl-model-1` with the catalog's flags and a shared Hugging Face cache, then smoke-test chat, a tool call and JSON mode. Saves the deployment and sets Autopilot's `vllm` provider to `http://127.0.0.1:<port>/v1`. |
+| `dl model update [MODEL] [--dry-run]` | Start the replacement as `dl-model-2` on port+1 when there's free VRAM; otherwise warn about downtime and ask. Smoke-test both, print a side-by-side table, then switch the provider and stop the old container, keeping its config for rollback. A failure removes the new container and leaves the old one serving. |
+| `dl model rollback` | Restart the previous deployment and switch the provider back. |
+| `dl model status` | The running model, port, GPU memory, and the last smoke-test results. |
+
+`--dry-run` prints every Docker command without running it. The catalog lives in `src/model-catalog.ts`: each entry pins the Hugging Face repo, minimum VRAM, vLLM image tag, and flags (tool-call parser, reasoning parser, max model length, quantization). It starts with two Qwen 3 4B versions (an older/newer pair for trying `update`) and GLM-4.7-Flash when 48 GB is available.
+
+```sh
+dl model up                 # pick from what fits; defaults to port 8000
+dl model update qwen-new    # test the newer Qwen, then switch
+dl model rollback           # back to the previous one
+dl model status
+```
+
+The model's state is kept separately from a server install, in `~/.local/state/directionallylocal/model.json` (or `$XDG_STATE_HOME`), so `dl model` works on a laptop or a server without touching `/etc/directionallylocal/state.json`.
 
 ### On the server
 

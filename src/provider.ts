@@ -48,8 +48,8 @@ export const BUILT_IN_PROVIDERS: readonly string[] = [
   "deepinfra", "vercel", "kimi-code", "zai", "zai-coding", "ollama", "lmstudio", "requesty", "openrouter",
 ];
 
-/** Providers that take no key at all. */
-export const KEYLESS_PROVIDERS: readonly string[] = ["ollama", "lmstudio"];
+/** Providers that take no key at all. vLLM's OpenAI server is local and keyless. */
+export const KEYLESS_PROVIDERS: readonly string[] = ["ollama", "lmstudio", "vllm"];
 
 /**
  * Where the built-in providers live, for `dl keys set <id>` on a server (which has no
@@ -75,6 +75,7 @@ export const KNOWN_PROVIDERS: Record<string, { name: string; baseUrl: string; ap
   zai: { name: "Z.ai", baseUrl: "https://api.z.ai/api/paas/v4", apiKeyEnv: "ZAI_API_KEY" },
   ollama: { name: "Ollama", baseUrl: "http://127.0.0.1:11434/v1", apiKeyEnv: "OLLAMA_API_KEY" },
   lmstudio: { name: "LM Studio", baseUrl: "http://127.0.0.1:1234/v1", apiKeyEnv: "LMSTUDIO_API_KEY" },
+  vllm: { name: "vLLM", baseUrl: "http://127.0.0.1:8000/v1", apiKeyEnv: "VLLM_API_KEY" },
 };
 
 export const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
