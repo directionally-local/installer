@@ -1,27 +1,29 @@
 # Directionally Local roadmap
 
-Coding agents on your own hardware, in six phases. Each phase ends at a gate you can test, not a date. A phase starts when the one before it passes its gate. Everything else runs as a background track that never blocks the phases.
+Coding agents on your own hardware, in six phases. Each phase ends at a gate you can test, not a date. A numbered phase starts when the one before it passes its gate. Phase 1.5 runs alongside phase 1 and never blocks phase 2. Everything else runs as a background track that never blocks the phases.
 
-Last updated 3 November 2026. On npm today: dl 0.9.4, Autopilot 3.1.2, Hotcell 0.1.38, camouflage-tui 2.11.0, Serverless Objects 0.13.6.
+Last updated 8 November 2026. On npm today: dl 0.9.4, Autopilot 3.1.2, Hotcell 0.1.38, camouflage-tui 2.11.0, Serverless Objects 0.13.6.
 
 Scope: the Directionally Local repositories (installer, autopilot, hotcell, serverless-objects, pr-deck), camouflage, and the Aster apps.
 
 Issues carry a `phase-0` to `phase-5` label in `autopilot` and `installer`; `decision` marks a choice the owner has to make before building.
 
-## The next eight weeks: 3 November to 28 December
+## The next ten weeks: 3 November 2026 to 11 January 2027
 
-For these eight weeks, work is ordered by one test: does it bring more people to dl each week, keep them coming back, or turn them into paying users? Anything that doesn't waits until January (list below). Phase 0 daily use runs alongside, not before.
+For these ten weeks, work is ordered by one test: does it bring more people to dl each week, keep them coming back, or turn them into paying users? Anything that doesn't waits until January (list below). Phase 0 daily use runs alongside, not before.
 
 | Week | Dates | What ships |
 | --- | --- | --- |
 | 1 | 3–9 Nov | **Free managed tier, invite-only (3 Nov):** GitHub sign-in, a weekly allowance that resets every Monday, a global spend stop, a kill switch, and a per-request usage log (account, tokens, cached tokens, cost). [installer#78](https://github.com/directionally-local/installer/issues/78), [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102) · **Open to every existing user once the admin dashboard and the one-account-per-person checks work:** one account per GitHub user, and GitHub accounts younger than 30 days need an invite code · Cached tokens charged at their real cost · The weekly allowance can be changed without a release · **Admin dashboard (by 9 Nov):** weekly active users, cohort retention, cost per user, who hit the limit ([installer#86](https://github.com/directionally-local/installer/issues/86)) · Retire the old Kimiflare Cloud service ([installer#84](https://github.com/directionally-local/installer/pull/84) checklist) |
-| 2 | 10–16 Nov | **Bring your Claude Code setup, part 1:** dl's first run finds an existing `CLAUDE.md`, MCP config and repository context, locally ([autopilot#1126](https://github.com/directionally-local/autopilot/issues/1126)) |
-| 3 | 17–23 Nov | **Bring your Claude Code setup, part 2:** the first session works in under two minutes ([autopilot#1126](https://github.com/directionally-local/autopilot/issues/1126)) · **Continue in dl:** when Claude Code hits a rate limit, one keystroke opens the same task in dl ([autopilot#1127](https://github.com/directionally-local/autopilot/issues/1127)) |
-| 4 | 24–30 Nov | **Autopilot reports its state to herdr** ([autopilot#1103](https://github.com/directionally-local/autopilot/issues/1103)) |
-| 5 | 1–7 Dec | **"Your tokens are back":** the Monday reset is shown to free-tier users ([installer#87](https://github.com/directionally-local/installer/issues/87)) · Pull request upstream so herdr lists dl as a supported agent |
-| 6 | 8–14 Dec | **Pro plan, $20 a month:** a much larger weekly Flash allowance plus DeepSeek V4 Pro, offered at the moment a free user reaches the limit ([installer#88](https://github.com/directionally-local/installer/issues/88)) |
-| 7 | 15–21 Dec | Fixes from the Pro launch and from the usage data; the fresh-VM test ([installer#47](https://github.com/directionally-local/installer/issues/47)) |
-| 8 | 22–28 Dec | Hardening and first-run quality; nothing new starts |
+| 2 | 10–16 Nov | **dl model v0.1 (by 11 Nov):** run open models on your own GPUs; Nvidia only, one machine, vLLM in Docker. `dl model up`, `dl model update`, `dl model rollback`, `dl model status` |
+| 3 | 17–23 Nov | **dl model, tested updates:** check a new model deployment before switching over; automatically roll back if it fails. Make setup and recovery work end to end on one Nvidia machine |
+| 4 | 24–30 Nov | **Bring your Claude Code setup, part 1:** dl's first run finds an existing `CLAUDE.md`, MCP config and repository context, locally ([autopilot#1126](https://github.com/directionally-local/autopilot/issues/1126)) |
+| 5 | 1–7 Dec | **Bring your Claude Code setup, part 2:** the first session works in under two minutes ([autopilot#1126](https://github.com/directionally-local/autopilot/issues/1126)) · **Continue in dl:** when Claude Code hits a rate limit, one keystroke opens the same task in dl ([autopilot#1127](https://github.com/directionally-local/autopilot/issues/1127)) |
+| 6 | 8–14 Dec | **Autopilot reports its state to herdr** ([autopilot#1103](https://github.com/directionally-local/autopilot/issues/1103)) |
+| 7 | 15–21 Dec | **"Your tokens are back":** the Monday reset is shown to free-tier users ([installer#87](https://github.com/directionally-local/installer/issues/87)) · Pull request upstream so herdr lists dl as a supported agent |
+| 8 | 22–28 Dec | **Pro plan, $20 a month:** a much larger weekly Flash allowance plus DeepSeek V4 Pro, offered at the moment a free user reaches the limit ([installer#88](https://github.com/directionally-local/installer/issues/88)) |
+| 9 | 29 Dec–4 Jan | Fixes from the Pro launch and from the usage data; the fresh-VM test ([installer#47](https://github.com/directionally-local/installer/issues/47)) |
+| 10 | 5–11 Jan | Hardening and first-run quality; nothing new starts |
 
 **Kept throughout, because they protect the first run:** laptop mode (plain Autopilot), every `dl` a new session with `dl -c` to continue, eight sessions on an 8 GB laptop, the fresh-VM test, and guardrails for destructive actions so a first run never costs anyone their data ([autopilot#1125](https://github.com/directionally-local/autopilot/issues/1125)).
 
@@ -71,7 +73,7 @@ People sign in with GitHub and get free tokens instead of bringing an API key. U
 
 **After the MVP:** terminal panes for any CLI and a shell; splits and tabs; mouse support.
 
-**This week, cheaply:** Autopilot reports its state through herdr's protocol ([autopilot#1103](https://github.com/directionally-local/autopilot/issues/1103)), so people who already use herdr see Autopilot correctly today.
+**Ahead of the MVP, cheaply:** Autopilot reports its state through herdr's protocol ([autopilot#1103](https://github.com/directionally-local/autopilot/issues/1103)), so people who already use herdr see Autopilot correctly today.
 
 **Decided with [installer#72](https://github.com/directionally-local/installer/issues/72):** dl on a laptop runs plain Autopilot, so those sessions aren't in a server and the multiplexer can't list them. Either plain Autopilot publishes its events on a local socket the multiplexer reads, or terminal panes come earlier. [decision](decisions/laptop-mode.md)
 
@@ -206,6 +208,21 @@ The original self-host promise: send tasks from the laptop, close it, come back 
 | Done | Pause idle sandboxes after 15 minutes (disk only, no RAM or CPU); resume on the next message | shipped |
 | Filed | Fast session start: measure, then a git mirror per repo, then a saved starting point | autopilot#1095 |
 | Filed | See sessions across all places | installer#49 |
+
+### Phase 1.5 — your own GPUs
+
+Run open models on hardware you control. This starts in weeks 2–3 alongside the solo-server work; it does not wait for the phase 1 gate or block phase 2.
+
+**First release, by 11 Nov:** `dl model up` sets up vLLM in Docker on one Nvidia machine. `dl model status` shows what is running; `dl model update` deploys a new version; `dl model rollback` returns to the last working one.
+
+**Gate:** on one Nvidia machine, bring up a model, update it, and recover from a failed update automatically without losing the working deployment.
+
+| Status | Item | Issues |
+| --- | --- | --- |
+| Planned | Model setup: choose an open model, check the Nvidia GPU and Docker, start vLLM, and connect dl to it | new |
+| Planned | Test updates before switching traffic; automatically roll back on failure, with manual `dl model rollback` as a fallback | new |
+| Later | `dl model adopt` brings an existing vLLM setup under dl's management without replacing it | new |
+| Later | Multi-GPU deployments and AMD support | new |
 
 ### Phase 2 — A multiplexer for many sessions
 
