@@ -18,22 +18,20 @@ Update: `dl update`. It updates `dl` when npm has a newer one, with the same ins
 Background tasks are the part that needs setting up, and `dl` sets them up the first time you ask for one. `dl run "task"` with nowhere to send it asks one question:
 
 ```
-  Background tasks keep going when this laptop sleeps.
-
-  Where should they run?
-  › Use my own server
-    Run them on this computer   needs Docker Desktop or OrbStack
+  Where should background tasks run?
+  › My own server   keeps going when this laptop sleeps · needs SSH access
+    This computer   needs Docker Desktop or OrbStack
 ```
 
-- **Use my own server** — keeps going when your laptop is closed; needs SSH access. `dl` lists the hosts in `~/.ssh/config` (or takes `user@host[:port]`), checks it over SSH, installs itself there, and pairs this laptop. Nothing is exposed on the server: `dl` reaches it through an SSH tunnel.
-- **Run them on this computer** — nothing to rent; tasks pause while it sleeps. macOS and Linux, with Docker; not offered on Windows yet (use a server, or WSL 2, which takes the Linux path).
+- **My own server** — keeps going when your laptop is closed; needs SSH access. `dl` lists the hosts in `~/.ssh/config` (or takes `user@host[:port]`), checks it over SSH, installs itself there, and pairs this laptop. Nothing is exposed on the server: `dl` reaches it through an SSH tunnel.
+- **This computer** — nothing to rent; tasks pause while it sleeps. macOS and Linux, with Docker; not offered on Windows yet (use a server, or WSL 2, which takes the Linux path).
 
-Then it installs Hotcell and Autopilot on the place, builds the sandbox image, starts the services, asks for the provider (Autopilot's picker) and the GitHub token, and sends the task. `dl setup` does the same without a task, for when you'd rather set things up first. What it shows, for this computer:
+Then it installs Hotcell and Autopilot on the place, builds the sandbox image, starts the services, takes the provider (reusing the one you already picked in Autopilot, or opening Autopilot's picker if there isn't one) and the GitHub token, and sends the task. `dl setup` does the same without a task, for when you'd rather set things up first. What it shows, for this computer:
 
 ```
   ✓ Checking this computer   macOS 15.1 · Docker Desktop 29.5.2 · Node 24.22.1 · 120 GB free
   ✓ Installing Hotcell (sandbox SDK) + Autopilot (harness)   Autopilot 3.15.0 · Hotcell 0.1.38
-  ✓ Building the sandbox image   Node 24 · Autopilot 3.1.2
+  ✓ Building the sandbox image   Node 24 · Autopilot 3.15.0
   ✓ Starting services     start at login · logs in ~/.directionallylocal/logs
   ✓ Connecting            this computer · tasks pause while it sleeps
 
@@ -57,6 +55,8 @@ For background tasks, the provider and model are Autopilot's choice to make too,
 - **On a server,** over the same SSH channel the install used, into Hotcell's keystore there.
 
 Keys stay on the place. Sandboxes get spend-capped gateway tokens from Hotcell instead; your laptop never holds a provider key for a place. Keyless providers (Ollama, LM Studio) store no key. Change the provider later with `dl provider set`, the model with `dl model`.
+
+Signed in to the free tier in Autopilot? Background tasks reuse it: setup makes a server key for the place (named after it) and stores that, so the place keeps working after the one-hour access token expires. Change it later with `dl provider set`.
 
 ### The GitHub token
 
