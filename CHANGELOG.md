@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.22.0](https://github.com/directionally-local/installer/compare/v0.21.0...v0.22.0) (2026-11-09)
+
+
+### Features
+
+* add dl model up/update/rollback/status for local vLLM ([93e39cd](https://github.com/directionally-local/installer/commit/93e39cd2a60273bc783bee3fea476a5fa2a0296e))
+* add dl model up/update/rollback/status for local vLLM ([8c965d1](https://github.com/directionally-local/installer/commit/8c965d1cf956423f570780e672e71e3e08c608c6))
+* **free:** accounts below the bar are told who free tokens are for and how to ask for credits ([#181](https://github.com/directionally-local/installer/issues/181)) ([e16c6cb](https://github.com/directionally-local/installer/commit/e16c6cb2767c4094662c6e0814c36440cec5e314))
+* **free:** additional account signals with private thresholds for Full ([#183](https://github.com/directionally-local/installer/issues/183)) ([34083dc](https://github.com/directionally-local/installer/commit/34083dc486e919137855f218fd7dd581e401a002))
+* **free:** an email at each spend milestone: $50, $100, $200 and on ([#182](https://github.com/directionally-local/installer/issues/182)) ([2fc8607](https://github.com/directionally-local/installer/commit/2fc8607048365ba0d77fe73690dcda6ed08a176f))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.16.0 ([#184](https://github.com/directionally-local/installer/issues/184)) ([56840b2](https://github.com/directionally-local/installer/commit/56840b281fd3413dd9a37a8dfa7375b0317eea18))
+* **free:** one free account per inbox, blocked inboxes and domains, and a daily cap per email domain ([#180](https://github.com/directionally-local/installer/issues/180)) ([d3ebc96](https://github.com/directionally-local/installer/commit/d3ebc969f9643d05abd760d5659f1d28d387cd64))
+* **setup:** reuse Autopilot's provider instead of asking again ([62870c8](https://github.com/directionally-local/installer/commit/62870c8d2d2183742411da76ab086a9b95468dca))
+* **setup:** reuse Autopilot's provider instead of asking again ([5243507](https://github.com/directionally-local/installer/commit/5243507c20f249cf763c9ad1769179581c65767c)), closes [#103](https://github.com/directionally-local/installer/issues/103) [#111](https://github.com/directionally-local/installer/issues/111)
+
 ## [0.21.0](https://github.com/directionally-local/installer/compare/v0.20.0...v0.21.0) (2026-11-08)
 
 
