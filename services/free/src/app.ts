@@ -8,7 +8,7 @@ import { MAX_SERVER_KEYS, parseServerKey, type AccountObject, type Allowance, ty
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
-import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, PersonState, PersonStatus, RequestRecord } from "./directory-object.js";
+import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, LevelSignalRow, PersonState, PersonStatus, RequestRecord } from "./directory-object.js";
 import { createCheckout, createPortal, githubIdFrom, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
 import { deliverAlerts, pauseAlert, sendEmail, type Alert, type EmailBinding, type ServingContext, type UpstreamOutcome } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
@@ -16,7 +16,7 @@ import { normalizeReferralCode, referralLink } from "./referrals.js";
 import { networkOf, rateLimitNetwork } from "./network.js";
 import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, type Sender } from "./feedback.js";
 import { apiError, json } from "./errors.js";
-import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, simpleDashboardPage, type SpendView } from "./dashboard-page.js";
+import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, simpleDashboardPage, STARTER_ROWS, type SpendView, type StarterRow } from "./dashboard-page.js";
 import { cleanBatch } from "./events.js";
 import { cleanDownload, cleanInstall, MAX_TELEMETRY_BYTES } from "./telemetry.js";
 import {
@@ -42,7 +42,22 @@ import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVIT
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
 import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, modelById, type FreeModel, type Pool } from "./models.js";
 import { emailBlocked, emailDomain, normalizeEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
-import { belowBarLine, CREDITS_REQUEST_EMAIL, levelFor, levelReason, starterLine, type GithubSignals, type Level, type LevelReason, type LevelThresholds } from "./admission.js";
+import {
+  batchCounter,
+  belowBarLine,
+  CREDITS_REQUEST_EMAIL,
+  dayOf,
+  levelChecks,
+  levelFor,
+  levelReason,
+  starterLine,
+  type GithubSignals,
+  type Level,
+  type LevelChecks,
+  type LevelReason,
+  type LevelThresholds,
+  type SignalThresholds,
+} from "./admission.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
 import { chooseUpstream, providerConfigured } from "./upstream-choice.js";
 import { freeStatus, type FreeStatus } from "./status.js";
@@ -381,6 +396,55 @@ function limitsFor(config: FreeConfig, bonusTokens = 0, level: Level = "full"): 
 /** The level thresholds, from the effective config. */
 function levelThresholds(config: FreeConfig): LevelThresholds {
   return { minAccountAgeDays: config.fullMinAccountAgeDays, minPublicRepos: config.fullMinPublicRepos, minContributions: config.fullMinContributions };
+}
+
+/** The additional checks' thresholds, from the effective config. Admin-only: never in a response to the person. */
+function signalThresholds(config: FreeConfig): SignalThresholds {
+  return {
+    humanSignalsNeeded: config.humanSignalsNeeded,
+    minActiveWeeks: config.minActiveWeeks,
+    minRepoAgeDays: config.minRepoAgeDays,
+    minSocial: config.minSocial,
+    minFollowers: config.minFollowers,
+    batchWindowDays: config.batchWindowDays,
+    batchSize: config.batchSize,
+  };
+}
+
+/** A people row's stored signals, as admission.ts takes them. */
+function storedSignals(person: LevelSignalRow): GithubSignals {
+  return {
+    accountAgeDays: person.account_age_days ?? 0,
+    publicRepos: person.public_repos ?? 0,
+    followers: person.followers ?? 0,
+    contributions: person.contributions ?? 0,
+    restrictedContributions: person.restricted_contributions ?? 0,
+    createdDay: person.github_created_day ?? null,
+    activeWeeks: person.active_weeks ?? null,
+    outsideContributions: person.outside_contributions ?? null,
+    oldestRepoCreatedAt: person.oldest_repo_at ?? null,
+    social: person.social ?? null,
+  };
+}
+
+/**
+ * Every person's stored signals and the checks they pass today, for the admin people API and
+ * the dashboard: why someone is Starter. Admin-only.
+ */
+function peopleChecks(people: LevelSignalRow[], config: FreeConfig, now: number): Map<number, LevelChecks> {
+  const rules = signalThresholds(config);
+  const peers = batchCounter(
+    people.map((person) => person.github_created_day ?? null),
+    rules.batchWindowDays,
+  );
+  const out = new Map<number, LevelChecks>();
+  for (const person of people) {
+    // The count includes the person's own row; the check counts the others.
+    const day = person.github_created_day ?? null;
+    const batchPeers = Math.max(0, peers(day) - (day === null ? 0 : 1));
+    out.set(person.github_id, levelChecks(storedSignals(person), levelThresholds(config), rules, { now, batchPeers }));
+  }
+  return out;
 }
 
 const signingKeys = new Map<string, Promise<CryptoKey>>();
@@ -1042,14 +1106,16 @@ async function recheckStarter(c: Ctx, identity: Identity, config: FreeConfig): P
   if (person.signals_at !== null && person.signals_at >= since) return false;
   const profile = await githubPublicProfile(identity.login, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS);
   if (!profile) return false;
+  // The public profile, plus what only sign-in can read (contributions and the additional
+  // signals) as stored then: no token here.
   const signals: GithubSignals = {
+    ...storedSignals(person),
     accountAgeDays: profile.createdAt === undefined ? 0 : Math.max(0, Math.floor((c.now() - profile.createdAt) / DAY_MS)),
     publicRepos: profile.publicRepos ?? 0,
     followers: profile.followers ?? 0,
-    contributions: person.contributions ?? 0,
-    restrictedContributions: person.restricted_contributions ?? 0,
+    createdDay: profile.createdAt === undefined ? person.github_created_day : dayOf(profile.createdAt),
   };
-  return (await directory(c).recheckLevel(identity.githubId, signals, levelThresholds(config), c.now())) === "full";
+  return (await directory(c).recheckLevel(identity.githubId, signals, levelThresholds(config), signalThresholds(config), c.now())) === "full";
 }
 
 /** The GitHub signals read at sign-in, and the level they give. */
@@ -1074,12 +1140,14 @@ async function readSignals(c: Ctx, user: { id: number; createdAt: number | undef
   let followers = 0;
   let contributions = 0;
   let restrictedContributions = 0;
+  let extra: Pick<GithubSignals, "activeWeeks" | "outsideContributions" | "oldestRepoCreatedAt" | "social"> = {};
   let outcome: GithubCheckOutcome;
   try {
     const read = await githubSignals(accessToken, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS);
     followers = read.followers;
     contributions = read.contributions;
     restrictedContributions = read.restrictedContributions;
+    extra = { activeWeeks: read.activeWeeks, outsideContributions: read.outsideContributions, oldestRepoCreatedAt: read.oldestRepoCreatedAt, social: read.social };
     outcome = contributions > 0 ? "contributions" : "none";
   } catch (error) {
     console.warn("GitHub signals read failed open:", error instanceof Error ? error.message : String(error));
@@ -1087,9 +1155,13 @@ async function readSignals(c: Ctx, user: { id: number; createdAt: number | undef
   }
   const checkAlert = await directory(c).countGithubCheck(outcome, c.now());
   if (checkAlert) await alert(c, [checkAlert]);
-  const signals: GithubSignals = { accountAgeDays, publicRepos, followers, contributions, restrictedContributions };
+  const createdDay = user.createdAt === undefined ? null : dayOf(user.createdAt);
+  const signals: GithubSignals = { accountAgeDays, publicRepos, followers, contributions, restrictedContributions, createdDay, ...extra };
   if (outcome === "error") return { signals, level: "full", levelReason: "qualifies" };
-  return { signals, level: levelFor(signals, thresholds), levelReason: levelReason(signals, thresholds) };
+  const rules = signalThresholds(config);
+  const batchPeers = await directory(c).creationBatchPeers(createdDay, rules.batchWindowDays, user.id);
+  const checks = levelChecks(signals, thresholds, rules, { now: c.now(), batchPeers });
+  return { signals, level: levelFor(checks), levelReason: levelReason(signals, thresholds, checks) };
 }
 
 /**
@@ -2316,6 +2388,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     const levelFilter = c.url.searchParams.get("level");
     const sharedOnly = c.url.searchParams.get("shared") === "1";
     const people = await directory(c).listPeople();
+    const checks = peopleChecks(people, config, now);
     const sessions = await directory(c).weekSessions(now);
     const rows = await Promise.all(
       people.map(async (person) => {
@@ -2335,8 +2408,15 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
             followers: person.followers,
             contributions: person.contributions,
             restrictedContributions: person.restricted_contributions,
+            githubCreatedDay: person.github_created_day === null ? null : isoDay(person.github_created_day * DAY_MS),
+            activeWeeks: person.active_weeks,
+            outsideContributions: person.outside_contributions,
+            oldestRepoCreatedAt: person.oldest_repo_at === null ? null : new Date(person.oldest_repo_at).toISOString(),
+            social: person.social,
             checkedAt: person.signals_at === null ? null : new Date(person.signals_at).toISOString(),
           },
+          // Which checks the stored signals pass under today's settings: why someone is Starter.
+          checks: checks.get(person.github_id),
           // The contact email from the sign-in step, and whether they asked for product updates.
           contact: { address: person.email ?? null, updates: person.email_updates === null ? null : person.email_updates === 1 },
           networks: await directory(c).networkCount(person.github_id),
@@ -2641,7 +2721,33 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
   };
   if (csv !== undefined && isCsvTable(csv)) return dashboardCsv(csv, data, view);
   if (simpleData) return simpleDashboardPage({ data, spend: view, signOut: viaCookie, simple: simpleData, ...(abuse ? { abuse } : {}) });
-  return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie, ...(abuse ? { abuse } : {}), ...(csrf ? { csrf } : {}) });
+  const starters = await startersView(c, config, now);
+  return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie, starters, ...(abuse ? { abuse } : {}), ...(csrf ? { csrf } : {}) });
+}
+
+/** The full dashboard's Starter accounts: stored signals and checks, newest first, admins left out. */
+async function startersView(c: Ctx, config: FreeConfig, now: number): Promise<{ rows: StarterRow[]; total: number }> {
+  const people = await directory(c).levelSignals();
+  const checks = peopleChecks(people, config, now);
+  const starters = people.filter((person) => person.level === "starter" && !c.config.adminGithubIds.has(person.github_id)).reverse();
+  const rows = starters.slice(0, STARTER_ROWS).map(
+    (person): StarterRow => ({
+      githubId: person.github_id,
+      login: person.login,
+      admittedAt: person.admitted_at,
+      levelReason: person.level_reason,
+      accountAgeDays: person.account_age_days,
+      publicRepos: person.public_repos,
+      contributions: person.contributions,
+      followers: person.followers,
+      activeWeeks: person.active_weeks ?? null,
+      outsideContributions: person.outside_contributions ?? null,
+      oldestRepoAt: person.oldest_repo_at ?? null,
+      social: person.social ?? null,
+      checks: checks.get(person.github_id)!,
+    }),
+  );
+  return { rows, total: starters.length };
 }
 
 async function adminSignIn(c: Ctx): Promise<Response> {

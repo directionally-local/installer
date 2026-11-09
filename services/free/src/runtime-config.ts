@@ -32,6 +32,20 @@ export const RUNTIME_SETTINGS = {
   fullMinPublicRepos: { kind: "count", env: "FULL_MIN_PUBLIC_REPOS" },
   /** ... or this many contributions in the last year. */
   fullMinContributions: { kind: "count", env: "FULL_MIN_CONTRIBUTIONS" },
+  /** Additional account signals for Full (admission.ts levelChecks): needed without the public bar, one fewer with it. */
+  humanSignalsNeeded: { kind: "count", env: "HUMAN_SIGNALS_NEEDED" },
+  /** ... weeks with a contribution in the last year ... */
+  minActiveWeeks: { kind: "count", env: "MIN_ACTIVE_WEEKS" },
+  /** ... days since the oldest owned non-fork repository was created ... */
+  minRepoAgeDays: { kind: "count", env: "MIN_REPO_AGE_DAYS" },
+  /** ... accounts followed plus repositories starred ... */
+  minSocial: { kind: "count", env: "MIN_SOCIAL" },
+  /** ... and followers. */
+  minFollowers: { kind: "count", env: "MIN_FOLLOWERS" },
+  /** Days either side of an account's creation day that count as one creation batch. */
+  batchWindowDays: { kind: "count", env: "BATCH_WINDOW_DAYS" },
+  /** Signed-up accounts in that window that make a batch (with 0 followers: Starter); 0 turns it off. */
+  batchSize: { kind: "count", env: "BATCH_SIZE" },
   /** A Starter account's weekly tokens (DeepSeek only). */
   starterWeeklyTokens: { kind: "tokens", env: "STARTER_WEEKLY_TOKENS" },
   /** New sign-ins one network gets a day before the rest are Starter. */

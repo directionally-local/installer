@@ -142,6 +142,21 @@ export interface GitHubUserFixture {
    * a count, "error" (HTTP 502) or "throw" (the fetch itself fails).
    */
   contributions?: number | "error" | "throw";
+  /** Weeks of the contribution calendar with a contribution (default 0). */
+  activeWeeks?: number;
+  /** Pull requests opened in the last year, counted as contributions to others' work (default 0). */
+  pullRequests?: number;
+  /** Commits to repositories other accounts own (default 0). */
+  outsideCommits?: number;
+  /**
+   * When the oldest owned repository was created: default the account's creation, when it has
+   * public repositories (so an old account passes this check); null for none.
+   */
+  repoCreatedAt?: string | null;
+  /** The oldest owned repository is a fork (default false). */
+  repoIsFork?: boolean;
+  /** Accounts followed plus repositories starred (default 10). */
+  social?: number;
 }
 
 export type OpenRouterHandler = (body: Record<string, unknown>, init: RequestInit) => Response | Promise<Response>;
@@ -314,16 +329,35 @@ export async function createService(vars: Record<string, string> = {}, options: 
       const token = new Headers(init.headers).get("authorization")?.replace("Bearer token-for-", "") ?? "";
       const user = JSON.parse(decodeURIComponent(token)) as GitHubUserFixture;
       calls.githubGraphql.push(user.login);
-      assert.match(String(init.body), /viewer \{ followers \{ totalCount \} contributionsCollection \{ restrictedContributionsCount contributionCalendar \{ totalContributions/);
+      assert.match(String(init.body), /viewer \{ login followers \{ totalCount \} following \{ totalCount \} starredRepositories \{ totalCount \}/);
+      assert.match(String(init.body), /repositories\(ownerAffiliations: OWNER, first: 5, orderBy: \{ field: CREATED_AT, direction: ASC \}\)/);
+      assert.match(String(init.body), /commitContributionsByRepository\(maxRepositories: 25\)/);
+      assert.match(String(init.body), /contributionCalendar \{ totalContributions weeks \{ contributionDays \{ contributionCount/);
       if (user.contributions === "throw") throw new TypeError("fetch failed");
       if (user.contributions === "error") return Response.json({ message: "Server Error" }, { status: 502 });
+      const repoAt = user.repoCreatedAt !== undefined ? user.repoCreatedAt : (user.publicRepos ?? 3) > 0 ? (user.createdAt ?? "2015-01-01T00:00:00Z") : null;
+      const social = user.social ?? 10;
       return Response.json({
         data: {
           viewer: {
+            login: user.login,
             followers: { totalCount: user.followers ?? 0 },
+            following: { totalCount: Math.floor(social / 2) },
+            starredRepositories: { totalCount: social - Math.floor(social / 2) },
+            repositories: { nodes: repoAt === null ? [] : [{ createdAt: repoAt, isFork: user.repoIsFork ?? false }] },
             contributionsCollection: {
               restrictedContributionsCount: user.restrictedContributions ?? 0,
-              contributionCalendar: { totalContributions: user.contributions ?? 0 },
+              totalPullRequestContributions: user.pullRequests ?? 0,
+              totalIssueContributions: 0,
+              totalPullRequestReviewContributions: 0,
+              commitContributionsByRepository: [
+                { repository: { owner: { login: user.login } }, contributions: { totalCount: 40 } },
+                ...((user.outsideCommits ?? 0) > 0 ? [{ repository: { owner: { login: "someone-else" } }, contributions: { totalCount: user.outsideCommits } }] : []),
+              ],
+              contributionCalendar: {
+                totalContributions: user.contributions ?? 0,
+                weeks: Array.from({ length: 53 }, (_, week) => ({ contributionDays: Array.from({ length: 7 }, (_, d) => ({ contributionCount: week < (user.activeWeeks ?? 0) && d === 0 ? 1 : 0 })) })),
+              },
             },
           },
         },

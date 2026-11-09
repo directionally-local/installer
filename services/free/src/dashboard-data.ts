@@ -25,7 +25,25 @@ import { DAY_MS, weekStart } from "./week.js";
 /** Tables and columns the dashboard may read. Everything is counts, tokens, cost, time or who. */
 export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd", "paid_cost_usd", "credit_usd"],
-  people: ["github_id", "login", "admitted_at", "admitted_via"],
+  // Levels and the GitHub signals behind them, numbers only (the Starter accounts table).
+  people: [
+    "github_id",
+    "login",
+    "admitted_at",
+    "admitted_via",
+    "level",
+    "level_reason",
+    "account_age_days",
+    "public_repos",
+    "followers",
+    "contributions",
+    "restricted_contributions",
+    "github_created_day",
+    "active_weeks",
+    "outside_contributions",
+    "oldest_repo_at",
+    "social",
+  ],
   grants: ["github_id", "weekly_tokens", "weekly_usd"],
   spend_weeks: ["week_start", "usd", "tokens", "requests", "admin_usd", "admin_tokens", "admin_requests", "paid_usd", "paid_tokens", "paid_requests", "credit_usd", "free_credit_usd", "openai_credit_usd", "openai_free_credit_usd"],
   upstream_daily: ["day", "upstream", "requests", "errors", "prompt_tokens", "cached_tokens", "cash_usd", "credit_usd"],
