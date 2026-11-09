@@ -2153,6 +2153,8 @@ async function luminalChat(
  * before the first-byte timeout, it retries once on the model's fallback (DeepSeek on Luminal)
  * when the caller gave one. A 4xx about the request itself is passed through.
  */
+const TOOLS_UNSUPPORTED_MESSAGE = "GPT-6.1 Sol and GPT-6 Astra can't use tools on the free tier yet, so they can't run coding tasks. Switch to GPT-6 Luna with /model. A fix is on the way.";
+
 async function openaiChat(
   c: Ctx,
   input: {
@@ -2178,6 +2180,15 @@ async function openaiChat(
   for (const field of OPENROUTER_ONLY_FIELDS) delete payload[field];
   if (stream) payload.stream_options = { include_usage: true };
   else delete payload.stream_options;
+  // OpenAI's chat completions API refuses function tools while a GPT-6 model reasons:
+  // GPT-6 Luna takes tools only with reasoning off, and Sol and Astra (which can't turn
+  // reasoning off) don't take them at all. A coding agent always sends tools.
+  const hasTools = Array.isArray(payload.tools) && payload.tools.length > 0;
+  if (hasTools && input.model.id === "gpt-6-luna") payload.reasoning_effort = "none";
+  else if (hasTools) {
+    const allowance = await settle(undefined, "tools_unsupported", { chargeNothing: true });
+    return apiError(400, "tools_unsupported", TOOLS_UNSUPPORTED_MESSAGE, {}, quotaHeaders(allowance));
+  }
 
   const transient = async (status: 429 | 503, code: string, message: string, retryAfterHeader: string | null, record: { status: string; outcome: UpstreamOutcome; ttfbMs?: number }) => {
     const allowance = await settle(undefined, record.status, { chargeNothing: true, upstreamError: true, outcome: record.outcome, ...(record.ttfbMs !== undefined ? { ttfbMs: record.ttfbMs } : {}) });
