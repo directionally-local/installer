@@ -36,6 +36,18 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
   requests are priced at list. At the mix the free tier actually sees (95% of input tokens
   cached, output under 1% of all tokens) a person who uses every pool costs about $9.35 a week,
   so the $20 per-person cap leaves room for a much less cache-friendly week.
+- **Responses API.** OpenAI’s chat completions API refuses function tools while a GPT-6 model
+  reasons, so OpenAI requests go to `https://api.openai.com/v1/responses`. Clients still speak
+  Chat Completions: `src/openai-responses.ts` turns `messages` into `input` items (assistant
+  `tool_calls` into `function_call`, `tool` messages into `function_call_output`, image parts into
+  `input_image`), `tools` and `tool_choice` into their Responses form (`strict` false unless the
+  client set it), `reasoning_effort` (or OpenRouter’s `reasoning.effort`) into
+  `reasoning.effort`, and the reserved output cap into `max_output_tokens`, with `store: false`.
+  `temperature` and `top_p` are dropped: GPT-6 refuses them. The answer comes back as a
+  `chat.completion` (tool calls with `finish_reason: "tool_calls"`, an output-capped response
+  with `"length"`) or, streamed, as chat chunks ending in a usage chunk and `data: [DONE]`.
+  Usage maps `input_tokens`, `output_tokens` (reasoning included), cached and reasoning tokens
+  to the chat names, so charging is unchanged. Luminal and OpenRouter stay on Chat Completions.
 - Any other model or provider needs the person’s own key (`model_not_allowed`).
 
 ## Account levels

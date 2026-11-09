@@ -64,6 +64,7 @@ import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
 import { meterStream } from "./sse.js";
+import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
 import { DAY_MS, isoDay, weekEnd, weekStart } from "./week.js";
 import { deliverUserEmail, EMAIL_STOP_BASE, logUserEmails, userEmailsOn, verifyStopToken, weekMostlyUsed, type UserEmailStore } from "./user-email-send.js";
 import type { UserEmailKind } from "./user-emails.js";
@@ -95,7 +96,8 @@ import type { UserEmailKind } from "./user-emails.js";
 export const VERSION = "0.1.0";
 export const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 export const LUMINAL_URL = "https://flash.luminal.cloud/v1/chat/completions";
-export const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+/** OpenAI's Responses API: its chat completions API refuses function tools while GPT-6 reasons. */
+export const OPENAI_URL = "https://api.openai.com/v1/responses";
 /** OpenRouter-only request fields Luminal's OpenAI-compatible API doesn't take. */
 const OPENROUTER_ONLY_FIELDS = ["provider", "usage", "models", "route", "transforms", "plugins", "session_id", "reasoning", "max_tokens"] as const;
 /** Retry-After for a transient Luminal error that didn't say, in seconds. */
@@ -2149,9 +2151,11 @@ async function luminalChat(
 }
 
 /**
- * One request to OpenAI, the default provider. On a 429, a 5xx, a network error or no response
- * before the first-byte timeout, it retries once on the model's fallback (DeepSeek on Luminal)
- * when the caller gave one. A 4xx about the request itself is passed through.
+ * One request to OpenAI, the default provider, through the Responses API: the client's chat
+ * completions request is translated to a Responses request, and the answer back to a chat
+ * completion or chunk stream (see openai-responses.ts). On a 429, a 5xx, a network error or no
+ * response before the first-byte timeout, it retries once on the model's fallback (DeepSeek on
+ * Luminal) when the caller gave one. A 4xx about the request itself is passed through.
  */
 async function openaiChat(
   c: Ctx,
@@ -2171,13 +2175,7 @@ async function openaiChat(
   },
 ): Promise<Response> {
   const { body, stream, started, settle } = input;
-  const payload: Record<string, unknown> = { ...body, model: input.model.upstreamModel, max_completion_tokens: input.maxTokens, user: input.user };
-  // OpenRouter's `reasoning: {effort}` is `reasoning_effort` in the OpenAI shape.
-  const effort = (body.reasoning as { effort?: unknown } | undefined)?.effort;
-  if (typeof effort === "string" && payload.reasoning_effort === undefined) payload.reasoning_effort = effort;
-  for (const field of OPENROUTER_ONLY_FIELDS) delete payload[field];
-  if (stream) payload.stream_options = { include_usage: true };
-  else delete payload.stream_options;
+  const payload = toResponsesRequest(body, { model: input.model.upstreamModel, maxTokens: input.maxTokens, user: input.user, stream });
 
   const transient = async (status: 429 | 503, code: string, message: string, retryAfterHeader: string | null, record: { status: string; outcome: UpstreamOutcome; ttfbMs?: number }) => {
     const allowance = await settle(undefined, record.status, { chargeNothing: true, upstreamError: true, outcome: record.outcome, ...(record.ttfbMs !== undefined ? { ttfbMs: record.ttfbMs } : {}) });
@@ -2220,7 +2218,7 @@ async function openaiChat(
   const contentType = response.headers.get("content-type") ?? "";
   if (stream && response.body && contentType.includes("text/event-stream")) {
     const metered = meterStream(
-      response.body,
+      toChatStream(response.body),
       async ({ usage, errored, upstreamFailed, firstContentAt }) => {
         await settle(usage, usage ? (errored ? "stream_error" : "ok") : "no_usage", {
           ttfbMs,
@@ -2236,13 +2234,17 @@ async function openaiChat(
     });
   }
 
-  const text = await response.text();
+  const upstreamText = await response.text();
+  const upstream = parseJson(upstreamText) as { error?: unknown } | undefined;
+  // A finished response becomes a chat completion; anything else (an error body) passes as it is.
+  const translated = isResponse(upstream) && !upstream.error;
+  const text = translated ? JSON.stringify(toChatCompletion(upstream)) : upstreamText;
   const parsed = parseJson(text) as { usage?: unknown; error?: unknown } | undefined;
   const usage = parseUsage(parsed?.usage);
   const allowance = await settle(usage, usage ? "ok" : "no_usage", { ttfbMs, ttftMs: c.now() - started, ...(parsed?.error ? { upstreamError: true } : {}) });
   return new Response(text, {
     status: 200,
-    headers: { "content-type": contentType || "application/json", "cache-control": "no-store", ...quotaHeaders(allowance) },
+    headers: { "content-type": translated ? "application/json" : contentType || "application/json", "cache-control": "no-store", ...quotaHeaders(allowance) },
   });
 }
 
