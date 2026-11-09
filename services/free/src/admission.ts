@@ -59,7 +59,28 @@ export function thresholdText(thresholds: LevelThresholds): string {
  * accusation, and no hint that anything was done wrong.
  */
 export function starterLine(thresholds: LevelThresholds, starterTokens: number): string {
+  if (starterTokens <= 0) return belowBarLine(thresholds);
   return `Starter access: DeepSeek only, ${formatTokens(starterTokens)} tokens a week. Full access (GPT-6 and the bigger allowance) needs ${thresholdText(thresholds)}. Keep using GitHub, use an invite code, or bring your own key.`;
+}
+
+/** The bar in plain words: "1 year old with 100+ contributions in the last year". */
+function barText(t: LevelThresholds): string {
+  const years = t.minAccountAgeDays / 365;
+  const age = Number.isInteger(years) && years >= 1 ? `${years} year${years === 1 ? "" : "s"}` : `${t.minAccountAgeDays} days`;
+  // A huge repos minimum means that path is switched off: don't mention it.
+  const repos = t.minPublicRepos <= 1000 ? ` or ${t.minPublicRepos}+ public repositories` : "";
+  return `at least ${age} old with ${t.minContributions}+ contributions in the last year${repos}`;
+}
+
+/** Where people below the bar can ask for free credits anyway. */
+export const CREDITS_REQUEST_EMAIL = "contact@directionallylocal.com";
+
+/**
+ * What an account below the bar is told when it gets no free tokens at all (Starter set to 0):
+ * who free tokens are for, how to ask for credits anyway, and the own-key way.
+ */
+export function belowBarLine(thresholds: LevelThresholds): string {
+  return `Free tokens are for established GitHub accounts: ${barText(thresholds)}. Not there yet? Email ${CREDITS_REQUEST_EMAIL} and tell us what you want to build with dl, and we'll give you free credits. Or use your own API key with /provider.`;
 }
 
 /** "5M", "1.2M", "800k". */

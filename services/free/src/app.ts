@@ -42,7 +42,7 @@ import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVIT
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
 import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, modelById, type FreeModel, type Pool } from "./models.js";
 import { emailBlocked, emailDomain, normalizeEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
-import { levelFor, levelReason, starterLine, type GithubSignals, type Level, type LevelReason, type LevelThresholds } from "./admission.js";
+import { belowBarLine, CREDITS_REQUEST_EMAIL, levelFor, levelReason, starterLine, type GithubSignals, type Level, type LevelReason, type LevelThresholds } from "./admission.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
 import { chooseUpstream, providerConfigured } from "./upstream-choice.js";
 import { freeStatus, type FreeStatus } from "./status.js";
@@ -1662,6 +1662,10 @@ async function chat(c: Ctx): Promise<Response> {
 
   const guarded = await apiGuard(c, identity, headers);
   if (guarded) return guarded;
+  // Below the bar with no Starter allowance: say who free tokens are for and how to ask anyway.
+  if (level === "starter" && !isAdmin && gate.config.starterWeeklyTokens <= 0) {
+    return apiError(403, "below_bar", belowBarLine(levelThresholds(gate.config)), { contact: CREDITS_REQUEST_EMAIL }, await headers());
+  }
 
   const raw = await c.request.text();
   const bodyBytes = new TextEncoder().encode(raw).length;
