@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ADMIN_ID, completion, createService, errorCode, luminalUsage, MODEL, NOW, openaiUsage, usage, type Service } from "./harness.js";
+import { ADMIN_ID, completion, createService, errorCode, luminalUsage, MODEL, NOW, openaiResponse, responsesUsage, usage, type Service } from "./harness.js";
 
 /**
  * OpenAI as the default provider: GPT-6 Luna first, DeepSeek on Luminal as the automatic
@@ -32,7 +32,7 @@ const me = async (service: Service, token: string) =>
   };
 
 describe("OpenAI as the default provider", () => {
-  it("serves GPT-6 Luna on OpenAI, with max_completion_tokens and no OpenRouter fields", async () => {
+  it("serves GPT-6 Luna on OpenAI's Responses API, with max_output_tokens and no OpenRouter fields", async () => {
     const { service, token } = await member(OPENAI);
     const response = await chat(service, token);
     assert.equal(response.status, 200);
@@ -40,8 +40,12 @@ describe("OpenAI as the default provider", () => {
     assert.equal(service.calls.luminal.length, 0);
     const sent = service.calls.openai[0]!.body;
     assert.equal(sent.model, "gpt-6-luna");
-    assert.equal(sent.max_completion_tokens, 32_768);
+    assert.equal(sent.max_output_tokens, 32_768);
+    assert.equal(sent.max_completion_tokens, undefined);
     assert.equal(sent.max_tokens, undefined);
+    assert.equal(sent.messages, undefined);
+    assert.deepEqual(sent.input, [{ type: "message", role: "user", content: "hello" }]);
+    assert.equal(sent.store, false);
     assert.equal(sent.provider, undefined);
     assert.equal(sent.usage, undefined);
     assert.equal(service.calls.openai[0]!.headers.authorization, "Bearer sk-openai-test");
@@ -49,7 +53,7 @@ describe("OpenAI as the default provider", () => {
 
   it("prices the request at OpenAI's list prices and charges the OpenAI credit", async () => {
     const { service, token, adminToken } = await member(OPENAI);
-    service.setOpenAI(() => completion(openaiUsage(1_000_000, 1_000_000, 0)));
+    service.setOpenAI(() => openaiResponse(responsesUsage(1_000_000, 1_000_000, 0)));
     assert.equal((await chat(service, token)).status, 200);
     const spend = (await (await service.request("GET", "/admin/spend", { token: adminToken })).json()) as {
       openaiCredit: { usedUsd: number; balanceUsd: number; leftUsd: number };
@@ -133,7 +137,7 @@ describe("weekly pools", () => {
 
   it("charges the pool of the model that served, not a second allowance", async () => {
     const { service, token } = await member(OPENAI);
-    service.setOpenAI(() => completion(openaiUsage(1000, 1000, 0)));
+    service.setOpenAI(() => openaiResponse(responsesUsage(1000, 1000, 0)));
     assert.equal((await chat(service, token, { model: SOL })).status, 200);
     let body = await me(service, token);
     assert.equal(body.pools.sol!.usedThisWeek, 2000);

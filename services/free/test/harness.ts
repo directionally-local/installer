@@ -169,7 +169,7 @@ export interface Service {
     openRouter: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     /** Calls to Luminal's chat completions (a fake: nothing leaves the process). */
     luminal: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
-    /** Calls to OpenAI's chat completions (a fake: nothing leaves the process). */
+    /** Calls to OpenAI's Responses API (a fake: nothing leaves the process). */
     openai: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     githubTokens: Array<{ code: string; redirect_uri?: string }>;
     /** Contribution lookups on GitHub's GraphQL API, by login. */
@@ -194,7 +194,7 @@ export interface Service {
   setGithubProfile(handler: (login: string) => Response | Promise<Response>): void;
   /** Answers calls to Luminal (default: a completion with Luminal-shaped usage, no cost). */
   setLuminal(handler: OpenRouterHandler): void;
-  /** Answers calls to OpenAI (default: a completion with OpenAI-shaped usage, no cost). */
+  /** Answers calls to OpenAI's Responses API (default: a "hi" response, streamed when asked, with Responses usage). */
   setOpenAI(handler: OpenRouterHandler): void;
   request(method: string, path: string, options?: { body?: unknown; token?: string; headers?: Record<string, string>; form?: Record<string, string>; ip?: string }): Promise<Response>;
   signIn(user: GitHubUserFixture, options?: { invite?: string; deviceId?: string }): Promise<Tokens>;
@@ -220,15 +220,71 @@ export function luminalUsage(prompt: number, completion: number, cached = 0): Re
   return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion, prompt_tokens_details: { cached_tokens: cached } };
 }
 
-/** A usage object the way OpenAI reports it: cached tokens, no cost (the service prices it). */
-export function openaiUsage(prompt: number, completion: number, cached = 0): Record<string, unknown> {
+/** A usage object the way OpenAI's Responses API reports it: cached and reasoning tokens, no cost. */
+export function responsesUsage(input: number, output: number, cached = 0, reasoning = 0): Record<string, unknown> {
   return {
-    prompt_tokens: prompt,
-    completion_tokens: completion,
-    total_tokens: prompt + completion,
-    prompt_tokens_details: { cached_tokens: cached, cache_write_tokens: 0, audio_tokens: 0 },
-    completion_tokens_details: { reasoning_tokens: 0, audio_tokens: 0 },
+    input_tokens: input,
+    input_tokens_details: { cache_write_tokens: 0, cached_tokens: cached },
+    output_tokens: output,
+    output_tokens_details: { reasoning_tokens: reasoning },
+    total_tokens: input + output,
   };
+}
+
+/** A Responses `response` object; `output` defaults to one "hi" message. */
+export function responseObject(usageObject: Record<string, unknown> | undefined, options: { output?: unknown[]; status?: string; incompleteReason?: string; model?: string } = {}): Record<string, unknown> {
+  return {
+    id: "resp_1",
+    object: "response",
+    created_at: 1_790_000_000,
+    status: options.status ?? "completed",
+    error: null,
+    incomplete_details: options.incompleteReason ? { reason: options.incompleteReason } : null,
+    model: options.model ?? "gpt-6-luna",
+    output: options.output ?? [messageItem("hi")],
+    ...(usageObject ? { usage: usageObject } : {}),
+  };
+}
+
+/** A Responses output message with one output_text part. */
+export function messageItem(text: string): Record<string, unknown> {
+  return { type: "message", id: "msg_1", status: "completed", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] };
+}
+
+/** A Responses function_call output item. */
+export function functionCallItem(callId: string, name: string, args: string): Record<string, unknown> {
+  return { type: "function_call", id: `fc_${callId}`, call_id: callId, name, arguments: args, status: "completed" };
+}
+
+/** A non-streaming Responses answer. */
+export function openaiResponse(usageObject: Record<string, unknown> | undefined, options: Parameters<typeof responseObject>[1] = {}): Response {
+  return Response.json(responseObject(usageObject, options));
+}
+
+/** A Responses event stream (`event:` and `data:` lines, no `[DONE]`), as OpenAI sends it. */
+export function responsesSse(events: Array<Record<string, unknown>>, options: { split?: boolean } = {}): Response {
+  const text = events.map((event) => `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+  const bytes = new TextEncoder().encode(text);
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (options.split) for (let index = 0; index < bytes.length; index += 7) controller.enqueue(bytes.slice(index, index + 7));
+      else controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8" } });
+}
+
+/** The events of a streamed response that says `text`, then finishes with `usageObject`. */
+export function responsesTextEvents(text: string, usageObject: Record<string, unknown> | undefined, options: { status?: string; incompleteReason?: string } = {}): Array<Record<string, unknown>> {
+  const done = responseObject(usageObject, { output: [messageItem(text)], ...options });
+  return [
+    { type: "response.created", response: { ...done, status: "in_progress", output: [], usage: null } },
+    { type: "response.output_item.added", output_index: 0, item: { type: "message", id: "msg_1", role: "assistant", content: [] } },
+    ...[...text].map((character) => ({ type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: character })),
+    { type: "response.output_item.done", output_index: 0, item: messageItem(text) },
+    { type: options.status === "incomplete" ? "response.incomplete" : "response.completed", response: done },
+  ];
 }
 
 export function completion(usageObject: Record<string, unknown> | undefined): Response {
@@ -298,7 +354,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
   let openRouter: OpenRouterHandler = () => completion(usage(100, 10));
   let githubProfile = (login: string): Response | Promise<Response> => Response.json({ login, email: null });
   let luminal: OpenRouterHandler = () => completion(luminalUsage(100, 10));
-  let openai: OpenRouterHandler = () => completion(openaiUsage(100, 10));
+  let openai: OpenRouterHandler = (body) => (body.stream ? responsesSse(responsesTextEvents("hi", responsesUsage(100, 10))) : openaiResponse(responsesUsage(100, 10)));
 
   const fetcher = async (input: string, init: RequestInit = {}): Promise<Response> => {
     const url = String(input);
@@ -373,7 +429,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
       calls.luminal.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
       return luminal(body, init);
     }
-    if (url === "https://api.openai.com/v1/chat/completions") {
+    if (url === "https://api.openai.com/v1/responses") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       calls.openai.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
       return openai(body, init);
