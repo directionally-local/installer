@@ -41,6 +41,24 @@ export interface FreeConfig {
   fullMinPublicRepos: number;
   /** ... or this many contributions in the last year (FULL_MIN_CONTRIBUTIONS). */
   fullMinContributions: number;
+  /**
+   * Additional account signals for Full (admission.ts `levelChecks`); the real values are set
+   * in the private admin settings. Signals needed without the public bar, one fewer with it
+   * (HUMAN_SIGNALS_NEEDED).
+   */
+  humanSignalsNeeded: number;
+  /** Weeks with a contribution in the last year (MIN_ACTIVE_WEEKS). */
+  minActiveWeeks: number;
+  /** Age of the oldest owned non-fork repository (MIN_REPO_AGE_DAYS). */
+  minRepoAgeDays: number;
+  /** Accounts followed plus repositories starred (MIN_SOCIAL). */
+  minSocial: number;
+  /** Followers (MIN_FOLLOWERS). */
+  minFollowers: number;
+  /** Days either side of an account's creation that count as one batch (BATCH_WINDOW_DAYS). */
+  batchWindowDays: number;
+  /** Signed-up accounts in that window that make a batch; 0 turns it off (BATCH_SIZE). */
+  batchSize: number;
   /** A Starter account's weekly tokens (STARTER_WEEKLY_TOKENS): DeepSeek only. */
   starterWeeklyTokens: number;
   /** New sign-ins one network gets a day before the rest are Starter (NETWORK_SIGNUPS_PER_DAY). */
@@ -200,6 +218,13 @@ export const DEFAULTS = {
   fullMinAccountAgeDays: 90,
   fullMinPublicRepos: 3,
   fullMinContributions: 50,
+  humanSignalsNeeded: 3,
+  minActiveWeeks: 8,
+  minRepoAgeDays: 180,
+  minSocial: 10,
+  minFollowers: 3,
+  batchWindowDays: 1,
+  batchSize: 15,
   starterWeeklyTokens: 5_000_000,
   networkSignupsPerDay: 3,
   blockedEmails: [],
@@ -282,6 +307,13 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     fullMinAccountAgeDays: whole(env.FULL_MIN_ACCOUNT_AGE_DAYS, DEFAULTS.fullMinAccountAgeDays, "FULL_MIN_ACCOUNT_AGE_DAYS"),
     fullMinPublicRepos: whole(env.FULL_MIN_PUBLIC_REPOS, DEFAULTS.fullMinPublicRepos, "FULL_MIN_PUBLIC_REPOS"),
     fullMinContributions: whole(env.FULL_MIN_CONTRIBUTIONS, DEFAULTS.fullMinContributions, "FULL_MIN_CONTRIBUTIONS"),
+    humanSignalsNeeded: whole(env.HUMAN_SIGNALS_NEEDED, DEFAULTS.humanSignalsNeeded, "HUMAN_SIGNALS_NEEDED"),
+    minActiveWeeks: whole(env.MIN_ACTIVE_WEEKS, DEFAULTS.minActiveWeeks, "MIN_ACTIVE_WEEKS"),
+    minRepoAgeDays: whole(env.MIN_REPO_AGE_DAYS, DEFAULTS.minRepoAgeDays, "MIN_REPO_AGE_DAYS"),
+    minSocial: whole(env.MIN_SOCIAL, DEFAULTS.minSocial, "MIN_SOCIAL"),
+    minFollowers: whole(env.MIN_FOLLOWERS, DEFAULTS.minFollowers, "MIN_FOLLOWERS"),
+    batchWindowDays: whole(env.BATCH_WINDOW_DAYS, DEFAULTS.batchWindowDays, "BATCH_WINDOW_DAYS"),
+    batchSize: whole(env.BATCH_SIZE, DEFAULTS.batchSize, "BATCH_SIZE"),
     starterWeeklyTokens: whole(env.STARTER_WEEKLY_TOKENS, DEFAULTS.starterWeeklyTokens, "STARTER_WEEKLY_TOKENS"),
     networkSignupsPerDay: whole(env.NETWORK_SIGNUPS_PER_DAY, DEFAULTS.networkSignupsPerDay, "NETWORK_SIGNUPS_PER_DAY"),
     blockedEmails: env.BLOCKED_EMAILS === undefined ? [...DEFAULTS.blockedEmails] : String(env.BLOCKED_EMAILS).split(",").map((v) => v.trim()).filter(Boolean),

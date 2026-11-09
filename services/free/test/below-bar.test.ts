@@ -25,7 +25,7 @@ describe("below the bar, with no Starter allowance", () => {
     await service.signIn({ id: ADMIN_ID, login: "owner" });
     const flow = await startBrowserFlow(service.request, { id: 201, login: "newbie2", createdAt: "2026-10-01T00:00:00Z", publicRepos: 0, contributions: 3 }, undefined, { stopAtDetails: true });
     assert.match(flow.page, /Email contact@directionallylocal\.com and tell us what you want to build/);
-    const dev = await service.signIn({ id: 202, login: "dev", createdAt: "2019-01-01T00:00:00Z", publicRepos: 0, contributions: 250 });
+    const dev = await service.signIn({ id: 202, login: "dev", createdAt: "2019-01-01T00:00:00Z", publicRepos: 0, contributions: 250, activeWeeks: 30 });
     assert.equal((await service.request("POST", "/v1/chat/completions", { token: dev.access_token, body })).status, 200);
   });
 });

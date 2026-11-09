@@ -46,13 +46,21 @@ without turning away real developers.
 - **Full**: the account is at least `FULL_MIN_ACCOUNT_AGE_DAYS` (90) days old **and** has
   `FULL_MIN_PUBLIC_REPOS` (3) public repositories **or** `FULL_MIN_CONTRIBUTIONS` (50)
   contributions in the last year (private ones count when the person shows them).
+- **Additional account signals**: on top of that public bar, Full also needs a few more
+  account signals from the same public GitHub data, read at sign-in with the same token, and
+  an account must not come from a batch of accounts created together. Their thresholds are
+  runtime settings (`humanSignalsNeeded`, `minActiveWeeks`, `minRepoAgeDays`, `minSocial`,
+  `minFollowers`, `batchWindowDays`, `batchSize`; see `src/admission.ts` `levelChecks`) whose
+  real values live in the admin settings. Nothing a person is shown names them: an account
+  that misses them gets the same message as one below the public bar. `GET /admin/people` and
+  the dashboard's Starter table show the stored signals and which checks pass.
 - **Starter**: everyone else. DeepSeek only, `STARTER_WEEKLY_TOKENS` (5M) tokens a week, no
   GPT-6. Asking for a GPT-6 model is a 403 `starter_model_not_allowed` with an honest
   sentence: what Starter gets, why, and the three ways up (keep using GitHub, an invite code,
   your own key). Starter accounts are admitted, never refused.
 - **Signals** are read at sign-in with the token sign-in already has (no new scopes): account
-  age and public repositories from `/user`, then one GraphQL call for followers, contributions
-  and `restrictedContributionsCount`. Only the numbers and when they were read are stored:
+  age and public repositories from `/user`, then one GraphQL call for followers, contributions,
+  `restrictedContributionsCount` and the additional signals. Only the numbers and when they were read are stored:
   never repository names or contents. If GitHub can't answer, the account gets Full (fail open)
   and the failure is counted.
 - **Promotion**: at sign-in, weekly from the public profile (promote only, once per person per

@@ -11,7 +11,7 @@ import type { Upstream } from "./config.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
-import { qualifiesForFull, type GithubSignals, type Level, type LevelReason, type LevelThresholds } from "./admission.js";
+import { levelChecks, type GithubSignals, type Level, type LevelReason, type LevelThresholds, type SignalThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 import type { UserEmailClaim } from "./user-email-send.js";
 import type { UserEmailKind } from "./user-emails.js";
@@ -74,6 +74,15 @@ export interface PersonRow {
   restricted_contributions: number | null;
   /** When the signals were last read (Unix ms). */
   signals_at: number | null;
+  /** The UTC day the GitHub account was created (for the creation-batch check); null when unknown. */
+  github_created_day: number | null;
+  /** Additional account signals (admission.ts levelChecks), numbers only; null until first read. */
+  active_weeks: number | null;
+  outside_contributions: number | null;
+  /** When the oldest owned non-fork repository was created (Unix ms); null for none or unknown. */
+  oldest_repo_at: number | null;
+  /** Accounts followed plus repositories starred. */
+  social: number | null;
   /** The contact email given at sign-in (prefilled from GitHub's primary verified email). */
   email: string | null;
   /** 1 when the person ticked "send me dl updates"; 0 when they didn't; null before they were asked. */
@@ -147,6 +156,26 @@ export interface QueuePlace {
 }
 
 /** What `gate` adds for the caller: queue place, referral numbers and this week's bonus. */
+/** The columns `levelSignals` reads. */
+export const LEVEL_SIGNAL_COLUMNS = [
+  "github_id",
+  "login",
+  "admitted_at",
+  "level",
+  "level_reason",
+  "account_age_days",
+  "public_repos",
+  "followers",
+  "contributions",
+  "restricted_contributions",
+  "github_created_day",
+  "active_weeks",
+  "outside_contributions",
+  "oldest_repo_at",
+  "social",
+] as const;
+export type LevelSignalRow = Pick<PersonRow, (typeof LEVEL_SIGNAL_COLUMNS)[number]>;
+
 export interface PersonState {
   queue: QueuePlace | null;
   bonusTokens: number;
@@ -543,6 +572,13 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["people", "contributions", "INTEGER"],
   ["people", "restricted_contributions", "INTEGER"],
   ["people", "signals_at", "INTEGER"],
+  // Additional account signals (admission.ts levelChecks), numbers only, and the GitHub
+  // account's creation day for the creation-batch count.
+  ["people", "github_created_day", "INTEGER"],
+  ["people", "active_weeks", "INTEGER"],
+  ["people", "outside_contributions", "INTEGER"],
+  ["people", "oldest_repo_at", "INTEGER"],
+  ["people", "social", "INTEGER"],
   // The contact email from the sign-in step, and whether the person wants product updates.
   ["people", "email", "TEXT"],
   ["people", "email_updates", "INTEGER"],
@@ -579,6 +615,13 @@ export class DirectoryObject extends DurableObject {
         this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
         added.add(`${table}.${column}`);
       }
+      this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS people_created_day ON people (github_created_day)");
+      // The creation day for rows read before it was stored: the age in days when the signals
+      // were read, counted back from then (exact to the day, give or take one).
+      this.ctx.storage.sql.exec(
+        `UPDATE people SET github_created_day = signals_at / ${DAY_MS} - account_age_days
+         WHERE github_created_day IS NULL AND signals_at IS NOT NULL AND account_age_days IS NOT NULL`,
+      );
       const rebuilt = this.#backfillDailyActivity();
       if (rebuilt || added.has("daily_activity.sessions")) this.#backfillSessions();
     });
@@ -706,6 +749,7 @@ export class DirectoryObject extends DurableObject {
       const sig = input.signals;
       const levelValues = [level, reason, sig?.accountAgeDays ?? null, sig?.publicRepos ?? null, sig?.followers ?? null, sig?.contributions ?? null, sig?.restrictedContributions ?? null, sig ? input.now : null] as const;
       const admitted = (via: "existing" | "admin" | "open" | "invite", created: boolean): AdmitResult => {
+        if (sig) this.#storeExtraSignals(input.githubId, sig);
         if (input.clientDeviceId) sql.exec("INSERT OR IGNORE INTO devices (device_id, github_id) VALUES (?, ?)", input.clientDeviceId, input.githubId);
         const referralCode = this.#ensureCode(input.githubId, input.login, input.now);
         if (created && via !== "admin" && input.referralCode) this.#recordReferral(input.githubId, input.login, input.referralCode, input.now);
@@ -1067,6 +1111,17 @@ export class DirectoryObject extends DurableObject {
     );
   }
 
+  /**
+   * Everyone's level and stored signals (numbers only), oldest sign-up first: the full
+   * dashboard's Starter table and its creation-batch counts. Reads only DASHBOARD_COLUMNS.
+   */
+  async levelSignals(): Promise<LevelSignalRow[]> {
+    return this.ctx.storage.sql
+      .exec<LevelSignalRow>(`SELECT ${LEVEL_SIGNAL_COLUMNS.join(", ")} FROM people ORDER BY admitted_at`)
+      .toArray()
+      .map((row) => ({ ...row }));
+  }
+
   async listPeople(): Promise<PersonRow[]> {
     return this.ctx.storage.sql.exec<PersonRow>("SELECT * FROM people ORDER BY admitted_at").toArray().map((row) => ({ ...row }));
   }
@@ -1248,10 +1303,11 @@ export class DirectoryObject extends DurableObject {
   }
 
   /**
-   * Re-reads a person's signals and promotes a Starter account to Full when they now qualify.
-   * Never demotes, and never overrides an admin's own choice of level. Returns the level after.
+   * Re-reads a person's signals and promotes a Starter account to Full when they now pass every
+   * check (admission.ts levelChecks; `signals` carries the stored additional signals). Never
+   * demotes, and never overrides an admin's own choice of level. Returns the level after.
    */
-  async recheckLevel(githubId: number, signals: GithubSignals, thresholds: LevelThresholds, now: number): Promise<Level | undefined> {
+  async recheckLevel(githubId: number, signals: GithubSignals, thresholds: LevelThresholds, rules: SignalThresholds, now: number): Promise<Level | undefined> {
     return this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
       const row = sql.exec<{ level: Level; level_reason: string | null }>("SELECT level, level_reason FROM people WHERE github_id = ?", githubId).toArray()[0];
@@ -1266,12 +1322,49 @@ export class DirectoryObject extends DurableObject {
         now,
         githubId,
       );
-      if (row.level === "starter" && row.level_reason !== "admin" && qualifiesForFull(signals, thresholds)) {
+      if (signals.createdDay !== undefined && signals.createdDay !== null) sql.exec("UPDATE people SET github_created_day = ? WHERE github_id = ?", signals.createdDay, githubId);
+      if (row.level !== "starter" || row.level_reason === "admin") return row.level;
+      const checks = levelChecks(signals, thresholds, rules, { now, batchPeers: this.#batchPeers(signals.createdDay, rules.batchWindowDays, githubId) });
+      if (checks.full) {
         sql.exec("UPDATE people SET level = 'full', level_reason = 'qualifies' WHERE github_id = ?", githubId);
         return "full";
       }
       return row.level;
     });
+  }
+
+  /**
+   * How many people already in the table have a GitHub account created within `windowDays` of
+   * `day` (this account left out): the creation-batch count. 0 when the day is unknown.
+   */
+  async creationBatchPeers(day: number | null | undefined, windowDays: number, githubId: number): Promise<number> {
+    return this.#batchPeers(day, windowDays, githubId);
+  }
+
+  #batchPeers(day: number | null | undefined, windowDays: number, githubId: number): number {
+    if (day === undefined || day === null) return 0;
+    return (
+      this.ctx.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM people WHERE github_created_day BETWEEN ? AND ? AND github_id != ?", day - windowDays, day + windowDays, githubId)
+        .toArray()[0]?.n ?? 0
+    );
+  }
+
+  /** The additional signals and creation day read at sign-in; a value not read keeps the one stored. */
+  #storeExtraSignals(githubId: number, sig: GithubSignals): void {
+    this.ctx.storage.sql.exec(
+      `UPDATE people SET github_created_day = COALESCE(?, github_created_day), active_weeks = COALESCE(?, active_weeks),
+         outside_contributions = COALESCE(?, outside_contributions), social = COALESCE(?, social),
+         oldest_repo_at = CASE WHEN ? THEN ? ELSE oldest_repo_at END WHERE github_id = ?`,
+      sig.createdDay ?? null,
+      sig.activeWeeks ?? null,
+      sig.outsideContributions ?? null,
+      sig.social ?? null,
+      // Null is a real answer for the oldest repository (none), so it's stored when the rest was read.
+      sig.activeWeeks !== undefined && sig.activeWeeks !== null ? 1 : 0,
+      sig.oldestRepoCreatedAt ?? null,
+      githubId,
+    );
   }
 
   /** How many distinct networks this person has signed in from (for the admin page). */

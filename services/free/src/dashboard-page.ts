@@ -4,6 +4,27 @@ import { COHORT_WEEKS, FUNNEL_DAYS, REGULAR_DAYS, RETENTION_OFFSETS, TOKEN_LIMIT
 import { ABUSE_DAYS, type AbuseData, type AbusePerson, type SimpleData } from "./abuse.js";
 import { BRAND_ORIGIN, BRAND_TOKENS, PRODUCT_NAME } from "./pages.js";
 import { isoDay } from "./week.js";
+import type { LevelChecks } from "./admission.js";
+
+/** One Starter account on the full dashboard: its stored signals and which checks pass. Admin-only. */
+export interface StarterRow {
+  githubId: number;
+  login: string;
+  admittedAt: number;
+  levelReason: string | null;
+  accountAgeDays: number | null;
+  publicRepos: number | null;
+  contributions: number | null;
+  followers: number | null;
+  activeWeeks: number | null;
+  outsideContributions: number | null;
+  oldestRepoAt: number | null;
+  social: number | null;
+  checks: LevelChecks;
+}
+
+/** The full dashboard shows this many Starter accounts, newest first. */
+export const STARTER_ROWS = 50;
 
 /**
  * The admin dashboard as server-rendered HTML, plus a CSV of each table. No scripts and no
@@ -466,6 +487,25 @@ ${checkRows.length === 0 ? empty(4, "No contribution lookups.") : checkRows.join
 </section>`;
 }
 
+/** Starter accounts and why: each stored signal, marked when its check passes. */
+function startersSection(rows: StarterRow[], total: number): string {
+  const num = (value: number | null) => (value === null ? "–" : count(value));
+  const mark = (text: string, pass: boolean) => (pass ? `<strong title="passes">${text}</strong>` : `<span class="muted">${text}</span>`);
+  const body = rows.map((row) => {
+    const c = row.checks;
+    return `<tr><td class="l">${who(row.login, row.githubId)}</td><td>${when(row.admittedAt)}</td><td class="l">${escapeHtml(row.levelReason ?? "–")}</td><td>${num(row.accountAgeDays)}</td><td>${num(row.publicRepos)}</td><td>${num(row.contributions)}</td><td>${mark(c.publicBar ? "yes" : "no", c.publicBar)}</td><td>${mark(num(row.activeWeeks), c.activeWeeks)}</td><td>${mark(num(row.outsideContributions), c.outsideContributions)}</td><td>${mark(row.oldestRepoAt === null ? "–" : escapeHtml(isoDay(row.oldestRepoAt)), c.oldRepo)}</td><td>${mark(num(row.social), c.social)}</td><td>${mark(num(row.followers), c.followers)}</td><td>${count(c.humanSignals)}</td><td>${c.creationBatch ? `<strong>yes</strong> <span class="muted">(${count(c.batchPeers)})</span>` : `<span class="muted">no (${count(c.batchPeers)})</span>`}</td><td>${c.full ? "<strong>yes</strong>" : "no"}</td></tr>`;
+  });
+  return `<section id="starters">
+<div class="head"><h2>Starter accounts</h2><span class="muted">${count(total)} in all${total > rows.length ? `, newest ${rows.length} shown` : ""}. Admins left out.</span></div>
+<div class="scroll"><table>
+<thead><tr><th class="l">GitHub login</th><th>Signed up (UTC)</th><th class="l">Reason</th><th>Age (days)</th><th>Public repos</th><th>Contributions</th><th>Public bar</th><th>Active weeks</th><th>Outside contributions</th><th>Oldest repo</th><th>Following + stars</th><th>Followers</th><th>Signals passing</th><th>Creation batch (peers)</th><th>Passes now</th></tr></thead>
+<tbody>
+${body.length === 0 ? `<tr><td colspan="15" class="l muted">No Starter accounts.</td></tr>` : body.join("\n")}
+</tbody></table></div>
+<p class="note">The signals stored at the last sign-in or re-check, under today's thresholds (the level settings in /admin/config). Bold: the check passes. "Passes now" yes on a Starter account means it would be promoted at its next re-check or sign-in; an admin-set level stands either way. Numbers only.</p>
+</section>`;
+}
+
 function adminLogSection(abuse: AbuseData): string {
   return `<section id="log">
 <div class="head"><h2>Admin log</h2><span class="muted">Settings, pause and block changes, newest first</span></div>
@@ -548,7 +588,7 @@ function viewToggle(current: "simple" | "full"): string {
   return `<nav class="views" aria-label="Dashboard view">${link("simple", "Simple")}${link("full", "Full")}</nav>`;
 }
 
-export function dashboardPage(input: { data: DashboardData; spend: SpendView; login: string; signOut: boolean; abuse?: AbuseData; csrf?: string }): Response {
+export function dashboardPage(input: { data: DashboardData; spend: SpendView; login: string; signOut: boolean; abuse?: AbuseData; csrf?: string; starters?: { rows: StarterRow[]; total: number } }): Response {
   const { data, spend } = input;
   const currentWeek = data.currentWeek;
   const thisOrDate = (week: number) => (week === currentWeek ? `${day(week)} (this week)` : day(week));
@@ -792,7 +832,8 @@ ${data.funnel
 
   const abuse = input.abuse ? abuseSection(input.abuse, input.csrf) : "";
   const log = input.abuse ? adminLogSection(input.abuse) : "";
-  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, budgetSection, abuse, upstreamSection, queueSection, referralSection, paidSection, funnelSection, activeSection, retentionSection, costSection, limitsSection, log].join("\n"));
+  const starters = input.starters ? startersSection(input.starters.rows, input.starters.total) : "";
+  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, budgetSection, abuse, upstreamSection, queueSection, referralSection, paidSection, funnelSection, activeSection, retentionSection, costSection, limitsSection, starters, log].join("\n"));
 }
 
 // ─── The simple view ──────────────────────────────────────────────────────

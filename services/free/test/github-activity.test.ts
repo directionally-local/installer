@@ -44,7 +44,7 @@ describe("account levels at sign-in", () => {
 
   it("gives Full to an account with 50 contributions in the last year", async () => {
     const { service, admin } = await open();
-    const flow = await startBrowserFlow(service.request, { id: 100, login: "contrib", publicRepos: 0, contributions: 50 });
+    const flow = await startBrowserFlow(service.request, { id: 100, login: "contrib", publicRepos: 0, contributions: 50, activeWeeks: 20 });
     assert.ok(signedIn(flow.page));
     const row = await person(service, admin, 100);
     assert.equal(row?.level, "full");
@@ -72,7 +72,7 @@ describe("account levels at sign-in", () => {
 
   it("counts private contributions the person shows", async () => {
     const { service, admin } = await open();
-    const flow = await startBrowserFlow(service.request, { id: 100, login: "private", publicRepos: 0, contributions: 60, restrictedContributions: 55 });
+    const flow = await startBrowserFlow(service.request, { id: 100, login: "private", publicRepos: 0, contributions: 60, restrictedContributions: 55, activeWeeks: 20 });
     assert.ok(signedIn(flow.page));
     const row = await person(service, admin, 100);
     assert.equal(row?.level, "full");
@@ -128,9 +128,9 @@ describe("account levels at sign-in", () => {
 });
 
 describe("what a Starter account gets", () => {
-  async function starter(): Promise<{ service: Service; token: string; admin: string }> {
+  async function starter(extra: Partial<GitHubUserFixture> = {}): Promise<{ service: Service; token: string; admin: string }> {
     const { service, admin } = await open({ LUMINAL_API_KEY: "sk-luminal-test" });
-    const user: GitHubUserFixture = { id: 100, login: "starter", createdAt: NEW, publicRepos: 0, contributions: 0 };
+    const user: GitHubUserFixture = { id: 100, login: "starter", createdAt: NEW, publicRepos: 0, contributions: 0, ...extra };
     const { access_token } = await service.signIn(user);
     return { service, token: access_token, admin };
   }
@@ -165,6 +165,8 @@ describe("what a Starter account gets", () => {
     assert.equal(me.pools.sol!.tokensPerWeek, 0);
     assert.equal(me.pools.astra!.tokensPerWeek, 0);
     assert.equal(me.signals.publicRepos, 0);
+    // The person sees the public bar and its signals only.
+    assert.deepEqual(Object.keys(me.signals).sort(), ["accountAgeDays", "checkedAt", "contributions", "followers", "publicRepos", "restrictedContributions"]);
   });
 
   it("is promoted by an admin, and demoted again", async () => {
@@ -177,7 +179,8 @@ describe("what a Starter account gets", () => {
   });
 
   it("is re-checked weekly from the public profile, and promoted when it qualifies", async () => {
-    const { service, token, admin } = await starter();
+    // Below the public bar, with two of the additional signals stored at sign-in.
+    const { service, token } = await starter({ activeWeeks: 20 });
     // A server key outlives the access token, so the clock can move a week.
     const key = ((await (await service.request("POST", "/v1/keys", { token, body: { name: "test" } })).json()) as { key: string }).key;
     // The public profile now says 5 repositories.
