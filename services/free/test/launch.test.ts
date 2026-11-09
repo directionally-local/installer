@@ -477,7 +477,7 @@ describe("402 quota_exceeded", () => {
 describe("spend alerts", () => {
   it("fires once per threshold per week for the weekly cap, and once ever for the all-time cap", async () => {
     const { service } = await openService({ PER_PERSON_WEEKLY_USD_CAP: "none" });
-    const texts = () => service.calls.webhooks.map((hook) => String(hook.body.text));
+    const texts = () => service.calls.webhooks.map((hook) => String(hook.body.text)).filter((t) => !/ spent so far| spent in total/.test(t));
     await spendLive(service, 100);
     await spendLive(service, 20); // 48%: nothing yet
     assert.deepEqual(texts(), []);
@@ -525,7 +525,7 @@ describe("spend alerts", () => {
   it("posts to a Telegram bot URL end to end", async () => {
     const { service } = await openService({ ALERT_WEBHOOK_URL: "https://api.telegram.org/bot123:abc/sendMessage", ALERT_TELEGRAM_CHAT_ID: "-100" });
     await spendLive(service, 130);
-    assert.deepEqual(service.calls.webhooks, [
+    assert.deepEqual(service.calls.webhooks.filter((hook) => !/ spent (so far|in total)/.test(JSON.stringify(hook.body))), [
       { url: "https://api.telegram.org/bot123:abc/sendMessage", body: { chat_id: "-100", text: "dl free tier: $130 of the $250 weekly cap used (50%). Resets Mon 00:00 UTC.", disable_web_page_preview: true } },
     ]);
   });
@@ -535,7 +535,7 @@ describe("spend alerts", () => {
     await service.request("POST", "/admin/pause", { token: admin });
     await service.request("POST", "/admin/pause", { token: admin }); // no change, no alert
     await service.request("POST", "/admin/unpause", { token: admin });
-    assert.deepEqual(service.calls.webhooks.map((hook) => hook.body.text), [
+    assert.deepEqual(service.calls.webhooks.map((hook) => hook.body.text).filter((t) => !/ spent (so far|in total)/.test(String(t))), [
       "dl free tier: free tokens paused for everyone by owner (kill switch).",
       "dl free tier: free tokens resumed by owner (kill switch off).",
     ]);
@@ -566,6 +566,8 @@ describe("spend alerts", () => {
   it("sends email through the send_email binding, with the short line as the subject", async () => {
     const { service } = await openService({ ALERT_EMAIL_TO: "owner@example.com", ALERT_WEBHOOK_URL: "" }, { email: true });
     await spendLive(service, 200);
+    const milestoneFree = service.calls.emails.filter((e) => !/spent so far/.test(e.raw));
+    service.calls.emails.splice(0, service.calls.emails.length, ...milestoneFree);
     assert.equal(service.calls.emails.length, 1);
     const [email] = service.calls.emails;
     assert.equal(email!.from, "alerts@dl.new");

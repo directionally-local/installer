@@ -6,7 +6,7 @@ import type { DownloadCount, InstallCount } from "./telemetry.js";
 import { abuseData, outsideDl, simpleData, type AbuseData, type SimpleData } from "./abuse.js";
 import { dashboardData, installBreakdown, notAdmin, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
-import { creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
+import { milestoneCrossed, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type ReferralOutcome } from "./referrals.js";
@@ -1605,6 +1605,10 @@ export class DirectoryObject extends DurableObject {
         if (policy && credit > 0) alerts.push(...this.#creditAlerts(record.at, policy, "luminal"));
       }
       if (upstream === "openai" && policy && openaiCredit > 0) alerts.push(...this.#creditAlerts(record.at, policy, "openai"));
+      if (credit > 0 || openaiCredit > 0 || cash > 0) {
+        const milestone = this.#milestoneAlert(record.at);
+        if (milestone) alerts.push(milestone);
+      }
       // Every request checks, whoever served it: after a switch to OpenRouter, OpenRouter's
       // traffic is what notices the 30 quiet minutes that end a slow-down.
       if (policy && serving) {
@@ -1675,6 +1679,38 @@ export class DirectoryObject extends DurableObject {
     check(`spend:week:${spend.weekStart}:`, spend.spentUsd, policy.globalWeeklyUsdCap, weeklySpendAlert);
     check("spend:total:", spend.totalSpentUsd, policy.globalTotalUsdCap, totalSpendAlert);
     return out;
+  }
+
+  /**
+   * All-time spend across every provider (OpenAI and Luminal credit, OpenRouter cash, admins
+   * included: it's all money) crossing $50, $100, $200 and so on: one email per milestone, ever.
+   */
+  #milestoneAlert(now: number): Alert | undefined {
+    const spend = this.#spendSync(now);
+    const cashUsd = spend.totalSpentUsd + spend.adminTotalSpentUsd;
+    const totalUsd = spend.openaiCreditUsedUsd + spend.creditUsedUsd + cashUsd;
+    const hit = milestoneCrossed(totalUsd, this.#sentThresholds("spend-milestone:"));
+    if (!hit) return undefined;
+    for (const m of hit.mark) this.#markAlert(`spend-milestone:${m}`, now);
+    const week = weekStart(now);
+    const top = this.ctx.storage.sql
+      .exec<{ login: string | null; github_id: number; usd: number }>(
+        `SELECT p.login AS login, r.github_id AS github_id, SUM(r.credit_usd) AS usd FROM requests r LEFT JOIN people p ON p.github_id = r.github_id
+         WHERE r.at >= ? AND r.is_admin = 0 GROUP BY r.github_id ORDER BY usd DESC LIMIT 3`,
+        week,
+      )
+      .toArray()
+      .filter((row) => row.usd > 0)
+      .map((row) => ({ login: row.login ?? String(row.github_id), usd: row.usd }));
+    return spendMilestoneAlert({
+      milestone: hit.milestone,
+      totalUsd,
+      openaiUsd: spend.openaiCreditUsedUsd,
+      luminalUsd: spend.creditUsedUsd,
+      cashUsd,
+      weekUsd: spend.openaiCreditWeekUsd + spend.creditWeekUsd + spend.spentUsd + spend.adminSpentUsd,
+      top,
+    });
   }
 
   /** A host failing more than 20% of at least 20 requests in the last hour: alert once until it recovers. */
