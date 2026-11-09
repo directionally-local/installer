@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/directionally-local/installer/compare/v0.22.0...v0.22.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **free:** send GPT-6 through OpenAI's Responses API so tools and reasoning work together ([#186](https://github.com/directionally-local/installer/issues/186)) ([2c65501](https://github.com/directionally-local/installer/commit/2c655012b605a29f34f52963dcc7dc318354fb3d))
+
 ## [0.22.0](https://github.com/directionally-local/installer/compare/v0.21.0...v0.22.0) (2026-11-09)
 
 
