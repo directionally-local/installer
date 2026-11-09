@@ -100,6 +100,35 @@ export function totalSpendAlert(spentUsd: number, capUsd: number, threshold: num
   };
 }
 
+/** All-time spend milestones that send an email, in dollars across every provider. */
+export const SPEND_MILESTONES_USD = [50, 100, 200, 300, 500, 750, 1000, 1500, 2000, 2500, 3000, 4000, 5000, 6000, 7000] as const;
+
+/** The highest milestone at or below `totalUsd`, if it hasn't been announced yet. */
+export function milestoneCrossed(totalUsd: number, sent: ReadonlySet<number>): { milestone: number; mark: number[] } | undefined {
+  const reached = SPEND_MILESTONES_USD.filter((m) => totalUsd >= m);
+  const fresh = reached.filter((m) => !sent.has(m));
+  if (fresh.length === 0) return undefined;
+  return { milestone: reached[reached.length - 1]!, mark: fresh };
+}
+
+/** A spend milestone: the total, where it went, this week's spend and who spent most this week. */
+export function spendMilestoneAlert(input: {
+  milestone: number;
+  totalUsd: number;
+  openaiUsd: number;
+  luminalUsd: number;
+  cashUsd: number;
+  weekUsd: number;
+  top: Array<{ login: string; usd: number }>;
+}): Alert {
+  const top = input.top.length ? ` Top this week: ${input.top.map((t) => `${t.login} ${dollars(t.usd)}`).join(", ")}.` : "";
+  const cash = input.cashUsd > 0 ? `, OpenRouter cash ${dollars(input.cashUsd)}` : "";
+  return {
+    subject: `dl free tier: ${dollars(input.milestone)} spent so far`,
+    text: `dl free tier: ${dollars(input.totalUsd)} spent in total (OpenAI ${dollars(input.openaiUsd)}, Luminal ${dollars(input.luminalUsd)}${cash}). This week: ${dollars(input.weekUsd)}.${top}`,
+  };
+}
+
 export function pauseAlert(paused: boolean, login: string): Alert {
   return paused
     ? { subject: "dl free tier: free tokens paused (kill switch)", text: `dl free tier: free tokens paused for everyone by ${login} (kill switch).` }
