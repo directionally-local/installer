@@ -134,6 +134,25 @@ describe("the basic level", () => {
     assert.equal(people.find((row) => row.githubId === 100)?.levelReason, "admin");
     assert.equal(people.find((row) => row.githubId === 101)?.level, "full");
   });
+
+  it("re-checks admin-set Starter levels only when asked, and hands raised ones back to the rules", async () => {
+    const { service, admin } = await open({ BASIC_WEEKLY_TOKENS: "0" });
+    await service.signIn(belowBar(100, OLD));
+    await service.signIn(belowBar(102, YOUNG));
+    await service.signIn({ id: 101, login: "dev", createdAt: OLD, publicRepos: 0, contributions: 3 });
+    for (const id of [100, 102]) assert.equal((await service.request("POST", `/admin/people/${id}/level`, { token: admin, body: { level: "starter" } })).status, 200);
+    assert.equal((await service.request("POST", "/admin/people/101/level", { token: admin, body: { level: "full" } })).status, 200);
+    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { basicWeeklyTokens: 10_000_000 } })).status, 200);
+    const outcome = (await (await service.request("POST", "/v1/admin/recheck-below-bar", { token: admin, body: { includeAdminStarters: true } })).json()) as Record<string, number>;
+    assert.equal(outcome.raised, 1);
+    const people = ((await (await service.request("GET", "/admin/people", { token: admin })).json()) as { people: Array<Record<string, any>> }).people;
+    const row = (id: number) => people.find((person) => person.githubId === id)!;
+    assert.equal(row(100).level, "basic");
+    assert.equal(row(100).levelReason, null, "back to the automatic rules");
+    assert.equal(row(102).level, "starter", "too young for basic");
+    assert.equal(row(101).level, "full", "an admin grant of Full is never touched");
+    assert.equal(row(101).levelReason, "admin");
+  });
 });
 
 describe("the Starter allowance", () => {

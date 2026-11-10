@@ -1597,10 +1597,10 @@ export class DirectoryObject extends DurableObject {
   /**
    * The admin's "re-check below-bar accounts": raises these GitHub ids (chosen by the caller from
    * stored signals) to basic, each only while it is still an active Starter account whose level
-   * an admin or an invite didn't set, and stores the creation-batch flag of every id in
+   * an invite didn't set (nor an admin, unless `includeAdminStarters`), and stores the creation-batch flag of every id in
    * `flags`. Never lowers anyone, never touches blocked accounts. Logged like setLevel.
    */
-  async raiseToBasic(input: { raise: number[]; flags: Array<{ githubId: number; flagged: boolean }>; actor: { githubId: number; login: string; now: number } }): Promise<{ raised: number }> {
+  async raiseToBasic(input: { raise: number[]; flags: Array<{ githubId: number; flagged: boolean }>; actor: { githubId: number; login: string; now: number }; includeAdminStarters?: boolean }): Promise<{ raised: number }> {
     return this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
       for (const flag of input.flags) {
@@ -1611,8 +1611,11 @@ export class DirectoryObject extends DurableObject {
         const found = sql
           .exec<{ login: string; level: Level; level_reason: string | null; status: string }>("SELECT login, level, level_reason, status FROM people WHERE github_id = ?", githubId)
           .toArray()[0];
-        if (!found || found.status !== "active" || found.level !== "starter" || found.level_reason === "admin" || found.level_reason === "invite") continue;
-        sql.exec("UPDATE people SET level = 'basic', batch_flag = 0 WHERE github_id = ?", githubId);
+        if (!found || found.status !== "active" || found.level !== "starter" || found.level_reason === "invite") continue;
+        if (found.level_reason === "admin" && !input.includeAdminStarters) continue;
+        // An admin-set Starter raised here goes back to the automatic rules (no sticky reason).
+        if (found.level_reason === "admin") sql.exec("UPDATE people SET level = 'basic', level_reason = NULL, batch_flag = 0 WHERE github_id = ?", githubId);
+        else sql.exec("UPDATE people SET level = 'basic', batch_flag = 0 WHERE github_id = ?", githubId);
         this.#log(`person_level:${githubId}:${found.login}`, "starter", "basic", input.actor);
         raised++;
       }
