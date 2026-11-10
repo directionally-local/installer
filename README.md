@@ -1,6 +1,6 @@
 # Directionally Local installer
 
-Coding agents that run on your own computer or on your own server. Send a task; it runs in its own [Hotcell](https://github.com/directionally-local/hotcell) sandbox, driven by [Autopilot](https://github.com/directionally-local/autopilot), and comes back as a pull request, even with your laptop closed. Start one at [dl.new](https://dl.new).
+Coding agents that run on your own computer or on your own server. Send a task; it runs in its own [Hotcell](https://github.com/directionally-local/hotcell) sandbox, driven by [Autopilot](https://github.com/directionally-local/autopilot), and comes back as a pull request, even with your laptop closed. Start one at [dl.new](https://dl.new). On GPUs you own, `dl model` sets up an open model, tests it, and connects dl to it; see [On your own GPUs](#on-your-own-gpus).
 
 Where this is going: [the roadmap](docs/ROADMAP.md).
 
@@ -129,6 +129,10 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 Run options: `--server NAME`, `-m/--model MODEL`, `--repo OWNER/NAME`, `--detach`.
 
 ### On your own GPUs
+
+`dl model` sets up open models on Nvidia GPUs you own and keeps them updated safely. `dl model up` detects the GPUs, picks a tested config, starts the model with vLLM in Docker, checks that it answers correctly (chat, a tool call, JSON), and points Autopilot at it. `dl model update` tests a new version next to the old one and only switches if it passes; `dl model rollback` undoes it. Data and weights stay on your hardware.
+
+Today: Nvidia GPUs, one machine, vLLM, tested with small models. Coming soon: large models that need several GPUs (GLM 5.3 Flash, DeepSeek V4.1 Flash, Kimi K2.6). On the roadmap: AMD and Huawei Ascend. Running open models on your own GPUs? [Tell us what you run](https://directionallylocal.com/gpus/#partner).
 
 `dl model` can serve a curated open model on this machine's Nvidia GPU with vLLM in Docker, then point Autopilot at it. It needs an Nvidia driver, Docker, and nvidia-container-toolkit; `dl model up` checks all three and says what's missing.
 
