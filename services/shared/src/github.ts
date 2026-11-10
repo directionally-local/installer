@@ -131,11 +131,10 @@ export interface GitHubPublicProfile {
 }
 
 /**
- * An account's public profile, unauthenticated: age, public repositories and followers. Used
- * for the weekly Starter re-check, where the person's own token isn't available. Undefined
- * when GitHub doesn't answer or the profile isn't there.
+ * GET https://api.github.com/users/<login>, unauthenticated: the HTTP status and the JSON body,
+ * or undefined when GitHub doesn't answer within `timeoutMs` or the request fails.
  */
-export async function githubPublicProfile(login: string, fetcher: Fetch, userAgent = "directionallylocal", timeoutMs = 5000): Promise<GitHubPublicProfile | undefined> {
+async function fetchPublicUser(login: string, fetcher: Fetch, userAgent: string, timeoutMs: number): Promise<{ status: number; body: Record<string, unknown> } | undefined> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -143,20 +142,49 @@ export async function githubPublicProfile(login: string, fetcher: Fetch, userAge
       headers: { accept: "application/vnd.github+json", "user-agent": userAgent, "x-github-api-version": "2022-11-28" },
       signal: controller.signal,
     });
-    if (!response.ok) return undefined;
-    const body = (await response.json().catch(() => ({}))) as { created_at?: unknown; public_repos?: unknown; followers?: unknown };
-    const createdAt = typeof body.created_at === "string" ? Date.parse(body.created_at) : Number.NaN;
-    const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined);
-    return {
-      createdAt: Number.isFinite(createdAt) ? createdAt : undefined,
-      publicRepos: count(body.public_repos),
-      followers: count(body.followers),
-    };
+    if (!response.ok) return { status: response.status, body: {} };
+    const body = (await response.json().catch(() => ({}))) as unknown;
+    return { status: response.status, body: body && typeof body === "object" ? (body as Record<string, unknown>) : {} };
   } catch {
     return undefined;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * An account's public profile, unauthenticated: age, public repositories and followers. Used
+ * for the weekly Starter re-check, where the person's own token isn't available. Undefined
+ * when GitHub doesn't answer or the profile isn't there.
+ */
+export async function githubPublicProfile(login: string, fetcher: Fetch, userAgent = "directionallylocal", timeoutMs = 5000): Promise<GitHubPublicProfile | undefined> {
+  const found = await fetchPublicUser(login, fetcher, userAgent, timeoutMs);
+  if (!found || found.status < 200 || found.status > 299) return undefined;
+  const body = found.body;
+  const createdAt = typeof body.created_at === "string" ? Date.parse(body.created_at) : Number.NaN;
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined);
+  return {
+    createdAt: Number.isFinite(createdAt) ? createdAt : undefined,
+    publicRepos: count(body.public_repos),
+    followers: count(body.followers),
+  };
+}
+
+/**
+ * A login's stable numeric GitHub id (and its current spelling), from the same public endpoint.
+ * "not_found" when GitHub says there is no such user (404); "error" when it doesn't answer,
+ * rate-limits, or answers with something else.
+ */
+export async function githubUserByLogin(login: string, fetcher: Fetch, userAgent = "directionallylocal", timeoutMs = 5000): Promise<{ id: number; login: string } | "not_found" | "error"> {
+  const found = await fetchPublicUser(login, fetcher, userAgent, timeoutMs);
+  if (!found) return "error";
+  if (found.status === 404) return "not_found";
+  if (found.status < 200 || found.status > 299) return "error";
+  const { id, login: current, type } = found.body;
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0 || typeof current !== "string") return "error";
+  // Organizations share the endpoint, but can't sign in.
+  if (type !== undefined && type !== "User") return "not_found";
+  return { id, login: current };
 }
 
 export const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
