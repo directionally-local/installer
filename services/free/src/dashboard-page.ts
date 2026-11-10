@@ -41,7 +41,8 @@ export const STARTER_ROWS = 50;
  * The only forms are sign-out, block/unblock, the routing setting (primaryUpstream) switch and the Tools
  * tab's two forms; all but sign-out post back here with a CSRF token.
  *
- * Four tabs: the full view (the default, every table), a simple one at /admin?view=simple,
+ * The home screen (home-page.ts) is the default at /admin. Behind it, four tabs: the full view
+ * at /admin?view=full (every table), a simple one at /admin?view=simple,
  * four cards readable at a glance (sign-ups, growth, tokens per person, red flags), mostly
  * inline SVG charts, and Tools at /admin?view=tools (give free tokens by GitHub username, write
  * an email to users), whose buttons post a form and get the page back, and Health at
@@ -230,7 +231,7 @@ export function nonce(): string {
   return [...crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function shell(title: string, body: string, status = 200, headers: Record<string, string> = {}, head = "", style = STYLE): Response {
+export function shell(title: string, body: string, status = 200, headers: Record<string, string> = {}, head = "", style = STYLE): Response {
   const styleNonce = nonce();
   const html = `<!doctype html>
 <html lang="en">
@@ -750,7 +751,7 @@ function modelNames(provider: "openai" | "luminal"): string {
 /** The Simple / Full / Tools / Health switch: four links, the current one marked. */
 function viewToggle(current: "simple" | "full" | "tools" | "health"): string {
   const link = (view: "simple" | "full" | "tools" | "health", label: string) => `<a href="/admin?view=${view}"${current === view ? ` aria-current="page"` : ""}>${label}</a>`;
-  return `<nav class="views" aria-label="Dashboard view">${link("simple", "Simple")}${link("full", "Full")}${link("tools", "Tools")}${link("health", "Health")}</nav>`;
+  return `<nav class="views" aria-label="Dashboard view"><a href="/admin">Home</a>${link("simple", "Simple")}${link("full", "Full")}${link("tools", "Tools")}${link("health", "Health")}</nav>`;
 }
 
 export function dashboardPage(input: { data: DashboardData; spend: SpendView; login: string; signOut: boolean; abuse?: AbuseData; csrf?: string; starters?: { rows: StarterRow[]; total: number } }): Response {
@@ -1050,7 +1051,7 @@ ${data.funnel
  * 10px radius, bold numbers over small muted labels) in the dl tokens, light and dark. Charts
  * come in two drawings, wide and narrow, so their text stays the same size on a phone.
  */
-const SIMPLE_STYLE = `${BRAND_TOKENS}
+export const SIMPLE_STYLE = `${BRAND_TOKENS}
 :root {
   --k-bg: #F9FAFB; --k-card: #FFFFFF; --k-text: #111827; --k-muted: #6B7280; --k-faint: #9CA3AF; --k-border: #E5E7EB; --k-axis: #D1D5DB;
   --k-shadow: 0 1px 2px 0 rgb(0 0 0 / .04); --k-up: #047857; --k-down: #B91C1C; --k-flag: #B45309; --k-flag-bg: rgba(245, 158, 11, .1);
@@ -1156,7 +1157,7 @@ svg.chart.heat.wide { max-width: 1000px; }
 `;
 
 /** A bar's path: square at the baseline, 3px rounded at the far end. */
-function barPath(x: number, y: number, width: number, height: number, horizontal = false): string {
+export function barPath(x: number, y: number, width: number, height: number, horizontal = false): string {
   const r = Math.min(3, horizontal ? width : height, horizontal ? height / 2 : width / 2);
   if (horizontal) return `M${x.toFixed(1)} ${y.toFixed(1)}h${(width - r).toFixed(1)}a${r} ${r} 0 0 1 ${r} ${r}v${(height - 2 * r).toFixed(1)}a${r} ${r} 0 0 1 -${r} ${r}h-${(width - r).toFixed(1)}z`;
   return `M${x.toFixed(1)} ${(y + height).toFixed(1)}v-${(height - r).toFixed(1)}a${r} ${r} 0 0 1 ${r} -${r}h${(width - 2 * r).toFixed(1)}a${r} ${r} 0 0 1 ${r} ${r}v${(height - r).toFixed(1)}z`;

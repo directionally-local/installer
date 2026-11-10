@@ -397,7 +397,7 @@ describe("upstream telemetry, dashboard and alerts", () => {
     assert.equal(openRouterWeek.cash_usd, "0.01");
     assert.equal(openRouterWeek.credit_usd, "0");
 
-    const html = await (await service.request("GET", "/admin", { token: adminToken })).text();
+    const html = await (await service.request("GET", "/admin?view=full", { token: adminToken })).text();
     assert.match(html, /<h2>Upstreams<\/h2>/);
     assert.match(html, /<tr><td>Luminal<\/td><td class="l wrap">[^<]*<\/td><td class="used">\$0\.\d+ <span class="muted">of \$10\.00<\/span>/);
     assert.match(html, /aria-label="Luminal credit used against the balance"/);
@@ -408,7 +408,7 @@ describe("upstream telemetry, dashboard and alerts", () => {
     const { service, token, adminToken } = await member({ LUMINAL_CREDIT_USD: "0.2" });
     service.setLuminal(() => completion(luminalUsage(BIG.prompt, BIG.completion, BIG.cached)));
     await chat(service, token);
-    const html = await (await service.request("GET", "/admin", { token: adminToken })).text();
+    const html = await (await service.request("GET", "/admin?view=full", { token: adminToken })).text();
     assert.match(html, /class="banner"[^>]*>[^<]*of the \$0\.200 Luminal credit used/);
   });
 });

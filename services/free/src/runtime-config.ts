@@ -1,4 +1,4 @@
-import { MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, UPSTREAMS, type FreeConfig } from "./config.js";
+import { ACCESS_REQUEST_ALERT_MODES, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, UPSTREAMS, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
@@ -100,6 +100,8 @@ export const RUNTIME_SETTINGS = {
   userEmails: { kind: "flag", env: "USER_EMAILS" },
   /** Free tokens inside dl only: chat requests without session events are refused (app.ts). */
   dlOnly: { kind: "flag", env: "DL_ONLY" },
+  /** The owner's email about access requests: "each" (one per request), "daily" (in the daily digest) or "off". */
+  accessRequestAlerts: { kind: "alertMode", env: "ACCESS_REQUEST_ALERTS" },
 } as const;
 
 export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;
@@ -153,6 +155,8 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= MAX_USD ? value : "invalid";
     case "seconds":
       return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= MAX_FIRST_BYTE_TIMEOUT_SECONDS ? value : "invalid";
+    case "alertMode":
+      return typeof value === "string" && (ACCESS_REQUEST_ALERT_MODES as readonly string[]).includes(value) ? value : "invalid";
   }
 }
 
@@ -170,6 +174,7 @@ const RULES: Record<Kind, string> = {
   upstream: '"openai", "luminal" or "openrouter"',
   amount: `a number of dollars, 0 to ${MAX_USD}`,
   seconds: `a number of seconds, more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS}`,
+  alertMode: '"each", "daily" or "off"',
 };
 
 /**

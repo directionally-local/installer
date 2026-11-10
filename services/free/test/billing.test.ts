@@ -392,7 +392,7 @@ describe("the dashboard's paid section", () => {
     svc.setOpenRouter(() => completion(usage(10, 10, 0, 0.25)));
     await chat(svc, pro.key);
     const admin = (await svc.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
-    const html = await (await svc.request("GET", "/admin", { token: admin })).text();
+    const html = await (await svc.request("GET", "/admin?view=full", { token: admin })).text();
     assert.match(html, /Pro subscribers<b>1<\/b>/);
     assert.match(html, /Top-ups<b>1 <span class="muted">this week<\/span><\/b>/);
     assert.match(html, /Revenue, before tax<b>\$13\.00 <span class="muted">this week<\/span><\/b>/);

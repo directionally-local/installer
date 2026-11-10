@@ -8,7 +8,7 @@ import { MAX_SERVER_KEYS, parseServerKey, type AccountObject, type Allowance, ty
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
-import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, LevelSignalRow, PersonRow, PersonState, PersonStatus, RequestRecord } from "./directory-object.js";
+import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, LevelSignalRow, PersonRow, PersonState, PersonStatus, RequestRecord, SpendSummary } from "./directory-object.js";
 import { createCheckout, createPortal, githubIdFrom, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
 import { accessRequestAlert, deliverAlerts, isHeaderSafeAddress, pauseAlert, sendEmail, type Alert, type EmailBinding, type ServingContext, type UpstreamOutcome } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
@@ -16,6 +16,7 @@ import { normalizeReferralCode, referralLink } from "./referrals.js";
 import { networkOf, rateLimitNetwork } from "./network.js";
 import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, type Sender } from "./feedback.js";
 import { apiError, json } from "./errors.js";
+import { homePage } from "./home-page.js";
 import { dashboardCsv, dashboardPage, deniedPage, healthCsv, healthPage, isCsvTable, isHealthCsvTable, signedInPage, signInPage, simpleDashboardPage, STARTER_ROWS, toolsPage, type SpendView, type StarterRow, type ToolsState } from "./dashboard-page.js";
 import { ACCESS_REQUEST_MAX_BYTES, ACCESS_REQUEST_USAGE, ACCESS_REQUESTS_PER_DAY, parseAccessRequest } from "./access-request.js";
 import { cleanBatch } from "./events.js";
@@ -450,6 +451,17 @@ function limitsFor(config: FreeConfig, bonusTokens = 0, level: Level = "full", b
   return { ...base, weeklyUsd: config.starterWeeklyUsdCap, level: "starter", levelTokens: batchFlagged ? 0 : config.starterWeeklyTokens };
 }
 
+/**
+ * One person's limits as their own requests get them: their level (basic with its tokens off is
+ * Starter), the creation-batch flag (0 tokens) and this week's referral bonus. For admin views of
+ * someone else, where `runtime(c)` holds the caller.
+ */
+async function personLimits(c: Ctx, config: FreeConfig, githubId: number, now: number): Promise<{ level: Level; limits: Limits }> {
+  const person = (await directory(c).gate(now, policyOf(c.config), githubId)).person;
+  const level = servedLevel(person?.level ?? "full", config);
+  return { level, limits: limitsFor(config, person?.bonusTokens, level, person?.batchFlagged === true) };
+}
+
 /** The level thresholds, from the effective config. */
 function levelThresholds(config: FreeConfig): LevelThresholds {
   return { minAccountAgeDays: config.fullMinAccountAgeDays, minPublicRepos: config.fullMinPublicRepos, minContributions: config.fullMinContributions };
@@ -673,7 +685,7 @@ function servingContext(c: Ctx, config: FreeConfig): ServingContext {
   return {
     serving: chooseUpstream(config.primaryUpstream, c.config) ?? "none",
     openRouterConfigured: c.config.openRouterApiKey !== undefined,
-    switchUrl: `${c.base}/admin#upstream`,
+    switchUrl: `${c.base}/admin?view=full#upstream`,
   };
 }
 
@@ -1729,8 +1741,9 @@ async function accessRequest(c: Ctx, method: string): Promise<Response> {
     if (result.reason === "already_pending") return apiError(409, "already_pending", "Your request is already waiting for an answer. You'll get an email when it's granted.");
     return rateLimited(result.retryAfterSeconds ?? 3600);
   }
-  // The owner hears who asked and how many wait: never what they wrote.
-  await alert(c, [accessRequestAlert(identity.login, result.pendingCount)]);
+  // The owner hears who asked and how many wait: never what they wrote. "daily" leaves it to the
+  // daily digest, "off" to the admin home screen.
+  if ((await runtime(c)).config.accessRequestAlerts === "each") await alert(c, [accessRequestAlert(identity.login, result.pendingCount)]);
   return json({ status: "pending" }, 201);
 }
 
@@ -2606,8 +2619,9 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     if (!action && method === "GET") {
       const detail = await directory(c).personDetail(githubId, now);
       if (!detail) return apiError(404, "not_found", "No such person.");
-      const allowance = await account(c, githubId).allowance(now, limits);
-      return json({ ...detail, allowance: allowanceView(allowance), serverKeys: await account(c, githubId).keyCount() });
+      const own = await personLimits(c, config, githubId, now);
+      const allowance = await account(c, githubId).allowance(now, own.limits);
+      return json({ ...detail, level: own.level, allowance: allowanceView(allowance), serverKeys: await account(c, githubId).keyCount() });
     }
     if (action === "revoke-tokens" && method === "POST") {
       // Ends every sign-in session and deletes every server key; the person can sign in again.
@@ -2648,7 +2662,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
         usdPerWeek: usdPerWeek as number | null | undefined,
         usedThisWeek: usedThisWeek as number | undefined,
         spentUsdThisWeek: spentUsdThisWeek as number | undefined,
-        limits,
+        limits: (await personLimits(c, config, githubId, now)).limits,
         now,
       });
       if (!allowance) return apiError(404, "not_found", "No such person.");
@@ -2998,7 +3012,7 @@ async function adminWebPersonAction(c: Ctx, githubId: number, action: "block" | 
   if (retry !== undefined) return rateLimited(retry);
   const status = await setBlocked(c, githubId, action === "block", { githubId: session.githubId, login: session.login, now: c.now() });
   if (!status) return deniedPage("No such person", `No free tier account has GitHub id ${githubId}.`, 404);
-  return new Response(null, { status: 303, headers: { location: "/admin#abuse", "cache-control": "no-store" } });
+  return new Response(null, { status: 303, headers: { location: "/admin?view=full#abuse", "cache-control": "no-store" } });
 }
 
 /**
@@ -3024,7 +3038,7 @@ async function adminWebUpstream(c: Ctx): Promise<Response> {
     return deniedPage("Not changed", `The service has no ${secret}, so ${name} can't serve. Set the secret first.`, 409);
   }
   await directory(c).updateOverrides([{ key: "primaryUpstream", value: choice }], { githubId: session.githubId, login: session.login, now: c.now() });
-  return new Response(null, { status: 303, headers: { location: "/admin#upstream", "cache-control": "no-store" } });
+  return new Response(null, { status: 303, headers: { location: "/admin?view=full#upstream", "cache-control": "no-store" } });
 }
 
 async function adminWeb(c: Ctx, path: string, method: string): Promise<Response> {
@@ -3071,15 +3085,21 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     const health = await directory(c).health({ now, adminIds: [...c.config.adminGithubIds], days: healthWindow(c.url.searchParams.get("days")) });
     return csv !== undefined && isHealthCsvTable(csv) ? healthCsv(csv, health) : healthPage({ health, login: identity.login, signOut: viaCookie });
   }
-  // The simple view is opt-in; anything else is the full view, as before.
-  const simple = csv === undefined && c.url.searchParams.get("view") === "simple";
+  // The home screen is the default; Simple and Full are opt-in (?view=simple, ?view=full).
+  const viewName = c.url.searchParams.get("view");
+  if (csv === undefined && viewName !== "simple" && viewName !== "full") return homeResponse(c, config, paused, now, csrf, viaCookie);
+  const simple = csv === undefined && viewName === "simple";
   const weekParam = c.url.searchParams.get("week");
   const topWeek = weekParam && /^\d{4}-\d{2}-\d{2}$/.test(weekParam) ? Date.parse(`${weekParam}T00:00:00Z`) : Number.NaN;
   const [data, spend, abuse, simpleData] = await Promise.all([
     directory(c).dashboard({
       now,
       adminIds: [...c.config.adminGithubIds],
-      limits: { weeklyTokens: config.weeklyTokens, weeklyUsd: config.perPersonWeeklyUsdCap ?? null },
+      limits: {
+        weeklyTokens: config.weeklyTokens,
+        weeklyUsd: config.perPersonWeeklyUsdCap ?? null,
+        levels: { basicTokens: config.basicWeeklyTokens, basicUsd: config.basicWeeklyUsdCap ?? null, starterTokens: config.starterWeeklyTokens, starterUsd: config.starterWeeklyUsdCap ?? null },
+      },
       policy: policyOf(c.config),
       ...(Number.isFinite(topWeek) ? { topWeek } : {}),
     }),
@@ -3087,7 +3107,26 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     csv === undefined ? directory(c).abuse({ now, adminIds: [...c.config.adminGithubIds] }) : undefined,
     simple ? directory(c).simple({ now, adminIds: [...c.config.adminGithubIds] }) : undefined,
   ]);
-  const view: SpendView = {
+  const view = spendView(c, config, paused, spend);
+  if (csv !== undefined && isCsvTable(csv) && !isHealthCsvTable(csv)) return dashboardCsv(csv, data, view);
+  if (simpleData) return simpleDashboardPage({ data, spend: view, signOut: viaCookie, simple: simpleData, ...(abuse ? { abuse } : {}) });
+  const starters = await startersView(c, config, now);
+  return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie, starters, ...(abuse ? { abuse } : {}), ...(csrf ? { csrf } : {}) });
+}
+
+/** GET /admin: the home screen, from the small home reads, the spend counters and the pending requests. */
+async function homeResponse(c: Ctx, config: FreeConfig, paused: boolean, now: number, csrf: string | undefined, signOut: boolean, notice?: { error: boolean; text: string }): Promise<Response> {
+  const [home, spend, requests] = await Promise.all([
+    directory(c).home({ now, adminIds: [...c.config.adminGithubIds] }),
+    directory(c).spend(now),
+    directory(c).pendingAccessRequests(now),
+  ]);
+  return homePage({ home, spend: spendView(c, config, paused, spend), requests, signOut, ...(csrf ? { csrf } : {}), ...(notice ? { notice } : {}) });
+}
+
+/** The dashboard's spend, caps and settings, from the effective config and the spend counters. */
+function spendView(c: Ctx, config: FreeConfig, paused: boolean, spend: SpendSummary): SpendView {
+  return {
     weekUsd: spend.spentUsd,
     totalUsd: spend.totalSpentUsd,
     adminWeekUsd: spend.adminSpentUsd,
@@ -3127,10 +3166,6 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     fullMinPublicRepos: config.fullMinPublicRepos,
     fullMinContributions: config.fullMinContributions,
   };
-  if (csv !== undefined && isCsvTable(csv) && !isHealthCsvTable(csv)) return dashboardCsv(csv, data, view);
-  if (simpleData) return simpleDashboardPage({ data, spend: view, signOut: viaCookie, simple: simpleData, ...(abuse ? { abuse } : {}) });
-  const starters = await startersView(c, config, now);
-  return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie, starters, ...(abuse ? { abuse } : {}), ...(csrf ? { csrf } : {}) });
 }
 
 /** Sign-up days the Tools tab's cohort picker lists. */
@@ -3188,7 +3223,7 @@ async function adminWebTools(c: Ctx): Promise<Response> {
   if (!sameOrigin(c) || !timingSafeEqual(form.get("csrf") ?? "", csrf)) return deniedPage("Not changed", "Use the tools only from the dashboard itself.", 403);
   const retry = await limited(c, `admin:gh:${session.githubId}`, LIMITS.apiPerson);
   if (retry !== undefined) return rateLimited(retry);
-  const { config } = await runtime(c);
+  const { config, paused } = await runtime(c);
   const actor = { githubId: session.githubId, login: session.login, now: c.now() };
   const state = (posted: Pick<ToolsState, "grant" | "compose"> & Partial<Pick<ToolsState, "requestNotice" | "recheck">>) => toolsState(c, config, session, true, csrf, posted).then(toolsPage);
 
@@ -3199,15 +3234,17 @@ async function adminWebTools(c: Ctx): Promise<Response> {
     const id = Number(form.get("id"));
     const action = form.get("action");
     const note = (form.get("note") ?? "").trim().slice(0, 300) || null;
-    if (!Number.isSafeInteger(id) || (action !== "grant" && action !== "decline")) {
-      return state({ grant: { text: "" }, compose: emptyEmailForm(), requestNotice: { error: true, text: "Pick Grant or Decline on a request." } });
-    }
+    // The home screen's cards post here too (from=home), and get the home screen back.
+    const home = form.get("from") === "home";
+    const answer = (requestNotice: { error: boolean; text: string }) =>
+      home ? homeResponse(c, config, paused, c.now(), csrf, true, requestNotice) : state({ grant: { text: "" }, compose: emptyEmailForm(), requestNotice });
+    if (!Number.isSafeInteger(id) || (action !== "grant" && action !== "decline")) return answer({ error: true, text: "Pick Grant or Decline on a request." });
     const result = await decideAccessRequest(c, config, id, action, note, actor);
-    const requestNotice =
+    return answer(
       "code" in result
         ? { error: true, text: result.message }
-        : { error: false, text: result.status === "granted" ? `Granted: ${result.login} is Full now, and gets an email.` : `Declined ${result.login}'s request.` };
-    return state({ grant: { text: "" }, compose: emptyEmailForm(), requestNotice });
+        : { error: false, text: result.status === "granted" ? `Granted: ${result.login} is Full now, and gets an email.` : `Declined ${result.login}'s request.` },
+    );
   }
 
   if (form.get("tool") === "grant") {

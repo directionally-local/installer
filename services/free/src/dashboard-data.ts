@@ -43,6 +43,8 @@ export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
     "contributions",
     "restricted_contributions",
     "github_created_day",
+    // The creation-batch flag: a flagged Starter account has no allowance (the limits table).
+    "batch_flag",
     "active_weeks",
     "outside_contributions",
     "oldest_repo_at",
@@ -91,6 +93,11 @@ export interface DashboardLimits {
   weeklyTokens: number;
   /** null: no per-person spend cap. */
   weeklyUsd: number | null;
+  /**
+   * The smaller levels' allowances, so the limits table holds basic and Starter accounts to their
+   * own (a batch-flagged Starter account has none). Without them everyone is held to Full's.
+   */
+  levels?: { basicTokens: number; basicUsd: number | null; starterTokens: number; starterUsd: number | null };
 }
 
 export interface WeekActive {
@@ -400,7 +407,9 @@ export function dashboardData(
     .toArray()
     .map((row) => ({ githubId: row.github_id, login: row.login, requests: row.requests, tokens: row.tokens, costUsd: row.cost, activeDays: row.days }));
 
-  // Who reached their allowance this week or last, and on which day: running totals per week.
+  // Who reached their allowance this week or last, and on which day: running totals per week,
+  // against each person's own level (basic with its tokens off is Starter, as app.ts serves it).
+  const levels = input.limits.levels;
   const limitRows = sql
     .exec<{
       week: number;
@@ -418,12 +427,18 @@ export function dashboardData(
                 SUM(charged_tokens) OVER (PARTITION BY github_id, ${WEEK_OF_DAY} ORDER BY day) AS tokens,
                 SUM(cost_usd) OVER (PARTITION BY github_id, ${WEEK_OF_DAY} ORDER BY day) AS cost
          FROM daily_activity WHERE day >= ? AND requests > 0 AND ${notAdmin("github_id")}),
+       served AS (
+         SELECT r.github_id AS github_id, r.day AS day, r.week AS week, r.tokens AS tokens, r.cost AS cost, g.weekly_tokens AS grant_tokens, g.weekly_usd AS grant_usd,
+                CASE WHEN ? = 0 OR p.level IS NULL OR p.level = 'full' THEN 'full' WHEN p.level = 'basic' AND ? > 0 THEN 'basic'
+                     WHEN p.batch_flag = 1 THEN 'none' ELSE 'starter' END AS level
+         FROM running r LEFT JOIN grants g ON g.github_id = r.github_id LEFT JOIN people p ON p.github_id = r.github_id),
        limited AS (
-         SELECT r.github_id AS github_id, r.day AS day, r.week AS week, r.tokens AS tokens, r.cost AS cost,
-                COALESCE(g.weekly_tokens, ?) AS token_limit, COALESCE(g.weekly_usd, ?) AS usd_limit
-         FROM running r LEFT JOIN grants g ON g.github_id = r.github_id)
+         SELECT github_id, day, week, tokens, cost,
+                CASE level WHEN 'basic' THEN ? WHEN 'starter' THEN ? WHEN 'none' THEN 0 ELSE COALESCE(grant_tokens, ?) END AS token_limit,
+                COALESCE(grant_usd, CASE level WHEN 'basic' THEN ? WHEN 'starter' THEN ? WHEN 'none' THEN NULL ELSE ? END) AS usd_limit
+         FROM served)
        SELECT l.week AS week, l.github_id AS github_id, p.login AS login,
-              MIN(CASE WHEN l.tokens >= l.token_limit * ${TOKEN_LIMIT_SHARE} THEN l.day END) AS token_day,
+              MIN(CASE WHEN l.token_limit > 0 AND l.tokens >= l.token_limit * ${TOKEN_LIMIT_SHARE} THEN l.day END) AS token_day,
               MIN(CASE WHEN l.cost >= l.usd_limit THEN l.day END) AS usd_day,
               MAX(l.tokens) AS tokens, MAX(l.cost) AS cost, MAX(l.token_limit) AS token_limit, MAX(l.usd_limit) AS usd_limit
        FROM limited l LEFT JOIN people p ON p.github_id = l.github_id
@@ -431,7 +446,13 @@ export function dashboardData(
        HAVING token_day IS NOT NULL OR usd_day IS NOT NULL`,
       currentWeekDay - 7,
       admins,
+      levels ? 1 : 0,
+      levels?.basicTokens ?? 0,
+      levels?.basicTokens ?? 0,
+      levels?.starterTokens ?? 0,
       input.limits.weeklyTokens,
+      levels?.basicUsd ?? null,
+      levels?.starterUsd ?? null,
       input.limits.weeklyUsd,
     )
     .toArray();

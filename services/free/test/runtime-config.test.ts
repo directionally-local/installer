@@ -73,6 +73,7 @@ describe("runtime settings (units)", () => {
       luminalFirstByteTimeoutSeconds: 30,
       userEmails: true,
       dlOnly: true,
+      accessRequestAlerts: "each",
     });
   });
 

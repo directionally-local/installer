@@ -609,7 +609,7 @@ describe("dashboard additions", () => {
   it("shows the credit budget, when the queue starts, the queue, referrals and the funnel", async () => {
     const { service } = await openService();
     const cookie = await adminCookie(service);
-    let html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    let html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
     assert.doesNotMatch(html, /class="banner"/);
     // Spend is per provider; the OpenRouter cash caps aren't shown as a budget.
     assert.match(html, /<tr><td>Luminal <span class="muted">\(no key\)<\/span><\/td><td class="l wrap">[^<]*<\/td><td class="used">\$0 <span class="muted">of \$2,000<\/span><svg[^]*?<\/svg><\/td><td>\$0 <span class="muted">free \$0 of \$250 budget<\/span><\/td>/);
@@ -625,7 +625,7 @@ describe("dashboard additions", () => {
     await signUp(service, { id: 200, login: "waiting", ip: "198.51.100.3" });
     void referrer;
 
-    html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
     assert.doesNotMatch(html, /class="banner"/);
     assert.match(html, /Waiting line starts at<b>–<\/b><span class="note">On: 1 waiting\. New open sign-ups join the line\./);
     assert.match(html, /Waiting now<b>1<\/b>/);

@@ -189,7 +189,16 @@ export interface FreeConfig {
    * A free-plan account that sends chat requests but no session events is refused (app.ts).
    */
   dlOnly: boolean;
+  /**
+   * The owner's email about access requests (/request in dl), ACCESS_REQUEST_ALERTS: "each" (one
+   * per request, the default), "daily" (counted in the daily digest instead) or "off". Also a
+   * runtime setting.
+   */
+  accessRequestAlerts: AccessRequestAlerts;
 }
+
+export type AccessRequestAlerts = "each" | "daily" | "off";
+export const ACCESS_REQUEST_ALERT_MODES: readonly AccessRequestAlerts[] = ["each", "daily", "off"];
 
 export type Upstream = "openai" | "luminal" | "openrouter";
 export const UPSTREAMS: readonly Upstream[] = ["openai", "luminal", "openrouter"];
@@ -247,6 +256,7 @@ export const DEFAULTS = {
   openAdmission: false,
   requireGithubActivity: true,
   dlOnly: true,
+  accessRequestAlerts: "each" as AccessRequestAlerts,
   /**
    * OpenRouter's cache-read price over its input price for deepseek/deepseek-v4.1-flash-1017,
    * from https://openrouter.ai/api/v1/models on 2026-11-03: input $0.30/M, cache read
@@ -395,6 +405,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     userEmails: flag(env.USER_EMAILS, true, "USER_EMAILS"),
     userEmailsToAdmins: flag(env.USER_EMAILS_TO_ADMINS, false, "USER_EMAILS_TO_ADMINS"),
     dlOnly: flag(env.DL_ONLY, DEFAULTS.dlOnly, "DL_ONLY"),
+    accessRequestAlerts: accessRequestAlerts(env.ACCESS_REQUEST_ALERTS),
   };
 }
 
@@ -531,6 +542,13 @@ function hostCooldown(value: unknown): number {
   const minutes = whole(value, DEFAULTS.openRouterHostCooldownMinutes, "OPENROUTER_HOST_COOLDOWN_MINUTES");
   if (minutes > MAX_HOST_COOLDOWN_MINUTES) throw new ConfigError(`OPENROUTER_HOST_COOLDOWN_MINUTES must be 0 to ${MAX_HOST_COOLDOWN_MINUTES} (got "${minutes}").`);
   return minutes;
+}
+
+function accessRequestAlerts(value: unknown): AccessRequestAlerts {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return DEFAULTS.accessRequestAlerts;
+  if ((ACCESS_REQUEST_ALERT_MODES as readonly string[]).includes(raw)) return raw as AccessRequestAlerts;
+  throw new ConfigError(`ACCESS_REQUEST_ALERTS must be "each", "daily" or "off" (got "${raw}").`);
 }
 
 function upstream(value: unknown): Upstream {
