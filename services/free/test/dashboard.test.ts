@@ -318,7 +318,7 @@ describe("admin dashboard numbers", () => {
     assert.doesNotMatch(html, /<script|\sstyle="|<link|@import/i);
     assert.match(html, /prefers-color-scheme: dark/);
     // The toggle, Simple current; the free tier's state as a pill.
-    assert.match(html, /<nav class="views" aria-label="Dashboard view"><a href="\/admin\?view=simple" aria-current="page">Simple<\/a><a href="\/admin\?view=full">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><\/nav>/);
+    assert.match(html, /<nav class="views" aria-label="Dashboard view"><a href="\/admin\?view=simple" aria-current="page">Simple<\/a><a href="\/admin\?view=full">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><a href="\/admin\?view=health">Health<\/a><\/nav>/);
     assert.match(html, /class="pill open"[^>]*>Free tier open</);
     // The four cards, and nothing from the full view's tables.
     for (const id of ["signups", "growth", "tokens", "flags"]) assert.match(html, new RegExp(`<section class="card[^"]*" id="${id}"`));
@@ -365,7 +365,7 @@ describe("admin dashboard numbers", () => {
     const full = await page("/admin");
     assert.equal(await page("/admin?view=full"), full);
     assert.equal(await page("/admin?view=something-else"), full);
-    assert.match(full, /<span class="who"><nav class="views" aria-label="Dashboard view"><a href="\/admin\?view=simple">Simple<\/a><a href="\/admin\?view=full" aria-current="page">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><\/nav>Signed in as/);
+    assert.match(full, /<span class="who"><nav class="views" aria-label="Dashboard view"><a href="\/admin\?view=simple">Simple<\/a><a href="\/admin\?view=full" aria-current="page">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><a href="\/admin\?view=health">Health<\/a><\/nav>Signed in as/);
     // Every section of the full view is still there, in order.
     const headings = [...full.matchAll(/<h2>([^<]+)<\/h2>/g)].map((match) => match[1]);
     assert.deepEqual(headings.slice(0, 3), ["Spend", "Abuse", "Upstreams"]);

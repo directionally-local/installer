@@ -16,7 +16,7 @@ import { normalizeReferralCode, referralLink } from "./referrals.js";
 import { networkOf, rateLimitNetwork } from "./network.js";
 import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, type Sender } from "./feedback.js";
 import { apiError, json } from "./errors.js";
-import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, simpleDashboardPage, STARTER_ROWS, toolsPage, type SpendView, type StarterRow, type ToolsState } from "./dashboard-page.js";
+import { dashboardCsv, dashboardPage, deniedPage, healthCsv, healthPage, isCsvTable, isHealthCsvTable, signedInPage, signInPage, simpleDashboardPage, STARTER_ROWS, toolsPage, type SpendView, type StarterRow, type ToolsState } from "./dashboard-page.js";
 import { ACCESS_REQUEST_MAX_BYTES, ACCESS_REQUEST_USAGE, ACCESS_REQUESTS_PER_DAY, parseAccessRequest } from "./access-request.js";
 import { cleanBatch } from "./events.js";
 import { cleanDownload, cleanInstall, MAX_TELEMETRY_BYTES } from "./telemetry.js";
@@ -72,6 +72,7 @@ import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-con
 import { meterStream } from "./sse.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
 import { DAY_MS, isoDay, weekEnd, weekStart } from "./week.js";
+import { healthWindow } from "./health-data.js";
 import {
   deliverUserEmail,
   EMAIL_STOP_BASE,
@@ -3065,6 +3066,11 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
   if (csv === undefined && c.url.searchParams.get("view") === "tools") {
     return toolsPage(await toolsState(c, config, identity, viaCookie, csrf, { grant: { text: "" }, compose: emptyEmailForm() }));
   }
+  // The Health view and its CSVs read only health-data.ts's queries.
+  if ((csv === undefined && c.url.searchParams.get("view") === "health") || (csv !== undefined && isHealthCsvTable(csv))) {
+    const health = await directory(c).health({ now, adminIds: [...c.config.adminGithubIds], days: healthWindow(c.url.searchParams.get("days")) });
+    return csv !== undefined && isHealthCsvTable(csv) ? healthCsv(csv, health) : healthPage({ health, login: identity.login, signOut: viaCookie });
+  }
   // The simple view is opt-in; anything else is the full view, as before.
   const simple = csv === undefined && c.url.searchParams.get("view") === "simple";
   const weekParam = c.url.searchParams.get("week");
@@ -3121,7 +3127,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     fullMinPublicRepos: config.fullMinPublicRepos,
     fullMinContributions: config.fullMinContributions,
   };
-  if (csv !== undefined && isCsvTable(csv)) return dashboardCsv(csv, data, view);
+  if (csv !== undefined && isCsvTable(csv) && !isHealthCsvTable(csv)) return dashboardCsv(csv, data, view);
   if (simpleData) return simpleDashboardPage({ data, spend: view, signOut: viaCookie, simple: simpleData, ...(abuse ? { abuse } : {}) });
   const starters = await startersView(c, config, now);
   return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie, starters, ...(abuse ? { abuse } : {}), ...(csrf ? { csrf } : {}) });

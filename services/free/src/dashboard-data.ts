@@ -206,10 +206,10 @@ export interface PaidView {
   paidRequestsWeek: number;
 }
 
-/** One upstream over one window (today, UTC, or this Monday-to-Sunday week). Admins included. */
+/** One upstream over one window (today, UTC, this Monday-to-Sunday week, or the Health view's last N days). Admins included. */
 export interface UpstreamStats {
   upstream: "openai" | "luminal" | "openrouter";
-  window: "today" | "week";
+  window: "today" | "week" | `${number}d`;
   requests: number;
   /** Requests the upstream failed: 429, 5xx, a timeout, a network error or a failed stream. */
   errors: number;
@@ -773,12 +773,26 @@ export function installBreakdown(
   return { platforms, failedSteps };
 }
 
-/** Per upstream, today and this week: counts from `upstream_daily`, percentiles from `upstream_timings`. */
-export function upstreamStats(sql: Sql, now: number): UpstreamStats[] {
+/** One window of `upstreamStats`: counts from UTC day `fromDay` on, timings from `since` (default: that day's start). */
+export interface UpstreamWindow {
+  window: UpstreamStats["window"];
+  fromDay: number;
+  since?: number;
+}
+
+/**
+ * Per upstream, today and this week (or the windows given): counts from `upstream_daily`,
+ * percentiles from `upstream_timings` (kept TIMINGS_MAX_AGE_MS, 15 days, by the Directory).
+ */
+export function upstreamStats(sql: Sql, now: number, windows?: readonly UpstreamWindow[]): UpstreamStats[] {
   const today = Math.floor(now / DAY_MS);
   const week = weekStart(now) / DAY_MS;
   const out: UpstreamStats[] = [];
-  for (const [window, fromDay] of [["today", today], ["week", week]] as const) {
+  const list: readonly UpstreamWindow[] = windows ?? [
+    { window: "today", fromDay: today },
+    { window: "week", fromDay: week },
+  ];
+  for (const { window, fromDay, since: from } of list) {
     for (const upstream of UPSTREAM_NAMES) {
       const row = sql
         .exec<{ requests: number | null; errors: number | null; prompt: number | null; cached: number | null; cash: number | null; credit: number | null }>(
@@ -789,7 +803,7 @@ export function upstreamStats(sql: Sql, now: number): UpstreamStats[] {
           fromDay,
         )
         .toArray()[0];
-      const since = fromDay * DAY_MS;
+      const since = from ?? fromDay * DAY_MS;
       out.push({
         upstream,
         window,
