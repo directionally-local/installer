@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createService, errorCode, NOW } from "./harness.js";
-import { cleanDownload, cleanInstall, DOWNLOAD_ROUTES, INSTALL_STEPS } from "../src/telemetry.js";
+import { cleanDownload, cleanInstall, DOWNLOAD_ROUTES, INSTALL_FAIL_REASONS, INSTALL_STEPS } from "../src/telemetry.js";
 
 const DAY = 86_400_000;
 const INSTALL = { os: "darwin", arch: "arm64", mode: "laptop", dlVersion: "0.13.0", result: "ok", via: "home" };
@@ -25,6 +25,12 @@ describe("telemetry allowlists", () => {
     assert.deepEqual(cleanInstall(INSTALL), { ...INSTALL, failedStep: "" });
     assert.deepEqual(cleanInstall({ ...INSTALL, dlVersion: "", result: "failed", failedStep: "node" }), { ...INSTALL, dlVersion: "unknown", result: "failed", failedStep: "node" });
     for (const step of INSTALL_STEPS) assert.equal(typeof cleanInstall({ ...INSTALL, result: "failed", failedStep: step }), "object");
+    // Why it failed, when the script says: kept with the step; a reason it doesn't know is dropped, not refused.
+    assert.equal((cleanInstall({ ...INSTALL, result: "failed", failedStep: "node", failedReason: "run" }) as { failedStep: string }).failedStep, "node:run");
+    assert.equal((cleanInstall({ ...INSTALL, result: "failed", failedStep: "preflight", failedReason: "termux" }) as { failedStep: string }).failedStep, "preflight:termux");
+    for (const reason of INSTALL_FAIL_REASONS) assert.equal(typeof cleanInstall({ ...INSTALL, result: "failed", failedStep: "node", failedReason: reason }), "object");
+    assert.equal((cleanInstall({ ...INSTALL, result: "failed", failedStep: "node", failedReason: "/home/alice: not found" }) as { failedStep: string }).failedStep, "node");
+    assert.equal((cleanInstall({ ...INSTALL, failedReason: "run" }) as { failedStep: string }).failedStep, "", "no reason without a failed step");
     for (const bad of [
       { ...INSTALL, os: "windows" },
       { ...INSTALL, arch: "riscv64" },
@@ -53,6 +59,7 @@ describe("POST /v1/telemetry/download and /v1/telemetry/install", () => {
     assert.equal((await post("install", INSTALL)).status, 204);
     assert.equal((await post("install", INSTALL, "198.51.100.9")).status, 204);
     assert.equal((await post("install", { ...INSTALL, result: "failed", failedStep: "install_dl", dlVersion: "" })).status, 204);
+    assert.equal((await post("install", { ...INSTALL, result: "failed", failedStep: "node", failedReason: "run", dlVersion: "" })).status, 204);
     service.clock.now = NOW + DAY;
     assert.equal((await post("download", { route: "home", client: "curl" })).status, 204);
 
@@ -65,7 +72,7 @@ describe("POST /v1/telemetry/download and /v1/telemetry/install", () => {
     const installs = rows(service, "install_daily");
     assert.deepEqual(
       installs.map((row) => [row.result, row.failed_step, row.dl_version, row.installs]).sort(),
-      [["failed", "install_dl", "unknown", 1], ["ok", "", "0.13.0", 2]],
+      [["failed", "install_dl", "unknown", 1], ["failed", "node:run", "unknown", 1], ["ok", "", "0.13.0", 2]],
     );
     assert.deepEqual(Object.keys(installs[0]!).sort(), ["arch", "day", "dl_version", "failed_step", "installs", "mode", "os", "result", "via"]);
 

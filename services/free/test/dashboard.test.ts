@@ -540,6 +540,7 @@ describe("admin dashboard install funnel", () => {
     await post("install", install, "2026-11-03", 4);
     await post("install", { ...install, os: "linux", arch: "x64", mode: "server", result: "failed", failedStep: "dl_up" }, "2026-11-03", 2);
     await post("install", { ...install, result: "failed", failedStep: "node" }, "2026-11-04");
+    await post("install", { ...install, os: "linux", result: "failed", failedStep: "preflight", failedReason: "arm32" }, "2026-11-04");
     service.clock.now = NOW;
     const admit = (githubId: number, login: string, when: string, isAdmin = false) =>
       directory.admit({ githubId, login, isAdmin, inviteCode: undefined, clientDeviceId: null, accountTooNew: false, openAdmission: true, maxActive: 100, now: at(when) });
@@ -568,10 +569,10 @@ describe("admin dashboard install funnel", () => {
     });
     assert.deepEqual(
       [row("day", "2026-11-04").scripts_served, row("day", "2026-11-04").installs_failed, row("day", "2026-11-04").active],
-      ["3", "1", "2"],
+      ["3", "2", "2"],
     );
     const thisWeek = row("week", "2026-11-02");
-    assert.deepEqual([thisWeek.scripts_served, thisWeek.installs_ok, thisWeek.installs_failed, thisWeek.signed_up, thisWeek.first_request, thisWeek.active], ["10", "4", "3", "2", "1", "0"]);
+    assert.deepEqual([thisWeek.scripts_served, thisWeek.installs_ok, thisWeek.installs_failed, thisWeek.signed_up, thisWeek.first_request, thisWeek.active], ["10", "4", "4", "2", "1", "0"]);
     const lastWeek = row("week", "2026-10-26");
     assert.deepEqual([lastWeek.scripts_served, lastWeek.signed_up, lastWeek.first_request, lastWeek.active], ["4", "1", "1", "1"], "carol: 3 request days");
 
@@ -581,8 +582,10 @@ describe("admin dashboard install funnel", () => {
       [
         ["system", "darwin", "arm64", "laptop", "", "4", "1"],
         ["system", "linux", "x64", "server", "", "0", "2"],
+        ["system", "linux", "arm64", "laptop", "", "0", "1"],
         ["failed_step", "", "", "", "dl_up", "", "2"],
         ["failed_step", "", "", "", "node", "", "1"],
+        ["failed_step", "", "", "", "preflight:arm32", "", "1"],
       ],
     );
 
@@ -591,6 +594,7 @@ describe("admin dashboard install funnel", () => {
     assert.match(html, /Anonymous counts: one per script served/);
     assert.match(html, /can't be joined to people/);
     assert.match(html, /Server setup \(dl up\)<\/td><td>2</);
+    assert.match(html, /Checks \(system, user, curl\): 32-bit ARM system<\/td><td>1</, "with why, when the script said");
     assert.match(html, /macOS arm64<\/td><td>laptop<\/td><td>4<\/td><td>1</);
     assert.match(html, /install-funnel\.csv/);
     assert.match(html, /<h3>By sign-up week<\/h3>/);

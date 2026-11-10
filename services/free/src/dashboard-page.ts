@@ -411,6 +411,25 @@ const STEP_LABELS: Record<string, string> = {
   path: "Putting dl on PATH",
   dl_up: "Server setup (dl up)",
 };
+/** Why a step failed, when install.sh said (`step:reason` in the failed-steps table). */
+const REASON_LABELS: Record<string, string> = {
+  termux: "Android (Termux)",
+  arm32: "32-bit ARM system",
+  musl: "musl Linux (Alpine)",
+  tools: "no tar or gzip",
+  glibc: "glibc older than 2.28",
+  fetch: "couldn't reach nodejs.org",
+  download: "download failed",
+  checksum: "checksum didn't match",
+  unpack: "couldn't unpack",
+  run: "Node.js doesn't run here",
+  unpatched: "Node.js missing the fix",
+};
+function stepLabel(step: string): string {
+  const [name = "", reason] = step.split(":");
+  const label = STEP_LABELS[name] ?? name;
+  return reason ? `${label}: ${REASON_LABELS[reason] ?? reason}` : label;
+}
 
 const short = (ms: number) => isoDay(ms).slice(5);
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -992,7 +1011,7 @@ ${f.platforms.length === 0 ? `<tr><td colspan="4" class="l muted">No installs co
 <div class="tile">Top failed steps, last ${WEEKS_SHOWN} weeks*<div class="scroll"><table>
 <thead><tr><th>Step</th><th>Failed</th></tr></thead>
 <tbody>
-${f.failedSteps.length === 0 ? `<tr><td colspan="2" class="l muted">No failed installs.</td></tr>` : f.failedSteps.map((row) => `<tr><td>${escapeHtml(STEP_LABELS[row.step] ?? row.step)}</td><td>${count(row.failed)}</td></tr>`).join("\n")}
+${f.failedSteps.length === 0 ? `<tr><td colspan="2" class="l muted">No failed installs.</td></tr>` : f.failedSteps.map((row) => `<tr><td>${escapeHtml(stepLabel(row.step))}</td><td>${count(row.failed)}</td></tr>`).join("\n")}
 </tbody></table></div></div>
 </div>
 <h3>By sign-up week</h3>
