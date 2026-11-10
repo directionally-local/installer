@@ -4,7 +4,7 @@ import type { DirectoryObject } from "./directory-object.js";
 import { DEFAULT_MODEL, POOLS, POOL_TOKENS, creditPrices, modelById, type Pool } from "./models.js";
 import type { Upstream } from "./config.js";
 import type { Level } from "./admission.js";
-import { costAtPrices, costOf, planReservation } from "./quota.js";
+import { FALLBACK_USD_PER_MILLION_TOKENS, costAtPrices, costOf, estimateCostUsd, planReservation } from "./quota.js";
 import { weekEnd, weekStart } from "./week.js";
 
 /**
@@ -219,6 +219,9 @@ export class AccountObject extends DurableObject<AccountEnv> {
       if (!columns.includes("provider")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN provider TEXT");
       if (!columns.includes("model")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN model TEXT");
       if (!columns.includes("prompt_estimate")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN prompt_estimate INTEGER");
+      // The reservation's estimated cost in USD, held against the dollar cap while it is in
+      // flight. Null on reservations made before (they count as nothing).
+      if (!columns.includes("cost_estimate")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN cost_estimate REAL");
     });
   }
 
@@ -243,8 +246,12 @@ export class AccountObject extends DurableObject<AccountEnv> {
 
   /**
    * Holds tokens for one request. The token cap is exact (the reservation covers the worst
-   * case). The spend cap is checked against settled cost, so it can be passed by at most the
-   * cost of the requests in flight when it's reached.
+   * case). The dollar cap counts what is settled plus the estimated cost of every weekly
+   * reservation still in flight (`estimateCostUsd`): a request whose estimate doesn't fit next
+   * to those is refused, so parallel requests can't run past the cap together. A request with
+   * nothing else in flight still goes through while any of the cap is left, so the week ends at
+   * the cap rather than an estimate short of it: the overshoot is at most that one request.
+   * Settling or sweeping a reservation deletes it, which releases its estimate.
    */
   async reserve(input: {
     pool?: Pool;
@@ -265,18 +272,27 @@ export class AccountObject extends DurableObject<AccountEnv> {
     // The weekly allowance first (free or Pro), then top-ups.
     const spendReached = before.usdPerWeek !== null && before.spentUsdThisWeek >= before.usdPerWeek;
     const weeklyRoom = spendReached || (before.plan === "free" && input.limits.freeBlocked) ? 0 : before.remaining;
+    const model = modelById(input.model ?? DEFAULT_MODEL);
+    const estimate = (maxTokens: number) =>
+      model ? estimateCostUsd(input.promptEstimate, maxTokens, model.prices) : ((Math.max(0, input.promptEstimate) + maxTokens) * FALLBACK_USD_PER_MILLION_TOKENS) / 1_000_000;
     let source: Source = "weekly";
     let plan = planReservation(input.promptEstimate, input.requestedMaxTokens, weeklyRoom);
+    let spendFull = false;
+    if (plan && before.usdPerWeek !== null) {
+      const inFlight = this.#inFlightWeekly();
+      spendFull = inFlight.count > 0 && before.spentUsdThisWeek + inFlight.usd + estimate(plan.maxTokens) > before.usdPerWeek;
+      if (spendFull) plan = undefined;
+    }
     if (!plan) {
       source = "topup";
       plan = planReservation(input.promptEstimate, input.requestedMaxTokens, before.topupTokensLeft);
     }
-    if (!plan) return { ok: false, code: "quota_exceeded", reason: spendReached ? "spend" : "tokens", allowance: before };
+    if (!plan) return { ok: false, code: "quota_exceeded", reason: spendReached || spendFull ? "spend" : "tokens", allowance: before };
     const paid = source === "topup" || before.plan === "pro";
     const reservationId = crypto.randomUUID();
     const expiresAt = input.now + RESERVATION_TTL_MS;
     this.ctx.storage.sql.exec(
-      "INSERT INTO reservations (id, amount, created_at, expires_at, source, paid, pool, provider, model, prompt_estimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO reservations (id, amount, created_at, expires_at, source, paid, pool, provider, model, prompt_estimate, cost_estimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       reservationId,
       plan.amount,
       input.now,
@@ -287,6 +303,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
       input.provider ?? null,
       input.model ?? null,
       Math.max(0, Math.round(input.promptEstimate)),
+      estimate(plan.maxTokens),
     );
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm === null || alarm > expiresAt) await this.ctx.storage.setAlarm(expiresAt);
@@ -578,6 +595,14 @@ export class AccountObject extends DurableObject<AccountEnv> {
     if (next === null || next === undefined) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(next);
     return stale.length;
+  }
+
+  /** Weekly reservations in flight (top-ups don't count toward the dollar cap) and their estimated cost. */
+  #inFlightWeekly(): { count: number; usd: number } {
+    const row = this.ctx.storage.sql
+      .exec<{ n: number; usd: number | null }>("SELECT COUNT(*) AS n, SUM(cost_estimate) AS usd FROM reservations WHERE source = 'weekly'")
+      .toArray()[0];
+    return { count: row?.n ?? 0, usd: row?.usd ?? 0 };
   }
 
   #row(): AccountRow | undefined {
