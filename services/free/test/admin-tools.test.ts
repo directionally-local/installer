@@ -217,8 +217,8 @@ describe("the dashboard's Tools tab", () => {
     it("lists sign-up days with reachable people, and a day fills the range", async () => {
       const { s, cookie } = await people();
       const page = await (await s.request("GET", "/admin?view=tools", { headers: { cookie } })).text();
-      assert.match(page, /value="pick:2026-11-02"[^>]*><b>Mon Nov 2<\/b><small>2 full · 0 starter<\/small>/);
-      assert.match(page, /value="pick:2026-11-03"[^>]*><b>Tue Nov 3<\/b><small>1 full · 0 starter<\/small>/);
+      assert.match(page, /value="pick:2026-11-02"[^>]*><b>Mon Nov 2<\/b><small>2 full · 0 basic · 0 starter<\/small>/);
+      assert.match(page, /value="pick:2026-11-03"[^>]*><b>Tue Nov 3<\/b><small>1 full · 0 basic · 0 starter<\/small>/);
       const { html } = await tools(s, cookie, { ...COPY, action: "pick:2026-11-02" });
       assert.match(html, /name="from" value="2026-11-02"/);
       assert.match(html, /name="to" value="2026-11-02"/);

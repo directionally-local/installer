@@ -2,8 +2,11 @@
  * Account levels for the free tier, as plain arithmetic (the Directory object keeps the rows).
  *
  * `full` is for accounts that look like working developers: old enough, and with either some
- * public repositories or a real contribution history. `starter` is everyone else: a small
- * allowance on DeepSeek only, enough to try the thing, not enough to farm.
+ * public repositories or a real contribution history. `basic` is the middle: below that bar, but
+ * an older account that isn't part of a creation batch, with every model on a smaller weekly
+ * allowance (its own runtime settings; 0 tokens turns it off). `starter` is everyone else: every
+ * model on a small allowance (or none), enough to try the thing, not enough to farm. A Starter
+ * account flagged by the creation-batch check gets no free tokens at all, whatever the setting.
  *
  * The point is to make account farming unprofitable without turning away real developers:
  * plenty of real people have no public repositories because their work is private, so the
@@ -16,7 +19,7 @@
 
 import { DAY_MS } from "./week.js";
 
-export type Level = "full" | "starter";
+export type Level = "full" | "basic" | "starter";
 
 /** What GitHub told us about an account, as numbers only. */
 export interface GithubSignals {
@@ -108,8 +111,25 @@ export function levelChecks(signals: GithubSignals, bar: LevelThresholds, rules:
   return { publicBar, activeWeeks, outsideContributions, oldRepo, social, followers, humanSignals, batchPeers: context.batchPeers, creationBatch, full };
 }
 
-export function levelFor(checks: LevelChecks): Level {
-  return checks.full ? "full" : "starter";
+/**
+ * The basic level's rule, from runtime settings: an account at least `minAccountAgeDays` old,
+ * not flagged by the creation-batch check. `weeklyTokens` 0 turns the level off. Never shown to
+ * the person: the basic line says what the level gets, not who gets it.
+ */
+export interface BasicRule {
+  minAccountAgeDays: number;
+  weeklyTokens: number;
+}
+
+/** Whether an account below the public bar gets the basic level. */
+export function qualifiesForBasic(signals: Pick<GithubSignals, "accountAgeDays">, checks: Pick<LevelChecks, "creationBatch">, rule: BasicRule): boolean {
+  return rule.weeklyTokens > 0 && !checks.creationBatch && signals.accountAgeDays >= rule.minAccountAgeDays;
+}
+
+/** Full when every check passes; else basic when `basic` is given and the account qualifies; else starter. */
+export function levelFor(checks: LevelChecks, signals?: GithubSignals, basic?: BasicRule): Level {
+  if (checks.full) return "full";
+  return signals && basic && qualifiesForBasic(signals, checks, basic) ? "basic" : "starter";
 }
 
 /**
@@ -151,12 +171,13 @@ export function thresholdText(thresholds: LevelThresholds): string {
 }
 
 /**
- * The honest sentence for a Starter account: what it gets, why, and the three ways up. No
- * accusation, and no hint that anything was done wrong.
+ * The honest sentence for a Starter account: what it gets, why, and the ways up. No
+ * accusation, and no hint that anything was done wrong. With no Starter tokens (the setting at
+ * 0, or an account that gets none), the below-the-bar line.
  */
-export function starterLine(thresholds: LevelThresholds, starterTokens: number): string {
+export function starterLine(thresholds: LevelThresholds, starterTokens: number, starterUsd?: number): string {
   if (starterTokens <= 0) return belowBarLine(thresholds);
-  return `Starter access: DeepSeek only, ${formatTokens(starterTokens)} tokens a week. Full access (GPT-6 and the bigger allowance) needs ${thresholdText(thresholds)}. Keep using GitHub, use an invite code, or bring your own key.`;
+  return `Starter access: a small free allowance to try dl, ${allowanceText(starterTokens, starterUsd)}. It resets every Monday. The full free tier is for established GitHub accounts: ${barText(thresholds)}. Want more? Type /request in dl and tell us what you're building. Or use your own API key with /provider.`;
 }
 
 /** The bar in plain words: "1 year old with 100+ contributions in the last year". */
@@ -168,15 +189,38 @@ function barText(t: LevelThresholds): string {
   return `at least ${age} old with ${t.minContributions}+ contributions in the last year${repos}`;
 }
 
-/** Where people below the bar can ask for free credits anyway. */
+/** Where people below the bar can ask for free credits when /request in dl isn't at hand. */
 export const CREDITS_REQUEST_EMAIL = "contact@directionallylocal.com";
 
+/** The endpoint dl's /request command posts to (app.ts). Refusals carry it as `request`. */
+export const ACCESS_REQUEST_PATH = "/v1/access-request";
+
 /**
- * What an account below the bar is told when it gets no free tokens at all (Starter set to 0):
- * who free tokens are for, how to ask for credits anyway, and the own-key way.
+ * What an account below the bar is told when it gets no free tokens at all: who free tokens are
+ * for, how to ask for them anyway (/request in dl, or email), and the own-key way.
  */
 export function belowBarLine(thresholds: LevelThresholds): string {
-  return `Free tokens are for established GitHub accounts: ${barText(thresholds)}. Not there yet? Email ${CREDITS_REQUEST_EMAIL} and tell us what you want to build with dl, and we'll give you free credits. Or use your own API key with /provider.`;
+  return `Free tokens are for established GitHub accounts: ${barText(thresholds)}. Not there yet? Type /request in dl and tell us what you're building, and we may give you free tokens (or email ${CREDITS_REQUEST_EMAIL}). Or use your own API key with /provider.`;
+}
+
+/** "10M tokens a week of every model, GPT-6 included, up to $3" (no dollar part without a cap). */
+function allowanceText(weeklyTokens: number, weeklyUsd: number | undefined): string {
+  const usd = weeklyUsd === undefined ? "" : `, up to $${Number.isInteger(weeklyUsd) ? weeklyUsd : weeklyUsd.toFixed(2)}`;
+  return `${formatTokens(weeklyTokens)} tokens a week of every model, GPT-6 included${usd}`;
+}
+
+/**
+ * The sign-in page's line for a basic account: what it gets and how to ask for more. Never why:
+ * the rule behind the level is private.
+ */
+export function basicLine(weeklyTokens: number, weeklyUsd: number | undefined): string {
+  return `Basic access: a smaller free allowance, ${allowanceText(weeklyTokens, weeklyUsd)}. It resets every Monday. Want more? Type /request in dl and tell us what you're building. Or use your own API key with /provider.`;
+}
+
+/** What a basic or Starter account is told when this week's allowance is used up. */
+export function limitLine(level: "basic" | "starter", weeklyTokens: number, weeklyUsd: number | undefined): string {
+  const name = level === "basic" ? "Basic" : "Starter";
+  return `You've used this week's free ${name} allowance (${allowanceText(weeklyTokens, weeklyUsd)}). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.`;
 }
 
 /** "5M", "1.2M", "800k". */

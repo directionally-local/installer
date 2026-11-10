@@ -15,7 +15,9 @@ describe("below the bar, with no Starter allowance", () => {
     const err = ((await res.clone().json()) as { error: { code: string; message: string } }).error;
     assert.equal(err.code, "below_bar");
     assert.match(err.message, /established GitHub accounts: at least 1 year old with 100\+ contributions in the last year\./);
-    assert.match(err.message, /Email contact@directionallylocal\.com and tell us what you want to build with dl/);
+    assert.match(err.message, /Type \/request in dl and tell us what you're building, and we may give you free tokens \(or email contact@directionallylocal\.com\)/);
+    assert.equal((err as unknown as { request: string }).request, "/v1/access-request");
+    assert.equal((err as unknown as { contact: string }).contact, "contact@directionallylocal.com");
     assert.doesNotMatch(err.message, /repositories/, "the switched-off repos path isn't mentioned");
     assert.equal(service.calls.openai.length + service.calls.luminal.length, 0, "nothing reaches a provider");
   });
@@ -24,7 +26,7 @@ describe("below the bar, with no Starter allowance", () => {
     const service = await createService(BAR);
     await service.signIn({ id: ADMIN_ID, login: "owner" });
     const flow = await startBrowserFlow(service.request, { id: 201, login: "newbie2", createdAt: "2026-10-01T00:00:00Z", publicRepos: 0, contributions: 3 }, undefined, { stopAtDetails: true });
-    assert.match(flow.page, /Email contact@directionallylocal\.com and tell us what you want to build/);
+    assert.match(flow.page, /Type \/request in dl and tell us what you&#39;re building/);
     const dev = await service.signIn({ id: 202, login: "dev", createdAt: "2019-01-01T00:00:00Z", publicRepos: 0, contributions: 250, activeWeeks: 30 });
     assert.equal((await service.request("POST", "/v1/chat/completions", { token: dev.access_token, body })).status, 200);
   });

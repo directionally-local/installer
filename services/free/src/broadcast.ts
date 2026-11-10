@@ -11,7 +11,7 @@ import { FOOTER } from "./user-emails.js";
  * to the same person twice, however often the call is retried and whatever the filters.
  */
 
-export type BroadcastAudience = "full" | "starter" | "all";
+export type BroadcastAudience = "full" | "basic" | "starter" | "all";
 
 export interface BroadcastRequest {
   subject: string;
@@ -71,11 +71,11 @@ function parseTime(value: unknown, endOfDay: boolean): number | null | "invalid"
 
 export function parseBroadcast(body: Record<string, unknown>): { ok: true; value: BroadcastRequest } | { ok: false; message: string } {
   const usage =
-    'Send {subject, text, audience: "full" | "starter" | "all", signedUpFrom?, signedUpTo?, dryRun: true | false}; the dates are "YYYY-MM-DD" or ISO times.';
+    'Send {subject, text, audience: "full" | "basic" | "starter" | "all", signedUpFrom?, signedUpTo?, dryRun: true | false}; the dates are "YYYY-MM-DD" or ISO times.';
   const { audience, dryRun } = body;
   const copy = parseCopy(body.subject, body.text);
   if (!copy.ok) return { ok: false, message: copy.message };
-  if (audience !== "full" && audience !== "starter" && audience !== "all") return { ok: false, message: usage };
+  if (audience !== "full" && audience !== "basic" && audience !== "starter" && audience !== "all") return { ok: false, message: usage };
   if (typeof dryRun !== "boolean") return { ok: false, message: `${usage} dryRun is required, so a send is never an accident.` };
   const from = parseTime(body.signedUpFrom, false);
   const to = parseTime(body.signedUpTo, true);

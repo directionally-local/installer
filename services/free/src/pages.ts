@@ -184,9 +184,9 @@ ${DISCLOSURE}`,
   );
 }
 
-/** What the details step shows a Starter account: its line, and whether to offer the invite field. */
+/** What the details step shows a basic or Starter account: its line, and the invite field. */
 export interface DetailsStarter {
-  /** The honest sentence: what Starter gets, why, and the ways up (admission.ts `starterLine`). */
+  /** The honest sentence: what the level gets and the ways up (admission.ts `basicLine`, `starterLine`). */
   line: string;
 }
 
@@ -203,7 +203,7 @@ export function detailsPage(
   const starter = options.starter
     ? `
   <p class="fine" style="text-align:left">${escapeHtml(options.starter.line)}</p>
-  <label class="field"><span>Invite code (optional): unlocks GPT-6 and the full allowance</span>
+  <label class="field"><span>Invite code (optional): unlocks the full free tier</span>
     <input name="invite_code" aria-label="Invite code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="DL-XXXX-XXXX">
   </label>`
     : "";

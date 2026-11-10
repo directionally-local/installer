@@ -24,7 +24,7 @@ import { DAY_MS, weekStart } from "./week.js";
 
 /** Tables and columns the dashboard may read. Everything is counts, tokens, cost, time or who. */
 export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
-  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd", "paid_cost_usd", "credit_usd"],
+  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd", "paid_cost_usd", "credit_usd", "sessions"],
   // Levels and the GitHub signals behind them, numbers only (the Starter accounts table).
   people: [
     "github_id",
@@ -35,6 +35,8 @@ export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
     "admitted_via",
     "level",
     "level_reason",
+    // Whether the person had free tokens at sign-up: retention counts only people who could use dl.
+    "signup_tokens",
     "account_age_days",
     "public_repos",
     "followers",
@@ -58,6 +60,8 @@ export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   download_daily: ["day", "route", "client", "downloads"],
   install_daily: ["day", "os", "arch", "mode", "dl_version", "result", "failed_step", "via", "installs"],
   payments: ["github_id", "kind", "amount_cents", "at"],
+  // Days someone was refused free tokens below the bar: the sign-up funnel. Ids and days only.
+  refused_days: ["github_id", "day"],
 };
 
 /** Pro counts as subscribed this long past its period end (as in account-object.ts). */
@@ -102,6 +106,20 @@ export interface Cohort {
   size: number;
   /** One entry per RETENTION_OFFSETS; null when that week hasn't finished yet. */
   retained: Array<{ offset: number; active: number; share: number } | null>;
+}
+
+/**
+ * One sign-up day's funnel: everyone admitted that UTC day (admins and blocked accounts left
+ * out), how many had free tokens at sign-up (Full or basic, an admin's grant, or Starter with an
+ * allowance), how many were refused (no free tokens), and how many of those still opened dl that
+ * day (a dl session, or a refused chat request).
+ */
+export interface SignupFunnelDay {
+  day: number;
+  signedUp: number;
+  gotTokens: number;
+  refused: number;
+  refusedOpened: number;
 }
 
 /** People admitted on one UTC day, and who made a request on given days after it. */
@@ -251,8 +269,10 @@ export interface DashboardData {
   currentWeek: number;
   weeklyActive: WeekActive[];
   cohorts: Cohort[];
-  /** Daily retention: the last DAILY_COHORTS sign-up days, newest first. */
+  /** Daily retention: the last DAILY_COHORTS sign-up days, newest first. Only people who had free tokens at sign-up. */
   dailyCohorts: DailyCohort[];
+  /** The same sign-up days' funnel (everyone who signed up), newest first. */
+  signupFunnel: SignupFunnelDay[];
   weeklyCost: WeekCost[];
   topWeek: number;
   top: TopSpender[];
@@ -548,6 +568,7 @@ export function dashboardData(
     weeklyActive,
     cohorts,
     dailyCohorts: dailyCohorts(sql, input.now, admins),
+    signupFunnel: signupFunnel(sql, input.now, admins),
     weeklyCost,
     topWeek: toMs(topWeekDay),
     top,
@@ -557,14 +578,23 @@ export function dashboardData(
 }
 
 /**
- * Daily retention: people grouped by the UTC day they were admitted (the last DAILY_COHORTS such
- * days), admins and blocked accounts left out, and how many of them made at least one request on
- * each of RETENTION_DAYS days after it. A day is null until it has ended (UTC), so today's partial
- * numbers never show or count in the averages. `admins`: ADMIN_GITHUB_IDS as a JSON array. Two indexed reads.
+ * Whether a person had free tokens at sign-up, as SQL over `people p`. For sign-ups from before
+ * `signup_tokens` was stored, the current level stands in: anyone not Starter counts.
+ */
+const HAD_TOKENS = "COALESCE(p.signup_tokens, p.level != 'starter')";
+
+/**
+ * Daily retention: people who could use dl (they had free tokens at sign-up: Full, basic, an
+ * admin's grant, or Starter with an allowance) grouped by the UTC day they were admitted (the
+ * last DAILY_COHORTS such days), admins and blocked accounts left out, and how many of them made
+ * at least one request on each of RETENTION_DAYS days after it. People refused free tokens are
+ * left out: they can't make a request, so they would only dilute the share. A day is null until
+ * it has ended (UTC), so today's partial numbers never show or count in the averages. `admins`:
+ * ADMIN_GITHUB_IDS as a JSON array. Two indexed reads.
  */
 export function dailyCohorts(sql: Sql, now: number, admins: string): DailyCohort[] {
   const today = Math.floor(now / DAY_MS);
-  const counted = `p.status != 'blocked' AND ${notAdmin("p.github_id")}`;
+  const counted = `p.status != 'blocked' AND ${HAD_TOKENS} = 1 AND ${notAdmin("p.github_id")}`;
   const sizes = sql
     .exec<{ day: number; n: number }>(
       `SELECT p.admitted_at / ${DAY_MS} AS day, COUNT(*) AS n FROM people p WHERE p.admitted_at < ? AND ${counted} GROUP BY 1 ORDER BY 1 DESC LIMIT ?`,
@@ -600,6 +630,35 @@ export function dailyCohorts(sql: Sql, now: number, admins: string): DailyCohort
       return { offset, active: n, share: n / cohort.n };
     }),
   }));
+}
+
+/**
+ * The sign-up funnel per UTC sign-up day (the last DAILY_COHORTS days with any sign-up, newest
+ * first): see SignupFunnelDay. "Opened dl" is a dl session or a refused request on the sign-up day.
+ */
+export function signupFunnel(sql: Sql, now: number, admins: string): SignupFunnelDay[] {
+  const today = Math.floor(now / DAY_MS);
+  const counted = `p.status != 'blocked' AND ${notAdmin("p.github_id")}`;
+  // The oldest of the last DAILY_COHORTS sign-up days first, so the funnel reads only those days.
+  const days = sql
+    .exec<{ day: number }>(`SELECT DISTINCT p.admitted_at / ${DAY_MS} AS day FROM people p WHERE p.admitted_at < ? AND ${counted} ORDER BY 1 DESC LIMIT ?`, (today + 1) * DAY_MS, admins, DAILY_COHORTS)
+    .toArray();
+  if (days.length === 0) return [];
+  const first = days[days.length - 1]!.day;
+  return sql
+    .exec<{ day: number; signed_up: number; got: number; opened: number | null }>(
+      `SELECT p.admitted_at / ${DAY_MS} AS day, COUNT(*) AS signed_up, SUM(${HAD_TOKENS}) AS got,
+              SUM(${HAD_TOKENS} = 0 AND (
+                EXISTS (SELECT 1 FROM daily_activity d WHERE d.github_id = p.github_id AND d.day = p.admitted_at / ${DAY_MS} AND d.sessions > 0)
+                OR EXISTS (SELECT 1 FROM refused_days r WHERE r.github_id = p.github_id AND r.day = p.admitted_at / ${DAY_MS}))) AS opened
+       FROM people p WHERE p.admitted_at >= ? AND p.admitted_at < ? AND ${counted}
+       GROUP BY 1 ORDER BY 1 DESC`,
+      first * DAY_MS,
+      (today + 1) * DAY_MS,
+      admins,
+    )
+    .toArray()
+    .map((row) => ({ day: row.day * DAY_MS, signedUp: row.signed_up, gotTokens: row.got ?? 0, refused: row.signed_up - (row.got ?? 0), refusedOpened: row.opened ?? 0 }));
 }
 
 /**

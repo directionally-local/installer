@@ -330,7 +330,7 @@ describe("admin dashboard numbers", () => {
     // Tokens per person: carol and alice, coloured by level, never the admin.
     assert.match(html, /<title>carol: 995\.0k tokens this week \(Full\)<\/title>/);
     assert.match(html, /<title>alice: 2\.0k tokens this week \(Full\)<\/title>/);
-    assert.match(html, /<i class="c1"><\/i>Full<\/span><span><i class="c2"><\/i>Starter/);
+    assert.match(html, /<i class="c1"><\/i>Full<\/span><span><i class="c3"><\/i>Basic<\/span><span><i class="c2"><\/i>Starter/);
     assert.doesNotMatch(html, /owner: /);
     // Red flags: alice and carol reached their allowance this week; the line links to the full view's table.
     assert.match(html, /<li><a href="\/admin\?view=full#limits">Near weekly cap: alice, carol<\/a><\/li>/);
@@ -520,7 +520,7 @@ describe("admin dashboard daily retention", () => {
   it("says so when nobody has signed up", async () => {
     const service = await createService();
     const html = await (await service.request("GET", "/admin?view=simple", { headers: { cookie: await adminCookie(service) } })).text();
-    assert.match(html, /id="retention"[^>]*>\n<h2>Retention<\/h2>\n<p class="empty">No sign-ups yet\.<\/p>/);
+    assert.match(html, /id="retention"[^>]*>\n<h2>Retention<\/h2>\n<p class="caption">Counts only people who could use dl[^<]*<\/p>\n<p class="empty">No sign-ups with free tokens yet\.<\/p>/);
   });
 });
 
@@ -600,7 +600,7 @@ describe("admin dashboard install funnel", () => {
 describe("admin dashboard privacy", () => {
   // Columns that hold anything but counts, tokens, cost, time or who: never read by the dashboard.
   const FORBIDDEN = ["props", "session_id", "type", "model", "status", "received_at", "latency_ms", "note", "code_hash", "device_id", "old_value", "new_value", "changed_by_login"];
-  const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_timings", "download_daily", "install_daily"]);
+  const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_timings", "download_daily", "install_daily", "refused_days"]);
 
   // The abuse section reads network hashes, device ids, status and the admin log on purpose:
   // its queries carry ABUSE_QUERY_TAG and are held to ABUSE_COLUMNS instead.

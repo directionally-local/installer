@@ -4,14 +4,15 @@ import { ADMIN_ID, completion, createInvite, createService, MODEL, startBrowserF
 
 /**
  * Account levels: Full for accounts that look like working developers, Starter for everyone
- * else. Starter gets DeepSeek only and a small weekly allowance; it is never refused.
+ * else. Starter gets every model on a small weekly allowance; it is never refused. The basic
+ * level is off here (basic.test.ts covers it).
  */
 
 const NEW = "2026-10-20T00:00:00Z"; // 15 days before the harness clock
 const OLD = "2015-01-01T00:00:00Z";
 
 async function open(vars: Record<string, string> = {}): Promise<{ service: Service; admin: string }> {
-  const service = await createService({ OPEN_ADMISSION: "true", OPENAI_API_KEY: "sk-test", ...vars });
+  const service = await createService({ OPEN_ADMISSION: "true", OPENAI_API_KEY: "sk-test", BASIC_WEEKLY_TOKENS: "0", ...vars });
   const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
   return { service, admin };
 }
@@ -135,21 +136,19 @@ describe("what a Starter account gets", () => {
     return { service, token: access_token, admin };
   }
 
-  it("serves a GPT-6 request on DeepSeek with x-dl-fallback: starter, and charges the Starter allowance", async () => {
+  it("serves GPT-6 itself (every model), and charges the Starter allowance", async () => {
     const { service, token } = await starter();
     const before = (await (await service.request("GET", "/v1/me", { token })).json()) as { pools: Record<string, { usedThisWeek: number }> };
     const response = await chat(service, token, "gpt-6-luna");
     assert.equal(response.status, 200);
-    assert.equal(response.headers.get("x-dl-fallback"), "starter");
-    assert.equal(service.calls.luminal.length, 1);
-    assert.equal(service.calls.openai.length, 0);
+    assert.equal(response.headers.get("x-dl-fallback"), null);
+    assert.equal(service.calls.openai.length, 1);
+    assert.equal(service.calls.luminal.length, 0);
     const after = (await (await service.request("GET", "/v1/me", { token })).json()) as { pools: Record<string, { usedThisWeek: number }> };
     assert.ok(after.pools.luna!.usedThisWeek > before.pools.luna!.usedThisWeek, "the Starter allowance paid");
-    // DeepSeek itself gets no fallback header.
-    assert.equal((await chat(service, token, MODEL)).headers.get("x-dl-fallback"), null);
   });
 
-  it("gets 5M tokens a week on the Luna pool, and nothing on Sol or Astra", async () => {
+  it("gets 5M tokens a week in every pool, Sol and Astra at most their own, and the Starter dollar cap", async () => {
     const { service, token } = await starter();
     const me = (await (await service.request("GET", "/v1/me", { token })).json()) as {
       level: string;
@@ -162,8 +161,9 @@ describe("what a Starter account gets", () => {
     assert.equal(me.levelReason, "account_too_new");
     assert.deepEqual(me.thresholds, { minAccountAgeDays: 90, minPublicRepos: 3, minContributions: 50 });
     assert.equal(me.pools.luna!.tokensPerWeek, 5_000_000);
-    assert.equal(me.pools.sol!.tokensPerWeek, 0);
-    assert.equal(me.pools.astra!.tokensPerWeek, 0);
+    assert.equal(me.pools.sol!.tokensPerWeek, 5_000_000);
+    assert.equal(me.pools.astra!.tokensPerWeek, 3_000_000);
+    assert.equal((me as unknown as { allowance: { usdPerWeek: number } }).allowance.usdPerWeek, 0.5);
     assert.equal(me.signals.publicRepos, 0);
     // The person sees the public bar and its signals only.
     assert.deepEqual(Object.keys(me.signals).sort(), ["accountAgeDays", "checkedAt", "contributions", "followers", "publicRepos", "restrictedContributions"]);
@@ -171,10 +171,13 @@ describe("what a Starter account gets", () => {
 
   it("is promoted by an admin, and demoted again", async () => {
     const { service, token, admin } = await starter();
+    const level = async () => ((await (await service.request("GET", "/v1/me", { token })).json()) as { level: string; allowance: { tokensPerWeek: number } });
     assert.equal((await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "full" } })).status, 200);
-    assert.equal((await chat(service, token, "gpt-6-luna")).headers.get("x-dl-fallback"), null);
+    assert.equal((await level()).level, "full");
+    assert.equal((await level()).allowance.tokensPerWeek, 50_000_000);
     assert.equal((await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "starter" } })).status, 200);
-    assert.equal((await chat(service, token, "gpt-6-luna")).headers.get("x-dl-fallback"), "starter");
+    assert.equal((await level()).level, "starter");
+    assert.equal((await level()).allowance.tokensPerWeek, 5_000_000);
     assert.equal((await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "nope" } })).status, 400);
   });
 

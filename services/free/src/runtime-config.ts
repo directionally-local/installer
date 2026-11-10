@@ -46,8 +46,16 @@ export const RUNTIME_SETTINGS = {
   batchWindowDays: { kind: "count", env: "BATCH_WINDOW_DAYS" },
   /** Signed-up accounts in that window that make a batch (with 0 followers: Starter); 0 turns it off. */
   batchSize: { kind: "count", env: "BATCH_SIZE" },
-  /** A Starter account's weekly tokens (DeepSeek only). */
+  /** A Starter account's weekly tokens, every model; 0 for none. Batch-flagged accounts get none either way. */
   starterWeeklyTokens: { kind: "tokens", env: "STARTER_WEEKLY_TOKENS" },
+  /** A Starter account's weekly USD cap. */
+  starterWeeklyUsdCap: { kind: "usd", env: "STARTER_WEEKLY_USD_CAP" },
+  /** Below the public bar, accounts at least this many days old and not in a creation batch are basic. */
+  basicMinAccountAgeDays: { kind: "count", env: "BASIC_MIN_ACCOUNT_AGE_DAYS" },
+  /** A basic account's weekly tokens, every model; 0 turns the basic level off (Starter instead). */
+  basicWeeklyTokens: { kind: "tokens", env: "BASIC_WEEKLY_TOKENS" },
+  /** A basic account's weekly USD cap. */
+  basicWeeklyUsdCap: { kind: "usd", env: "BASIC_WEEKLY_USD_CAP" },
   /** New sign-ins one network gets a day before the rest are Starter. */
   networkSignupsPerDay: { kind: "count", env: "NETWORK_SIGNUPS_PER_DAY" },
   /** Inboxes and domains that can't sign up for the free tier. */

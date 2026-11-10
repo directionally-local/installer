@@ -59,8 +59,16 @@ export interface FreeConfig {
   batchWindowDays: number;
   /** Signed-up accounts in that window that make a batch; 0 turns it off (BATCH_SIZE). */
   batchSize: number;
-  /** A Starter account's weekly tokens (STARTER_WEEKLY_TOKENS): DeepSeek only. */
+  /** A Starter account's weekly tokens (STARTER_WEEKLY_TOKENS), of every model. 0: no free tokens. */
   starterWeeklyTokens: number;
+  /** A Starter account's weekly dollar cap (STARTER_WEEKLY_USD_CAP); undefined: tokens only. */
+  starterWeeklyUsdCap: number | undefined;
+  /** The basic level (admission.ts BasicRule) needs an account at least this old (BASIC_MIN_ACCOUNT_AGE_DAYS). */
+  basicMinAccountAgeDays: number;
+  /** A basic account's weekly tokens, of every model (BASIC_WEEKLY_TOKENS); 0 turns the level off. */
+  basicWeeklyTokens: number;
+  /** A basic account's weekly dollar cap (BASIC_WEEKLY_USD_CAP); undefined: tokens only. */
+  basicWeeklyUsdCap: number | undefined;
   /** New sign-ins one network gets a day before the rest are Starter (NETWORK_SIGNUPS_PER_DAY). */
   networkSignupsPerDay: number;
   /** Inboxes (`name@domain`) and domains (`@domain`) that can't sign up (BLOCKED_EMAILS, comma-separated). */
@@ -229,6 +237,10 @@ export const DEFAULTS = {
   batchWindowDays: 1,
   batchSize: 15,
   starterWeeklyTokens: 5_000_000,
+  starterWeeklyUsdCap: 0.5,
+  basicMinAccountAgeDays: 365,
+  basicWeeklyTokens: 10_000_000,
+  basicWeeklyUsdCap: 3,
   networkSignupsPerDay: 3,
   blockedEmails: [],
   domainSignupsPerDay: 5,
@@ -318,6 +330,10 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     batchWindowDays: whole(env.BATCH_WINDOW_DAYS, DEFAULTS.batchWindowDays, "BATCH_WINDOW_DAYS"),
     batchSize: whole(env.BATCH_SIZE, DEFAULTS.batchSize, "BATCH_SIZE"),
     starterWeeklyTokens: whole(env.STARTER_WEEKLY_TOKENS, DEFAULTS.starterWeeklyTokens, "STARTER_WEEKLY_TOKENS"),
+    starterWeeklyUsdCap: usd(env.STARTER_WEEKLY_USD_CAP, DEFAULTS.starterWeeklyUsdCap, "STARTER_WEEKLY_USD_CAP"),
+    basicMinAccountAgeDays: whole(env.BASIC_MIN_ACCOUNT_AGE_DAYS, DEFAULTS.basicMinAccountAgeDays, "BASIC_MIN_ACCOUNT_AGE_DAYS"),
+    basicWeeklyTokens: whole(env.BASIC_WEEKLY_TOKENS, DEFAULTS.basicWeeklyTokens, "BASIC_WEEKLY_TOKENS"),
+    basicWeeklyUsdCap: usd(env.BASIC_WEEKLY_USD_CAP, DEFAULTS.basicWeeklyUsdCap, "BASIC_WEEKLY_USD_CAP"),
     networkSignupsPerDay: whole(env.NETWORK_SIGNUPS_PER_DAY, DEFAULTS.networkSignupsPerDay, "NETWORK_SIGNUPS_PER_DAY"),
     blockedEmails: env.BLOCKED_EMAILS === undefined ? [...DEFAULTS.blockedEmails] : String(env.BLOCKED_EMAILS).split(",").map((v) => v.trim()).filter(Boolean),
     domainSignupsPerDay: whole(env.DOMAIN_SIGNUPS_PER_DAY, DEFAULTS.domainSignupsPerDay, "DOMAIN_SIGNUPS_PER_DAY"),

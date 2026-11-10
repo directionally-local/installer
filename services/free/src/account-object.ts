@@ -111,12 +111,13 @@ export interface Limits {
    */
   freeBlocked?: boolean;
   /**
-   * "starter" caps the Luna pool at `starterTokens` and zeroes Sol and Astra, so a Starter
-   * account gets DeepSeek only. Pro is unaffected.
+   * "basic" and "starter" put every pool at `levelTokens` (Sol and Astra at most their own
+   * fixed grants): every model, a smaller allowance. The dollar cap for the level comes in
+   * `weeklyUsd`. Pro is unaffected.
    */
   level?: Level;
-  /** A Starter account's weekly tokens (STARTER_WEEKLY_TOKENS). */
-  starterTokens?: number;
+  /** A basic or Starter account's weekly tokens (BASIC_WEEKLY_TOKENS or STARTER_WEEKLY_TOKENS; 0 for a batch-flagged Starter). */
+  levelTokens?: number;
 }
 
 export interface BillingState {
@@ -644,20 +645,23 @@ export class AccountObject extends DurableObject<AccountEnv> {
     for (const pool of POOLS) {
       const used = sql.exec<{ used: number }>("SELECT used FROM pool_usage WHERE week_start = ? AND pool = ?", start, pool).toArray()[0]?.used ?? 0;
       const reserved = sql.exec<{ total: number | null }>("SELECT SUM(amount) AS total FROM reservations WHERE pool = ? AND source = 'weekly'", pool).toArray()[0]?.total ?? 0;
-      // A Starter account gets DeepSeek only: the Luna pool at the Starter grant, nothing else.
-      // Pro replaces the level, as it replaces the free allowance.
-      const starter = limits.level === "starter" && plan !== "pro";
+      // A basic or Starter account gets every model on its level's smaller allowance: each pool
+      // at the level's tokens, Sol and Astra no more than their own grants. Pro replaces the
+      // level, as it replaces the free allowance.
+      const limited = (limits.level === "starter" || limits.level === "basic") && plan !== "pro";
+      const levelTokens = Math.max(0, limits.levelTokens ?? 0);
       const base =
         pool === "luna"
           ? plan === "pro"
             ? (limits.proTokensPerWeek ?? limits.weeklyTokens)
-            : starter
-              ? (limits.starterTokens ?? 5_000_000)
+            : limited
+              ? levelTokens
               : (row?.weekly_tokens ?? limits.weeklyTokens)
-          : starter
-            ? 0
+          : limited
+            ? Math.min(POOL_TOKENS[pool], levelTokens)
             : POOL_TOKENS[pool];
-      const tokensPerWeek = pool === "luna" && !starter ? base + bonus : base;
+      // The referral bonus is for Full only, as it was before the smaller levels had every model.
+      const tokensPerWeek = pool === "luna" && !limited ? base + bonus : base;
       out[pool] = { tokensPerWeek, usedThisWeek: used, reserved, remaining: Math.max(0, tokensPerWeek - used - reserved) };
     }
     return out;
