@@ -611,10 +611,10 @@ describe("dashboard additions", () => {
     const cookie = await adminCookie(service);
     let html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
     assert.doesNotMatch(html, /class="banner"/);
-    // The budget is the Luminal credit; the OpenRouter cash caps aren't shown as one.
-    assert.match(html, /Luminal credit used<b>\$0 <span class="muted">of \$2,000<\/span>/);
-    assert.match(html, /Credit this week<b>\$0 <span class="muted">of \$250<\/span>/);
-    assert.match(html, /Queue starts at<b>\$200 <span class="muted">80% of \$250<\/span>/);
+    // Spend is per provider; the OpenRouter cash caps aren't shown as a budget.
+    assert.match(html, /<tr><td>Luminal <span class="muted">\(no key\)<\/span><\/td><td class="l wrap">[^<]*<\/td><td class="used">\$0 <span class="muted">of \$2,000<\/span><svg[^]*?<\/svg><\/td><td>\$0 <span class="muted">free \$0 of \$250 budget<\/span><\/td>/);
+    // No credit provider has a key, so only OpenRouter cash can start the line (as shouldQueue does).
+    assert.match(html, /Waiting line starts at<b>–<\/b><span class="note">No OpenAI or Luminal key: credit spend doesn&#39;t start the line\. Free OpenRouter cash past \$200 this week also starts it\./);
     assert.doesNotMatch(html, /cash spend|weekly cap used|all-time cap/i);
 
     const referrer = await signUp(service, { id: 100, login: "ref", ip: "198.51.100.1" });
@@ -627,7 +627,7 @@ describe("dashboard additions", () => {
 
     html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
     assert.doesNotMatch(html, /class="banner"/);
-    assert.match(html, /Queue starts at<b>[^<]*<span[^>]*>[^<]*<\/span><\/b><span class="note">On: 1 waiting\./);
+    assert.match(html, /Waiting line starts at<b>–<\/b><span class="note">On: 1 waiting\. New open sign-ups join the line\./);
     assert.match(html, /Waiting now<b>1<\/b>/);
     assert.match(html, /Links used<b>1<\/b>/);
     assert.match(html, /Sign-ups via referral<b>1<\/b><span class="note">1 became weekly active/);

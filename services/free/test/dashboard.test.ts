@@ -368,7 +368,7 @@ describe("admin dashboard numbers", () => {
     assert.match(full, /<span class="who"><nav class="views" aria-label="Dashboard view"><a href="\/admin\?view=simple">Simple<\/a><a href="\/admin\?view=full" aria-current="page">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><\/nav>Signed in as/);
     // Every section of the full view is still there, in order.
     const headings = [...full.matchAll(/<h2>([^<]+)<\/h2>/g)].map((match) => match[1]);
-    assert.deepEqual(headings.slice(0, 3), ["Budget: Luminal credit", "Abuse", "Upstreams"]);
+    assert.deepEqual(headings.slice(0, 3), ["Spend", "Abuse", "Upstreams"]);
     for (const heading of ["Queue for free tokens", "Referrals", "Paid plans", "Funnel", "Weekly active developers", "Cohort retention", "Cost per user per week", "Who hit the limit", "Admin log"]) assert.ok(headings.includes(heading), heading);
     assert.match(full, /<form method="post" action="\/admin\/dashboard\/people\/100\/block">/);
     assert.doesNotMatch(full, /class="card/);

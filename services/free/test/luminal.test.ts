@@ -399,7 +399,7 @@ describe("upstream telemetry, dashboard and alerts", () => {
 
     const html = await (await service.request("GET", "/admin", { token: adminToken })).text();
     assert.match(html, /<h2>Upstreams<\/h2>/);
-    assert.match(html, /Luminal credit used<b>\$0\.\d+ <span class="muted">of \$10\.00<\/span>/);
+    assert.match(html, /<tr><td>Luminal<\/td><td class="l wrap">[^<]*<\/td><td class="used">\$0\.\d+ <span class="muted">of \$10\.00<\/span>/);
     assert.match(html, /aria-label="Luminal credit used against the balance"/);
     assert.match(html, /<td>Luminal<\/td><td>11<\/td><td>1 <span class="muted">\(9\.1%\)<\/span><\/td><td>5\.0 s<\/td><td>9\.0 s<\/td>/);
   });

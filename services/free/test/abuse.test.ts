@@ -230,17 +230,17 @@ describe("budget tiles and the serving upstream", () => {
   it("shows the upstream chooseUpstream picks, and none sensibly", async () => {
     const none = await createService({ OPENROUTER_API_KEY: "" });
     const html = await dashboard(none, await adminCookie(none));
-    assert.match(html, /Serving<b class="state">None \(no OPENAI_API_KEY, LUMINAL_API_KEY or OPENROUTER_API_KEY\)<\/b>/);
+    assert.match(html, /GPT-6 models go to<b class="state">nowhere<\/b>/);
+    assert.match(html, /DeepSeek goes to<b class="state">nowhere<\/b>/);
     assert.match(html, /State<b class="state">Not serving: no upstream key \(503 no_upstream\)<\/b>/);
-    assert.doesNotMatch(html, /queue watches OpenRouter spend/);
 
-    // Luminal serves even with primaryUpstream openrouter when there is no OpenRouter key.
+    // DeepSeek stays on Luminal with the routing setting on OpenRouter when there is no OpenRouter key.
     const luminal = await createService({ OPENROUTER_API_KEY: "", LUMINAL_API_KEY: "lum", PRIMARY_UPSTREAM: "openrouter" });
     const page = await dashboard(luminal, await adminCookie(luminal));
-    assert.match(page, /Serving<b class="state">Luminal<\/b>/);
+    assert.match(page, /DeepSeek goes to<b class="state">Luminal<\/b>/);
+    assert.match(page, /DeepSeek → <strong>Luminal<\/strong>/);
     assert.match(page, /State<b class="state">Serving<\/b>/);
-    // The same numbers as the daily digest: credit left of the balance, free credit of the weekly budget.
-    assert.match(page, /Luminal credit used<b>\$0 <span class="muted">of \$2,000<\/span><\/b>.*\$2,000 left\./s);
-    assert.match(page, /Credit this week<b>\$0 <span class="muted">of \$250<\/span>/);
+    // The same numbers as the daily digest: credit used of the balance, what is left, free credit of the weekly budget.
+    assert.match(page, /<tr><td>Luminal<\/td><td class="l wrap">DeepSeek V4\.1 Flash 1017; the GPT-6 fallback<\/td><td class="used">\$0 <span class="muted">of \$2,000<\/span><svg[^]*?<\/svg><\/td><td>\$0 <span class="muted">free \$0 of \$250 budget<\/span><\/td><td>\$2,000<\/td><\/tr>/);
   });
 });
