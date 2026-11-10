@@ -1,0 +1,22 @@
+-- GPU 0: NVIDIA RTX PRO 5000 Blackwell · 48935 MiB · driver 580.95.05 · CUDA 13.0
+-- Update strategy: side-by-side: the old model keeps serving while qwen-new starts (20 GB new + 20 GB old)
+.. Download and start qwen-new: vllm/vllm-openai:v0.20.0
+ok Download and start qwen-new: port 8001 · logs: docker logs -f dl-model-2
+.. Chat, tool call and JSON smoke tests: waiting for download and API readiness (up to 5 minutes)
+ok Chat, tool call and JSON smoke tests: 446.1 tokens/sec
+-- Comparison: old Qwen/Qwen3-4B: 9964.1 tok/s | new Qwen/Qwen3-4B-Instruct-2507: 446.1 tok/s
+-- Checks: old chat/tools/JSON ✓ ✓ ✓ | new chat/tools/JSON ✓ ✓ ✓
+ok Model serving: Qwen/Qwen3-4B-Instruct-2507 · http://127.0.0.1:8001/v1
+===SPLIT===
+[2m[tool write({"content": "hello from local vllm", "path": "/root/ap-task.txt"})][0m
+[2m[result: Created /root/ap-task.txt (21 chars).][0m
+The text "hello from local vllm" has been successfully written to /root/ap-task.txt.
+AP_EXIT=0
+===SPLIT===
+-- concurrency 1: 1 reqs · TTFT p50 0.069s · p95 0.069s · 126.3 tok/s decode
+-- concurrency 8: 8 reqs · TTFT p50 9.304s · p95 9.309s · 878.4 tok/s decode
+-- concurrency 32: 32 reqs · TTFT p50 0.149s · p95 0.154s · 3386.7 tok/s decode
+-- Prefix cache: 50.5% hit rate (from vLLM logs)
+BENCH_EXIT=0
+===SPLIT===
+2026-11-10T15-15-02-223Z-bench.log
