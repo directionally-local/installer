@@ -1,5 +1,5 @@
 /**
- * The emails the free tier sends to the people who use it, all four in one place so the copy is
+ * The emails the free tier sends to the people who use it, all of them in one place so the copy is
  * easy to edit. Keep it lowercase everywhere (subjects too), and use no em or en dashes and no
  * other dashes as punctuation: a test checks this file.
  *
@@ -10,7 +10,7 @@
  * When each one goes out is in user-email-send.ts.
  */
 
-export type UserEmailKind = "welcome" | "didnt_start" | "week_80" | "gone_quiet";
+export type UserEmailKind = "welcome" | "welcome_starter" | "didnt_start" | "week_80" | "gone_quiet";
 
 export interface UserEmailCopy {
   subject: string;
@@ -25,7 +25,7 @@ export const USER_EMAILS: Record<UserEmailKind, UserEmailCopy> = {
 
 sina here, i build dl.
 
-you're on the free tier now. every week you get gpt-6 and deepseek tokens on me, about $17 worth. it resets every monday.
+you're on the free tier now. every week you get gpt-6 and deepseek tokens on me, up to $20 worth. it resets every monday.
 
 three things worth trying first:
 - open dl in a repo and ask it how the project fits together
@@ -33,6 +33,20 @@ three things worth trying first:
 - ask it to write tests for one file
 
 if anything breaks or feels off, just reply to this. it comes straight to me and i read every one.
+
+sina`,
+  },
+
+  // 1b. The same moment, for a new sign-up below the bar for free tokens.
+  welcome_starter: {
+    subject: "you're in",
+    body: `hey,
+
+sina here, i build dl.
+
+you're signed in. free tokens are for github accounts over a year old with 100+ contributions in the last year, and yours doesn't meet that yet, so for now you'll need your own key: run /provider in dl.
+
+if you're a real dev building something, email contact@directionallylocal.com with your github username and what you're working on, and i'll sort you out with credits.
 
 sina`,
   },
@@ -60,7 +74,7 @@ sina`,
 
 you've used about 80% of this week's free tokens. honestly that's great, it means dl is doing real work for you.
 
-they reset on {resets}. if you need more before then, you can plug in your own key with /provider and keep going, or send a friend your link from /invite and you both get extra tokens.
+they reset on {resets}. if you need more before then, you can plug in your own key with /provider and keep going.
 
 if you're building something cool with it, reply and tell me. i'm curious.
 

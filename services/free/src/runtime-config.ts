@@ -88,7 +88,7 @@ export const RUNTIME_SETTINGS = {
   luminalWeeklyCreditUsd: { kind: "usd", env: "LUMINAL_WEEKLY_CREDIT_USD" },
   /** Seconds to wait for Luminal's first byte before a transient 503. */
   luminalFirstByteTimeoutSeconds: { kind: "seconds", env: "LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS" },
-  /** Emails to users (user-emails.ts) on or off; they also need RESEND_API_KEY. */
+  /** Emails to users (user-emails.ts) on or off; they also need the USER_EMAIL binding or RESEND_API_KEY. */
   userEmails: { kind: "flag", env: "USER_EMAILS" },
   /** Free tokens inside dl only: chat requests without session events are refused (app.ts). */
   dlOnly: { kind: "flag", env: "DL_ONLY" },

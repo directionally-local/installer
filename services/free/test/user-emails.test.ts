@@ -106,6 +106,21 @@ describe("emails to users: welcome", () => {
     assert.equal(s.calls.resend.length, 1);
   });
 
+  it("tells a sign-up below the bar, with no Starter tokens, that they need a key or can ask for credits", async () => {
+    const s = await service({ STARTER_WEEKLY_TOKENS: "0", FULL_MIN_ACCOUNT_AGE_DAYS: "365", FULL_MIN_CONTRIBUTIONS: "100", FULL_MIN_PUBLIC_REPOS: "100000" });
+    await startBrowserFlow(s.request, { id: 210, login: "newbie", email: "newbie@work.example", createdAt: "2026-10-01T00:00:00Z", publicRepos: 0, contributions: 3 });
+    assert.deepEqual(sentTo(s), ["newbie@work.example"]);
+    const text = String(s.calls.resend[0]!.body.text);
+    assert.match(text, /\/provider/);
+    assert.match(text, /contact@directionallylocal\.com/);
+    assert.doesNotMatch(text, /\$20 worth/, "no promise of free tokens");
+    assert.equal(s.calls.resend[0]!.headers["idempotency-key"], "dl-user-email-welcome_starter-210-once");
+
+    // And no "did something get in the way?" later: "pick free" wouldn't help them.
+    await scheduled(s, NOW + 2 * DAY);
+    assert.equal(s.calls.resend.length, 1);
+  });
+
   it("doesn't go to admins, or to people who signed up before and only now give an email", async () => {
     const s = await service();
     await s.signIn({ id: ADMIN_ID, login: "owner" });

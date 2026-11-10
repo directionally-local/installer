@@ -184,7 +184,11 @@ export interface Service {
     stripe: Array<{ path: string; form: URLSearchParams; headers: Record<string, string> }>;
     /** Calls to Resend (https://api.resend.com/emails): JSON body and headers. Nothing leaves the process. */
     resend: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
+    /** Messages sent through the fake USER_EMAIL binding (Cloudflare Email Service, with `userEmail: true`). */
+    userEmail: Array<Record<string, unknown>>;
   };
+  /** Answers sends through the fake USER_EMAIL binding (default: `{messageId}`); throw to refuse one. */
+  setUserEmail(handler: (message: Record<string, unknown>) => { messageId: string } | Promise<{ messageId: string }>): void;
   /** Answers calls to Resend (default: 200 with an id). */
   setResend(handler: (body: Record<string, unknown>) => Response | Promise<Response>): void;
   /** Answers calls to api.stripe.com (default: a Checkout or portal session with a URL). */
@@ -311,7 +315,7 @@ export function sse(chunks: string[], options: { split?: boolean } = {}): Respon
   return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
-export async function createService(vars: Record<string, string> = {}, options: { email?: boolean } = {}): Promise<Service> {
+export async function createService(vars: Record<string, string> = {}, options: { email?: boolean; userEmail?: boolean } = {}): Promise<Service> {
   const [{ createHandler }, { AuthObject }, { DirectoryObject }, { AccountObject }, { RateLimiterObject }] = await Promise.all([
     import("../src/app.js"),
     import("../src/auth-object.js"),
@@ -338,12 +342,21 @@ export async function createService(vars: Record<string, string> = {}, options: 
     ...namespaces,
   };
   const clock = { now: NOW };
-  const calls: Service["calls"] = { openRouter: [], luminal: [], openai: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [], resend: [] };
+  const calls: Service["calls"] = { openRouter: [], luminal: [], openai: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [], resend: [], userEmail: [] };
   let resend = (_body: Record<string, unknown>): Response | Promise<Response> => Response.json({ id: `email-${calls.resend.length}` });
   let stripe = (path: string, _form?: URLSearchParams): Response | Promise<Response> =>
     path === "/v1/checkout/sessions"
       ? Response.json({ id: `cs_test_${calls.stripe.length}`, url: `https://checkout.stripe.com/c/pay/cs_test_${calls.stripe.length}` })
       : Response.json({ id: "bps_test_1", url: "https://billing.stripe.com/p/session/test_1" });
+  let userEmail = (_message: Record<string, unknown>): { messageId: string } | Promise<{ messageId: string }> => ({ messageId: `cf-${calls.userEmail.length}` });
+  if (options.userEmail) {
+    envRef.env.USER_EMAIL = {
+      async send(message: Record<string, unknown>) {
+        calls.userEmail.push(structuredClone(message));
+        return userEmail(message);
+      },
+    };
+  }
   if (options.email) {
     envRef.env.ALERT_EMAIL = {
       async send(message: { from: string; to: string; raw: string }) {
@@ -506,6 +519,9 @@ export async function createService(vars: Record<string, string> = {}, options: 
     },
     setResend: (next) => {
       resend = next;
+    },
+    setUserEmail: (next) => {
+      userEmail = next;
     },
     request,
     signIn,

@@ -618,7 +618,7 @@ with who made it and when.
 | `luminalCreditUsd` | `LUMINAL_CREDIT_USD` | 2000 |
 | `luminalWeeklyCreditUsd` | `LUMINAL_WEEKLY_CREDIT_USD` | 250; `none` for no weekly credit budget |
 | `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
-| `userEmails` | `USER_EMAILS` | true (sends only with `RESEND_API_KEY`) |
+| `userEmails` | `USER_EMAILS` | true (sends only with the `USER_EMAIL` binding or `RESEND_API_KEY`) |
 | `dlOnly` | `DL_ONLY` | true (free tokens inside dl only; see below) |
 
 Env only: `REFERRAL_LINK_BASE` (`https://dl.new/r/`), the offers above, `ALERT_EMAIL_TO`,
@@ -640,9 +640,17 @@ curl -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json'
 
 ## Emails to users
 
-Four plain-text emails to the people on the free tier, sent through Resend
-(`POST https://api.resend.com/emails`). The copy is in `src/user-emails.ts`; when each goes
-out is in `src/user-email-send.ts`.
+Four plain-text emails to the people on the free tier. The copy is in `src/user-emails.ts`;
+when each goes out is in `src/user-email-send.ts`. The provider:
+
+1. **Cloudflare Email Service**, when the `send_email` binding `USER_EMAIL` exists (the
+   Cloudflare config declares it: `"send_email": [..., { "name": "USER_EMAIL" }]`). It sends
+   with the binding's `send({from, to, replyTo, subject, text, headers})`
+   ([Workers API](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/)),
+   from `directionallylocal.com`, which must be onboarded in Email Service. Needs the Workers
+   Paid plan. Off Cloudflare the binding is simply absent.
+2. Otherwise **Resend** (`POST https://api.resend.com/emails`) when `RESEND_API_KEY` is set.
+3. Otherwise nothing is sent and nothing fails.
 
 | email | when |
 |---|---|
@@ -655,8 +663,9 @@ Only to people with an email who haven't pressed stop; never to admins (unless
 `USER_EMAILS_TO_ADMINS=true`, for testing); at most one email per person per UTC day; each
 kind once per person, the weekly one once per week. Nobody still waiting in the queue gets the
 welcome or the didn't-start email. Every send is recorded in the Directory's `user_emails`
-table before Resend is called, and Resend gets an `Idempotency-Key`, so nothing goes twice
-across retries or deploys. A failed send is retried once, by the next daily run (01:00 UTC);
+table before the provider is called and marked sent or failed after it, so nothing goes twice
+across retries or deploys (Resend also gets an `Idempotency-Key`; Email Service has none, so a
+crash between the send and the mark could, rarely, repeat one email on the retry). A failed send is retried once, by the next daily run (01:00 UTC);
 failures are logged as counts only.
 
 Each email ends with a stop link, `/email/stop?u=<github id>&t=<hmac>` (an HMAC of the id with
@@ -666,15 +675,47 @@ same URL. GET shows a page with one button; POST (the button, or a mail app's on
 
 | env | default |
 |---|---|
-| `RESEND_API_KEY` (secret) | unset: nothing is sent and nothing fails |
+| `USER_EMAIL` (binding) | absent: Resend, if `RESEND_API_KEY` is set |
+| `RESEND_API_KEY` (secret) | unset (and no binding): nothing is sent and nothing fails |
 | `EMAIL_FROM` | `sina <sina@directionallylocal.com>` |
 | `EMAIL_REPLY_TO` | `contact@directionallylocal.com` |
 | `USER_EMAILS` (also the runtime setting `userEmails`) | true |
 | `USER_EMAILS_TO_ADMINS` | false |
 
-Before anything is delivered, `directionallylocal.com` must be verified in Resend (its SPF and
-DKIM DNS records). To stop every email without a deploy:
-`POST /admin/config {"userEmails": false}`.
+With Resend, `directionallylocal.com` must be verified in Resend (its SPF and DKIM DNS
+records). To stop every email without a deploy: `POST /admin/config {"userEmails": false}`.
+
+### Test email (admins)
+
+`POST /admin/emails/test {"kind": "welcome" | "didnt_start" | "week_80" | "gone_quiet", "to": "<address>"}`
+sends one email of that kind to `to`, exactly as a person would get it (copy, sender, Reply-To,
+headers, provider), with the calling admin's own stop link. It records nothing for anyone and
+works while `userEmails` is off. Answers `{sent, provider, messageId}`, or 502 with the
+provider's error code (for example `E_SENDER_NOT_VERIFIED`).
+
+### Broadcasts (admins)
+
+```sh
+curl -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"subject": "a quick check-in", "text": "hey,\n\nhow is dl going?\n\nsina",
+       "audience": "all", "signedUpFrom": "2026-11-01", "signedUpTo": "2026-11-07", "dryRun": true}' \
+  https://free.example.com/admin/emails/broadcast
+```
+
+A one-off email to active people of a level (`full`, `starter` or `all`) who signed up in the
+range (`people.admitted_at`; a plain date includes that whole day). Never to blocked or
+suspended accounts, people who pressed stop, people with no email, or admins (unless
+`USER_EMAILS_TO_ADMINS`). The text gets the same stop footer as every user email, and the
+`List-Unsubscribe` headers. The copy must be lowercase outside URLs and addresses, with no em or
+en dashes, or the call is refused. `dryRun` is required: `true` answers `{count,
+waitingForTomorrow, sample}` (3 recipients) and sends nothing.
+
+The broadcast's id is a hash of the subject and text, recorded per person in `user_emails`
+(kind `broadcast`), so calling again never sends the same message to anyone twice, whatever the
+filters. The one-a-day cap applies: people who had another email today wait for a call
+tomorrow. A call sends at most 100, one every 600 ms, and stops at the provider's rate or
+daily limit (`stoppedBy`); call again for the `remaining` ones, failed ones included (3
+attempts each). Refused while `userEmails` is off.
 
 ## What counts against the weekly allowance
 

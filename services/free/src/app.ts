@@ -10,7 +10,7 @@ import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
 import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, LevelSignalRow, PersonState, PersonStatus, RequestRecord } from "./directory-object.js";
 import { createCheckout, createPortal, githubIdFrom, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
-import { deliverAlerts, pauseAlert, sendEmail, type Alert, type EmailBinding, type ServingContext, type UpstreamOutcome } from "./alerts.js";
+import { deliverAlerts, isHeaderSafeAddress, pauseAlert, sendEmail, type Alert, type EmailBinding, type ServingContext, type UpstreamOutcome } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
 import { normalizeReferralCode, referralLink } from "./referrals.js";
 import { networkOf, rateLimitNetwork } from "./network.js";
@@ -66,8 +66,22 @@ import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-con
 import { meterStream } from "./sse.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
 import { DAY_MS, isoDay, weekEnd, weekStart } from "./week.js";
-import { deliverUserEmail, EMAIL_STOP_BASE, logUserEmails, userEmailsOn, verifyStopToken, weekMostlyUsed, type UserEmailStore } from "./user-email-send.js";
-import type { UserEmailKind } from "./user-emails.js";
+import {
+  deliverUserEmail,
+  EMAIL_STOP_BASE,
+  logUserEmails,
+  sendPlainEmail,
+  stopUrl,
+  userEmailsOn,
+  userEmailTransport,
+  verifyStopToken,
+  weekMostlyUsed,
+  type UserEmailBinding,
+  type UserEmailStore,
+  type UserEmailTransport,
+} from "./user-email-send.js";
+import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind } from "./user-emails.js";
+import { BROADCAST_BATCH, broadcastBody, broadcastId, parseBroadcast } from "./broadcast.js";
 
 /**
  * The free managed tier's HTTP surface: device-flow sign-in with GitHub, the account and
@@ -211,7 +225,7 @@ export interface Env {
   OPENROUTER_PRICE_OUTPUT?: string;
   LUMINAL_CREDIT_USD?: string;
   LUMINAL_WEEKLY_CREDIT_USD?: string;
-  /** A secret: Resend's API key for emails to users. Without it none are sent. Never logged. */
+  /** A secret: Resend's API key for emails to users, when USER_EMAIL isn't bound. Never logged. */
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
   EMAIL_REPLY_TO?: string;
@@ -220,6 +234,11 @@ export interface Env {
   DL_ONLY?: string;
   /** Cloudflare's send_email binding for alert email; optional (absent off Cloudflare). */
   ALERT_EMAIL?: EmailBinding;
+  /**
+   * Cloudflare Email Service's send_email binding for emails to users; optional (absent off
+   * Cloudflare). When it exists it is used instead of Resend.
+   */
+  USER_EMAIL?: UserEmailBinding;
   AUTH: DurableObjectNamespace<AuthObject>;
   DIRECTORY: DurableObjectNamespace<DirectoryObject>;
   ACCOUNT: DurableObjectNamespace<AccountObject>;
@@ -231,7 +250,7 @@ export interface HandlerOptions {
   now?: () => number;
   /** Outbound fetch (OpenRouter and GitHub), for tests. */
   fetch?: Fetch;
-  /** The pause between emails to users in the daily run (Resend allows 2 requests a second); tests set 0. */
+  /** The pause between emails to users in the daily run and a broadcast (Resend allows 2 requests a second); tests set 0. */
   emailGapMs?: number;
 }
 
@@ -253,6 +272,8 @@ interface Ctx {
   base: string;
   /** This isolate's last /v1/status answer (see `status`). */
   statusCache: { value?: FreeStatus; at: number };
+  /** The pause between emails to users (HandlerOptions.emailGapMs). */
+  emailGapMs: number;
 }
 
 /** The daily digest's cron: 01:00 UTC, 09:00 in Singapore. Must match `triggers.crons` in both wrangler configs. */
@@ -266,6 +287,12 @@ export interface ScheduledController {
   scheduledTime: number;
 }
 
+/**
+ * The default pause between emails to users: Resend allows 2 requests a second. Email Service
+ * publishes no per-second rate (only a daily quota that grows), so the same pace is used for it.
+ */
+const EMAIL_GAP_MS = 600;
+
 export function createHandler(options: HandlerOptions = {}): {
   fetch(request: Request, env: Env): Promise<Response>;
   scheduled(controller: ScheduledController, env: Env): Promise<void>;
@@ -273,6 +300,7 @@ export function createHandler(options: HandlerOptions = {}): {
   const now = options.now ?? (() => Date.now());
   const fetcher: Fetch = options.fetch ?? ((input, init) => fetch(input, init));
   const statusCache: Ctx["statusCache"] = { at: 0 };
+  const emailGapMs = options.emailGapMs ?? EMAIL_GAP_MS;
   return {
     /**
      * Cron triggers. The only one is the daily digest (DIGEST_CRON); the weekly queue needs
@@ -289,7 +317,7 @@ export function createHandler(options: HandlerOptions = {}): {
       const digest = await env.DIRECTORY.getByName("directory").dailyDigest(at, policyOf(config), config.paused);
       if (digest) await deliver({ config, env, fetch: fetcher, base: config.publicUrl ?? DEFAULT_PUBLIC_URL, now }, [digest]);
       try {
-        await scheduledUserEmails(env, config, fetcher, now(), options.emailGapMs ?? 600);
+        await scheduledUserEmails(env, config, fetcher, now(), emailGapMs);
       } catch (error) {
         console.error("user emails (daily): run failed", error instanceof Error ? error.name : "error");
       }
@@ -304,7 +332,7 @@ export function createHandler(options: HandlerOptions = {}): {
       }
       const url = new URL(request.url);
       const ip = clientIp(request);
-      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin, statusCache };
+      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin, statusCache, emailGapMs };
       return route(ctx);
     },
   };
@@ -661,12 +689,18 @@ function pausedError(headers: Record<string, string> = {}): Response {
 
 // ─── Emails to users (user-email-send.ts) ────────────────────────────────────
 
+/** The provider for emails to users: the USER_EMAIL binding, else Resend, else none. */
+function userEmailVia(c: Pick<Ctx, "env" | "config" | "fetch">): UserEmailTransport | undefined {
+  return userEmailTransport(c.env.USER_EMAIL, c.config, c.fetch);
+}
+
 /** Sends one email to a user if it should go. Never throws and never fails the request. */
 async function userEmail(c: Ctx, config: FreeConfig, kind: UserEmailKind, githubId: number, period: string): Promise<void> {
-  if (!userEmailsOn(config)) return;
+  const transport = userEmailVia(c);
+  if (!userEmailsOn(config, transport)) return;
   const outcome = await deliverUserEmail({
     store: directory(c) as unknown as UserEmailStore,
-    fetch: c.fetch,
+    transport,
     config,
     signingKey: await signingKey(c.config),
     base: c.config.publicUrl ?? EMAIL_STOP_BASE,
@@ -683,10 +717,11 @@ async function userEmail(c: Ctx, config: FreeConfig, kind: UserEmailKind, github
  * The runtime setting `userEmails` applies (the admin overrides are read here, as a request would).
  */
 async function scheduledUserEmails(env: Env, envConfig: FreeConfig, fetcher: Fetch, now: number, gapMs: number): Promise<void> {
-  if (!envConfig.resendApiKey) return;
+  const transport = userEmailVia({ env, config: envConfig, fetch: fetcher });
+  if (!transport) return;
   const store = env.DIRECTORY.getByName("directory");
   const config = applyOverrides(envConfig, await store.overrides());
-  if (!userEmailsOn(config)) return;
+  if (!userEmailsOn(config, transport)) return;
   const candidates = await store.userEmailCandidates(now);
   const jobs: Array<{ kind: UserEmailKind; githubId: number; period: string; retry?: boolean }> = [
     ...candidates.retries.map((job) => ({ ...job, retry: true })),
@@ -698,7 +733,7 @@ async function scheduledUserEmails(env: Env, envConfig: FreeConfig, fetcher: Fet
   for (const job of jobs.slice(0, MAX_DAILY_USER_EMAILS)) {
     const outcome = await deliverUserEmail({
       store: store as unknown as UserEmailStore,
-      fetch: fetcher,
+      transport,
       config,
       signingKey: key,
       base: config.publicUrl ?? EMAIL_STOP_BASE,
@@ -1064,7 +1099,12 @@ async function deviceDetails(c: Ctx): Promise<Response> {
   const saved = await directory(c).setEmail(found.githubId, email, updates, c.now());
   // The welcome email, for a new sign-up only: nobody was in the Directory before this step.
   // Not for someone still waiting in line for free tokens: the Directory checks.
-  if (saved && !person) await userEmail(c, (await runtime(c)).config, "welcome", found.githubId, "");
+  if (saved && !person) {
+    const config = (await runtime(c)).config;
+    // Below the bar with no Starter tokens: a welcome that says so and where to ask for credits.
+    const kind = level.level === "starter" && config.starterWeeklyTokens <= 0 ? "welcome_starter" : "welcome";
+    await userEmail(c, config, kind, found.githubId, "");
+  }
   return response;
 }
 
@@ -1888,7 +1928,7 @@ async function chat(c: Ctx): Promise<Response> {
     };
     await alert(c, await directory(c).recordRequest(record, policyOf(gate.config), servingContext(c, gate.config)));
     // Most of the week's free tokens used: one email a week, on the settlement that crossed 80%.
-    if (!settled.paid && !isAdmin && userEmailsOn(gate.config) && weekMostlyUsed(settled.allowance)) {
+    if (!settled.paid && !isAdmin && userEmailsOn(gate.config, userEmailVia(c)) && weekMostlyUsed(settled.allowance)) {
       await userEmail(c, gate.config, "week_80", identity.githubId, String(weekStart(c.now())));
     }
     return settled.allowance;
@@ -2308,6 +2348,8 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
   const actor = { githubId: identity.githubId, login: identity.login, now };
 
   if (method === "GET" && rest === "metrics") return adminMetrics(c);
+  if (method === "POST" && rest === "emails/test") return adminTestEmail(c, identity.githubId);
+  if (method === "POST" && rest === "emails/broadcast") return adminBroadcast(c, config);
   if (method === "GET" && rest === "spend") {
     const spend = await directory(c).spend(now);
     return json({
@@ -2491,6 +2533,95 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     }
   }
   return apiError(404, "not_found", `${method} /admin/${rest} isn't a route.`);
+}
+
+/**
+ * POST /admin/emails/test {kind, to}: one email to users of `kind`, exactly as a person would get
+ * it (copy, sender, Reply-To, headers, provider), sent to `to`. Its stop link is the calling
+ * admin's own. Nothing about any person changes: no user_emails row, no one-a-day cap. It works
+ * while the `userEmails` setting is off, so the owner can look before turning them on.
+ */
+async function adminTestEmail(c: Ctx, adminId: number): Promise<Response> {
+  const body = (await readJson(c)) ?? {};
+  const kinds = Object.keys(USER_EMAILS) as UserEmailKind[];
+  const kind = body.kind as UserEmailKind;
+  const to = typeof body.to === "string" ? body.to.trim() : "";
+  if (!kinds.includes(kind) || !isHeaderSafeAddress(to)) return apiError(400, "invalid_request", `Send {kind, to}: kind is one of ${kinds.join(", ")}; to is one email address.`);
+  const transport = userEmailVia(c);
+  if (!transport) return apiError(503, "emails_unavailable", "No email provider: bind USER_EMAIL (Cloudflare Email Service) or set RESEND_API_KEY.");
+  const unsubscribeUrl = await stopUrl(c.config.publicUrl ?? EMAIL_STOP_BASE, await signingKey(c.config), adminId);
+  const email = renderUserEmail(kind, { resets: resetsText(weekEnd(c.now())), unsubscribeUrl });
+  const outcome = await sendPlainEmail(transport, c.config, { to, subject: email.subject, text: email.body, unsubscribeUrl, idempotencyKey: `dl-test-email-${crypto.randomUUID()}` });
+  if (!outcome.ok) return apiError(502, "email_failed", `The provider refused it, code ${outcome.code ?? "error"}.`, { provider: transport.provider, code: outcome.code ?? "error" });
+  return json({ sent: true, provider: transport.provider, kind, to, messageId: outcome.messageId ?? null });
+}
+
+/**
+ * POST /admin/emails/broadcast {subject, text, audience, signedUpFrom?, signedUpTo?, dryRun}: a
+ * one-off email, see broadcast.ts, to active people of the audience's level who signed up in the
+ * range. Never to blocked or suspended accounts, people who pressed stop, or admins; each gets the
+ * stop link and the List-Unsubscribe headers. The broadcast's id (a hash of subject and text) is
+ * recorded per person, so a retried call never sends twice; the one-a-day cap applies, and
+ * people already emailed today are left for a call tomorrow. At most BROADCAST_BATCH sends per
+ * call, paced like the daily run; call again for the rest. dryRun sends nothing.
+ */
+async function adminBroadcast(c: Ctx, config: FreeConfig): Promise<Response> {
+  const body = await readJson(c);
+  const parsed = parseBroadcast(body ?? {});
+  if (!parsed.ok) return apiError(400, "invalid_request", parsed.message);
+  const request = parsed.value;
+  const transport = userEmailVia(c);
+  if (!request.dryRun && !transport) return apiError(503, "emails_unavailable", "No email provider: bind USER_EMAIL (Cloudflare Email Service) or set RESEND_API_KEY.");
+  if (!request.dryRun && !config.userEmails) return apiError(409, "emails_off", "Emails to users are off (the userEmails setting).");
+  const id = await broadcastId(request.subject, request.text);
+  const filter = { adminIds: [...c.config.adminGithubIds], includeAdmins: config.userEmailsToAdmins };
+  const audience = await directory(c).broadcastAudience({ id, audience: request.audience, from: request.from, to: request.to, now: c.now(), ...filter });
+  const ready = audience.filter((person) => !person.emailedToday);
+  const waiting = audience.length - ready.length;
+  if (request.dryRun) {
+    return json({
+      dryRun: true,
+      id,
+      provider: transport?.provider ?? null,
+      count: ready.length,
+      waitingForTomorrow: waiting,
+      sample: ready.slice(0, 3).map((person) => ({ githubId: person.githubId, login: person.login, address: person.email })),
+    });
+  }
+  const key = await signingKey(c.config);
+  const base = c.config.publicUrl ?? EMAIL_STOP_BASE;
+  let sent = 0;
+  let failed = 0;
+  let skipped = 0;
+  let stoppedBy: string | null = null;
+  const batch = ready.slice(0, BROADCAST_BATCH);
+  for (const [index, person] of batch.entries()) {
+    const claim = await directory(c).claimBroadcast({ githubId: person.githubId, id, now: c.now(), ...filter });
+    if (!claim) {
+      skipped++;
+      continue;
+    }
+    const unsubscribeUrl = await stopUrl(base, key, claim.githubId);
+    const outcome = await sendPlainEmail(transport!, c.config, {
+      to: claim.email,
+      subject: request.subject,
+      text: broadcastBody(request.text, unsubscribeUrl),
+      unsubscribeUrl,
+      idempotencyKey: `dl-broadcast-${id}-${claim.githubId}`,
+    });
+    await directory(c).finishUserEmail({ githubId: claim.githubId, kind: "broadcast", period: id, ok: outcome.ok, now: c.now() });
+    if (outcome.ok) sent++;
+    else failed++;
+    // The provider's rate or daily limit: stop here; the rest go on a later call.
+    if (outcome.code === "E_RATE_LIMIT_EXCEEDED" || outcome.code === "E_DAILY_LIMIT_EXCEEDED" || outcome.code === "http_429") {
+      stoppedBy = outcome.code;
+      break;
+    }
+    if (index < batch.length - 1 && c.emailGapMs > 0) await new Promise((resolve) => setTimeout(resolve, c.emailGapMs));
+  }
+  if (failed > 0) console.error(`user emails (broadcast): ${sent} sent, ${failed} failed`);
+  else if (sent > 0) console.log(`user emails (broadcast): ${sent} sent`);
+  return json({ dryRun: false, id, provider: transport!.provider, sent, failed, skipped, remaining: ready.length - sent - skipped, waitingForTomorrow: waiting, stoppedBy });
 }
 
 /**
