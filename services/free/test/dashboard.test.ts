@@ -415,6 +415,109 @@ describe("admin dashboard numbers", () => {
   });
 });
 
+describe("admin dashboard daily retention", () => {
+  /**
+   * NOW is Wednesday 2026-11-04 12:00 UTC. Sign-up day 10-20: alice (D0, D1, D14), bob (D2 only),
+   * dave (never), carol (blocked, D1) and the admin (every day). Sign-up day 11-02: erin (D0 and
+   * D2, today; a session event but no request on D1). frank signed up 10-25 and is blocked.
+   */
+  async function retentionScenario(): Promise<{ service: Service; cookie: string }> {
+    const service = await createService();
+    const directory = service.directory();
+    const admit = (githubId: number, login: string, when: string, isAdmin = false) =>
+      directory.admit({ githubId, login, isAdmin, inviteCode: undefined, clientDeviceId: null, accountTooNew: false, openAdmission: true, maxActive: 100, now: at(when) });
+    const request = (githubId: number, when: string) =>
+      directory.recordRequest({
+        githubId,
+        isAdmin: githubId === ADMIN_ID,
+        at: at(when),
+        model: MODEL,
+        promptTokens: 1000,
+        completionTokens: 0,
+        cachedTokens: 0,
+        chargedTokens: 1000,
+        costUsd: 0.01,
+        status: "ok",
+        latencyMs: 100,
+      });
+    await admit(ADMIN_ID, "owner", "2026-10-20T08:00:00Z", true);
+    await admit(100, "alice", "2026-10-20T09:00:00Z");
+    await admit(101, "bob", "2026-10-20T23:30:00Z");
+    await admit(102, "carol", "2026-10-20T10:00:00Z");
+    await admit(103, "dave", "2026-10-20T11:00:00Z");
+    await admit(104, "erin", "2026-11-02T07:00:00Z");
+    await admit(105, "frank", "2026-10-25T07:00:00Z");
+    await request(100, "2026-10-20T09:30:00Z");
+    await request(100, "2026-10-21");
+    await request(100, "2026-11-03");
+    await request(101, "2026-10-22");
+    await request(102, "2026-10-21");
+    await request(105, "2026-10-25T08:00:00Z");
+    await request(104, "2026-11-02T08:00:00Z");
+    await directory.recordEvents(104, [{ id: "r1", type: "session.start", sessionId: "s", at: at("2026-11-03"), props: {} }], NOW);
+    await request(104, "2026-11-04T10:00:00Z");
+    for (let day = at("2026-10-20"); day <= NOW; day += DAY) await request(ADMIN_ID, new Date(day).toISOString());
+    const db = directoryEntry(service).state.db;
+    db.prepare("UPDATE people SET status = 'blocked' WHERE github_id IN (102, 105)").run();
+    return { service, cookie: await adminCookie(service) };
+  }
+
+  it("computes the share active on each day after sign-up, blank for days to come, without admins or blocked accounts", async () => {
+    const { service, cookie } = await retentionScenario();
+    const rows = await csv(service, cookie, "retention-daily");
+    assert.deepEqual(Object.keys(rows[0]!), ["cohort", "size", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d14"]);
+    const third = String(Math.round((1 / 3) * 1e6) / 1e6);
+    assert.deepEqual(
+      rows.map((row) => Object.values(row)),
+      [
+        ["2026-11-02", "1", "1", "0", "1", "", "", "", "", "", ""],
+        ["2026-10-20", "3", third, third, third, "0", "0", "0", "0", "0", third],
+      ],
+    );
+
+    const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    const metrics = (await (await service.request("GET", "/admin/metrics", { token: adminToken })).json()) as { cohorts: Array<{ day: string; size: number; d: Record<string, number | null> }> };
+    assert.deepEqual(metrics.cohorts, [
+      { day: "2026-11-02", size: 1, d: { 0: 1, 1: 0, 2: 1, 3: null, 4: null, 5: null, 6: null, 7: null, 14: null } },
+      { day: "2026-10-20", size: 3, d: { 0: 0.3333, 1: 0.3333, 2: 0.3333, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 14: 0.3333 } },
+    ]);
+
+    const full = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    assert.match(full, /<h2>Daily retention<\/h2><a href="\/admin\/dashboard\/retention-daily\.csv" download>CSV<\/a>/);
+    assert.match(full, /<tr><td>Mon 2026-11-02<\/td><td>1<\/td><td title="1 of 1">100% <span class="muted">\(1\)<\/span><\/td><td title="0 of 1">0%/);
+  });
+
+  it("draws the retention card: a triangle of cells with tooltips, D14 only in the wide drawing, and the weighted D1 and D7", async () => {
+    const { service, cookie } = await retentionScenario();
+    const html = await (await service.request("GET", "/admin?view=simple", { headers: { cookie } })).text();
+    assert.doesNotMatch(html, /<script|\sstyle="/i);
+    assert.match(html, /<section class="card span3" id="retention" aria-label="Retention">\n<h2>Retention<\/h2>/);
+    const [wide, narrow] = [...html.matchAll(/<svg class="chart heat (wide|narrow)"[\s\S]*?<\/svg>/g)].map((match) => match[0]);
+    assert.ok(wide && narrow);
+    const cells = (svg: string) => [...svg.matchAll(/<title>([^<]* · D\d+ [^<]*)<\/title>/g)].map((match) => match[1]);
+    // Newest first; erin's cohort has D0..D2 so far, 10-20 has all nine (D14 included).
+    assert.deepEqual(cells(wide), [
+      "Nov 2 · 1 person · D0 100% (1)",
+      "Nov 2 · 1 person · D1 0% (0)",
+      "Nov 2 · 1 person · D2 100% (1)",
+      ...[0, 1, 2].map((d) => `Oct 20 · 3 people · D${d} 33% (1)`),
+      ...[3, 4, 5, 6, 7].map((d) => `Oct 20 · 3 people · D${d} 0% (0)`),
+      "Oct 20 · 3 people · D14 33% (1)",
+    ]);
+    assert.deepEqual(cells(narrow), cells(wide).slice(0, -1));
+    assert.match(wide, />D14<\/text>/);
+    assert.doesNotMatch(narrow, />D14</);
+    assert.match(html, /<p class="avg">Average D1 <b>25%<\/b> <span class="muted">\(2 cohorts, 4 people\)<\/span> · D7 <b>0%<\/b> <span class="muted">\(1 cohort, 3 people\)<\/span>, weighted by cohort size\.<\/p>/);
+    assert.doesNotMatch(html, /owner|carol|frank|NaN/);
+  });
+
+  it("says so when nobody has signed up", async () => {
+    const service = await createService();
+    const html = await (await service.request("GET", "/admin?view=simple", { headers: { cookie: await adminCookie(service) } })).text();
+    assert.match(html, /id="retention"[^>]*>\n<h2>Retention<\/h2>\n<p class="empty">No sign-ups yet\.<\/p>/);
+  });
+});
+
 describe("admin dashboard install funnel", () => {
   it("shows scripts served → installs → sign-ups → first request → active, per day and per week, with a CSV", async () => {
     const service = await createService();
@@ -523,7 +626,7 @@ describe("admin dashboard privacy", () => {
     try {
       assert.equal((await service.request("GET", "/admin", { headers: { cookie } })).status, 200);
       assert.equal((await service.request("GET", "/admin?view=simple", { headers: { cookie } })).status, 200);
-      for (const table of ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"]) await csv(service, cookie, table);
+      for (const table of ["spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"]) await csv(service, cookie, table);
     } finally {
       db.prepare = prepare;
       db.setAuthorizer?.(null);
@@ -533,7 +636,9 @@ describe("admin dashboard privacy", () => {
     assert.ok(statements.some((statement) => statement.startsWith(ABUSE_QUERY_TAG)));
     for (const statement of statements) {
       const abuse = statement.startsWith(ABUSE_QUERY_TAG);
-      const code = statement.replace(/'[^']*'/g, "''").replace(/\/\*.*?\*\//g, "");
+      // The one status the dashboard reads: blocked accounts are left out of the daily cohorts
+      // (people.status, held to DASHBOARD_COLUMNS by the authorizer below).
+      const code = statement.replaceAll("p.status != 'blocked'", "").replace(/'[^']*'/g, "''").replace(/\/\*.*?\*\//g, "");
       for (const word of abuse ? CONTENT : FORBIDDEN) assert.doesNotMatch(code, new RegExp(`\\b${word}\\b`, "i"), `${word} in: ${statement}`);
       const ctes = new Set([...code.matchAll(/\b(\w+)\s+AS\s*\(/gi)].map((match) => match[1]!.toLowerCase()));
       for (const match of code.matchAll(/\b(?:FROM|JOIN)\s+(\w+)/gi)) {

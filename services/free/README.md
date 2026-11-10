@@ -890,8 +890,16 @@ day, last 8 weeks), cohort retention (weeks 1, 2 and 4 after sign-up), cost per 
 this week and last (and on which day), and the budget with the pause and admission state. The
 page wears the dl.new brand: its fonts and logo load from `https://dl.new` (the page's CSP allows
 `font-src` and `img-src` from there and nothing else; still no scripts). Each table has a CSV at `/admin/dashboard/<table>.csv`
-(`spend`, `weekly-active`, `retention`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`,
+(`spend`, `weekly-active`, `retention`, `retention-daily`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`,
 `queue`, `referrals`, `funnel`, `install-funnel`, `installs`, `paid`, `upstreams`).
+
+**Daily retention:** people grouped by the UTC day they were admitted (the last 14 days with
+sign-ups; admins and blocked accounts left out), and the share who made at least one request on
+day 0–7 and 14 after it. Days that haven't come yet are blank; today counts as far as it has
+gone. The simple view (`/admin?view=simple`) draws it as a cohort triangle (the phone drawing
+drops D14) with the average D1 and D7 under it, weighted by cohort size; the full view has the
+table, `retention-daily.csv` has `cohort, size, d0…d7, d14` (shares), and `GET /admin/metrics`
+returns it as `cohorts: [{day, size, d: {0: share, …, 14: share}}]` (null for days to come).
 
 At the top: the **budget, which is the Luminal credit**: credit used and left of
 `luminalCreditUsd` ($2,000), this week's free credit against `luminalWeeklyCreditUsd` ($250), and

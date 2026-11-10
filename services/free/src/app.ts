@@ -2540,7 +2540,7 @@ async function adminMetrics(c: Ctx): Promise<Response> {
   const from = parse("from") ?? to - 27 * DAY_MS;
   if (Number.isNaN(to) || Number.isNaN(from) || from > to) return apiError(400, "invalid_request", "from and to must be ISO dates with from <= to.");
   if (to - from > 366 * DAY_MS) return apiError(400, "invalid_request", "The range can't be longer than 366 days.");
-  const metrics = await directory(c).metrics({ from, to, now });
+  const metrics = await directory(c).metrics({ from, to, now, adminIds: [...c.config.adminGithubIds] });
   return json({ ...metrics, generatedAt: new Date(now).toISOString(), today: isoDay(now) });
 }
 
