@@ -1099,7 +1099,12 @@ async function deviceDetails(c: Ctx): Promise<Response> {
   const saved = await directory(c).setEmail(found.githubId, email, updates, c.now());
   // The welcome email, for a new sign-up only: nobody was in the Directory before this step.
   // Not for someone still waiting in line for free tokens: the Directory checks.
-  if (saved && !person) await userEmail(c, (await runtime(c)).config, "welcome", found.githubId, "");
+  if (saved && !person) {
+    const config = (await runtime(c)).config;
+    // Below the bar with no Starter tokens: a welcome that says so and where to ask for credits.
+    const kind = level.level === "starter" && config.starterWeeklyTokens <= 0 ? "welcome_starter" : "welcome";
+    await userEmail(c, config, kind, found.githubId, "");
+  }
   return response;
 }
 

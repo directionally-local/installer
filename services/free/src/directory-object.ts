@@ -1194,7 +1194,7 @@ export class DirectoryObject extends DurableObject {
       if (existing && (existing.status !== "failed" || !input.retry || existing.attempts >= 2)) return undefined;
       if (!existing && input.retry) return undefined;
       // Welcome and "didn't start" wait while the person waits in the queue for free tokens.
-      if ((input.kind === "welcome" || input.kind === "didnt_start") && sql.exec("SELECT 1 FROM queue WHERE github_id = ? AND admitted_at IS NULL", input.githubId).toArray().length > 0) return undefined;
+      if ((input.kind === "welcome" || input.kind === "welcome_starter" || input.kind === "didnt_start") && sql.exec("SELECT 1 FROM queue WHERE github_id = ? AND admitted_at IS NULL", input.githubId).toArray().length > 0) return undefined;
       const today = sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND day = ? AND status IN ('pending', 'sent') LIMIT 1", input.githubId, day).toArray();
       if (today.length > 0) return undefined;
       sql.exec(
@@ -1254,6 +1254,7 @@ export class DirectoryObject extends DurableObject {
              AND NOT (q.github_id IS NOT NULL AND q.admitted_at IS NULL)
              AND COALESCE(q.admitted_at, p.admitted_at) > ? AND COALESCE(q.admitted_at, p.admitted_at) <= ?
              AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.github_id = p.github_id)
+             AND p.level = 'full'
            ORDER BY p.github_id`,
           now - 72 * 3_600_000,
           now - 24 * 3_600_000,
