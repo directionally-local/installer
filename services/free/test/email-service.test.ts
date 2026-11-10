@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { ADMIN_ID, createService, NOW, startBrowserFlow, type Service } from "./harness.js";
 import { policyOf } from "../src/queue.js";
 import { readFreeConfig } from "../src/config.js";
-import { broadcastCopyProblem } from "../src/broadcast.js";
+import { broadcastCopyProblem, hasCapitals } from "../src/broadcast.js";
 import { bindingSender, userEmailTransport } from "../src/user-email-send.js";
 
 // After the harness: app.js loads cloudflare:workers, which the harness resolves.
@@ -133,6 +133,23 @@ describe("POST /admin/emails/test", () => {
     assert.match((message.headers as Record<string, string>)["List-Unsubscribe"]!, new RegExp(`/email/stop\\?u=${ADMIN_ID}&t=`));
     assert.deepEqual(rows(s), [], "no user_emails row: it counts as a send for nobody");
     assert.equal((await s.directory().getPerson(ADMIN_ID)).email_stop, 0);
+  });
+
+  it("sends typed copy as a broadcast would, to the admin's own address unless one is given", async () => {
+    const s = await createService({ OPEN_ADMISSION: "true", USER_EMAILS: "false" }, { userEmail: true });
+    const admin = (await s.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    const own = await s.request("POST", "/admin/emails/test", { token: admin, body: { subject: "GPT-6 is in", text: "hey,\r\n\nline two  \n\n" } });
+    assert.equal(own.status, 200);
+    const message = s.calls.userEmail.at(-1)!;
+    assert.equal(message.to, "owner.1@example.com");
+    assert.equal(message.subject, "GPT-6 is in");
+    assert.match(String(message.text), /^hey,\n\nline two\n\n.*\/email\/stop\?u=1&t=/s);
+    const other = await s.request("POST", "/admin/emails/test", { token: admin, body: { subject: "hi", text: "hey", to: "me@example.org" } });
+    assert.equal(other.status, 200);
+    assert.equal(s.calls.userEmail.at(-1)!.to, "me@example.org");
+    assert.equal((await s.request("POST", "/admin/emails/test", { token: admin, body: { subject: "hi — there", text: "hey" } })).status, 400);
+    assert.equal((await s.request("POST", "/admin/emails/test", { token: admin, body: { subject: "", text: "hey" } })).status, 400);
+    assert.deepEqual(rows(s), []);
   });
 
   it("is for admins only and checks its input", async () => {
@@ -284,14 +301,13 @@ describe("POST /admin/emails/broadcast", () => {
     assert.deepEqual([next.body.count, next.body.waitingForTomorrow], [4, 0]);
   });
 
-  it("refuses uppercase outside URLs and addresses, em and en dashes, and a missing dryRun", async () => {
+  it("refuses em and en dashes and a missing dryRun, but allows capitals and notes them", async () => {
     const { s, admin } = await setup();
     const before = s.calls.userEmail.length;
     for (const body of [
-      { subject: "A check-in", text: "hey" },
-      { subject: "a check-in", text: "hey, I wondered" },
       { subject: "a check—in", text: "hey" },
       { subject: "a check-in", text: "hey – there" },
+      { subject: "a check-in\nsecond line", text: "hey" },
     ]) {
       const refused = await broadcast(s, admin, { ...body, audience: "all", dryRun: false });
       assert.equal(refused.status, 400, JSON.stringify(body));
@@ -300,8 +316,21 @@ describe("POST /admin/emails/broadcast", () => {
     assert.equal((await broadcast(s, admin, { ...COPY, audience: "everyone", dryRun: true })).status, 400);
     assert.equal((await broadcast(s, admin, { ...COPY, audience: "all", signedUpFrom: "last week", dryRun: true })).status, 400);
     assert.equal(s.calls.userEmail.length, before);
-    assert.equal(broadcastCopyProblem("see https://Example.com/A and Sina@Example.com", "ok"), undefined);
-    assert.match(broadcastCopyProblem("ok", "Hey")!, /uppercase/);
+    // Proper nouns are fine: capitals are noted, never refused.
+    const named = await broadcast(s, admin, { subject: "GPT-6 is in", text: "hey, OpenAI's GPT-6 is on the free tier now.", audience: "all", dryRun: true });
+    assert.equal(named.status, 200);
+    assert.equal(named.body.hasCapitals, true);
+    assert.equal((await broadcast(s, admin, { ...COPY, audience: "all", dryRun: true })).body.hasCapitals, false);
+    assert.equal(broadcastCopyProblem("ok", "Hey"), undefined);
+    assert.equal(hasCapitals("see https://Example.com/A and Sina@Example.com", "ok"), false);
+    assert.equal(hasCapitals("ok", "Hey"), true);
+  });
+
+  it("gets the same id from CRLF and LF line breaks, so a form and the API never send twice", async () => {
+    const { s, admin } = await setup();
+    const lf = await broadcast(s, admin, { ...COPY, audience: "all", dryRun: true });
+    const crlf = await broadcast(s, admin, { ...COPY, text: COPY.text.replace(/\n/g, "\r\n"), audience: "all", dryRun: true });
+    assert.equal(crlf.body.id, lf.body.id);
   });
 
   it("is for admins only, and refuses to send while user emails are off", async () => {
