@@ -1,6 +1,6 @@
 import { escapeHtml } from "../../shared/src/html.js";
 import { DOWNLOAD_ROUTES } from "./telemetry.js";
-import { COHORT_WEEKS, FUNNEL_DAYS, REGULAR_DAYS, RETENTION_OFFSETS, TOKEN_LIMIT_SHARE, WEEKS_SHOWN, type DashboardData, type InstallFunnelRow } from "./dashboard-data.js";
+import { averageRetention, COHORT_WEEKS, DAILY_COHORTS, FUNNEL_DAYS, REGULAR_DAYS, RETENTION_DAYS, RETENTION_OFFSETS, TOKEN_LIMIT_SHARE, WEEKS_SHOWN, type DailyCohort, type DashboardData, type InstallFunnelRow } from "./dashboard-data.js";
 import { ABUSE_DAYS, type AbuseData, type AbusePerson, type SimpleData } from "./abuse.js";
 import { BRAND_ORIGIN, BRAND_TOKENS, PRODUCT_NAME } from "./pages.js";
 import { isoDay } from "./week.js";
@@ -82,7 +82,7 @@ export interface SpendView {
 /** The red banner shows at this share of either cap. */
 export const BANNER_SHARE = 0.8;
 
-export const CSV_TABLES = ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"] as const;
+export const CSV_TABLES = ["spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"] as const;
 export type CsvTable = (typeof CSV_TABLES)[number];
 
 export function isCsvTable(name: string): name is CsvTable {
@@ -365,6 +365,18 @@ const STEP_LABELS: Record<string, string> = {
 };
 
 const short = (ms: number) => isoDay(ms).slice(5);
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** "Nov 8" (UTC). */
+const monthDay = (ms: number) => `${MONTHS[new Date(ms).getUTCMonth()]} ${new Date(ms).getUTCDate()}`;
+
+/** "Average D1 16% · D7 5%": day 1 and day 7 over the cohorts that have reached them, weighted by size. */
+function retentionAverages(cohorts: readonly DailyCohort[]): string {
+  const part = (offset: 1 | 7) => {
+    const average = averageRetention(cohorts, offset);
+    return average === null ? `D${offset} –` : `D${offset} <b>${percent(average.share)}</b> <span class="muted">(${count(average.cohorts)} cohort${average.cohorts === 1 ? "" : "s"}, ${count(average.people)} people)</span>`;
+  };
+  return `Average ${part(1)} · ${part(7)}, weighted by cohort size.`;
+}
 
 // ─── Abuse ────────────────────────────────────────────────────────────────
 
@@ -674,6 +686,27 @@ ${
 <p class="note">People grouped by the week they were admitted (week 0); the share with any activity in the given week after it. Weeks that haven't ended show –.</p>
 </section>`;
 
+  const dailyRetentionSection = `<section id="retention-daily">
+<div class="head"><h2>Daily retention</h2>${csvLink("retention-daily")}</div>
+<div class="scroll"><table>
+<thead><tr><th>Signed up (UTC)</th><th>People</th>${RETENTION_DAYS.map((offset) => `<th>D${offset}</th>`).join("")}</tr></thead>
+<tbody>
+${
+  data.dailyCohorts.length === 0
+    ? `<tr><td colspan="${2 + RETENTION_DAYS.length}" class="l muted">No sign-ups yet.</td></tr>`
+    : data.dailyCohorts
+        .map(
+          (cohort) =>
+            `<tr><td>${escapeHtml(weekday(cohort.day))}</td><td>${count(cohort.size)}</td>${cohort.retained
+              .map((cell) => (cell ? `<td title="${cell.active} of ${cohort.size}">${percent(cell.share)} <span class="muted">(${cell.active})</span></td>` : `<td class="muted">–</td>`))
+              .join("")}</tr>`,
+        )
+        .join("\n")
+}
+</tbody></table></div>
+<p class="note">${retentionAverages(data.dailyCohorts)} People grouped by the UTC day they were admitted (the last ${DAILY_COHORTS} days with sign-ups; admins and blocked accounts left out); the share who made at least one request on day N after it. A day shows – until it has ended (UTC).</p>
+</section>`;
+
   const topWeek = data.topWeek;
   const costSection = `<section>
 <div class="head"><h2>Cost per user per week</h2>${csvLink("weekly-cost")}</div>
@@ -833,7 +866,7 @@ ${data.funnel
   const abuse = input.abuse ? abuseSection(input.abuse, input.csrf) : "";
   const log = input.abuse ? adminLogSection(input.abuse) : "";
   const starters = input.starters ? startersSection(input.starters.rows, input.starters.total) : "";
-  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, budgetSection, abuse, upstreamSection, queueSection, referralSection, paidSection, funnelSection, activeSection, retentionSection, costSection, limitsSection, starters, log].join("\n"));
+  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, budgetSection, abuse, upstreamSection, queueSection, referralSection, paidSection, funnelSection, activeSection, retentionSection, dailyRetentionSection, costSection, limitsSection, starters, log].join("\n"));
 }
 
 // ─── The simple view ──────────────────────────────────────────────────────
@@ -882,6 +915,7 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outlin
 main { max-width: 80rem; margin: 0 auto; padding: 28px 32px 48px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
 .card { background: var(--k-card); border: 1px solid var(--k-border); border-radius: 10px; padding: 24px; box-shadow: var(--k-shadow); min-width: 0; }
 .span2 { grid-column: span 2; }
+.span3 { grid-column: 1 / -1; }
 h2 { font-size: 15px; font-weight: 600; color: var(--k-muted); margin: 0 0 12px; }
 .big { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 16px; }
 .big b { font-size: 34px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
@@ -905,6 +939,16 @@ svg.chart .hit { fill: transparent; }
 svg.chart g:hover .hit { fill: color-mix(in srgb, var(--k-text) 5%, transparent); }
 svg.chart .c1 { fill: var(--c-1); }
 svg.chart .c2 { fill: var(--c-2); }
+svg.chart .cell { fill: var(--k-card); }
+svg.chart text.on { fill: #FFFFFF; font-weight: 600; }
+svg.chart.narrow text.on { font-weight: 500; }
+svg.chart.heat.narrow text.who, svg.chart.heat.narrow text.v { font-size: 11px; }
+svg.chart text.in { fill: var(--k-text); }
+svg.chart text.h { fill: var(--k-muted); font-weight: 600; }
+svg.chart.heat.wide { max-width: 1000px; }
+.avg { margin: 14px 0 0; font-size: 13px; color: var(--k-muted); }
+.avg b { color: var(--k-text); font-variant-numeric: tabular-nums; }
+.avg .muted { color: var(--k-faint); }
 .legend { display: flex; gap: 16px; margin: 0 0 12px; font-size: 12px; color: var(--k-muted); }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
@@ -917,7 +961,7 @@ svg.chart .c2 { fill: var(--c-2); }
 .flags a:hover { text-decoration: underline; }
 .none { color: var(--k-muted); margin: 0; }
 .empty { color: var(--k-muted); margin: 8px 0 0; }
-@media (max-width: 1100px) { main { grid-template-columns: minmax(0, 1fr); } .span2 { grid-column: auto; } .growth { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 1100px) { main { grid-template-columns: minmax(0, 1fr); } .span2, .span3 { grid-column: auto; } .growth { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 760px) {
   .bar > div { padding: 12px 16px; }
   main { padding: 16px 16px 40px; gap: 14px; }
@@ -990,6 +1034,65 @@ ${parts.join("\n")}
 </svg>`;
 }
 
+/** A cell's label: whole percents ("8%", "<1%"), so it fits a narrow cell; the tooltip has the exact share. */
+function wholePercent(share: number): string {
+  return share > 0 && share < 0.005 ? "<1%" : `${Math.round(share * 100)}%`;
+}
+
+/** Cell colour: one hue, more opaque for a higher share (square root, so small shares still differ). */
+function heatOpacity(share: number): number {
+  return 0.08 + 0.92 * Math.sqrt(Math.max(0, Math.min(1, share)));
+}
+
+/**
+ * The retention triangle: one row per sign-up day (newest at the top) with its size, one cell per
+ * day after it with the share who made a request, coloured by that share; days still to come are
+ * left blank. The narrow drawing drops the last column (D14) when there are more than eight.
+ */
+function retentionChart(cohorts: readonly DailyCohort[], width: number, kind: "wide" | "narrow"): string {
+  const wide = kind === "wide";
+  const offsets = wide || RETENTION_DAYS.length <= 8 ? [...RETENTION_DAYS] : RETENTION_DAYS.slice(0, 8);
+  const labelWidth = wide ? 110 : 42;
+  const sizeWidth = wide ? 64 : 30;
+  const lead = wide ? 14 : 4;
+  // A wider gap before a column that isn't the next day (D14 after D7).
+  const breaks = offsets.filter((offset, index) => index > 0 && offset !== offsets[index - 1]! + 1).length;
+  const breakGap = wide ? 10 : 6;
+  const gap = 2;
+  const cellWidth = (width - labelWidth - sizeWidth - lead - breaks * breakGap) / offsets.length;
+  const cellHeight = wide ? 30 : 24;
+  const header = 22;
+  const height = header + cohorts.length * (cellHeight + gap);
+  const font = wide ? 12 : 10;
+  const columnX: number[] = [];
+  let x = labelWidth + sizeWidth + lead;
+  offsets.forEach((offset, index) => {
+    if (index > 0 && offset !== offsets[index - 1]! + 1) x += breakGap;
+    columnX.push(x);
+    x += cellWidth;
+  });
+  const head = `<text class="h" x="0" y="${header - 8}">${wide ? "Signed up" : "Day"}</text><text class="h" x="${labelWidth + sizeWidth - 6}" y="${header - 8}" text-anchor="end">${wide ? "People" : "N"}</text>${offsets
+    .map((offset, index) => `<text class="h" x="${(columnX[index]! + cellWidth / 2).toFixed(1)}" y="${header - 8}" text-anchor="middle">D${offset}</text>`)
+    .join("")}`;
+  const rows = cohorts.map((cohort, row) => {
+    const y = header + row * (cellHeight + gap);
+    const middle = (y + cellHeight / 2 + font * 0.36).toFixed(1);
+    const name = monthDay(cohort.day);
+    const cells = offsets.map((offset, index) => {
+      const cell = cohort.retained[RETENTION_DAYS.indexOf(offset)];
+      if (!cell) return "";
+      const opacity = heatOpacity(cell.share);
+      const cx = columnX[index]!;
+      return `<g><title>${escapeHtml(`${name} · ${count(cohort.size)} ${cohort.size === 1 ? "person" : "people"} · D${offset} ${percent(cell.share)} (${count(cell.active)})`)}</title><rect class="c1" x="${(cx + gap / 2).toFixed(1)}" y="${y}" width="${(cellWidth - gap).toFixed(1)}" height="${cellHeight}" rx="3" fill-opacity="${opacity.toFixed(3)}"></rect><text class="${opacity > 0.62 ? "on" : "in"}" x="${(cx + cellWidth / 2).toFixed(1)}" y="${middle}" text-anchor="middle" font-size="${font}">${escapeHtml(wholePercent(cell.share))}</text></g>`;
+    });
+    return `<g><g><title>${escapeHtml(`${name} · ${count(cohort.size)} ${cohort.size === 1 ? "person" : "people"}`)}</title><rect class="hit" x="0" y="${y}" width="${labelWidth + sizeWidth}" height="${cellHeight}"></rect><text class="who" x="0" y="${middle}">${escapeHtml(name)}</text><text class="v" x="${labelWidth + sizeWidth - 6}" y="${middle}" text-anchor="end">${count(cohort.size)}</text></g>${cells.join("")}</g>`;
+  });
+  return `<svg class="chart heat ${kind}" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="Retention by sign-up day: share active on days ${offsets.join(", ")} after signing up">
+${head}
+${rows.join("\n")}
+</svg>`;
+}
+
 /** Week-over-week change: "+25%", or "—" when the week before had none (never "Infinity%"). */
 export function growth(current: number, previous: number): { text: string; trend: "up" | "down" | "flat" } {
   if (previous <= 0) return { text: "—", trend: "flat" };
@@ -1039,8 +1142,9 @@ export function redFlags(data: DashboardData, spend: SpendView, simple: SimpleDa
 }
 
 /**
- * GET /admin?view=simple: four cards readable in a few seconds. Sign-ups per day with the total,
- * week-over-week growth, tokens this week per person by level, and red flags when there are any.
+ * GET /admin?view=simple: five cards readable in a few seconds. Sign-ups per day with the total,
+ * week-over-week growth, tokens this week per person by level, red flags when there are any, and
+ * retention by sign-up day.
  * The header carries the Simple / Full switch and whether the free tier is open.
  */
 export function simpleDashboardPage(input: { data: DashboardData; spend: SpendView; signOut: boolean; simple: SimpleData; abuse?: AbuseData }): Response {
@@ -1102,7 +1206,18 @@ ${tokenChart(simple.topTokens, 320, "narrow")}`
 ${flags.length === 0 ? `<p class="none">No red flags.</p>` : `<ul class="flags">\n${flags.map((flag) => `<li><a href="${flag.href}">${escapeHtml(flag.text)}</a></li>`).join("\n")}\n</ul>`}
 </section>`;
 
-  return shell(`Admin · ${PRODUCT_NAME}`, `${header}\n<main>\n${signups}\n${growthCard}\n${tokenCard}\n${flagCard}\n</main>`, 200, {}, "", SIMPLE_STYLE);
+  const retentionCard = `<section class="card span3" id="retention" aria-label="Retention">
+<h2>Retention</h2>
+${
+  data.dailyCohorts.length === 0
+    ? `<p class="empty">No sign-ups yet.</p>`
+    : `${retentionChart(data.dailyCohorts, 1000, "wide")}
+${retentionChart(data.dailyCohorts, 320, "narrow")}
+<p class="avg">${retentionAverages(data.dailyCohorts)}</p>`
+}
+</section>`;
+
+  return shell(`Admin · ${PRODUCT_NAME}`, `${header}\n<main>\n${signups}\n${growthCard}\n${tokenCard}\n${flagCard}\n${retentionCard}\n</main>`, 200, {}, "", SIMPLE_STYLE);
 }
 
 // ─── CSV ──────────────────────────────────────────────────────────────────
@@ -1135,6 +1250,12 @@ export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendV
       body = csv(
         ["signup_week", "people", ...RETENTION_OFFSETS.flatMap((offset) => [`week_${offset}_active`, `week_${offset}_share`])],
         data.cohorts.map((cohort) => [day(cohort.weekStart), cohort.size, ...cohort.retained.flatMap((cell) => (cell ? [cell.active, cell.share] : [null, null]))]),
+      );
+      break;
+    case "retention-daily":
+      body = csv(
+        ["cohort", "size", ...RETENTION_DAYS.map((offset) => `d${offset}`)],
+        data.dailyCohorts.map((cohort) => [day(cohort.day), cohort.size, ...cohort.retained.map((cell) => cell?.share ?? null)]),
       );
       break;
     case "weekly-cost":

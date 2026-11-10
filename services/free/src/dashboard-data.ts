@@ -29,6 +29,8 @@ export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   people: [
     "github_id",
     "login",
+    // Only to leave blocked accounts out of the daily cohorts.
+    "status",
     "admitted_at",
     "admitted_via",
     "level",
@@ -67,6 +69,10 @@ export const WEEKS_SHOWN = 8;
 export const COHORT_WEEKS = 12;
 /** Retention is shown for these weeks after the sign-up week (week 0). */
 export const RETENTION_OFFSETS = [1, 2, 4] as const;
+/** Daily retention: the last this many sign-up days (UTC days with at least one sign-up). */
+export const DAILY_COHORTS = 21;
+/** Daily retention is shown for these days after the sign-up day (day 0). */
+export const RETENTION_DAYS = [0, 1, 2, 3, 4, 5, 6, 7, 14] as const;
 /** Days of activity in one week that make someone a regular. */
 export const REGULAR_DAYS = 3;
 /**
@@ -95,6 +101,15 @@ export interface Cohort {
   weekStart: number;
   size: number;
   /** One entry per RETENTION_OFFSETS; null when that week hasn't finished yet. */
+  retained: Array<{ offset: number; active: number; share: number } | null>;
+}
+
+/** People admitted on one UTC day, and who made a request on given days after it. */
+export interface DailyCohort {
+  /** The sign-up day, as Unix ms (00:00 UTC). */
+  day: number;
+  size: number;
+  /** One entry per RETENTION_DAYS; null until that day has ended (UTC). */
   retained: Array<{ offset: number; active: number; share: number } | null>;
 }
 
@@ -236,6 +251,8 @@ export interface DashboardData {
   currentWeek: number;
   weeklyActive: WeekActive[];
   cohorts: Cohort[];
+  /** Daily retention: the last DAILY_COHORTS sign-up days, newest first. */
+  dailyCohorts: DailyCohort[];
   weeklyCost: WeekCost[];
   topWeek: number;
   top: TopSpender[];
@@ -530,12 +547,78 @@ export function dashboardData(
     installFunnel,
     weeklyActive,
     cohorts,
+    dailyCohorts: dailyCohorts(sql, input.now, admins),
     weeklyCost,
     topWeek: toMs(topWeekDay),
     top,
     limitHits,
     people: { admitted, activeThisWeek: weeklyActive[weeklyActive.length - 1]?.active ?? 0 },
   };
+}
+
+/**
+ * Daily retention: people grouped by the UTC day they were admitted (the last DAILY_COHORTS such
+ * days), admins and blocked accounts left out, and how many of them made at least one request on
+ * each of RETENTION_DAYS days after it. A day is null until it has ended (UTC), so today's partial
+ * numbers never show or count in the averages. `admins`: ADMIN_GITHUB_IDS as a JSON array. Two indexed reads.
+ */
+export function dailyCohorts(sql: Sql, now: number, admins: string): DailyCohort[] {
+  const today = Math.floor(now / DAY_MS);
+  const counted = `p.status != 'blocked' AND ${notAdmin("p.github_id")}`;
+  const sizes = sql
+    .exec<{ day: number; n: number }>(
+      `SELECT p.admitted_at / ${DAY_MS} AS day, COUNT(*) AS n FROM people p WHERE p.admitted_at < ? AND ${counted} GROUP BY 1 ORDER BY 1 DESC LIMIT ?`,
+      (today + 1) * DAY_MS,
+      admins,
+      DAILY_COHORTS,
+    )
+    .toArray();
+  if (sizes.length === 0) return [];
+  const first = sizes[sizes.length - 1]!.day;
+  const last = RETENTION_DAYS[RETENTION_DAYS.length - 1]!;
+  const active = new Map<string, number>();
+  // CROSS JOIN keeps people as the outer loop: the few recent sign-ups, each looked up in
+  // daily_activity by (github_id, day), instead of a scan of every person's every day.
+  for (const row of sql
+    .exec<{ cohort: number; after: number; n: number }>(
+      `SELECT p.admitted_at / ${DAY_MS} AS cohort, d.day - p.admitted_at / ${DAY_MS} AS after, COUNT(*) AS n
+       FROM people p CROSS JOIN daily_activity d ON d.github_id = p.github_id AND d.day >= p.admitted_at / ${DAY_MS} AND d.day <= p.admitted_at / ${DAY_MS} + ${last}
+       WHERE p.admitted_at >= ? AND p.admitted_at < ? AND d.requests > 0 AND ${counted} GROUP BY 1, 2`,
+      first * DAY_MS,
+      (today + 1) * DAY_MS,
+      admins,
+    )
+    .toArray()) {
+    active.set(`${row.cohort}:${row.after}`, row.n);
+  }
+  return sizes.map((cohort) => ({
+    day: cohort.day * DAY_MS,
+    size: cohort.n,
+    retained: RETENTION_DAYS.map((offset) => {
+      if (cohort.day + offset >= today) return null;
+      const n = active.get(`${cohort.day}:${offset}`) ?? 0;
+      return { offset, active: n, share: n / cohort.n };
+    }),
+  }));
+}
+
+/**
+ * Day `offset`'s retention over the cohorts that have reached it, weighted by cohort size (all
+ * their active people over all their people); null when none has.
+ */
+export function averageRetention(cohorts: readonly DailyCohort[], offset: (typeof RETENTION_DAYS)[number]): { share: number; cohorts: number; people: number } | null {
+  const index = RETENTION_DAYS.indexOf(offset);
+  let people = 0;
+  let active = 0;
+  let counted = 0;
+  for (const cohort of cohorts) {
+    const cell = cohort.retained[index];
+    if (!cell) continue;
+    people += cohort.size;
+    active += cell.active;
+    counted++;
+  }
+  return counted === 0 || people === 0 ? null : { share: active / people, cohorts: counted, people };
 }
 
 /**

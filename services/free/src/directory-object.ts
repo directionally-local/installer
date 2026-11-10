@@ -4,7 +4,7 @@ import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
 import { abuseData, outsideDl, simpleData, type AbuseData, type SimpleData } from "./abuse.js";
-import { dashboardData, installBreakdown, notAdmin, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
+import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
 import { milestoneCrossed, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
@@ -2106,7 +2106,7 @@ export class DirectoryObject extends DurableObject {
   }
 
   /** Admin analytics over whole UTC days `from`..`to` (inclusive), computed from the stored records. */
-  async metrics(input: { from: number; to: number; now: number; top?: number }): Promise<Record<string, unknown>> {
+  async metrics(input: { from: number; to: number; now: number; top?: number; adminIds?: number[] }): Promise<Record<string, unknown>> {
     const sql = this.ctx.storage.sql;
     const from = Math.floor(input.from / DAY_MS) * DAY_MS;
     const until = Math.floor(input.to / DAY_MS) * DAY_MS + DAY_MS;
@@ -2289,6 +2289,13 @@ export class DirectoryObject extends DurableObject {
       githubChecks,
       weeklyActive,
       retention,
+      // Daily retention as the dashboard shows it (the last sign-up days, whatever from and to say):
+      // the share of each cohort that made a request on day N after signing up; null until that day has ended.
+      cohorts: dailyCohorts(sql, input.now, JSON.stringify(input.adminIds ?? [])).map((cohort) => ({
+        day: isoDay(cohort.day),
+        size: cohort.size,
+        d: Object.fromEntries(cohort.retained.map((cell, index) => [RETENTION_DAYS[index], cell ? round(cell.share, 4) : null])),
+      })),
       totals: {
         requests: totals?.requests ?? 0,
         tokensIn: totals?.tokens_in ?? 0,
