@@ -2067,7 +2067,8 @@ export class DirectoryObject extends DurableObject {
         record.promptTokens,
         record.cachedTokens,
         cash,
-        credit,
+        // Each upstream's own credit: Luminal's, or OpenAI's (only one is non-zero per request).
+        credit + openaiCredit,
       );
       if (record.ttfbMs != null || record.ttftMs != null) {
         this.ctx.storage.sql.exec("INSERT INTO upstream_timings (at, upstream, ttfb_ms, ttft_ms) VALUES (?, ?, ?, ?)", record.at, upstream, record.ttfbMs ?? null, record.ttftMs ?? null);
