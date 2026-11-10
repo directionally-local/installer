@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.23.0](https://github.com/directionally-local/installer/compare/v0.22.1...v0.23.0) (2026-11-10)
+
+
+### Features
+
+* **free:** basic level, access requests from dl, retention on people who could use dl ([#198](https://github.com/directionally-local/installer/issues/198)) ([84cc6b8](https://github.com/directionally-local/installer/commit/84cc6b81f0d7854ff19a08c0f604e5038168445e))
+* **free:** daily cohort retention on the admin dashboard ([#188](https://github.com/directionally-local/installer/issues/188)) ([fbc0453](https://github.com/directionally-local/installer/commit/fbc045367add789217204ba6ac4ce0ee9cc94fbf))
+* **free:** link the community discord in the welcome emails ([#193](https://github.com/directionally-local/installer/issues/193)) ([ce37ee5](https://github.com/directionally-local/installer/commit/ce37ee59d8634f3b34739347f78161ce2fe1c98a))
+* **free:** send user emails through Cloudflare Email Service ([#190](https://github.com/directionally-local/installer/issues/190)) ([d14d046](https://github.com/directionally-local/installer/commit/d14d04602ee673c6d67a34671c507379af288095))
+* **free:** Tools tab to give free tokens by GitHub username and write an email ([#192](https://github.com/directionally-local/installer/issues/192)) ([d6d381f](https://github.com/directionally-local/installer/commit/d6d381fb48c41fbf1ac3628e52c7bb88203d2294))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.17.0 ([#199](https://github.com/directionally-local/installer/issues/199)) ([d9cc0e2](https://github.com/directionally-local/installer/commit/d9cc0e2f2acc9f3a5c3dca60e4a82fe407ae4d7c))
+* **free:** one Spend card across providers on the admin dashboard ([#195](https://github.com/directionally-local/installer/issues/195)) ([8b331b8](https://github.com/directionally-local/installer/commit/8b331b8ffee0e5fe7c70a5295bc4928ead63af0b))
+
 ## [0.22.1](https://github.com/directionally-local/installer/compare/v0.22.0...v0.22.1) (2026-11-09)
 
 
