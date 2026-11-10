@@ -34,7 +34,7 @@
 # it's passed on to dl, which passes it to Autopilot for the free tier sign-in. On a laptop it's
 # also kept in ~/.config/directionallylocal/pending-referral until that sign-in, so signing in on
 # a later run still credits it.
-# At the end it sends one anonymous count to free.directionallylocal.com (OS, chip, laptop or server, dl version, ok or the step that failed, which page); no IP or identity is kept, and DL_NO_TELEMETRY=1, DO_NOT_TRACK=1 or CI turns it off.
+# At the end it sends one anonymous count to free.directionallylocal.com (OS, chip, laptop or server, dl version, ok or the step that failed and, when known, a word for why, which page); no IP or identity is kept, and DL_NO_TELEMETRY=1, DO_NOT_TRACK=1 or CI turns it off.
 set -eu
 
 # DL_HOME_SET: the install goes where DL_HOME says, not into $HOME.
@@ -76,7 +76,10 @@ trap on_exit EXIT
 
 # The anonymous count at the end: the step the install is on (one of preflight, node,
 # install_dl, path, dl_up), laptop or server, and dl's version once it's installed.
+# REASON: what went wrong within the step, when the script knows (a word from a fixed list:
+# termux, arm32, musl, tools, glibc, fetch, download, checksum, unpack, run, unpatched).
 STAGE=preflight
+REASON=""
 COUNT_MODE=""
 COUNT_VERSION=""
 COUNTED=""
@@ -99,7 +102,12 @@ count_install() {
     [0-9]*.[0-9]*.[0-9]*) c_version=$COUNT_VERSION ;;
   esac
   c_body=$(printf '{"os":"%s","arch":"%s","mode":"%s","dlVersion":"%s","result":"%s",' "$c_os" "$c_arch" "$COUNT_MODE" "$c_version" "$1")
-  if [ "$1" = failed ]; then c_body="$c_body\"failedStep\":\"$STAGE\","; fi
+  if [ "$1" = failed ]; then
+    c_body="$c_body\"failedStep\":\"$STAGE\","
+    case $REASON in
+      termux|arm32|musl|tools|glibc|fetch|download|checksum|unpack|run|unpatched) c_body="$c_body\"failedReason\":\"$REASON\"," ;;
+    esac
+  fi
   c_body="$c_body\"via\":\"$c_via\"}"
   (curl -fsS -m 3 -X POST -H 'Content-Type: application/json' -d "$c_body" https://free.directionallylocal.com/v1/telemetry/install >/dev/null 2>&1 &) 2>/dev/null || true
 }
@@ -322,12 +330,37 @@ can_unxz() {
   [ "$1" = darwin ] || command -v xz >/dev/null 2>&1
 }
 
+# Android's Termux: its own variables, or Android's uname (Termux's coreutils says Android).
+is_termux() {
+  [ -n "${TERMUX_VERSION:-}" ] && return 0
+  case ${PREFIX:-} in */com.termux/*) return 0 ;; esac
+  [ "$(uname -o 2>/dev/null)" = Android ]
+}
+
+# nodejs.org's Linux builds of Node.js 24 need glibc 2.28 or newer. Fails before the download
+# when this system's glibc is older (Ubuntu 18.04, Amazon Linux 2, CentOS 7); says nothing
+# when it can't tell.
+check_glibc() {
+  version=$(getconf GNU_LIBC_VERSION 2>/dev/null) || return 0
+  version=${version#glibc }
+  major=${version%%.*}
+  minor=${version#*.}
+  minor=${minor%%[!0-9]*}
+  case $major$minor in ""|*[!0-9]*) return 0 ;; esac
+  if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 28 ]; }; then
+    REASON=glibc
+    fail "Node.js 24 needs glibc 2.28 or newer, and this system has $version (Ubuntu 18.04, Amazon Linux 2 and CentOS 7 are too old). Use a newer Linux (Ubuntu 20.04+, Debian 10+, Fedora, Amazon Linux 2023), or install Node.js 22.23.4+ or 24.22.1+ for it yourself and run this again; it's used from your PATH"
+  fi
+}
+
 # Node.js 24 LTS from nodejs.org into $DL_HOME, checked against its published SHA-256.
 # The .tar.xz when tar can unpack it: half the download of the .tar.gz (28 MB, not 53).
 install_own_node() {
   base="${DL_NODE_DIST:-https://nodejs.org/dist/latest-v24.x}"
+  if [ "$1" = linux ]; then check_glibc; fi
   step "Installing Node.js 24"
-  sums=$(curl -fsSL "$base/SHASUMS256.txt") || fail "couldn't reach nodejs.org to download Node.js"
+  REASON=fetch
+  sums=$(curl -fsSL "$base/SHASUMS256.txt") || fail "couldn't reach nodejs.org to download Node.js (check this computer's internet connection or proxy, then run this again)"
   ext=tar.gz
   if can_unxz "$1"; then ext=tar.xz; fi
   want="-$1-$2.$ext"
@@ -335,8 +368,10 @@ install_own_node() {
   expected=$(printf '%s\n' "$sums" | awk -v file="$file" '$2 == file { print $1; exit }')
   if [ -z "$file" ] || [ -z "$expected" ]; then fail "nodejs.org has no Node.js 24 for $1-$2"; fi
   download="$DL_HOME/$file.download"
+  REASON=download
   download "$base/$file" "$download" "Downloading Node.js 24"
   STEP="Installing Node.js 24"
+  REASON=checksum
   if [ "$(sha256_of "$download")" != "$expected" ]; then
     rm -f "$download"
     fail "the Node.js download didn't match its checksum; try again"
@@ -348,6 +383,7 @@ install_own_node() {
   rm -rf "$staging"
   mkdir -p "$staging"
   if [ "$ext" = tar.xz ]; then unpack=-xJf; else unpack=-xzf; fi
+  REASON=unpack
   quietly "unpacking Node.js" tar "$unpack" "$download" -C "$staging"
   rm -f "$download"
   [ -x "$staging/$dir/bin/node" ] || fail "the Node.js download has no $dir/bin/node"
@@ -362,7 +398,22 @@ install_own_node() {
   for old in "$DL_HOME"/node-v*; do
     if [ -e "$old" ]; then rm -rf "$old"; fi
   done
-  node_is_patched "$DL_HOME/node/bin/node" || fail "the Node.js from nodejs.org ($("$DL_HOME/node/bin/node" -v 2>/dev/null || echo '?')) is missing the CVE-2026-111497 fix"
+  # It has to run here before anything else is asked of it: a Node that can't start (a 32-bit
+  # system, an old or missing glibc, a folder mounted noexec) used to fail as "missing the fix".
+  REASON=run
+  if ! own_version=$("$DL_HOME/node/bin/node" -v 2>"$LOG.node"); then
+    # The first line of what it said, without the shell's "sh: 1: " in front.
+    why=$(grep -v '^[[:space:]]*$' "$LOG.node" 2>/dev/null | head -n 1 | sed 's/^[^ ]*sh: [0-9]*: //')
+    rm -f "$LOG.node"
+    rm -rf "${DL_HOME:?}/node"
+    case $why in
+      *GLIBC_*) REASON=glibc; fail "Node.js 24 doesn't run on this system: it needs glibc 2.28 or newer (${why}). Use a newer Linux (Ubuntu 20.04+, Debian 10+, Fedora, Amazon Linux 2023), or install Node.js 22.23.4+ or 24.22.1+ from your package manager and run this again" ;;
+    esac
+    fail "Node.js 24 from nodejs.org doesn't run on this computer ($(uname -s) $(uname -m)${why:+: $why}). Install Node.js 22.23.4+ or 24.22.1+ yourself (https://nodejs.org/en/download) and run this again; it's used from your PATH"
+  fi
+  rm -f "$LOG.node"
+  REASON=unpatched
+  node_is_patched "$DL_HOME/node/bin/node" || fail "the Node.js from nodejs.org ($own_version) is missing the CVE-2026-111497 fix"
   step_done "Installed Node.js" "$("$DL_HOME/node/bin/node" -v) · in $DL_HOME/node"
 }
 
@@ -521,11 +572,29 @@ laptop_main() {
     Linux) os=linux ;;
     *) fail "this works on macOS and Linux (found $(uname -s)); on Windows, run it inside WSL 2" ;;
   esac
+  # Android (Termux): Linux to uname, but not glibc Linux, so neither nodejs.org's Node nor
+  # Autopilot's terminal renderer runs there (Termux's own nodejs reports itself as android, which
+  # the renderer isn't built for). An Ubuntu inside Termux (proot-distro) is regular arm64 Linux.
+  if [ "$os" = linux ] && is_termux; then
+    REASON=termux
+    fail "Android (Termux) can't run dl directly: Node.js from nodejs.org and Autopilot's terminal renderer are built for regular Linux, not Android. Run it in Ubuntu inside Termux instead:
+    pkg install proot-distro && proot-distro install ubuntu && proot-distro login ubuntu
+  then, in that Ubuntu: apt update && apt install -y curl && curl -fsSL https://dl.new | sh"
+  fi
   case $(uname -m) in
     arm64|aarch64) arch=arm64 ;;
     x86_64|amd64) arch=x64 ;;
-    *) fail "Node.js has no build for this CPU ($(uname -m))" ;;
+    armv6*|armv7*|armv8l|arm|armhf)
+      REASON=arm32
+      fail "this is 32-bit ARM ($(uname -m)), and Node.js 24 and Autopilot need 64-bit: on a Raspberry Pi 3, 4 or 5 install the 64-bit Raspberry Pi OS (or another arm64 Linux) and run this again" ;;
+    *) fail "Node.js has no build for this CPU ($(uname -m)); dl runs on 64-bit Intel/AMD (x86_64) and ARM (arm64)" ;;
   esac
+  # A 64-bit kernel with a 32-bit system on it (32-bit Raspberry Pi OS on a Pi 4 or 5 says
+  # aarch64): an arm64 Node can't start there, and there's no 32-bit Node.js 24.
+  if [ "$os" = linux ] && [ "$(getconf LONG_BIT 2>/dev/null)" = 32 ]; then
+    REASON=arm32
+    fail "this is a 64-bit processor running a 32-bit system ($(uname -m) kernel, 32-bit programs; e.g. 32-bit Raspberry Pi OS), and Node.js 24 and Autopilot need a 64-bit one: install the 64-bit Raspberry Pi OS (or another arm64 Linux) and run this again"
+  fi
   # On a Mac, root is sudo by mistake. On Linux root is a user like any other (HOME=/root), but
   # not with someone else's home: a sudo that kept HOME would leave root's files in it.
   if [ "$(id -u)" -eq 0 ]; then
@@ -535,12 +604,14 @@ laptop_main() {
     fi
   fi
   [ -n "${HOME:-}" ] || [ "$DL_HOME" != "/.directionallylocal" ] || fail "HOME isn't set; set it, or DL_HOME=DIR"
-  command -v curl >/dev/null 2>&1 || fail "curl is needed"
+  command -v curl >/dev/null 2>&1 || fail "curl is needed; install it with your package manager (e.g. apt install curl) and run this again"
   # Minimal images (Amazon Linux's container, for one) can lack them; the downloads are tarballs.
+  REASON=tools
   { command -v tar && command -v gzip; } >/dev/null 2>&1 || fail "tar and gzip are needed; install them with your package manager (e.g. dnf install tar gzip) and run this again"
   # Alpine and other musl Linux: Autopilot's terminal renderer, nodejs.org's Node and dl's
   # bundle are all built for glibc, so the agent can't start there even with the system's Node.
   if [ "$os" = linux ] && ls /lib/ld-musl-* >/dev/null 2>&1; then
+    REASON=musl
     fail "Alpine and other musl Linux can't run Autopilot (its terminal renderer is built for glibc); use a glibc distribution such as Ubuntu, Debian, Fedora or Amazon Linux"
   fi
   mkdir -p "$DL_HOME/bin"
@@ -549,6 +620,7 @@ laptop_main() {
   # A Node that's new enough is used where it is; otherwise dl gets its own, which goes on
   # PATH only for dl and what it starts (Autopilot, npm), not for your shell.
   STAGE=node
+  REASON=""
   own=""
   if node_is_patched; then
     node=$(command -v node)
@@ -564,6 +636,7 @@ laptop_main() {
   [ -x "$npm" ] || npm=npm
 
   STAGE=install_dl
+  REASON=""
   package="${DL_PACKAGE:-directionallylocal@${DL_VERSION:-latest}}"
   step "Installing dl"
   dl_started=$(date +%s)
@@ -587,6 +660,7 @@ laptop_main() {
   step_done "Installed dl" "dl $COUNT_VERSION · in $DL_HOME · $(clock $(($(date +%s) - dl_started)))"
 
   STAGE=path
+  REASON=""
   if [ "${DL_NO_MODIFY_PATH:-}" != "1" ]; then
     add_to_path "$os"
   fi
@@ -699,6 +773,7 @@ main() {
   # 26.12.1+, the same rule as Hotcell's engines. A missing or unsupported Node gets 24 LTS
   # (security fixes until April 2028); an unpatched 22, 24 or 26 is upgraded on its own line.
   STAGE=node
+  REASON=""
   if ! node_is_patched; then
     line=24
     case "$(node_major)" in 24|26) line=$(node_major) ;; esac
@@ -710,6 +785,7 @@ main() {
   fi
 
   STAGE=install_dl
+  REASON=""
   package="${DL_PACKAGE:-directionallylocal@${DL_VERSION:-latest}}"
   step "Getting the installer"
   quietly "installing $package" as_root npm install -g --no-audit --no-fund --loglevel=error "$package"
@@ -728,6 +804,7 @@ main() {
   # dl up continues the same screen, so it skips its own title.
   export DL_TITLE_SHOWN=1
   STAGE=dl_up
+  REASON=""
   if (exec </dev/tty) 2>/dev/null; then
     as_root directionallylocal up </dev/tty
   else
