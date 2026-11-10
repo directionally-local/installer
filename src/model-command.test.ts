@@ -148,6 +148,24 @@ test("a failed run leaves a timestamped log file with the path in the error", as
   assert.match(system.files.get(path!)!.content, /WARN|FAIL/);
 });
 
+test("bench sweeps concurrency levels and reports TTFT and decode throughput", async () => {
+  const { system, options, lines } = fixture();
+  const stream = (tokens: number) => new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      const encode = new TextEncoder();
+      for (let index = 0; index < tokens; index++) controller.enqueue(encode.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "x" } }] })}\n\n`));
+      controller.enqueue(encode.encode(`data: ${JSON.stringify({ choices: [{ delta: {} }], usage: { completion_tokens: tokens } })}\n\n`));
+      controller.enqueue(encode.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  }), { status: 200 });
+  options.fetch = async () => stream(8);
+  await modelCommand("up", ["qwen-old"], options);
+  assert.equal(await modelCommand("bench", [], { ...options, fetch: options.fetch }), 0);
+  assert.match(lines.join(""), /concurrency 1/);
+  assert.match(lines.join(""), /TTFT p50/);
+});
+
 test("status with no model says how to start one", async () => {
   const { options, lines } = fixture();
   assert.equal(await modelCommand("status", [], options), 0);
