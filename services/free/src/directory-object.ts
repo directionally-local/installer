@@ -34,7 +34,7 @@ export type AdmitResult =
   | {
       ok: true;
       created: boolean;
-      via: "existing" | "admin" | "open" | "invite";
+      via: "existing" | "admin" | "open" | "invite" | "grant";
       queued: boolean;
       queueStarted: boolean;
       referralCode: string;
@@ -537,6 +537,15 @@ const SCHEMA = [
      PRIMARY KEY (github_id, kind, period)
    ) WITHOUT ROWID`,
   `CREATE INDEX IF NOT EXISTS user_emails_status ON user_emails (status)`,
+  // Free tokens an admin gave by GitHub username before the person signed up (grant.ts): one row
+  // per GitHub id, used once, at the first sign-up. No email, no content.
+  `CREATE TABLE IF NOT EXISTS pregrants (
+     github_id  INTEGER PRIMARY KEY,
+     login      TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     created_by INTEGER NOT NULL,
+     used_at    INTEGER
+   )`,
   `CREATE TABLE IF NOT EXISTS subscriptions (
      github_id  INTEGER PRIMARY KEY,
      state      TEXT NOT NULL,
@@ -749,7 +758,7 @@ export class DirectoryObject extends DurableObject {
       const reason = input.levelReason ?? "qualifies";
       const sig = input.signals;
       const levelValues = [level, reason, sig?.accountAgeDays ?? null, sig?.publicRepos ?? null, sig?.followers ?? null, sig?.contributions ?? null, sig?.restrictedContributions ?? null, sig ? input.now : null] as const;
-      const admitted = (via: "existing" | "admin" | "open" | "invite", created: boolean): AdmitResult => {
+      const admitted = (via: "existing" | "admin" | "open" | "invite" | "grant", created: boolean): AdmitResult => {
         if (sig) this.#storeExtraSignals(input.githubId, sig);
         if (input.clientDeviceId) sql.exec("INSERT OR IGNORE INTO devices (device_id, github_id) VALUES (?, ?)", input.clientDeviceId, input.githubId);
         const referralCode = this.#ensureCode(input.githubId, input.login, input.now);
@@ -811,6 +820,20 @@ export class DirectoryObject extends DurableObject {
           ...levelValues,
         );
         return admitted("admin", true);
+      }
+      // An admin gave this GitHub id free tokens before it signed up: Full, reason "admin", used
+      // once. The owner's own choice, like an invite, and it skips the cohort cap and the queue.
+      const pregrant = sql.exec<{ github_id: number }>("SELECT github_id FROM pregrants WHERE github_id = ? AND used_at IS NULL", input.githubId).toArray()[0];
+      if (pregrant) {
+        sql.exec("UPDATE pregrants SET used_at = ? WHERE github_id = ?", input.now, input.githubId);
+        sql.exec(
+          "INSERT INTO people (github_id, login, status, admitted_at, admitted_via, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at) VALUES (?, ?, 'active', ?, 'grant', 'full', 'admin', ?, ?, ?, ?, ?, ?)",
+          input.githubId,
+          input.login,
+          input.now,
+          ...levelValues.slice(2),
+        );
+        return admitted("grant", true);
       }
       if (input.inviteOnly !== false) {
         const active = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM people WHERE status = 'active' AND admitted_via != 'admin'").toArray()[0]?.n ?? 0;
@@ -1454,6 +1477,59 @@ export class DirectoryObject extends DurableObject {
       if (found.level !== level) this.#log(`person_level:${githubId}:${found.login}`, found.level, level, actor);
       return true;
     });
+  }
+
+  /**
+   * Gives one GitHub id free tokens (grant.ts), atomically: an existing person is set to Full with
+   * reason "admin" (logged like setLevel; a waiting place in the queue is let in), a blocked one is
+   * left alone, and an id with no account gets a pre-grant used at its first sign-up.
+   */
+  async grantFull(githubId: number, login: string, actor: { githubId: number; login: string; now: number }): Promise<"granted" | "already_full" | "pregranted" | "blocked"> {
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const found = sql.exec<{ login: string; status: string; level: Level; level_reason: string | null }>("SELECT login, status, level, level_reason FROM people WHERE github_id = ?", githubId).toArray()[0];
+      if (!found) {
+        sql.exec("INSERT INTO pregrants (github_id, login, created_at, created_by, used_at) VALUES (?, ?, ?, ?, NULL) ON CONFLICT (github_id) DO UPDATE SET login = excluded.login", githubId, login, actor.now, actor.githubId);
+        this.#log(`pregrant:${githubId}:${login}`, null, "full", actor);
+        return "pregranted";
+      }
+      if (found.status === "blocked") return "blocked";
+      sql.exec("UPDATE queue SET admitted_at = ? WHERE github_id = ? AND admitted_at IS NULL", actor.now, githubId);
+      // Already Full keeps Full, but as the admin's choice, so a later sign-in can't lower it.
+      if (found.level === "full") {
+        if (found.level_reason !== "admin") sql.exec("UPDATE people SET level_reason = 'admin' WHERE github_id = ?", githubId);
+        return "already_full";
+      }
+      sql.exec("UPDATE people SET level = 'full', level_reason = 'admin' WHERE github_id = ?", githubId);
+      this.#log(`person_level:${githubId}:${found.login}`, found.level, "full", actor);
+      return "granted";
+    });
+  }
+
+  /** Whether this GitHub id has an unused pre-grant: sign-in then skips the Starter step. */
+  async hasPregrant(githubId: number): Promise<boolean> {
+    return this.ctx.storage.sql.exec("SELECT 1 FROM pregrants WHERE github_id = ? AND used_at IS NULL", githubId).toArray().length > 0;
+  }
+
+  /**
+   * The broadcast cohort picker: per UTC sign-up day, newest first, how many people a broadcast
+   * can reach (active, with an email, not stopped, not admins), Full and Starter. Days with
+   * nobody reachable are left out. Counts only.
+   */
+  async broadcastCohorts(input: { days: number; adminIds: number[]; includeAdmins: boolean }): Promise<Array<{ day: number; full: number; starter: number }>> {
+    return this.ctx.storage.sql
+      .exec<{ day: number; full: number; starter: number }>(
+        `SELECT (admitted_at / ${DAY_MS}) * ${DAY_MS} AS day, SUM(level = 'full') AS full, SUM(level = 'starter') AS starter
+         FROM people
+         WHERE status = 'active' AND email IS NOT NULL AND email_stop = 0
+           AND (? = 1 OR (admitted_via != 'admin' AND github_id NOT IN (SELECT value FROM json_each(?))))
+         GROUP BY day ORDER BY day DESC LIMIT ?`,
+        input.includeAdmins ? 1 : 0,
+        JSON.stringify(input.adminIds),
+        input.days,
+      )
+      .toArray()
+      .map((row) => ({ day: row.day, full: row.full, starter: row.starter }));
   }
 
   /** The dashboard's abuse section (see abuse.ts). Admins are left out. */

@@ -5,6 +5,8 @@ import { ABUSE_DAYS, type AbuseData, type AbusePerson, type SimpleData } from ".
 import { BRAND_ORIGIN, BRAND_TOKENS, PRODUCT_NAME } from "./pages.js";
 import { isoDay } from "./week.js";
 import type { LevelChecks } from "./admission.js";
+import { hasCapitals, type BroadcastAudience } from "./broadcast.js";
+import { GRANT_LABELS, MAX_GRANT_LOGINS, type GrantResult } from "./grant.js";
 
 /** One Starter account on the full dashboard: its stored signals and which checks pass. Admin-only. */
 export interface StarterRow {
@@ -32,12 +34,14 @@ export const STARTER_ROWS = 50;
  * under `default-src 'none'`. It wears the dl.new brand (tokens, Bricolage/Geist/Geist Mono and
  * the logo, loaded from dl.new and nothing else), light and dark following the device. Charts
  * are small inline SVGs with presentation attributes and a `<title>` per bar for the value.
- * The only forms are sign-out, block/unblock and the "Serve from" upstream switch; the last
- * two post back here with a CSRF token.
+ * The only forms are sign-out, block/unblock, the "Serve from" upstream switch and the Tools
+ * tab's two forms; all but sign-out post back here with a CSRF token.
  *
- * Two views: the full one (the default, every table) and a simple one at /admin?view=simple,
+ * Three tabs: the full view (the default, every table), a simple one at /admin?view=simple,
  * four cards readable at a glance (sign-ups, growth, tokens per person, red flags), mostly
- * inline SVG charts. Switching is a plain link: no scripts.
+ * inline SVG charts, and Tools at /admin?view=tools (give free tokens by GitHub username, write
+ * an email to users), whose buttons post a form and get the page back. Switching is a plain
+ * link: no scripts.
  */
 
 /** Global spend, caps and admission, for the first section. */
@@ -594,10 +598,10 @@ function servingName(spend: SpendView): string {
         : "None (no OPENAI_API_KEY, LUMINAL_API_KEY or OPENROUTER_API_KEY)";
 }
 
-/** The Simple / Full switch: two links, the current one marked. */
-function viewToggle(current: "simple" | "full"): string {
-  const link = (view: "simple" | "full", label: string) => `<a href="/admin?view=${view}"${current === view ? ` aria-current="page"` : ""}>${label}</a>`;
-  return `<nav class="views" aria-label="Dashboard view">${link("simple", "Simple")}${link("full", "Full")}</nav>`;
+/** The Simple / Full / Tools switch: three links, the current one marked. */
+function viewToggle(current: "simple" | "full" | "tools"): string {
+  const link = (view: "simple" | "full" | "tools", label: string) => `<a href="/admin?view=${view}"${current === view ? ` aria-current="page"` : ""}>${label}</a>`;
+  return `<nav class="views" aria-label="Dashboard view">${link("simple", "Simple")}${link("full", "Full")}${link("tools", "Tools")}</nav>`;
 }
 
 export function dashboardPage(input: { data: DashboardData; spend: SpendView; login: string; signOut: boolean; abuse?: AbuseData; csrf?: string; starters?: { rows: StarterRow[]; total: number } }): Response {
@@ -1218,6 +1222,219 @@ ${retentionChart(data.dailyCohorts, 320, "narrow")}
 </section>`;
 
   return shell(`Admin · ${PRODUCT_NAME}`, `${header}\n<main>\n${signups}\n${growthCard}\n${tokenCard}\n${flagCard}\n${retentionCard}\n</main>`, 200, {}, "", SIMPLE_STYLE);
+}
+
+// ─── Tools ────────────────────────────────────────────────────────────────
+
+/** What the Tools tab shows: the forms as posted, and what the last button did. */
+export interface ToolsState {
+  login: string;
+  signOut: boolean;
+  /** Only with a browser session: the forms need it. A bearer view shows no forms. */
+  csrf?: string;
+  /** The admin's own contact email: where "send me a test" goes when no address is typed. */
+  adminEmail: string | null;
+  /** The userEmails setting; sending is refused while it's off (a test still goes). */
+  emailsOn: boolean;
+  provider: string | null;
+  /** Sign-up days, newest first, with the people a broadcast can reach at each level. */
+  cohorts: Array<{ day: number; full: number; starter: number }>;
+  grant: { text: string; results?: GrantResult[]; error?: string };
+  /** The email being written. */
+  compose: {
+    subject: string;
+    text: string;
+    audience: BroadcastAudience;
+    /** "YYYY-MM-DD" or "" for no bound; both inclusive. */
+    from: string;
+    to: string;
+    testTo: string;
+    notice?: { error: boolean; text: string };
+    preview?: { count: number; waitingForTomorrow: number; sample: string[] };
+    /** The token that lets "yes, send" (and "send the rest") through for this copy and audience. */
+    confirm?: string;
+    /** Show the in-page confirm step. */
+    confirming?: boolean;
+    sent?: { sent: number; failed: number; remaining: number; waitingForTomorrow: number; stoppedBy: string | null };
+  };
+}
+
+/** The simple view's look, plus forms: fields at 16px so a phone doesn't zoom in on them. */
+const TOOLS_STYLE = `${SIMPLE_STYLE}
+main.tools { max-width: 46rem; grid-template-columns: minmax(0, 1fr); }
+.card h2 { color: var(--k-text); font-size: 17px; margin: 0 0 4px; }
+.card .lede { margin: 0 0 14px; color: var(--k-muted); font-size: 13.5px; }
+.tools form { display: grid; gap: 14px; margin: 0; }
+.field { display: grid; gap: 6px; }
+.field > span, legend { font-size: 13px; font-weight: 600; color: var(--k-muted); }
+fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 8px; min-width: 0; }
+legend { padding: 0; margin-bottom: 6px; }
+input[type="text"], input[type="email"], input[type="date"], textarea {
+  width: 100%; font: 16px/1.45 var(--body); color: var(--k-text); background: var(--k-card);
+  border: 1px solid var(--k-border); border-radius: 8px; padding: 9px 11px; margin: 0;
+}
+input[type="date"] { min-height: 42px; min-width: 0; max-width: 100%; display: block; -webkit-appearance: none; appearance: none; }
+.dates .field { min-width: 0; }
+textarea { resize: vertical; min-height: 6rem; }
+textarea.letter { min-height: 14rem; }
+input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.dates { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.btn { font: 600 14px var(--body); padding: 9px 14px; border-radius: 8px; border: 1px solid var(--k-border); background: var(--k-card); color: var(--k-text); cursor: pointer; min-height: 40px; }
+.btn:hover { border-color: var(--k-muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #FFFFFF; }
+.btn.quiet { border-color: transparent; color: var(--k-muted); padding-left: 6px; padding-right: 6px; }
+.btn:disabled { opacity: .5; cursor: default; }
+.seg { display: inline-flex; gap: 4px; background: var(--k-bg); border: 1px solid var(--k-border); border-radius: 8px; padding: 3px; flex-wrap: wrap; }
+.seg label { position: relative; }
+.seg input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.seg span { display: block; padding: 6px 14px; border-radius: 6px; font-size: 14px; font-weight: 500; color: var(--k-muted); }
+.seg input:checked + span { background: var(--k-text); color: var(--k-card); }
+.seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+.days { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: 6px; }
+.day { text-align: left; font: 13px/1.3 var(--body); padding: 7px 10px; border-radius: 8px; border: 1px solid var(--k-border); background: var(--k-card); color: var(--k-text); cursor: pointer; display: grid; gap: 1px; }
+.day b { font-weight: 600; }
+.day small { color: var(--k-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.day[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.hint { margin: 0; font-size: 12.5px; color: var(--k-muted); }
+.caps { margin: 0; font-size: 12.5px; color: var(--k-flag); }
+.msg { margin: 0; padding: 10px 12px; border-radius: 8px; font-size: 14px; background: var(--k-ok-bg); color: var(--k-text); }
+.msg.err { background: var(--k-stop-bg); }
+.msg.flag { background: var(--k-flag-bg); }
+.panel { border: 1px solid var(--k-border); border-radius: 10px; padding: 14px; display: grid; gap: 10px; background: var(--k-bg); }
+.panel.confirm { border-color: var(--accent); }
+.panel p { margin: 0; }
+.big2 { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.nums { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.nums div { display: grid; gap: 2px; }
+.nums dt { font-size: 12px; color: var(--k-muted); }
+.nums dd { margin: 0; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.results { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.results li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 10px; padding: 7px 10px; border-radius: 8px; background: var(--k-bg); font-size: 14px; }
+.results code { font: 13.5px var(--mono); overflow-wrap: anywhere; }
+.chip { font-size: 12.5px; font-weight: 600; }
+.chip.ok { color: var(--k-ok); }
+.chip.no { color: var(--k-stop); }
+.chip.mid { color: var(--k-muted); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (max-width: 520px) { .nums { grid-template-columns: repeat(2, minmax(0, 1fr)); } .actions .btn { flex: 1 1 auto; } }
+`;
+
+const GRANT_TONE: Record<GrantResult["outcome"], "ok" | "no" | "mid"> = {
+  granted: "ok",
+  already_full: "mid",
+  pregranted: "ok",
+  blocked: "no",
+  not_found: "no",
+  github_error: "no",
+};
+
+function plural(n: number, one: string, many = `${one}s`): string {
+  return `${count(n)} ${n === 1 ? one : many}`;
+}
+
+function grantCard(state: ToolsState): string {
+  const { grant, csrf } = state;
+  const results = grant.results
+    ? `<ul class="results" aria-label="Results">${grant.results
+        .map(
+          (result) =>
+            `<li><code>${escapeHtml(result.login ?? result.input)}</code><span class="chip ${GRANT_TONE[result.outcome]}">${escapeHtml(GRANT_LABELS[result.outcome])}</span></li>`,
+        )
+        .join("")}</ul>`
+    : "";
+  return `<section class="card" id="grant" aria-label="Give free tokens">
+<h2>Give free tokens</h2>
+<p class="lede">Full level for these GitHub accounts, as an admin's choice. Someone who hasn't signed up yet gets it at their first sign-up. Blocked accounts are left alone.</p>
+${
+  csrf
+    ? `<form method="post" action="/admin/dashboard/tools#grant">
+<input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="grant">
+<label class="field"><span>GitHub usernames</span><textarea name="logins" rows="3" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="octocat, @hubot&#10;github.com/someone">${escapeHtml(grant.text)}</textarea></label>
+<p class="hint">Separated by spaces, commas or new lines; @name and github.com links work. Up to ${MAX_GRANT_LOGINS} at a time.</p>
+<div class="row"><button class="btn primary" type="submit">Give free tokens</button></div>
+${grant.error ? `<p class="msg err" role="alert">${escapeHtml(grant.error)}</p>` : ""}
+${results}
+</form>`
+    : `<p class="hint">Sign in at /admin in a browser to use this.</p>`
+}
+</section>`;
+}
+
+function emailCard(state: ToolsState): string {
+  const { compose: email, csrf } = state;
+  if (!csrf) {
+    return `<section class="card" id="email" aria-label="Write an email"><h2>Write an email</h2><p class="hint">Sign in at /admin in a browser to use this.</p></section>`;
+  }
+  const radio = (value: BroadcastAudience, label: string) =>
+    `<label><input type="radio" name="audience" value="${value}"${email.audience === value ? " checked" : ""}><span>${label}</span></label>`;
+  const single = email.from !== "" && email.from === email.to ? email.from : "";
+  const dayButtons = state.cohorts.map((row) => {
+    const value = isoDay(row.day);
+    return `<button type="submit" class="day" name="action" value="pick:${value}" aria-pressed="${single === value}"><b>${escapeHtml(`${WEEKDAYS[new Date(row.day).getUTCDay()]} ${monthDay(row.day)}`)}</b><small>${count(row.full)} full · ${count(row.starter)} starter</small></button>`;
+  });
+  const capitals = (email.subject !== "" || email.text !== "") && hasCapitals(email.subject, email.text);
+  const preview = email.preview;
+  const sent = email.sent;
+  const confirmField = email.confirm ? `<input type="hidden" name="confirm" value="${escapeHtml(email.confirm)}">` : "";
+  const sample = preview && preview.sample.length > 0 ? ` For example ${escapeHtml(preview.sample.join(", "))}.` : "";
+  const waiting = (n: number) => (n > 0 ? ` ${plural(n, "more person", "more people")} already had an email today; they can get it tomorrow.` : "");
+  const outcome = [
+    email.notice ? `<p class="msg${email.notice.error ? " err" : ""}" role="${email.notice.error ? "alert" : "status"}">${escapeHtml(email.notice.text)}</p>` : "",
+    preview && !email.confirming && !sent
+      ? `<div class="panel" role="status"><p><span class="big2">${count(preview.count)}</span> ${preview.count === 1 ? "person gets" : "people get"} it now.${sample}</p>${waiting(preview.waitingForTomorrow) ? `<p class="hint">${escapeHtml(waiting(preview.waitingForTomorrow).trim())}</p>` : ""}</div>`
+      : "",
+    preview && email.confirming
+      ? `<div class="panel confirm" role="alert"><p><strong>Send this to ${plural(preview.count, "person", "people")} now?</strong>${sample}</p>${waiting(preview.waitingForTomorrow) ? `<p class="hint">${escapeHtml(waiting(preview.waitingForTomorrow).trim())}</p>` : ""}${state.emailsOn ? "" : `<p class="msg err">Emails to users are off (the userEmails setting), so this will be refused.</p>`}<div class="row actions"><button class="btn primary" type="submit" name="action" value="send">Yes, send to ${plural(preview.count, "person", "people")}</button><button class="btn" type="submit" name="action" value="cancel">Cancel</button></div></div>`
+      : "",
+    sent
+      ? `<div class="panel" role="status"><dl class="nums"><div><dt>Sent</dt><dd>${count(sent.sent)}</dd></div><div><dt>Waiting for tomorrow</dt><dd>${count(sent.waitingForTomorrow)}</dd></div><div><dt>Remaining</dt><dd>${count(sent.remaining)}</dd></div><div><dt>Failed</dt><dd>${count(sent.failed)}</dd></div></dl>${
+          sent.stoppedBy ? `<p class="hint">The provider's limit stopped this batch (${escapeHtml(sent.stoppedBy)}); send the rest later.</p>` : ""
+        }${sent.failed > 0 ? `<p class="hint">Failed sends are tried again on the next send, up to 3 times.</p>` : ""}${
+          sent.remaining > 0 ? `<div class="row"><button class="btn primary" type="submit" name="action" value="send">Send the rest (${count(sent.remaining)})</button></div>` : ""
+        }</div>`
+      : "",
+  ].join("");
+  return `<section class="card" id="email" aria-label="Write an email">
+<h2>Write an email</h2>
+<p class="lede">Plain text, sent exactly as typed, from the usual sender with the stop link under it. Never to blocked accounts, people who pressed stop, or admins; at most one email a day each.</p>
+${state.emailsOn ? "" : `<p class="msg flag">Emails to users are off (the userEmails setting): tests and previews work, sending doesn't.</p>`}
+${state.provider ? "" : `<p class="msg err">No email provider is set up (USER_EMAIL or RESEND_API_KEY): nothing can be sent.</p>`}
+<form method="post" action="/admin/dashboard/tools#email-actions">
+<input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="email">${confirmField}
+<button type="submit" name="action" value="preview" class="sr" tabindex="-1" aria-hidden="true">Preview</button>
+<label class="field"><span>Subject</span><input type="text" name="subject" value="${escapeHtml(email.subject)}" maxlength="200" autocomplete="off"></label>
+<label class="field"><span>Text</span><textarea class="letter" name="text" rows="12">\n${escapeHtml(email.text)}</textarea></label>
+${capitals ? `<p class="caps">Has capitals. Fine for names like GPT-6 or OpenAI; it still sends.</p>` : ""}
+<fieldset><legend>Who gets it</legend><div class="seg">${radio("full", "Full")}${radio("starter", "Starter")}${radio("all", "Everyone")}</div></fieldset>
+<fieldset><legend>Signed up (UTC, both days included)</legend>
+<div class="dates"><label class="field"><span>From</span><input type="date" name="from" value="${escapeHtml(email.from)}"></label><label class="field"><span>To</span><input type="date" name="to" value="${escapeHtml(email.to)}"></label></div>
+${
+  dayButtons.length > 0
+    ? `<p class="hint">Or pick a sign-up day. People an email can reach:</p><div class="days">${dayButtons.join("")}</div>`
+    : `<p class="hint">Nobody an email can reach has signed up yet.</p>`
+}
+${email.from || email.to ? `<div class="row"><button class="btn quiet" type="submit" name="action" value="clear">Any sign-up day</button></div>` : ""}
+</fieldset>
+<label class="field"><span>Send the test to</span><input type="email" name="test_to" value="${escapeHtml(email.testTo)}" placeholder="${escapeHtml(state.adminEmail ?? "you@example.com")}" autocomplete="email" autocapitalize="off"></label>
+<div class="row actions" id="email-actions"><button class="btn" type="submit" name="action" value="test">Send me a test</button><button class="btn" type="submit" name="action" value="preview">Preview who gets it</button><button class="btn primary" type="submit" name="action" value="confirm">Send…</button></div>
+${outcome}
+</form>
+</section>`;
+}
+
+/**
+ * GET /admin?view=tools, and what POST /admin/dashboard/tools answers: two cards, "Give free
+ * tokens" (paste GitHub usernames) and "Write an email" (a plain one-off email to a level and a
+ * sign-up range, with a test, a preview and an in-page confirm). Same look as the simple view.
+ */
+export function toolsPage(state: ToolsState): Response {
+  const header = `<header class="bar"><div>
+<a class="brand" href="/admin?view=simple"><span class="logo"><img src="${BRAND_ORIGIN}/logo-64.webp" alt="" width="22" height="22"></span><b>${escapeHtml(PRODUCT_NAME)} admin</b></a>
+${viewToggle("tools")}
+${state.signOut ? `<form method="post" action="/admin/signout"><button type="submit" class="out">Sign out</button></form>` : ""}
+</div></header>`;
+  return shell(`Tools · ${PRODUCT_NAME}`, `${header}\n<main class="tools">\n${grantCard(state)}\n${emailCard(state)}\n</main>`, 200, {}, "", TOOLS_STYLE);
 }
 
 // ─── CSV ──────────────────────────────────────────────────────────────────

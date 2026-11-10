@@ -1,6 +1,6 @@
 import type { DurableObjectNamespace } from "cloudflare:workers";
 import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.js";
-import { githubAuthorizeUrl, githubPrimaryEmail, githubPublicProfile, githubSignInFromCode, githubUserFromCode, type Fetch } from "../../shared/src/github.js";
+import { githubAuthorizeUrl, githubPrimaryEmail, githubPublicProfile, githubSignInFromCode, githubUserByLogin, githubUserFromCode, type Fetch } from "../../shared/src/github.js";
 import { githubSignals } from "../../shared/src/github-signals.js";
 import { hmacKey, signJwt, verifyJwt } from "../../shared/src/jwt.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
@@ -16,7 +16,7 @@ import { normalizeReferralCode, referralLink } from "./referrals.js";
 import { networkOf, rateLimitNetwork } from "./network.js";
 import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, type Sender } from "./feedback.js";
 import { apiError, json } from "./errors.js";
-import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, simpleDashboardPage, STARTER_ROWS, type SpendView, type StarterRow } from "./dashboard-page.js";
+import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, simpleDashboardPage, STARTER_ROWS, toolsPage, type SpendView, type StarterRow, type ToolsState } from "./dashboard-page.js";
 import { cleanBatch } from "./events.js";
 import { cleanDownload, cleanInstall, MAX_TELEMETRY_BYTES } from "./telemetry.js";
 import {
@@ -81,7 +81,8 @@ import {
   type UserEmailTransport,
 } from "./user-email-send.js";
 import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind } from "./user-emails.js";
-import { BROADCAST_BATCH, broadcastBody, broadcastId, parseBroadcast } from "./broadcast.js";
+import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
+import { MAX_GRANT_LOGINS, parseLogins, type GrantResult } from "./grant.js";
 
 /**
  * The free managed tier's HTTP surface: device-flow sign-in with GitHub, the account and
@@ -1001,7 +1002,9 @@ async function deviceCallback(c: Ctx): Promise<Response> {
   const { user } = signIn;
 
   const identity: Identity = { githubId: user.id, login: user.login };
-  const level = await readSignals(c, user, signIn.accessToken);
+  const read = await readSignals(c, user, signIn.accessToken);
+  // An admin gave this account free tokens before it signed up (grant.ts): Full, the admin's choice.
+  const level: SignInLevel = (await directory(c).hasPregrant(user.id)) ? { ...read, level: "full", levelReason: "admin" } : read;
   const person = await directory(c).getPerson(user.id);
   // The details step: the contact email, asked once, and an invite field for a Starter account. A
   // returning Full account that already gave an email goes straight through.
@@ -2350,6 +2353,14 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
   if (method === "GET" && rest === "metrics") return adminMetrics(c);
   if (method === "POST" && rest === "emails/test") return adminTestEmail(c, identity.githubId);
   if (method === "POST" && rest === "emails/broadcast") return adminBroadcast(c, config);
+  if (method === "POST" && rest === "grant") {
+    const body = (await readJson(c)) ?? {};
+    const logins = body.logins;
+    const usage = `Send {logins: ["octocat", ...]}: 1 to ${MAX_GRANT_LOGINS} GitHub usernames (a leading @ or a github.com URL is fine).`;
+    if (!Array.isArray(logins) || logins.length === 0 || logins.length > MAX_GRANT_LOGINS || !logins.every((login) => typeof login === "string")) return apiError(400, "invalid_request", usage);
+    const results = await grantLogins(c, logins.join("\n"), actor);
+    return "status" in results ? failed(results) : json({ results });
+  }
   if (method === "GET" && rest === "spend") {
     const spend = await directory(c).spend(now);
     return json({
@@ -2535,25 +2546,53 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
   return apiError(404, "not_found", `${method} /admin/${rest} isn't a route.`);
 }
 
+/** A failure the admin JSON routes answer with apiError, and the dashboard shows as a line. */
+interface AdminFailure {
+  status: number;
+  code: string;
+  message: string;
+  extra?: Record<string, unknown>;
+}
+
+const NO_EMAIL_PROVIDER: AdminFailure = { status: 503, code: "emails_unavailable", message: "No email provider: bind USER_EMAIL (Cloudflare Email Service) or set RESEND_API_KEY." };
+
+const failed = (failure: AdminFailure) => apiError(failure.status, failure.code, failure.message, failure.extra);
+
 /**
- * POST /admin/emails/test {kind, to}: one email to users of `kind`, exactly as a person would get
- * it (copy, sender, Reply-To, headers, provider), sent to `to`. Its stop link is the calling
- * admin's own. Nothing about any person changes: no user_emails row, no one-a-day cap. It works
- * while the `userEmails` setting is off, so the owner can look before turning them on.
+ * POST /admin/emails/test {kind, to} or {subject, text, to?}: one email sent to `to`, exactly as a
+ * person would get it (copy, sender, Reply-To, headers, provider). With `kind`, a user email of
+ * that kind; with `subject` and `text`, a one-off email as a broadcast would send it (same checks,
+ * same stop footer), and `to` defaults to the admin's own contact email. Its stop link is the
+ * calling admin's own. Nothing about any person changes: no user_emails row, no one-a-day cap. It
+ * works while the `userEmails` setting is off, so the owner can look before turning them on.
  */
 async function adminTestEmail(c: Ctx, adminId: number): Promise<Response> {
   const body = (await readJson(c)) ?? {};
+  const result = await sendTestEmail(c, adminId, body);
+  return "status" in result ? failed(result) : json(result);
+}
+
+async function sendTestEmail(c: Ctx, adminId: number, body: Record<string, unknown>): Promise<{ sent: true; provider: string; kind: string; to: string; messageId: string | null } | AdminFailure> {
   const kinds = Object.keys(USER_EMAILS) as UserEmailKind[];
+  const typed = body.subject !== undefined || body.text !== undefined;
+  const invalid = (message: string): AdminFailure => ({ status: 400, code: "invalid_request", message });
+  const usage = `Send {kind, to} (kind is one of ${kinds.join(", ")}) or {subject, text, to?}; to is one email address.`;
+  let to = typeof body.to === "string" ? body.to.trim() : "";
+  if (typed && to === "") to = (await directory(c).getPerson(adminId))?.email ?? "";
+  if (!isHeaderSafeAddress(to)) return invalid(typed && body.to === undefined ? "You have no contact email on the free tier; send {to}." : usage);
   const kind = body.kind as UserEmailKind;
-  const to = typeof body.to === "string" ? body.to.trim() : "";
-  if (!kinds.includes(kind) || !isHeaderSafeAddress(to)) return apiError(400, "invalid_request", `Send {kind, to}: kind is one of ${kinds.join(", ")}; to is one email address.`);
+  if (!typed && !kinds.includes(kind)) return invalid(usage);
+  const copy = typed ? parseCopy(body.subject, body.text) : undefined;
+  if (copy && !copy.ok) return invalid(copy.message);
   const transport = userEmailVia(c);
-  if (!transport) return apiError(503, "emails_unavailable", "No email provider: bind USER_EMAIL (Cloudflare Email Service) or set RESEND_API_KEY.");
+  if (!transport) return NO_EMAIL_PROVIDER;
   const unsubscribeUrl = await stopUrl(c.config.publicUrl ?? EMAIL_STOP_BASE, await signingKey(c.config), adminId);
-  const email = renderUserEmail(kind, { resets: resetsText(weekEnd(c.now())), unsubscribeUrl });
+  const email = copy?.ok
+    ? { subject: copy.subject, body: broadcastBody(copy.text, unsubscribeUrl) }
+    : renderUserEmail(kind, { resets: resetsText(weekEnd(c.now())), unsubscribeUrl });
   const outcome = await sendPlainEmail(transport, c.config, { to, subject: email.subject, text: email.body, unsubscribeUrl, idempotencyKey: `dl-test-email-${crypto.randomUUID()}` });
-  if (!outcome.ok) return apiError(502, "email_failed", `The provider refused it, code ${outcome.code ?? "error"}.`, { provider: transport.provider, code: outcome.code ?? "error" });
-  return json({ sent: true, provider: transport.provider, kind, to, messageId: outcome.messageId ?? null });
+  if (!outcome.ok) return { status: 502, code: "email_failed", message: `The provider refused it, code ${outcome.code ?? "error"}.`, extra: { provider: transport.provider, code: outcome.code ?? "error" } };
+  return { sent: true, provider: transport.provider, kind: copy ? "broadcast" : kind, to, messageId: outcome.messageId ?? null };
 }
 
 /**
@@ -2569,29 +2608,38 @@ async function adminBroadcast(c: Ctx, config: FreeConfig): Promise<Response> {
   const body = await readJson(c);
   const parsed = parseBroadcast(body ?? {});
   if (!parsed.ok) return apiError(400, "invalid_request", parsed.message);
-  const request = parsed.value;
+  const result = await runBroadcast(c, config, parsed.value);
+  return "status" in result ? failed(result) : json(result);
+}
+
+type BroadcastOutcome =
+  | { dryRun: true; id: string; provider: string | null; count: number; waitingForTomorrow: number; hasCapitals: boolean; sample: Array<{ githubId: number; login: string; address: string }> }
+  | { dryRun: false; id: string; provider: string; sent: number; failed: number; skipped: number; remaining: number; waitingForTomorrow: number; stoppedBy: string | null };
+
+async function runBroadcast(c: Ctx, config: FreeConfig, request: BroadcastRequest): Promise<BroadcastOutcome | AdminFailure> {
   const transport = userEmailVia(c);
-  if (!request.dryRun && !transport) return apiError(503, "emails_unavailable", "No email provider: bind USER_EMAIL (Cloudflare Email Service) or set RESEND_API_KEY.");
-  if (!request.dryRun && !config.userEmails) return apiError(409, "emails_off", "Emails to users are off (the userEmails setting).");
+  if (!request.dryRun && !transport) return NO_EMAIL_PROVIDER;
+  if (!request.dryRun && !config.userEmails) return { status: 409, code: "emails_off", message: "Emails to users are off (the userEmails setting)." };
   const id = await broadcastId(request.subject, request.text);
   const filter = { adminIds: [...c.config.adminGithubIds], includeAdmins: config.userEmailsToAdmins };
   const audience = await directory(c).broadcastAudience({ id, audience: request.audience, from: request.from, to: request.to, now: c.now(), ...filter });
   const ready = audience.filter((person) => !person.emailedToday);
   const waiting = audience.length - ready.length;
   if (request.dryRun) {
-    return json({
+    return {
       dryRun: true,
       id,
       provider: transport?.provider ?? null,
       count: ready.length,
       waitingForTomorrow: waiting,
+      hasCapitals: hasCapitals(request.subject, request.text),
       sample: ready.slice(0, 3).map((person) => ({ githubId: person.githubId, login: person.login, address: person.email })),
-    });
+    };
   }
   const key = await signingKey(c.config);
   const base = c.config.publicUrl ?? EMAIL_STOP_BASE;
   let sent = 0;
-  let failed = 0;
+  let failedCount = 0;
   let skipped = 0;
   let stoppedBy: string | null = null;
   const batch = ready.slice(0, BROADCAST_BATCH);
@@ -2611,7 +2659,7 @@ async function adminBroadcast(c: Ctx, config: FreeConfig): Promise<Response> {
     });
     await directory(c).finishUserEmail({ githubId: claim.githubId, kind: "broadcast", period: id, ok: outcome.ok, now: c.now() });
     if (outcome.ok) sent++;
-    else failed++;
+    else failedCount++;
     // The provider's rate or daily limit: stop here; the rest go on a later call.
     if (outcome.code === "E_RATE_LIMIT_EXCEEDED" || outcome.code === "E_DAILY_LIMIT_EXCEEDED" || outcome.code === "http_429") {
       stoppedBy = outcome.code;
@@ -2619,9 +2667,36 @@ async function adminBroadcast(c: Ctx, config: FreeConfig): Promise<Response> {
     }
     if (index < batch.length - 1 && c.emailGapMs > 0) await new Promise((resolve) => setTimeout(resolve, c.emailGapMs));
   }
-  if (failed > 0) console.error(`user emails (broadcast): ${sent} sent, ${failed} failed`);
+  if (failedCount > 0) console.error(`user emails (broadcast): ${sent} sent, ${failedCount} failed`);
   else if (sent > 0) console.log(`user emails (broadcast): ${sent} sent`);
-  return json({ dryRun: false, id, provider: transport!.provider, sent, failed, skipped, remaining: ready.length - sent - skipped, waitingForTomorrow: waiting, stoppedBy });
+  return { dryRun: false, id, provider: transport!.provider, sent, failed: failedCount, skipped, remaining: ready.length - sent - skipped, waitingForTomorrow: waiting, stoppedBy };
+}
+
+/**
+ * Gives free tokens to the GitHub usernames in `text` (grant.ts parseLogins; at most
+ * MAX_GRANT_LOGINS, or nothing is done). Each is resolved to its id
+ * through GitHub's public API, then raised to Full, left alone when blocked, or pre-granted when
+ * it has no account yet. Logs counts only.
+ */
+async function grantLogins(c: Ctx, text: string, actor: { githubId: number; login: string; now: number }): Promise<GrantResult[] | AdminFailure> {
+  const { logins, invalid } = parseLogins(text);
+  if (logins.length + invalid.length === 0) return { status: 400, code: "invalid_request", message: "Paste one or more GitHub usernames." };
+  if (logins.length > MAX_GRANT_LOGINS) return { status: 400, code: "invalid_request", message: `At most ${MAX_GRANT_LOGINS} usernames at a time; this has ${logins.length}.` };
+  const results: GrantResult[] = [];
+  for (const input of logins) {
+    const user = await githubUserByLogin(input, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS);
+    if (user === "not_found" || user === "error") {
+      results.push({ input, outcome: user === "error" ? "github_error" : "not_found" });
+      continue;
+    }
+    const outcome = await directory(c).grantFull(user.id, user.login, actor);
+    results.push({ input, outcome, login: user.login, githubId: user.id });
+  }
+  for (const input of invalid) results.push({ input, outcome: "not_found" });
+  const counts = new Map<string, number>();
+  for (const result of results) counts.set(result.outcome, (counts.get(result.outcome) ?? 0) + 1);
+  console.log(`admin grant: ${[...counts].map(([outcome, n]) => `${n} ${outcome}`).join(", ") || "nothing"}`);
+  return results;
 }
 
 /**
@@ -2690,9 +2765,9 @@ async function adminMetrics(c: Ctx): Promise<Response> {
 // with a session id) in an HttpOnly, Secure, SameSite=Strict, __Host- cookie. It can't be used
 // as a bearer token, and a bearer token can't be used as it. Every request checks the id is
 // still an admin and the session wasn't signed out. Pages only read, cross-site requests carry
-// no Strict cookie, and the POSTs (sign-out, block/unblock from the abuse section, and the
-// "Serve from" upstream switch) also require a same-origin request; block/unblock and the
-// upstream switch also carry a CSRF token bound to the session.
+// no Strict cookie, and the POSTs (sign-out, block/unblock from the abuse section, the
+// "Serve from" upstream switch, and the Tools tab's forms) also require a same-origin request;
+// all but sign-out also carry a CSRF token bound to the session.
 
 function adminCookie(value: string, maxAge: number): string {
   return `${ADMIN_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
@@ -2777,6 +2852,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
   if (path === "/admin/signin" && method === "GET") return adminSignIn(c);
   if (path === "/admin/signout" && method === "POST") return adminSignOut(c);
   if (path === "/admin/dashboard/upstream" && method === "POST") return adminWebUpstream(c);
+  if (path === "/admin/dashboard/tools" && method === "POST") return adminWebTools(c);
   const personAction = /^\/admin\/dashboard\/people\/(\d{1,15})\/(block|unblock)$/.exec(path);
   if (personAction && method === "POST") return adminWebPersonAction(c, Number(personAction[1]), personAction[2] as "block" | "unblock");
   const csv = /^\/admin\/dashboard\/([a-z-]+)\.csv$/.exec(path)?.[1];
@@ -2808,6 +2884,9 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
 
   const now = c.now();
   const { config, paused } = await runtime(c);
+  if (csv === undefined && c.url.searchParams.get("view") === "tools") {
+    return toolsPage(await toolsState(c, config, identity, viaCookie, csrf, { grant: { text: "" }, compose: emptyEmailForm() }));
+  }
   // The simple view is opt-in; anything else is the full view, as before.
   const simple = csv === undefined && c.url.searchParams.get("view") === "simple";
   const weekParam = c.url.searchParams.get("week");
@@ -2856,6 +2935,107 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
   if (simpleData) return simpleDashboardPage({ data, spend: view, signOut: viaCookie, simple: simpleData, ...(abuse ? { abuse } : {}) });
   const starters = await startersView(c, config, now);
   return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie, starters, ...(abuse ? { abuse } : {}), ...(csrf ? { csrf } : {}) });
+}
+
+/** Sign-up days the Tools tab's cohort picker lists. */
+const COHORT_PICKER_DAYS = 14;
+
+function emptyEmailForm(): ToolsState["compose"] {
+  return { subject: "", text: "", audience: "full", from: "", to: "", testTo: "" };
+}
+
+/** Everything the Tools tab shows besides what was just posted. */
+async function toolsState(
+  c: Ctx,
+  config: FreeConfig,
+  identity: Identity,
+  signOut: boolean,
+  csrf: string | undefined,
+  posted: Pick<ToolsState, "grant" | "compose">,
+): Promise<ToolsState> {
+  const [cohorts, me] = await Promise.all([
+    directory(c).broadcastCohorts({ days: COHORT_PICKER_DAYS, adminIds: [...c.config.adminGithubIds], includeAdmins: config.userEmailsToAdmins }),
+    directory(c).getPerson(identity.githubId),
+  ]);
+  return {
+    login: identity.login,
+    signOut,
+    ...(csrf ? { csrf } : {}),
+    adminEmail: me?.email ?? null,
+    emailsOn: config.userEmails,
+    provider: userEmailVia(c)?.provider ?? null,
+    cohorts,
+    ...posted,
+  };
+}
+
+/** Binds the in-page "yes, send" to exactly the copy and audience that were counted. */
+function confirmToken(csrf: string, form: ToolsState["compose"]): Promise<string> {
+  return sha256Hex(`broadcast-confirm:${csrf}:${JSON.stringify([form.subject, form.text, form.audience, form.from, form.to])}`);
+}
+
+/**
+ * POST /admin/dashboard/tools: the Tools tab's two forms, rendered again with the result (no
+ * scripts: every button posts the form). `tool=grant` gives free tokens to the pasted usernames.
+ * `tool=email` with `action`: pick or clear a sign-up day, send a test to the admin (or an
+ * address), preview who gets it (a dry run), confirm (a dry run that shows the count and a
+ * "yes, send" button carrying a token bound to the copy and audience), and send (only with that
+ * token; same copy means the same broadcast id, so "send the rest" never sends twice).
+ */
+async function adminWebTools(c: Ctx): Promise<Response> {
+  const session = await adminSession(c);
+  if (!session) return deniedPage("Signed out", "Sign in to the dashboard again, then retry.", 401);
+  const form = await readForm(c);
+  const csrf = await adminCsrf(c, session);
+  if (!sameOrigin(c) || !timingSafeEqual(form.get("csrf") ?? "", csrf)) return deniedPage("Not changed", "Use the tools only from the dashboard itself.", 403);
+  const retry = await limited(c, `admin:gh:${session.githubId}`, LIMITS.apiPerson);
+  if (retry !== undefined) return rateLimited(retry);
+  const { config } = await runtime(c);
+  const actor = { githubId: session.githubId, login: session.login, now: c.now() };
+  const state = (posted: Pick<ToolsState, "grant" | "compose">) => toolsState(c, config, session, true, csrf, posted).then(toolsPage);
+
+  if (form.get("tool") === "grant") {
+    const text = (form.get("logins") ?? "").slice(0, 20_000);
+    const results = await grantLogins(c, text, actor);
+    return state({ grant: "status" in results ? { text, error: results.message } : { text: "", results }, compose: emptyEmailForm() });
+  }
+
+  const audience = form.get("audience");
+  const day = (name: string) => {
+    const value = form.get(name) ?? "";
+    return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : "";
+  };
+  const draft: ToolsState["compose"] = {
+    subject: (form.get("subject") ?? "").slice(0, 1000),
+    text: (form.get("text") ?? "").replace(/\r\n?/g, "\n").slice(0, 20_000),
+    audience: audience === "starter" || audience === "all" ? audience : "full",
+    from: day("from"),
+    to: day("to"),
+    testTo: (form.get("test_to") ?? "").trim().slice(0, 254),
+  };
+  const action = form.get("action") ?? "";
+  const picked = /^pick:(\d{4}-\d{2}-\d{2})$/.exec(action)?.[1];
+  if (picked) return state({ grant: { text: "" }, compose: { ...draft, from: picked, to: picked } });
+  if (action === "clear") return state({ grant: { text: "" }, compose: { ...draft, from: "", to: "" } });
+  if (action === "test") {
+    const result = await sendTestEmail(c, session.githubId, { subject: draft.subject, text: draft.text, ...(draft.testTo ? { to: draft.testTo } : {}) });
+    const notice = "status" in result ? { error: true, text: result.message } : { error: false, text: `Test sent to ${result.to}.` };
+    return state({ grant: { text: "" }, compose: { ...draft, notice } });
+  }
+  if (action !== "preview" && action !== "confirm" && action !== "send") return state({ grant: { text: "" }, compose: draft });
+
+  const parsed = parseBroadcast({ subject: draft.subject, text: draft.text, audience: draft.audience, signedUpFrom: draft.from || undefined, signedUpTo: draft.to || undefined, dryRun: action !== "send" });
+  if (!parsed.ok) return state({ grant: { text: "" }, compose: { ...draft, notice: { error: true, text: parsed.message } } });
+  const token = await confirmToken(csrf, draft);
+  const sending = action === "send" && timingSafeEqual(form.get("confirm") ?? "", token);
+  const result = await runBroadcast(c, config, { ...parsed.value, dryRun: !sending });
+  if ("status" in result) return state({ grant: { text: "" }, compose: { ...draft, notice: { error: true, text: result.message } } });
+  if (!result.dryRun) return state({ grant: { text: "" }, compose: { ...draft, confirm: token, sent: result } });
+  const preview = { count: result.count, waitingForTomorrow: result.waitingForTomorrow, sample: result.sample.map((person) => person.login) };
+  if (action === "preview") return state({ grant: { text: "" }, compose: { ...draft, preview } });
+  // Confirm, or a send whose copy or audience changed since it was counted: count (again) and ask.
+  const changed = action === "send" ? { notice: { error: true, text: "The message or the audience changed since the count. Check the new count, then send." } } : {};
+  return state({ grant: { text: "" }, compose: { ...draft, preview, ...(result.count > 0 ? { confirm: token, confirming: true } : {}), ...changed } });
 }
 
 /** The full dashboard's Starter accounts: stored signals and checks, newest first, admins left out. */
