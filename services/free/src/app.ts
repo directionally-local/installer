@@ -2448,7 +2448,10 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
   const actor = { githubId: identity.githubId, login: identity.login, now };
 
   if (method === "GET" && rest === "metrics") return adminMetrics(c);
-  if (method === "POST" && rest === "recheck-below-bar") return json(await recheckBelowBar(c, config, actor));
+  if (method === "POST" && rest === "recheck-below-bar") {
+    const body = (await readJson(c)) ?? {};
+    return json(await recheckBelowBar(c, config, actor, body.includeAdminStarters === true));
+  }
   if (method === "GET" && rest === "access-requests") {
     const pending = await directory(c).pendingAccessRequests(now);
     return json({ requests: pending.map((request) => ({ ...request, at: new Date(request.at).toISOString() })) });
@@ -2824,9 +2827,11 @@ export interface RecheckOutcome {
  * Re-evaluates every active non-admin Starter account from its stored signals (the account's
  * age counted to today from its creation day) and raises the ones that qualify to basic. Also
  * stores each one's creation-batch flag again. Never lowers anyone; blocked and suspended
- * accounts, admin-set levels and redeemed invites are left alone.
+ * accounts and redeemed invites are left alone, and so are admin-set Starter levels unless
+ * `includeAdminStarters` ({"includeAdminStarters": true} in the body): then they're re-checked like
+ * anyone else, and a raised one goes back to the automatic rules.
  */
-async function recheckBelowBar(c: Ctx, config: FreeConfig, actor: { githubId: number; login: string; now: number }): Promise<RecheckOutcome> {
+async function recheckBelowBar(c: Ctx, config: FreeConfig, actor: { githubId: number; login: string; now: number }, includeAdminStarters = false): Promise<RecheckOutcome> {
   const now = c.now();
   const people = await directory(c).recheckSignals();
   const checks = peopleChecks(people, config, now);
@@ -2836,7 +2841,8 @@ async function recheckBelowBar(c: Ctx, config: FreeConfig, actor: { githubId: nu
   const flags: Array<{ githubId: number; flagged: boolean }> = [];
   let flagged = 0;
   for (const person of people) {
-    if (person.level !== "starter" || person.status !== "active" || person.level_reason === "admin" || person.level_reason === "invite") continue;
+    if (person.level !== "starter" || person.status !== "active" || person.level_reason === "invite") continue;
+    if (person.level_reason === "admin" && !includeAdminStarters) continue;
     if (c.config.adminGithubIds.has(person.github_id)) continue;
     const check = checks.get(person.github_id)!;
     const stored = person.account_age_days ?? 0;
@@ -2846,7 +2852,7 @@ async function recheckBelowBar(c: Ctx, config: FreeConfig, actor: { githubId: nu
     if (qualifiesForBasic({ accountAgeDays }, check, rule)) raise.push(person.github_id);
     else if (check.creationBatch) flagged++;
   }
-  const { raised } = await directory(c).raiseToBasic({ raise, flags, actor });
+  const { raised } = await directory(c).raiseToBasic({ raise, flags, actor, includeAdminStarters });
   console.log(`admin recheck below bar: ${flags.length} checked, ${raised} raised to basic, ${flagged} flagged`);
   return { checked: flags.length, raised, flagged, starter: flags.length - raised - flagged };
 }
