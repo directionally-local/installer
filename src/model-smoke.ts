@@ -18,7 +18,7 @@ export async function smokeTest(deployment: Pick<ModelDeployment, "repo" | "port
   /** Decode-only throughput: stream the chat reply and divide completion tokens by (last token time - first token time), excluding TTFT. */
   const streamingChat = async (): Promise<{ content: string; tokensPerSecond: number }> => {
     const response = await call(url, { method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: deployment.repo, messages: [{ role: "user", content: "Reply briefly." }], max_tokens: 256, stream: true, stream_options: { include_usage: true } }), signal: AbortSignal.timeout(30_000) });
+      body: JSON.stringify({ model: deployment.repo, messages: [{ role: "user", content: "Count from 1 to 200, separated by spaces." }], max_tokens: 512, stream: true, stream_options: { include_usage: true } }), signal: AbortSignal.timeout(30_000) });
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
     if (!response.body) throw new Error("Chat stream had no body");
     const reader = response.body.getReader();
@@ -51,7 +51,9 @@ export async function smokeTest(deployment: Pick<ModelDeployment, "repo" | "port
       }
     }
     const decodeSeconds = firstTokenAt !== undefined && lastTokenAt !== undefined ? (lastTokenAt - firstTokenAt) / 1000 : 0;
-    const tokensPerSecond = Math.round(completionTokens / Math.max(decodeSeconds, 0.001) * 10) / 10;
+    // Short replies arrive in a single chunk, collapsing the decode window to milliseconds and
+    // inflating tok/s by orders of magnitude; a 50 ms floor keeps the figure honest-ish.
+    const tokensPerSecond = Math.round(completionTokens / Math.max(decodeSeconds, 0.05) * 10) / 10;
     return { content, tokensPerSecond };
   };
   try {

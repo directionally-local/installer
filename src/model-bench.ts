@@ -15,7 +15,7 @@ const percentile = (values: number[], p: number): number => {
 async function one(url: string, repo: string, call: FetchModel): Promise<{ ttft: number; tokPerSec: number }> {
   const started = performance.now();
   const response = await call(url, { method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: repo, messages: [{ role: "user", content: "Write a two-sentence story about a robot." }], max_tokens: 128, stream: true, stream_options: { include_usage: true } }), signal: AbortSignal.timeout(120_000) });
+    body: JSON.stringify({ model: repo, messages: [{ role: "user", content: "Count from 1 to 200, separated by spaces." }], max_tokens: 512, stream: true, stream_options: { include_usage: true } }), signal: AbortSignal.timeout(120_000) });
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
   if (!response.body) throw new Error("Stream had no body");
   const reader = response.body.getReader();
@@ -47,7 +47,8 @@ async function one(url: string, repo: string, call: FetchModel): Promise<{ ttft:
   }
   if (firstTokenAt === undefined) throw new Error("No tokens received");
   const decodeSeconds = (lastTokenAt! - firstTokenAt) / 1000;
-  return { ttft: (firstTokenAt - started) / 1000, tokPerSec: completionTokens / Math.max(decodeSeconds, 0.001) };
+  // Single-chunk replies collapse the decode window; floor it so tok/s stays plausible.
+  return { ttft: (firstTokenAt - started) / 1000, tokPerSec: completionTokens / Math.max(decodeSeconds, 0.05) };
 }
 
 /** Concurrency sweep against the active model: TTFT p50/p95 and aggregate decode throughput per level. */
