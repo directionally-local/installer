@@ -91,6 +91,14 @@ describe("dl keys on a server", () => {
     assert.equal(add.input, undefined);
     assert.equal(aster().provider.id, "ollama");
 
+    // vLLM is keyless but not a Hotcell built-in: the route needs --base-url and --keyless.
+    const vllm = await run(system, ["set", "vllm"], { json: true });
+    assert.equal(vllm.code, 0, vllm.err);
+    const vllmAdd = system.commands.filter((entry) => entry.command === "runuser" && entry.args.includes("add")).at(-1)!;
+    assert.deepEqual(vllmAdd.args.slice(vllmAdd.args.indexOf("keys")), ["keys", "add", "vllm", "--base-url", "http://127.0.0.1:8000/v1", "--keyless"]);
+    assert.equal(vllmAdd.input, undefined);
+    assert.deepEqual(aster().provider, { id: "vllm", baseUrl: "http://127.0.0.1:8000/v1", apiKeyEnv: "VLLM_API_KEY" });
+
     const unknown = await run(system, ["set", "myproxy"], { json: true, stdin: true }, { stdin: "k-1234567890\n" });
     assert.equal(unknown.code, 1);
     assert.match(JSON.parse(unknown.out).error, /add --base-url URL/);
