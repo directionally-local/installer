@@ -893,13 +893,13 @@ page wears the dl.new brand: its fonts and logo load from `https://dl.new` (the 
 (`spend`, `weekly-active`, `retention`, `retention-daily`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`,
 `queue`, `referrals`, `funnel`, `install-funnel`, `installs`, `paid`, `upstreams`).
 
-**Daily retention:** people grouped by the UTC day they were admitted (the last 14 days with
+**Daily retention:** people grouped by the UTC day they were admitted (the last 21 days with
 sign-ups; admins and blocked accounts left out), and the share who made at least one request on
-day 0–7 and 14 after it. Days that haven't come yet are blank; today counts as far as it has
-gone. The simple view (`/admin?view=simple`) draws it as a cohort triangle (the phone drawing
+day 0–7 and 14 after it. A day stays blank until it has ended (UTC), so today's partial
+numbers never show or count in the averages. The simple view (`/admin?view=simple`) draws it as a cohort triangle (the phone drawing
 drops D14) with the average D1 and D7 under it, weighted by cohort size; the full view has the
 table, `retention-daily.csv` has `cohort, size, d0…d7, d14` (shares), and `GET /admin/metrics`
-returns it as `cohorts: [{day, size, d: {0: share, …, 14: share}}]` (null for days to come).
+returns it as `cohorts: [{day, size, d: {0: share, …, 14: share}}]` (null for days that haven't ended).
 
 At the top: the **budget, which is the Luminal credit**: credit used and left of
 `luminalCreditUsd` ($2,000), this week's free credit against `luminalWeeklyCreditUsd` ($250), and

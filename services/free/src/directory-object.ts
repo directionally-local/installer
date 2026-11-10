@@ -2290,7 +2290,7 @@ export class DirectoryObject extends DurableObject {
       weeklyActive,
       retention,
       // Daily retention as the dashboard shows it (the last sign-up days, whatever from and to say):
-      // the share of each cohort that made a request on day N after signing up; null for days to come.
+      // the share of each cohort that made a request on day N after signing up; null until that day has ended.
       cohorts: dailyCohorts(sql, input.now, JSON.stringify(input.adminIds ?? [])).map((cohort) => ({
         day: isoDay(cohort.day),
         size: cohort.size,

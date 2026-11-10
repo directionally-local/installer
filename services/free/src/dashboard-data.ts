@@ -70,7 +70,7 @@ export const COHORT_WEEKS = 12;
 /** Retention is shown for these weeks after the sign-up week (week 0). */
 export const RETENTION_OFFSETS = [1, 2, 4] as const;
 /** Daily retention: the last this many sign-up days (UTC days with at least one sign-up). */
-export const DAILY_COHORTS = 14;
+export const DAILY_COHORTS = 21;
 /** Daily retention is shown for these days after the sign-up day (day 0). */
 export const RETENTION_DAYS = [0, 1, 2, 3, 4, 5, 6, 7, 14] as const;
 /** Days of activity in one week that make someone a regular. */
@@ -109,7 +109,7 @@ export interface DailyCohort {
   /** The sign-up day, as Unix ms (00:00 UTC). */
   day: number;
   size: number;
-  /** One entry per RETENTION_DAYS; null when that day hasn't started yet. */
+  /** One entry per RETENTION_DAYS; null until that day has ended (UTC). */
   retained: Array<{ offset: number; active: number; share: number } | null>;
 }
 
@@ -559,8 +559,8 @@ export function dashboardData(
 /**
  * Daily retention: people grouped by the UTC day they were admitted (the last DAILY_COHORTS such
  * days), admins and blocked accounts left out, and how many of them made at least one request on
- * each of RETENTION_DAYS days after it. A day that hasn't started yet is null; today counts as far
- * as it has gone. `admins`: ADMIN_GITHUB_IDS as a JSON array. Two indexed reads.
+ * each of RETENTION_DAYS days after it. A day is null until it has ended (UTC), so today's partial
+ * numbers never show or count in the averages. `admins`: ADMIN_GITHUB_IDS as a JSON array. Two indexed reads.
  */
 export function dailyCohorts(sql: Sql, now: number, admins: string): DailyCohort[] {
   const today = Math.floor(now / DAY_MS);
@@ -595,7 +595,7 @@ export function dailyCohorts(sql: Sql, now: number, admins: string): DailyCohort
     day: cohort.day * DAY_MS,
     size: cohort.n,
     retained: RETENTION_DAYS.map((offset) => {
-      if (cohort.day + offset > today) return null;
+      if (cohort.day + offset >= today) return null;
       const n = active.get(`${cohort.day}:${offset}`) ?? 0;
       return { offset, active: n, share: n / cohort.n };
     }),

@@ -418,8 +418,9 @@ describe("admin dashboard numbers", () => {
 describe("admin dashboard daily retention", () => {
   /**
    * NOW is Wednesday 2026-11-04 12:00 UTC. Sign-up day 10-20: alice (D0, D1, D14), bob (D2 only),
-   * dave (never), carol (blocked, D1) and the admin (every day). Sign-up day 11-02: erin (D0 and
-   * D2, today; a session event but no request on D1). frank signed up 10-25 and is blocked.
+   * dave (never), carol (blocked, D1) and the admin (every day). Sign-up day 11-02: erin (D0, a
+   * session event but no request on D1, and D2, which is today and hasn't ended). gina signed up
+   * today and made a request: a row with no cells yet. frank signed up 10-25 and is blocked.
    */
   async function retentionScenario(): Promise<{ service: Service; cookie: string }> {
     const service = await createService();
@@ -447,6 +448,8 @@ describe("admin dashboard daily retention", () => {
     await admit(103, "dave", "2026-10-20T11:00:00Z");
     await admit(104, "erin", "2026-11-02T07:00:00Z");
     await admit(105, "frank", "2026-10-25T07:00:00Z");
+    await admit(106, "gina", "2026-11-04T08:00:00Z");
+    await request(106, "2026-11-04T09:00:00Z");
     await request(100, "2026-10-20T09:30:00Z");
     await request(100, "2026-10-21");
     await request(100, "2026-11-03");
@@ -462,7 +465,7 @@ describe("admin dashboard daily retention", () => {
     return { service, cookie: await adminCookie(service) };
   }
 
-  it("computes the share active on each day after sign-up, blank for days to come, without admins or blocked accounts", async () => {
+  it("computes the share active on each day after sign-up, blank until the day has ended, without admins or blocked accounts", async () => {
     const { service, cookie } = await retentionScenario();
     const rows = await csv(service, cookie, "retention-daily");
     assert.deepEqual(Object.keys(rows[0]!), ["cohort", "size", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d14"]);
@@ -470,7 +473,8 @@ describe("admin dashboard daily retention", () => {
     assert.deepEqual(
       rows.map((row) => Object.values(row)),
       [
-        ["2026-11-02", "1", "1", "0", "1", "", "", "", "", "", ""],
+        ["2026-11-04", "1", "", "", "", "", "", "", "", "", ""],
+        ["2026-11-02", "1", "1", "0", "", "", "", "", "", "", ""],
         ["2026-10-20", "3", third, third, third, "0", "0", "0", "0", "0", third],
       ],
     );
@@ -478,12 +482,14 @@ describe("admin dashboard daily retention", () => {
     const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
     const metrics = (await (await service.request("GET", "/admin/metrics", { token: adminToken })).json()) as { cohorts: Array<{ day: string; size: number; d: Record<string, number | null> }> };
     assert.deepEqual(metrics.cohorts, [
-      { day: "2026-11-02", size: 1, d: { 0: 1, 1: 0, 2: 1, 3: null, 4: null, 5: null, 6: null, 7: null, 14: null } },
+      { day: "2026-11-04", size: 1, d: { 0: null, 1: null, 2: null, 3: null, 4: null, 5: null, 6: null, 7: null, 14: null } },
+      { day: "2026-11-02", size: 1, d: { 0: 1, 1: 0, 2: null, 3: null, 4: null, 5: null, 6: null, 7: null, 14: null } },
       { day: "2026-10-20", size: 3, d: { 0: 0.3333, 1: 0.3333, 2: 0.3333, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 14: 0.3333 } },
     ]);
 
     const full = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
     assert.match(full, /<h2>Daily retention<\/h2><a href="\/admin\/dashboard\/retention-daily\.csv" download>CSV<\/a>/);
+    assert.match(full, /<tr><td>Wed 2026-11-04<\/td><td>1<\/td>(<td class="muted">–<\/td>){9}<\/tr>/);
     assert.match(full, /<tr><td>Mon 2026-11-02<\/td><td>1<\/td><td title="1 of 1">100% <span class="muted">\(1\)<\/span><\/td><td title="0 of 1">0%/);
   });
 
@@ -495,11 +501,10 @@ describe("admin dashboard daily retention", () => {
     const [wide, narrow] = [...html.matchAll(/<svg class="chart heat (wide|narrow)"[\s\S]*?<\/svg>/g)].map((match) => match[0]);
     assert.ok(wide && narrow);
     const cells = (svg: string) => [...svg.matchAll(/<title>([^<]* · D\d+ [^<]*)<\/title>/g)].map((match) => match[1]);
-    // Newest first; erin's cohort has D0..D2 so far, 10-20 has all nine (D14 included).
+    // Newest first; today's cohort (gina) has no cells, erin's has D0 and D1 (D2 is today), 10-20 has all nine.
     assert.deepEqual(cells(wide), [
       "Nov 2 · 1 person · D0 100% (1)",
       "Nov 2 · 1 person · D1 0% (0)",
-      "Nov 2 · 1 person · D2 100% (1)",
       ...[0, 1, 2].map((d) => `Oct 20 · 3 people · D${d} 33% (1)`),
       ...[3, 4, 5, 6, 7].map((d) => `Oct 20 · 3 people · D${d} 0% (0)`),
       "Oct 20 · 3 people · D14 33% (1)",
@@ -508,7 +513,8 @@ describe("admin dashboard daily retention", () => {
     assert.match(wide, />D14<\/text>/);
     assert.doesNotMatch(narrow, />D14</);
     assert.match(html, /<p class="avg">Average D1 <b>25%<\/b> <span class="muted">\(2 cohorts, 4 people\)<\/span> · D7 <b>0%<\/b> <span class="muted">\(1 cohort, 3 people\)<\/span>, weighted by cohort size\.<\/p>/);
-    assert.doesNotMatch(html, /owner|carol|frank|NaN/);
+    assert.match(wide, /<title>Nov 4 · 1 person<\/title>/);
+    assert.doesNotMatch(html, /Nov 4 · 1 person · D|owner|carol|frank|NaN/);
   });
 
   it("says so when nobody has signed up", async () => {

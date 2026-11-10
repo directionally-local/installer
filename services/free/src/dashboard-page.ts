@@ -704,7 +704,7 @@ ${
         .join("\n")
 }
 </tbody></table></div>
-<p class="note">${retentionAverages(data.dailyCohorts)} People grouped by the UTC day they were admitted (the last ${DAILY_COHORTS} days with sign-ups; admins and blocked accounts left out); the share who made at least one request on day N after it. Days that haven't come yet show –; today's numbers are still growing.</p>
+<p class="note">${retentionAverages(data.dailyCohorts)} People grouped by the UTC day they were admitted (the last ${DAILY_COHORTS} days with sign-ups; admins and blocked accounts left out); the share who made at least one request on day N after it. A day shows – until it has ended (UTC).</p>
 </section>`;
 
   const topWeek = data.topWeek;
