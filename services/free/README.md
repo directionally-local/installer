@@ -672,6 +672,7 @@ with who made it and when.
 | `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
 | `userEmails` | `USER_EMAILS` | true (sends only with the `USER_EMAIL` binding or `RESEND_API_KEY`) |
 | `dlOnly` | `DL_ONLY` | true (free tokens inside dl only; see below) |
+| `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request); `daily` (one line in the daily digest); `off` |
 | `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 5,000,000 (0: no free tokens below Basic) |
 | `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 0.5 |
 | `basicMinAccountAgeDays` | `BASIC_MIN_ACCOUNT_AGE_DAYS` | see `src/config.ts` |
@@ -984,7 +985,29 @@ lists, `413` over 1 KB, `429` when rate-limited.
 
 ## Admin dashboard
 
-`GET /admin` is a server-rendered page for admins: weekly active developers (3+ days and any
+**Home screen.** `GET /admin` opens on four questions, each answered in one plain sentence, made to
+be read on a phone in half a minute (`src/home-page.ts`, numbers from `src/home-data.ts`):
+
+1. **Are we OK?** "Fine", "Watch it" or "Act now", this week's free spend against the weekly budget
+   (the configured providers' weekly credit budgets added up), where it lands by Monday at this
+   pace, the credit left per provider and how many weeks it lasts. Act now: past 80% of the budget
+   by Monday, under 4 weeks of credit, a provider's credit used up, or no provider key. Watch it:
+   past 50%, under 8 weeks, or paused. A small chart of spend per day for 14 days, by provider.
+2. **Who's using it?** People with a request or session today and this week, sign-ups today, and
+   the five who spent most this week: tier in plain words (full, middle, small, no tokens), dollars
+   of their real cap (their level's, or an admin's grant; a creation-batch account has none), and
+   "at cap" when they reached it.
+3. **Is anything broken?** At most three problems, worst first, each linking to the Health or Full
+   view: a provider failing 10%+ of requests today and at least twice its week's share (20+
+   requests), a model failing more than 10% this week (20+ requests), installs on one platform
+   failing more than 15% (5+ installs), more than 25% of this week's sessions ending without a
+   normal exit (20+ sessions), spend or credit past the thresholds above, and people at their cap.
+4. **What needs me?** Pending `/request` asks with Grant and Decline (the Tools tab's form,
+   answered back on the home screen). This block comes first when anything is pending.
+
+Simple, Full (`?view=full`), Health and Tools are links in a "Details" row at the bottom.
+
+**Full view.** `GET /admin?view=full` is the full page: weekly active developers (3+ days and any
 day, last 8 weeks), cohort retention (weeks 1, 2 and 4 after sign-up), cost per person per week
 (total, median, mean, and the top 10 of any week), who reached their token or dollar allowance
 this week and last (and on which day), and the budget with the pause and admission state. The

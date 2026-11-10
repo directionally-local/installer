@@ -119,7 +119,7 @@ describe("dashboard spend card", () => {
       MIN_FOLLOWERS: "43",
     });
     const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
-    const html = await (await service.request("GET", "/admin", { token: adminToken })).text();
+    const html = await (await service.request("GET", "/admin?view=full", { token: adminToken })).text();
     assert.match(html, /<section id="budget">\n<div class="head"><h2>Spend<\/h2><a href="\/admin\/dashboard\/spend\.csv" download>CSV<\/a><\/div>/);
     assert.doesNotMatch(html, /Budget: Luminal credit|Queue starts at|Serving from|Switch upstream/);
     assert.match(html, /Spent, all time<b>\$0<\/b><span class="note">OpenAI \$0 \+ Luminal \$0 \+ \$0 older metered OpenRouter spend/);

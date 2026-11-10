@@ -7,6 +7,7 @@ import { abuseData, outsideDl, simpleData, type AbuseData, type SimpleData } fro
 import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, signupFunnel, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
 import { healthData, type HealthData, type HealthWindow } from "./health-data.js";
+import { homeData, type HomeData } from "./home-data.js";
 import { milestoneCrossed, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
@@ -1763,6 +1764,11 @@ export class DirectoryObject extends DurableObject {
     return healthData(this.ctx.storage.sql, input);
   }
 
+  /** The home screen's numbers (see home-data.ts): small reads, so /admin opens fast. */
+  async home(input: { now: number; adminIds: number[] }): Promise<HomeData> {
+    return homeData(this.ctx.storage.sql, input);
+  }
+
   /** The simple dashboard's per-person numbers (see abuse.ts). Admins are left out. */
   async simple(input: { now: number; adminIds: number[] }): Promise<SimpleData> {
     return simpleData(this.ctx.storage.sql, input);
@@ -2441,7 +2447,17 @@ export class DirectoryObject extends DurableObject {
       credit: { balanceUsd: policy.luminalCreditUsd, leftUsd: Math.max(0, round(policy.luminalCreditUsd - live.creditUsedUsd)) },
       queueWaiting: data.queue.waiting,
       paused: envPaused || this.#paused(),
+      ...(policy.accessRequestAlerts === "daily" ? { accessRequests: this.#accessRequestDay(from, until) } : {}),
     });
+  }
+
+  /** Access requests made in [from, until): how many, the first logins, and how many wait now. Never what they wrote. */
+  #accessRequestDay(from: number, until: number): { count: number; logins: string[]; pending: number } {
+    const sql = this.ctx.storage.sql;
+    const logins = sql.exec<{ login: string }>("SELECT login FROM access_requests WHERE at >= ? AND at < ? ORDER BY at, id LIMIT ?", from, until, DIGEST_MAX_LOGINS).toArray().map((row) => row.login);
+    const total = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM access_requests WHERE at >= ? AND at < ?", from, until).toArray()[0]?.n ?? 0;
+    const pending = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM access_requests WHERE status = 'pending'").toArray()[0]?.n ?? 0;
+    return { count: total, logins, pending };
   }
 
   /**

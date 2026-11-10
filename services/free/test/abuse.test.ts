@@ -32,7 +32,7 @@ async function adminCookie(service: Service): Promise<string> {
 }
 
 async function dashboard(service: Service, cookie: string): Promise<string> {
-  const response = await service.request("GET", "/admin", { headers: { cookie } });
+  const response = await service.request("GET", "/admin?view=full", { headers: { cookie } });
   assert.equal(response.status, 200);
   return response.text();
 }
@@ -147,7 +147,7 @@ describe("blocking a person", () => {
 
     const done = await post(service, cookie, "/admin/dashboard/people/101/block", { csrf });
     assert.equal(done.status, 303);
-    assert.equal(done.headers.get("location"), "/admin#abuse");
+    assert.equal(done.headers.get("location"), "/admin?view=full#abuse");
     assert.equal(await errorCode(await chat(service, bob.access_token)), "blocked");
 
     const after = await dashboard(service, cookie);

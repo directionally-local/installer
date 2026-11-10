@@ -134,7 +134,7 @@ export function accessRequestAlert(login: string, pending: number): Alert {
   return {
     subject: `dl free tier: new access request from @${login}`,
     text: `dl free tier: new access request from @${login} (${pending} pending). Answer it on the admin Tools tab.`,
-    footer: "Sent for every new access request.",
+    footer: 'Sent for every new access request. Set accessRequestAlerts to "daily" for one line in the daily digest instead, or "off".',
   };
 }
 
@@ -228,7 +228,7 @@ export interface LuminalWindow {
 export interface ServingContext {
   serving: "openai" | "luminal" | "openrouter" | "none";
   openRouterConfigured: boolean;
-  /** The dashboard's upstream switch: <base>/admin#upstream. */
+  /** The dashboard's upstream switch: <base>/admin?view=full#upstream. */
   switchUrl: string;
 }
 
@@ -376,6 +376,8 @@ export interface DailyDigest {
   credit: { balanceUsd: number; leftUsd: number };
   queueWaiting: number;
   paused: boolean;
+  /** Only with accessRequestAlerts "daily": requests made that day (logins, at most DIGEST_MAX_LOGINS) and how many wait now. */
+  accessRequests?: { count: number; logins: string[]; pending: number };
 }
 
 /** Requests and tokens of people who aren't admins; dollars of free usage only. */
@@ -444,6 +446,11 @@ export function dailyDigestAlert(digest: DailyDigest): Alert {
   lines.push(`  Sign-ups: ${count(week.signups)}`, `  Active people: ${count(week.active)}`, ...usageLines(week.usage, "  ", `Free credit spent: ${dollars(week.usage.freeCreditUsd)}${budget}`));
   lines.push(`  Paid: ${payments(week.payments)}`);
   lines.push("", `Queue: ${count(digest.queueWaiting)} waiting`, `Free tokens: ${digest.paused ? "PAUSED (kill switch)" : "on"}`);
+  const asks = digest.accessRequests;
+  if (asks) {
+    lines.push(`Access requests: ${count(asks.count)} new, ${count(asks.pending)} waiting for an answer${asks.pending > 0 ? " (answer them on the admin home screen)" : ""}`);
+    if (asks.logins.length > 0) lines.push(`  ${asks.logins.map((login) => `@${login}`).join(", ")}${asks.count > asks.logins.length ? ` and ${count(asks.count - asks.logins.length)} more` : ""}`);
+  }
   return {
     subject: `dl free tier: daily, ${digest.date}: ${count(signups.count)} new, ${count(digest.active)} active`,
     text: lines.join("\n"),

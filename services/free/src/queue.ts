@@ -1,4 +1,4 @@
-import type { FreeConfig, Upstream } from "./config.js";
+import type { AccessRequestAlerts, FreeConfig, Upstream } from "./config.js";
 import { DAY_MS, WEEK_MS, weekEnd } from "./week.js";
 
 /**
@@ -48,6 +48,8 @@ export interface Policy {
   openaiConfigured: boolean;
   openaiCreditUsd: number;
   openaiWeeklyCreditUsd: number | undefined;
+  /** The owner's access-request emails: "daily" puts them in the daily digest. Optional for older callers: "each". */
+  accessRequestAlerts?: AccessRequestAlerts;
 }
 
 /** Whether a prepaid-credit provider serves requests, so the queue and alerts watch its credit. */
@@ -92,6 +94,7 @@ export function policyOf(config: FreeConfig): Policy {
     openaiConfigured: config.openaiApiKey !== undefined,
     openaiCreditUsd: config.openaiCreditUsd,
     openaiWeeklyCreditUsd: config.openaiWeeklyCreditUsd,
+    accessRequestAlerts: config.accessRequestAlerts,
   };
 }
 

@@ -74,7 +74,7 @@ describe("admin dashboard sign-in", () => {
     for (const attribute of ["Path=/", "HttpOnly", "Secure", "SameSite=Strict", "Max-Age=3600"]) assert.ok(session.includes(attribute), attribute);
     assert.ok(setCookies.some((value) => value.startsWith("__Host-dl_admin_oauth=;") && value.includes("Max-Age=0")));
 
-    const page = await service.request("GET", "/admin", { headers: { cookie: cookie! } });
+    const page = await service.request("GET", "/admin?view=full", { headers: { cookie: cookie! } });
     assert.equal(page.status, 200);
     const html = await page.text();
     assert.match(html, /Signed in as <strong>owner<\/strong>/);
@@ -172,7 +172,7 @@ describe("admin dashboard sign-in", () => {
 describe("admin dashboard page", () => {
   it("is plain HTML that works under a strict content security policy", async () => {
     const service = await createService();
-    const response = await service.request("GET", "/admin", { headers: { cookie: await adminCookie(service) } });
+    const response = await service.request("GET", "/admin?view=full", { headers: { cookie: await adminCookie(service) } });
     const csp = response.headers.get("content-security-policy")!;
     assert.match(csp, /default-src 'none'/);
     assert.match(csp, /frame-ancestors 'none'/);
@@ -303,7 +303,7 @@ describe("admin dashboard numbers", () => {
         ["2026-11-02", "carol", "2026-11-04", "tokens", "1000000", "5"],
       ],
     );
-    const html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    const html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
     assert.match(html, /Tue 2026-11-03/);
   });
 
@@ -318,7 +318,7 @@ describe("admin dashboard numbers", () => {
     assert.doesNotMatch(html, /<script|\sstyle="|<link|@import/i);
     assert.match(html, /prefers-color-scheme: dark/);
     // The toggle, Simple current; the free tier's state as a pill.
-    assert.match(html, /<nav class="views" aria-label="Dashboard view"><a href="\/admin\?view=simple" aria-current="page">Simple<\/a><a href="\/admin\?view=full">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><a href="\/admin\?view=health">Health<\/a><\/nav>/);
+    assert.match(html, /<nav class="views" aria-label="Dashboard view"><a href="\/admin">Home<\/a><a href="\/admin\?view=simple" aria-current="page">Simple<\/a><a href="\/admin\?view=full">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><a href="\/admin\?view=health">Health<\/a><\/nav>/);
     assert.match(html, /class="pill open"[^>]*>Free tier open</);
     // The four cards, and nothing from the full view's tables.
     for (const id of ["signups", "growth", "tokens", "flags"]) assert.match(html, new RegExp(`<section class="card[^"]*" id="${id}"`));
@@ -359,13 +359,14 @@ describe("admin dashboard numbers", () => {
     assert.match(html, /No tokens used this week\./);
   });
 
-  it("keeps the full view as the default, unchanged but for the toggle", async () => {
+  it("keeps the full view at ?view=full, unchanged but for the toggle; anything else is the home screen", async () => {
     const { service, cookie } = await scenario();
     const page = async (path: string) => (await (await service.request("GET", path, { headers: { cookie } })).text()).replace(/nonce="[0-9a-f]+"/, 'nonce=""');
-    const full = await page("/admin");
-    assert.equal(await page("/admin?view=full"), full);
-    assert.equal(await page("/admin?view=something-else"), full);
-    assert.match(full, /<span class="who"><nav class="views" aria-label="Dashboard view"><a href="\/admin\?view=simple">Simple<\/a><a href="\/admin\?view=full" aria-current="page">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><a href="\/admin\?view=health">Health<\/a><\/nav>Signed in as/);
+    const full = await page("/admin?view=full");
+    const home = await page("/admin");
+    assert.match(home, /<h2 id="ok-h">Are we OK\?<\/h2>/);
+    assert.equal(await page("/admin?view=something-else"), home);
+    assert.match(full, /<span class="who"><nav class="views" aria-label="Dashboard view"><a href="\/admin">Home<\/a><a href="\/admin\?view=simple">Simple<\/a><a href="\/admin\?view=full" aria-current="page">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><a href="\/admin\?view=health">Health<\/a><\/nav>Signed in as/);
     // Every section of the full view is still there, in order.
     const headings = [...full.matchAll(/<h2>([^<]+)<\/h2>/g)].map((match) => match[1]);
     assert.deepEqual(headings.slice(0, 3), ["Spend", "Abuse", "Upstreams"]);
@@ -385,7 +386,7 @@ describe("admin dashboard numbers", () => {
     assert.equal(row!.admitted, "3");
     const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
     await service.request("POST", "/admin/pause", { token: adminToken });
-    const html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    const html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
     assert.match(html, /Paused for everyone/);
     assert.doesNotMatch(html, /<td>owner</);
   });
@@ -487,7 +488,7 @@ describe("admin dashboard daily retention", () => {
       { day: "2026-10-20", size: 3, d: { 0: 0.3333, 1: 0.3333, 2: 0.3333, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 14: 0.3333 } },
     ]);
 
-    const full = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    const full = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
     assert.match(full, /<h2>Daily retention<\/h2><a href="\/admin\/dashboard\/retention-daily\.csv" download>CSV<\/a>/);
     assert.match(full, /<tr><td>Wed 2026-11-04<\/td><td>1<\/td>(<td class="muted">–<\/td>){9}<\/tr>/);
     assert.match(full, /<tr><td>Mon 2026-11-02<\/td><td>1<\/td><td title="1 of 1">100% <span class="muted">\(1\)<\/span><\/td><td title="0 of 1">0%/);
@@ -589,7 +590,7 @@ describe("admin dashboard install funnel", () => {
       ],
     );
 
-    const html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    const html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
     assert.match(html, /<h2>Funnel<\/h2>/);
     assert.match(html, /Anonymous counts: one per script served/);
     assert.match(html, /can't be joined to people/);
@@ -634,7 +635,7 @@ describe("admin dashboard privacy", () => {
       return SQLITE_OK;
     });
     try {
-      assert.equal((await service.request("GET", "/admin", { headers: { cookie } })).status, 200);
+      assert.equal((await service.request("GET", "/admin?view=full", { headers: { cookie } })).status, 200);
       assert.equal((await service.request("GET", "/admin?view=simple", { headers: { cookie } })).status, 200);
       for (const table of ["spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"]) await csv(service, cookie, table);
     } finally {
@@ -728,8 +729,9 @@ describe("admin dashboard speed", () => {
       assert.equal(response.status, 200, `${name}: ${body.slice(0, 200)}`);
       return body;
     };
-    const html = await time("page", "/admin");
-    await time("page again", "/admin");
+    const home = await time("home", "/admin");
+    const html = await time("page", "/admin?view=full");
+    await time("page again", "/admin?view=full");
     const simple = await time("simple", "/admin?view=simple");
     for (const table of ["weekly-active", "retention", "weekly-cost", "top-cost", "limits"]) await time(`${table}.csv`, `/admin/dashboard/${table}.csv`);
 
@@ -739,6 +741,9 @@ describe("admin dashboard speed", () => {
         `roll-up of ${rows} rows built in ${Math.round(backfillMs)} ms; ${JSON.stringify(timings)}`,
     );
     assert.match(html, /dev-\d+/);
+    assert.match(home, /Are we OK\?/);
+    assert.match(home, /dev-\d+/);
+    assert.ok(timings.home! < 1000, `home took ${timings.home} ms`);
     assert.ok(timings.page! < 2000, `page took ${timings.page} ms`);
     assert.ok(timings["page again"]! < 2000);
     assert.ok(timings.simple! < 2000, `simple view took ${timings.simple} ms`);
