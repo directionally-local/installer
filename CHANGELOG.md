@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.24.0](https://github.com/directionally-local/installer/compare/v0.23.0...v0.24.0) (2026-11-10)
+
+
+### Features
+
+* **free:** Health view on the admin dashboard ([#206](https://github.com/directionally-local/installer/issues/206)) ([8ddcdf4](https://github.com/directionally-local/installer/commit/8ddcdf4bc3a9aad4d34a0f1da424e127ae30a5e1))
+* **free:** re-check admin-set Starter accounts when asked ([#200](https://github.com/directionally-local/installer/issues/200)) ([319c0cd](https://github.com/directionally-local/installer/commit/319c0cd2fc5b508ae642b849d3aff061ba527c93))
+
+
+### Bug Fixes
+
+* **free:** hold in-flight estimates against the weekly dollar cap ([#208](https://github.com/directionally-local/installer/issues/208)) ([3abed56](https://github.com/directionally-local/installer/commit/3abed5694cecfe982bc6a5e5d0d877c3a68e59e5))
+* **install:** clear errors on Linux systems nodejs.org's Node can't run, with a reason in the count ([#207](https://github.com/directionally-local/installer/issues/207)) ([04f3a3b](https://github.com/directionally-local/installer/commit/04f3a3bf44c8a71e7ba9f750759758832ab6a6da))
+* register vLLM's keyless route with --keyless ([#196](https://github.com/directionally-local/installer/issues/196)) ([976feb3](https://github.com/directionally-local/installer/commit/976feb37ebbfb4a2f1d878f0b5b3c1e5eb120c99))
+
 ## [0.23.0](https://github.com/directionally-local/installer/compare/v0.22.1...v0.23.0) (2026-11-10)
 
 
