@@ -62,7 +62,9 @@ describe("emails to users: the copy", () => {
   it("is lowercase, has no em or en dash, never names the person, and ends with the stop link", () => {
     for (const [kind, copy] of Object.entries(USER_EMAILS)) {
       for (const text of [copy.subject, copy.body, FOOTER].map((part) => part.replace("{unsubscribeUrl}", ""))) {
-        assert.equal(text, text.toLowerCase(), `${kind} isn't all lowercase`);
+        // Links keep their case (an invite code is case-sensitive); the words around them don't.
+        const words = text.replace(/https?:\/\/\S+/g, "");
+        assert.equal(words, words.toLowerCase(), `${kind} isn't all lowercase`);
         assert.doesNotMatch(text, /[—–]/, `${kind} has an em or en dash`);
         assert.doesNotMatch(text, /\{login\}/, `${kind} uses the login`);
       }
