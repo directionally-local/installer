@@ -213,6 +213,15 @@ describe("GPT-6 through OpenAI's Responses API", () => {
     assert.equal(await openaiCreditUsed(service, adminToken), 0.555);
   });
 
+  it("counts OpenAI's credit in the daily per-provider spend (the home screen's chart)", async () => {
+    const { service, token, adminToken } = await member();
+    service.setOpenAI(() => openaiResponse(responsesUsage(1_000_000, 1_000_000, 500_000, 400_000)));
+    assert.equal((await chat(service, token, { model: "gpt-6-luna" })).status, 200);
+    const csv = await (await service.request("GET", "/admin/dashboard/upstreams.csv", { token: adminToken })).text();
+    const today = csv.split("\n").find((line) => line.startsWith("today,openai,"))!.split(",");
+    assert.equal(Number(today[8]), 0.555, "credit_usd for openai today");
+  });
+
   it("maps an incomplete response (output cap) to finish_reason length, streamed or not", async () => {
     const { service, token } = await member();
     service.setOpenAI(() => openaiResponse(responsesUsage(10, 256), { status: "incomplete", incompleteReason: "max_output_tokens", output: [messageItem("partial")] }));
