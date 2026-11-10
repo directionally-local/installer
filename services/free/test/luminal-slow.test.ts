@@ -215,7 +215,8 @@ describe("switching upstream from /admin", () => {
     const { service, people, admin } = await setup();
     const cookie = await adminCookie(service);
     const page = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
-    assert.match(page, /<p class="serving">Serving from <strong>Luminal<\/strong> <a href="#upstream">Switch upstream<\/a><\/p>/);
+    assert.match(page, /<p class="serving"><span>Each model goes to its own provider:<\/span><span>GPT-6 → <strong>[^<]+<\/strong><\/span><span>DeepSeek → <strong>Luminal<\/strong><\/span><a href="#upstream">Routing<\/a><\/p>/);
+    assert.doesNotMatch(page, /Serving from|Switch upstream/);
     assert.match(page, /<section id="upstream">/);
     assert.match(page, /<button type="button" class="on" disabled aria-pressed="true">Luminal<\/button>/);
     assert.match(page, /<form method="post" action="\/admin\/dashboard\/upstream"><input type="hidden" name="csrf" value="[0-9a-f]{64}"><input type="hidden" name="upstream" value="openrouter"><button type="submit" class="danger">OpenRouter<\/button><\/form>/);
@@ -244,7 +245,8 @@ describe("switching upstream from /admin", () => {
     assert.equal(service.calls.openRouter.length, 1);
 
     const switched = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
-    assert.match(switched, /Serving from <strong>OpenRouter<\/strong>/);
+    assert.match(switched, /DeepSeek → <strong>OpenRouter<\/strong>/);
+    assert.match(switched, /DeepSeek goes to<b class="state">OpenRouter<\/b>/);
     assert.match(switched, /<input type="hidden" name="upstream" value="luminal"><button type="submit">Luminal<\/button>/);
     assert.match(switched, /primaryUpstream/);
     assert.equal((await post({ upstream: "luminal", csrf })).status, 303);

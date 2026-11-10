@@ -7,6 +7,8 @@ import { isoDay } from "./week.js";
 import type { LevelChecks } from "./admission.js";
 import { hasCapitals, type BroadcastAudience } from "./broadcast.js";
 import { GRANT_LABELS, MAX_GRANT_LOGINS, type GrantResult } from "./grant.js";
+import { FREE_MODELS } from "./models.js";
+import { creditBudget, creditMode } from "./queue.js";
 
 /** One Starter account on the full dashboard: its stored signals and which checks pass. Admin-only. */
 export interface StarterRow {
@@ -34,7 +36,7 @@ export const STARTER_ROWS = 50;
  * under `default-src 'none'`. It wears the dl.new brand (tokens, Bricolage/Geist/Geist Mono and
  * the logo, loaded from dl.new and nothing else), light and dark following the device. Charts
  * are small inline SVGs with presentation attributes and a `<title>` per bar for the value.
- * The only forms are sign-out, block/unblock, the "Serve from" upstream switch and the Tools
+ * The only forms are sign-out, block/unblock, the routing setting (primaryUpstream) switch and the Tools
  * tab's two forms; all but sign-out post back here with a CSRF token.
  *
  * Three tabs: the full view (the default, every table), a simple one at /admin?view=simple,
@@ -56,7 +58,7 @@ export interface SpendView {
   paused: boolean;
   pausedByEnv: boolean;
   openAdmission: boolean;
-  /** New accounts need a public repo or a contribution in the last year to skip the invite. */
+  /** The GitHub account check at sign-up: off gives everyone Full. */
   requireGithubActivity: boolean;
   maxActiveUsers: number;
   weeklyTokens: number;
@@ -77,10 +79,20 @@ export interface SpendView {
   creditUsedUsd: number;
   creditWeekUsd: number;
   freeCreditWeekUsd: number;
-  /** The weekly credit budget the queue protects; null for none. */
+  /** Luminal's weekly credit budget; null for none. */
   weeklyCreditUsd: number | null;
+  /** OpenAI credit: the balance, used since the start, used this week (all, and free usage only), the weekly budget. */
+  openaiCreditUsd: number;
+  openaiCreditUsedUsd: number;
+  openaiCreditWeekUsd: number;
+  openaiFreeCreditWeekUsd: number;
+  openaiWeeklyCreditUsd: number | null;
   /** A Starter account's weekly tokens. */
   starterWeeklyTokens: number;
+  /** The public bar for Full (free tokens): account age, and public repositories or contributions. */
+  fullMinAccountAgeDays: number;
+  fullMinPublicRepos: number;
+  fullMinContributions: number;
 }
 
 /** The red banner shows at this share of either cap. */
@@ -171,6 +183,8 @@ svg text { fill: var(--muted); font: 11px var(--mono); }
 .key.soft { background: var(--soft); }
 .serving { margin: 12px 0 0; padding: 10px 14px; border: 1px solid var(--ink); border-radius: 10px; background: var(--surface); display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
 .serving strong { font: 700 17px var(--display); }
+td.wrap { white-space: normal; min-width: 11rem; }
+td.used svg { margin-top: 4px; min-width: 8rem; height: 6px; }
 .switch { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
 button.on { background: var(--ink); color: var(--on-ink); border-color: var(--ink); cursor: default; }
 .banner { background: var(--accent); color: #fff; border-radius: 10px; padding: 10px 14px; margin: 14px 0 0; font-weight: 600; }
@@ -385,7 +399,7 @@ function retentionAverages(cohorts: readonly DailyCohort[]): string {
 // ─── Abuse ────────────────────────────────────────────────────────────────
 
 /**
- * "Serve from: Luminal / OpenRouter": one button per upstream, the current one pressed. Only
+ * "Routing setting: OpenAI / Luminal / OpenRouter" (primaryUpstream): one button per upstream, the current one pressed. Only
  * with a CSRF token (a browser session); an upstream without a key can't be chosen.
  */
 function upstreamSwitch(spend: SpendView, csrf: string | undefined): string {
@@ -396,8 +410,8 @@ function upstreamSwitch(spend: SpendView, csrf: string | undefined): string {
     if (!configured) return `<button type="button" disabled title="No ${secret[upstream]}">${label}</button>`;
     return `<form method="post" action="/admin/dashboard/upstream"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="upstream" value="${upstream}"><button type="submit"${upstream === "openrouter" ? ` class="danger"` : ""}>${label}</button></form>`;
   };
-  return `<div class="switch"><span>Serve from:</span>${button("openai", "OpenAI", spend.openaiConfigured)}${button("luminal", "Luminal", spend.luminalConfigured)}${button("openrouter", "OpenRouter", spend.openRouterConfigured)}</div>
-<p class="note">Takes effect on the next request; nothing switches back on its own. OpenAI is the default; a model's own provider serves it, and GPT-6 Luna falls back to DeepSeek on Luminal when OpenAI fails or its credit runs out. OpenRouter spends OpenRouter credit (cash) until you switch back.${spend.openRouterConfigured ? "" : " OpenRouter can't be chosen: the service has no OPENROUTER_API_KEY."} Each switch is in the admin log.</p>`;
+  return `<div class="switch"><span>Routing setting:</span>${button("openai", "OpenAI", spend.openaiConfigured)}${button("luminal", "Luminal", spend.luminalConfigured)}${button("openrouter", "OpenRouter", spend.openRouterConfigured)}</div>
+<p class="note">This setting doesn't move GPT-6 traffic: GPT-6 models always go to OpenAI and DeepSeek to Luminal. OpenAI and Luminal route the same; they only pick whose weekly credit budget the waiting line watches (OpenAI is the default). OpenRouter sends DeepSeek requests to OpenRouter, paid in cash instead of Luminal credit, until you switch back; GPT-6 stays on OpenAI.${spend.openRouterConfigured ? "" : " OpenRouter can't be chosen: the service has no OPENROUTER_API_KEY."} This is the primaryUpstream setting; it takes effect on the next request, nothing switches back on its own, and each switch is in the admin log.</p>`;
 }
 
 /** Block (or Unblock, when blocked) for one person; nothing without a CSRF token (bearer views). */
@@ -539,20 +553,59 @@ ${
 
 // ─── The page ─────────────────────────────────────────────────────────────
 
-/** When this week's free credit spend would reach the queue's start, at this week's pace so far. */
-function queueStart(spend: SpendView, data: DashboardData): { startUsd: number | null; text: string } {
-  const startUsd = spend.weeklyCreditUsd === null ? null : spend.queueThreshold * spend.weeklyCreditUsd;
-  if (data.queue.waiting > 0) return { startUsd, text: `On: ${count(data.queue.waiting)} waiting. New open sign-ups join the line.` };
-  if (startUsd === null) return { startUsd, text: "No weekly credit budget, so credit never starts the queue." };
-  if (spend.freeCreditWeekUsd >= startUsd) return { startUsd, text: "On: new open sign-ups wait for free tokens." };
-  const left = `${usd(startUsd - spend.freeCreditWeekUsd)} of free credit to go.`;
-  const elapsed = data.now - data.currentWeek;
-  if (spend.freeCreditWeekUsd <= 0 || elapsed < 3_600_000) return { startUsd, text: `${left} Too early in the week for a pace.` };
-  const at = data.currentWeek + (elapsed * startUsd) / spend.freeCreditWeekUsd;
-  return {
-    startUsd,
-    text: at < spend.resetsAt ? `${left} At this week's pace: ${weekday(at)} ${new Date(at).toISOString().slice(11, 16)} UTC.` : `${left} Not this week at this week's pace.`,
+/**
+ * The waiting line, as the code runs it (queue.ts `shouldQueue`, `creditBudget`): which weekly
+ * credit budget it watches, the spend at which new open sign-ups start to wait, the spend it
+ * compares, and when that spend would get there at this week's pace.
+ */
+export function queueStart(spend: SpendView, data: DashboardData): { startUsd: number | null; budgetUsd: number | null; provider: string | null; watchedUsd: number; text: string } {
+  const policy = {
+    primaryUpstream: spend.primaryUpstream,
+    openaiConfigured: spend.openaiConfigured,
+    luminalConfigured: spend.luminalConfigured,
+    openaiCreditUsd: spend.openaiCreditUsd,
+    openaiWeeklyCreditUsd: spend.openaiWeeklyCreditUsd ?? undefined,
+    luminalCreditUsd: spend.creditUsd,
+    luminalWeeklyCreditUsd: spend.weeklyCreditUsd ?? undefined,
   };
+  const budget = creditMode(policy) ? creditBudget(policy) : undefined;
+  const budgetUsd = budget?.weeklyUsd ?? null;
+  const provider = budget ? PROVIDER_NAMES[budget.provider] : null;
+  const startUsd = budgetUsd === null ? null : spend.queueThreshold * budgetUsd;
+  // shouldQueue compares this week's free Luminal credit spend, whichever budget it watches.
+  const watchedUsd = spend.freeCreditWeekUsd;
+  const result = (text: string) => ({ startUsd, budgetUsd, provider, watchedUsd, text });
+  if (data.queue.waiting > 0) return result(`On: ${count(data.queue.waiting)} waiting. New open sign-ups join the line.`);
+  if (startUsd === null) return result(budget ? "No weekly credit budget, so credit spend never starts the line." : spend.primaryUpstream === "openrouter" ? "Routed to OpenRouter: credit spend doesn't start the line." : "No OpenAI or Luminal key: credit spend doesn't start the line.");
+  if (watchedUsd >= startUsd) return result("On: new open sign-ups wait for free tokens.");
+  const left = `${usd(startUsd - watchedUsd)} to go.`;
+  const elapsed = data.now - data.currentWeek;
+  if (watchedUsd <= 0 || elapsed < 3_600_000) return result(`${left} Too early in the week for a pace.`);
+  const at = data.currentWeek + (elapsed * startUsd) / watchedUsd;
+  return result(at < spend.resetsAt ? `${left} At this week's pace: ${weekday(at)} ${new Date(at).toISOString().slice(11, 16)} UTC.` : `${left} Not this week at this week's pace.`);
+}
+
+/** Any repository count at or above this means the repositories path to Full is switched off. */
+export const REPOS_PATH_OFF = 100_000;
+
+/**
+ * Who gets in and who gets free tokens, from the effective settings. Only the public bar: the
+ * private account checks' thresholds are never shown here.
+ */
+export function admissionText(spend: SpendView, admitted: number): string {
+  const starter = spend.starterWeeklyTokens > 0 ? `${tokens(spend.starterWeeklyTokens)} DeepSeek tokens a week` : "no free tokens";
+  const parts: string[] = [];
+  if (spend.fullMinAccountAgeDays > 0) parts.push(`at least ${count(spend.fullMinAccountAgeDays)} days old`);
+  const paths = [`${count(spend.fullMinContributions)}+ contributions in the last year`];
+  if (spend.fullMinPublicRepos < REPOS_PATH_OFF) paths.push(`${count(spend.fullMinPublicRepos)}+ public repos`);
+  parts.push(`with ${paths.join(" or ")}`);
+  const bar = spend.requireGithubActivity
+    ? `Free tokens (Full) need a GitHub account ${parts.join(" ")}, and the private account checks count too; below that, Starter: ${starter}.`
+    : "GitHub account check off: everyone gets Full.";
+  const who = spend.openAdmission
+    ? `Admission: open, any GitHub account can sign up; ${count(admitted)} admitted, no cap while open.`
+    : `Admission: invite-only; ${count(admitted)} of ${count(spend.maxActiveUsers)} admitted. An invite always gives Full.`;
+  return `${who} ${bar}`;
 }
 
 /** "Serving", or why free requests aren't served. */
@@ -577,25 +630,67 @@ function freeTierState(spend: SpendView): string {
         : "Serving";
 }
 
-/** The red banner's sentences: the Luminal credit, or this week's credit budget, past BANNER_SHARE. */
-function creditWarnings(spend: SpendView): string[] {
-  const creditShare = spend.creditUsd > 0 ? spend.creditUsedUsd / spend.creditUsd : spend.creditUsedUsd > 0 ? 1 : 0;
-  const weekCreditShare = spend.weeklyCreditUsd !== null && spend.weeklyCreditUsd > 0 ? spend.freeCreditWeekUsd / spend.weeklyCreditUsd : 0;
+const PROVIDER_NAMES = { openai: "OpenAI", luminal: "Luminal", openrouter: "OpenRouter" } as const;
+
+/** One row per prepaid-credit provider, from the effective config and the spend counters. */
+export function creditProviders(spend: SpendView): Array<{ id: "openai" | "luminal"; name: string; configured: boolean; balanceUsd: number; usedUsd: number; weekUsd: number; freeWeekUsd: number; weeklyBudgetUsd: number | null }> {
   return [
-    ...(creditShare >= BANNER_SHARE ? [`${percent(creditShare)} of the ${usd(spend.creditUsd)} Luminal credit used (${usd(spend.creditUsedUsd)}).`] : []),
-    ...(weekCreditShare >= BANNER_SHARE ? [`${percent(weekCreditShare)} of this week's ${usd(spend.weeklyCreditUsd)} credit budget used (${usd(spend.freeCreditWeekUsd)}).`] : []),
+    { id: "openai", name: "OpenAI", configured: spend.openaiConfigured, balanceUsd: spend.openaiCreditUsd, usedUsd: spend.openaiCreditUsedUsd, weekUsd: spend.openaiCreditWeekUsd, freeWeekUsd: spend.openaiFreeCreditWeekUsd, weeklyBudgetUsd: spend.openaiWeeklyCreditUsd },
+    { id: "luminal", name: "Luminal", configured: spend.luminalConfigured, balanceUsd: spend.creditUsd, usedUsd: spend.creditUsedUsd, weekUsd: spend.creditWeekUsd, freeWeekUsd: spend.freeCreditWeekUsd, weeklyBudgetUsd: spend.weeklyCreditUsd },
   ];
 }
 
-/** Who serves now, as the dashboard names it. */
-function servingName(spend: SpendView): string {
-  return spend.serving === "openai"
-    ? "OpenAI"
-    : spend.serving === "luminal"
-      ? "Luminal"
-      : spend.serving === "openrouter"
-        ? spend.primaryUpstream === "luminal" ? "OpenRouter (no LUMINAL_API_KEY)" : "OpenRouter"
-        : "None (no OPENAI_API_KEY, LUMINAL_API_KEY or OPENROUTER_API_KEY)";
+/** Spend across providers: the prepaid credit, plus the older metered OpenRouter cash (admins included). */
+export function spendTotals(spend: SpendView): { allTimeUsd: number; weekUsd: number; meteredAllTimeUsd: number; meteredWeekUsd: number } {
+  const providers = creditProviders(spend);
+  const round = (value: number) => Math.round(value * 1e6) / 1e6;
+  const meteredAllTimeUsd = round(spend.totalUsd + spend.adminTotalUsd);
+  const meteredWeekUsd = round(spend.weekUsd + spend.adminWeekUsd);
+  return {
+    allTimeUsd: round(providers.reduce((sum, row) => sum + row.usedUsd, 0) + meteredAllTimeUsd),
+    weekUsd: round(providers.reduce((sum, row) => sum + row.weekUsd, 0) + meteredWeekUsd),
+    meteredAllTimeUsd,
+    meteredWeekUsd,
+  };
+}
+
+/** The red banner's sentences: a provider's credit, or its weekly credit budget, past BANNER_SHARE. */
+function creditWarnings(spend: SpendView): string[] {
+  return creditProviders(spend).flatMap((row) => {
+    const share = row.balanceUsd > 0 ? row.usedUsd / row.balanceUsd : row.usedUsd > 0 ? 1 : 0;
+    const weekShare = row.weeklyBudgetUsd !== null && row.weeklyBudgetUsd > 0 ? row.freeWeekUsd / row.weeklyBudgetUsd : 0;
+    return [
+      ...(share >= BANNER_SHARE ? [`${percent(share)} of the ${usd(row.balanceUsd)} ${row.name} credit used (${usd(row.usedUsd)}).`] : []),
+      ...(weekShare >= BANNER_SHARE ? [`${percent(weekShare)} of this week's ${usd(row.weeklyBudgetUsd)} ${row.name} credit budget used (${usd(row.freeWeekUsd)}).`] : []),
+    ];
+  });
+}
+
+/**
+ * Where each model goes right now, as app.ts `servingModel` decides: GPT-6 models to OpenAI
+ * (DeepSeek on Luminal when OpenAI has no key or credit), DeepSeek to Luminal, or to OpenRouter
+ * when the routing setting says so or Luminal has no key.
+ */
+export function routes(spend: SpendView): { gpt: string; deepseek: string } {
+  const luminalReady = spend.luminalConfigured && spend.creditUsedUsd < spend.creditUsd;
+  const openaiReady = spend.openaiConfigured && spend.openaiCreditUsedUsd < spend.openaiCreditUsd;
+  const deepseek =
+    spend.primaryUpstream === "openrouter" && spend.openRouterConfigured
+      ? "OpenRouter"
+      : luminalReady
+        ? "Luminal"
+        : !spend.luminalConfigured && spend.openRouterConfigured
+          ? "OpenRouter"
+          : "nowhere";
+  const gpt = openaiReady ? "OpenAI" : luminalReady ? "DeepSeek on Luminal (fallback)" : "nowhere";
+  return { gpt, deepseek };
+}
+
+/** Model names per provider, from models.ts. */
+function modelNames(provider: "openai" | "luminal"): string {
+  return FREE_MODELS.filter((model) => model.provider === provider)
+    .map((model) => model.name)
+    .join(", ");
 }
 
 /** The Simple / Full / Tools switch: three links, the current one marked. */
@@ -613,15 +708,36 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
   const banner = warnings.length > 0 ? `<p class="banner" role="alert">${warnings.map(escapeHtml).join(" ")}</p>` : "";
   const queue = queueStart(spend, data);
 
+  const totals = spendTotals(spend);
+  const providers = creditProviders(spend);
+  const route = routes(spend);
+  const providerRow = (row: ReturnType<typeof creditProviders>[number]) => {
+    const serves = row.id === "openai" ? modelNames("openai") : `${modelNames("luminal")}; the GPT-6 fallback`;
+    const budget = row.weeklyBudgetUsd === null ? "" : ` <span class="muted">free ${usd(row.freeWeekUsd)} of ${usd(row.weeklyBudgetUsd)} budget</span>`;
+    return `<tr><td>${row.name}${row.configured ? "" : ` <span class="muted">(no key)</span>`}</td><td class="l wrap">${escapeHtml(serves)}</td><td class="used">${usd(row.usedUsd)} <span class="muted">of ${usd(row.balanceUsd)}</span>${meter(row.usedUsd, row.balanceUsd, `${row.name} credit used against the balance`)}</td><td>${usd(row.weekUsd)}${budget}</td><td>${usd(Math.max(0, row.balanceUsd - row.usedUsd))}</td></tr>`;
+  };
+  const meteredRow = `<tr><td>OpenRouter <span class="muted">(older, metered)</span></td><td class="l wrap">${route.deepseek === "OpenRouter" ? "DeepSeek, now" : "Nothing now; DeepSeek only when routed there"}</td><td>${usd(totals.meteredAllTimeUsd)} <span class="muted">cash, no balance</span></td><td>${usd(totals.meteredWeekUsd)}</td><td>–</td></tr>`;
+  const creditNames = providers.map((row) => `${row.name} ${usd(row.usedUsd)}`).join(" + ");
   const budgetSection = `<section id="budget">
-<div class="head"><h2>Budget: Luminal credit</h2>${csvLink("spend")}</div>
+<div class="head"><h2>Spend</h2>${csvLink("spend")}</div>
 <div class="tiles">
-<div class="tile lead">Luminal credit used<b>${usd(spend.creditUsedUsd)} <span class="muted">of ${usd(spend.creditUsd)}</span></b>${meter(spend.creditUsedUsd, spend.creditUsd, "Luminal credit used against the balance")}<span class="note">${usd(Math.max(0, spend.creditUsd - spend.creditUsedUsd))} left. Luminal-served usage pauses at the balance.</span></div>
-<div class="tile lead">Credit this week<b>${usd(spend.freeCreditWeekUsd)} <span class="muted">of ${escapeHtml(cap(spend.weeklyCreditUsd))}</span></b>${meter(spend.freeCreditWeekUsd, spend.weeklyCreditUsd, "free credit this week against the weekly credit budget")}<span class="note">Free usage since ${escapeHtml(day(currentWeek))}; ${usd(spend.creditWeekUsd)} with admins and paid plans. Resets ${escapeHtml(weekday(spend.resetsAt))} 00:00 UTC.</span></div>
-<div class="tile lead">Queue starts at<b>${queue.startUsd === null ? "–" : usd(queue.startUsd)}${spend.weeklyCreditUsd === null ? "" : ` <span class="muted">${escapeHtml(percent(spend.queueThreshold))} of ${usd(spend.weeklyCreditUsd)}</span>`}</b><span class="note">${escapeHtml(queue.text)}${spend.serving === "openrouter" ? " Luminal isn't serving, so the queue watches OpenRouter spend instead." : ""}</span></div>
-<div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">Admission: ${spend.openAdmission ? `open (old enough GitHub accounts${spend.requireGithubActivity ? " with a public repo or a contribution in the last year" : ""}); ${count(data.people.admitted)} admitted, no cap while open` : `invite-only; ${count(data.people.admitted)} of ${count(spend.maxActiveUsers)} admitted`}. GitHub activity check: ${spend.requireGithubActivity ? "on" : "off"}. Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} a week.</span></div>
+<div class="tile lead">Spent, all time<b>${usd(totals.allTimeUsd)}</b><span class="note">${creditNames} + ${usd(totals.meteredAllTimeUsd)} older metered OpenRouter spend, from before prepaid credit. Admins and paid plans included.</span></div>
+<div class="tile lead">Spent this week<b>${usd(totals.weekUsd)}</b><span class="note">${providers.map((row) => `${row.name} ${usd(row.weekUsd)}`).join(" + ")}${totals.meteredWeekUsd > 0 ? ` + OpenRouter ${usd(totals.meteredWeekUsd)}` : ""}, since ${escapeHtml(day(currentWeek))}. Resets ${escapeHtml(weekday(spend.resetsAt))} 00:00 UTC.</span></div>
+<div class="tile lead">Waiting line starts at<b>${queue.startUsd === null ? "–" : `${usd(queue.startUsd)} <span class="muted">a week</span>`}</b><span class="note">${
+    queue.startUsd === null
+      ? ""
+      : `New open sign-ups get an account but wait in line for free tokens once this week's free Luminal credit spend (${usd(queue.watchedUsd)} so far) reaches this: ${escapeHtml(percent(spend.queueThreshold))} of the ${usd(queue.budgetUsd)} ${escapeHtml(queue.provider ?? "")} weekly credit budget. Invites skip the line; Mondays let it in as far as the budget allows. `
+  }${escapeHtml(queue.text)}${spend.weeklyCapUsd === null ? "" : ` Free OpenRouter cash past ${usd(spend.queueThreshold * spend.weeklyCapUsd)} this week also starts it.`}</span></div>
+<div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">${escapeHtml(admissionText(spend, data.people.admitted))} Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} a week.</span></div>
 </div>
-<p class="note">Effective values, with admin overrides applied. Credit is Luminal's prepaid credit at its list prices; admins count against it.</p>
+<h3>By provider</h3>
+<div class="scroll"><table>
+<thead><tr><th class="l">Provider</th><th class="l">Serves</th><th>Used / balance</th><th>This week</th><th>Left</th></tr></thead>
+<tbody>
+${providers.map(providerRow).join("\n")}
+${meteredRow}
+</tbody></table></div>
+<p class="note">Effective values, with admin overrides applied. Credit is each provider's prepaid credit at its list prices; admins and paid plans count against it. "Free" is usage outside admins and paid plans, what the weekly budgets and the waiting line watch.</p>
 </section>`;
 
   const upstreamRow = (row: DashboardData["upstreams"][number]) =>
@@ -631,16 +747,16 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
 <tbody>
 ${data.upstreams.filter((row) => row.window === window).map(upstreamRow).join("\n")}
 </tbody></table></div>`;
-  const serving = servingName(spend);
   const upstreamSection = `<section id="upstream">
 <div class="head"><h2>Upstreams</h2>${csvLink("upstreams")}</div>
 <div class="tiles">
-<div class="tile lead">Serving<b class="state">${escapeHtml(serving)}</b><span class="note">primaryUpstream: ${escapeHtml(spend.primaryUpstream)}. ${spend.serving === "none" ? "Free requests get 503 no_upstream until a key is set." : "A model's own provider serves it; GPT-6 Luna falls back to DeepSeek when OpenAI fails."}</span></div>
+<div class="tile lead">GPT-6 models go to<b class="state">${escapeHtml(route.gpt)}</b><span class="note">Each model goes to its own provider. GPT-6 falls back to DeepSeek on Luminal when OpenAI fails or its credit runs out.</span></div>
+<div class="tile lead">DeepSeek goes to<b class="state">${escapeHtml(route.deepseek)}</b><span class="note">${route.deepseek === "nowhere" ? "No provider can serve DeepSeek: set LUMINAL_API_KEY, or route it to OpenRouter." : "Luminal, unless the routing setting below says OpenRouter or Luminal has no key."}</span></div>
 </div>
 ${upstreamSwitch(spend, input.csrf)}
 ${upstreamTable("today")}
 ${upstreamTable("week")}
-<p class="note">Admins included. TTFT: time to the first content chunk (text, reasoning or a tool call); TTFB: time to the response headers. Errors: 429, 5xx, timeouts, unreachable and failed streams. Credit is Luminal's prepaid credit at its list prices; cash is OpenRouter's reported cost, when OpenRouter serves.</p>
+<p class="note">Admins included. TTFT: time to the first content chunk (text, reasoning or a tool call); TTFB: time to the response headers. Errors: 429, 5xx, timeouts, unreachable and failed streams. Credit is the provider's prepaid credit (OpenAI or Luminal) at its list prices; cash is OpenRouter's reported cost, when OpenRouter serves.</p>
 </section>`;
 
   const activeSection = `<section>
@@ -864,8 +980,8 @@ ${data.funnel
     }</span>`,
   )}
 <h1>Free tier</h1>
-<p class="serving">Serving from <strong>${escapeHtml(serving)}</strong> <a href="#upstream">Switch upstream</a></p>
-<p class="lede">${count(data.people.admitted)} people admitted, ${count(data.people.activeThisWeek)} active this week. Admins are left out of every number but the credit. Updated ${escapeHtml(new Date(data.now).toISOString().slice(0, 16).replace("T", " "))} UTC. Counts, tokens, cost and times only.</p>`;
+<p class="serving"><span>Each model goes to its own provider:</span><span>GPT-6 → <strong>${escapeHtml(route.gpt)}</strong></span><span>DeepSeek → <strong>${escapeHtml(route.deepseek)}</strong></span><a href="#upstream">Routing</a></p>
+<p class="lede">${count(data.people.admitted)} people admitted, ${count(data.people.activeThisWeek)} active this week. Admins are left out of every number but spend. Updated ${escapeHtml(new Date(data.now).toISOString().slice(0, 16).replace("T", " "))} UTC. Counts, tokens, cost and times only.</p>`;
 
   const abuse = input.abuse ? abuseSection(input.abuse, input.csrf) : "";
   const log = input.abuse ? adminLogSection(input.abuse) : "";
@@ -1454,12 +1570,14 @@ function csv(header: string[], rows: unknown[][]): string {
 export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendView): Response {
   let body: string;
   switch (table) {
-    case "spend":
+    case "spend": {
+      const totals = spendTotals(spend);
       body = csv(
-        ["week_start", "week_usd", "weekly_cap_usd", "total_usd", "total_cap_usd", "admin_week_usd", "admin_total_usd", "paused", "paused_by_env", "open_admission", "admitted", "max_active_users", "resets_at", "primary_upstream", "luminal_credit_usd", "luminal_credit_used_usd", "free_credit_week_usd", "weekly_credit_usd", "require_github_activity"],
-        [[day(data.currentWeek), spend.weekUsd, spend.weeklyCapUsd, spend.totalUsd, spend.totalCapUsd, spend.adminWeekUsd, spend.adminTotalUsd, spend.paused, spend.pausedByEnv, spend.openAdmission, data.people.admitted, spend.maxActiveUsers, new Date(spend.resetsAt).toISOString(), spend.primaryUpstream, spend.creditUsd, spend.creditUsedUsd, spend.freeCreditWeekUsd, spend.weeklyCreditUsd, spend.requireGithubActivity]],
+        ["week_start", "week_usd", "weekly_cap_usd", "total_usd", "total_cap_usd", "admin_week_usd", "admin_total_usd", "paused", "paused_by_env", "open_admission", "admitted", "max_active_users", "resets_at", "primary_upstream", "luminal_credit_usd", "luminal_credit_used_usd", "free_credit_week_usd", "weekly_credit_usd", "require_github_activity", "luminal_credit_week_usd", "openai_credit_usd", "openai_credit_used_usd", "openai_credit_week_usd", "openai_free_credit_week_usd", "openai_weekly_credit_usd", "metered_total_usd", "spent_all_time_usd", "spent_week_usd"],
+        [[day(data.currentWeek), spend.weekUsd, spend.weeklyCapUsd, spend.totalUsd, spend.totalCapUsd, spend.adminWeekUsd, spend.adminTotalUsd, spend.paused, spend.pausedByEnv, spend.openAdmission, data.people.admitted, spend.maxActiveUsers, new Date(spend.resetsAt).toISOString(), spend.primaryUpstream, spend.creditUsd, spend.creditUsedUsd, spend.freeCreditWeekUsd, spend.weeklyCreditUsd, spend.requireGithubActivity, spend.creditWeekUsd, spend.openaiCreditUsd, spend.openaiCreditUsedUsd, spend.openaiCreditWeekUsd, spend.openaiFreeCreditWeekUsd, spend.openaiWeeklyCreditUsd, totals.meteredAllTimeUsd, totals.allTimeUsd, totals.weekUsd]],
       );
       break;
+    }
     case "weekly-active":
       body = csv(["week_start", `active_${REGULAR_DAYS}_plus_days`, "active_any_day"], data.weeklyActive.map((week) => [day(week.weekStart), week.regular, week.active]));
       break;
@@ -1514,6 +1632,7 @@ export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendV
         [
           ...data.upstreams.map((row) => [row.window, row.upstream, row.requests, row.errors, row.medianTtftMs, row.p90TtftMs, row.medianTtfbMs, row.cacheHitShare, row.creditUsd, row.cashUsd]),
           ["all_time", "luminal_credit", null, null, null, null, null, null, spend.creditUsedUsd, null],
+          ["all_time", "openai_credit", null, null, null, null, null, null, spend.openaiCreditUsedUsd, null],
         ],
       );
       break;

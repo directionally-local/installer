@@ -65,11 +65,13 @@ export function creditMode(policy: Pick<Policy, "primaryUpstream" | "luminalConf
  */
 export function creditBudget(
   policy: Pick<Policy, "primaryUpstream" | "openaiConfigured" | "luminalConfigured" | "openaiCreditUsd" | "openaiWeeklyCreditUsd" | "luminalCreditUsd" | "luminalWeeklyCreditUsd">,
-): { balanceUsd: number; weeklyUsd: number | undefined } {
-  if (policy.primaryUpstream === "openai" && policy.openaiConfigured) return { balanceUsd: policy.openaiCreditUsd, weeklyUsd: policy.openaiWeeklyCreditUsd };
-  if (policy.primaryUpstream === "luminal" && policy.luminalConfigured) return { balanceUsd: policy.luminalCreditUsd, weeklyUsd: policy.luminalWeeklyCreditUsd };
-  if (policy.openaiConfigured) return { balanceUsd: policy.openaiCreditUsd, weeklyUsd: policy.openaiWeeklyCreditUsd };
-  return { balanceUsd: policy.luminalCreditUsd, weeklyUsd: policy.luminalWeeklyCreditUsd };
+): { balanceUsd: number; weeklyUsd: number | undefined; provider: "openai" | "luminal" } {
+  const openai = { balanceUsd: policy.openaiCreditUsd, weeklyUsd: policy.openaiWeeklyCreditUsd, provider: "openai" as const };
+  const luminal = { balanceUsd: policy.luminalCreditUsd, weeklyUsd: policy.luminalWeeklyCreditUsd, provider: "luminal" as const };
+  if (policy.primaryUpstream === "openai" && policy.openaiConfigured) return openai;
+  if (policy.primaryUpstream === "luminal" && policy.luminalConfigured) return luminal;
+  if (policy.openaiConfigured) return openai;
+  return luminal;
 }
 
 export function policyOf(config: FreeConfig): Policy {

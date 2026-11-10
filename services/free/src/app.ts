@@ -2766,7 +2766,7 @@ async function adminMetrics(c: Ctx): Promise<Response> {
 // as a bearer token, and a bearer token can't be used as it. Every request checks the id is
 // still an admin and the session wasn't signed out. Pages only read, cross-site requests carry
 // no Strict cookie, and the POSTs (sign-out, block/unblock from the abuse section, the
-// "Serve from" upstream switch, and the Tools tab's forms) also require a same-origin request;
+// routing setting (primaryUpstream) switch, and the Tools tab's forms) also require a same-origin request;
 // all but sign-out also carry a CSRF token bound to the session.
 
 function adminCookie(value: string, maxAge: number): string {
@@ -2823,7 +2823,7 @@ async function adminWebPersonAction(c: Ctx, githubId: number, action: "block" | 
 }
 
 /**
- * POST /admin/dashboard/upstream: the dashboard's "Serve from" switch. Sets the primaryUpstream
+ * POST /admin/dashboard/upstream: the dashboard's routing setting switch. Sets the primaryUpstream
  * override (logged in the admin log like any setting), then back to the dashboard. Refused when
  * the chosen upstream has no key, since it couldn't serve.
  */
@@ -2929,7 +2929,15 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     creditWeekUsd: spend.creditWeekUsd,
     freeCreditWeekUsd: spend.freeCreditWeekUsd,
     weeklyCreditUsd: config.luminalWeeklyCreditUsd ?? null,
+    openaiCreditUsd: config.openaiCreditUsd,
+    openaiCreditUsedUsd: spend.openaiCreditUsedUsd,
+    openaiCreditWeekUsd: spend.openaiCreditWeekUsd,
+    openaiFreeCreditWeekUsd: spend.openaiFreeCreditWeekUsd,
+    openaiWeeklyCreditUsd: config.openaiWeeklyCreditUsd ?? null,
     starterWeeklyTokens: config.starterWeeklyTokens,
+    fullMinAccountAgeDays: config.fullMinAccountAgeDays,
+    fullMinPublicRepos: config.fullMinPublicRepos,
+    fullMinContributions: config.fullMinContributions,
   };
   if (csv !== undefined && isCsvTable(csv)) return dashboardCsv(csv, data, view);
   if (simpleData) return simpleDashboardPage({ data, spend: view, signOut: viaCookie, simple: simpleData, ...(abuse ? { abuse } : {}) });
