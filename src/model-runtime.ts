@@ -36,7 +36,8 @@ export function dockerArgs(model: ModelRecipe, port: number, context: number, sl
   if (index !== -1) flags.splice(index, 2);
   return ["run", "-d", "--name", `dl-model-${slot}`, "--gpus", "all", "--ipc=host",
     "-p", `127.0.0.1:${port}:8000`, "-v", "dl-model-hf-cache:/root/.cache/huggingface",
-    model.image, "--model", model.repo, "--served-model-name", model.repo, ...flags, "--max-model-len", String(context)];
+    model.image, "--model", model.repo, "--served-model-name", model.repo, ...flags, "--max-model-len", String(context),
+    "--gpu-memory-utilization", String(model.gpuMemoryUtilization)];
 }
 
 export async function containerRunning(system: System, container: string): Promise<boolean> {

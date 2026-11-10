@@ -50,6 +50,8 @@ export interface ModelDeployment {
   image: string;
   flags: readonly string[];
   minVramMiB: number;
+  /** Fraction of GPU VRAM this deployment reserves; kept for rollback. */
+  gpuMemoryUtilization?: number;
   lastTest: { chat: boolean; tools: boolean; json: boolean; tokensPerSecond: number; at: string };
 }
 
