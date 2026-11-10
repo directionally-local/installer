@@ -1,6 +1,6 @@
 import type { DurableObjectNamespace } from "cloudflare:workers";
 import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.js";
-import { githubAuthorizeUrl, githubPrimaryEmail, githubPublicProfile, githubSignInFromCode, githubUserByLogin, githubUserFromCode, type Fetch } from "../../shared/src/github.js";
+import { githubAuthorizeUrl, githubPrimaryEmail, githubPublicProfile, githubSignInFromCode, githubUserByLogin, githubUserFromCode, type Fetch, type GitHubAppCredentials } from "../../shared/src/github.js";
 import { githubSignals } from "../../shared/src/github-signals.js";
 import { hmacKey, signJwt, verifyJwt } from "../../shared/src/jwt.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
@@ -1164,6 +1164,11 @@ async function deviceDetails(c: Ctx): Promise<Response> {
 }
 
 const GITHUB_USER_AGENT = "directionallylocal-free";
+
+/** The sign-in OAuth app's credentials, for public GitHub reads at the app's rate limit. */
+function githubApp(config: FreeConfig): GitHubAppCredentials {
+  return { clientId: config.githubClientId, clientSecret: config.githubClientSecret };
+}
 /** How long the sign-up activity check waits for GitHub's GraphQL API before letting the person through. */
 const GITHUB_CHECK_TIMEOUT_MS = 5000;
 
@@ -1202,7 +1207,7 @@ async function recheckStarter(c: Ctx, identity: Identity, config: FreeConfig): P
   // own signals), then on the weekly cadence.
   const since = person.level_reason === "network_limit" ? c.now() - 60 * 60_000 : week;
   if (person.signals_at !== null && person.signals_at >= since) return undefined;
-  const profile = await githubPublicProfile(identity.login, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS);
+  const profile = await githubPublicProfile(identity.login, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS, githubApp(c.config));
   if (!profile) return undefined;
   // The public profile, plus what only sign-in can read (contributions and the additional
   // signals) as stored then: no token here.
@@ -2811,7 +2816,7 @@ async function grantLogins(c: Ctx, text: string, actor: { githubId: number; logi
   if (logins.length > MAX_GRANT_LOGINS) return { status: 400, code: "invalid_request", message: `At most ${MAX_GRANT_LOGINS} usernames at a time; this has ${logins.length}.` };
   const results: GrantResult[] = [];
   for (const input of logins) {
-    const user = await githubUserByLogin(input, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS);
+    const user = await githubUserByLogin(input, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS, githubApp(c.config));
     if (user === "not_found" || user === "error") {
       results.push({ input, outcome: user === "error" ? "github_error" : "not_found" });
       continue;

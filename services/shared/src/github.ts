@@ -131,15 +131,28 @@ export interface GitHubPublicProfile {
 }
 
 /**
- * GET https://api.github.com/users/<login>, unauthenticated: the HTTP status and the JSON body,
- * or undefined when GitHub doesn't answer within `timeoutMs` or the request fails.
+ * An OAuth app's client id and secret. Sent as HTTP basic auth on public reads, they raise
+ * GitHub's rate limit from 60 an hour per IP address (shared by everyone on a Workers IP) to
+ * the app's own 5,000 an hour. They read only public data.
  */
-async function fetchPublicUser(login: string, fetcher: Fetch, userAgent: string, timeoutMs: number): Promise<{ status: number; body: Record<string, unknown> } | undefined> {
+export interface GitHubAppCredentials {
+  clientId: string;
+  clientSecret: string;
+}
+
+/**
+ * GET https://api.github.com/users/<login>, with the app's credentials when given: the HTTP
+ * status and the JSON body, or undefined when GitHub doesn't answer within `timeoutMs` or the
+ * request fails.
+ */
+async function fetchPublicUser(login: string, fetcher: Fetch, userAgent: string, timeoutMs: number, app?: GitHubAppCredentials): Promise<{ status: number; body: Record<string, unknown> } | undefined> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const headers: Record<string, string> = { accept: "application/vnd.github+json", "user-agent": userAgent, "x-github-api-version": "2022-11-28" };
+    if (app) headers.authorization = `Basic ${btoa(`${app.clientId}:${app.clientSecret}`)}`;
     const response = await fetcher(`https://api.github.com/users/${encodeURIComponent(login)}`, {
-      headers: { accept: "application/vnd.github+json", "user-agent": userAgent, "x-github-api-version": "2022-11-28" },
+      headers,
       signal: controller.signal,
     });
     if (!response.ok) return { status: response.status, body: {} };
@@ -157,8 +170,8 @@ async function fetchPublicUser(login: string, fetcher: Fetch, userAgent: string,
  * for the weekly Starter re-check, where the person's own token isn't available. Undefined
  * when GitHub doesn't answer or the profile isn't there.
  */
-export async function githubPublicProfile(login: string, fetcher: Fetch, userAgent = "directionallylocal", timeoutMs = 5000): Promise<GitHubPublicProfile | undefined> {
-  const found = await fetchPublicUser(login, fetcher, userAgent, timeoutMs);
+export async function githubPublicProfile(login: string, fetcher: Fetch, userAgent = "directionallylocal", timeoutMs = 5000, app?: GitHubAppCredentials): Promise<GitHubPublicProfile | undefined> {
+  const found = await fetchPublicUser(login, fetcher, userAgent, timeoutMs, app);
   if (!found || found.status < 200 || found.status > 299) return undefined;
   const body = found.body;
   const createdAt = typeof body.created_at === "string" ? Date.parse(body.created_at) : Number.NaN;
@@ -175,8 +188,8 @@ export async function githubPublicProfile(login: string, fetcher: Fetch, userAge
  * "not_found" when GitHub says there is no such user (404); "error" when it doesn't answer,
  * rate-limits, or answers with something else.
  */
-export async function githubUserByLogin(login: string, fetcher: Fetch, userAgent = "directionallylocal", timeoutMs = 5000): Promise<{ id: number; login: string } | "not_found" | "error"> {
-  const found = await fetchPublicUser(login, fetcher, userAgent, timeoutMs);
+export async function githubUserByLogin(login: string, fetcher: Fetch, userAgent = "directionallylocal", timeoutMs = 5000, app?: GitHubAppCredentials): Promise<{ id: number; login: string } | "not_found" | "error"> {
+  const found = await fetchPublicUser(login, fetcher, userAgent, timeoutMs, app);
   if (!found) return "error";
   if (found.status === 404) return "not_found";
   if (found.status < 200 || found.status > 299) return "error";
