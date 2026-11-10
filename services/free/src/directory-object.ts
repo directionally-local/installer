@@ -6,6 +6,7 @@ import type { DownloadCount, InstallCount } from "./telemetry.js";
 import { abuseData, outsideDl, simpleData, type AbuseData, type SimpleData } from "./abuse.js";
 import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, signupFunnel, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
+import { healthData, type HealthData, type HealthWindow } from "./health-data.js";
 import { milestoneCrossed, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
@@ -358,6 +359,8 @@ const SCHEMA = [
   // A person's events by when they arrived (the dl-only check, on each chat request), and by session.
   `CREATE INDEX IF NOT EXISTS events_person ON events (github_id, received_at)`,
   `CREATE INDEX IF NOT EXISTS events_session ON events (github_id, session_id)`,
+  // The Health view: one event type over a time window (session starts, turns, errors).
+  `CREATE INDEX IF NOT EXISTS events_type_at ON events (type, at)`,
   `CREATE TABLE IF NOT EXISTS spend_weeks (
      week_start     INTEGER PRIMARY KEY,
      usd            REAL NOT NULL,
@@ -1753,6 +1756,11 @@ export class DirectoryObject extends DurableObject {
   /** The dashboard's abuse section (see abuse.ts). Admins are left out. */
   async abuse(input: { now: number; adminIds: number[] }): Promise<AbuseData> {
     return abuseData(this.ctx.storage.sql, input);
+  }
+
+  /** The Health view's numbers (see health-data.ts). Admins are left out. */
+  async health(input: { now: number; adminIds: number[]; days: HealthWindow }): Promise<HealthData> {
+    return healthData(this.ctx.storage.sql, input);
   }
 
   /** The simple dashboard's per-person numbers (see abuse.ts). Admins are left out. */

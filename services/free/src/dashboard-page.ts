@@ -10,6 +10,7 @@ import { hasCapitals, type BroadcastAudience } from "./broadcast.js";
 import { GRANT_LABELS, MAX_GRANT_LOGINS, type GrantResult } from "./grant.js";
 import { FREE_MODELS } from "./models.js";
 import { creditBudget, creditMode } from "./queue.js";
+import { HEALTH_WINDOWS, healthTakeaways, INSTALL_STEPS, NORMAL_SESSION_ENDS, NO_END, STILL_OPEN, type HealthData } from "./health-data.js";
 
 /** One Starter account on the full dashboard: its stored signals and which checks pass. Admin-only. */
 export interface StarterRow {
@@ -40,11 +41,12 @@ export const STARTER_ROWS = 50;
  * The only forms are sign-out, block/unblock, the routing setting (primaryUpstream) switch and the Tools
  * tab's two forms; all but sign-out post back here with a CSRF token.
  *
- * Three tabs: the full view (the default, every table), a simple one at /admin?view=simple,
+ * Four tabs: the full view (the default, every table), a simple one at /admin?view=simple,
  * four cards readable at a glance (sign-ups, growth, tokens per person, red flags), mostly
  * inline SVG charts, and Tools at /admin?view=tools (give free tokens by GitHub username, write
- * an email to users), whose buttons post a form and get the page back. Switching is a plain
- * link: no scripts.
+ * an email to users), whose buttons post a form and get the page back, and Health at
+ * /admin?view=health (errors, crashes, versions, sessions, tools, models and installs from
+ * Autopilot's session events; health-data.ts). Switching is a plain link: no scripts.
  */
 
 /** Global spend, caps and admission, for the first section. */
@@ -104,11 +106,30 @@ export interface SpendView {
 /** The red banner shows at this share of either cap. */
 export const BANNER_SHARE = 0.8;
 
-export const CSV_TABLES = ["spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"] as const;
+/** The Health view's tables (healthCsv); they take ?days= like the page. */
+export const HEALTH_CSV_TABLES = [
+  "health-errors",
+  "health-request-failures",
+  "health-ends",
+  "health-turns",
+  "health-versions",
+  "health-sessions",
+  "health-tools",
+  "health-models",
+  "health-upstreams",
+  "health-installs",
+] as const;
+export type HealthCsvTable = (typeof HEALTH_CSV_TABLES)[number];
+
+export const CSV_TABLES = ["spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams", ...HEALTH_CSV_TABLES] as const;
 export type CsvTable = (typeof CSV_TABLES)[number];
 
 export function isCsvTable(name: string): name is CsvTable {
   return (CSV_TABLES as readonly string[]).includes(name);
+}
+
+export function isHealthCsvTable(name: string): name is HealthCsvTable {
+  return (HEALTH_CSV_TABLES as readonly string[]).includes(name);
 }
 
 /** Security headers every dashboard response carries. `nonce` allows the one stylesheet. */
@@ -200,6 +221,9 @@ button.on { background: var(--ink); color: var(--on-ink); border-color: var(--in
 .views { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
 .views a { font: 500 12px var(--body); padding: 2px 9px; border-radius: 6px; text-decoration: none; color: var(--muted); }
 .views a[aria-current="page"] { background: var(--ink); color: var(--on-ink); }
+.takeaway { margin: 0 0 4px; font-weight: 600; }
+tr.bad td { color: var(--accent); }
+.health-views { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 4px 0 0; }
 `;
 
 export function nonce(): string {
@@ -704,10 +728,10 @@ function modelNames(provider: "openai" | "luminal"): string {
     .join(", ");
 }
 
-/** The Simple / Full / Tools switch: three links, the current one marked. */
-function viewToggle(current: "simple" | "full" | "tools"): string {
-  const link = (view: "simple" | "full" | "tools", label: string) => `<a href="/admin?view=${view}"${current === view ? ` aria-current="page"` : ""}>${label}</a>`;
-  return `<nav class="views" aria-label="Dashboard view">${link("simple", "Simple")}${link("full", "Full")}${link("tools", "Tools")}</nav>`;
+/** The Simple / Full / Tools / Health switch: four links, the current one marked. */
+function viewToggle(current: "simple" | "full" | "tools" | "health"): string {
+  const link = (view: "simple" | "full" | "tools" | "health", label: string) => `<a href="/admin?view=${view}"${current === view ? ` aria-current="page"` : ""}>${label}</a>`;
+  return `<nav class="views" aria-label="Dashboard view">${link("simple", "Simple")}${link("full", "Full")}${link("tools", "Tools")}${link("health", "Health")}</nav>`;
 }
 
 export function dashboardPage(input: { data: DashboardData; spend: SpendView; login: string; signOut: boolean; abuse?: AbuseData; csrf?: string; starters?: { rows: StarterRow[]; total: number } }): Response {
@@ -1678,6 +1702,226 @@ ${state.signOut ? `<form method="post" action="/admin/signout"><button type="sub
   return shell(`Tools · ${PRODUCT_NAME}`, `${header}\n<main class="tools">\n${requestsCard(state)}\n${grantCard(state)}\n${recheckCard(state)}\n${emailCard(state)}\n</main>`, 200, {}, "", TOOLS_STYLE);
 }
 
+// ─── Health ───────────────────────────────────────────────────────────────
+
+const OS_NAMES: Record<string, string> = { darwin: "macOS", linux: "Linux", win32: "Windows" };
+const osLabel = (os: string) => OS_NAMES[os] ?? os;
+const UPSTREAM_LABELS: Record<string, string> = { openai: "OpenAI", luminal: "Luminal", openrouter: "OpenRouter" };
+
+/** A compact table: header cells, body rows (already HTML), and what to say when there are none. */
+function healthTable(head: string[], rows: string[], empty: string): string {
+  return `<div class="scroll"><table>
+<thead><tr>${head.map((cell) => `<th>${escapeHtml(cell)}</th>`).join("")}</tr></thead>
+<tbody>
+${rows.length === 0 ? `<tr><td colspan="${head.length}" class="l muted">${escapeHtml(empty)}</td></tr>` : rows.join("\n")}
+</tbody></table></div>`;
+}
+
+/** A row; `bad` marks it (colour plus a word, so it doesn't rest on colour alone). */
+function healthRow(cells: string[], bad = false): string {
+  return `<tr${bad ? ` class="bad"` : ""}>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`;
+}
+
+const abnormalChip = ` <span class="status blocked">abnormal</span>`;
+const shareCell = (n: number, share: number) => `${count(n)} <span class="muted">(${percent(share)})</span>`;
+
+/**
+ * GET /admin?view=health: what Autopilot's session events and the request log say about bugs,
+ * crashes and what gets used (health-data.ts), over the last 1, 7 or 30 days. Seven sections,
+ * each a one-line takeaway, compact tables and a CSV. Same look as the full view.
+ */
+export function healthPage(input: { health: HealthData; login: string; signOut: boolean }): Response {
+  const h = input.health;
+  const say = healthTakeaways(h);
+  const query = `?days=${h.days}`;
+  const section = (id: string, title: string, csvs: Array<CsvTable>, takeaway: string, body: string, note: string) => `<section id="${id}">
+<div class="head"><h2>${escapeHtml(title)}</h2><span>${csvs.map((table) => csvLink(table, query)).join(" · ")}</span></div>
+<p class="takeaway">${escapeHtml(takeaway)}</p>
+${body}
+<p class="note">${note}</p>
+</section>`;
+  const windowSwitch = `<nav class="views" aria-label="Window">${HEALTH_WINDOWS.map(
+    (days) => `<a href="/admin?view=health&amp;days=${days}"${days === h.days ? ` aria-current="page"` : ""}>${days === 1 ? "1 day" : `${days} days`}</a>`,
+  ).join("")}</nav>`;
+
+  const header = `${markHeader(
+    `<span class="who">${viewToggle("health")}Signed in as <strong>${escapeHtml(input.login)}</strong>${
+      input.signOut ? `<form method="post" action="/admin/signout"><button type="submit">Sign out</button></form>` : ""
+    }</span>`,
+  )}
+<h1>Health</h1>
+<div class="health-views">${windowSwitch}<span class="muted">Last ${h.days === 1 ? "24 hours" : `${h.days} days`}, to ${escapeHtml(new Date(h.now).toISOString().slice(0, 16).replace("T", " "))} UTC.</span></div>
+<p class="lede">From Autopilot's session events (sent only while the free tier is the provider) and the free tier's request log. Admins left out except where a section says. Counts and outcomes only: never prompts, code, paths or repositories.</p>`;
+
+  const errors = section(
+    "errors",
+    "Errors",
+    ["health-errors", "health-request-failures"],
+    say.errors,
+    `<h3>Reported by Autopilot (${count(h.errors.total)}, ${count(h.errors.people)} people)</h3>
+${healthTable(
+  ["Error code", "Count", "People", "Autopilot versions"],
+  h.errors.codes.map((row) =>
+    healthRow([
+      escapeHtml(row.code),
+      count(row.count),
+      count(row.people),
+      escapeHtml(
+        row.versions
+          .slice(0, 4)
+          .map((version) => `${version.version} ×${version.count}`)
+          .join(", ") + (row.versions.length > 4 ? ", …" : ""),
+      ),
+    ]),
+  ),
+  "No errors reported.",
+)}
+<h3>Free tier requests that failed (${count(h.requests.failed)} of ${count(h.requests.total)})</h3>
+${healthTable(
+  ["Status", "Model", "Failed", "Of the model's requests"],
+  h.requests.failures.map((row) => healthRow([escapeHtml(row.status), escapeHtml(row.model), count(row.count), percent(row.share)])),
+  "No failed requests.",
+)}`,
+    "Error codes are what a failed turn carried: a provider code, an HTTP status (http_429) or an error class, never the message. Versions come from the session's start. Request statuses: upstream_busy (429), upstream_error (5xx), upstream_timeout, upstream_unreachable, stream_error, abandoned.",
+  );
+
+  const endLabel = (end: string) => escapeHtml(end);
+  const ends = section(
+    "ends",
+    "Crashes and abnormal ends",
+    ["health-ends", "health-turns"],
+    say.ends,
+    `<h3>How sessions ended (${count(h.ends.sessions)} started)</h3>
+${healthTable(
+  ["End", "Sessions", "Share"],
+  h.ends.overall.map((row) => healthRow([`${endLabel(row.end)}${row.normal ? "" : abnormalChip}`, count(row.count), percent(row.share)], !row.normal)),
+  "No sessions started.",
+)}
+<h3>By Autopilot version and OS</h3>
+${healthTable(
+  ["Version", "OS", "Sessions", "Abnormal", "Most common"],
+  h.ends.split.map((row) =>
+    healthRow([escapeHtml(row.version), escapeHtml(osLabel(row.os)), count(row.sessions), row.abnormal > 0 ? shareCell(row.abnormal, row.share) : "0", row.top === null ? "–" : escapeHtml(row.top)], row.abnormal > 0),
+  ),
+  "No sessions started.",
+)}
+<h3>How turns ended (${count(h.ends.turnTotal)})</h3>
+${healthTable(
+  ["Turn end", "Turns", "Share"],
+  h.ends.turns.map((row) => healthRow([`${endLabel(row.end)}${row.normal ? "" : abnormalChip}`, count(row.count), percent(row.share)], !row.normal)),
+  "No turns.",
+)}`,
+    `Sessions started in the window. Autopilot sends a session end only for ${NORMAL_SESSION_ENDS.map((end) => `"${end}"`).join(" and ")} (/clear); a crash or a killed terminal sends none, so ${escapeHtml(NO_END)} is a session with no end whose last event is over 6 hours old, and ${escapeHtml(STILL_OPEN)} one active more recently. Turns end complete, needs_input, aborted (Esc), guardrail or error.`,
+  );
+
+  const versions = section(
+    "versions",
+    "Versions",
+    ["health-versions"],
+    say.versions,
+    `<div class="tiles">
+<div class="tile">Autopilot version${healthTable(
+      ["Version", "Sessions", "People"],
+      h.versions.versions.map((row) => healthRow([`${escapeHtml(row.version)}${row.version === h.versions.latest ? ` <span class="muted">newest</span>` : ""}`, shareCell(row.count, row.share), count(row.people)])),
+      "No sessions.",
+    )}</div>
+<div class="tile">OS${healthTable(
+      ["OS", "Sessions", "People"],
+      h.versions.os.map((row) => healthRow([escapeHtml(osLabel(row.os)), shareCell(row.count, row.share), count(row.people)])),
+      "No sessions.",
+    )}</div>
+</div>`,
+    "From each session's start. A person on two versions counts under both.",
+  );
+
+  const s = h.sessions;
+  const durationText = (value: number | null) => (value === null ? "–" : value >= 60_000 ? `${(value / 60_000).toFixed(value >= 600_000 ? 0 : 1)} min` : ms(value));
+  const sessions = section(
+    "sessions",
+    "Sessions",
+    ["health-sessions"],
+    say.sessions,
+    `<div class="tiles">
+<div class="tile">Sessions<b>${count(s.sessions)}</b><span class="note">${count(s.people)} people; ${count(s.ended)} sent an end</span></div>
+<div class="tile">Turns per session<b>${s.turnsMedian === null ? "–" : count(s.turnsMedian)} <span class="muted">median</span></b><span class="note">p90 ${s.turnsP90 === null ? "–" : count(s.turnsP90)}</span></div>
+<div class="tile">Duration<b>${durationText(s.durationMedianMs)} <span class="muted">median</span></b><span class="note">p90 ${durationText(s.durationP90Ms)}; ended sessions only</span></div>
+<div class="tile">Opened and left<b>${count(s.zeroTurns)}</b><span class="note">${s.sessions > 0 ? `${percent(s.zeroTurns / s.sessions)} of sessions had no turn` : "no sessions"}</span></div>
+<div class="tile">PRs opened<b>${count(s.prs)}</b><span class="note">${s.prsPer100 === null ? "–" : s.prsPer100.toFixed(1)} per 100 sessions</span></div>
+</div>`,
+    "Sessions started in the window. Turns: the session end's count, or its turn events when it sent no end. PRs: a pull request URL a tool printed in that session.",
+  );
+
+  const tools = section(
+    "tools",
+    "Tools",
+    ["health-tools"],
+    say.tools,
+    healthTable(
+      ["Tool", "Calls", "Sessions using it"],
+      h.tools.tools.map((row) => healthRow([escapeHtml(row.tool), shareCell(row.calls, h.tools.calls > 0 ? row.calls / h.tools.calls : 0), shareCell(row.sessions, row.share)])),
+      "No tool calls reported.",
+    ),
+    `Summed from each turn's end (the session end repeats the same counts). Sessions using it: of the ${count(h.tools.sessions)} sessions with a turn in the window. Names only, never arguments.`,
+  );
+
+  const upstreams = h.models.upstreams.filter((row) => row.requests > 0 || row.medianTtftMs !== null);
+  const models = section(
+    "models",
+    "Models",
+    ["health-models", "health-upstreams"],
+    say.models,
+    `<div class="tiles">
+<div class="tile">Sessions by model${healthTable(
+      ["Model", "Sessions"],
+      h.models.sessions.map((row) => healthRow([escapeHtml(row.model), shareCell(row.count, row.share)])),
+      "No sessions.",
+    )}</div>
+<div class="tile">Requests by model${healthTable(
+      ["Model", "Requests", "Failed"],
+      h.models.requests.map((row) => healthRow([escapeHtml(row.model), shareCell(row.requests, row.share), row.requests > 0 ? shareCell(row.failed, row.failed / row.requests) : "0"])),
+      "No requests.",
+    )}</div>
+</div>
+<h3>Time to first token by upstream</h3>
+${healthTable(
+  ["Upstream", "Requests", "Errors", "TTFT median", "TTFT p90"],
+  upstreams.map((row) => healthRow([UPSTREAM_LABELS[row.upstream] ?? row.upstream, count(row.requests), count(row.errors), ms(row.medianTtftMs), ms(row.p90TtftMs)])),
+  "No upstream requests.",
+)}`,
+    "Sessions by the model at their start; requests from the free tier's log. The upstream table is the Full view's, over this window: admins included (no person is stored with it), counts by UTC day, timings kept 15 days.",
+  );
+
+  const installRows = h.installs.platforms.map((row) =>
+    healthRow(
+      [
+        escapeHtml(`${osLabel(row.os)} ${row.arch}`),
+        escapeHtml(row.mode),
+        count(row.ok),
+        count(row.failed),
+        row.ok + row.failed > 0 ? percent(row.failShare) : "–",
+        row.topStep === null ? "–" : escapeHtml(INSTALL_STEPS[row.topStep] ?? row.topStep),
+      ],
+      row.failed > 0,
+    ),
+  );
+  const installs = section(
+    "installs",
+    "Installs",
+    ["health-installs"],
+    say.installs,
+    `${healthTable(["System", "Mode", "Ok", "Failed", "Fail share", "Mostly fails at"], installRows, "No installs counted.")}
+<h3>Failed steps</h3>
+${healthTable(
+  ["Step", "Failed"],
+  h.installs.failedSteps.map((row) => healthRow([escapeHtml(STEP_LABELS[row.step] ?? row.step), count(row.failed)])),
+  "No failed installs.",
+)}`,
+    `Anonymous counts from install.sh, by UTC day since ${escapeHtml(day(h.fromDay))}: they can't be joined to people, so admins are in them.`,
+  );
+
+  return shell(`Health · ${PRODUCT_NAME}`, [header, errors, ends, versions, sessions, tools, models, installs].join("\n"));
+}
+
 // ─── CSV ──────────────────────────────────────────────────────────────────
 
 function csvField(value: unknown): string {
@@ -1692,7 +1936,7 @@ function csv(header: string[], rows: unknown[][]): string {
   return [header, ...rows].map((row) => row.map(csvField).join(",")).join("\r\n") + "\r\n";
 }
 
-export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendView): Response {
+export function dashboardCsv(table: Exclude<CsvTable, HealthCsvTable>, data: DashboardData, spend: SpendView): Response {
   let body: string;
   switch (table) {
     case "spend": {
@@ -1815,6 +2059,76 @@ export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendV
     headers: {
       "content-type": "text/csv; charset=utf-8",
       "content-disposition": `attachment; filename="free-${table}-${day(data.now)}.csv"`,
+      ...dashboardHeaders(),
+    },
+  });
+}
+
+/** One Health table as CSV (see healthPage); the file name carries the window. */
+export function healthCsv(table: HealthCsvTable, h: HealthData): Response {
+  let body: string;
+  switch (table) {
+    case "health-errors":
+      body = csv(
+        ["error_code", "count", "people", "autopilot_version", "version_count"],
+        h.errors.codes.flatMap((row) =>
+          row.versions.length === 0 ? [[row.code, row.count, row.people, null, null]] : row.versions.map((version) => [row.code, row.count, row.people, version.version, version.count]),
+        ),
+      );
+      break;
+    case "health-request-failures":
+      body = csv(["status", "model", "failed", "share_of_model_requests"], h.requests.failures.map((row) => [row.status, row.model, row.count, row.share]));
+      break;
+    case "health-ends":
+      body = csv(
+        ["autopilot_version", "os", "end", "sessions", "share", "normal"],
+        [...h.ends.overall.map((row) => ["all", "all", row.end, row.count, row.share, row.normal]), ...h.ends.detail.map((row) => [row.version, row.os, row.end, row.count, row.share, row.normal])],
+      );
+      break;
+    case "health-turns":
+      body = csv(["turn_end", "turns", "share", "normal"], h.ends.turns.map((row) => [row.end, row.count, row.share, row.normal]));
+      break;
+    case "health-versions":
+      body = csv(
+        ["kind", "value", "sessions", "share", "people", "newest"],
+        [...h.versions.versions.map((row) => ["autopilot_version", row.version, row.count, row.share, row.people, row.version === h.versions.latest]), ...h.versions.os.map((row) => ["os", row.os, row.count, row.share, row.people, null])],
+      );
+      break;
+    case "health-sessions": {
+      const s = h.sessions;
+      body = csv(
+        ["sessions", "people", "ended", "turns_median", "turns_p90", "duration_median_ms", "duration_p90_ms", "zero_turn_sessions", "prs_opened", "prs_per_100_sessions"],
+        [[s.sessions, s.people, s.ended, s.turnsMedian, s.turnsP90, s.durationMedianMs, s.durationP90Ms, s.zeroTurns, s.prs, s.prsPer100]],
+      );
+      break;
+    }
+    case "health-tools":
+      body = csv(["tool", "calls", "sessions_using", "share_of_sessions"], h.tools.tools.map((row) => [row.tool, row.calls, row.sessions, row.share]));
+      break;
+    case "health-models":
+      body = csv(
+        ["kind", "model", "count", "share", "failed"],
+        [...h.models.sessions.map((row) => ["sessions", row.model, row.count, row.share, null]), ...h.models.requests.map((row) => ["requests", row.model, row.requests, row.share, row.failed])],
+      );
+      break;
+    case "health-upstreams":
+      body = csv(["upstream", "requests", "errors", "ttft_median_ms", "ttft_p90_ms", "ttfb_median_ms"], h.models.upstreams.map((row) => [row.upstream, row.requests, row.errors, row.medianTtftMs, row.p90TtftMs, row.medianTtfbMs]));
+      break;
+    case "health-installs":
+      body = csv(
+        ["kind", "os", "arch", "mode", "step", "ok", "failed", "fail_share", "top_failed_step"],
+        [
+          ...h.installs.platforms.map((row) => ["system", row.os, row.arch, row.mode, null, row.ok, row.failed, row.failShare, row.topStep]),
+          ...h.installs.failedSteps.map((row) => ["failed_step", null, null, null, row.step || "unknown", null, row.failed, null, null]),
+        ],
+      );
+      break;
+  }
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename="free-${table}-${h.days}d-${day(h.now)}.csv"`,
       ...dashboardHeaders(),
     },
   });
