@@ -34,6 +34,8 @@ three things worth trying first:
 
 if anything breaks or feels off, just reply to this. it comes straight to me and i read every one.
 
+there's also a discord where people share what they're building and help each other out: https://discord.gg/zeBnJTgcRK
+
 sina`,
   },
 
@@ -47,6 +49,8 @@ sina here, i build dl.
 you're signed in. free tokens are for github accounts over a year old with 100+ contributions in the last year, and yours doesn't meet that yet, so for now you'll need your own key: run /provider in dl.
 
 if you're a real dev building something, email contact@directionallylocal.com with your github username and what you're working on, and i'll sort you out with credits.
+
+there's also a discord where people share what they're building: https://discord.gg/zeBnJTgcRK
 
 sina`,
   },
