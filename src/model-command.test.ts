@@ -135,6 +135,19 @@ test("a stale spare container stops the update before the current model is touch
   assert.ok(system.running.has("dl-model-2"));
 });
 
+test("a failed run leaves a timestamped log file with the path in the error", async () => {
+  const { system, options, failNew } = fixture();
+  options.logDir = "/tmp/logs";
+  await modelCommand("up", ["qwen-old"], options);
+  failNew();
+  const error = await modelCommand("update", ["qwen-new"], options).catch((caught: Error) => caught);
+  assert.match(String(error?.message), /Full log: \/tmp\/logs\/.*-update\.log/);
+  const path = [...system.files.keys()].find((key) => key.startsWith("/tmp/logs/") && key.includes("update"));
+  assert.ok(path, "log file written");
+  assert.match(system.files.get(path!)!.content, /smoke failed/);
+  assert.match(system.files.get(path!)!.content, /WARN|FAIL/);
+});
+
 test("status with no model says how to start one", async () => {
   const { options, lines } = fixture();
   assert.equal(await modelCommand("status", [], options), 0);

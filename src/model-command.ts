@@ -1,4 +1,5 @@
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { autopilotConfigFile } from "./laptop/free-tier.js";
 import { fittingModels, recipe, type ModelRecipe } from "./model-catalog.js";
 import { checkGpuDocker, containerRunning, detectHardware, dockerArgs, logTail, removeContainer } from "./model-runtime.js";
@@ -19,6 +20,33 @@ export interface ModelCommandOptions {
   interactive?: boolean;
   /** For tests; production waits for the model to download and start. */
   smoke?: typeof smokeTest;
+  /** Directory for per-run logs; defaults to ~/.directionallylocal/logs. */
+  logDir?: string;
+}
+
+/** Tee every UI event into a per-run log file so a failed switch can be diagnosed afterwards. */
+function loggingUi(ui: Ui, record: (line: string) => void): Ui {
+  const stamp = (text: string) => record(`${new Date().toISOString()} ${text}`);
+  return {
+    get interactive() { return ui.interactive; },
+    title: (text) => { stamp(`== ${text}`); ui.title(text); },
+    line: (status, label, detail) => { stamp(`${status} ${label}${detail ? `: ${detail}` : ""}`); ui.line(status, label, detail); },
+    plan: (steps) => { stamp(`plan ${steps.map((step) => step.label).join(" | ")}`); ui.plan(steps); },
+    start: (id, detail) => { stamp(`.. ${id}${detail ? `: ${detail}` : ""}`); ui.start(id, detail); },
+    done: (id, detail) => { stamp(`ok ${id}${detail ? `: ${detail}` : ""}`); ui.done(id, detail); },
+    fail: (id, message) => { stamp(`FAIL ${id}: ${message}`); ui.fail(id, message); },
+    questions: (intro) => ui.questions(intro),
+    answered: (label, detail) => ui.answered(label, detail),
+    rejected: (message) => ui.rejected(message),
+    prompt: (label, hint) => ui.prompt(label, hint),
+    ready: (headline, items, extra) => ui.ready(headline, items, extra),
+    warn: (text) => { stamp(`WARN ${text}`); ui.warn(text); },
+    finish: () => ui.finish(),
+  };
+}
+
+export function runLogDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(env.HOME || homedir(), ".directionallylocal", "logs");
 }
 
 function isInteractive(options: ModelCommandOptions): boolean {
@@ -90,8 +118,36 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
   }
 }
 
-/** The existing `dl model [ID]` picker lives in laptop/settings.ts; only subcommands come here. */
 export async function modelCommand(action: string, args: string[], options: ModelCommandOptions): Promise<number> {
+  const records: string[] = [];
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const wrapped: ModelCommandOptions = { ...options, ui: loggingUi(options.ui, (line) => records.push(line)) };
+  const persist = async (): Promise<string | undefined> => {
+    if (options.system.dryRun) return undefined;
+    try {
+      const dir = options.logDir ?? runLogDir();
+      const path = join(dir, `${stamp}-${action}.log`);
+      await options.system.mkdir(dir, { mode: 0o700 });
+      await options.system.writeFile(path, `${records.join("\n")}\n`, { mode: 0o644 });
+      return path;
+    } catch { return undefined; }
+  };
+  try {
+    const code = await modelCommandInner(action, args, wrapped);
+    await persist();
+    return code;
+  } catch (error) {
+    const path = await persist();
+    if (error instanceof Error) {
+      if (path) error.message += `\nFull log: ${path}`;
+      throw error;
+    }
+    throw new Error(`${String(error)}${path ? `\nFull log: ${path}` : ""}`);
+  }
+}
+
+/** The existing `dl model [ID]` picker lives in laptop/settings.ts; only subcommands come here. */
+async function modelCommandInner(action: string, args: string[], options: ModelCommandOptions): Promise<number> {
   const { system, ui } = options;
   if ((action === "up" || action === "update") && args.length > 1 || (action === "status" || action === "rollback") && args.length > 0) {
     ui.line("failed", "Usage", `dl model ${action}${action === "up" || action === "update" ? " [model] [--dry-run]" : ""}`);
