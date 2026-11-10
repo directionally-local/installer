@@ -63,12 +63,14 @@ export async function smokeTest(deployment: Pick<ModelDeployment, "repo" | "port
       }
     }
     if (!chat?.content.trim()) throw new Error("Chat returned no text");
-    const tool = await request({ messages: [{ role: "user", content: "Call ping with value 1." }],
+    const tool = await request({ messages: [{ role: "user", content: "Call ping with value 1." }], chat_template_kwargs: { enable_thinking: false },
+    // Thinking models (Qwen3 base) burn their reply on <think> tokens or leak them into content; disable thinking for the structured checks.
       tools: [{ type: "function", function: { name: "ping", description: "Check a value", parameters: { type: "object", properties: { value: { type: "integer" } }, required: ["value"] } } }], tool_choice: { type: "function", function: { name: "ping" } } });
     const calls = tool.body.choices?.[0]?.message?.tool_calls as Array<{ function?: { name?: string; arguments?: string } }> | undefined;
     if (calls?.[0]?.function?.name !== "ping" || !calls[0].function?.arguments || JSON.parse(calls[0].function.arguments).value !== 1) throw new Error("Tool call did not return ping(1)");
-    const json = await request({ messages: [{ role: "user", content: "Return JSON with ok true." }], response_format: { type: "json_object" } });
-    if (JSON.parse(json.body.choices?.[0]?.message?.content ?? "null")?.ok !== true) throw new Error("JSON mode did not return {ok:true}");
+    const json = await request({ messages: [{ role: "user", content: "Return JSON with ok true." }], response_format: { type: "json_object" }, chat_template_kwargs: { enable_thinking: false } });
+    const text = String(json.body.choices?.[0]?.message?.content ?? "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+    if (JSON.parse(text || "null")?.ok !== true) throw new Error("JSON mode did not return {ok:true}");
     return { chat: true, tools: true, json: true, tokensPerSecond: chat.tokensPerSecond, at: new Date().toISOString() };
   } catch (error) {
     throw new Error(`Smoke test failed for ${deployment.repo}: ${error instanceof Error ? error.message : String(error)}\nvLLM logs (${deployment.container}):\n${await logTail(system, deployment.container)}`);

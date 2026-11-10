@@ -167,11 +167,16 @@ export async function modelCommand(action: string, args: string[], options: Mode
       ui.line("info", "Dry run", "No model, provider or state changed.");
       return 0;
     }
-    // Test the previous endpoint too; failure must leave it serving and keep the provider unchanged.
+    // Test the previous endpoint too — but only the candidate gates the switch: a broken incumbent is a reason to switch, not to abort.
     if (old && !stoppedOld) {
-      const oldResult = await (options.smoke ?? smokeTest)(old, system, options.fetch);
-      ui.line("info", "Comparison", `old ${old.repo}: ${oldResult.tokensPerSecond} tok/s | new ${candidate.repo}: ${candidate.lastTest.tokensPerSecond} tok/s`);
-      ui.line("info", "Checks", "old chat/tools/JSON ✓ ✓ ✓ | new chat/tools/JSON ✓ ✓ ✓");
+      try {
+        const oldResult = await (options.smoke ?? smokeTest)(old, system, options.fetch);
+        ui.line("info", "Comparison", `old ${old.repo}: ${oldResult.tokensPerSecond} tok/s | new ${candidate.repo}: ${candidate.lastTest.tokensPerSecond} tok/s`);
+        ui.line("info", "Checks", `old chat/tools/JSON ${oldResult.chat ? "✓" : "✗"} ${oldResult.tools ? "✓" : "✗"} ${oldResult.json ? "✓" : "✗"} | new chat/tools/JSON ✓ ✓ ✓`);
+      } catch (error) {
+        ui.warn(`The current model failed its smoke re-test (${error instanceof Error ? error.message.split("\n")[0] : String(error)}). Switching anyway.`);
+        ui.line("info", "Comparison", `old ${old.repo}: re-test failed | new ${candidate.repo}: ${candidate.lastTest.tokensPerSecond} tok/s`);
+      }
     } else if (old) ui.line("info", "Comparison", `old ${old.repo}: ${old.lastTest.tokensPerSecond} tok/s (last test) | new ${candidate.repo}: ${candidate.lastTest.tokensPerSecond} tok/s`);
     await configureProvider(options, candidate, configPath);
     await writeModelState(system, { version: 1, active: candidate, ...(old ? { previous: old } : {}) }, statePath);

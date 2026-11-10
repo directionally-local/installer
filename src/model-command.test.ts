@@ -12,6 +12,7 @@ function fixture() {
   const lines: string[] = [];
   const answers: string[] = [];
   let failNew = false;
+  let failOld = false;
   const prompter: Prompter = {
     choose: async () => "qwen-old", select: async (_question, choices) => ({ value: choices[0]!.value }),
     secret: async () => "", text: async () => answers.shift() ?? "",
@@ -20,9 +21,10 @@ function fixture() {
     configPath: "/tmp/autopilot/config.json", statePath: "/tmp/model.json",
     smoke: async (deployment: Pick<ModelDeployment, "repo" | "port" | "container">) => {
       if (failNew && deployment.repo.includes("2507")) throw new Error("smoke failed: model loading\nvLLM logs: crash");
+      if (failOld && !deployment.repo.includes("2507")) throw new Error("smoke failed: JSON mode did not return {ok:true}\nvLLM logs: ok");
       return { chat: true, tools: true, json: true, tokensPerSecond: deployment.repo.includes("2507") ? 25 : 10, at: "now" };
     } };
-  return { system, lines, answers, options, failNew: () => { failNew = true; } };
+  return { system, lines, answers, options, failNew: () => { failNew = true; }, failOld: () => { failOld = true; } };
 }
 
 test("up configures vllm provider and state; status shows GPU and tests", async () => {
@@ -60,6 +62,18 @@ test("update chooses side-by-side when the GPU reservation fits in free VRAM", a
   assert.ok(!lines.join("").match(/Accept downtime/));
   assert.ok(system.running.has("dl-model-2"));
   assert.ok(!system.running.has("dl-model-1"));
+});
+
+test("an incumbent that fails its smoke re-test warns but does not stop the switch", async () => {
+  const { system, options, lines, failOld } = fixture();
+  await modelCommand("up", ["qwen-old"], options);
+  failOld();
+  assert.equal(await modelCommand("update", ["qwen-new"], options), 0);
+  assert.ok(system.running.has("dl-model-2"));
+  assert.ok(!system.running.has("dl-model-1"));
+  assert.match(lines.join(""), /failed its smoke re-test|Switching anyway/);
+  assert.equal(JSON.parse(system.files.get("/tmp/model.json")!.content).active.id, "qwen-new");
+  assert.equal(JSON.parse(system.files.get("/tmp/autopilot/config.json")!.content).providers.vllm.baseUrl, "http://127.0.0.1:8001/v1");
 });
 
 test("failed update removes candidate and preserves old provider and state", async () => {
