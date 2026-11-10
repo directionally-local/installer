@@ -129,6 +129,15 @@ export function spendMilestoneAlert(input: {
   };
 }
 
+/** A new access request (/request in dl): who, and how many wait. Never what they wrote. */
+export function accessRequestAlert(login: string, pending: number): Alert {
+  return {
+    subject: `dl free tier: new access request from @${login}`,
+    text: `dl free tier: new access request from @${login} (${pending} pending). Answer it on the admin Tools tab.`,
+    footer: "Sent for every new access request.",
+  };
+}
+
 export function pauseAlert(paused: boolean, login: string): Alert {
   return paused
     ? { subject: "dl free tier: free tokens paused (kill switch)", text: `dl free tier: free tokens paused for everyone by ${login} (kill switch).` }

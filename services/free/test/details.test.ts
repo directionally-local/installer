@@ -83,7 +83,7 @@ describe("the sign-in details step", () => {
     const code = await createInvite(service, admin);
     const flow = await startBrowserFlow(service.request, { id: 104, login: "erin", createdAt: NEW, publicRepos: 0 }, undefined, { stopAtDetails: true });
     assert.match(flow.page, /name="invite_code"/);
-    assert.match(flow.page, /Starter access: DeepSeek only/);
+    assert.match(flow.page, /Starter access: a small free allowance to try dl, 5M tokens a week of every model, GPT-6 included, up to \$0.50/);
 
     const wrong = await submitDetails(service.request, flow.page, { invite: "DL-NOPE-NOPE" });
     assert.equal(wrong.status, 400);

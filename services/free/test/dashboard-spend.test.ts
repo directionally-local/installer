@@ -40,6 +40,10 @@ function view(overrides: Partial<SpendView> = {}): SpendView {
     openaiFreeCreditWeekUsd: 10,
     openaiWeeklyCreditUsd: 2000,
     starterWeeklyTokens: 0,
+    starterWeeklyUsd: 0.5,
+    basicWeeklyTokens: 10_000_000,
+    basicWeeklyUsd: 3,
+    basicMinAccountAgeDays: 365,
     fullMinAccountAgeDays: 365,
     fullMinPublicRepos: 100_000,
     fullMinContributions: 100,
@@ -92,10 +96,10 @@ describe("dashboard spend card", () => {
     const text = admissionText(view(), 120);
     assert.equal(
       text,
-      "Admission: open, any GitHub account can sign up; 120 admitted, no cap while open. Free tokens (Full) need a GitHub account at least 365 days old with 100+ contributions in the last year, and the private account checks count too; below that, Starter: no free tokens.",
+      "Admission: open, any GitHub account can sign up; 120 admitted, no cap while open. Free tokens (Full) need a GitHub account at least 365 days old with 100+ contributions in the last year, and the private account checks count too; below that, Basic, for accounts at least 365 days old outside a creation batch: 10.0M tokens a week of every model, up to $3; everyone else, Starter: no free tokens.",
     );
     assert.doesNotMatch(text, /public repo/, "the repositories path is off at 100,000");
-    assert.match(admissionText(view({ fullMinPublicRepos: 3, fullMinAccountAgeDays: 90, fullMinContributions: 50, starterWeeklyTokens: 2_000_000 }), 1), /at least 90 days old with 50\+ contributions in the last year or 3\+ public repos.*Starter: 2\.0M DeepSeek tokens a week/);
+    assert.match(admissionText(view({ fullMinPublicRepos: 3, fullMinAccountAgeDays: 90, fullMinContributions: 50, starterWeeklyTokens: 2_000_000 }), 1), /at least 90 days old with 50\+ contributions in the last year or 3\+ public repos.*Basic, for accounts at least 365 days old outside a creation batch: 10\.0M tokens a week of every model, up to \$3; everyone else, Starter: 2\.0M tokens a week of every model, up to \$0.5 \(none for creation-batch accounts\)/);
     assert.match(admissionText(view({ requireGithubActivity: false }), 1), /GitHub account check off: everyone gets Full\./);
     assert.match(admissionText(view({ openAdmission: false }), 7), /^Admission: invite-only; 7 of 50 admitted\./);
   });

@@ -10,11 +10,13 @@ import { ADMIN_ID, createInvite, createService, errorCode, MODEL, startBrowserFl
  */
 
 // The public bar as it is run: 1 year old with 100 contributions (the repos path off), and no
-// Starter allowance, so an account below it gets the below_bar refusal.
+// Starter allowance, so an account below it gets the below_bar refusal. The basic level is off
+// here (basic.test.ts covers it), so these accounts stay Starter.
 const BAR = {
   OPENAI_API_KEY: "sk-test",
   OPEN_ADMISSION: "true",
   STARTER_WEEKLY_TOKENS: "0",
+  BASIC_WEEKLY_TOKENS: "0",
   FULL_MIN_ACCOUNT_AGE_DAYS: "365",
   FULL_MIN_CONTRIBUTIONS: "100",
   FULL_MIN_PUBLIC_REPOS: "100000",
@@ -164,7 +166,7 @@ describe("additional account signals", () => {
     for (const name of ["humanSignalsNeeded", "minActiveWeeks", "minRepoAgeDays", "minSocial", "minFollowers", "batchWindowDays", "batchSize"]) assert.ok(name in settings, name);
   });
 
-  it("names only the public bar and the email route in what a Starter account is shown", async () => {
+  it("names only the public bar, /request and the email route in what a Starter account is shown", async () => {
     const { service } = await open();
     const hidden = /follow|star|week(?!ly)|fork|batch|signal|review|pull request|issue|oldest|creat/i;
     const tokens = await service.signIn(above(100));
@@ -172,6 +174,7 @@ describe("additional account signals", () => {
     const message = ((await res.json()) as { error: { message: string } }).error.message;
     assert.match(message, /at least 1 year old with 100\+ contributions in the last year/);
     assert.match(message, /contact@directionallylocal\.com/);
+    assert.match(message, /Type \/request in dl/);
     assert.doesNotMatch(message, hidden);
     const flow = await startBrowserFlow(service.request, above(101), undefined, { stopAtDetails: true });
     const line = /Free tokens are for[^<]*/.exec(flow.page)?.[0] ?? "";

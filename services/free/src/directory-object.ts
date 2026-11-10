@@ -4,14 +4,14 @@ import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
 import { abuseData, outsideDl, simpleData, type AbuseData, type SimpleData } from "./abuse.js";
-import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
+import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, signupFunnel, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent } from "./events.js";
 import { milestoneCrossed, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
-import { levelChecks, type GithubSignals, type Level, type LevelReason, type LevelThresholds, type SignalThresholds } from "./admission.js";
+import { levelChecks, levelFor, type BasicRule, type GithubSignals, type Level, type LevelReason, type LevelThresholds, type SignalThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
 import type { UserEmailKind } from "./user-emails.js";
@@ -54,6 +54,20 @@ export interface ConfigChange {
   changedAt: string;
 }
 
+/** One pending access request as the admin Tools tab shows it. `building` and `link` are user content. */
+export interface PendingAccessRequest {
+  id: number;
+  githubId: number;
+  login: string;
+  at: number;
+  building: string;
+  link: string | null;
+  level: Level | null;
+  accountAgeDays: number | null;
+  contributions: number | null;
+  sessionsThisWeek: number;
+}
+
 /** "blocked" is an admin's abuse block: no requests, no refresh, no new sign-in. */
 export type PersonStatus = "active" | "suspended" | "blocked";
 
@@ -63,7 +77,7 @@ export interface PersonRow {
   status: PersonStatus;
   admitted_at: number;
   admitted_via: string;
-  /** "full" or "starter" (see admission.ts). */
+  /** "full", "basic" or "starter" (see admission.ts). */
   level: Level;
   /** Why the level is what it is: qualifies, account_too_new, few_repos_and_contributions, network_limit, invite, admin. */
   level_reason: LevelReason | null;
@@ -75,6 +89,17 @@ export interface PersonRow {
   restricted_contributions: number | null;
   /** When the signals were last read (Unix ms). */
   signals_at: number | null;
+  /**
+   * 1 when the creation-batch check flagged the account at its last sign-in or re-check: below
+   * the bar, it then gets no free tokens at all. Admin-only; never shown to the person.
+   */
+  batch_flag: number;
+  /**
+   * 1 when the person had free tokens at sign-up (Full, basic, an admin's grant, or Starter with
+   * a Starter allowance and no batch flag), 0 when not; null for sign-ups before it was stored.
+   * Retention counts only the people who could use dl.
+   */
+  signup_tokens: number | null;
   /** The UTC day the GitHub account was created (for the creation-batch check); null when unknown. */
   github_created_day: number | null;
   /** Additional account signals (admission.ts levelChecks), numbers only; null until first read. */
@@ -176,6 +201,8 @@ export const LEVEL_SIGNAL_COLUMNS = [
   "social",
 ] as const;
 export type LevelSignalRow = Pick<PersonRow, (typeof LEVEL_SIGNAL_COLUMNS)[number]>;
+/** A LevelSignalRow plus what the admin's below-bar re-check needs (not read by the dashboard). */
+export type RecheckRow = LevelSignalRow & Pick<PersonRow, "status" | "batch_flag" | "signals_at">;
 
 export interface PersonState {
   queue: QueuePlace | null;
@@ -183,10 +210,12 @@ export interface PersonState {
   referral: { code: string; joined: number; activeThisWeek: number } | null;
   /** An admin blocked this account (people.status "blocked"). */
   blocked: boolean;
-  /** "full" or "starter": what the account may use. */
+  /** "full", "basic" or "starter": what the account may use. */
   level: Level;
   /** Why the level is what it is (qualifies, account_too_new, network_limit, invite, admin). */
   levelReason: LevelReason | null;
+  /** The creation-batch check flagged the account: below the bar, no free tokens. Never shown to the person. */
+  batchFlagged: boolean;
   /** The GitHub signals last read, as numbers only; null until the first read. */
   signals: {
     accountAgeDays: number | null;
@@ -546,6 +575,29 @@ const SCHEMA = [
      created_by INTEGER NOT NULL,
      used_at    INTEGER
    )`,
+  // Access requests from inside dl (/request, POST /v1/access-request). `building` and `link` are
+  // the person's own words: shown only on the admin Tools tab (escaped), never logged, never in
+  // an alert, a metric or an export.
+  `CREATE TABLE IF NOT EXISTS access_requests (
+     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+     github_id   INTEGER NOT NULL,
+     login       TEXT NOT NULL,
+     at          INTEGER NOT NULL,
+     building    TEXT NOT NULL,
+     link        TEXT,
+     status      TEXT NOT NULL DEFAULT 'pending',
+     decided_at  INTEGER,
+     decided_by  INTEGER,
+     note        TEXT
+   )`,
+  "CREATE INDEX IF NOT EXISTS access_requests_person ON access_requests (github_id, at)",
+  // Days a person was refused free tokens below the bar (a chat request answered below_bar): the
+  // sign-up funnel's "refused but opened dl". Ids and days only.
+  `CREATE TABLE IF NOT EXISTS refused_days (
+     github_id INTEGER NOT NULL,
+     day       INTEGER NOT NULL,
+     PRIMARY KEY (github_id, day)
+   )`,
   `CREATE TABLE IF NOT EXISTS subscriptions (
      github_id  INTEGER PRIMARY KEY,
      state      TEXT NOT NULL,
@@ -602,6 +654,9 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["requests", "via_key", "INTEGER NOT NULL DEFAULT 0"],
   // dl sessions: distinct session ids in a person's events, counted on the day of the first one.
   ["daily_activity", "sessions", "INTEGER NOT NULL DEFAULT 0"],
+  // The creation-batch flag (admission.ts levelChecks), and the level at sign-up for retention.
+  ["people", "batch_flag", "INTEGER NOT NULL DEFAULT 0"],
+  ["people", "signup_tokens", "INTEGER"],
 ];
 
 /** Timings older than this are dropped: the dashboard shows today and this week. */
@@ -734,6 +789,10 @@ export class DirectoryObject extends DurableObject {
     signals?: GithubSignals;
     level?: Level;
     levelReason?: LevelReason;
+    /** The creation-batch check flagged the account at this sign-in. */
+    batchFlagged?: boolean;
+    /** Starter has a weekly allowance right now (STARTER_WEEKLY_TOKENS above 0): for `signup_tokens`. */
+    starterTokens?: boolean;
     now: number;
   }): Promise<AdmitResult> {
     const inviteHash = input.inviteCode ? await sha256Hex(normalizeInviteCode(input.inviteCode)) : undefined;
@@ -760,6 +819,15 @@ export class DirectoryObject extends DurableObject {
       const levelValues = [level, reason, sig?.accountAgeDays ?? null, sig?.publicRepos ?? null, sig?.followers ?? null, sig?.contributions ?? null, sig?.restrictedContributions ?? null, sig ? input.now : null] as const;
       const admitted = (via: "existing" | "admin" | "open" | "invite" | "grant", created: boolean): AdmitResult => {
         if (sig) this.#storeExtraSignals(input.githubId, sig);
+        if (sig) sql.exec("UPDATE people SET batch_flag = ? WHERE github_id = ?", input.batchFlagged ? 1 : 0, input.githubId);
+        // Whether the person had free tokens at sign-up, for retention: who could use dl from the start.
+        if (created) {
+          sql.exec(
+            "UPDATE people SET signup_tokens = CASE WHEN level != 'starter' THEN 1 ELSE ? END WHERE github_id = ? AND signup_tokens IS NULL",
+            input.starterTokens === true && !input.batchFlagged ? 1 : 0,
+            input.githubId,
+          );
+        }
         if (input.clientDeviceId) sql.exec("INSERT OR IGNORE INTO devices (device_id, github_id) VALUES (?, ?)", input.clientDeviceId, input.githubId);
         const referralCode = this.#ensureCode(input.githubId, input.login, input.now);
         if (created && via !== "admin" && input.referralCode) this.#recordReferral(input.githubId, input.login, input.referralCode, input.now);
@@ -1071,9 +1139,10 @@ export class DirectoryObject extends DurableObject {
         contributions: number | null;
         restricted_contributions: number | null;
         signals_at: number | null;
-      }>("SELECT login, status, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at FROM people WHERE github_id = ?", githubId)
+        batch_flag: number;
+      }>("SELECT login, status, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at, batch_flag FROM people WHERE github_id = ?", githubId)
       .toArray()[0];
-    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false, level: "full", levelReason: null, signals: null, outsideDl: false };
+    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false, level: "full", levelReason: null, batchFlagged: false, signals: null, outsideDl: false };
     const code = this.#ensureCode(githubId, person.login, now);
     const counting = countingPairs(sql, this.#pairs(githubId), now);
     const joined = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ? AND outcome = 'ok'", githubId).toArray()[0]?.n ?? 0;
@@ -1084,6 +1153,7 @@ export class DirectoryObject extends DurableObject {
       blocked: person.status === "blocked",
       level: person.level ?? "full",
       levelReason: person.level_reason ?? null,
+      batchFlagged: person.batch_flag === 1,
       signals:
         person.signals_at === null
           ? null
@@ -1133,6 +1203,14 @@ export class DirectoryObject extends DurableObject {
         .toArray()
         .map((row) => [row.github_id, row.n]),
     );
+  }
+
+  /** Everyone's level and stored signals, with status and the batch flag: the admin's below-bar re-check. */
+  async recheckSignals(): Promise<RecheckRow[]> {
+    return this.ctx.storage.sql
+      .exec<RecheckRow>(`SELECT ${LEVEL_SIGNAL_COLUMNS.join(", ")}, status, batch_flag, signals_at FROM people ORDER BY admitted_at`)
+      .toArray()
+      .map((row) => ({ ...row }));
   }
 
   /**
@@ -1217,9 +1295,10 @@ export class DirectoryObject extends DurableObject {
       if (existing && (existing.status !== "failed" || !input.retry || existing.attempts >= 2)) return undefined;
       if (!existing && input.retry) return undefined;
       // Welcome and "didn't start" wait while the person waits in the queue for free tokens.
-      if ((input.kind === "welcome" || input.kind === "welcome_starter" || input.kind === "didnt_start") && sql.exec("SELECT 1 FROM queue WHERE github_id = ? AND admitted_at IS NULL", input.githubId).toArray().length > 0) return undefined;
+      if ((input.kind === "welcome" || input.kind === "welcome_basic" || input.kind === "welcome_starter" || input.kind === "welcome_starter_small" || input.kind === "didnt_start") && sql.exec("SELECT 1 FROM queue WHERE github_id = ? AND admitted_at IS NULL", input.githubId).toArray().length > 0) return undefined;
+      // At most one a day, except the answer to an access request the person asked for.
       const today = sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND day = ? AND status IN ('pending', 'sent') LIMIT 1", input.githubId, day).toArray();
-      if (today.length > 0) return undefined;
+      if (today.length > 0 && input.kind !== "access_granted") return undefined;
       sql.exec(
         `INSERT INTO user_emails (github_id, kind, period, status, attempts, day, claimed_at) VALUES (?, ?, ?, 'pending', 1, ?, ?)
          ON CONFLICT (github_id, kind, period) DO UPDATE SET status = 'pending', attempts = attempts + 1, day = excluded.day, claimed_at = excluded.claimed_at`,
@@ -1277,7 +1356,7 @@ export class DirectoryObject extends DurableObject {
              AND NOT (q.github_id IS NOT NULL AND q.admitted_at IS NULL)
              AND COALESCE(q.admitted_at, p.admitted_at) > ? AND COALESCE(q.admitted_at, p.admitted_at) <= ?
              AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.github_id = p.github_id)
-             AND p.level = 'full'
+             AND p.level IN ('full', 'basic')
            ORDER BY p.github_id`,
           now - 72 * 3_600_000,
           now - 24 * 3_600_000,
@@ -1398,11 +1477,13 @@ export class DirectoryObject extends DurableObject {
   }
 
   /**
-   * Re-reads a person's signals and promotes a Starter account to Full when they now pass every
-   * check (admission.ts levelChecks; `signals` carries the stored additional signals). Never
-   * demotes, and never overrides an admin's own choice of level. Returns the level after.
+   * Re-reads a person's signals and promotes a Starter account to basic or Full, or a basic one
+   * to Full, when they now qualify (admission.ts levelChecks; `signals` carries the stored
+   * additional signals). Never demotes, and never overrides an admin's own choice of level or a
+   * redeemed invite. The creation-batch flag is stored again for a Starter account. Returns the
+   * level after.
    */
-  async recheckLevel(githubId: number, signals: GithubSignals, thresholds: LevelThresholds, rules: SignalThresholds, now: number): Promise<Level | undefined> {
+  async recheckLevel(githubId: number, signals: GithubSignals, thresholds: LevelThresholds, rules: SignalThresholds, now: number, basic?: BasicRule): Promise<Level | undefined> {
     return this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
       const row = sql.exec<{ level: Level; level_reason: string | null }>("SELECT level, level_reason FROM people WHERE github_id = ?", githubId).toArray()[0];
@@ -1418,11 +1499,14 @@ export class DirectoryObject extends DurableObject {
         githubId,
       );
       if (signals.createdDay !== undefined && signals.createdDay !== null) sql.exec("UPDATE people SET github_created_day = ? WHERE github_id = ?", signals.createdDay, githubId);
-      if (row.level !== "starter" || row.level_reason === "admin") return row.level;
+      if (row.level === "full" || row.level_reason === "admin" || row.level_reason === "invite") return row.level;
       const checks = levelChecks(signals, thresholds, rules, { now, batchPeers: this.#batchPeers(signals.createdDay, rules.batchWindowDays, githubId) });
-      if (checks.full) {
-        sql.exec("UPDATE people SET level = 'full', level_reason = 'qualifies' WHERE github_id = ?", githubId);
-        return "full";
+      const next = levelFor(checks, signals, basic);
+      if (row.level === "starter") sql.exec("UPDATE people SET batch_flag = ? WHERE github_id = ?", checks.creationBatch ? 1 : 0, githubId);
+      if (next === "full" || (next === "basic" && row.level === "starter")) {
+        sql.exec("UPDATE people SET level = ? WHERE github_id = ?", next, githubId);
+        if (next === "full") sql.exec("UPDATE people SET level_reason = 'qualifies' WHERE github_id = ?", githubId);
+        return next;
       }
       return row.level;
     });
@@ -1485,7 +1569,11 @@ export class DirectoryObject extends DurableObject {
    * left alone, and an id with no account gets a pre-grant used at its first sign-up.
    */
   async grantFull(githubId: number, login: string, actor: { githubId: number; login: string; now: number }): Promise<"granted" | "already_full" | "pregranted" | "blocked"> {
-    return this.ctx.storage.transactionSync(() => {
+    return this.ctx.storage.transactionSync(() => this.#grantFullSync(githubId, login, actor));
+  }
+
+  #grantFullSync(githubId: number, login: string, actor: { githubId: number; login: string; now: number }): "granted" | "already_full" | "pregranted" | "blocked" {
+    {
       const sql = this.ctx.storage.sql;
       const found = sql.exec<{ login: string; status: string; level: Level; level_reason: string | null }>("SELECT login, status, level, level_reason FROM people WHERE github_id = ?", githubId).toArray()[0];
       if (!found) {
@@ -1503,7 +1591,134 @@ export class DirectoryObject extends DurableObject {
       sql.exec("UPDATE people SET level = 'full', level_reason = 'admin' WHERE github_id = ?", githubId);
       this.#log(`person_level:${githubId}:${found.login}`, found.level, "full", actor);
       return "granted";
+    }
+  }
+
+  /**
+   * The admin's "re-check below-bar accounts": raises these GitHub ids (chosen by the caller from
+   * stored signals) to basic, each only while it is still an active Starter account whose level
+   * an admin or an invite didn't set, and stores the creation-batch flag of every id in
+   * `flags`. Never lowers anyone, never touches blocked accounts. Logged like setLevel.
+   */
+  async raiseToBasic(input: { raise: number[]; flags: Array<{ githubId: number; flagged: boolean }>; actor: { githubId: number; login: string; now: number } }): Promise<{ raised: number }> {
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      for (const flag of input.flags) {
+        sql.exec("UPDATE people SET batch_flag = ? WHERE github_id = ? AND level = 'starter' AND status = 'active'", flag.flagged ? 1 : 0, flag.githubId);
+      }
+      let raised = 0;
+      for (const githubId of input.raise) {
+        const found = sql
+          .exec<{ login: string; level: Level; level_reason: string | null; status: string }>("SELECT login, level, level_reason, status FROM people WHERE github_id = ?", githubId)
+          .toArray()[0];
+        if (!found || found.status !== "active" || found.level !== "starter" || found.level_reason === "admin" || found.level_reason === "invite") continue;
+        sql.exec("UPDATE people SET level = 'basic', batch_flag = 0 WHERE github_id = ?", githubId);
+        this.#log(`person_level:${githubId}:${found.login}`, "starter", "basic", input.actor);
+        raised++;
+      }
+      return { raised };
     });
+  }
+
+  // ─── Access requests (/request in dl) ─────────────────────────────────────
+
+  /** The person's newest request, for GET /v1/access-request. */
+  async accessRequestStatus(githubId: number): Promise<{ status: "pending" | "granted" | "declined"; at: number } | undefined> {
+    const row = this.ctx.storage.sql
+      .exec<{ status: "pending" | "granted" | "declined"; at: number; decided_at: number | null }>(
+        "SELECT status, at, decided_at FROM access_requests WHERE github_id = ? ORDER BY id DESC LIMIT 1",
+        githubId,
+      )
+      .toArray()[0];
+    return row ? { status: row.status, at: row.decided_at ?? row.at } : undefined;
+  }
+
+  /**
+   * Stores a new request, atomically: refused while one is pending, and past `perDay` requests
+   * in the last 24 hours. `pendingCount` is what the owner's alert says.
+   */
+  async submitAccessRequest(input: { githubId: number; login: string; building: string; link: string | null; now: number; perDay: number }): Promise<{ ok: true; pendingCount: number } | { ok: false; reason: "already_pending" | "rate_limited"; retryAfterSeconds?: number }> {
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      if (sql.exec("SELECT 1 FROM access_requests WHERE github_id = ? AND status = 'pending'", input.githubId).toArray().length > 0) return { ok: false, reason: "already_pending" };
+      const recent = sql.exec<{ at: number }>("SELECT at FROM access_requests WHERE github_id = ? AND at > ? ORDER BY at", input.githubId, input.now - DAY_MS).toArray();
+      if (recent.length >= input.perDay) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((recent[0]!.at + DAY_MS - input.now) / 1000));
+        return { ok: false, reason: "rate_limited", retryAfterSeconds };
+      }
+      sql.exec("INSERT INTO access_requests (github_id, login, at, building, link, status) VALUES (?, ?, ?, ?, ?, 'pending')", input.githubId, input.login, input.now, input.building, input.link);
+      const pendingCount = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM access_requests WHERE status = 'pending'").toArray()[0]?.n ?? 0;
+      return { ok: true, pendingCount };
+    });
+  }
+
+  /**
+   * Pending requests, newest first, with what the admin page shows next to each: the current
+   * level, the stored account age and contributions, and dl sessions this week (UTC, Monday on).
+   */
+  async pendingAccessRequests(now: number): Promise<PendingAccessRequest[]> {
+    return this.ctx.storage.sql
+      .exec<{
+        id: number;
+        github_id: number;
+        login: string;
+        at: number;
+        building: string;
+        link: string | null;
+        level: Level | null;
+        account_age_days: number | null;
+        contributions: number | null;
+        sessions: number | null;
+      }>(
+        `SELECT r.id, r.github_id, COALESCE(p.login, r.login) AS login, r.at, r.building, r.link, p.level, p.account_age_days, p.contributions,
+                (SELECT SUM(d.sessions) FROM daily_activity d WHERE d.github_id = r.github_id AND d.day >= ?) AS sessions
+         FROM access_requests r LEFT JOIN people p ON p.github_id = r.github_id
+         WHERE r.status = 'pending' ORDER BY r.at DESC, r.id DESC LIMIT 200`,
+        weekStart(now) / DAY_MS,
+      )
+      .toArray()
+      .map((row) => ({
+        id: row.id,
+        githubId: row.github_id,
+        login: row.login,
+        at: row.at,
+        building: row.building,
+        link: row.link,
+        level: row.level,
+        accountAgeDays: row.account_age_days,
+        contributions: row.contributions,
+        sessionsThisWeek: row.sessions ?? 0,
+      }));
+  }
+
+  /**
+   * An admin's answer to a pending request. Grant sets Full with reason "admin", the same way
+   * as the Tools tab's grant (a blocked account is left alone and the request stays pending).
+   * Undefined for no such pending request.
+   */
+  async decideAccessRequest(input: { id: number; decision: "grant" | "decline"; note: string | null; actor: { githubId: number; login: string; now: number } }): Promise<
+    { githubId: number; login: string; status: "granted" | "declined"; outcome?: "granted" | "already_full" | "pregranted" } | { githubId: number; login: string; status: "blocked" } | undefined
+  > {
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const row = sql.exec<{ github_id: number; login: string }>("SELECT github_id, login FROM access_requests WHERE id = ? AND status = 'pending'", input.id).toArray()[0];
+      if (!row) return undefined;
+      let outcome: "granted" | "already_full" | "pregranted" | undefined;
+      if (input.decision === "grant") {
+        const granted = this.#grantFullSync(row.github_id, row.login, input.actor);
+        if (granted === "blocked") return { githubId: row.github_id, login: row.login, status: "blocked" as const };
+        outcome = granted;
+      }
+      const status = input.decision === "grant" ? ("granted" as const) : ("declined" as const);
+      sql.exec("UPDATE access_requests SET status = ?, decided_at = ?, decided_by = ?, note = ? WHERE id = ?", status, input.actor.now, input.actor.githubId, input.note, input.id);
+      this.#log(`access_request:${row.github_id}:${row.login}`, "pending", status, input.actor);
+      return { githubId: row.github_id, login: row.login, status, ...(outcome ? { outcome } : {}) };
+    });
+  }
+
+  /** A chat request was refused below the bar today (the sign-up funnel). Ids and days only. */
+  async recordRefusal(githubId: number, now: number): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT OR IGNORE INTO refused_days (github_id, day) VALUES (?, ?)", githubId, Math.floor(now / DAY_MS));
   }
 
   /** Whether this GitHub id has an unused pre-grant: sign-in then skips the Starter step. */
@@ -1516,10 +1731,10 @@ export class DirectoryObject extends DurableObject {
    * can reach (active, with an email, not stopped, not admins), Full and Starter. Days with
    * nobody reachable are left out. Counts only.
    */
-  async broadcastCohorts(input: { days: number; adminIds: number[]; includeAdmins: boolean }): Promise<Array<{ day: number; full: number; starter: number }>> {
+  async broadcastCohorts(input: { days: number; adminIds: number[]; includeAdmins: boolean }): Promise<Array<{ day: number; full: number; basic: number; starter: number }>> {
     return this.ctx.storage.sql
-      .exec<{ day: number; full: number; starter: number }>(
-        `SELECT (admitted_at / ${DAY_MS}) * ${DAY_MS} AS day, SUM(level = 'full') AS full, SUM(level = 'starter') AS starter
+      .exec<{ day: number; full: number; basic: number; starter: number }>(
+        `SELECT (admitted_at / ${DAY_MS}) * ${DAY_MS} AS day, SUM(level = 'full') AS full, SUM(level = 'basic') AS basic, SUM(level = 'starter') AS starter
          FROM people
          WHERE status = 'active' AND email IS NOT NULL AND email_stop = 0
            AND (? = 1 OR (admitted_via != 'admin' AND github_id NOT IN (SELECT value FROM json_each(?))))
@@ -1529,7 +1744,7 @@ export class DirectoryObject extends DurableObject {
         input.days,
       )
       .toArray()
-      .map((row) => ({ day: row.day, full: row.full, starter: row.starter }));
+      .map((row) => ({ day: row.day, full: row.full, basic: row.basic, starter: row.starter }));
   }
 
   /** The dashboard's abuse section (see abuse.ts). Admins are left out. */
@@ -2438,12 +2653,15 @@ export class DirectoryObject extends DurableObject {
       weeklyActive,
       retention,
       // Daily retention as the dashboard shows it (the last sign-up days, whatever from and to say):
-      // the share of each cohort that made a request on day N after signing up; null until that day has ended.
+      // the share of each cohort that made a request on day N after signing up; null until that day
+      // has ended. Only people who could use dl: they had free tokens at sign-up.
       cohorts: dailyCohorts(sql, input.now, JSON.stringify(input.adminIds ?? [])).map((cohort) => ({
         day: isoDay(cohort.day),
         size: cohort.size,
         d: Object.fromEntries(cohort.retained.map((cell, index) => [RETENTION_DAYS[index], cell ? round(cell.share, 4) : null])),
       })),
+      // Everyone who signed up on those days: got free tokens, refused, and refused but opened dl that day.
+      signupFunnel: signupFunnel(sql, input.now, JSON.stringify(input.adminIds ?? [])).map((row) => ({ ...row, day: isoDay(row.day) })),
       totals: {
         requests: totals?.requests ?? 0,
         tokensIn: totals?.tokens_in ?? 0,

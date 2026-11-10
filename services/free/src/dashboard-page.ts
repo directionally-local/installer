@@ -5,6 +5,7 @@ import { ABUSE_DAYS, type AbuseData, type AbusePerson, type SimpleData } from ".
 import { BRAND_ORIGIN, BRAND_TOKENS, PRODUCT_NAME } from "./pages.js";
 import { isoDay } from "./week.js";
 import type { LevelChecks } from "./admission.js";
+import type { PendingAccessRequest } from "./directory-object.js";
 import { hasCapitals, type BroadcastAudience } from "./broadcast.js";
 import { GRANT_LABELS, MAX_GRANT_LOGINS, type GrantResult } from "./grant.js";
 import { FREE_MODELS } from "./models.js";
@@ -87,8 +88,13 @@ export interface SpendView {
   openaiCreditWeekUsd: number;
   openaiFreeCreditWeekUsd: number;
   openaiWeeklyCreditUsd: number | null;
-  /** A Starter account's weekly tokens. */
+  /** A Starter account's weekly tokens (a batch-flagged one gets none), and its dollar cap. */
   starterWeeklyTokens: number;
+  starterWeeklyUsd: number | null;
+  /** The basic level: weekly tokens (0: off), dollar cap, and the account age it needs. Admin-only. */
+  basicWeeklyTokens: number;
+  basicWeeklyUsd: number | null;
+  basicMinAccountAgeDays: number;
   /** The public bar for Full (free tokens): account age, and public repositories or contributions. */
   fullMinAccountAgeDays: number;
   fullMinPublicRepos: number;
@@ -593,14 +599,19 @@ export const REPOS_PATH_OFF = 100_000;
  * private account checks' thresholds are never shown here.
  */
 export function admissionText(spend: SpendView, admitted: number): string {
-  const starter = spend.starterWeeklyTokens > 0 ? `${tokens(spend.starterWeeklyTokens)} DeepSeek tokens a week` : "no free tokens";
+  const usd = (value: number | null) => (value === null ? "" : `, up to $${value}`);
+  const starter = spend.starterWeeklyTokens > 0 ? `${tokens(spend.starterWeeklyTokens)} tokens a week of every model${usd(spend.starterWeeklyUsd)} (none for creation-batch accounts)` : "no free tokens";
+  const basic =
+    spend.basicWeeklyTokens > 0
+      ? `Basic, for accounts at least ${count(spend.basicMinAccountAgeDays)} days old outside a creation batch: ${tokens(spend.basicWeeklyTokens)} tokens a week of every model${usd(spend.basicWeeklyUsd)}`
+      : "";
   const parts: string[] = [];
   if (spend.fullMinAccountAgeDays > 0) parts.push(`at least ${count(spend.fullMinAccountAgeDays)} days old`);
   const paths = [`${count(spend.fullMinContributions)}+ contributions in the last year`];
   if (spend.fullMinPublicRepos < REPOS_PATH_OFF) paths.push(`${count(spend.fullMinPublicRepos)}+ public repos`);
   parts.push(`with ${paths.join(" or ")}`);
   const bar = spend.requireGithubActivity
-    ? `Free tokens (Full) need a GitHub account ${parts.join(" ")}, and the private account checks count too; below that, Starter: ${starter}.`
+    ? `Free tokens (Full) need a GitHub account ${parts.join(" ")}, and the private account checks count too; below that, ${basic ? `${basic}; everyone else, Starter` : "Starter"}: ${starter}.`
     : "GitHub account check off: everyone gets Full.";
   const who = spend.openAdmission
     ? `Admission: open, any GitHub account can sign up; ${count(admitted)} admitted, no cap while open.`
@@ -1001,14 +1012,14 @@ const SIMPLE_STYLE = `${BRAND_TOKENS}
   --k-bg: #F9FAFB; --k-card: #FFFFFF; --k-text: #111827; --k-muted: #6B7280; --k-faint: #9CA3AF; --k-border: #E5E7EB; --k-axis: #D1D5DB;
   --k-shadow: 0 1px 2px 0 rgb(0 0 0 / .04); --k-up: #047857; --k-down: #B91C1C; --k-flag: #B45309; --k-flag-bg: rgba(245, 158, 11, .1);
   --k-ok: #047857; --k-ok-bg: rgba(16, 185, 129, .1); --k-stop: #B91C1C; --k-stop-bg: rgba(239, 68, 68, .09);
-  --c-1: #2A78D6; --c-2: #EB6834;
+  --c-1: #2A78D6; --c-2: #EB6834; --c-3: #1A9C7B;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --k-bg: #0B0E12; --k-card: #161A21; --k-text: #E6E9EE; --k-muted: #8A919E; --k-faint: #646B78; --k-border: #262B34; --k-axis: #3A404B;
     --k-shadow: none; --k-up: #34D399; --k-down: #F87171; --k-flag: #FBBF24; --k-flag-bg: rgba(251, 191, 36, .1);
     --k-ok: #34D399; --k-ok-bg: rgba(52, 211, 153, .12); --k-stop: #F87171; --k-stop-bg: rgba(248, 113, 113, .12);
-    --c-1: #3987E5; --c-2: #D95926;
+    --c-1: #3987E5; --c-2: #D95926; --c-3: #2BB592;
   }
 }
 * { box-sizing: border-box; }
@@ -1059,6 +1070,7 @@ svg.chart .hit { fill: transparent; }
 svg.chart g:hover .hit { fill: color-mix(in srgb, var(--k-text) 5%, transparent); }
 svg.chart .c1 { fill: var(--c-1); }
 svg.chart .c2 { fill: var(--c-2); }
+svg.chart .c3 { fill: var(--c-3); }
 svg.chart .cell { fill: var(--k-card); }
 svg.chart text.on { fill: #FFFFFF; font-weight: 600; }
 svg.chart.narrow text.on { font-weight: 500; }
@@ -1067,6 +1079,13 @@ svg.chart text.in { fill: var(--k-text); }
 svg.chart text.h { fill: var(--k-muted); font-weight: 600; }
 svg.chart.heat.wide { max-width: 1000px; }
 .avg { margin: 14px 0 0; font-size: 13px; color: var(--k-muted); }
+.caption { margin: -4px 0 12px; font-size: 13px; color: var(--k-muted); }
+.sub { margin: 20px 0 8px; font-size: 14px; font-weight: 600; color: var(--k-text); }
+.funnel { display: grid; max-width: 36rem; font-size: 13px; font-variant-numeric: tabular-nums; }
+.funnel > div { display: grid; grid-template-columns: minmax(3.5rem, 1.2fr) repeat(4, minmax(0, 1fr)); gap: 6px; padding: 5px 0; border-bottom: 1px solid var(--k-border); align-items: end; }
+.funnel span { text-align: right; min-width: 0; }
+.funnel span:first-child { text-align: left; }
+.funnel .fh span { color: var(--k-muted); font-weight: 600; font-size: 12px; line-height: 1.25; }
 .avg b { color: var(--k-text); font-variant-numeric: tabular-nums; }
 .avg .muted { color: var(--k-faint); }
 .legend { display: flex; gap: 16px; margin: 0 0 12px; font-size: 12px; color: var(--k-muted); }
@@ -1074,6 +1093,7 @@ svg.chart.heat.wide { max-width: 1000px; }
 .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 .legend i.c1 { background: var(--c-1); }
 .legend i.c2 { background: var(--c-2); }
+.legend i.c3 { background: var(--c-3); }
 .flags { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .flags li { display: flex; gap: 10px; align-items: baseline; padding: 9px 12px; border-radius: 8px; background: var(--k-flag-bg); font-size: 13.5px; line-height: 1.35; }
 .flags li::before { content: "!"; flex: none; width: 16px; height: 16px; border-radius: 50%; background: var(--k-flag); color: var(--k-card); font: 700 11px/16px var(--body); text-align: center; transform: translateY(2px); }
@@ -1143,8 +1163,9 @@ function tokenChart(rows: SimpleData["topTokens"], width: number, kind: "wide" |
     const w = Math.max(2, (row.tokens / max) * plot);
     const name = row.login ?? `#${row.githubId}`;
     const shown = name.length > chars ? `${name.slice(0, chars - 1)}…` : name;
-    const level = row.level === "starter" ? "Starter" : "Full";
-    return `<g><title>${escapeHtml(`${name}: ${tokens(row.tokens)} tokens this week (${level})`)}</title><rect class="hit" x="0" y="${y}" width="${width}" height="${rowHeight}"></rect><text class="who" x="${labelWidth - 10}" y="${y + rowHeight / 2 + 4}" text-anchor="end">${escapeHtml(shown)}</text><path class="${row.level === "starter" ? "c2" : "c1"}" d="${barPath(labelWidth, y + (rowHeight - barHeight) / 2, w, barHeight, true)}"></path>${
+    const level = row.level === "starter" ? "Starter" : row.level === "basic" ? "Basic" : "Full";
+    const colour = row.level === "starter" ? "c2" : row.level === "basic" ? "c3" : "c1";
+    return `<g><title>${escapeHtml(`${name}: ${tokens(row.tokens)} tokens this week (${level})`)}</title><rect class="hit" x="0" y="${y}" width="${width}" height="${rowHeight}"></rect><text class="who" x="${labelWidth - 10}" y="${y + rowHeight / 2 + 4}" text-anchor="end">${escapeHtml(shown)}</text><path class="${colour}" d="${barPath(labelWidth, y + (rowHeight - barHeight) / 2, w, barHeight, true)}"></path>${
       index === 0 ? `<text class="v" x="${(labelWidth + w + 6).toFixed(1)}" y="${y + rowHeight / 2 + 4}">${escapeHtml(tokens(row.tokens))}</text>` : ""
     }</g>`;
   });
@@ -1234,7 +1255,7 @@ export function redFlags(data: DashboardData, spend: SpendView, simple: SimpleDa
   // At or near the weekly cap: who reached it (with per-person grants), and who is past 80% of their level's tokens.
   const hits = data.limitHits.filter((hit) => hit.weekStart === data.currentWeek);
   const hitIds = new Set(hits.map((hit) => hit.githubId));
-  const allowance = (level: string | null) => (level === "starter" ? spend.starterWeeklyTokens : spend.weeklyTokens);
+  const allowance = (level: string | null) => (level === "starter" ? spend.starterWeeklyTokens : level === "basic" ? spend.basicWeeklyTokens : spend.weeklyTokens);
   const near = simple.topTokens.filter((row) => !hitIds.has(row.githubId) && row.tokens >= BANNER_SHARE * allowance(row.level));
   const capped = [...hits.map((hit) => label(hit.login, hit.githubId)), ...near.map((row) => label(row.login, row.githubId))];
   if (capped.length > 0) flags.push({ text: `Near weekly cap: ${names(capped)}`, href: "/admin?view=full#limits" });
@@ -1243,7 +1264,7 @@ export function redFlags(data: DashboardData, spend: SpendView, simple: SimpleDa
     flags.push({ text: `Used outside dl: ${names(simple.outsideDl.map((row) => `${label(row.login, row.githubId)} (${count(row.requests)} requests, 0 dl sessions)`))}`, href: "/admin?view=full#abuse" });
   }
   // Starter accounts using a lot: half their week or more, not already listed at the cap.
-  const busyStarters = simple.topTokens.filter((row) => row.level === "starter" && !hitIds.has(row.githubId) && !near.includes(row) && row.tokens >= 0.5 * spend.starterWeeklyTokens);
+  const busyStarters = simple.topTokens.filter((row) => row.level === "starter" && spend.starterWeeklyTokens > 0 && !hitIds.has(row.githubId) && !near.includes(row) && row.tokens >= 0.5 * spend.starterWeeklyTokens);
   if (busyStarters.length > 0) flags.push({ text: `Busy Starter: ${names(busyStarters.map((row) => `${label(row.login, row.githubId)} (${tokens(row.tokens)})`))}`, href: "/admin?view=full#abuse" });
   if (abuse && abuse.clusterCount > 0) {
     flags.push({ text: `${count(abuse.clusteredAccounts)} accounts share ${abuse.clusterCount === 1 ? "a network" : `${count(abuse.clusterCount)} networks`}`, href: "/admin?view=full#abuse" });
@@ -1259,6 +1280,25 @@ export function redFlags(data: DashboardData, spend: SpendView, simple: SimpleDa
     });
   }
   return flags.slice(0, 5);
+}
+
+/** Sign-up days shown in the Simple view's funnel. */
+const FUNNEL_TABLE_DAYS = 7;
+
+/** The sign-up funnel per day, newest first: signed up, got tokens, refused, refused but opened dl. Compact for a phone. */
+function signupFunnelTable(rows: DashboardData["signupFunnel"]): string {
+  if (rows.length === 0) return "";
+  const cell = (text: string, role = "cell") => `<span role="${role}">${escapeHtml(text)}</span>`;
+  const body = rows
+    .slice(0, FUNNEL_TABLE_DAYS)
+    .map((row) => `<div role="row">${cell(monthDay(row.day), "rowheader")}${cell(count(row.signedUp))}${cell(count(row.gotTokens))}${cell(count(row.refused))}${cell(count(row.refusedOpened))}</div>`)
+    .join("");
+  return `<h3 class="sub">Sign-ups by day</h3>
+<div class="funnel" role="table" aria-label="Sign-ups by day: signed up, got free tokens, refused, refused but opened dl that day">
+<div role="row" class="fh">${cell("Day", "columnheader")}${cell("Signed up", "columnheader")}${cell("Got tokens", "columnheader")}${cell("Refused", "columnheader")}${cell("Refused, opened dl", "columnheader")}</div>
+${body}
+</div>
+<p class="avg">Opened dl: a dl session or a refused request on the sign-up day (UTC).</p>`;
 }
 
 /**
@@ -1314,7 +1354,7 @@ ${stat("Weekly active people", activeNow, activeBefore, "last full week")}
 ${
   simple.topTokens.length === 0
     ? `<p class="empty">No tokens used this week.</p>`
-    : `<div class="legend"><span><i class="c1"></i>Full</span><span><i class="c2"></i>Starter</span></div>
+    : `<div class="legend"><span><i class="c1"></i>Full</span><span><i class="c3"></i>Basic</span><span><i class="c2"></i>Starter</span></div>
 ${tokenChart(simple.topTokens, 800, "wide")}
 ${tokenChart(simple.topTokens, 320, "narrow")}`
 }
@@ -1328,13 +1368,15 @@ ${flags.length === 0 ? `<p class="none">No red flags.</p>` : `<ul class="flags">
 
   const retentionCard = `<section class="card span3" id="retention" aria-label="Retention">
 <h2>Retention</h2>
+<p class="caption">Counts only people who could use dl: they had free tokens at sign-up (Full, Basic, an admin's grant, or a Starter allowance). People refused free tokens are in the funnel below.</p>
 ${
   data.dailyCohorts.length === 0
-    ? `<p class="empty">No sign-ups yet.</p>`
+    ? `<p class="empty">No sign-ups with free tokens yet.</p>`
     : `${retentionChart(data.dailyCohorts, 1000, "wide")}
 ${retentionChart(data.dailyCohorts, 320, "narrow")}
 <p class="avg">${retentionAverages(data.dailyCohorts)}</p>`
 }
+${signupFunnelTable(data.signupFunnel)}
 </section>`;
 
   return shell(`Admin · ${PRODUCT_NAME}`, `${header}\n<main>\n${signups}\n${growthCard}\n${tokenCard}\n${flagCard}\n${retentionCard}\n</main>`, 200, {}, "", SIMPLE_STYLE);
@@ -1354,8 +1396,14 @@ export interface ToolsState {
   emailsOn: boolean;
   provider: string | null;
   /** Sign-up days, newest first, with the people a broadcast can reach at each level. */
-  cohorts: Array<{ day: number; full: number; starter: number }>;
+  cohorts: Array<{ day: number; full: number; basic: number; starter: number }>;
   grant: { text: string; results?: GrantResult[]; error?: string };
+  /** Pending access requests (/request in dl), newest first. `building` and `link` are user content. */
+  requests: PendingAccessRequest[];
+  /** What the last Grant or Decline did. */
+  requestNotice?: { error: boolean; text: string };
+  /** What the last "re-check below-bar accounts" did. */
+  recheck?: { checked: number; raised: number; flagged: number; starter: number };
   /** The email being written. */
   compose: {
     subject: string;
@@ -1432,6 +1480,16 @@ input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); 
 .chip.ok { color: var(--k-ok); }
 .chip.no { color: var(--k-stop); }
 .chip.mid { color: var(--k-muted); }
+.reqs { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.req { border: 1px solid var(--k-border); border-radius: 10px; padding: 12px 14px; display: grid; gap: 6px; background: var(--k-bg); min-width: 0; }
+.req p { margin: 0; }
+.req-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 10px; align-items: baseline; }
+.req-head a { color: var(--k-text); text-decoration: none; }
+.req-head code { font: 600 14px var(--mono); overflow-wrap: anywhere; }
+.req-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+.req-link { font-size: 13.5px; overflow-wrap: anywhere; }
+.req-link a { color: var(--accent); }
+.req-actions { display: grid; gap: 8px; margin-top: 4px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 @media (max-width: 520px) { .nums { grid-template-columns: repeat(2, minmax(0, 1fr)); } .actions .btn { flex: 1 1 auto; } }
 `;
@@ -1477,6 +1535,73 @@ ${results}
 </section>`;
 }
 
+/** "https://example.com/x" shown as text with a link; anything that isn't http(s) as text only. */
+function requestLink(link: string | null): string {
+  if (!link) return "";
+  const safe = /^https?:\/\//i.test(link);
+  return safe
+    ? `<p class="req-link"><a href="${escapeHtml(link)}" rel="noopener noreferrer nofollow" target="_blank">${escapeHtml(link)}</a></p>`
+    : `<p class="req-link">${escapeHtml(link)}</p>`;
+}
+
+/** Days, rounded down: "3 years", "200 days". */
+function ageText(days: number | null): string {
+  if (days === null) return "age unknown";
+  return days >= 730 ? `${Math.floor(days / 365)} years` : `${count(days)} days`;
+}
+
+/**
+ * Pending access requests, newest first: who, their level and numbers, what they're building
+ * (user content, escaped), and Grant (Full, as an admin's choice) or Decline with an optional note.
+ */
+function requestsCard(state: ToolsState): string {
+  const { csrf, requests } = state;
+  const notice = state.requestNotice ? `<p class="msg${state.requestNotice.error ? " err" : ""}" role="${state.requestNotice.error ? "alert" : "status"}">${escapeHtml(state.requestNotice.text)}</p>` : "";
+  const items = requests.map((request) => {
+    const level = request.level === null ? "not signed up" : request.level === "basic" ? "Basic" : request.level === "starter" ? "Starter" : "Full";
+    const facts = [level, ageText(request.accountAgeDays), `${request.contributions === null ? "–" : count(request.contributions)} contributions`, plural(request.sessionsThisWeek, "dl session") + " this week"];
+    const actions = csrf
+      ? `<form method="post" action="/admin/dashboard/tools#requests" class="req-actions">
+<input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="request"><input type="hidden" name="id" value="${request.id}">
+<label class="field"><span class="sr">Note (optional)</span><input type="text" name="note" maxlength="300" placeholder="Note (optional, only you see it)" autocomplete="off"></label>
+<div class="row"><button class="btn primary" type="submit" name="action" value="grant">Grant</button><button class="btn" type="submit" name="action" value="decline">Decline</button></div>
+</form>`
+      : "";
+    return `<li class="req">
+<div class="req-head"><a href="https://github.com/${encodeURIComponent(request.login)}" rel="noopener noreferrer nofollow" target="_blank"><code>@${escapeHtml(request.login)}</code></a><span class="hint">${escapeHtml(when(request.at))}</span></div>
+<p class="hint">${facts.map(escapeHtml).join(" · ")}</p>
+<p class="req-text">${escapeHtml(request.building)}</p>
+${requestLink(request.link)}
+${actions}
+</li>`;
+  });
+  return `<section class="card" id="requests" aria-label="Requests">
+<h2>Requests</h2>
+<p class="lede">People asking for free tokens from inside dl (/request). Grant gives Full, as an admin's choice, and emails them; Decline sends nothing.</p>
+${notice}
+${requests.length === 0 ? `<p class="hint">No pending requests.</p>` : `<ul class="reqs">${items.join("\n")}</ul>`}
+${csrf ? "" : `<p class="hint">Sign in at /admin in a browser to answer them.</p>`}
+</section>`;
+}
+
+/** "Re-check below-bar accounts": raises qualifying Starter accounts to basic from stored signals. */
+function recheckCard(state: ToolsState): string {
+  const { csrf, recheck } = state;
+  const result = recheck
+    ? `<div class="panel" role="status"><dl class="nums"><div><dt>Checked</dt><dd>${count(recheck.checked)}</dd></div><div><dt>Raised to Basic</dt><dd>${count(recheck.raised)}</dd></div><div><dt>Starter</dt><dd>${count(recheck.starter)}</dd></div><div><dt>Batch-flagged</dt><dd>${count(recheck.flagged)}</dd></div></dl></div>`
+    : "";
+  return `<section class="card" id="recheck" aria-label="Re-check below-bar accounts">
+<h2>Re-check below-bar accounts</h2>
+<p class="lede">Looks at every active Starter account (not admins, not admin-set levels) from its stored signals, raises the ones that now qualify to Basic, and stores the creation-batch flag again. Never lowers anyone; blocked accounts are left alone.</p>
+${
+  csrf
+    ? `<form method="post" action="/admin/dashboard/tools#recheck"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="recheck"><div class="row"><button class="btn primary" type="submit">Re-check below-bar accounts</button></div></form>`
+    : `<p class="hint">Sign in at /admin in a browser to use this.</p>`
+}
+${result}
+</section>`;
+}
+
 function emailCard(state: ToolsState): string {
   const { compose: email, csrf } = state;
   if (!csrf) {
@@ -1487,7 +1612,7 @@ function emailCard(state: ToolsState): string {
   const single = email.from !== "" && email.from === email.to ? email.from : "";
   const dayButtons = state.cohorts.map((row) => {
     const value = isoDay(row.day);
-    return `<button type="submit" class="day" name="action" value="pick:${value}" aria-pressed="${single === value}"><b>${escapeHtml(`${WEEKDAYS[new Date(row.day).getUTCDay()]} ${monthDay(row.day)}`)}</b><small>${count(row.full)} full · ${count(row.starter)} starter</small></button>`;
+    return `<button type="submit" class="day" name="action" value="pick:${value}" aria-pressed="${single === value}"><b>${escapeHtml(`${WEEKDAYS[new Date(row.day).getUTCDay()]} ${monthDay(row.day)}`)}</b><small>${count(row.full)} full · ${count(row.basic)} basic · ${count(row.starter)} starter</small></button>`;
   });
   const capitals = (email.subject !== "" || email.text !== "") && hasCapitals(email.subject, email.text);
   const preview = email.preview;
@@ -1522,7 +1647,7 @@ ${state.provider ? "" : `<p class="msg err">No email provider is set up (USER_EM
 <label class="field"><span>Subject</span><input type="text" name="subject" value="${escapeHtml(email.subject)}" maxlength="200" autocomplete="off"></label>
 <label class="field"><span>Text</span><textarea class="letter" name="text" rows="12">\n${escapeHtml(email.text)}</textarea></label>
 ${capitals ? `<p class="caps">Has capitals. Fine for names like GPT-6 or OpenAI; it still sends.</p>` : ""}
-<fieldset><legend>Who gets it</legend><div class="seg">${radio("full", "Full")}${radio("starter", "Starter")}${radio("all", "Everyone")}</div></fieldset>
+<fieldset><legend>Who gets it</legend><div class="seg">${radio("full", "Full")}${radio("basic", "Basic")}${radio("starter", "Starter")}${radio("all", "Everyone")}</div></fieldset>
 <fieldset><legend>Signed up (UTC, both days included)</legend>
 <div class="dates"><label class="field"><span>From</span><input type="date" name="from" value="${escapeHtml(email.from)}"></label><label class="field"><span>To</span><input type="date" name="to" value="${escapeHtml(email.to)}"></label></div>
 ${
@@ -1550,7 +1675,7 @@ export function toolsPage(state: ToolsState): Response {
 ${viewToggle("tools")}
 ${state.signOut ? `<form method="post" action="/admin/signout"><button type="submit" class="out">Sign out</button></form>` : ""}
 </div></header>`;
-  return shell(`Tools · ${PRODUCT_NAME}`, `${header}\n<main class="tools">\n${grantCard(state)}\n${emailCard(state)}\n</main>`, 200, {}, "", TOOLS_STYLE);
+  return shell(`Tools · ${PRODUCT_NAME}`, `${header}\n<main class="tools">\n${requestsCard(state)}\n${grantCard(state)}\n${recheckCard(state)}\n${emailCard(state)}\n</main>`, 200, {}, "", TOOLS_STYLE);
 }
 
 // ─── CSV ──────────────────────────────────────────────────────────────────

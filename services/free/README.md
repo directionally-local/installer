@@ -52,8 +52,8 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
 
 ## Account levels
 
-Every account is `full` or `starter`. The point is to make account farming unprofitable
-without turning away real developers.
+Every account is `full`, `basic` or `starter`. The point is to make account farming
+unprofitable without turning away real developers.
 
 - **Full**: the account is at least `FULL_MIN_ACCOUNT_AGE_DAYS` (90) days old **and** has
   `FULL_MIN_PUBLIC_REPOS` (3) public repositories **or** `FULL_MIN_CONTRIBUTIONS` (50)
@@ -66,23 +66,38 @@ without turning away real developers.
   real values live in the admin settings. Nothing a person is shown names them: an account
   that misses them gets the same message as one below the public bar. `GET /admin/people` and
   the dashboard's Starter table show the stored signals and which checks pass.
-- **Starter**: everyone else. DeepSeek only, `STARTER_WEEKLY_TOKENS` (5M) tokens a week, no
-  GPT-6. Asking for a GPT-6 model is a 403 `starter_model_not_allowed` with an honest
-  sentence: what Starter gets, why, and the three ways up (keep using GitHub, an invite code,
-  your own key). Starter accounts are admitted, never refused.
+- **Basic**: below the public bar, but an account at least `basicMinAccountAgeDays` old that the
+  creation-batch check didn't flag. Every model (GPT-6 included) on its own allowance:
+  `basicWeeklyTokens` tokens and `basicWeeklyUsdCap` dollars a week (Sol and Astra at most their
+  own pool sizes). `basicWeeklyTokens` 0 turns the level off: those accounts are then served as
+  Starter. Nothing a person is shown says who gets Basic, only what it gets.
+- **Starter**: everyone else. Every model on `STARTER_WEEKLY_TOKENS` tokens and
+  `starterWeeklyUsdCap` dollars a week, or no free tokens at all when the setting is 0. An
+  account the creation-batch check flagged (`people.batch_flag`) gets no free tokens whatever
+  the setting, and is told the same as everyone with none (`below_bar`). Starter accounts are
+  admitted, never refused at sign-in.
+- **Access requests**: anyone below Full can ask for more from inside dl with `/request`
+  (`POST /v1/access-request`, below). The admin answers on the Tools tab: Grant sets Full with
+  reason `admin` and emails the person; Decline sends nothing.
 - **Signals** are read at sign-in with the token sign-in already has (no new scopes): account
   age and public repositories from `/user`, then one GraphQL call for followers, contributions,
   `restrictedContributionsCount` and the additional signals. Only the numbers and when they were read are stored:
   never repository names or contents. If GitHub can't answer, the account gets Full (fail open)
   and the failure is counted.
 - **Promotion**: at sign-in, weekly from the public profile (promote only, once per person per
-  week), with an invite code, or by an admin. An admin can also demote or block; their choice
-  stands until they change it.
+  week: Starter to Basic or Full, Basic to Full), with an invite code, by an access request, or
+  by an admin. An admin can also demote or block; their choice stands until they change it.
+- **Re-check below-bar accounts** (Tools tab, or `POST /admin/recheck-below-bar`): looks at
+  every active non-admin Starter account from its stored signals (age counted to today), raises
+  the ones that qualify to Basic, and stores the batch flag again. Never lowers anyone, never
+  touches blocked accounts, admin-set levels or redeemed invites. Answers
+  `{checked, raised, flagged, starter}`.
 - **Network cap**: at most `NETWORK_SIGNUPS_PER_DAY` (3) new sign-ins per network per day.
   Beyond that the account still gets in, as Starter.
 - **Existing users** are re-checked lazily on their next request; nobody is cut off mid-session.
 - **Admin**: `GET /admin/people` shows each person's level, signals and network count, and
-  takes `?level=starter` and `?shared=1`. `POST /admin/people/:id/level {level}` sets it.
+  takes `?level=starter` and `?shared=1`. `POST /admin/people/:id/level {level}` sets it
+  (`full`, `basic` or `starter`).
 
 ## Admission
 
@@ -180,6 +195,41 @@ Queued:
 ```
 
 The wait reads "about N days" under two weeks, else "about N weeks".
+
+A Basic or Starter week used up (a free user): `basic_limit` or `starter_limit`, with what the
+level gets, that it resets Monday, and the two ways on. `request` is the access-request endpoint.
+
+```json
+{ "error": { "code": "basic_limit",
+             "message": "You've used this week's free Basic allowance (10M tokens a week of every model, GPT-6 included, up to $3). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.",
+             "reason": "tokens", "resetsAt": "2026-11-09T00:00:00.000Z", "request": "/v1/access-request",
+             "offers": { "...": "as above" }, "referralLink": "https://dl.new/r/alice" } }
+```
+
+No free tokens at all (HTTP 403 `below_bar`): `contact` (the email fallback) and `request`.
+
+### Access requests (`/request` in dl; `Authorization: Bearer <access token or server key>`)
+
+`POST /v1/access-request {building, link?}`: `building` is required, 10 to 600 characters after
+trimming; `link` is optional, an `http://` or `https://` URL of at most 300 characters. Any
+signed-in person who isn't blocked.
+
+| answer | when |
+|---|---|
+| 201 `{"status": "pending"}` | stored; the owner gets an alert with the login and the pending count only |
+| 409 `already_pending` | a request is already waiting |
+| 409 `already_full` | Full accounts and admins |
+| 429 `rate_limited` | more than 3 submissions in 24 hours |
+| 400 `invalid_request` | a clear message about what to fix |
+| 403 `blocked` | a blocked account |
+
+`GET /v1/access-request` → `{"status": "none" | "pending" | "granted" | "declined", "at"?: ISO}`
+(the newest request; `at` is when it was sent, or answered).
+
+What a person writes is user content: stored as plain text, shown only on the admin Tools tab
+(escaped), never logged, never in an alert, a metric or an export. Admins:
+`GET /admin/access-requests` (pending, newest first) and
+`POST /admin/access-requests/:id/grant` or `/decline` (`{note?}`).
 
 ### Sign-up with a referral code
 
@@ -579,6 +629,8 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `global_weekly_budget_reached` | chat (503) | `reason: "weekly_budget"`, `pausedForEveryone: true`, `resetsAt` (ISO time), `Retry-After` header |
 | `global_total_budget_reached` | chat (503) | `reason: "total_budget"`, `pausedForEveryone: true`, `resetsAt: null` |
 | `quota_exceeded` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `offers`, `referralLink` |
+| `basic_limit`, `starter_limit` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `request`, `offers`, `referralLink` |
+| `below_bar` | chat (403) | `contact`, `request` |
 | `free_tier_queued` | chat (402) | `position`, `etaAt`, `offers`, `referralLink` |
 | `upstream_credit_exhausted` | chat (503) | `reason: "credit_exhausted"`, `pausedForEveryone: true`, `resetsAt: null` |
 | `upstream_busy` | chat (429, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
@@ -620,6 +672,11 @@ with who made it and when.
 | `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
 | `userEmails` | `USER_EMAILS` | true (sends only with the `USER_EMAIL` binding or `RESEND_API_KEY`) |
 | `dlOnly` | `DL_ONLY` | true (free tokens inside dl only; see below) |
+| `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 5,000,000 (0: no free tokens below Basic) |
+| `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 0.5 |
+| `basicMinAccountAgeDays` | `BASIC_MIN_ACCOUNT_AGE_DAYS` | see `src/config.ts` |
+| `basicWeeklyTokens` | `BASIC_WEEKLY_TOKENS` | 10,000,000 (0 turns Basic off) |
+| `basicWeeklyUsdCap` | `BASIC_WEEKLY_USD_CAP` | 3 |
 
 Env only: `REFERRAL_LINK_BASE` (`https://dl.new/r/`), the offers above, `ALERT_EMAIL_TO`,
 `ALERT_EMAIL_FROM` (`alerts@dl.new`), `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_KIND`,
@@ -640,7 +697,7 @@ curl -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json'
 
 ## Emails to users
 
-Four plain-text emails to the people on the free tier. The copy is in `src/user-emails.ts`;
+Plain-text emails to the people on the free tier. The copy is in `src/user-emails.ts`;
 when each goes out is in `src/user-email-send.ts`. The provider:
 
 1. **Cloudflare Email Service**, when the `send_email` binding `USER_EMAIL` exists (the
@@ -654,13 +711,15 @@ when each goes out is in `src/user-email-send.ts`. The provider:
 
 | email | when |
 |---|---|
-| welcome | right after a new sign-up gives their email on the details step |
+| welcome | right after a new sign-up gives their email on the details step; by level: `welcome` (Full), `welcome_basic`, `welcome_starter_small` (a Starter allowance), `welcome_starter` (no free tokens) |
+| access granted | an admin grants the person's access request (`access_granted`; not held back by the one-a-day rule) |
 | didn't start | daily run: admitted 24 to 72 hours ago, no request yet |
 | most of the week used | the request whose settlement takes the week past 80% of a pool's tokens or of the weekly dollar cap; once a week |
 | gone quiet | daily run: requests on 2 or more days, none in the last 7 |
 
 Only to people with an email who haven't pressed stop; never to admins (unless
-`USER_EMAILS_TO_ADMINS=true`, for testing); at most one email per person per UTC day; each
+`USER_EMAILS_TO_ADMINS=true`, for testing); at most one email per person per UTC day (an
+access grant excepted); each
 kind once per person, the weekly one once per week. Nobody still waiting in the queue gets the
 welcome or the didn't-start email. Every send is recorded in the Directory's `user_emails`
 table before the provider is called and marked sent or failed after it, so nothing goes twice
@@ -941,6 +1000,12 @@ numbers never show or count in the averages. The simple view (`/admin?view=simpl
 drops D14) with the average D1 and D7 under it, weighted by cohort size; the full view has the
 table, `retention-daily.csv` has `cohort, size, d0…d7, d14` (shares), and `GET /admin/metrics`
 returns it as `cohorts: [{day, size, d: {0: share, …, 14: share}}]` (null for days that haven't ended).
+It counts only people who could use dl: they had free tokens at sign-up (`people.signup_tokens`:
+Full, Basic, an admin's grant, or a Starter allowance without the batch flag; for sign-ups from
+before it was stored, the current level stands in). Next to it, per sign-up day, a small funnel
+of everyone: signed up, got tokens, refused, and refused but opened dl that day (a dl session or
+a refused chat request, from `refused_days`); `GET /admin/metrics` has it as
+`signupFunnel: [{day, signedUp, gotTokens, refused, refusedOpened}]`.
 
 At the top: the **budget, which is the Luminal credit**: credit used and left of
 `luminalCreditUsd` ($2,000), this week's free credit against `luminalWeeklyCreditUsd` ($250), and

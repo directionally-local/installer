@@ -8,15 +8,16 @@ import { MAX_SERVER_KEYS, parseServerKey, type AccountObject, type Allowance, ty
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
-import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, LevelSignalRow, PersonState, PersonStatus, RequestRecord } from "./directory-object.js";
+import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, LevelSignalRow, PersonRow, PersonState, PersonStatus, RequestRecord } from "./directory-object.js";
 import { createCheckout, createPortal, githubIdFrom, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
-import { deliverAlerts, isHeaderSafeAddress, pauseAlert, sendEmail, type Alert, type EmailBinding, type ServingContext, type UpstreamOutcome } from "./alerts.js";
+import { accessRequestAlert, deliverAlerts, isHeaderSafeAddress, pauseAlert, sendEmail, type Alert, type EmailBinding, type ServingContext, type UpstreamOutcome } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
 import { normalizeReferralCode, referralLink } from "./referrals.js";
 import { networkOf, rateLimitNetwork } from "./network.js";
 import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, type Sender } from "./feedback.js";
 import { apiError, json } from "./errors.js";
 import { dashboardCsv, dashboardPage, deniedPage, isCsvTable, signedInPage, signInPage, simpleDashboardPage, STARTER_ROWS, toolsPage, type SpendView, type StarterRow, type ToolsState } from "./dashboard-page.js";
+import { ACCESS_REQUEST_MAX_BYTES, ACCESS_REQUEST_USAGE, ACCESS_REQUESTS_PER_DAY, parseAccessRequest } from "./access-request.js";
 import { cleanBatch } from "./events.js";
 import { cleanDownload, cleanInstall, MAX_TELEMETRY_BYTES } from "./telemetry.js";
 import {
@@ -40,9 +41,11 @@ import {
 } from "./messages.js";
 import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
-import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, modelById, type FreeModel, type Pool } from "./models.js";
+import { ALLOWED_MODELS, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, modelById, type FreeModel, type Pool } from "./models.js";
 import { emailBlocked, emailDomain, normalizeEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
 import {
+  ACCESS_REQUEST_PATH,
+  basicLine,
   batchCounter,
   belowBarLine,
   CREDITS_REQUEST_EMAIL,
@@ -50,7 +53,10 @@ import {
   levelChecks,
   levelFor,
   levelReason,
+  limitLine,
+  qualifiesForBasic,
   starterLine,
+  type BasicRule,
   type GithubSignals,
   type Level,
   type LevelChecks,
@@ -357,6 +363,7 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/v1/chat/completions") return chat(c);
   if (method === "POST" && path === "/v1/events") return events(c);
   if (method === "POST" && path === "/v1/feedback") return feedback(c);
+  if ((method === "GET" || method === "POST") && path === ACCESS_REQUEST_PATH) return accessRequest(c, method);
   if (method === "GET" && path === "/v1/feedback/reply-address") return feedbackReplyAddress(c);
   if (method === "POST" && path === "/v1/telemetry/download") return telemetry(c, "download");
   if (method === "POST" && path === "/v1/telemetry/install") return telemetry(c, "install");
@@ -411,17 +418,35 @@ async function readForm(c: Ctx): Promise<URLSearchParams> {
   return new URLSearchParams(await c.request.text());
 }
 
-/** `bonusTokens`: this week's referral bonus, added on top of the weekly allowance. */
-function limitsFor(config: FreeConfig, bonusTokens = 0, level: Level = "full"): Limits {
-  return {
-    weeklyTokens: config.weeklyTokens,
-    weeklyUsd: config.perPersonWeeklyUsdCap,
-    proTokensPerWeek: config.offers.pro.tokensPerWeek,
-    proUsdPerWeek: config.proWeeklyUsdCap,
-    level,
-    starterTokens: config.starterWeeklyTokens,
-    ...(bonusTokens > 0 ? { bonusTokens } : {}),
-  };
+/** The level a person is served at: basic with its tokens set to 0 (the level off) is Starter. */
+function servedLevel(level: Level, config: FreeConfig): Level {
+  return level === "basic" && config.basicWeeklyTokens <= 0 ? "starter" : level;
+}
+
+/**
+ * Below the bar with no free tokens at all: Starter with the setting at 0, or a Starter account
+ * the creation-batch check flagged (never said to the person).
+ */
+function noFreeTokens(level: Level, config: FreeConfig, batchFlagged: boolean): boolean {
+  return servedLevel(level, config) === "starter" && (batchFlagged || config.starterWeeklyTokens <= 0);
+}
+
+/** The basic level's rule, from the effective config. Admin-only: never in a response to the person. */
+function basicRule(config: FreeConfig): BasicRule {
+  return { minAccountAgeDays: config.basicMinAccountAgeDays, weeklyTokens: config.basicWeeklyTokens };
+}
+
+/**
+ * The allowance's limits for a level. `bonusTokens`: this week's referral bonus, added on top of
+ * Full's weekly allowance. Basic and Starter get every model on their own tokens and dollar cap;
+ * a batch-flagged Starter account gets 0 tokens.
+ */
+function limitsFor(config: FreeConfig, bonusTokens = 0, level: Level = "full", batchFlagged = false): Limits {
+  const served = servedLevel(level, config);
+  const base = { weeklyTokens: config.weeklyTokens, proTokensPerWeek: config.offers.pro.tokensPerWeek, proUsdPerWeek: config.proWeeklyUsdCap };
+  if (served === "full") return { ...base, weeklyUsd: config.perPersonWeeklyUsdCap, level: "full", ...(bonusTokens > 0 ? { bonusTokens } : {}) };
+  if (served === "basic") return { ...base, weeklyUsd: config.basicWeeklyUsdCap, level: "basic", levelTokens: config.basicWeeklyTokens };
+  return { ...base, weeklyUsd: config.starterWeeklyUsdCap, level: "starter", levelTokens: batchFlagged ? 0 : config.starterWeeklyTokens };
 }
 
 /** The level thresholds, from the effective config. */
@@ -1006,18 +1031,19 @@ async function deviceCallback(c: Ctx): Promise<Response> {
   // An admin gave this account free tokens before it signed up (grant.ts): Full, the admin's choice.
   const level: SignInLevel = (await directory(c).hasPregrant(user.id)) ? { ...read, level: "full", levelReason: "admin" } : read;
   const person = await directory(c).getPerson(user.id);
-  // The details step: the contact email, asked once, and an invite field for a Starter account. A
-  // returning Full account that already gave an email goes straight through.
+  // The details step: the contact email, asked once, and the level's line with an invite field
+  // for a basic or Starter account. A returning Full account that already gave an email goes
+  // straight through.
   if (person?.status !== "blocked") {
-    const starter = effectiveLevel(person, level) === "starter";
-    if (!person?.email || starter) {
+    const below = effectiveLevel(person, level) !== "full";
+    if (!person?.email || below) {
       const email = person?.email ?? (await githubPrimaryEmail(signIn.accessToken, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS));
       const details: SignInDetails = { level };
       const issued = await auth(c).decide(claimed.deviceRef, "needs_details", identity, c.now(), undefined, JSON.stringify(details));
       return detailsPage(issued.ticket ?? "", identity.login, {
         ...(email ? { email } : {}),
         updates: person?.email_updates === 1,
-        ...(starter ? { starter: await starterDetails(c) } : {}),
+        ...(below ? { starter: await levelDetails(c, person, level) } : {}),
       });
     }
   }
@@ -1035,7 +1061,7 @@ interface SignInDetails {
 function parseDetails(raw: string | null): SignInDetails {
   try {
     const parsed = JSON.parse(raw ?? "") as SignInDetails;
-    if (parsed && typeof parsed === "object" && parsed.level && (parsed.level.level === "full" || parsed.level.level === "starter")) return parsed;
+    if (parsed && typeof parsed === "object" && parsed.level && (parsed.level.level === "full" || parsed.level.level === "basic" || parsed.level.level === "starter")) return parsed;
   } catch {
     // Fall through: an unreadable step is treated as a plain Full sign-in.
   }
@@ -1048,9 +1074,21 @@ function effectiveLevel(person: { level: Level; level_reason: LevelReason | null
   return signIn.level;
 }
 
-async function starterDetails(c: Ctx): Promise<{ line: string }> {
+/** The details step's line for a basic or Starter account: what it gets, never why. */
+async function levelDetails(c: Ctx, person: PersonRow | undefined, signIn: SignInLevel): Promise<{ line: string }> {
   const { config } = await runtime(c);
-  return { line: starterLine(levelThresholds(config), config.starterWeeklyTokens) };
+  const level = servedLevel(effectiveLevel(person, signIn), config);
+  if (level === "basic") return { line: basicLine(config.basicWeeklyTokens, config.basicWeeklyUsdCap) };
+  const flagged = signIn.batchFlagged === true || person?.batch_flag === 1;
+  return { line: starterLine(levelThresholds(config), flagged ? 0 : config.starterWeeklyTokens, config.starterWeeklyUsdCap) };
+}
+
+/** The welcome email for the level a new sign-up was admitted at. */
+function welcomeKind(level: Level, batchFlagged: boolean, config: FreeConfig): UserEmailKind {
+  const served = servedLevel(level, config);
+  if (served === "full") return "welcome";
+  if (served === "basic") return "welcome_basic";
+  return noFreeTokens(served, config, batchFlagged) ? "welcome_starter" : "welcome_starter_small";
 }
 
 const EMAIL_BLOCKED_MESSAGE = "This email can't be used for the free tier. Use your own API key instead, or write to contact@directionallylocal.com.";
@@ -1073,7 +1111,7 @@ async function deviceDetails(c: Ctx): Promise<Response> {
   if (!found) return donePage("Sign-in expired", "This step expired. Start sign-in again in your terminal.", 400);
   const details = parseDetails(found.details);
   const person = await directory(c).getPerson(found.githubId);
-  const starter = effectiveLevel(person, details.level) === "starter" ? await starterDetails(c) : undefined;
+  const starter = effectiveLevel(person, details.level) !== "full" ? await levelDetails(c, person, details.level) : undefined;
   const email = (form.get("email") ?? "").trim();
   const updates = form.get("updates") === "1";
   const inviteCode = starter ? (form.get("invite_code") ?? "").trim() || undefined : undefined;
@@ -1096,7 +1134,7 @@ async function deviceDetails(c: Ctx): Promise<Response> {
   }
   const level: SignInLevel = inviteCode ? { ...details.level, level: "full", levelReason: "invite" } : details.level;
   const response = await admitAndFinish(c, found.deviceRef, found.clientDeviceId, found, inviteCode, undefined, ticket, found.referralCode ?? undefined, level, {
-    onInvalidInvite: () => again("That invite code isn't valid or was already used. Check it, or leave it empty to continue on Starter."),
+    onInvalidInvite: () => again("That invite code isn't valid or was already used. Check it, or leave it empty to continue."),
   });
   // Saved for anyone admitted (new or returning); a refusal leaves nothing to save it on.
   const saved = await directory(c).setEmail(found.githubId, email, updates, c.now());
@@ -1104,8 +1142,9 @@ async function deviceDetails(c: Ctx): Promise<Response> {
   // Not for someone still waiting in line for free tokens: the Directory checks.
   if (saved && !person) {
     const config = (await runtime(c)).config;
-    // Below the bar with no Starter tokens: a welcome that says so and where to ask for credits.
-    const kind = level.level === "starter" && config.starterWeeklyTokens <= 0 ? "welcome_starter" : "welcome";
+    // The welcome for the level the person was admitted at (a network limit can lower it).
+    const admittedAs = await directory(c).getPerson(found.githubId);
+    const kind = welcomeKind(admittedAs?.level ?? level.level, admittedAs ? admittedAs.batch_flag === 1 : level.batchFlagged === true, config);
     await userEmail(c, config, kind, found.githubId, "");
   }
   return response;
@@ -1137,20 +1176,21 @@ function inviteIntro(reason: InviteReason | undefined, minAccountAgeDays: number
  * when that happens often in a day).
  */
 /**
- * Once a week, a Starter account's public profile is re-read (age, public repositories,
- * followers) and it is promoted to Full when it now qualifies. Promotion only, and only for
- * accounts an admin hasn't set by hand. False when nothing changed.
+ * Once a week, a basic or Starter account's public profile is re-read (age, public repositories,
+ * followers) and it is promoted (Starter to basic or Full, basic to Full) when it now
+ * qualifies. Promotion only, and only for accounts an admin or an invite didn't set. The new
+ * level, or undefined when nothing changed.
  */
-async function recheckStarter(c: Ctx, identity: Identity, config: FreeConfig): Promise<boolean> {
+async function recheckStarter(c: Ctx, identity: Identity, config: FreeConfig): Promise<Level | undefined> {
   const person = await directory(c).getPerson(identity.githubId);
-  if (!person || person.level !== "starter" || person.level_reason === "admin") return false;
+  if (!person || (person.level !== "starter" && person.level !== "basic") || person.level_reason === "admin" || person.level_reason === "invite") return undefined;
   const week = weekStart(c.now());
   // A network-limited account is re-checked soon after sign-in (it may already qualify on its
   // own signals), then on the weekly cadence.
   const since = person.level_reason === "network_limit" ? c.now() - 60 * 60_000 : week;
-  if (person.signals_at !== null && person.signals_at >= since) return false;
+  if (person.signals_at !== null && person.signals_at >= since) return undefined;
   const profile = await githubPublicProfile(identity.login, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS);
-  if (!profile) return false;
+  if (!profile) return undefined;
   // The public profile, plus what only sign-in can read (contributions and the additional
   // signals) as stored then: no token here.
   const signals: GithubSignals = {
@@ -1160,7 +1200,8 @@ async function recheckStarter(c: Ctx, identity: Identity, config: FreeConfig): P
     followers: profile.followers ?? 0,
     createdDay: profile.createdAt === undefined ? person.github_created_day : dayOf(profile.createdAt),
   };
-  return (await directory(c).recheckLevel(identity.githubId, signals, levelThresholds(config), signalThresholds(config), c.now())) === "full";
+  const after = await directory(c).recheckLevel(identity.githubId, signals, levelThresholds(config), signalThresholds(config), c.now(), basicRule(config));
+  return after !== undefined && after !== person.level ? after : undefined;
 }
 
 /** The GitHub signals read at sign-in, and the level they give. */
@@ -1168,6 +1209,8 @@ interface SignInLevel {
   signals?: GithubSignals;
   level: Level;
   levelReason: LevelReason;
+  /** The creation-batch check flagged the account (below the bar: no free tokens). Never shown. */
+  batchFlagged?: boolean;
 }
 
 /**
@@ -1206,7 +1249,7 @@ async function readSignals(c: Ctx, user: { id: number; createdAt: number | undef
   const rules = signalThresholds(config);
   const batchPeers = await directory(c).creationBatchPeers(createdDay, rules.batchWindowDays, user.id);
   const checks = levelChecks(signals, thresholds, rules, { now: c.now(), batchPeers });
-  return { signals, level: levelFor(checks), levelReason: levelReason(signals, thresholds, checks) };
+  return { signals, level: levelFor(checks, signals, basicRule(config)), levelReason: levelReason(signals, thresholds, checks), batchFlagged: !checks.full && checks.creationBatch };
 }
 
 /**
@@ -1253,7 +1296,8 @@ async function admitAndFinish(
     referralCode,
     networkHash: await networkHash(c),
     policy: policyOf(config),
-    ...(signIn ? { signals: signIn.signals, level, levelReason } : {}),
+    ...(signIn ? { signals: signIn.signals, level, levelReason, batchFlagged: signIn.batchFlagged === true && level !== "full" } : {}),
+    starterTokens: config.starterWeeklyTokens > 0,
     now: c.now(),
   });
   if (result.ok) {
@@ -1389,7 +1433,7 @@ async function me(c: Ctx): Promise<Response> {
   if (guarded) return guarded;
   c.callerId = identity.githubId;
   const { config, person } = await runtime(c);
-  const allowance = await account(c, identity.githubId).allowance(c.now(), limitsFor(config, person?.bonusTokens, person?.level ?? "full"));
+  const allowance = await account(c, identity.githubId).allowance(c.now(), limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true));
   if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
   // A Pro subscriber isn't waiting for anything; their place is kept if Pro ends.
   const queue = allowance.plan === "pro" ? null : (person?.queue ?? null);
@@ -1398,8 +1442,8 @@ async function me(c: Ctx): Promise<Response> {
     login: identity.login,
     githubId: identity.githubId,
     status: allowance.status,
-    /** "full" or "starter": what this account may use. */
-    level: person?.level ?? "full",
+    /** "full", "basic" or "starter": what this account may use. */
+    level: servedLevel(person?.level ?? "full", config),
     /** Why the level is what it is, so a client can explain without guessing. */
     levelReason: person?.levelReason ?? null,
     /** The thresholds a Full account must clear, from the effective config. */
@@ -1643,6 +1687,52 @@ async function events(c: Ctx): Promise<Response> {
   return json({ accepted }, 202);
 }
 
+// ─── Access requests ────────────────────────────────────────────────────────
+
+/**
+ * POST /v1/access-request {building, link?} → 201 {status: "pending"}; GET → {status, at?}.
+ * dl's /request command: any signed-in person who isn't blocked asks for (more) free tokens.
+ * One pending at a time (409 already_pending), not for Full (409 already_full), at most
+ * ACCESS_REQUESTS_PER_DAY a day (429). What they wrote is user content: stored as plain text and
+ * shown only on the admin Tools tab (escaped). Never logged, never in an alert or a metric.
+ */
+async function accessRequest(c: Ctx, method: string): Promise<Response> {
+  const identity = await authenticate(c, { keys: true });
+  if (identity instanceof Response) return identity;
+  const guarded = await apiGuard(c, identity);
+  if (guarded) return guarded;
+  c.callerId = identity.githubId;
+  const [{ person }, stored] = await Promise.all([runtime(c), directory(c).getPerson(identity.githubId)]);
+  if (!stored) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
+  if (person?.blocked || stored.status === "blocked") return blockedError();
+  if (method === "GET") {
+    const found = await directory(c).accessRequestStatus(identity.githubId);
+    return json(found ? { status: found.status, at: new Date(found.at).toISOString() } : { status: "none" });
+  }
+  if (stored.level === "full" || c.config.adminGithubIds.has(identity.githubId)) {
+    return apiError(409, "already_full", "You already have the full free tier.");
+  }
+  if (Number(c.request.headers.get("content-length") ?? 0) > ACCESS_REQUEST_MAX_BYTES) return apiError(400, "invalid_request", ACCESS_REQUEST_USAGE);
+  const text = await c.request.text();
+  if (new TextEncoder().encode(text).length > ACCESS_REQUEST_MAX_BYTES) return apiError(400, "invalid_request", ACCESS_REQUEST_USAGE);
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return apiError(400, "invalid_request", ACCESS_REQUEST_USAGE);
+  }
+  const parsed = parseAccessRequest(body);
+  if (!parsed.ok) return apiError(400, "invalid_request", parsed.message);
+  const result = await directory(c).submitAccessRequest({ githubId: identity.githubId, login: identity.login, building: parsed.building, link: parsed.link, now: c.now(), perDay: ACCESS_REQUESTS_PER_DAY });
+  if (!result.ok) {
+    if (result.reason === "already_pending") return apiError(409, "already_pending", "Your request is already waiting for an answer. You'll get an email when it's granted.");
+    return rateLimited(result.retryAfterSeconds ?? 3600);
+  }
+  // The owner hears who asked and how many wait: never what they wrote.
+  await alert(c, [accessRequestAlert(identity.login, result.pendingCount)]);
+  return json({ status: "pending" }, 201);
+}
+
 // ─── Feedback ───────────────────────────────────────────────────────────────
 
 /**
@@ -1771,17 +1861,23 @@ async function chat(c: Ctx): Promise<Response> {
   if (gate.person?.blocked) return blockedError();
   // A Starter account is re-checked once a week from its public profile, and promoted if it
   // now qualifies. Promotion only: nobody is demoted mid-week.
-  if (gate.person?.level === "starter" && !isAdmin && (await recheckStarter(c, identity, gate.config))) gate.person.level = "full";
-  const level = gate.person?.level ?? "full";
-  const limits = limitsFor(gate.config, gate.person?.bonusTokens, level);
+  if (gate.person && (gate.person.level === "starter" || gate.person.level === "basic") && !isAdmin) {
+    const promoted = await recheckStarter(c, identity, gate.config);
+    if (promoted) gate.person.level = promoted;
+  }
+  const level = servedLevel(gate.person?.level ?? "full", gate.config);
+  const batchFlagged = gate.person?.batchFlagged === true;
+  const limits = limitsFor(gate.config, gate.person?.bonusTokens, level, batchFlagged);
   const link = linkFor(gate.config, gate.person);
   const headers = async () => quotaHeaders(await person.allowance(c.now(), limits));
 
   const guarded = await apiGuard(c, identity, headers);
   if (guarded) return guarded;
-  // Below the bar with no Starter allowance: say who free tokens are for and how to ask anyway.
-  if (level === "starter" && !isAdmin && gate.config.starterWeeklyTokens <= 0) {
-    return apiError(403, "below_bar", belowBarLine(levelThresholds(gate.config)), { contact: CREDITS_REQUEST_EMAIL }, await headers());
+  // Below the bar with no free tokens: say who free tokens are for and how to ask anyway. The
+  // refusal is counted per day for the sign-up funnel (ids and days only).
+  if (!isAdmin && noFreeTokens(level, gate.config, batchFlagged)) {
+    await directory(c).recordRefusal(identity.githubId, c.now());
+    return apiError(403, "below_bar", belowBarLine(levelThresholds(gate.config)), { contact: CREDITS_REQUEST_EMAIL, request: ACCESS_REQUEST_PATH }, await headers());
   }
 
   const raw = await c.request.text();
@@ -1799,11 +1895,8 @@ async function chat(c: Ctx): Promise<Response> {
     return apiError(400, "model_not_allowed", `The free tier serves ${ALLOWED_MODELS.join(", ")} only.`, { allowed: [...ALLOWED_MODELS] }, await headers());
   }
   const requested = modelById(body.model)!;
-  // Starter accounts get DeepSeek only: GPT-6 needs Full. Rather than refuse the request (a
-  // Starter's first prompt would fail), serve it on DeepSeek and say so with
-  // `x-dl-fallback: starter`; the client explains the level once.
-  const starterFallback = level === "starter" && requested.provider !== "luminal";
-  const effective = starterFallback ? modelById(DEEPSEEK_MODEL)! : requested;
+  // Every level gets every model; basic and Starter on their smaller allowance.
+  const effective = requested;
 
   if (gate.paused) return pausedError(await headers());
   // Which model actually serves: the requested one when its provider has a key and credit left,
@@ -1872,6 +1965,16 @@ async function chat(c: Ctx): Promise<Response> {
     if (reservation.code === "quota_exceeded") {
       if (freeBlock && reservation.allowance.plan === "free") return freeBlock();
       const resetsAt = new Date(reservation.allowance.resetsAt).toISOString();
+      // A basic or Starter week used up: what the level gets, when it resets, and the ways to more.
+      if (!isAdmin && reservation.allowance.plan === "free" && (level === "basic" || level === "starter")) {
+        return apiError(
+          402,
+          `${level}_limit`,
+          limitLine(level, limits.levelTokens ?? 0, limits.weeklyUsd),
+          { resetsAt, reason: reservation.reason, request: ACCESS_REQUEST_PATH, offers: offers(gate.config), referralLink: link },
+          quota,
+        );
+      }
       return apiError(402, "quota_exceeded", quotaMessage(reservation.reason, resetsAt, reservation.allowance.plan), { resetsAt, reason: reservation.reason, offers: offers(gate.config), referralLink: link }, quota);
     }
     if (reservation.code === "blocked") return blockedError(quota);
@@ -1963,12 +2066,6 @@ async function chat(c: Ctx): Promise<Response> {
   };
 
   const response = await attempt(serving.model, serving.provider, reservation);
-  if (starterFallback) {
-    // A Starter asked for GPT-6: DeepSeek served it. Distinct from the OpenAI-failure value.
-    const outHeaders = new Headers(response.headers);
-    outHeaders.set("x-dl-fallback", "starter");
-    return new Response(response.body, { status: response.status, headers: outHeaders });
-  }
   if (!serving.fallback) return response;
   // The requested model's provider couldn't serve it, so its fallback did: say which.
   const outHeaders = new Headers(response.headers);
@@ -2351,6 +2448,18 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
   const actor = { githubId: identity.githubId, login: identity.login, now };
 
   if (method === "GET" && rest === "metrics") return adminMetrics(c);
+  if (method === "POST" && rest === "recheck-below-bar") return json(await recheckBelowBar(c, config, actor));
+  if (method === "GET" && rest === "access-requests") {
+    const pending = await directory(c).pendingAccessRequests(now);
+    return json({ requests: pending.map((request) => ({ ...request, at: new Date(request.at).toISOString() })) });
+  }
+  const decide = /^access-requests\/(\d+)\/(grant|decline)$/.exec(rest);
+  if (decide && method === "POST") {
+    const body = (await readJson(c)) ?? {};
+    const note = typeof body.note === "string" && body.note.trim() !== "" ? body.note.trim().slice(0, 300) : null;
+    const result = await decideAccessRequest(c, config, Number(decide[1]), decide[2] as "grant" | "decline", note, actor);
+    return "code" in result ? failed(result) : json(result);
+  }
   if (method === "POST" && rest === "emails/test") return adminTestEmail(c, identity.githubId);
   if (method === "POST" && rest === "emails/broadcast") return adminBroadcast(c, config);
   if (method === "POST" && rest === "grant") {
@@ -2447,7 +2556,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     const sessions = await directory(c).weekSessions(now);
     const rows = await Promise.all(
       people.map(async (person) => {
-        const allowance = await account(c, person.github_id).allowance(now, limitsFor(config, 0, person.level));
+        const allowance = await account(c, person.github_id).allowance(now, limitsFor(config, 0, person.level, person.batch_flag === 1));
         return {
           githubId: person.github_id,
           login: person.login,
@@ -2517,7 +2626,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     if (action === "level" && method === "POST") {
       const body = (await readJson(c)) ?? {};
       const level = body.level;
-      if (level !== "full" && level !== "starter") return apiError(400, "invalid_request", 'Send {level: "full"} or {level: "starter"}.');
+      if (level !== "full" && level !== "basic" && level !== "starter") return apiError(400, "invalid_request", 'Send {level: "full"}, {level: "basic"} or {level: "starter"}.');
       if (!(await directory(c).setLevel(githubId, level, actor))) return apiError(404, "not_found", "No such person.");
       return json({ githubId, level });
     }
@@ -2697,6 +2806,69 @@ async function grantLogins(c: Ctx, text: string, actor: { githubId: number; logi
   for (const result of results) counts.set(result.outcome, (counts.get(result.outcome) ?? 0) + 1);
   console.log(`admin grant: ${[...counts].map(([outcome, n]) => `${n} ${outcome}`).join(", ") || "nothing"}`);
   return results;
+}
+
+/** What the admin's "re-check below-bar accounts" did: counts only. */
+export interface RecheckOutcome {
+  /** Active non-admin Starter accounts looked at (not set by an admin or an invite). */
+  checked: number;
+  /** Raised to basic. */
+  raised: number;
+  /** Still Starter, and flagged by the creation-batch check: no free tokens. */
+  flagged: number;
+  /** Still Starter, not flagged: the Starter allowance. */
+  starter: number;
+}
+
+/**
+ * Re-evaluates every active non-admin Starter account from its stored signals (the account's
+ * age counted to today from its creation day) and raises the ones that qualify to basic. Also
+ * stores each one's creation-batch flag again. Never lowers anyone; blocked and suspended
+ * accounts, admin-set levels and redeemed invites are left alone.
+ */
+async function recheckBelowBar(c: Ctx, config: FreeConfig, actor: { githubId: number; login: string; now: number }): Promise<RecheckOutcome> {
+  const now = c.now();
+  const people = await directory(c).recheckSignals();
+  const checks = peopleChecks(people, config, now);
+  const rule = basicRule(config);
+  const today = Math.floor(now / DAY_MS);
+  const raise: number[] = [];
+  const flags: Array<{ githubId: number; flagged: boolean }> = [];
+  let flagged = 0;
+  for (const person of people) {
+    if (person.level !== "starter" || person.status !== "active" || person.level_reason === "admin" || person.level_reason === "invite") continue;
+    if (c.config.adminGithubIds.has(person.github_id)) continue;
+    const check = checks.get(person.github_id)!;
+    const stored = person.account_age_days ?? 0;
+    const elapsed = person.signals_at === null ? 0 : Math.max(0, Math.floor((now - person.signals_at) / DAY_MS));
+    const accountAgeDays = person.github_created_day !== null && person.github_created_day !== undefined ? Math.max(0, today - person.github_created_day) : stored + elapsed;
+    flags.push({ githubId: person.github_id, flagged: check.creationBatch });
+    if (qualifiesForBasic({ accountAgeDays }, check, rule)) raise.push(person.github_id);
+    else if (check.creationBatch) flagged++;
+  }
+  const { raised } = await directory(c).raiseToBasic({ raise, flags, actor });
+  console.log(`admin recheck below bar: ${flags.length} checked, ${raised} raised to basic, ${flagged} flagged`);
+  return { checked: flags.length, raised, flagged, starter: flags.length - raised - flagged };
+}
+
+/**
+ * An admin grants (Full, reason "admin", like the Tools tab's grant) or declines a pending
+ * access request. A grant emails the person (access_granted); a decline sends nothing.
+ */
+async function decideAccessRequest(
+  c: Ctx,
+  config: FreeConfig,
+  id: number,
+  decision: "grant" | "decline",
+  note: string | null,
+  actor: { githubId: number; login: string; now: number },
+): Promise<{ id: number; githubId: number; login: string; status: "granted" | "declined" } | AdminFailure> {
+  const result = await directory(c).decideAccessRequest({ id, decision, note, actor });
+  if (!result) return { status: 404, code: "not_found", message: "No such pending request." };
+  if (result.status === "blocked") return { status: 409, code: "blocked", message: `${result.login} is blocked; unblock the account first.` };
+  if (result.status === "granted") await userEmail(c, config, "access_granted", result.githubId, String(id));
+  console.log(`admin access request ${result.status}`);
+  return { id, githubId: result.githubId, login: result.login, status: result.status };
 }
 
 /**
@@ -2935,6 +3107,10 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     openaiFreeCreditWeekUsd: spend.openaiFreeCreditWeekUsd,
     openaiWeeklyCreditUsd: config.openaiWeeklyCreditUsd ?? null,
     starterWeeklyTokens: config.starterWeeklyTokens,
+    starterWeeklyUsd: config.starterWeeklyUsdCap ?? null,
+    basicWeeklyTokens: config.basicWeeklyTokens,
+    basicWeeklyUsd: config.basicWeeklyUsdCap ?? null,
+    basicMinAccountAgeDays: config.basicMinAccountAgeDays,
     fullMinAccountAgeDays: config.fullMinAccountAgeDays,
     fullMinPublicRepos: config.fullMinPublicRepos,
     fullMinContributions: config.fullMinContributions,
@@ -2959,11 +3135,12 @@ async function toolsState(
   identity: Identity,
   signOut: boolean,
   csrf: string | undefined,
-  posted: Pick<ToolsState, "grant" | "compose">,
+  posted: Pick<ToolsState, "grant" | "compose"> & Partial<Pick<ToolsState, "requestNotice" | "recheck">>,
 ): Promise<ToolsState> {
-  const [cohorts, me] = await Promise.all([
+  const [cohorts, me, requests] = await Promise.all([
     directory(c).broadcastCohorts({ days: COHORT_PICKER_DAYS, adminIds: [...c.config.adminGithubIds], includeAdmins: config.userEmailsToAdmins }),
     directory(c).getPerson(identity.githubId),
+    directory(c).pendingAccessRequests(c.now()),
   ]);
   return {
     login: identity.login,
@@ -2973,6 +3150,7 @@ async function toolsState(
     emailsOn: config.userEmails,
     provider: userEmailVia(c)?.provider ?? null,
     cohorts,
+    requests,
     ...posted,
   };
 }
@@ -3000,7 +3178,25 @@ async function adminWebTools(c: Ctx): Promise<Response> {
   if (retry !== undefined) return rateLimited(retry);
   const { config } = await runtime(c);
   const actor = { githubId: session.githubId, login: session.login, now: c.now() };
-  const state = (posted: Pick<ToolsState, "grant" | "compose">) => toolsState(c, config, session, true, csrf, posted).then(toolsPage);
+  const state = (posted: Pick<ToolsState, "grant" | "compose"> & Partial<Pick<ToolsState, "requestNotice" | "recheck">>) => toolsState(c, config, session, true, csrf, posted).then(toolsPage);
+
+  if (form.get("tool") === "recheck") {
+    return state({ grant: { text: "" }, compose: emptyEmailForm(), recheck: await recheckBelowBar(c, config, actor) });
+  }
+  if (form.get("tool") === "request") {
+    const id = Number(form.get("id"));
+    const action = form.get("action");
+    const note = (form.get("note") ?? "").trim().slice(0, 300) || null;
+    if (!Number.isSafeInteger(id) || (action !== "grant" && action !== "decline")) {
+      return state({ grant: { text: "" }, compose: emptyEmailForm(), requestNotice: { error: true, text: "Pick Grant or Decline on a request." } });
+    }
+    const result = await decideAccessRequest(c, config, id, action, note, actor);
+    const requestNotice =
+      "code" in result
+        ? { error: true, text: result.message }
+        : { error: false, text: result.status === "granted" ? `Granted: ${result.login} is Full now, and gets an email.` : `Declined ${result.login}'s request.` };
+    return state({ grant: { text: "" }, compose: emptyEmailForm(), requestNotice });
+  }
 
   if (form.get("tool") === "grant") {
     const text = (form.get("logins") ?? "").slice(0, 20_000);
@@ -3016,7 +3212,7 @@ async function adminWebTools(c: Ctx): Promise<Response> {
   const draft: ToolsState["compose"] = {
     subject: (form.get("subject") ?? "").slice(0, 1000),
     text: (form.get("text") ?? "").replace(/\r\n?/g, "\n").slice(0, 20_000),
-    audience: audience === "starter" || audience === "all" ? audience : "full",
+    audience: audience === "basic" || audience === "starter" || audience === "all" ? audience : "full",
     from: day("from"),
     to: day("to"),
     testTo: (form.get("test_to") ?? "").trim().slice(0, 254),

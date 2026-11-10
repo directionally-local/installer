@@ -10,7 +10,7 @@
  * When each one goes out is in user-email-send.ts.
  */
 
-export type UserEmailKind = "welcome" | "welcome_starter" | "didnt_start" | "week_80" | "gone_quiet";
+export type UserEmailKind = "welcome" | "welcome_basic" | "welcome_starter" | "welcome_starter_small" | "access_granted" | "didnt_start" | "week_80" | "gone_quiet";
 
 export interface UserEmailCopy {
   subject: string;
@@ -39,7 +39,29 @@ there's also a discord where people share what they're building and help each ot
 sina`,
   },
 
-  // 1b. The same moment, for a new sign-up below the bar for free tokens.
+  // 1b. The same moment, for a new sign-up at the basic level: below the bar, a smaller allowance.
+  // Never say why: the rule behind the level is private.
+  welcome_basic: {
+    subject: "you're in",
+    body: `hey,
+
+sina here, i build dl.
+
+you're on the free tier now, with a smaller weekly allowance of every model, gpt-6 included. it resets every monday.
+
+if you need more, type /request inside dl and tell me what you're building. i read every one.
+
+three things worth trying first:
+- open dl in a repo and ask it how the project fits together
+- give it a small bug you've been putting off
+- ask it to write tests for one file
+
+there's also a discord where people share what they're building and help each other out: https://discord.gg/zeBnJTgcRK
+
+sina`,
+  },
+
+  // 1c. The same moment, for a new sign-up below the bar with no free tokens.
   welcome_starter: {
     subject: "you're in",
     body: `hey,
@@ -48,9 +70,41 @@ sina here, i build dl.
 
 you're signed in. free tokens are for github accounts over a year old with 100+ contributions in the last year, and yours doesn't meet that yet, so for now you'll need your own key: run /provider in dl.
 
-if you're a real dev building something, email contact@directionallylocal.com with your github username and what you're working on, and i'll sort you out with credits.
+if you're a real dev building something, type /request inside dl and tell me what you're working on, and i'll sort you out with free tokens.
+
+if /request isn't in your dl yet, email contact@directionallylocal.com with your github username instead.
 
 there's also a discord where people share what they're building: https://discord.gg/zeBnJTgcRK
+
+sina`,
+  },
+
+  // 1d. The same moment, for a new sign-up below the bar while Starter has a small allowance.
+  welcome_starter_small: {
+    subject: "you're in",
+    body: `hey,
+
+sina here, i build dl.
+
+you're signed in, with a small weekly allowance to try every model, gpt-6 included. it resets every monday. the full free tier is for github accounts over a year old with 100+ contributions in the last year.
+
+if you need more, type /request inside dl and tell me what you're building, and i'll sort you out. or plug in your own key with /provider.
+
+if /request isn't in your dl yet, email contact@directionallylocal.com with your github username instead.
+
+there's also a discord where people share what they're building: https://discord.gg/zeBnJTgcRK
+
+sina`,
+  },
+
+  // 1e. An admin granted the person's access request (/request in dl).
+  access_granted: {
+    subject: "you're in",
+    body: `hey,
+
+you're in. you now have the full free tier: every model, gpt-6 included, with the full weekly allowance. it resets every monday.
+
+thanks for telling me what you're building. if anything breaks or feels off, just reply to this.
 
 sina`,
   },
