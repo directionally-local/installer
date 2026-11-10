@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "active": {
+    "id": "qwen-old",
+    "repo": "Qwen/Qwen3-4B",
+    "container": "dl-model-1",
+    "port": 8002,
+    "context": 32768,
+    "image": "vllm/vllm-openai:v0.20.0",
+    "flags": [
+      "--tool-call-parser",
+      "hermes",
+      "--enable-auto-tool-choice",
+      "--reasoning-parser",
+      "qwen3",
+      "--max-model-len",
+      "32768"
+    ],
+    "minVramMiB": 12288,
+    "gpuMemoryUtilization": 0.4,
+    "lastTest": {
+      "chat": true,
+      "tools": true,
+      "json": true,
+      "tokensPerSecond": 2651.4,
+      "at": "2026-11-10T13:54:08.230Z"
+    }
+  },
+  "previous": {
+    "id": "qwen-new",
+    "repo": "Qwen/Qwen3-4B-Instruct-2507",
+    "container": "dl-model-2",
+    "port": 8001,
+    "context": 32768,
+    "image": "vllm/vllm-openai:v0.20.0",
+    "flags": [
+      "--tool-call-parser",
+      "hermes",
+      "--enable-auto-tool-choice",
+      "--max-model-len",
+      "32768"
+    ],
+    "minVramMiB": 16384,
+    "gpuMemoryUtilization": 0.4,
+    "lastTest": {
+      "chat": true,
+      "tools": true,
+      "json": true,
+      "tokensPerSecond": 413.4,
+      "at": "2026-11-10T13:07:41.868Z"
+    }
+  }
+}

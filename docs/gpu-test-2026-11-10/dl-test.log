@@ -1,0 +1,302 @@
+Tue Nov 10 11:51:51 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX PRO 5000 Blac...    Off |   00000000:00:08.0 Off |                  Off |
+| 34%   25C    P0             35W /  300W |       0MiB /  48935MiB |      2%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+Unable to find image 'nvidia/cuda:12.4.1-base-ubuntu22.04' locally
+12.4.1-base-ubuntu22.04: Pulling from nvidia/cuda
+3c645031de29: Pulling fs layer
+0d6448aff889: Pulling fs layer
+0a7674e3e8fe: Pulling fs layer
+b71b637b97c5: Pulling fs layer
+56dc85502937: Pulling fs layer
+56dc85502937: Waiting
+b71b637b97c5: Waiting
+0d6448aff889: Verifying Checksum
+0d6448aff889: Download complete
+3c645031de29: Verifying Checksum
+3c645031de29: Download complete
+0a7674e3e8fe: Verifying Checksum
+0a7674e3e8fe: Download complete
+b71b637b97c5: Verifying Checksum
+b71b637b97c5: Download complete
+56dc85502937: Verifying Checksum
+56dc85502937: Download complete
+3c645031de29: Pull complete
+0d6448aff889: Pull complete
+0a7674e3e8fe: Pull complete
+b71b637b97c5: Pull complete
+56dc85502937: Pull complete
+Digest: sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95
+Status: Downloaded newer image for nvidia/cuda:12.4.1-base-ubuntu22.04
+docker: Error response from daemon: could not select device driver "" with capabilities: [[gpu]]
+
+Run 'docker run --help' for more information
+=== installing nvidia-container-toolkit ===
+Tue Nov 10 11:53:27 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX PRO 5000 Blac...    Off |   00000000:00:08.0 Off |                  Off |
+| 34%   25C    P0             35W /  300W |       0MiB /  48935MiB |      2%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+=== step2: node install + clone + build === Tue Nov 10 11:54:18 UTC 2026
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100 16631  100 16631    0     0   117k      0 --:--:-- --:--:-- --:--:--  117k
+=> Downloading nvm from git to '/root/.nvm'
+=> Cloning into '/root/.nvm'...
+* (HEAD detached at FETCH_HEAD)
+  master
+=> Compressing and cleaning up git repository
+
+=> Appending nvm source string to /root/.bashrc
+=> Appending bash_completion source string to /root/.bashrc
+=> Close and reopen your terminal to start using nvm or run the following to use it now:
+
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+Downloading and installing node v24.22.2...
+Downloading https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-x64.tar.xz...
+#=#=#                                                                                                                                                      0.4%#####                                                                       8.1%##################################                                         47.0%#################################################################          89.6%######################################################################### 100.0%
+Computing checksum with sha256sum
+Checksums matched!
+Now using node v24.22.2 (npm v11.19.1)
+Creating default alias: [0;32mdefault[0m [0;90m->[0m [0;32m24[0m ([0;90m->[0m [0;32mv24.22.2[0m)
+v24.22.2
+11.19.1
+Cloning into 'installer'...
+Switched to a new branch 'feat/model-command'
+Branch 'feat/model-command' set up to track remote branch 'feat/model-command' from 'origin'.
+From https://github.com/directionally-local/installer
+ * branch            feat/model-command -> FETCH_HEAD
+Already up to date.
+npm warn deprecated uuid@10.0.0: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
+
+added 241 packages, and audited 242 packages in 15s
+
+68 packages are looking for funding
+  run `npm fund` for details
+
+2 moderate severity vulnerabilities
+
+To address all issues, run:
+  npm audit fix
+
+Run `npm audit` for details.
+npm warn install-scripts 5 packages have install scripts not yet covered by allowScripts:
+npm warn install-scripts   cpu-features@0.0.10 (install: node buildcheck.js > buildcheck.gypi && node-gyp rebuild)
+npm warn install-scripts   esbuild@0.28.2 (postinstall: node install.js)
+npm warn install-scripts   isolated-vm@6.2.0 (install: node-gyp-build || node-gyp rebuild --release -j max)
+npm warn install-scripts   protobufjs@7.6.6 (postinstall: node scripts/postinstall)
+npm warn install-scripts   ssh2@1.17.0 (install: node install.js)
+npm warn install-scripts
+npm warn install-scripts Run `npm install-scripts ls` to review, or `npm install-scripts approve <pkg>` to allow.
+npm notice
+npm notice New major version of npm available! 11.19.1 -> 12.2.2
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.2
+npm notice To update run: npm install -g npm@12.2.2
+npm notice
+
+> directionallylocal@0.21.0 build
+> tsc -p tsconfig.build.json
+
+
+added 1 package, and audited 3 packages in 259ms
+
+found 0 vulnerabilities
+=== which dl: /root/.nvm/versions/node/v24.22.2/bin/dl ===
+-- Model: none · dl model up
+SETUP_DONE
+bash: line 1: dl: command not found
+bash: line 1: dl: command not found
+
+  ✗ nvidia-container-toolkit is missing. Install and configure it for Docker, then restart Docker.
+
+  ✗ nvidia-container-toolkit is missing. Install and configure it for Docker, then restart Docker.
+v0.20.0: Pulling from vllm/vllm-openai
+828c1365039a: Pulling fs layer
+2cf9fba20a14: Pulling fs layer
+0e0a2c237a99: Pulling fs layer
+31e49ca9b3e8: Pulling fs layer
+526d5438c009: Pulling fs layer
+30a0883f6112: Pulling fs layer
+ee05b64ebd17: Pulling fs layer
+de6038e90856: Pulling fs layer
+140381194cfe: Pulling fs layer
+2d7bccdd42ee: Pulling fs layer
+785232454539: Pulling fs layer
+debdf7471891: Pulling fs layer
+f679be53f59f: Pulling fs layer
+deaab889caa9: Pulling fs layer
+68fefeae3623: Pulling fs layer
+12952a88e3a5: Pulling fs layer
+721cac808025: Pulling fs layer
+7c524568f85f: Pulling fs layer
+c748ec979a1d: Pulling fs layer
+107632464625: Pulling fs layer
+72223b3b56ef: Pulling fs layer
+52a1baa33986: Pulling fs layer
+2df720b9c296: Pulling fs layer
+93e6ccab8651: Pulling fs layer
+39b4a455d8ec: Pulling fs layer
+deaab889caa9: Waiting
+7c524568f85f: Waiting
+31e49ca9b3e8: Waiting
+2df720b9c296: Waiting
+2d7bccdd42ee: Waiting
+785232454539: Waiting
+30a0883f6112: Waiting
+debdf7471891: Waiting
+72223b3b56ef: Waiting
+12952a88e3a5: Waiting
+de6038e90856: Waiting
+39b4a455d8ec: Waiting
+68fefeae3623: Waiting
+52a1baa33986: Waiting
+93e6ccab8651: Waiting
+721cac808025: Waiting
+526d5438c009: Waiting
+f679be53f59f: Waiting
+2cf9fba20a14: Verifying Checksum
+2cf9fba20a14: Download complete
+828c1365039a: Verifying Checksum
+828c1365039a: Download complete
+31e49ca9b3e8: Verifying Checksum
+31e49ca9b3e8: Download complete
+526d5438c009: Verifying Checksum
+526d5438c009: Download complete
+0e0a2c237a99: Verifying Checksum
+0e0a2c237a99: Download complete
+ee05b64ebd17: Download complete
+30a0883f6112: Verifying Checksum
+30a0883f6112: Download complete
+2d7bccdd42ee: Verifying Checksum
+2d7bccdd42ee: Download complete
+828c1365039a: Pull complete
+785232454539: Verifying Checksum
+785232454539: Download complete
+2cf9fba20a14: Pull complete
+de6038e90856: Verifying Checksum
+de6038e90856: Download complete
+debdf7471891: Verifying Checksum
+debdf7471891: Download complete
+0e0a2c237a99: Pull complete
+31e49ca9b3e8: Pull complete
+526d5438c009: Pull complete
+30a0883f6112: Pull complete
+ee05b64ebd17: Pull complete
+140381194cfe: Verifying Checksum
+140381194cfe: Download complete
+68fefeae3623: Verifying Checksum
+68fefeae3623: Download complete
+12952a88e3a5: Verifying Checksum
+12952a88e3a5: Download complete
+721cac808025: Verifying Checksum
+721cac808025: Download complete
+7c524568f85f: Verifying Checksum
+7c524568f85f: Download complete
+c748ec979a1d: Verifying Checksum
+c748ec979a1d: Download complete
+107632464625: Verifying Checksum
+107632464625: Download complete
+72223b3b56ef: Verifying Checksum
+72223b3b56ef: Download complete
+de6038e90856: Pull complete
+52a1baa33986: Verifying Checksum
+52a1baa33986: Download complete
+2df720b9c296: Verifying Checksum
+2df720b9c296: Download complete
+93e6ccab8651: Download complete
+deaab889caa9: Verifying Checksum
+deaab889caa9: Download complete
+39b4a455d8ec: Verifying Checksum
+39b4a455d8ec: Download complete
+140381194cfe: Pull complete
+2d7bccdd42ee: Pull complete
+785232454539: Pull complete
+debdf7471891: Pull complete
+-- GPU 0: NVIDIA RTX PRO 5000 Blackwell · 48935 MiB · driver 580.95.05 · CUDA 13.0
+-- Models that fit: qwen-old (12 GB) · qwen-new (16 GB)
+
+  ✗ Name a model: qwen-old, qwen-new
+-- GPU 0: NVIDIA RTX PRO 5000 Blackwell · 48935 MiB · driver 580.95.05 · CUDA 13.0
+-- Models that fit: qwen-old (12 GB) · qwen-new (16 GB)
+.. Download and start qwen-old: vllm/vllm-openai:v0.20.0
+  would run: docker run -d --name dl-model-1 --gpus all --ipc=host -p 127.0.0.1:8000:8000 -v dl-model-hf-cache:/root/.cache/huggingface vllm/vllm-openai:v0.20.0 --model Qwen/Qwen3-4B --served-model-name Qwen/Qwen3-4B --tool-call-parser hermes --enable-auto-tool-choice --reasoning-parser qwen3 --max-model-len 8192
+ok Download and start qwen-old: port 8000 · logs: docker logs -f dl-model-1
+-- Dry run: No model, provider or state changed.
+-- GPU 0: NVIDIA RTX PRO 5000 Blackwell · 48935 MiB · driver 580.95.05 · CUDA 13.0
+-- Models that fit: qwen-old (12 GB) · qwen-new (16 GB)
+.. Download and start qwen-old: vllm/vllm-openai:v0.20.0
+f679be53f59f: Retrying in 5 seconds
+f679be53f59f: Retrying in 4 seconds
+f679be53f59f: Retrying in 3 seconds
+f679be53f59f: Retrying in 2 seconds
+f679be53f59f: Retrying in 1 second
+f679be53f59f: Verifying Checksum
+f679be53f59f: Download complete
+f679be53f59f: Pull complete
+deaab889caa9: Pull complete
+68fefeae3623: Pull complete
+12952a88e3a5: Pull complete
+721cac808025: Pull complete
+7c524568f85f: Pull complete
+c748ec979a1d: Pull complete
+107632464625: Pull complete
+72223b3b56ef: Pull complete
+52a1baa33986: Pull complete
+2df720b9c296: Pull complete
+93e6ccab8651: Pull complete
+39b4a455d8ec: Pull complete
+Digest: sha256:04563c302537a91aa49ebdfbceda96111c5712275999b7e8804fa598f0b5641d
+Status: Downloaded newer image for vllm/vllm-openai:v0.20.0
+docker.io/vllm/vllm-openai:v0.20.0
+ok Download and start qwen-old: port 8000 · logs: docker logs -f dl-model-1
+.. Chat, tool call and JSON smoke tests: waiting for download and API readiness (up to 5 minutes)
+ok Chat, tool call and JSON smoke tests: 9.6 tokens/sec
+ok Model serving: Qwen/Qwen3-4B · http://127.0.0.1:8000/v1
+=== step5: curl checks Tue Nov 10 12:25:44 UTC 2026
+44851 MiB, 48935 MiB
+{"id":"chatcmpl-90281bb87216e027","object":"chat.completion","created":1794313544,"model":"Qwen/Qwen3-4B","choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":"\nOkay, the user wants me to say hello in one sentence. Let me think about how to approach this.\n\nFirst, I need to make sure I understand the request correctly. They just want a simple greeting, right? So the response should be concise and friendly.\n\nI should start with a standard greeting like \""},"logprobs":null,"finish_reason":"length","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":14,"total_tokens":78,"completion_tokens":64,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}=== step6: autopilot headless task Tue Nov 10 12:27:48 UTC 2026
+npm warn install-scripts
+npm warn install-scripts Run `npm install -g --allow-scripts=isolated-vm` to allow these scripts once, or `npm config set allow-scripts=isolated-vm --location=user` to allow them for all global installs.
+autopilot: unknown command "add a --version flag to cli.js that prints 1.0.0 and exits. make the minimal change.". To run a task here use -p "…"; on a server, --on <server> "…".
+
+[31mError: max_tokens=16384 cannot be greater than max_model_len=max_total_tokens=8192. Please request fewer output tokens. (parameter=max_tokens, value=16384)[0m
+=== step7: dl model update qwen-new Tue 10 Nov 2026 21:00:03 CST
+-- GPU 0: NVIDIA RTX PRO 5000 Blackwell · 48935 MiB · driver 580.95.05 · CUDA 13.0
+-- Models that fit: qwen-old (12 GB) · qwen-new (16 GB)
+-- Update strategy: downtime: 4 GB free, qwen-new reserves 20 GB
+!! Not enough free GPU memory for both models. The current model must stop while the new one starts; there will be downtime.
+
+  ✗ Not enough free GPU memory for both models. Free VRAM or run on a terminal to accept downtime.
