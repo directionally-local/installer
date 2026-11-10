@@ -44,6 +44,7 @@ test("Docker recipe pins image, loopback port, cache, tools and context", () => 
   assert.match(args, /dl-model-hf-cache/);
   assert.match(args, /--tool-call-parser hermes/);
   assert.match(args, /--max-model-len 4096/);
+  assert.match(args, /--gpu-memory-utilization 0\.4/);
   assert.throws(() => dockerArgs(recipe("qwen-old"), 8000, 100000, 1), /Context length/);
 });
 
@@ -61,6 +62,15 @@ test("smoke test checks chat, tool arguments, JSON mode and measures throughput"
   const calls: unknown[] = [];
   const respond = async (_url: string, init?: RequestInit) => {
     const input = JSON.parse(String(init?.body)); calls.push(input);
+    if (input.stream) {
+      const sse = [
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "Hello" } }] })}`,
+        `data: ${JSON.stringify({ choices: [{ delta: { content: " world" } }] })}`,
+        `data: ${JSON.stringify({ choices: [], usage: { completion_tokens: 10 } })}`,
+        "data: [DONE]",
+      ].join("\n\n");
+      return new Response(`${sse}\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }
     const message = input.tools ? { tool_calls: [{ function: { name: "ping", arguments: '{"value":1}' } }] } :
       input.response_format ? { content: '{"ok":true}' } : { content: "Hello" };
     return new Response(JSON.stringify({ choices: [{ message }], usage: { completion_tokens: 10 } }), { status: 200 });
