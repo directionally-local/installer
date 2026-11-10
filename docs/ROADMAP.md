@@ -2,7 +2,7 @@
 
 Coding agents on your own hardware, in six phases. Each phase ends at a gate you can test, not a date. A numbered phase starts when the one before it passes its gate. Phase 1.5 runs alongside phase 1 and never blocks phase 2. Everything else runs as a background track that never blocks the phases.
 
-Last updated 8 November 2026. On npm today: dl 0.9.4, Autopilot 3.1.2, Hotcell 0.1.38, camouflage-tui 2.11.0, Serverless Objects 0.13.6.
+Last updated 10 November 2026. On npm today: dl 0.23.0, Autopilot 3.17.0, Hotcell 0.1.38.
 
 Scope: the Directionally Local repositories (installer, autopilot, hotcell, serverless-objects, pr-deck), camouflage, and the Aster apps.
 
@@ -14,14 +14,14 @@ For these ten weeks, work is ordered by one test: does it bring more people to d
 
 | Week | Dates | What ships |
 | --- | --- | --- |
-| 1 | 3–9 Nov | **Free managed tier, invite-only (3 Nov):** GitHub sign-in, a weekly allowance that resets every Monday, a global spend stop, a kill switch, and a per-request usage log (account, tokens, cached tokens, cost). [installer#78](https://github.com/directionally-local/installer/issues/78), [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102) · **Open to every existing user once the admin dashboard and the one-account-per-person checks work:** one account per GitHub user, and GitHub accounts younger than 30 days need an invite code · Cached tokens charged at their real cost · The weekly allowance can be changed without a release · **Admin dashboard (by 9 Nov):** weekly active users, cohort retention, cost per user, who hit the limit ([installer#86](https://github.com/directionally-local/installer/issues/86)) · Retire the old Kimiflare Cloud service ([installer#84](https://github.com/directionally-local/installer/pull/84) checklist) |
+| 1 | 3–9 Nov | **Shipped: free managed tier.** GitHub sign-in, then an email address; free GPT-6 and DeepSeek tokens every week, how many depends on the GitHub account, `/request` for more; resets every Monday 00:00 UTC; a global spend stop, a kill switch, a per-request usage log (counts only). [installer#78](https://github.com/directionally-local/installer/issues/78), [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102) · Admin dashboard ([installer#86](https://github.com/directionally-local/installer/issues/86)) · Retire the old Kimiflare Cloud service ([installer#84](https://github.com/directionally-local/installer/pull/84) checklist) |
 | 2 | 10–16 Nov | **dl model v0.1 (by 11 Nov):** run open models on your own GPUs; Nvidia only, one machine, vLLM in Docker. `dl model up`, `dl model update`, `dl model rollback`, `dl model status` |
 | 3 | 17–23 Nov | **dl model, tested updates:** check a new model deployment before switching over; automatically roll back if it fails. Make setup and recovery work end to end on one Nvidia machine |
-| 4 | 24–30 Nov | **Bring your Claude Code setup, part 1:** dl's first run finds an existing `CLAUDE.md`, MCP config and repository context, locally ([autopilot#1126](https://github.com/directionally-local/autopilot/issues/1126)) |
-| 5 | 1–7 Dec | **Bring your Claude Code setup, part 2:** the first session works in under two minutes ([autopilot#1126](https://github.com/directionally-local/autopilot/issues/1126)) · **Continue in dl:** when Claude Code hits a rate limit, one keystroke opens the same task in dl ([autopilot#1127](https://github.com/directionally-local/autopilot/issues/1127)) |
+| 4 | 24–30 Nov | **Shipped early (3 Nov): bring your Claude Code setup, part 1:** dl's first run finds an existing `CLAUDE.md`, MCP config and repository context, locally ([autopilot#1126](https://github.com/directionally-local/autopilot/issues/1126)) |
+| 5 | 1–7 Dec | **Shipped early (3 Nov): bring your Claude Code setup, part 2:** the first session works in under two minutes ([autopilot#1126](https://github.com/directionally-local/autopilot/issues/1126)) · **Shipped early: continue in dl** (`dl --from-claude-code`, dl.new/continue): when Claude Code hits a rate limit, one keystroke opens the same task in dl ([autopilot#1127](https://github.com/directionally-local/autopilot/issues/1127)) |
 | 6 | 8–14 Dec | **Autopilot reports its state to herdr** ([autopilot#1103](https://github.com/directionally-local/autopilot/issues/1103)) |
 | 7 | 15–21 Dec | **"Your tokens are back":** the Monday reset is shown to free-tier users ([installer#87](https://github.com/directionally-local/installer/issues/87)) · Pull request upstream so herdr lists dl as a supported agent |
-| 8 | 22–28 Dec | **Pro plan, $20 a month:** a much larger weekly Flash allowance plus DeepSeek V4 Pro, offered at the moment a free user reaches the limit ([installer#88](https://github.com/directionally-local/installer/issues/88)) |
+| 8 | 22–28 Dec | **Paid plan** (details not public until confirmed), offered when a free user reaches the limit ([installer#88](https://github.com/directionally-local/installer/issues/88)) |
 | 9 | 29 Dec–4 Jan | Fixes from the Pro launch and from the usage data; the fresh-VM test ([installer#47](https://github.com/directionally-local/installer/issues/47)) |
 | 10 | 5–11 Jan | Hardening and first-run quality; nothing new starts |
 
@@ -31,29 +31,22 @@ For these ten weeks, work is ordered by one test: does it bring more people to d
 
 ## Parallel lane: the free managed tier
 
-People sign in with GitHub and get free tokens instead of bringing an API key. Unlike bring-your-own-key, every token is visible to us. Each person gets 50 million DeepSeek V4.1 Flash tokens or $5 of real cost per week, whichever comes first, inside a $250 weekly and $1,000 total budget; the allowance resets every Monday. Bring-your-own-key stays unlimited and free, and sends counts only (requests, tokens, sessions, timestamps). It revives the earlier Kimiflare Cloud service, which was built for Cloudflare Workers AI and removed from Autopilot in September; most of its design carries over to OpenRouter. Tracked in [installer#78](https://github.com/directionally-local/installer/issues/78) (service) and [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102) (client).
+People sign in with GitHub, then add an email address (one free account per email), and get free GPT-6 and DeepSeek tokens every week instead of bringing an API key. How many depends on the GitHub account; `/request` in dl asks for more. The week resets every Monday at 00:00 UTC. Free tokens only work inside dl and Autopilot. Bring-your-own-key stays unlimited and free. Tracked in [installer#78](https://github.com/directionally-local/installer/issues/78) (service) and [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102) (client).
 
-**In the MVP**
-- Sign in with GitHub through a device code, from `autopilot` or `dl`.
-- Invite codes and a cap on how many people are active.
-- A weekly token allowance per person; each request reserves its tokens first, so nobody overshoots.
-- One allowed model, `deepseek/deepseek-v4.1-flash`, through OpenRouter on a company key.
+**Shipped**
+- Sign in with GitHub through a device code, from `autopilot` or `dl`, then an email address.
+- GPT-6 (`gpt-6-luna` by default, also `gpt-6.1-sol` and `gpt-6-astra`) via OpenAI, and DeepSeek V4.1 Flash via Luminal, as the fallback and selectable by hand.
+- A weekly allowance per person; each request reserves its tokens first, so nobody overshoots.
 - Usage stored as counts per request, never prompt or code content.
-- A global weekly spend stop and a kill switch.
+- A global spend stop and a kill switch.
 - An admin view of people and usage.
-- "Directionally Local, free" first in Autopilot's provider picker, with `/usage`.
-- dl setup offers it first, so a new user needs no key; Hotcell gets a route so sandboxes use it too.
+- "Free, sign in with GitHub" first on Autopilot's first-run question, with `/usage`, `/request` and `/invite`.
 
-**Not in the MVP:** payments and top-ups; Google or other sign-ins and email links; any other model.
+**Not yet:** free tokens for background tasks and server sessions; other sign-ins.
 
-**Built as** a portable Workers app on Durable Objects with SQLite, per the installer's portable-services rules, so it also runs on Serverless Objects, sharing its sign-in with the team approvals page later. It reuses the old service's login flow, quota model, usage reading, rate limits, abuse controls and admin API, with auth and quota handling hardened.
+**Built as** a portable Workers app on Durable Objects with SQLite, per the installer's portable-services rules, so it also runs on Serverless Objects.
 
-**What it costs**
-- Measured on real Autopilot usage: 0.6% of tokens are output and 94% of input is served from cache.
-- 50 million tokens a week at that mix: about $0.57 per person on `deepseek-v4.1-flash`, about $2.40 if caching never hits.
-- A thousand people using all of it: roughly $570 to $2,400 a week.
-- 50 million tokens is about thirteen hours of heavy daily use, so most people won't reach it.
-- dl's current default is the dated `-1017` model at nearly seven times the input price; switch to the plain alias.
+Allowance amounts, eligibility rules and budgets are operational settings, not published here.
 
 ## Phase 2 in detail: the multiplexer MVP
 
