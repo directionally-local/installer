@@ -2,7 +2,7 @@
 
 Coding agents that run on your own computer or on your own server. Send a task; it runs in its own [Hotcell](https://github.com/directionally-local/hotcell) sandbox, driven by [Autopilot](https://github.com/directionally-local/autopilot), and comes back as a pull request, even with your laptop closed. Start one at [dl.new](https://dl.new).
 
-Where this is going: [the roadmap](docs/ROADMAP.md).
+Where this is going: [the roadmap](docs/ROADMAP.md). Come talk to us on [Discord](https://discord.gg/zeBnJTgcRK).
 
 ## Start on your laptop
 
@@ -235,6 +235,10 @@ To test the whole flow with unpublished builds of Autopilot or Hotcell, set `DL_
 ```sh
 DL_AUTOPILOT_SPEC=~/autopilot/autopilot-ai-3.1.0.tgz DL_HOTCELL_SPEC=~/hotcell/hotcell-1.5.0.tgz dl
 ```
+
+## Community
+
+Questions, ideas, or something you built with it: [join the Directionally Local Discord](https://discord.gg/zeBnJTgcRK).
 
 ## License
 
