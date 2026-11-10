@@ -51,6 +51,17 @@ test("update compares both, switches provider, and rollback restores old deploym
   assert.equal(JSON.parse(system.files.get("/tmp/autopilot/config.json")!.content).providers.vllm.baseUrl, "http://127.0.0.1:8000/v1");
 });
 
+test("update chooses side-by-side when the GPU reservation fits in free VRAM", async () => {
+  const { system, options, lines } = fixture();
+  await modelCommand("up", ["qwen-old"], options);
+  system.gpu = "0, GPU, 49152, 29491, 570.86\n"; // qwen-old reserves 0.4 * 49152, rest free
+  assert.equal(await modelCommand("update", ["qwen-new"], options), 0);
+  assert.match(lines.join(""), /side-by-side/);
+  assert.ok(!lines.join("").match(/Accept downtime/));
+  assert.ok(system.running.has("dl-model-2"));
+  assert.ok(!system.running.has("dl-model-1"));
+});
+
 test("failed update removes candidate and preserves old provider and state", async () => {
   const { system, options, failNew } = fixture();
   await modelCommand("up", ["qwen-old"], options);
@@ -98,7 +109,7 @@ test("non-interactive up uses defaults and names a model when none is given", as
   assert.equal(await modelCommand("up", ["qwen-old"], options), 0);
   const state = JSON.parse(system.files.get("/tmp/model.json")!.content);
   assert.equal(state.active.port, 8000);
-  assert.equal(state.active.context, 8192);
+  assert.equal(state.active.context, 32768);
 });
 
 test("a stale spare container stops the update before the current model is touched", async () => {

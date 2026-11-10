@@ -65,7 +65,7 @@ async function configureProvider(options: ModelCommandOptions, deployment: Model
 async function launch(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number): Promise<ModelDeployment> {
   const container = `dl-model-${slot}`;
   const deployment: ModelDeployment = { id: model.id, repo: model.repo, container, port, context,
-    image: model.image, flags: model.flags, minVramMiB: model.minVramMiB,
+    image: model.image, flags: model.flags, minVramMiB: model.minVramMiB, gpuMemoryUtilization: model.gpuMemoryUtilization,
     lastTest: { chat: false, tools: false, json: false, tokensPerSecond: 0, at: "" } };
   options.ui.plan([{ id: "launch", label: `Download and start ${model.id}` }, { id: "test", label: "Chat, tool call and JSON smoke tests" }]);
   options.ui.start("launch", model.image);
@@ -124,7 +124,7 @@ export async function modelCommand(action: string, args: string[], options: Mode
   const maxTotal = Math.max(...hardware.gpus.map((gpu) => gpu.totalMiB));
   const previous = state?.previous;
   const selected: ModelRecipe = action === "rollback"
-    ? { id: previous!.id, repo: previous!.repo, minVramMiB: previous!.minVramMiB, image: previous!.image, flags: previous!.flags, defaultContext: previous!.context }
+    ? { id: previous!.id, repo: previous!.repo, minVramMiB: previous!.minVramMiB, gpuMemoryUtilization: previous!.gpuMemoryUtilization ?? 0.9, image: previous!.image, flags: previous!.flags, defaultContext: previous!.context }
     : await selectModel(options, args[0], maxTotal);
   const old = state?.active;
   if (old && !(await containerRunning(system, old.container))) throw new Error(`Current model container ${old.container} is stopped; restart it before changing models.`);
@@ -139,7 +139,13 @@ export async function modelCommand(action: string, args: string[], options: Mode
   // Check the spare slot before stopping anything: a stale candidate must not cause downtime.
   if (old && await containerRunning(system, candidateContainer)) throw new Error(`Spare container ${candidateContainer} is running; stop it manually before changing models.`);
   // nvidia-smi free memory is per GPU. Do not sum several cards: vLLM is configured for one GPU.
-  const enoughFree = hardware.gpus.some((gpu) => gpu.freeMiB >= selected.minVramMiB);
+  // vLLM reserves gpuMemoryUtilization * total VRAM, not minVramMiB: that is what side-by-side must fit.
+  const reserveMiB = Math.ceil(selected.gpuMemoryUtilization * maxTotal);
+  if (reserveMiB < selected.minVramMiB) throw new Error(`${selected.id} gpu-memory-utilization ${selected.gpuMemoryUtilization} reserves ${Math.floor(reserveMiB / 1024)} GB, less than the ${Math.ceil(selected.minVramMiB / 1024)} GB the model needs.`);
+  const enoughFree = hardware.gpus.some((gpu) => gpu.freeMiB >= reserveMiB);
+  if (old) ui.line("info", "Update strategy", enoughFree
+    ? `side-by-side: the old model keeps serving while ${selected.id} starts (${Math.ceil(reserveMiB / 1024)} GB new + ${Math.ceil((old.gpuMemoryUtilization ?? 0.9) * maxTotal / 1024)} GB old)`
+    : `downtime: ${Math.ceil(Math.max(...hardware.gpus.map((gpu) => gpu.freeMiB)) / 1024)} GB free, ${selected.id} reserves ${Math.ceil(reserveMiB / 1024)} GB`);
   let stoppedOld = false;
   if (old && !enoughFree) {
     ui.warn("Not enough free GPU memory for both models. The current model must stop while the new one starts; there will be downtime.");
@@ -149,7 +155,7 @@ export async function modelCommand(action: string, args: string[], options: Mode
     await system.run("docker", ["stop", old.container]);
     stoppedOld = true;
   }
-  if (!old && !enoughFree) throw new Error(`${selected.id} needs ${Math.ceil(selected.minVramMiB / 1024)} GB free GPU VRAM.`);
+  if (!old && !enoughFree) throw new Error(`${selected.id} reserves ${Math.ceil(reserveMiB / 1024)} GB of GPU VRAM but the largest GPU has ${Math.ceil(Math.max(...hardware.gpus.map((gpu) => gpu.freeMiB)) / 1024)} GB free.`);
   if (old) await removeContainer(system, candidateContainer);
   const configPath = options.configPath ?? autopilotConfigFile();
   const previousConfig = await system.readFile(configPath);
