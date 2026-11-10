@@ -87,6 +87,8 @@ describe("POST /v1/admin/grant", () => {
     const lookup = s.calls.githubProfiles.slice(before);
     assert.deepEqual(lookup.map((call) => call.login), ["Alice"]);
     assert.equal(lookup[0]!.headers["user-agent"], "directionallylocal-free");
+    // With the OAuth app's credentials, so the lookup gets the app's rate limit, not a shared IP's.
+    assert.equal(lookup[0]!.headers.authorization, `Basic ${btoa("gh-client:gh-secret")}`);
     const person = await s.directory().getPerson(100);
     assert.deepEqual([person.level, person.level_reason], ["full", "admin"]);
     // The admin's choice stands at the next sign-in.
