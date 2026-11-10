@@ -12,7 +12,7 @@ export class FakeModelSystem extends FakeSystem {
   toolkit = true;
   override async probe(command: string, args: string[]): Promise<RunResult> {
     if (command === "nvidia-smi") return this.gpu ? ok(args.length ? this.gpu : "CUDA Version: 12.8\n") : fail();
-    if (command === "nvidia-container-cli") return this.toolkit ? ok("NVIDIA Container CLI 1.17\n") : fail();
+    if (command === "nvidia-ctk") return this.toolkit ? ok("NVIDIA Container Toolkit CLI version 1.17.4\n") : fail();
     if (command === "docker") {
       if (args[0] === "info") return this.docker ? ok(this.runtimes) : fail();
       if (args[0] === "inspect") return this.running.has(args.at(-1)!) ? ok("true\n") : fail();
