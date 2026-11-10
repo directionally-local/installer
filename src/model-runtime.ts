@@ -23,7 +23,7 @@ export async function detectHardware(system: System): Promise<Hardware> {
 export async function checkGpuDocker(system: System): Promise<void> {
   const docker = await system.probe("docker", ["info", "--format", "{{json .Runtimes}}"]);
   if (docker.code !== 0) throw new Error("Docker is missing or its daemon is stopped. Install/start Docker before running dl model up.");
-  const toolkit = await system.probe("nvidia-container-cli", ["--version"]);
+  const toolkit = await system.probe("nvidia-ctk", ["--version"]);
   if (toolkit.code !== 0 || !/nvidia/i.test(toolkit.stdout + toolkit.stderr)) throw new Error("nvidia-container-toolkit is missing. Install and configure it for Docker, then restart Docker.");
   if (!/"nvidia"\s*:/.test(docker.stdout)) throw new Error("Docker has no nvidia runtime. Run nvidia-ctk runtime configure --runtime=docker and restart Docker.");
 }
