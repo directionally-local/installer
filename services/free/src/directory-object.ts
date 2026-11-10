@@ -13,8 +13,9 @@ import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type Ref
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
 import { levelChecks, type GithubSignals, type Level, type LevelReason, type LevelThresholds, type SignalThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
-import type { UserEmailClaim } from "./user-email-send.js";
+import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
 import type { UserEmailKind } from "./user-emails.js";
+import type { BroadcastAudience } from "./broadcast.js";
 
 /**
  * Who is in, and what they used. One object (`getByName("directory")`): admissions, invite
@@ -1210,7 +1211,7 @@ export class DirectoryObject extends DurableObject {
   }
 
   /** Marks a claimed email sent, or failed (retried once by the next daily run). */
-  async finishUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; ok: boolean; now: number }): Promise<void> {
+  async finishUserEmail(input: { githubId: number; kind: UserEmailKind | "broadcast"; period: string; ok: boolean; now: number }): Promise<void> {
     this.ctx.storage.sql.exec(
       "UPDATE user_emails SET status = ?, sent_at = ? WHERE github_id = ? AND kind = ? AND period = ? AND status = 'pending'",
       input.ok ? "sent" : "failed",
@@ -1238,7 +1239,8 @@ export class DirectoryObject extends DurableObject {
     const week = String(weekStart(now));
     const retries = sql
       .exec<{ github_id: number; kind: UserEmailKind; period: string }>(
-        "SELECT github_id, kind, period FROM user_emails WHERE status = 'failed' AND attempts < 2 AND (kind != 'week_80' OR period = ?) ORDER BY claimed_at",
+        // Broadcasts are retried only by the owner calling the endpoint again.
+        "SELECT github_id, kind, period FROM user_emails WHERE status = 'failed' AND attempts < 2 AND kind != 'broadcast' AND (kind != 'week_80' OR period = ?) ORDER BY claimed_at",
         week,
       )
       .toArray()
@@ -1272,6 +1274,75 @@ export class DirectoryObject extends DurableObject {
         .toArray(),
     );
     return { retries, didntStart, goneQuiet };
+  }
+
+  /**
+   * Who a broadcast (broadcast.ts) still goes to: active people (never blocked or suspended) with
+   * an email who haven't pressed stop, not admins (unless `includeAdmins`), of the audience's
+   * level, signed up (admitted_at) in [from, to), and without this broadcast already sent, being
+   * sent, or failed 3 times. `emailedToday`: they had another email today, so the one-a-day cap
+   * holds this one until tomorrow.
+   */
+  async broadcastAudience(input: { id: string; audience: BroadcastAudience; from: number | null; to: number | null; now: number; adminIds: number[]; includeAdmins: boolean }): Promise<Array<{ githubId: number; login: string; email: string; emailedToday: boolean }>> {
+    const sql = this.ctx.storage.sql;
+    const day = Math.floor(input.now / DAY_MS);
+    return sql
+      .exec<{ github_id: number; login: string; email: string; admitted_via: string; today: number }>(
+        `SELECT p.github_id, p.login, p.email, p.admitted_via,
+                EXISTS (SELECT 1 FROM user_emails t WHERE t.github_id = p.github_id AND t.day = ? AND t.status IN ('pending', 'sent')) AS today
+         FROM people p
+         WHERE p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0
+           AND (? = 'all' OR p.level = ?)
+           AND (? IS NULL OR p.admitted_at >= ?) AND (? IS NULL OR p.admitted_at < ?)
+           AND NOT EXISTS (
+             SELECT 1 FROM user_emails e WHERE e.github_id = p.github_id AND e.kind = 'broadcast' AND e.period = ?
+               AND (e.status = 'sent' OR (e.status = 'pending' AND e.claimed_at > ?) OR e.attempts >= 3))
+         ORDER BY p.github_id`,
+        day,
+        input.audience,
+        input.audience,
+        input.from,
+        input.from,
+        input.to,
+        input.to,
+        input.id,
+        input.now - 3_600_000,
+      )
+      .toArray()
+      .filter((row) => input.includeAdmins || (row.admitted_via !== "admin" && !input.adminIds.includes(row.github_id)))
+      .map((row) => ({ githubId: row.github_id, login: row.login, email: row.email, emailedToday: row.today === 1 }));
+  }
+
+  /**
+   * Reserves broadcast `id` for one person, like `claimUserEmail`: re-checks that they are
+   * active, have an email, haven't pressed stop and had no email today, and that this broadcast
+   * hasn't gone to them (a failed one may be tried again, 3 attempts in all; a claim left
+   * pending for an hour counts as failed). Atomic, so two calls can't both send it.
+   */
+  async claimBroadcast(input: { githubId: number; id: string; now: number; adminIds: number[]; includeAdmins: boolean }): Promise<BroadcastClaim | undefined> {
+    const sql = this.ctx.storage.sql;
+    const day = Math.floor(input.now / DAY_MS);
+    return this.ctx.storage.transactionSync((): BroadcastClaim | undefined => {
+      const person = sql
+        .exec<{ email: string | null; email_stop: number; status: string; admitted_via: string }>("SELECT email, email_stop, status, admitted_via FROM people WHERE github_id = ?", input.githubId)
+        .toArray()[0];
+      if (!person || person.status !== "active" || !person.email || person.email_stop === 1) return undefined;
+      if (!input.includeAdmins && (person.admitted_via === "admin" || input.adminIds.includes(input.githubId))) return undefined;
+      const existing = sql
+        .exec<{ status: string; attempts: number; claimed_at: number }>("SELECT status, attempts, claimed_at FROM user_emails WHERE github_id = ? AND kind = 'broadcast' AND period = ?", input.githubId, input.id)
+        .toArray()[0];
+      if (existing && (existing.status === "sent" || existing.attempts >= 3 || (existing.status === "pending" && existing.claimed_at > input.now - 3_600_000))) return undefined;
+      if (sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND day = ? AND status IN ('pending', 'sent') LIMIT 1", input.githubId, day).toArray().length > 0) return undefined;
+      sql.exec(
+        `INSERT INTO user_emails (github_id, kind, period, status, attempts, day, claimed_at) VALUES (?, 'broadcast', ?, 'pending', 1, ?, ?)
+         ON CONFLICT (github_id, kind, period) DO UPDATE SET status = 'pending', attempts = attempts + 1, day = excluded.day, claimed_at = excluded.claimed_at`,
+        input.githubId,
+        input.id,
+        day,
+        input.now,
+      );
+      return { githubId: input.githubId, email: person.email, kind: "broadcast", period: input.id };
+    });
   }
 
   /** The unsubscribe link: no more emails to this person. False when there is no such person. */

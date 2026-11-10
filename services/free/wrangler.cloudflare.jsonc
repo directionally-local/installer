@@ -33,7 +33,7 @@
     "REFERRAL_BONUS_CAP": "50000000",
     "ALERT_EMAIL_FROM": "alerts@dl.new"
   },
-  "send_email": [{ "name": "ALERT_EMAIL" }],
+  "send_email": [{ "name": "ALERT_EMAIL" }, { "name": "USER_EMAIL" }],
   "triggers": { "crons": ["0 1 * * *"] },
   "durable_objects": {
     "bindings": [

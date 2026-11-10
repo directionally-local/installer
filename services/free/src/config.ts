@@ -163,13 +163,16 @@ export interface FreeConfig {
   paused: boolean;
   /** The public origin for links, when the request's own origin isn't it (behind a proxy). */
   publicUrl: string | undefined;
-  /** Resend's API key (RESEND_API_KEY, a secret) for emails to users. Without it none are sent. Never logged. */
+  /**
+   * Resend's API key (RESEND_API_KEY, a secret) for emails to users, used only when the USER_EMAIL
+   * binding (Cloudflare Email Service) is absent. With neither, none are sent. Never logged.
+   */
   resendApiKey: string | undefined;
   /** The sender of emails to users (EMAIL_FROM), name and address. */
   emailFrom: string;
   /** Where replies to them go (EMAIL_REPLY_TO). */
   emailReplyTo: string;
-  /** Emails to users on or off (USER_EMAILS, default on); also a runtime setting. Needs `resendApiKey`. */
+  /** Emails to users on or off (USER_EMAILS, default on); also a runtime setting. Needs the USER_EMAIL binding or `resendApiKey`. */
   userEmails: boolean;
   /** Send them to admins too (USER_EMAILS_TO_ADMINS), for testing. Off by default. */
   userEmailsToAdmins: boolean;
