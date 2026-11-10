@@ -258,6 +258,13 @@ describe("on this computer: setup", () => {
     const keyless = system.commands.filter(({ args }) => args.includes("keys") && args.includes("add")).at(-1)!;
     assert.deepEqual(keyless.args.slice(1), ["keys", "add", "ollama"]);
     assert.equal(keyless.input, undefined);
+    // vLLM is keyless but not a Hotcell built-in: the route needs --base-url and --keyless.
+    const vllm = await setUp(system, {}, new RecordingUi(), { provider: { id: "vllm", baseUrl: "http://127.0.0.1:8000/v1", apiKey: null, apiKeyEnv: "VLLM_API_KEY" } });
+    assert.deepEqual(vllm.needs, []);
+    const vllmAdd = system.commands.filter(({ args }) => args.includes("keys") && args.includes("add")).at(-1)!;
+    assert.deepEqual(vllmAdd.args.slice(1), ["keys", "add", "vllm", "--base-url", "http://127.0.0.1:8000/v1", "--keyless"]);
+    assert.equal(vllmAdd.input, undefined);
+    assert.equal(system.hotcellRouteUrls.get("vllm"), "http://127.0.0.1:8000/v1");
     await setUp(system, {}, new RecordingUi(), { provider: { id: "myproxy", baseUrl: "https://llm.example.com/v1", apiKey: "k-1234567890", apiKeyEnv: "MYPROXY_API_KEY" } });
     const custom = system.commands.filter(({ args }) => args.includes("keys") && args.includes("add")).at(-1)!;
     assert.deepEqual(custom.args.slice(1), ["keys", "add", "myproxy", "--stdin", "--base-url", "https://llm.example.com/v1"]);
