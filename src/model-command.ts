@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { autopilotConfigFile } from "./laptop/free-tier.js";
 import { fittingModels, recipe, type ModelRecipe } from "./model-catalog.js";
 import { checkGpuDocker, containerRunning, detectHardware, dockerArgs, logTail, removeContainer } from "./model-runtime.js";
+import { bench as benchModel } from "./model-bench.js";
 import { smokeTest, type FetchModel } from "./model-smoke.js";
 import { modelStatePath, readModelState, writeModelState, type ModelDeployment } from "./state.js";
 import type { System } from "./system.js";
@@ -149,7 +150,7 @@ export async function modelCommand(action: string, args: string[], options: Mode
 /** The existing `dl model [ID]` picker lives in laptop/settings.ts; only subcommands come here. */
 async function modelCommandInner(action: string, args: string[], options: ModelCommandOptions): Promise<number> {
   const { system, ui } = options;
-  if ((action === "up" || action === "update") && args.length > 1 || (action === "status" || action === "rollback") && args.length > 0) {
+  if ((action === "up" || action === "update") && args.length > 1 || (action === "status" || action === "rollback" || action === "bench") && args.length > 0) {
     ui.line("failed", "Usage", `dl model ${action}${action === "up" || action === "update" ? " [model] [--dry-run]" : ""}`);
     return 2;
   }
@@ -164,6 +165,14 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     ui.line("info", "Last test", `${state.active.lastTest.chat ? "chat ✓" : "chat ✗"} · ${state.active.lastTest.tools ? "tools ✓" : "tools ✗"} · ${state.active.lastTest.json ? "JSON ✓" : "JSON ✗"} · ${state.active.lastTest.tokensPerSecond} tokens/sec · ${state.active.lastTest.at}`);
     if (state.previous) ui.line("info", "Rollback", `${state.previous.repo} · dl model rollback`);
     return running ? 0 : 1;
+  }
+  if (action === "bench") {
+    if (!state) throw new Error("No model is installed. Run dl model up first.");
+    if (!(await containerRunning(system, state.active.container))) throw new Error(`Model container ${state.active.container} is stopped; bench needs a running model.`);
+    const result = await benchModel(state.active, system, options.fetch);
+    for (const level of result.levels) ui.line("info", `concurrency ${level.concurrency}`, `${level.requests} reqs · TTFT p50 ${level.ttftP50}s · p95 ${level.ttftP95}s · ${level.decodeTokPerSec} tok/s decode`);
+    if (result.prefixCacheHitRate !== undefined) ui.line("info", "Prefix cache", `${result.prefixCacheHitRate}% hit rate (from vLLM logs)`);
+    return 0;
   }
   if (action !== "up" && action !== "update" && action !== "rollback") return 2;
   if (action === "up" && state) {
