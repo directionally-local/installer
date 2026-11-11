@@ -46,14 +46,14 @@ const below = (id: number, extra: Partial<GitHubUserFixture> = {}): GitHubUserFi
 const above = (id: number, extra: Partial<GitHubUserFixture> = {}): GitHubUserFixture => ({ id, login: `user${id}`, createdAt: OLD, publicRepos: 0, contributions: 250, social: 0, ...extra });
 
 describe("additional account signals", () => {
-  it("gives Full below the public bar with three signals, and stores them as numbers", async () => {
+  it("never gives Full below the public bar, whatever the additional signals, and stores them as numbers", async () => {
     const { service, admin } = await open();
-    const tokens = await service.signIn(below(100, { activeWeeks: 10, social: 20, followers: 5 }));
+    const tokens = await service.signIn(below(100, { activeWeeks: 10, social: 20, followers: 5, outsideCommits: 1 }));
     const row = await person(service, admin, 100);
-    assert.equal(row.level, "full");
-    assert.equal(row.levelReason, "qualifies");
+    assert.equal(row.level, "starter");
+    assert.equal(row.levelReason, "account_too_new", "the public reason only");
     assert.equal(row.signals.activeWeeks, 10);
-    assert.equal(row.signals.outsideContributions, 0);
+    assert.equal(row.signals.outsideContributions, 1);
     assert.equal(row.signals.oldestRepoCreatedAt, null);
     assert.equal(row.signals.social, 20);
     assert.equal(row.signals.followers, 5);
@@ -61,27 +61,27 @@ describe("additional account signals", () => {
     assert.deepEqual(row.checks, {
       publicBar: false,
       activeWeeks: true,
-      outsideContributions: false,
+      outsideContributions: true,
       oldRepo: false,
       social: true,
       followers: true,
-      humanSignals: 3,
+      humanSignals: 4,
       batchPeers: 0,
       creationBatch: false,
-      full: true,
+      full: false,
     });
-    assert.equal((await chat(service, tokens.access_token)).status, 200);
+    assert.equal(await errorCode(await chat(service, tokens.access_token)), "below_bar");
   });
 
   it("counts pull requests, outside commits and an old non-fork repository", async () => {
     const { service, admin } = await open();
-    await service.signIn(below(100, { pullRequests: 0, outsideCommits: 4, repoCreatedAt: "2025-01-01T00:00:00Z", social: 12 }));
+    await service.signIn(above(100, { pullRequests: 0, outsideCommits: 4, repoCreatedAt: "2025-01-01T00:00:00Z" }));
     const row = await person(service, admin, 100);
     assert.equal(row.signals.outsideContributions, 4, "commits to the account's own repositories don't count");
     assert.equal(row.checks.oldRepo, true);
     assert.equal(row.level, "full");
     // A fork doesn't count as the account's own repository.
-    await service.signIn(below(101, { outsideCommits: 4, repoCreatedAt: "2025-01-01T00:00:00Z", repoIsFork: true, social: 12 }));
+    await service.signIn(above(101, { outsideCommits: 4, repoCreatedAt: "2025-01-01T00:00:00Z", repoIsFork: true }));
     const fork = await person(service, admin, 101);
     assert.equal(fork.signals.oldestRepoCreatedAt, null);
     assert.equal(fork.level, "starter");
@@ -104,24 +104,41 @@ describe("additional account signals", () => {
     assert.equal((await person(service, admin, 101)).level, "full");
   });
 
-  it("keeps an account from a creation batch with no followers on Starter, whatever its signals", async () => {
-    const { service, admin } = await open();
-    const day = "2024-03-10T00:00:00Z";
-    // Fifteen accounts already signed up that were created within a day of each other.
-    for (let id = 200; id < 215; id++) await service.signIn(below(id, { createdAt: id % 2 === 0 ? day : "2024-03-11T05:00:00Z" }));
-    await service.signIn(below(100, { createdAt: day, activeWeeks: 20, outsideCommits: 3, social: 30, repoCreatedAt: day }));
-    const batched = await person(service, admin, 100);
-    assert.equal(batched.checks.humanSignals, 4);
-    assert.equal(batched.checks.batchPeers, 15);
-    assert.equal(batched.checks.creationBatch, true);
-    assert.equal(batched.level, "starter");
-    // One follower is enough to leave the batch check.
-    await service.signIn(below(101, { createdAt: day, activeWeeks: 20, outsideCommits: 3, social: 30, followers: 1 }));
-    assert.equal((await person(service, admin, 101)).level, "full");
-    // An account created well apart from the batch isn't in it.
-    await service.signIn(below(102, { createdAt: "2024-03-20T00:00:00Z", activeWeeks: 20, outsideCommits: 3, social: 30 }));
+  it("keeps a sign-up farm account off Full and off free tokens: a young creation batch that follows itself", async () => {
+    // A Starter allowance and the basic level both on, so the batch flag is what gives 0 tokens.
+    const { service, admin } = await open({ STARTER_WEEKLY_TOKENS: "5000000", BASIC_WEEKLY_TOKENS: "10000000", BASIC_MIN_ACCOUNT_AGE_DAYS: "30" });
+    const day = new Date(service.clock.now - 100 * 86_400_000).toISOString();
+    const nextDay = new Date(service.clock.now - 99 * 86_400_000).toISOString();
+    // Twenty farm accounts already signed up, created within a day of each other.
+    for (let id = 200; id < 220; id++) await service.signIn(below(id, { createdAt: id % 2 === 0 ? day : nextDay, followers: 11, outsideCommits: 1, social: 30 }));
+    // One more: 100 days old, following and followed by the others, one contribution to another's repository.
+    const tokens = await service.signIn(below(100, { createdAt: day, followers: 11, outsideCommits: 1, social: 30 }));
+    const farm = await person(service, admin, 100);
+    assert.equal(farm.checks.publicBar, false);
+    assert.equal(farm.checks.humanSignals, 3);
+    assert.equal(farm.checks.batchPeers, 20);
+    assert.equal(farm.checks.creationBatch, true, "followers don't get an account out of a batch");
+    assert.equal(farm.checks.full, false);
+    assert.equal(farm.level, "starter", "never basic while flagged");
+    assert.equal((await service.directory().getPerson(100))?.batch_flag, 1);
+    assert.equal(await errorCode(await chat(service, tokens.access_token)), "below_bar", "0 tokens");
+    // A young account created well apart from the batch isn't in it: Starter's allowance.
+    const apart = await service.signIn(below(102, { createdAt: new Date(service.clock.now - 60 * 86_400_000).toISOString(), followers: 11, outsideCommits: 1, social: 30 }));
     assert.equal((await person(service, admin, 102)).checks.batchPeers, 0);
-    assert.equal((await person(service, admin, 102)).level, "full");
+    assert.equal((await person(service, admin, 102)).checks.creationBatch, false);
+    assert.equal((await chat(service, apart.access_token)).status, 200);
+  });
+
+  it("never flags an established account created on a busy day, and gives it Full with the public bar", async () => {
+    const { service, admin } = await open();
+    for (let id = 200; id < 220; id++) await service.signIn(below(id, { createdAt: OLD }));
+    const tokens = await service.signIn(above(100, { activeWeeks: 30, followers: 5, social: 20 }));
+    const row = await person(service, admin, 100);
+    assert.equal(row.checks.batchPeers, 20);
+    assert.equal(row.checks.creationBatch, false);
+    assert.equal(row.level, "full");
+    assert.equal(row.levelReason, "qualifies");
+    assert.equal((await chat(service, tokens.access_token)).status, 200);
   });
 
   for (const failure of ["error", "throw"] as const) {
@@ -138,29 +155,34 @@ describe("additional account signals", () => {
   it("takes every threshold from the admin settings", async () => {
     const { service, admin } = await open();
     const config = async (settings: Record<string, unknown>) => assert.equal((await service.request("POST", "/admin/config", { token: admin, body: settings })).status, 200);
-    // Two signals below the bar: Starter by default.
-    await service.signIn(below(100, { activeWeeks: 10, social: 20 }));
+    // The public bar and one signal: Starter by default (one fewer than humanSignalsNeeded).
+    await service.signIn(above(100, { activeWeeks: 10 }));
     assert.equal((await person(service, admin, 100)).level, "starter");
     await config({ humanSignalsNeeded: 2 });
-    await service.signIn(below(101, { activeWeeks: 10, social: 20 }));
+    await service.signIn(above(101, { activeWeeks: 10 }));
     assert.equal((await person(service, admin, 101)).level, "full");
+    // Below the public bar no setting gives Full.
+    await service.signIn(below(110, { activeWeeks: 10, social: 20, followers: 5 }));
+    assert.equal((await person(service, admin, 110)).level, "starter");
     await config({ humanSignalsNeeded: null, minActiveWeeks: 11 });
-    await service.signIn(below(102, { activeWeeks: 10, social: 20, followers: 3 }));
+    await service.signIn(above(102, { activeWeeks: 10, social: 20, followers: 3 }));
     assert.equal((await person(service, admin, 102)).checks.activeWeeks, false);
-    assert.equal((await person(service, admin, 102)).level, "starter");
     await config({ minActiveWeeks: null, minSocial: 21, minFollowers: 4, minRepoAgeDays: 10 });
     const row = await person(service, admin, 102);
     assert.deepEqual([row.checks.activeWeeks, row.checks.social, row.checks.followers], [true, false, false], "the admin view uses today's settings");
-    await service.signIn(below(103, { social: 30, followers: 4, repoCreatedAt: "2026-10-01T00:00:00Z" }));
+    await service.signIn(above(103, { social: 30, repoCreatedAt: "2026-10-01T00:00:00Z" }));
     assert.equal((await person(service, admin, 103)).level, "full", "a 34-day-old repository is old enough at 10 days");
-    // The batch check: size and window, and 0 turns it off.
+    // The batch check: size and window, and 0 turns it off. Only accounts younger than the bar's age.
     await config({ batchSize: 1, batchWindowDays: 0 });
-    await service.signIn(below(104, { activeWeeks: 10, social: 30, followers: 0, outsideCommits: 1 }));
-    assert.equal((await person(service, admin, 104)).checks.creationBatch, true);
+    await service.signIn(below(104, { activeWeeks: 10, social: 30, followers: 5, outsideCommits: 1 }));
+    assert.equal((await person(service, admin, 104)).checks.creationBatch, true, "account 110 was created the same day");
     assert.equal((await person(service, admin, 104)).level, "starter");
+    await service.signIn(above(106, { activeWeeks: 10, social: 30 }));
+    assert.equal((await person(service, admin, 106)).checks.creationBatch, false, "older than the bar's age");
+    assert.equal((await person(service, admin, 106)).level, "full");
     await config({ batchSize: 0 });
     await service.signIn(below(105, { activeWeeks: 10, social: 30, followers: 0, outsideCommits: 1 }));
-    assert.equal((await person(service, admin, 105)).level, "full");
+    assert.equal((await person(service, admin, 105)).checks.creationBatch, false);
     // The settings are listed with the rest.
     const settings = ((await (await service.request("GET", "/admin/config", { token: admin })).json()) as { effective: Record<string, unknown> }).effective;
     for (const name of ["humanSignalsNeeded", "minActiveWeeks", "minRepoAgeDays", "minSocial", "minFollowers", "batchWindowDays", "batchSize"]) assert.ok(name in settings, name);
@@ -198,10 +220,10 @@ describe("the weekly re-check with the additional signals", () => {
   }
 
   it("promotes when the stored signals plus the public profile now pass", async () => {
-    const { service, key } = await starterWithKey(below(100, { activeWeeks: 10, social: 20 }));
+    const { service, key } = await starterWithKey(above(100, { activeWeeks: 10 }));
     assert.equal((await service.directory().getPerson(100))?.level, "starter");
     // No token on the re-check: the profile adds followers; the rest is what sign-in stored.
-    service.setGithubProfile((login) => Response.json({ login, email: null, created_at: YOUNG, public_repos: 0, followers: 3 }));
+    service.setGithubProfile((login) => Response.json({ login, email: null, created_at: OLD, public_repos: 0, followers: 3 }));
     service.clock.now += 8 * 86_400_000;
     assert.equal((await chat(service, key)).status, 200);
     const row = await service.directory().getPerson(100);
@@ -217,26 +239,49 @@ describe("the weekly re-check with the additional signals", () => {
     assert.equal((await service.directory().getPerson(100))?.level, "starter");
   });
 
-  it("never demotes", async () => {
-    const { service, admin, key } = await starterWithKey(below(100, { activeWeeks: 10, social: 20, followers: 5 }));
+  it("never demotes Full", async () => {
+    const { service, admin, key } = await starterWithKey(above(100, { activeWeeks: 10, social: 20, followers: 5 }));
     assert.equal((await service.directory().getPerson(100))?.level, "full");
     // Tighter settings and a profile that no longer passes: still Full.
     assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { humanSignalsNeeded: 5 } })).status, 200);
-    service.setGithubProfile((login) => Response.json({ login, email: null, created_at: YOUNG, public_repos: 0, followers: 0 }));
+    service.setGithubProfile((login) => Response.json({ login, email: null, created_at: OLD, public_repos: 0, followers: 0 }));
     service.clock.now += 8 * 86_400_000;
     assert.equal((await chat(service, key)).status, 200);
     assert.equal((await service.directory().getPerson(100))?.level, "full");
   });
 
   it("leaves an admin's choice of Starter alone, even when the signals pass", async () => {
-    const { service, admin, key } = await starterWithKey(below(100, { activeWeeks: 10, social: 20, followers: 5 }));
+    const { service, admin, key } = await starterWithKey(above(100, { activeWeeks: 10, social: 20, followers: 5 }));
     assert.equal((await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "starter" } })).status, 200);
-    service.setGithubProfile((login) => Response.json({ login, email: null, created_at: YOUNG, public_repos: 0, followers: 5 }));
+    service.setGithubProfile((login) => Response.json({ login, email: null, created_at: OLD, public_repos: 0, followers: 5 }));
     service.clock.now += 8 * 86_400_000;
     assert.equal(await errorCode(await chat(service, key)), "below_bar");
     const row = await service.directory().getPerson(100);
     assert.equal(row?.level, "starter");
     assert.equal(row?.level_reason, "admin");
+  });
+
+  it("moves a basic account the creation-batch check now flags to Starter with no free tokens, but never an admin's basic", async () => {
+    const { service, admin } = await open({ BASIC_WEEKLY_TOKENS: "10000000", BASIC_MIN_ACCOUNT_AGE_DAYS: "30" });
+    const day = new Date(service.clock.now - 100 * 86_400_000).toISOString();
+    const keyFor = async (user: GitHubUserFixture) => {
+      const { access_token } = await service.signIn(user);
+      return ((await (await service.request("POST", "/v1/keys", { token: access_token, body: { name: "test" } })).json()) as { key: string }).key;
+    };
+    // Signed up before the rest of its batch: basic.
+    const key = await keyFor(below(100, { createdAt: day }));
+    const kept = await keyFor(below(101, { createdAt: day }));
+    assert.equal((await service.directory().getPerson(100))?.level, "basic");
+    assert.equal((await service.request("POST", "/admin/people/101/level", { token: admin, body: { level: "basic" } })).status, 200);
+    for (let id = 200; id < 220; id++) await service.signIn(below(id, { createdAt: day, followers: 11 }));
+    service.setGithubProfile((login) => Response.json({ login, email: null, created_at: day, public_repos: 0, followers: 11 }));
+    service.clock.now += 8 * 86_400_000;
+    assert.equal(await errorCode(await chat(service, key)), "below_bar");
+    const row = await service.directory().getPerson(100);
+    assert.equal(row?.level, "starter");
+    assert.equal(row?.batch_flag, 1);
+    assert.equal((await chat(service, kept)).status, 200, "an admin's level stands");
+    assert.equal((await service.directory().getPerson(101))?.level, "basic");
   });
 
   it("keeps an invite's Full when the signals don't pass", async () => {
@@ -255,7 +300,7 @@ describe("the admin views of the additional signals", () => {
   it("lists Starter accounts with their signals and checks on the full dashboard", async () => {
     const { service, admin } = await open();
     await service.signIn(above(100, { activeWeeks: 30 }));
-    await service.signIn(below(101, { activeWeeks: 10, social: 20, followers: 5 }));
+    await service.signIn(above(101, { activeWeeks: 10, social: 20, followers: 5 }));
     const page = await (await service.request("GET", "/admin?view=full", { token: admin })).text();
     assert.match(page, /<h2>Starter accounts<\/h2>/);
     assert.match(page, /user100/);

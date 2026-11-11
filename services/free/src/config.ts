@@ -43,8 +43,8 @@ export interface FreeConfig {
   fullMinContributions: number;
   /**
    * Additional account signals for Full (admission.ts `levelChecks`); the real values are set
-   * in the private admin settings. Signals needed without the public bar, one fewer with it
-   * (HUMAN_SIGNALS_NEEDED).
+   * in the private admin settings. Full needs the public bar and at least one fewer than this
+   * many signals (HUMAN_SIGNALS_NEEDED); without the public bar, no number of them gives Full.
    */
   humanSignalsNeeded: number;
   /** Weeks with a contribution in the last year (MIN_ACTIVE_WEEKS). */
@@ -57,7 +57,7 @@ export interface FreeConfig {
   minFollowers: number;
   /** Days either side of an account's creation that count as one batch (BATCH_WINDOW_DAYS). */
   batchWindowDays: number;
-  /** Signed-up accounts in that window that make a batch; 0 turns it off (BATCH_SIZE). */
+  /** Signed-up accounts in that window that make a batch, for accounts younger than the public bar's age; 0 turns it off (BATCH_SIZE). */
   batchSize: number;
   /** A Starter account's weekly tokens (STARTER_WEEKLY_TOKENS), of every model. 0: no free tokens. */
   starterWeeklyTokens: number;

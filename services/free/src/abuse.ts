@@ -145,11 +145,14 @@ export const OUTSIDE_DL_DAYS = 7;
 
 /**
  * Free tokens work inside dl only (the runtime setting `dlOnly`): Autopilot always sends session
- * events while the free tier is its provider, so an account whose sign-in token made at least
- * DL_ONLY_MIN_REQUESTS free chat requests in the last DL_ONLY_WINDOW_MS, with no session event
- * arriving in that time, is using the token in another tool. Autopilot batches events for a few
- * seconds, so a real session's first requests come before its first event; the threshold leaves
- * room for that. Requests with a server key (dl's server mode), admins' and paid ones aren't counted.
+ * events while the free tier is its provider. A session event (one with a session id) covers the
+ * DL_ONLY_WINDOW_MS after it; an account with no session event in the last DL_ONLY_WINDOW_MS is
+ * refused once it has made DL_ONLY_MIN_REQUESTS free chat requests that no session event covers
+ * (every one of them, for an account that never sent one). Autopilot batches events for a few
+ * seconds, so a new session's first requests come before its first event; the threshold is that
+ * grace. It is used up, not renewed every day: an account that never sends a session event gets
+ * that many requests in all, not that many a day. Requests with a server key (dl's server mode),
+ * admins' and paid ones aren't counted.
  */
 export const DL_ONLY_MIN_REQUESTS = 20;
 export const DL_ONLY_WINDOW_MS = DAY_MS;
@@ -158,16 +161,22 @@ export const DL_ONLY_WINDOW_MS = DAY_MS;
 const counted = (prefix = "") => `${prefix}is_admin = 0 AND ${prefix}paid = 0 AND ${prefix}via_key = 0`;
 
 /**
- * True when `githubId` used free tokens outside dl in the last DL_ONLY_WINDOW_MS (see above).
- * Two indexed reads: any event since (stops at the first), then the request count.
+ * True when `githubId` is using free tokens outside dl (see above). Indexed reads that stop
+ * early: the latest session event (newest first, stops at the first), then at most
+ * DL_ONLY_MIN_REQUESTS request rows that it doesn't cover.
  */
 export function outsideDl(store: Sql, githubId: number, now: number): boolean {
-  const since = now - DL_ONLY_WINDOW_MS;
-  const sent = store.exec("SELECT 1 FROM events WHERE github_id = ? AND received_at >= ? LIMIT 1", githubId, since).toArray().length > 0;
-  if (sent) return false;
-  const requests =
-    store.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM requests WHERE github_id = ? AND at >= ? AND ${counted()}`, githubId, since).toArray()[0]?.n ?? 0;
-  return requests >= DL_ONLY_MIN_REQUESTS;
+  const last =
+    store
+      .exec<{ received_at: number }>("SELECT received_at FROM events WHERE github_id = ? AND session_id IS NOT NULL ORDER BY received_at DESC LIMIT 1", githubId)
+      .toArray()[0]?.received_at ?? null;
+  const coveredUntil = last === null ? -1 : last + DL_ONLY_WINDOW_MS;
+  if (coveredUntil >= now) return false;
+  const uncovered =
+    store
+      .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM requests WHERE github_id = ? AND at > ? AND ${counted()} LIMIT ?)`, githubId, coveredUntil, DL_ONLY_MIN_REQUESTS)
+      .toArray()[0]?.n ?? 0;
+  return uncovered >= DL_ONLY_MIN_REQUESTS;
 }
 
 /** Every query here starts with this comment, so a test can hold them to `ABUSE_COLUMNS`. */

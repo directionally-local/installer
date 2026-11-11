@@ -1878,11 +1878,13 @@ async function chat(c: Ctx): Promise<Response> {
   c.callerId = identity.githubId;
   const gate = await runtime(c);
   if (gate.person?.blocked) return blockedError();
-  // A Starter account is re-checked once a week from its public profile, and promoted if it
-  // now qualifies. Promotion only: nobody is demoted mid-week.
+  // A Starter or basic account is re-checked once a week from its public profile, and promoted
+  // if it now qualifies. The one move down: a basic account the creation-batch check now flags
+  // goes to Starter with no free tokens (directory-object.ts recheckLevel).
   if (gate.person && (gate.person.level === "starter" || gate.person.level === "basic") && !isAdmin) {
-    const promoted = await recheckStarter(c, identity, gate.config);
-    if (promoted) gate.person.level = promoted;
+    const changed = await recheckStarter(c, identity, gate.config);
+    if (changed) gate.person.level = changed;
+    if (changed === "starter") gate.person.batchFlagged = true;
   }
   const level = servedLevel(gate.person?.level ?? "full", gate.config);
   const batchFlagged = gate.person?.batchFlagged === true;
@@ -1934,8 +1936,8 @@ async function chat(c: Ctx): Promise<Response> {
   // global cap reached. Pro and top-ups still work; the reservation decides which applies.
   const place = isAdmin ? null : (gate.person?.queue ?? null);
   const { globalTotalUsdCap: total, globalWeeklyUsdCap: weekly } = gate.config;
-  // Free tokens work inside dl only: a sign-in token that made many requests in the last day
-  // while Autopilot sent no session event is in another tool (abuse.ts). Server keys (dl's server
+  // Free tokens work inside dl only: a sign-in token with no session event in the last day that
+  // made many requests no session event covers is in another tool (abuse.ts). Server keys (dl's server
   // mode) are left out; like the blocks below, Pro and top-ups still work.
   const outsideDl = gate.config.dlOnly && identity.via !== "key" && gate.person?.outsideDl === true;
   const freeBlock: (() => Promise<Response>) | undefined = isAdmin
