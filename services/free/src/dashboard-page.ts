@@ -5,7 +5,7 @@ import { ABUSE_DAYS, type AbuseData, type AbusePerson, type SimpleData } from ".
 import { BRAND_ORIGIN, BRAND_TOKENS, PRODUCT_NAME } from "./pages.js";
 import { isoDay } from "./week.js";
 import type { LevelChecks } from "./admission.js";
-import type { PendingAccessRequest } from "./directory-object.js";
+import type { EarlyAccessLead, PendingAccessRequest } from "./directory-object.js";
 import { hasCapitals, type BroadcastAudience } from "./broadcast.js";
 import { GRANT_LABELS, MAX_GRANT_LOGINS, type GrantResult } from "./grant.js";
 import { FREE_MODELS } from "./models.js";
@@ -123,7 +123,7 @@ export const HEALTH_CSV_TABLES = [
 ] as const;
 export type HealthCsvTable = (typeof HEALTH_CSV_TABLES)[number];
 
-export const CSV_TABLES = ["spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams", ...HEALTH_CSV_TABLES] as const;
+export const CSV_TABLES = ["early-access", "spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams", ...HEALTH_CSV_TABLES] as const;
 export type CsvTable = (typeof CSV_TABLES)[number];
 
 export function isCsvTable(name: string): name is CsvTable {
@@ -1447,6 +1447,10 @@ export interface ToolsState {
   requests: PendingAccessRequest[];
   /** What the last Grant or Decline did. */
   requestNotice?: { error: boolean; text: string };
+  /** GPU early-access leads, newest first: emails people chose to leave (user content, escaped). */
+  leads: EarlyAccessLead[];
+  /** What the last "delete a lead" did. */
+  leadNotice?: { error: boolean; text: string };
   /** What the last "re-check below-bar accounts" did. */
   recheck?: { checked: number; raised: number; flagged: number; starter: number };
   /** The email being written. */
@@ -1535,6 +1539,13 @@ input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); 
 .req-link { font-size: 13.5px; overflow-wrap: anywhere; }
 .req-link a { color: var(--accent); }
 .req-actions { display: grid; gap: 8px; margin-top: 4px; }
+.leads-wrap { overflow-x: auto; }
+.leads { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.leads th, .leads td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--k-border); white-space: nowrap; }
+.leads th { font-size: 12px; font-weight: 600; color: var(--k-muted); }
+.leads td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.leads code { font: 13px var(--mono); }
+textarea.emails { font: 13px/1.5 var(--mono); min-height: 4rem; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 @media (max-width: 520px) { .nums { grid-template-columns: repeat(2, minmax(0, 1fr)); } .actions .btn { flex: 1 1 auto; } }
 `;
@@ -1647,6 +1658,57 @@ ${result}
 </section>`;
 }
 
+/** Leads shown in the table; the CSV and the copy box have them all. */
+const LEADS_SHOWN = 200;
+
+/**
+ * "GPU early access": the emails people left after saying yes to early access for their AMD or
+ * Ascend GPU (POST /v1/telemetry/gpu), newest first, with a CSV, a box holding every address to
+ * copy, and a form that deletes one person's leads on request. Emails are user content: escaped.
+ */
+function leadsCard(state: ToolsState): string {
+  const { leads, csrf } = state;
+  const notice = state.leadNotice ? `<p class="msg${state.leadNotice.error ? " err" : ""}" role="${state.leadNotice.error ? "alert" : "status"}">${escapeHtml(state.leadNotice.text)}</p>` : "";
+  const rows = leads
+    .slice(0, LEADS_SHOWN)
+    .map(
+      (lead) =>
+        `<tr><td><code>${escapeHtml(lead.email)}</code></td><td>${escapeHtml(GPU_VENDOR_NAMES[lead.vendor] ?? lead.vendor)}</td><td>${escapeHtml(lead.gpuModel || "–")}</td><td class="num">${lead.vramGb >= 0 ? `${count(lead.vramGb)} GB` : "–"}</td><td>${escapeHtml(isoDay(lead.at))}</td></tr>`,
+    );
+  const emails = [...new Set(leads.map((lead) => lead.email))];
+  const table =
+    leads.length === 0
+      ? `<p class="hint">No emails yet.</p>`
+      : `<div class="leads-wrap"><table class="leads"><thead><tr><th>Email</th><th>Vendor</th><th>GPU</th><th>VRAM</th><th>Date</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>
+${leads.length > LEADS_SHOWN ? `<p class="hint">The newest ${count(LEADS_SHOWN)} of ${count(leads.length)}; the CSV has them all.</p>` : ""}
+<p class="hint">${plural(leads.length, "lead")} · ${csvLink("early-access")}</p>
+<label class="field"><span>All ${plural(emails.length, "email")}, to copy</span><textarea class="emails" readonly rows="3" spellcheck="false">${escapeHtml(emails.join(", "))}</textarea></label>`;
+  const remove = csrf
+    ? `<form method="post" action="/admin/dashboard/tools#leads"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="early-access-delete">
+<label class="field"><span>Delete on request</span><input type="email" name="email" maxlength="254" placeholder="someone@example.com" autocomplete="off" autocapitalize="off"></label>
+<div class="row"><button class="btn" type="submit">Delete their leads</button></div></form>`
+    : "";
+  return `<section class="card" id="leads" aria-label="GPU early access">
+<h2>GPU early access</h2>
+<p class="lede">Emails people chose to leave after saying yes to early access for their AMD or Ascend GPU. Only for telling them when support is ready. The anonymous counts are in Health.</p>
+${notice}
+${table}
+${remove}
+</section>`;
+}
+
+/** GET /admin/dashboard/early-access.csv: every lead, newest first. */
+export function earlyAccessCsv(leads: EarlyAccessLead[], now: number): Response {
+  const body = csv(
+    ["email", "vendor", "gpu_model", "vram_gb", "date"],
+    leads.map((lead) => [lead.email, lead.vendor, lead.gpuModel, lead.vramGb >= 0 ? lead.vramGb : null, isoDay(lead.at)]),
+  );
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="free-early-access-${isoDay(now)}.csv"`, ...dashboardHeaders() },
+  });
+}
+
 function emailCard(state: ToolsState): string {
   const { compose: email, csrf } = state;
   if (!csrf) {
@@ -1720,7 +1782,7 @@ export function toolsPage(state: ToolsState): Response {
 ${viewToggle("tools")}
 ${state.signOut ? `<form method="post" action="/admin/signout"><button type="submit" class="out">Sign out</button></form>` : ""}
 </div></header>`;
-  return shell(`Tools · ${PRODUCT_NAME}`, `${header}\n<main class="tools">\n${requestsCard(state)}\n${grantCard(state)}\n${recheckCard(state)}\n${emailCard(state)}\n</main>`, 200, {}, "", TOOLS_STYLE);
+  return shell(`Tools · ${PRODUCT_NAME}`, `${header}\n<main class="tools">\n${requestsCard(state)}\n${grantCard(state)}\n${recheckCard(state)}\n${emailCard(state)}\n${leadsCard(state)}\n</main>`, 200, {}, "", TOOLS_STYLE);
 }
 
 // ─── Health ───────────────────────────────────────────────────────────────
@@ -1990,7 +2052,7 @@ function csv(header: string[], rows: unknown[][]): string {
   return [header, ...rows].map((row) => row.map(csvField).join(",")).join("\r\n") + "\r\n";
 }
 
-export function dashboardCsv(table: Exclude<CsvTable, HealthCsvTable>, data: DashboardData, spend: SpendView): Response {
+export function dashboardCsv(table: Exclude<CsvTable, HealthCsvTable | "early-access">, data: DashboardData, spend: SpendView): Response {
   let body: string;
   switch (table) {
     case "spend": {
