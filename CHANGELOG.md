@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.27.0](https://github.com/directionally-local/installer/compare/v0.26.0...v0.27.0) (2026-11-11)
+
+
+### Features
+
+* keep an optional email with a GPU early-access yes ([#224](https://github.com/directionally-local/installer/issues/224)) ([70940eb](https://github.com/directionally-local/installer/commit/70940eb6965bd1645c8b20ce9a98d437a51eb007))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.20.0 ([#226](https://github.com/directionally-local/installer/issues/226)) ([247dfbe](https://github.com/directionally-local/installer/commit/247dfbebf51e54ea436cb97a500eb617fac95a21))
+
 ## [0.26.0](https://github.com/directionally-local/installer/compare/v0.25.0...v0.26.0) (2026-11-11)
 
 
