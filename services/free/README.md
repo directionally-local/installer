@@ -646,6 +646,7 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `upstream_unavailable` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `upstream_timeout` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `dl_only` | chat (403) | none |
+| `server_keys_unavailable` | `POST /v1/keys`, and any request with a server key (403) | none |
 | `not_invited` | API, and older sign-ins | none |
 
 The two global budget codes mean "free tokens are paused for everyone, and your own key still
@@ -959,6 +960,13 @@ and each failure adds a row to `host_failures` (time, host, `http_5xx` | `error_
   - **Storage:** only the SHA-256 of the secret is kept.
   - **Limits:** at most 5 keys per account (409 `key_limit_reached`), and names must be unique
     within an account (409 `key_name_taken`).
+  - **Who may have keys:** admins, people whose level an admin set (`level_reason = 'admin'`:
+    a grant from the Tools tab or an answered `/request`) and Pro subscribers. Anyone else gets
+    403 `server_keys_unavailable` on `POST /v1/keys` ("Server keys on the free tier are by
+    request. Type /request in dl and say what server you want to run it on, or use your own API
+    key on the server."). Listing and revoking work for everyone. A key made before this rule
+    isn't deleted: requests with it get the same 403 until an admin grants the account, and then
+    it works again. A blocked or suspended account's key gets `blocked` or `suspended` as before.
   - **Errors:** a wrong or revoked key gets 401 `invalid_key`. Signing out leaves keys working.
   - **Admin view:** `/admin/people` shows how many keys each person has, never the keys.
 

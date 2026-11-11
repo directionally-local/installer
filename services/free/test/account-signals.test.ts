@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { DatabaseSync } from "node:sqlite";
-import { ADMIN_ID, createInvite, createService, errorCode, MODEL, startBrowserFlow, type GitHubUserFixture, type Service } from "./harness.js";
+import { ADMIN_ID, allowServerKeys, createInvite, createService, errorCode, MODEL, startBrowserFlow, type GitHubUserFixture, type Service } from "./harness.js";
 
 /**
  * The additional account signals behind Full: active weeks, contributions to others' work, an
@@ -215,6 +215,7 @@ describe("the weekly re-check with the additional signals", () => {
     const { service, admin } = await open();
     const { access_token } = await service.signIn(user);
     // A server key outlives the access token, so the clock can move a week.
+    allowServerKeys(service, user.id);
     const key = ((await (await service.request("POST", "/v1/keys", { token: access_token, body: { name: "test" } })).json()) as { key: string }).key;
     return { service, admin, key };
   }

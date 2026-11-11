@@ -587,6 +587,15 @@ export async function errorCode(response: Response): Promise<string> {
   return body.error?.code ?? "";
 }
 
+/**
+ * Lets an account create and use server keys as a Pro subscriber may, for tests that use a key
+ * only because it outlives an access token. It changes nothing else: not the level (an admin's
+ * grant would stop the weekly Starter re-check) and not the allowance (Pro would raise it).
+ */
+export function allowServerKeys(service: Service, githubId: number): void {
+  service.account(githubId).plan = async () => "pro";
+}
+
 /** An invite code from the admin API, signing the admin in first if needed. */
 export async function createInvite(service: Service, adminToken?: string): Promise<string> {
   const token = adminToken ?? (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;

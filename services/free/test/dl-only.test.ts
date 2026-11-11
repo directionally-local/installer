@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, createInvite, createService, MODEL, type Service } from "./harness.js";
+import { ADMIN_ID, allowServerKeys, createInvite, createService, MODEL, type Service } from "./harness.js";
 
 const DL_ONLY = "Free tokens work inside dl only. Run dl to keep using them, or use your own API key in any tool.";
 const HOUR = 3600_000;
@@ -117,6 +117,7 @@ describe("free tokens inside dl only", () => {
 
   it("leaves server keys (dl's server mode) out, and doesn't count their requests", async () => {
     const { service, token } = await member();
+    allowServerKeys(service, 100);
     const { key } = (await (await service.request("POST", "/v1/keys", { token, body: { name: "box" } })).json()) as { key: string };
     assert.deepEqual(await chats(service, key, 25), Array(25).fill(200));
     // The same person on a laptop: the server's requests don't push the sign-in token over.
@@ -168,6 +169,7 @@ describe("free tokens used outside dl, on the dashboard", () => {
   it("leaves admins and server keys out of the flag", async () => {
     const { service, token, adminToken } = await member();
     const cookie = await adminCookie(service);
+    allowServerKeys(service, 100);
     const { key } = (await (await service.request("POST", "/v1/keys", { token, body: { name: "box" } })).json()) as { key: string };
     await chats(service, adminToken, 12);
     await chats(service, key, 12);

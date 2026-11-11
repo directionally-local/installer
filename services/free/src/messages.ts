@@ -71,6 +71,10 @@ export const BLOCKED_MESSAGE = "This account is blocked from the free tier. Cont
 /** The dl-only refusal (code dl_only): free tokens were used from another tool. */
 export const DL_ONLY_MESSAGE = "Free tokens work inside dl only. Run dl to keep using them, or use your own API key in any tool.";
 
+/** The refusal (code server_keys_unavailable) for creating or using a server key without being granted them. */
+export const SERVER_KEYS_UNAVAILABLE_MESSAGE =
+  "Server keys on the free tier are by request. Type /request in dl and say what server you want to run it on, or use your own API key on the server.";
+
 export const DEVICE_TAKEN_MESSAGE = "This device already has a free allowance under another GitHub account; sign in with that account instead.";
 export const INVALID_INVITE_MESSAGE = "That invite code isn't valid or was already used.";
 

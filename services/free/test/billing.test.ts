@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, completion, createService, MODEL, NOW, usage, type Service } from "./harness.js";
+import { ADMIN_ID, allowServerKeys, completion, createService, MODEL, NOW, usage, type Service } from "./harness.js";
 import { checkoutParams, formEncode, signatureHeader, verifyWebhook } from "../src/stripe.js";
 
 const DAY = 86_400_000;
@@ -21,6 +21,7 @@ async function service(vars: Record<string, string> = {}): Promise<Service> {
 /** A person signed in, with a server key for chat (it outlives the clock jumps below) and an access token for billing. */
 async function person(svc: Service, id = 100): Promise<{ access: string; key: string }> {
   const tokens = await svc.signIn({ id, login: `user${id}` }, { invite: await invite(svc) });
+  allowServerKeys(svc, id);
   const key = await svc.request("POST", "/v1/keys", { token: tokens.access_token, body: { name: `k${id}` } });
   return { access: tokens.access_token, key: ((await key.json()) as { key: string }).key };
 }
@@ -290,6 +291,23 @@ describe("Pro through its payment events", () => {
     assert.equal((await me(svc, key)).plan, "free");
   });
 
+  it("lets a Pro subscriber create and use server keys, and only while Pro lasts", async () => {
+    const svc = await service();
+    const tokens = await svc.signIn({ id: 200, login: "user200" }, { invite: await invite(svc) });
+    const create = (name: string) => svc.request("POST", "/v1/keys", { token: tokens.access_token, body: { name } });
+    assert.equal(((await (await create("before")).json()) as { error: { code: string } }).error.code, "server_keys_unavailable");
+    await deliver(svc, "checkout.session.completed", proSession(200));
+    await deliver(svc, "invoice.paid", invoice(200, "in_1", Math.floor((NOW + 5 * DAY) / 1000)));
+    const created = await create("pro-box");
+    assert.equal(created.status, 201);
+    const { key } = (await created.json()) as { key: string };
+    assert.equal((await chat(svc, key)).status, 200);
+    svc.clock.now = NOW + 9 * DAY;
+    const refused = await chat(svc, key);
+    assert.equal(refused.status, 403);
+    assert.equal(((await refused.json()) as { error: { code: string } }).error.code, "server_keys_unavailable");
+  });
+
   it("handles each event id once", async () => {
     const svc = await service();
     await person(svc);
@@ -370,6 +388,7 @@ describe("top-ups", () => {
 
     // An open sign-up now waits in line; a top-up or Pro lets them work anyway.
     const queuedTokens = await svc.signIn({ id: 300, login: "late" });
+    allowServerKeys(svc, 300);
     const keyResponse = await svc.request("POST", "/v1/keys", { token: queuedTokens.access_token, body: { name: "k" } });
     const queuedKey = ((await keyResponse.json()) as { key: string }).key;
     const refused = await chat(svc, queuedKey);

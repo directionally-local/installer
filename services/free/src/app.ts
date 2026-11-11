@@ -25,6 +25,7 @@ import {
   BLOCKED_MESSAGE,
   DEVICE_TAKEN_MESSAGE,
   DL_ONLY_MESSAGE,
+  SERVER_KEYS_UNAVAILABLE_MESSAGE,
   INVALID_INVITE_MESSAGE,
   isSignInRefusal,
   CREDIT_EXHAUSTED_MESSAGE,
@@ -559,7 +560,12 @@ async function authenticate(c: Ctx, options: { keys?: boolean } = {}): Promise<C
     const parsed = parseServerKey(bearer);
     if (!options.keys || !parsed) return options.keys ? invalidKey() : invalid();
     const owner = await account(c, parsed.githubId).verifyKey(parsed.id, parsed.secret, c.now());
-    return owner ? { ...owner, via: "key" } : invalidKey();
+    if (!owner) return invalidKey();
+    // A key kept from before keys needed a grant stops working until an admin grants them (it
+    // isn't deleted). Blocked and suspended accounts are left to the refusals they get today.
+    const stored = await directory(c).getPerson(owner.githubId);
+    if ((!stored || stored.status === "active") && !(await serverKeysAllowed(c, owner.githubId, stored))) return serverKeysUnavailable();
+    return { ...owner, via: "key" };
   }
   const claims = await verifyJwt(bearer, await signingKey(c.config), Math.floor(c.now() / 1000));
   if (!claims || claims.typ !== "access" || claims.iss !== ISSUER || typeof claims.login !== "string") return invalid();
@@ -925,7 +931,24 @@ function keyView(key: ServerKeyView) {
   };
 }
 
-/** POST/GET /v1/keys and DELETE /v1/keys/:id. Managing keys takes a signed-in access token, not a key. */
+/**
+ * Who may create and use server keys: admins, people whose level an admin set (a grant from the
+ * Tools tab, an answered /request, a pre-grant), and Pro subscribers. A key spends free tokens
+ * with no dl session behind it, so for everyone else it is by request.
+ */
+async function serverKeysAllowed(c: Ctx, githubId: number, stored: PersonRow | undefined): Promise<boolean> {
+  if (c.config.adminGithubIds.has(githubId) || stored?.level_reason === "admin") return true;
+  return (await account(c, githubId).plan(c.now())) === "pro";
+}
+
+function serverKeysUnavailable(): Response {
+  return apiError(403, "server_keys_unavailable", SERVER_KEYS_UNAVAILABLE_MESSAGE);
+}
+
+/**
+ * POST/GET /v1/keys and DELETE /v1/keys/:id. Managing keys takes a signed-in access token, not a
+ * key. Anyone may list and revoke their keys; creating one needs `serverKeysAllowed`.
+ */
 async function keys(c: Ctx, rest: string, method: string): Promise<Response> {
   const identity = await authenticate(c);
   if (identity instanceof Response) return identity;
@@ -938,6 +961,8 @@ async function keys(c: Ctx, rest: string, method: string): Promise<Response> {
     const body = await readJson(c);
     const name = typeof body?.name === "string" ? body.name.trim() : "";
     if (!KEY_NAME.test(name)) return apiError(400, "invalid_request", "Send {name}: 1 to 64 printable characters, e.g. the server's hostname.");
+    const stored = await directory(c).getPerson(identity.githubId);
+    if (stored?.status === "active" && !(await serverKeysAllowed(c, identity.githubId, stored))) return serverKeysUnavailable();
     const created = await person.createKey({ name, now: c.now() });
     if (created.ok) return json({ ...keyView(created.view), key: created.key }, 201);
     switch (created.code) {

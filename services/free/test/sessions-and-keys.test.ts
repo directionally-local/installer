@@ -9,6 +9,8 @@ async function setup(): Promise<{ service: Service; admin: string; alice: Tokens
   const service = await createService();
   const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
   const alice = await service.signIn({ id: 100, login: "alice" }, { invite: await createInvite(service, admin) });
+  // Server keys are for people an admin granted them (see "who may have server keys" below).
+  await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "full" } });
   return { service, admin, alice, invite: () => createInvite(service, admin) };
 }
 
@@ -203,5 +205,93 @@ describe("server keys", () => {
     const { key } = (await (await service.request("POST", "/v1/keys", { token: alice.access_token, body: { name: "box" } })).json()) as { key: string };
     await service.request("POST", "/v1/token/revoke", { token: alice.access_token, body: { refresh_token: alice.refresh_token } });
     assert.equal((await chat(service, key)).status, 200);
+  });
+});
+
+describe("who may have server keys", () => {
+  const UNAVAILABLE =
+    "Server keys on the free tier are by request. Type /request in dl and say what server you want to run it on, or use your own API key on the server.";
+  const createKey = (service: Service, token: string, name = "box") => service.request("POST", "/v1/keys", { token, body: { name } });
+
+  /** Alice on Full through an invite, with no admin grant. */
+  async function ungranted(): Promise<{ service: Service; admin: string; alice: Tokens }> {
+    const service = await createService();
+    const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    const alice = await service.signIn({ id: 100, login: "alice" }, { invite: await createInvite(service, admin) });
+    return { service, admin, alice };
+  }
+
+  /** A key made before keys needed a grant: straight into the account, as the old POST /v1/keys did. */
+  async function oldKey(service: Service, githubId = 100): Promise<{ id: string; key: string }> {
+    const created = (await service.account(githubId).createKey({ name: "old-box", now: service.clock.now })) as { ok: true; key: string; view: { id: string } };
+    return { id: created.view.id, key: created.key };
+  }
+
+  it("refuses a Full account without an admin's grant, with a way to ask", async () => {
+    const { service, alice } = await ungranted();
+    assert.equal((await me(service, alice.access_token)).status, 200);
+    const refused = await createKey(service, alice.access_token);
+    assert.equal(refused.status, 403);
+    assert.deepEqual(await refused.json(), { error: { code: "server_keys_unavailable", message: UNAVAILABLE } });
+    assert.deepEqual(await (await service.request("GET", "/v1/keys", { token: alice.access_token })).json(), { keys: [], max: 5 });
+  });
+
+  it("lets admins, and people whose level an admin set, create keys", async () => {
+    const { service, admin, alice } = await ungranted();
+    assert.equal((await createKey(service, admin)).status, 201, "an admin");
+    assert.equal((await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "full" } })).status, 200);
+    assert.equal((await createKey(service, alice.access_token)).status, 201, "granted by an admin");
+  });
+
+  it("lets someone granted from the Tools tab create keys", async () => {
+    const { service, admin } = await ungranted();
+    service.setGithubProfile((login) => Response.json({ login, id: 101, type: "User", email: null }));
+    const bob = await service.signIn({ id: 101, login: "bob" }, { invite: await createInvite(service, admin) });
+    assert.equal(await errorCode(await createKey(service, bob.access_token)), "server_keys_unavailable");
+    assert.equal((await service.request("POST", "/v1/admin/grant", { token: admin, body: { logins: ["bob"] } })).status, 200);
+    assert.equal((await createKey(service, bob.access_token)).status, 201);
+  });
+
+  it("refuses an existing key of an account without a grant, keeps it, and lets it work after a grant", async () => {
+    const { service, admin, alice } = await ungranted();
+    const { id, key } = await oldKey(service);
+    const refused = await chat(service, key);
+    assert.equal(refused.status, 403);
+    assert.deepEqual(await refused.json(), { error: { code: "server_keys_unavailable", message: UNAVAILABLE } });
+    assert.equal(await errorCode(await me(service, key)), "server_keys_unavailable", "every route a key reaches");
+    assert.equal(service.calls.openRouter.length + service.calls.luminal.length, 0, "nothing reached an upstream");
+
+    // Still listed, and revocable, by its owner.
+    const listed = (await (await service.request("GET", "/v1/keys", { token: alice.access_token })).json()) as { keys: Array<{ id: string }> };
+    assert.deepEqual(listed.keys.map((k) => k.id), [id]);
+
+    await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "full" } });
+    assert.equal((await chat(service, key)).status, 200, "works again once granted");
+
+    const deleted = await service.request("DELETE", `/v1/keys/${id}`, { token: alice.access_token });
+    assert.deepEqual(await deleted.json(), { id, revoked: true });
+    assert.equal(await errorCode(await chat(service, key)), "invalid_key");
+  });
+
+  it("lets an account without a grant revoke its keys", async () => {
+    const { service, alice } = await ungranted();
+    const { id } = await oldKey(service);
+    assert.equal((await service.request("DELETE", `/v1/keys/${id}`, { token: alice.access_token })).status, 200);
+    assert.deepEqual(await (await service.request("GET", "/v1/keys", { token: alice.access_token })).json(), { keys: [], max: 5 });
+  });
+
+  it("keeps blocked and suspended accounts refused as before, granted or not", async () => {
+    const { service, admin, alice } = await ungranted();
+    const { key } = await oldKey(service);
+    await service.request("POST", "/admin/people/100/block", { token: admin });
+    assert.equal(await errorCode(await chat(service, key)), "blocked");
+    assert.equal(await errorCode(await createKey(service, alice.access_token, "other")), "blocked");
+    await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "full" } });
+    assert.equal(await errorCode(await chat(service, key)), "blocked", "a grant doesn't unblock");
+    await service.request("POST", "/admin/people/100/unblock", { token: admin });
+    assert.equal((await chat(service, key)).status, 200);
+
+    await service.request("POST", "/admin/people/100/suspend", { token: admin });
+    assert.equal(await errorCode(await chat(service, key)), "suspended");
   });
 });
