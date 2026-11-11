@@ -101,9 +101,12 @@ describe("POST /v1/access-request", () => {
     assert.doesNotMatch(alerts[0]!, /CSV|plots|github\.com\/me/);
   });
 
-  it("refuses Full and admins with already_full", async () => {
+  it("refuses admins and Full accounts that may have server keys with already_full", async () => {
     const { s, admin } = await open();
     const { access_token: dev } = await s.signIn({ id: 101, login: "dev", createdAt: "2019-01-01T00:00:00Z", publicRepos: 0, contributions: 250, activeWeeks: 30 });
+    // Full on its own signals, without server keys: may ask for them.
+    assert.equal((await submit(s, dev, { building: "a build server for my side project, to run dl on" })).status, 201);
+    await s.request("POST", "/admin/people/101/level", { token: admin, body: { level: "full" } });
     const full = await submit(s, dev, { building: BUILDING });
     assert.equal(full.status, 409);
     assert.equal(full.body.error.code, "already_full");

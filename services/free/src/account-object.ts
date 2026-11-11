@@ -376,6 +376,11 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return billing.proState === "active" && (billing.periodEnd === null || now < billing.periodEnd + PRO_GRACE_MS) ? "pro" : "free";
   }
 
+  /** "pro" or "free" now (see #plan). */
+  async plan(now: number): Promise<Plan> {
+    return this.#plan(now);
+  }
+
   async billing(): Promise<BillingState> {
     const { stateAt: _stateAt, ...state } = this.#billing();
     return state;

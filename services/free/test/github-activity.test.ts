@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, completion, createInvite, createService, MODEL, startBrowserFlow, type GitHubUserFixture, type Service } from "./harness.js";
+import { ADMIN_ID, allowServerKeys, completion, createInvite, createService, MODEL, startBrowserFlow, type GitHubUserFixture, type Service } from "./harness.js";
 
 /**
  * Account levels: Full for accounts that look like working developers, Starter for everyone
@@ -185,6 +185,7 @@ describe("what a Starter account gets", () => {
     // Below the public bar, with two of the additional signals stored at sign-in.
     const { service, token } = await starter({ activeWeeks: 20 });
     // A server key outlives the access token, so the clock can move a week.
+    allowServerKeys(service, 100);
     const key = ((await (await service.request("POST", "/v1/keys", { token, body: { name: "test" } })).json()) as { key: string }).key;
     // The public profile now says 5 repositories.
     service.setGithubProfile((login) => Response.json({ login, email: null, created_at: OLD, public_repos: 5, followers: 0 }));

@@ -25,6 +25,7 @@ import {
   BLOCKED_MESSAGE,
   DEVICE_TAKEN_MESSAGE,
   DL_ONLY_MESSAGE,
+  SERVER_KEYS_UNAVAILABLE_MESSAGE,
   INVALID_INVITE_MESSAGE,
   isSignInRefusal,
   CREDIT_EXHAUSTED_MESSAGE,
@@ -545,9 +546,11 @@ interface Caller extends Identity {
 
 /**
  * The person behind a valid access token, or a 401. With `keys`, a server key is accepted
- * too. An access token from a revoked session is refused like an expired one.
+ * too, from an account allowed keys (`serverKeysAllowed`); with `ungrantedKeys` as well, from
+ * any account (only /request, so a server with an old key can ask for a grant). An access token
+ * from a revoked session is refused like an expired one.
  */
-async function authenticate(c: Ctx, options: { keys?: boolean } = {}): Promise<Caller | Response> {
+async function authenticate(c: Ctx, options: { keys?: boolean; ungrantedKeys?: boolean } = {}): Promise<Caller | Response> {
   const header = c.request.headers.get("authorization") ?? "";
   const match = /^Bearer\s+(\S+)$/i.exec(header);
   const invalid = () => apiError(401, "invalid_token", "Sign in again: the access token is missing, invalid or expired.", {}, { "www-authenticate": 'Bearer error="invalid_token"' });
@@ -559,7 +562,13 @@ async function authenticate(c: Ctx, options: { keys?: boolean } = {}): Promise<C
     const parsed = parseServerKey(bearer);
     if (!options.keys || !parsed) return options.keys ? invalidKey() : invalid();
     const owner = await account(c, parsed.githubId).verifyKey(parsed.id, parsed.secret, c.now());
-    return owner ? { ...owner, via: "key" } : invalidKey();
+    if (!owner) return invalidKey();
+    if (options.ungrantedKeys) return { ...owner, via: "key" };
+    // A key kept from before keys needed a grant stops working until an admin grants them (it
+    // isn't deleted). Blocked and suspended accounts are left to the refusals they get today.
+    const stored = await directory(c).getPerson(owner.githubId);
+    if ((!stored || stored.status === "active") && !(await serverKeysAllowed(c, owner.githubId, stored))) return serverKeysUnavailable();
+    return { ...owner, via: "key" };
   }
   const claims = await verifyJwt(bearer, await signingKey(c.config), Math.floor(c.now() / 1000));
   if (!claims || claims.typ !== "access" || claims.iss !== ISSUER || typeof claims.login !== "string") return invalid();
@@ -925,7 +934,24 @@ function keyView(key: ServerKeyView) {
   };
 }
 
-/** POST/GET /v1/keys and DELETE /v1/keys/:id. Managing keys takes a signed-in access token, not a key. */
+/**
+ * Who may create and use server keys: admins, people whose level an admin set (a grant from the
+ * Tools tab, an answered /request, a pre-grant), and Pro subscribers. A key spends free tokens
+ * with no dl session behind it, so for everyone else it is by request.
+ */
+async function serverKeysAllowed(c: Ctx, githubId: number, stored: PersonRow | undefined): Promise<boolean> {
+  if (c.config.adminGithubIds.has(githubId) || stored?.level_reason === "admin") return true;
+  return (await account(c, githubId).plan(c.now())) === "pro";
+}
+
+function serverKeysUnavailable(): Response {
+  return apiError(403, "server_keys_unavailable", SERVER_KEYS_UNAVAILABLE_MESSAGE);
+}
+
+/**
+ * POST/GET /v1/keys and DELETE /v1/keys/:id. Managing keys takes a signed-in access token, not a
+ * key. Anyone may list and revoke their keys; creating one needs `serverKeysAllowed`.
+ */
 async function keys(c: Ctx, rest: string, method: string): Promise<Response> {
   const identity = await authenticate(c);
   if (identity instanceof Response) return identity;
@@ -938,6 +964,8 @@ async function keys(c: Ctx, rest: string, method: string): Promise<Response> {
     const body = await readJson(c);
     const name = typeof body?.name === "string" ? body.name.trim() : "";
     if (!KEY_NAME.test(name)) return apiError(400, "invalid_request", "Send {name}: 1 to 64 printable characters, e.g. the server's hostname.");
+    const stored = await directory(c).getPerson(identity.githubId);
+    if (stored?.status === "active" && !(await serverKeysAllowed(c, identity.githubId, stored))) return serverKeysUnavailable();
     const created = await person.createKey({ name, now: c.now() });
     if (created.ok) return json({ ...keyView(created.view), key: created.key }, 201);
     switch (created.code) {
@@ -1709,13 +1737,16 @@ async function events(c: Ctx): Promise<Response> {
 
 /**
  * POST /v1/access-request {building, link?} → 201 {status: "pending"}; GET → {status, at?}.
- * dl's /request command: any signed-in person who isn't blocked asks for (more) free tokens.
- * One pending at a time (409 already_pending), not for Full (409 already_full), at most
+ * dl's /request command: any signed-in person who isn't blocked asks for (more) free tokens, or
+ * for server keys. Accepts any server key of the account, granted or not. One pending at a time
+ * (409 already_pending), not for Full with server keys already (409 already_full), at most
  * ACCESS_REQUESTS_PER_DAY a day (429). What they wrote is user content: stored as plain text and
  * shown only on the admin Tools tab (escaped). Never logged, never in an alert or a metric.
  */
 async function accessRequest(c: Ctx, method: string): Promise<Response> {
-  const identity = await authenticate(c, { keys: true });
+  // The server_keys_unavailable refusal says to type /request: it works with any key, so it can
+  // be typed on the server itself.
+  const identity = await authenticate(c, { keys: true, ungrantedKeys: true });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
@@ -1727,7 +1758,8 @@ async function accessRequest(c: Ctx, method: string): Promise<Response> {
     const found = await directory(c).accessRequestStatus(identity.githubId);
     return json(found ? { status: found.status, at: new Date(found.at).toISOString() } : { status: "none" });
   }
-  if (stored.level === "full" || c.config.adminGithubIds.has(identity.githubId)) {
+  // Full without server keys may still ask: that is how keys are granted.
+  if (c.config.adminGithubIds.has(identity.githubId) || (stored.level === "full" && (await serverKeysAllowed(c, identity.githubId, stored)))) {
     return apiError(409, "already_full", "You already have the full free tier.");
   }
   if (Number(c.request.headers.get("content-length") ?? 0) > ACCESS_REQUEST_MAX_BYTES) return apiError(400, "invalid_request", ACCESS_REQUEST_USAGE);

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, authorize, completion, createService, MODEL, NOW, usage, type Service, type Tokens, submitDetails } from "./harness.js";
+import { ADMIN_ID, allowServerKeys, authorize, completion, createService, MODEL, NOW, usage, type Service, type Tokens, submitDetails } from "./harness.js";
 import { etaAt, forecast, queueOrder, shouldQueue, waitText } from "../src/queue.js";
 import { codeFor, normalizeReferralCode } from "../src/referrals.js";
 import { networkOf } from "../src/network.js";
@@ -62,6 +62,7 @@ async function signUp(
   assert.equal(token.status, 200, `${user.login}: ${page}`);
   const tokens = (await token.json()) as Tokens;
   // Tests jump weeks ahead, past an access token's hour: use a server key as the bearer.
+  allowServerKeys(service, user.id);
   const key = await request("POST", "/v1/keys", { token: tokens.access_token, body: { name: `test-${user.id}-${++keys}` } });
   assert.equal(key.status, 201, await key.clone().text());
   return { tokens: { ...tokens, access_token: ((await key.json()) as { key: string }).key }, page };
