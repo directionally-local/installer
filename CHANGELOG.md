@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.26.0](https://github.com/directionally-local/installer/compare/v0.25.0...v0.26.0) (2026-11-11)
+
+
+### Features
+
+* run dl model up from Autopilot's GPU first run, and count it ([#219](https://github.com/directionally-local/installer/issues/219)) ([0cfd965](https://github.com/directionally-local/installer/commit/0cfd9656c827d9bd041d938486e841fdaf908db1))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.19.0 ([#220](https://github.com/directionally-local/installer/issues/220)) ([a154505](https://github.com/directionally-local/installer/commit/a154505b7a8d8ed70d63d6d847f20dc6a4adca99))
+
 ## [0.25.0](https://github.com/directionally-local/installer/compare/v0.24.0...v0.25.0) (2026-11-11)
 
 
