@@ -21,6 +21,7 @@ export interface ModelCommandOptions {
   interactive?: boolean;
   /** For tests; production waits for the model to download and start. */
   smoke?: typeof smokeTest;
+  bench?: typeof benchModel;
   /** Directory for per-run logs; defaults to ~/.directionallylocal/logs. */
   logDir?: string;
 }
@@ -236,13 +237,23 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     if (old && !stoppedOld) {
       try {
         const oldResult = await (options.smoke ?? smokeTest)(old, system, options.fetch);
-        ui.line("info", "Comparison", `old ${old.repo}: ${oldResult.tokensPerSecond} tok/s | new ${candidate.repo}: ${candidate.lastTest.tokensPerSecond} tok/s`);
         ui.line("info", "Checks", `old chat/tools/JSON ${oldResult.chat ? "✓" : "✗"} ${oldResult.tools ? "✓" : "✗"} ${oldResult.json ? "✓" : "✗"} | new chat/tools/JSON ✓ ✓ ✓`);
       } catch (error) {
         ui.warn(`The current model failed its smoke re-test (${error instanceof Error ? error.message.split("\n")[0] : String(error)}). Switching anyway.`);
-        ui.line("info", "Comparison", `old ${old.repo}: re-test failed | new ${candidate.repo}: ${candidate.lastTest.tokensPerSecond} tok/s`);
       }
-    } else if (old) ui.line("info", "Comparison", `old ${old.repo}: ${old.lastTest.tokensPerSecond} tok/s (last test) | new ${candidate.repo}: ${candidate.lastTest.tokensPerSecond} tok/s`);
+      try {
+        const measure = options.bench ?? benchModel;
+        const oldBench = await measure(old, system, options.fetch, { levels: [1] });
+        const newBench = await measure(candidate, system, options.fetch, { levels: [1] });
+        const oldRate = oldBench.levels[0]?.decodeTokPerSec;
+        const newRate = newBench.levels[0]?.decodeTokPerSec;
+        if (oldRate === undefined || newRate === undefined) throw new Error("single-request bench returned no result");
+        ui.line("info", "Comparison", `old ${old.repo}: ${oldRate} tok/s decode | new ${candidate.repo}: ${newRate} tok/s decode (fixed 512-token bench)`);
+      } catch (error) {
+        ui.warn(`Single-request comparison bench failed (${error instanceof Error ? error.message : String(error)}). Switching anyway.`);
+        ui.line("info", "Comparison", `old ${old.repo}: unavailable | new ${candidate.repo}: unavailable (bench failed)`);
+      }
+    } else if (old) ui.line("info", "Comparison", `old ${old.repo}: not re-measured (stopped for downtime) | new ${candidate.repo}: ${candidate.lastTest.tokensPerSecond} tok/s (fixed-length smoke)`);
     await configureProvider(options, candidate, configPath);
     await writeModelState(system, { version: 1, active: candidate, ...(old ? { previous: old } : {}) }, statePath);
     if (old) await system.run("docker", ["stop", old.container]);
