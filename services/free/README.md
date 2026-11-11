@@ -1015,6 +1015,18 @@ per IP. Like installs it has no person attached, so admin machines can't be left
 the same steps go to `/v1/events` as `gpu.*` events with only those fields kept. The Health
 view's GPUs section and one line on the home screen read the counts.
 
+**GPU early-access emails.** After a yes to early access, Autopilot asks for an optional email
+("Only used to tell you when <vendor> support is ready"), and sends it as `"email"` on that
+`early_access` body (never when telemetry is off). It is read only there, with `answer` `yes`: a
+plausible address of at most 254 characters, not on the `blockedEmails` list (checked on its
+normalized inbox). A malformed or blocked one is dropped silently; the count is made either way,
+and `gpu_daily` stays anonymous. A kept one goes to the Directory's `early_access_leads` (time,
+vendor, GPU model, VRAM, the address and its normalized inbox), one row per inbox and vendor, the
+latest kept. The address is never logged. Admins see the leads in the Tools tab's "GPU early
+access" card (email, vendor, GPU, VRAM, date, newest first, escaped; a box with every address to
+copy), download them at `GET /admin/dashboard/early-access.csv`, and delete one person's leads on
+request from the same card. The dl.new privacy policy says this.
+
 ## Admin dashboard
 
 **Home screen.** `GET /admin` opens on four questions, each answered in one plain sentence, made to

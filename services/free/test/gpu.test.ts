@@ -2,8 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, createInvite, createService, errorCode, NOW, type Service } from "./harness.js";
-import { adminCookie } from "./admin-web.js";
-import { cleanEvent, cleanGpuProps, cleanGpuTelemetry, GPU_ERROR_TYPES, GPU_EVENTS, GPU_OPTIONS, GPU_VENDORS, type GpuCount } from "../src/events.js";
+import { adminCookie, tools } from "./admin-web.js";
+import { cleanEvent, cleanGpuProps, cleanGpuTelemetry, earlyAccessEmail, GPU_ERROR_TYPES, GPU_EVENTS, GPU_OPTIONS, GPU_VENDORS, type GpuCount } from "../src/events.js";
 import { gpuSentence } from "../src/home-page.js";
 
 /**
@@ -278,5 +278,151 @@ describe("GPUs on the admin screens", () => {
     assert.match(html, /<a href="\/admin\?view=health#gpus">GPUs \(7 days\): 12 Nvidia, 3 AMD, 1 Ascend · 5 chose own GPUs · 2 early access<\/a>/);
     assert.equal(gpuSentence({ gpus: { nvidia: 0, amd: 0, ascend: 0, ownGpus: 0, earlyAccess: 0 } }), null);
     assert.equal(gpuSentence({ gpus: { nvidia: 1200, amd: 0, ascend: 0, ownGpus: 1, earlyAccess: 0 } }), "GPUs (7 days): 1,200 Nvidia, 0 AMD, 0 Ascend · 1 chose own GPUs · 0 early access");
+  });
+});
+
+describe("GPU early-access emails", () => {
+  const AMD_YES = { event: "early_access", gpuVendor: "amd", answer: "yes", gpuModel: "AMD Instinct MI300X", gpuVramGb: 192 };
+  const leads = (service: Service) =>
+    db(service)
+      .prepare("SELECT vendor, gpu_model, vram_gb, email, email_norm, at FROM early_access_leads ORDER BY id")
+      .all()
+      .map((row) => ({ ...row }));
+  const post = (service: Service, body: unknown, ip = "203.0.113.7") => service.request("POST", "/v1/telemetry/gpu", { body, ip });
+
+  it("keeps an email only with early_access yes, apart from the counts, which are unchanged", async () => {
+    const service = await createService();
+    assert.equal((await post(service, { ...AMD_YES, email: " Alice@Example.com " })).status, 204);
+    assert.equal((await post(service, { ...AMD_YES, gpuVendor: "ascend", gpuModel: "Ascend 910B3", gpuVramGb: 64 })).status, 204, "a yes with no email");
+    for (const body of [
+      { ...AMD_YES, answer: "no", email: "no@example.com" },
+      { event: "detected", gpuVendor: "amd", email: "detected@example.com" },
+      { event: "prompt", gpuVendor: "nvidia", answer: "yes", email: "prompt@example.com" },
+      { event: "option", option: "gpus", email: "option@example.com" },
+    ]) {
+      assert.equal((await post(service, body)).status, 204, JSON.stringify(body));
+    }
+    assert.deepEqual(leads(service), [{ vendor: "amd", gpu_model: "AMD Instinct MI300X", vram_gb: 192, email: "Alice@Example.com", email_norm: "alice@example.com", at: NOW }]);
+    // The anonymous counts are exactly what they were without emails, and hold no address.
+    const counts = gpuRows(service).map((row) => [row.event, row.vendor, row.answer, row.n]);
+    assert.deepEqual(counts, [
+      ["detected", "amd", "", 1],
+      ["early_access", "amd", "no", 1],
+      ["early_access", "amd", "yes", 1],
+      ["early_access", "ascend", "yes", 1],
+      ["option", "", "", 1],
+      ["prompt", "nvidia", "yes", 1],
+    ]);
+    assert.doesNotMatch(JSON.stringify(gpuRows(service)), /@/);
+    assert.equal(earlyAccessEmail({ ...AMD_YES, email: "a@b.co" }, cleanGpuTelemetry(AMD_YES) as GpuCount), "a@b.co");
+  });
+
+  it("drops a malformed or blocked email without failing the count", async () => {
+    const service = await createService({ BLOCKED_EMAILS: "@catchall.example" });
+    for (const email of ["not-an-email", "a@b", "two words@example.com", `${"x".repeat(250)}@example.com`, 42, "", null, ["a@example.com"], "farm1@catchall.example", "x@sub.catchall.example"]) {
+      assert.equal((await post(service, { ...AMD_YES, email })).status, 204, JSON.stringify(email));
+    }
+    assert.deepEqual(leads(service), []);
+    assert.equal(gpuRows(service)[0]!.n, 10, "every one counted");
+    // The runtime setting blocks too.
+    const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { blockedEmails: ["@another.example"] } })).status, 200);
+    assert.equal((await post(service, { ...AMD_YES, email: "x@another.example" })).status, 204);
+    assert.equal((await post(service, { ...AMD_YES, email: "fine@example.org" })).status, 204);
+    assert.deepEqual(leads(service).map((row) => row.email), ["fine@example.org"]);
+  });
+
+  it("keeps one row per inbox and vendor, the latest", async () => {
+    const service = await createService();
+    await post(service, { ...AMD_YES, email: "bob+gpu@gmail.com", gpuModel: "Radeon RX 7900 XTX", gpuVramGb: 24 });
+    service.clock.now = NOW + DAY;
+    await post(service, { ...AMD_YES, email: "B.o.b@gmail.com" });
+    await post(service, { ...AMD_YES, gpuVendor: "ascend", gpuModel: "Ascend 910B3", gpuVramGb: 64, email: "bob@gmail.com" });
+    assert.deepEqual(
+      leads(service).map((row) => [row.vendor, row.email, row.email_norm, row.gpu_model, row.vram_gb, row.at]),
+      [
+        ["amd", "B.o.b@gmail.com", "bob@gmail.com", "AMD Instinct MI300X", 192, NOW + DAY],
+        ["ascend", "bob@gmail.com", "bob@gmail.com", "Ascend 910B3", 64, NOW + DAY],
+      ],
+    );
+    assert.equal(gpuRows(service).reduce((sum, row) => sum + Number(row.n), 0), 3, "each still counted");
+  });
+
+  it("stays under the per-IP rate limit", async () => {
+    const service = await createService();
+    const statuses: number[] = [];
+    for (let i = 0; i < 61; i++) statuses.push((await post(service, { ...AMD_YES, email: `p${i}@example.com` }, "192.0.2.50")).status);
+    assert.equal(statuses[60], 429);
+    assert.equal(leads(service).length, 60);
+  });
+
+  it("never logs the email", async () => {
+    const service = await createService({ BLOCKED_EMAILS: "@blocked.example" });
+    const lines: string[] = [];
+    const original = { log: console.log, info: console.info, warn: console.warn, error: console.error, debug: console.debug };
+    for (const name of Object.keys(original) as Array<keyof typeof original>) {
+      console[name] = (...args: unknown[]) => void lines.push(args.map((arg) => (typeof arg === "string" ? arg : (JSON.stringify(arg) ?? String(arg)))).join(" "));
+    }
+    try {
+      await post(service, { ...AMD_YES, email: "zebra-lead@example.com" });
+      await post(service, { ...AMD_YES, email: "zebra@blocked.example" });
+      await post(service, { ...AMD_YES, email: "zebra not valid" });
+      const cookie = await adminCookie(service);
+      await service.request("GET", "/admin?view=tools", { headers: { cookie } });
+      await service.request("GET", "/admin/dashboard/early-access.csv", { headers: { cookie } });
+    } finally {
+      Object.assign(console, original);
+    }
+    assert.doesNotMatch(lines.join("\n"), /zebra/i);
+  });
+
+  it("lists leads in the Tools tab, escaped, with a CSV and a copy box, for admins only", async () => {
+    const service = await createService();
+    await post(service, { ...AMD_YES, email: "carol@example.com" });
+    service.clock.now = NOW + DAY;
+    await post(service, { ...AMD_YES, gpuVendor: "ascend", gpuModel: "Ascend 910B3", gpuVramGb: 64, email: "<script>x</script>@evil.example" });
+    await post(service, { event: "early_access", gpuVendor: "amd", answer: "yes", email: "=cmd@quote.example" });
+    const cookie = await adminCookie(service);
+    const html = await (await service.request("GET", "/admin?view=tools", { headers: { cookie } })).text();
+    const card = /<section class="card" id="leads"[^]*?<\/section>/.exec(html)![0];
+    assert.match(card, /<h2>GPU early access<\/h2>/);
+    assert.doesNotMatch(card, /<script>/);
+    assert.match(card, /<code>&lt;script&gt;x&lt;\/script&gt;@evil\.example<\/code><\/td><td>Ascend<\/td><td>Ascend 910B3<\/td><td class="num">64 GB<\/td><td>2026-11-05<\/td>/);
+    assert.match(card, /<code>carol@example\.com<\/code><\/td><td>AMD<\/td><td>AMD Instinct MI300X<\/td><td class="num">192 GB<\/td><td>2026-11-04<\/td>/);
+    assert.match(card, /<td>AMD<\/td><td>–<\/td><td class="num">–<\/td>/, "no model or VRAM sent");
+    assert.match(card, /href="\/admin\/dashboard\/early-access\.csv" download/);
+    assert.match(card, /<textarea class="emails" readonly[^>]*>[^<]*carol@example\.com[^<]*<\/textarea>/);
+    assert.ok(card.indexOf("evil.example") < card.indexOf("carol@example.com"), "newest first");
+
+    const csv = await service.request("GET", "/admin/dashboard/early-access.csv", { headers: { cookie } });
+    assert.equal(csv.status, 200);
+    assert.match(csv.headers.get("content-type") ?? "", /text\/csv/);
+    const lines = (await csv.text()).trim().split("\r\n");
+    assert.equal(lines[0], "email,vendor,gpu_model,vram_gb,date");
+    assert.ok(lines.includes("carol@example.com,amd,AMD Instinct MI300X,192,2026-11-04"), lines.join("\n"));
+    assert.ok(lines.includes("'=cmd@quote.example,amd,,,2026-11-05"), "a spreadsheet doesn't read it as a formula");
+
+    // Admins only.
+    assert.equal((await service.request("GET", "/admin/dashboard/early-access.csv")).status, 401);
+    const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    const person = (await service.signIn({ id: 100, login: "alice" }, { invite: await createInvite(service, adminToken) })).access_token;
+    assert.equal((await service.request("GET", "/admin/dashboard/early-access.csv", { token: person })).status, 403);
+    assert.equal((await service.request("GET", "/admin?view=tools", { token: person })).status, 403);
+    const signedOut = await (await service.request("GET", "/admin?view=tools")).text();
+    assert.doesNotMatch(signedOut, /carol@example\.com/);
+  });
+
+  it("deletes one person's leads on request from the Tools tab", async () => {
+    const service = await createService();
+    await post(service, { ...AMD_YES, email: "dave+x@gmail.com" });
+    await post(service, { ...AMD_YES, gpuVendor: "ascend", email: "dave@gmail.com" });
+    await post(service, { ...AMD_YES, email: "erin@example.com" });
+    const cookie = await adminCookie(service);
+    const done = await tools(service, cookie, { tool: "early-access-delete", email: "D.ave@gmail.com" });
+    assert.equal(done.status, 200);
+    assert.match(done.html, /Deleted 2 leads\./);
+    assert.deepEqual(leads(service).map((row) => row.email), ["erin@example.com"]);
+    assert.match((await tools(service, cookie, { tool: "early-access-delete", email: "nobody@example.com" })).html, /No early-access lead has that email\./);
+    assert.match((await tools(service, cookie, { tool: "early-access-delete", email: "nope" })).html, /Enter the email to delete\./);
   });
 });

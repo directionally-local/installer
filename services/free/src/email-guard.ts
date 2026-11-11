@@ -26,6 +26,11 @@ export function normalizeEmail(address: string): string {
   return `${local}@${domain}`;
 }
 
+/** A plausible address: one @, a dot in the domain, no spaces, at most 254 characters. */
+export function plausibleEmail(value: string): boolean {
+  return value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
 export function emailDomain(normalized: string): string {
   return normalized.slice(normalized.lastIndexOf("@") + 1);
 }

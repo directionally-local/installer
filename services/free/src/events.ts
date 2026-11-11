@@ -4,6 +4,8 @@
  * paths or file contents.
  */
 
+import { plausibleEmail } from "./email-guard.js";
+
 export const EVENT_TYPES = ["session.start", "session.end", "turn.end", "pr.opened", "error", "gpu.detected", "gpu.prompt", "gpu.option", "gpu.early_access", "gpu.result"] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 export const MAX_EVENTS_PER_CALL = 100;
@@ -187,6 +189,20 @@ export function cleanGpuTelemetry(input: unknown): GpuCount | string {
     outcome,
     errorType: outcome === "failed" ? word<GpuCount["errorType"]>("errorType") || "other" : "",
   };
+}
+
+/**
+ * The optional `email` a "yes" to early access may carry (Autopilot asks for one after the Yes),
+ * trimmed, or undefined: on any other event or answer, or when it isn't a plausible address of
+ * at most 254 characters. A bad email is dropped, never a reason to refuse the count. It is kept
+ * apart from the anonymous counts (directory-object.ts early_access_leads).
+ */
+export function earlyAccessEmail(input: unknown, count: GpuCount): string | undefined {
+  if (count.event !== "early_access" || count.answer !== "yes") return undefined;
+  const raw = plainObject(input)?.email;
+  if (typeof raw !== "string") return undefined;
+  const email = raw.trim();
+  return plausibleEmail(email) ? email : undefined;
 }
 
 /** One event, cleaned, or undefined when it can't be stored (bad id or unknown type). */

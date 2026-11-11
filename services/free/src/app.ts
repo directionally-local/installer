@@ -17,9 +17,9 @@ import { networkOf, rateLimitNetwork } from "./network.js";
 import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, type Sender } from "./feedback.js";
 import { apiError, json } from "./errors.js";
 import { homePage } from "./home-page.js";
-import { dashboardCsv, dashboardPage, deniedPage, healthCsv, healthPage, isCsvTable, isHealthCsvTable, signedInPage, signInPage, simpleDashboardPage, STARTER_ROWS, toolsPage, type SpendView, type StarterRow, type ToolsState } from "./dashboard-page.js";
+import { dashboardCsv, dashboardPage, deniedPage, earlyAccessCsv, healthCsv, healthPage, isCsvTable, isHealthCsvTable, signedInPage, signInPage, simpleDashboardPage, STARTER_ROWS, toolsPage, type SpendView, type StarterRow, type ToolsState } from "./dashboard-page.js";
 import { ACCESS_REQUEST_MAX_BYTES, ACCESS_REQUEST_USAGE, ACCESS_REQUESTS_PER_DAY, parseAccessRequest } from "./access-request.js";
-import { cleanBatch, cleanGpuTelemetry } from "./events.js";
+import { cleanBatch, cleanGpuTelemetry, earlyAccessEmail, type GpuCount } from "./events.js";
 import { cleanDownload, cleanInstall, MAX_TELEMETRY_BYTES } from "./telemetry.js";
 import {
   BLOCKED_MESSAGE,
@@ -44,7 +44,7 @@ import {
 import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
 import { ALLOWED_MODELS, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, modelById, type FreeModel, type Pool } from "./models.js";
-import { emailBlocked, emailDomain, normalizeEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
+import { emailBlocked, emailDomain, normalizeEmail, plausibleEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
 import {
   ACCESS_REQUEST_PATH,
   basicLine,
@@ -1139,11 +1139,6 @@ const EMAIL_BLOCKED_MESSAGE = "This email can't be used for the free tier. Use y
 const EMAIL_IN_USE_MESSAGE = "This email is already used by another dl account. Each person gets one free account.";
 const DOMAIN_LIMIT_MESSAGE = "Too many new free accounts from this email domain today. Try again tomorrow, or write to contact@directionallylocal.com.";
 
-/** A plausible address: one @, a dot in the domain, no spaces, at most 254 characters. */
-function validEmail(value: string): boolean {
-  return value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
-
 /**
  * POST /device/details: the step after GitHub. Saves the contact email and the updates choice,
  * and redeems an invite code when a Starter account gives one, then finishes sign-in.
@@ -1160,7 +1155,7 @@ async function deviceDetails(c: Ctx): Promise<Response> {
   const updates = form.get("updates") === "1";
   const inviteCode = starter ? (form.get("invite_code") ?? "").trim() || undefined : undefined;
   const again = (error: string) => detailsPage(ticket, found.login, { email, updates, ...(starter ? { starter } : {}), error });
-  if (!validEmail(email)) return again("Enter an email address we can reach you at.");
+  if (!plausibleEmail(email)) return again("Enter an email address we can reach you at.");
   // One free account per inbox, no blocked inboxes or domains, and a daily cap per company domain.
   const { config: guard } = await runtime(c);
   const inbox = normalizeEmail(email);
@@ -1893,12 +1888,28 @@ async function telemetry(c: Ctx, kind: "download" | "install" | "gpu"): Promise<
     const count = cleanGpuTelemetry(body);
     if (typeof count === "string") return apiError(400, "invalid_request", count);
     await directory(c).countGpu(count, day);
+    await saveEarlyAccessLead(c, body, count);
   } else {
     const count = cleanInstall(body);
     if (typeof count === "string") return apiError(400, "invalid_request", count);
     await directory(c).countInstall(count, day);
   }
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+}
+
+/**
+ * A "yes" to GPU early access may carry an email address (events.ts earlyAccessEmail): kept, apart from
+ * the anonymous count, in early_access_leads, one row per inbox and vendor. A malformed or
+ * blocked (blockedEmails) address is dropped silently; the count above stands either way. The
+ * address is never logged.
+ */
+async function saveEarlyAccessLead(c: Ctx, body: unknown, count: GpuCount): Promise<void> {
+  const email = earlyAccessEmail(body, count);
+  if (!email) return;
+  const emailNorm = normalizeEmail(email);
+  const { blockedEmails } = applyOverrides(c.config, await directory(c).overrides());
+  if (emailBlocked(emailNorm, blockedEmails)) return;
+  await directory(c).saveEarlyAccessLead({ at: c.now(), vendor: count.gpuVendor, gpuModel: count.gpuModel, vramGb: count.gpuVramGb, email, emailNorm });
 }
 
 // ─── Inference ──────────────────────────────────────────────────────────────
@@ -3128,6 +3139,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
   if (csv === undefined && c.url.searchParams.get("view") === "tools") {
     return toolsPage(await toolsState(c, config, identity, viaCookie, csrf, { grant: { text: "" }, compose: emptyEmailForm() }));
   }
+  if (csv === "early-access") return earlyAccessCsv(await directory(c).earlyAccessLeads(), now);
   // The Health view and its CSVs read only health-data.ts's queries.
   if ((csv === undefined && c.url.searchParams.get("view") === "health") || (csv !== undefined && isHealthCsvTable(csv))) {
     const health = await directory(c).health({ now, adminIds: [...c.config.adminGithubIds], days: healthWindow(c.url.searchParams.get("days")) });
@@ -3156,7 +3168,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
     simple ? directory(c).simple({ now, adminIds: [...c.config.adminGithubIds] }) : undefined,
   ]);
   const view = spendView(c, config, paused, spend);
-  if (csv !== undefined && isCsvTable(csv) && !isHealthCsvTable(csv)) return dashboardCsv(csv, data, view);
+  if (csv !== undefined && isCsvTable(csv) && !isHealthCsvTable(csv) && csv !== "early-access") return dashboardCsv(csv, data, view);
   if (simpleData) return simpleDashboardPage({ data, spend: view, signOut: viaCookie, simple: simpleData, ...(abuse ? { abuse } : {}) });
   const starters = await startersView(c, config, now);
   return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie, starters, ...(abuse ? { abuse } : {}), ...(csrf ? { csrf } : {}) });
@@ -3230,12 +3242,13 @@ async function toolsState(
   identity: Identity,
   signOut: boolean,
   csrf: string | undefined,
-  posted: Pick<ToolsState, "grant" | "compose"> & Partial<Pick<ToolsState, "requestNotice" | "recheck">>,
+  posted: Pick<ToolsState, "grant" | "compose"> & Partial<Pick<ToolsState, "requestNotice" | "recheck" | "leadNotice">>,
 ): Promise<ToolsState> {
-  const [cohorts, me, requests] = await Promise.all([
+  const [cohorts, me, requests, leads] = await Promise.all([
     directory(c).broadcastCohorts({ days: COHORT_PICKER_DAYS, adminIds: [...c.config.adminGithubIds], includeAdmins: config.userEmailsToAdmins }),
     directory(c).getPerson(identity.githubId),
     directory(c).pendingAccessRequests(c.now()),
+    directory(c).earlyAccessLeads(),
   ]);
   return {
     login: identity.login,
@@ -3246,6 +3259,7 @@ async function toolsState(
     provider: userEmailVia(c)?.provider ?? null,
     cohorts,
     requests,
+    leads,
     ...posted,
   };
 }
@@ -3273,7 +3287,16 @@ async function adminWebTools(c: Ctx): Promise<Response> {
   if (retry !== undefined) return rateLimited(retry);
   const { config, paused } = await runtime(c);
   const actor = { githubId: session.githubId, login: session.login, now: c.now() };
-  const state = (posted: Pick<ToolsState, "grant" | "compose"> & Partial<Pick<ToolsState, "requestNotice" | "recheck">>) => toolsState(c, config, session, true, csrf, posted).then(toolsPage);
+  const state = (posted: Pick<ToolsState, "grant" | "compose"> & Partial<Pick<ToolsState, "requestNotice" | "recheck" | "leadNotice">>) => toolsState(c, config, session, true, csrf, posted).then(toolsPage);
+
+  if (form.get("tool") === "early-access-delete") {
+    // A deletion request: every lead for that inbox goes (normalized, so name+tag@ and Gmail's dots match).
+    const email = (form.get("email") ?? "").trim().slice(0, 254);
+    const removed = plausibleEmail(email) ? await directory(c).deleteEarlyAccessLeads(normalizeEmail(email)) : -1;
+    const leadNotice =
+      removed < 0 ? { error: true, text: "Enter the email to delete." } : { error: removed === 0, text: removed === 0 ? "No early-access lead has that email." : `Deleted ${removed === 1 ? "1 lead" : `${removed} leads`}.` };
+    return state({ grant: { text: "" }, compose: emptyEmailForm(), leadNotice });
+  }
 
   if (form.get("tool") === "recheck") {
     return state({ grant: { text: "" }, compose: emptyEmailForm(), recheck: await recheckBelowBar(c, config, actor) });

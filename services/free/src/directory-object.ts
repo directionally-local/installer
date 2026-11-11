@@ -292,6 +292,15 @@ export interface SpendSummary {
   openaiFreeCreditWeekUsd: number;
 }
 
+/** One GPU early-access lead as the admin sees it. "" for a GPU model not sent, -1 for VRAM not sent. */
+export interface EarlyAccessLead {
+  at: number;
+  vendor: string;
+  gpuModel: string;
+  vramGb: number;
+  email: string;
+}
+
 const ACTIVITY = `(SELECT github_id, at FROM requests UNION ALL SELECT github_id, at FROM events)`;
 /** Monday 00:00 UTC of `at`, in SQL: 1970-01-01 was a Thursday. */
 const WEEK_OF = (column: string) => `(((${column}) / ${DAY_MS}) - ((((${column}) / ${DAY_MS}) + 3) % 7)) * ${DAY_MS}`;
@@ -565,6 +574,21 @@ const SCHEMA = [
      n          INTEGER NOT NULL,
      PRIMARY KEY (day, event, vendor, model, vram_gb, gpu_count, answer, option, path, outcome, error_type)
    ) WITHOUT ROWID`,
+  // GPU early-access leads (POST /v1/telemetry/gpu, early_access with answer yes and an email the
+  // person chose to leave): kept apart from gpu_daily, whose counts stay anonymous. One row per
+  // inbox (email_norm, email-guard.ts normalizeEmail) and vendor; a repeat keeps the latest
+  // address, GPU and time. Only for telling them when support for their GPU is ready; deleted on
+  // request (deleteEarlyAccessLeads).
+  `CREATE TABLE IF NOT EXISTS early_access_leads (
+     id         INTEGER PRIMARY KEY,
+     at         INTEGER NOT NULL,
+     vendor     TEXT NOT NULL,
+     gpu_model  TEXT NOT NULL,
+     vram_gb    INTEGER NOT NULL,
+     email      TEXT NOT NULL,
+     email_norm TEXT NOT NULL,
+     UNIQUE (email_norm, vendor)
+   )`,
   // Per UTC day, outcomes of the sign-up GitHub activity check's contribution lookup (app.ts):
   // "contributions" passed, "none" sent to the invite step, "error" let through. Counts only.
   `CREATE TABLE IF NOT EXISTS github_checks_daily (
@@ -2401,6 +2425,36 @@ export class DirectoryObject extends DurableObject {
       count.outcome,
       count.errorType,
     );
+  }
+
+  /** Saves an early-access lead, or refreshes the one for the same inbox and vendor (early_access_leads). */
+  async saveEarlyAccessLead(lead: { at: number; vendor: string; gpuModel: string; vramGb: number; email: string; emailNorm: string }): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO early_access_leads (at, vendor, gpu_model, vram_gb, email, email_norm) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (email_norm, vendor) DO UPDATE SET at = excluded.at, gpu_model = excluded.gpu_model, vram_gb = excluded.vram_gb, email = excluded.email`,
+      lead.at,
+      lead.vendor,
+      lead.gpuModel,
+      lead.vramGb,
+      lead.email,
+      lead.emailNorm,
+    );
+  }
+
+  /** Early-access leads, newest first (the admin Tools tab and its CSV). */
+  async earlyAccessLeads(): Promise<EarlyAccessLead[]> {
+    return this.ctx.storage.sql
+      .exec<{ at: number; vendor: string; gpu_model: string; vram_gb: number; email: string }>("SELECT at, vendor, gpu_model, vram_gb, email FROM early_access_leads ORDER BY at DESC, id DESC")
+      .toArray()
+      .map((row) => ({ at: row.at, vendor: row.vendor, gpuModel: row.gpu_model, vramGb: row.vram_gb, email: row.email }));
+  }
+
+  /** Deletes every lead for an inbox (a deletion request); how many rows went. */
+  async deleteEarlyAccessLeads(emailNorm: string): Promise<number> {
+    const sql = this.ctx.storage.sql;
+    const { n } = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM early_access_leads WHERE email_norm = ?", emailNorm).one();
+    sql.exec("DELETE FROM early_access_leads WHERE email_norm = ?", emailNorm);
+    return n;
   }
 
   // ─── Metrics ─────────────────────────────────────────────────────────────
