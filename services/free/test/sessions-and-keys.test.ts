@@ -273,6 +273,22 @@ describe("who may have server keys", () => {
     assert.equal(await errorCode(await chat(service, key)), "invalid_key");
   });
 
+  it("still takes an ungranted key on /request (GET and POST), and nowhere else", async () => {
+    const { service, admin } = await ungranted();
+    const { key } = await oldKey(service);
+    assert.deepEqual(await (await service.request("GET", "/v1/access-request", { token: key })).json(), { status: "none" });
+    const asked = await service.request("POST", "/v1/access-request", { token: key, body: { building: "a build server for my side project, to run dl agents on" } });
+    assert.equal(asked.status, 201);
+    assert.deepEqual(await asked.json(), { status: "pending" });
+    for (const [method, path] of [["GET", "/v1/me"], ["GET", "/v1/models"], ["POST", "/v1/events"], ["POST", "/v1/chat/completions"]] as const) {
+      assert.equal(await errorCode(await service.request(method, path, { token: key, ...(method === "POST" ? { body: {} } : {}) })), "server_keys_unavailable", `${method} ${path}`);
+    }
+    // Granting the request gives the account keys: the same key works again.
+    const requests = ((await (await service.request("GET", "/v1/admin/access-requests", { token: admin })).json()) as { requests: Array<{ id: number }> }).requests;
+    assert.equal((await service.request("POST", `/v1/admin/access-requests/${requests[0]!.id}/grant`, { token: admin, body: {} })).status, 200);
+    assert.equal((await chat(service, key)).status, 200);
+  });
+
   it("lets an account without a grant revoke its keys", async () => {
     const { service, alice } = await ungranted();
     const { id } = await oldKey(service);

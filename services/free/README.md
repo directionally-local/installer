@@ -227,7 +227,7 @@ signed-in person who isn't blocked.
 |---|---|
 | 201 `{"status": "pending"}` | stored; the owner gets an alert with the login and the pending count only |
 | 409 `already_pending` | a request is already waiting |
-| 409 `already_full` | Full accounts and admins |
+| 409 `already_full` | Admins, and Full accounts that may already have server keys |
 | 429 `rate_limited` | more than 3 submissions in 24 hours |
 | 400 `invalid_request` | a clear message about what to fix |
 | 403 `blocked` | a blocked account |
@@ -966,7 +966,9 @@ and each failure adds a row to `host_failures` (time, host, `http_5xx` | `error_
     request. Type /request in dl and say what server you want to run it on, or use your own API
     key on the server."). Listing and revoking work for everyone. A key made before this rule
     isn't deleted: requests with it get the same 403 until an admin grants the account, and then
-    it works again. A blocked or suspended account's key gets `blocked` or `suspended` as before.
+    it works again. The one exception is `/v1/access-request` (GET and POST), which takes any
+    key, so `/request` can be typed on the server itself. A Full account without keys may send a
+    request (no 409 `already_full`); granting it gives the account keys. A blocked or suspended account's key gets `blocked` or `suspended` as before.
   - **Errors:** a wrong or revoked key gets 401 `invalid_key`. Signing out leaves keys working.
   - **Admin view:** `/admin/people` shows how many keys each person has, never the keys.
 
