@@ -1,6 +1,6 @@
 import { escapeHtml } from "../../shared/src/html.js";
 import { barPath, creditProviders, shell, SIMPLE_STYLE, type SpendView } from "./dashboard-page.js";
-import { atCap, modelName, realAllowance, type HomeData, type HomePerson, type Tier } from "./home-data.js";
+import { atCap, GPU_DAYS, modelName, realAllowance, type HomeData, type HomePerson, type Tier } from "./home-data.js";
 import { BRAND_ORIGIN, PRODUCT_NAME } from "./pages.js";
 import type { PendingAccessRequest } from "./directory-object.js";
 import { DAY_MS, WEEK_MS } from "./week.js";
@@ -204,6 +204,14 @@ export function usersSentence(home: Pick<HomeData, "people">): string {
   const { today, week, signupsToday } = home.people;
   const used = `${plural(today, "person", "people")} used dl today, ${week.toLocaleString("en-US")} this week.`;
   return `${used} ${signupsToday === 0 ? "No new sign-ups today." : `${plural(signupsToday, "new sign-up")} today.`}`;
+}
+
+/** "GPUs (7 days): 12 Nvidia, 3 AMD, 1 Ascend · 5 chose own GPUs · 2 early access", or null with none. */
+export function gpuSentence(home: Pick<HomeData, "gpus">): string | null {
+  const { nvidia, amd, ascend, ownGpus, earlyAccess } = home.gpus;
+  if (nvidia + amd + ascend + ownGpus + earlyAccess === 0) return null;
+  const n = (value: number) => value.toLocaleString("en-US");
+  return `GPUs (${GPU_DAYS} days): ${n(nvidia)} Nvidia, ${n(amd)} AMD, ${n(ascend)} Ascend · ${n(ownGpus)} chose own GPUs · ${n(earlyAccess)} early access`;
 }
 
 // ─── 3. Is anything broken? ───────────────────────────────────────────────
@@ -433,10 +441,12 @@ ${spendChart(home.spendDays, [...keys], 340, "narrow")}
     const amount = row.capUsd === null ? `<b>${escapeHtml(money(row.costUsd))}</b>, no cap` : `<b>${escapeHtml(money(row.costUsd))}</b> of ${escapeHtml(money(row.capUsd))}`;
     return `<li><span class="who">${link} <span class="tier">${escapeHtml(TIER_WORDS[row.tier])}</span></span><span class="amt">${row.atCap ? `<span class="capword">at cap</span> ` : ""}${amount}</span>${capBar(row.costUsd, row.capUsd, row.atCap)}</li>`;
   });
+  const gpuLine = gpuSentence(home);
   const using = `<section class="card" id="using" aria-labelledby="using-h">
 <h2 id="using-h">Who's using it?</h2>
 <p class="say">${escapeHtml(usersSentence(home))}</p>
 ${rows.length > 0 ? `<h3 class="sub">Spent most this week</h3><ul class="people">${rows.join("\n")}</ul>` : `<p class="none">Nobody has used free tokens this week.</p>`}
+${gpuLine ? `<p class="more"><a href="/admin?view=health#gpus">${escapeHtml(gpuLine)}</a></p>` : ""}
 </section>`;
 
   const broken = `<section class="card" id="broken" aria-labelledby="broken-h">

@@ -1002,6 +1002,19 @@ lists, `413` over 1 KB, `429` when rate-limited.
 - Stored in the Directory's `download_daily` and `install_daily`. The counts are best effort:
   anyone can post one, so read them as trends, not exact numbers.
 
+**GPU first run.** Before sign-in, Autopilot's GPU-aware first run counts its steps the same way:
+`POST /v1/telemetry/gpu {"event", "gpuVendor"?, "gpuModel"?, "gpuVramGb"?, "gpuCount"?, "answer"?,
+"option"?, "path"?, "outcome"?, "errorType"?}`, where `event` is `detected` (needs `gpuVendor`
+`nvidia|amd|ascend|none`), `prompt` (`gpuVendor`, `answer` `yes|no`), `early_access` (`gpuVendor`
+`amd|ascend`, `answer`), `option` (`option` `free|own_key|gpus|this_machine|remote_server|endpoint`)
+or `result` (`outcome` `ok|failed`, `path` `this_machine|remote_server|endpoint`, and with `failed`
+an `errorType` from a fixed list, `other` by default). Kept per UTC day in `gpu_daily`: those
+words, the GPU's name (64 characters of letters, digits, space and `._()+/-`), its VRAM in whole
+GB and the GPU count; a malformed optional field is dropped. Same responses as above; 60 an hour
+per IP. Like installs it has no person attached, so admin machines can't be left out. Signed in,
+the same steps go to `/v1/events` as `gpu.*` events with only those fields kept. The Health
+view's GPUs section and one line on the home screen read the counts.
+
 ## Admin dashboard
 
 **Home screen.** `GET /admin` opens on four questions, each answered in one plain sentence, made to

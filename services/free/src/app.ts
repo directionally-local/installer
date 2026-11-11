@@ -19,7 +19,7 @@ import { apiError, json } from "./errors.js";
 import { homePage } from "./home-page.js";
 import { dashboardCsv, dashboardPage, deniedPage, healthCsv, healthPage, isCsvTable, isHealthCsvTable, signedInPage, signInPage, simpleDashboardPage, STARTER_ROWS, toolsPage, type SpendView, type StarterRow, type ToolsState } from "./dashboard-page.js";
 import { ACCESS_REQUEST_MAX_BYTES, ACCESS_REQUEST_USAGE, ACCESS_REQUESTS_PER_DAY, parseAccessRequest } from "./access-request.js";
-import { cleanBatch } from "./events.js";
+import { cleanBatch, cleanGpuTelemetry } from "./events.js";
 import { cleanDownload, cleanInstall, MAX_TELEMETRY_BYTES } from "./telemetry.js";
 import {
   BLOCKED_MESSAGE,
@@ -168,6 +168,8 @@ const LIMITS = {
   // Cloudflare addresses, so this one is generous; install counts come from people's machines.
   telemetryDownloadIp: perMinute(600),
   telemetryInstallIp: { capacity: 20, perHour: 20 },
+  // A GPU first run sends a handful of counts (detected, prompt, option, result) per machine.
+  telemetryGpuIp: { capacity: 60, perHour: 60 },
   // Feedback is an email to the owner: a few at a time is plenty.
   feedbackPersonHour: { capacity: 5, perHour: 5 },
   feedbackPersonDay: { capacity: 20, perHour: 20 / 24 },
@@ -370,6 +372,7 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "GET" && path === "/v1/feedback/reply-address") return feedbackReplyAddress(c);
   if (method === "POST" && path === "/v1/telemetry/download") return telemetry(c, "download");
   if (method === "POST" && path === "/v1/telemetry/install") return telemetry(c, "install");
+  if (method === "POST" && path === "/v1/telemetry/gpu") return telemetry(c, "gpu");
   if (method === "GET" && path.startsWith("/v1/referrals/")) return referralLookup(c, path.slice("/v1/referrals/".length));
   if (method === "POST" && path === "/v1/billing/checkout") return billingCheckout(c);
   if (method === "POST" && path === "/v1/billing/portal") return billingPortal(c);
@@ -1867,14 +1870,16 @@ async function feedbackReplyAddress(c: Ctx): Promise<Response> {
 /**
  * POST /v1/telemetry/download {route, client} and POST /v1/telemetry/install {os, arch, mode,
  * dlVersion, result, failedStep?, via}: anonymous counts for the install funnel (telemetry.ts).
- * No sign-in. Each adds one to that day's total for its values; nothing else is kept. The rate
+ * POST /v1/telemetry/gpu {event, gpuVendor?, gpuModel?, gpuVramGb?, gpuCount?, answer?, option?,
+ * path?, outcome?, errorType?}: Autopilot's GPU first run before sign-in (events.ts
+ * cleanGpuTelemetry; signed in, the same goes to /v1/events as gpu.* events). No sign-in. Each adds one to that day's total for its values; nothing else is kept. The rate
  * limit is per IP, keyed by a hash salted with the signing key and the day, so the address
  * itself is never stored. 204 when counted.
  */
-async function telemetry(c: Ctx, kind: "download" | "install"): Promise<Response> {
+async function telemetry(c: Ctx, kind: "download" | "install" | "gpu"): Promise<Response> {
   const day = Math.floor(c.now() / DAY_MS);
   const ipKey = await sha256Hex(`telemetry:${c.config.tokenSigningKey}:${day}:${c.ipNet}`);
-  const retry = await limited(c, `telemetry:${kind}:${ipKey}`, kind === "download" ? LIMITS.telemetryDownloadIp : LIMITS.telemetryInstallIp);
+  const retry = await limited(c, `telemetry:${kind}:${ipKey}`, kind === "download" ? LIMITS.telemetryDownloadIp : kind === "gpu" ? LIMITS.telemetryGpuIp : LIMITS.telemetryInstallIp);
   if (retry !== undefined) return rateLimited(retry);
   if (Number(c.request.headers.get("content-length") ?? 0) > MAX_TELEMETRY_BYTES) return apiError(413, "too_large", "A telemetry body is under 1 KB.");
   const text = await c.request.text();
@@ -1884,6 +1889,10 @@ async function telemetry(c: Ctx, kind: "download" | "install"): Promise<Response
     const count = cleanDownload(body);
     if (typeof count === "string") return apiError(400, "invalid_request", count);
     await directory(c).countDownload(count, day);
+  } else if (kind === "gpu") {
+    const count = cleanGpuTelemetry(body);
+    if (typeof count === "string") return apiError(400, "invalid_request", count);
+    await directory(c).countGpu(count, day);
   } else {
     const count = cleanInstall(body);
     if (typeof count === "string") return apiError(400, "invalid_request", count);

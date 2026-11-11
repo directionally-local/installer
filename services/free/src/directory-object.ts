@@ -5,7 +5,7 @@ import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
 import { abuseData, outsideDl, simpleData, type AbuseData, type SimpleData } from "./abuse.js";
 import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, signupFunnel, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
-import type { CleanEvent } from "./events.js";
+import type { CleanEvent, GpuCount } from "./events.js";
 import { healthData, type HealthData, type HealthWindow } from "./health-data.js";
 import { homeData, type HomeData } from "./home-data.js";
 import { milestoneCrossed, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
@@ -546,6 +546,24 @@ const SCHEMA = [
      via         TEXT NOT NULL,
      installs    INTEGER NOT NULL,
      PRIMARY KEY (day, os, arch, mode, dl_version, result, failed_step, via)
+   ) WITHOUT ROWID`,
+  // Autopilot's GPU first run before sign-in (events.ts cleanGpuTelemetry): per UTC day and
+  // allowlisted values, how many machines reported each step. "" is a word not sent, -1 a number
+  // not sent. Nothing per person, so admins can't be left out (as with installs).
+  `CREATE TABLE IF NOT EXISTS gpu_daily (
+     day        INTEGER NOT NULL,
+     event      TEXT NOT NULL,
+     vendor     TEXT NOT NULL,
+     model      TEXT NOT NULL,
+     vram_gb    INTEGER NOT NULL,
+     gpu_count  INTEGER NOT NULL,
+     answer     TEXT NOT NULL,
+     option     TEXT NOT NULL,
+     path       TEXT NOT NULL,
+     outcome    TEXT NOT NULL,
+     error_type TEXT NOT NULL,
+     n          INTEGER NOT NULL,
+     PRIMARY KEY (day, event, vendor, model, vram_gb, gpu_count, answer, option, path, outcome, error_type)
    ) WITHOUT ROWID`,
   // Per UTC day, outcomes of the sign-up GitHub activity check's contribution lookup (app.ts):
   // "contributions" passed, "none" sent to the invite step, "error" let through. Counts only.
@@ -2363,6 +2381,25 @@ export class DirectoryObject extends DurableObject {
       count.result,
       count.failedStep,
       count.via,
+    );
+  }
+
+  /** Adds one to the day's count of GPU first-run steps with these values (events.ts cleanGpuTelemetry). */
+  async countGpu(count: GpuCount, day: number): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO gpu_daily (day, event, vendor, model, vram_gb, gpu_count, answer, option, path, outcome, error_type, n) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT (day, event, vendor, model, vram_gb, gpu_count, answer, option, path, outcome, error_type) DO UPDATE SET n = n + 1`,
+      day,
+      count.event,
+      count.gpuVendor,
+      count.gpuModel,
+      count.gpuVramGb,
+      count.gpuCount,
+      count.answer,
+      count.option,
+      count.path,
+      count.outcome,
+      count.errorType,
     );
   }
 

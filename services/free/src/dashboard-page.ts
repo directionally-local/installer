@@ -10,7 +10,7 @@ import { hasCapitals, type BroadcastAudience } from "./broadcast.js";
 import { GRANT_LABELS, MAX_GRANT_LOGINS, type GrantResult } from "./grant.js";
 import { FREE_MODELS } from "./models.js";
 import { creditBudget, creditMode } from "./queue.js";
-import { HEALTH_WINDOWS, healthTakeaways, INSTALL_STEPS, NORMAL_SESSION_ENDS, NO_END, STILL_OPEN, type HealthData } from "./health-data.js";
+import { GPU_OPTION_NAMES, GPU_VENDOR_NAMES, HEALTH_WINDOWS, healthTakeaways, INSTALL_STEPS, NORMAL_SESSION_ENDS, NO_END, STILL_OPEN, type HealthData } from "./health-data.js";
 
 /** One Starter account on the full dashboard: its stored signals and which checks pass. Admin-only. */
 export interface StarterRow {
@@ -46,8 +46,8 @@ export const STARTER_ROWS = 50;
  * four cards readable at a glance (sign-ups, growth, tokens per person, red flags), mostly
  * inline SVG charts, and Tools at /admin?view=tools (give free tokens by GitHub username, write
  * an email to users), whose buttons post a form and get the page back, and Health at
- * /admin?view=health (errors, crashes, versions, sessions, tools, models and installs from
- * Autopilot's session events; health-data.ts). Switching is a plain link: no scripts.
+ * /admin?view=health (errors, crashes, versions, sessions, tools, models, installs and GPUs from
+ * Autopilot's session events and the anonymous counts; health-data.ts). Switching is a plain link: no scripts.
  */
 
 /** Global spend, caps and admission, for the first section. */
@@ -119,6 +119,7 @@ export const HEALTH_CSV_TABLES = [
   "health-models",
   "health-upstreams",
   "health-installs",
+  "health-gpus",
 ] as const;
 export type HealthCsvTable = (typeof HEALTH_CSV_TABLES)[number];
 
@@ -1747,7 +1748,7 @@ const shareCell = (n: number, share: number) => `${count(n)} <span class="muted"
 
 /**
  * GET /admin?view=health: what Autopilot's session events and the request log say about bugs,
- * crashes and what gets used (health-data.ts), over the last 1, 7 or 30 days. Seven sections,
+ * crashes and what gets used (health-data.ts), over the last 1, 7 or 30 days. Eight sections,
  * each a one-line takeaway, compact tables and a CSV. Same look as the full view.
  */
 export function healthPage(input: { health: HealthData; login: string; signOut: boolean }): Response {
@@ -1939,7 +1940,40 @@ ${healthTable(
     `Anonymous counts from install.sh, by UTC day since ${escapeHtml(day(h.fromDay))}: they can't be joined to people, so admins are in them.`,
   );
 
-  return shell(`Health · ${PRODUCT_NAME}`, [header, errors, ends, versions, sessions, tools, models, installs].join("\n"));
+  const g = h.gpus;
+  const gpuName = (vendor: string) => escapeHtml(GPU_VENDOR_NAMES[vendor] ?? vendor);
+  const optionName = (option: string) => escapeHtml(GPU_OPTION_NAMES[option] ?? option);
+  const gpus = section(
+    "gpus",
+    "GPUs",
+    ["health-gpus"],
+    say.gpus,
+    `<div class="tiles">
+<div class="tile">First runs by GPU${healthTable(["GPU", "First runs"], g.detected.map((row) => healthRow([gpuName(row.vendor), count(row.count)])), "No first runs.")}</div>
+<div class="tile">Private model on this GPU?${healthTable(["Answer", "Count"], [healthRow(["Yes", count(g.prompt.yes)]), healthRow(["No", count(g.prompt.no)])], "No answers.")}</div>
+<div class="tile">Options picked${healthTable(["Option", "Count"], g.options.map((row) => healthRow([optionName(row.option), count(row.count)])), "No options picked.")}</div>
+<div class="tile">Early access${healthTable(["GPU", "Yes", "No"], g.earlyAccess.map((row) => healthRow([gpuName(row.vendor), count(row.yes), count(row.no)])), "No answers.")}</div>
+</div>
+<h3>Setups by path</h3>
+${healthTable(
+  ["Path", "Ok", "Failed", "Top errors"],
+  g.results.map((row) =>
+    healthRow(
+      [
+        optionName(row.path),
+        count(row.ok),
+        count(row.failed),
+        row.errors.length === 0 ? "–" : escapeHtml(row.errors.slice(0, 3).map((error) => `${error.errorType} (${error.count.toLocaleString("en-US")})`).join(", ")),
+      ],
+      row.failed > 0,
+    ),
+  ),
+  "No setups.",
+)}`,
+    `Anonymous counts from Autopilot's GPU first run before sign-in, by UTC day since ${escapeHtml(day(h.fromDay))}: one per step per machine, with no IP, account or device, so they can't be joined to people and admins are in them. A machine that runs the first run again is counted again.`,
+  );
+
+  return shell(`Health · ${PRODUCT_NAME}`, [header, errors, ends, versions, sessions, tools, models, installs, gpus].join("\n"));
 }
 
 // ─── CSV ──────────────────────────────────────────────────────────────────
@@ -2142,6 +2176,9 @@ export function healthCsv(table: HealthCsvTable, h: HealthData): Response {
           ...h.installs.failedSteps.map((row) => ["failed_step", null, null, null, row.step || "unknown", null, row.failed, null, null]),
         ],
       );
+      break;
+    case "health-gpus":
+      body = csv(["event", "vendor", "answer", "option", "path", "outcome", "error_type", "count"], h.gpus.rows.map((row) => [row.event, row.vendor, row.answer, row.option, row.path, row.outcome, row.errorType, row.count]));
       break;
   }
   return new Response(body, {
