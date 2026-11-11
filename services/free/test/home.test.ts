@@ -76,6 +76,7 @@ function homeFixture(overrides: Partial<HomeData> = {}): HomeData {
     models: [],
     installs: [],
     sessions: { judged: 0, abnormal: 0 },
+    gpus: { nvidia: 0, amd: 0, ascend: 0, ownGpus: 0, earlyAccess: 0 },
     providers: [],
     ...overrides,
   };

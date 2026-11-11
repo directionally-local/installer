@@ -1,4 +1,5 @@
 import { DASHBOARD_COLUMNS, installBreakdown, notAdmin, upstreamStats, type InstallFunnel, type Sql, type UpstreamStats } from "./dashboard-data.js";
+import { GPU_EARLY_ACCESS_VENDORS, GPU_OPTIONS, GPU_PATHS, GPU_VENDORS } from "./events.js";
 import { DAY_MS } from "./week.js";
 
 /**
@@ -24,8 +25,11 @@ import { DAY_MS } from "./week.js";
  * Tool calls are summed from turn.end only: session.end repeats the same counts, and a session
  * that crashed still sent its turns.
  *
- * Admins are left out of every number but the upstream timings and the installs, which have no
- * person attached (as on the Full view).
+ * GPUs come from `gpu_daily`: Autopilot's GPU first run before sign-in, anonymous per-day counts
+ * (events.ts cleanGpuTelemetry). The GPU's name, VRAM and count are stored but not read here.
+ *
+ * Admins are left out of every number but the upstream timings, the installs and the GPUs, which
+ * have no person attached (as on the Full view).
  */
 
 export const HEALTH_WINDOWS = [1, 7, 30] as const;
@@ -49,6 +53,7 @@ export const HEALTH_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   install_daily: DASHBOARD_COLUMNS.install_daily!,
   upstream_daily: DASHBOARD_COLUMNS.upstream_daily!,
   upstream_timings: DASHBOARD_COLUMNS.upstream_timings!,
+  gpu_daily: ["day", "event", "vendor", "answer", "option", "path", "outcome", "error_type", "n"],
 };
 
 /** Session ends that are a person closing or clearing the session. */
@@ -138,6 +143,25 @@ export interface HealthData {
     platforms: Array<{ os: string; arch: string; mode: string; ok: number; failed: number; failShare: number; topStep: string | null }>;
     failedSteps: InstallFunnel["failedSteps"];
   };
+  /** Autopilot's GPU first run, from fromDay (anonymous counts: admins included). */
+  gpus: HealthGpus;
+}
+
+export interface HealthGpus {
+  /** First runs per detected vendor, every vendor ("none": no GPU found). */
+  detected: Array<{ vendor: string; count: number }>;
+  /** First runs that found a GPU (any vendor but none). */
+  withGpu: number;
+  /** "Run a private model on this GPU?" */
+  prompt: { yes: number; no: number };
+  /** Options picked, every option. */
+  options: Array<{ option: string; count: number }>;
+  /** Early access asked for (yes) or not, per vendor it's offered for. */
+  earlyAccess: Array<{ vendor: string; yes: number; no: number }>;
+  /** Own-GPU setups per path, with their failures' error types, most first. */
+  results: Array<{ path: string; ok: number; failed: number; errors: Array<{ errorType: string; count: number }> }>;
+  /** Every stored combination read, for the CSV. */
+  rows: Array<{ event: string; vendor: string; answer: string; option: string; path: string; outcome: string; errorType: string; count: number }>;
 }
 
 /** Nearest-rank percentile of an ascending list; null when empty. */
@@ -406,6 +430,17 @@ export function healthData(store: Sql, input: { now: number; adminIds: readonly 
     topStep: topStep.get(`${row.os}\u0000${row.arch}\u0000${row.mode}`)?.step ?? null,
   }));
 
+  // ── GPU first runs, by UTC day (anonymous: admins can't be told apart).
+  const gpuRows = sql
+    .exec<{ event: string; vendor: string; answer: string; option: string; path: string; outcome: string; error_type: string; n: number }>(
+      `SELECT event, vendor, answer, option, path, outcome, error_type, SUM(n) AS n FROM gpu_daily WHERE day >= ? AND day < ?
+       GROUP BY event, vendor, answer, option, path, outcome, error_type ORDER BY event, vendor, answer, option, path, outcome, error_type`,
+      fromDay,
+      today + 1,
+    )
+    .toArray();
+  const gpus = gpuSummary(gpuRows.map((row) => ({ event: row.event, vendor: row.vendor, answer: row.answer, option: row.option, path: row.path, outcome: row.outcome, errorType: row.error_type, count: row.n })));
+
   // Equal counts: newest first, so an upgrade reads top-down.
   const versions = ranked(versionCounts, sessionCount)
     .sort((a, b) => b.count - a.count || compareVersions(b.key, a.key))
@@ -459,10 +494,80 @@ export function healthData(store: Sql, input: { now: number; adminIds: readonly 
       platforms,
       failedSteps: breakdown.failedSteps,
     },
+    gpus,
+  };
+}
+
+/** The GPU section's numbers from gpu_daily's rows. */
+export function gpuSummary(rows: HealthGpus["rows"]): HealthGpus {
+  const detected = new Map<string, number>(GPU_VENDORS.map((vendor) => [vendor, 0]));
+  const options = new Map<string, number>(GPU_OPTIONS.map((option) => [option, 0]));
+  const early = new Map<string, { yes: number; no: number }>(GPU_EARLY_ACCESS_VENDORS.map((vendor) => [vendor, { yes: 0, no: 0 }]));
+  const results = new Map<string, { ok: number; failed: number; errors: Map<string, number> }>(GPU_PATHS.map((path) => [path, { ok: 0, failed: 0, errors: new Map() }]));
+  const prompt = { yes: 0, no: 0 };
+  for (const row of rows) {
+    if (row.event === "detected" && detected.has(row.vendor)) tally(detected, row.vendor, row.count);
+    else if (row.event === "prompt" && (row.answer === "yes" || row.answer === "no")) prompt[row.answer] += row.count;
+    else if (row.event === "option" && options.has(row.option)) tally(options, row.option, row.count);
+    else if (row.event === "early_access" && (row.answer === "yes" || row.answer === "no")) {
+      const target = early.get(row.vendor);
+      if (target) target[row.answer] += row.count;
+    } else if (row.event === "result") {
+      const target = results.get(row.path);
+      if (!target) continue;
+      if (row.outcome === "ok") target.ok += row.count;
+      else if (row.outcome === "failed") {
+        target.failed += row.count;
+        tally(target.errors, row.errorType || "other", row.count);
+      }
+    }
+  }
+  return {
+    detected: [...detected.entries()].map(([vendor, count]) => ({ vendor, count })),
+    withGpu: [...detected.entries()].filter(([vendor]) => vendor !== "none").reduce((sum, [, n]) => sum + n, 0),
+    prompt,
+    options: [...options.entries()].map(([option, count]) => ({ option, count })),
+    earlyAccess: [...early.entries()].map(([vendor, counts]) => ({ vendor, ...counts })),
+    results: [...results.entries()].map(([path, row]) => ({
+      path,
+      ok: row.ok,
+      failed: row.failed,
+      errors: ranked(row.errors, row.failed).map(({ key, count }) => ({ errorType: key, count })),
+    })),
+    rows,
   };
 }
 
 // ─── Takeaways ───────────────────────────────────────────────────────────
+
+/** GPU vendors and first-run options in plain words. */
+export const GPU_VENDOR_NAMES: Readonly<Record<string, string>> = { nvidia: "Nvidia", amd: "AMD", ascend: "Ascend", none: "No GPU" };
+export const GPU_OPTION_NAMES: Readonly<Record<string, string>> = {
+  free: "Free tier",
+  own_key: "Own API key",
+  gpus: "Own GPUs",
+  this_machine: "This machine",
+  remote_server: "A remote server",
+  endpoint: "An endpoint",
+};
+
+/** "N machines with GPUs: x Nvidia, y AMD, z Ascend; k chose own GPUs." and how their setups went. */
+export function gpuTakeaway(gpus: HealthGpus): string {
+  const runs = gpus.detected.reduce((sum, row) => sum + row.count, 0);
+  if (runs === 0 && gpus.rows.length === 0) return "No GPU first runs counted.";
+  const count = (vendor: string) => gpus.detected.find((row) => row.vendor === vendor)?.count ?? 0;
+  const chose = gpus.options.find((row) => row.option === "gpus")?.count ?? 0;
+  let line = `${plural(gpus.withGpu, "machine")} with GPUs: ${count("nvidia").toLocaleString("en-US")} Nvidia, ${count("amd").toLocaleString("en-US")} AMD, ${count("ascend").toLocaleString("en-US")} Ascend; ${chose.toLocaleString("en-US")} chose own GPUs.`;
+  const ok = gpus.results.reduce((sum, row) => sum + row.ok, 0);
+  const failed = gpus.results.reduce((sum, row) => sum + row.failed, 0);
+  if (ok + failed > 0) {
+    const errors = new Map<string, number>();
+    for (const row of gpus.results) for (const error of row.errors) tally(errors, error.errorType, error.count);
+    const top = ranked(errors, failed)[0];
+    line += ` ${ok.toLocaleString("en-US")} of ${plural(ok + failed, "setup")} worked${top ? `; most failures: ${top.key}` : ""}.`;
+  }
+  return line;
+}
 
 /** install.sh's steps in plain words, for the takeaways and the page. */
 export const INSTALL_STEPS: Readonly<Record<string, string>> = {
@@ -483,7 +588,7 @@ const seconds = (ms: number) => (ms >= 60_000 ? `${(ms / 60_000).toFixed(ms >= 6
 const MIN_GROUP = 5;
 
 /** One plain-English line per section, computed from the numbers. */
-export function healthTakeaways(data: HealthData): Record<"errors" | "ends" | "versions" | "sessions" | "tools" | "models" | "installs", string> {
+export function healthTakeaways(data: HealthData): Record<"errors" | "ends" | "versions" | "sessions" | "tools" | "models" | "installs" | "gpus", string> {
   const { errors, requests, ends, versions, sessions, tools, models, installs } = data;
 
   let errorsLine: string;
@@ -551,5 +656,5 @@ export function healthTakeaways(data: HealthData): Record<"errors" | "ends" | "v
     }
   }
 
-  return { errors: errorsLine, ends: endsLine, versions: versionsLine, sessions: sessionsLine, tools: toolsLine, models: modelsLine, installs: installsLine };
+  return { errors: errorsLine, ends: endsLine, versions: versionsLine, sessions: sessionsLine, tools: toolsLine, models: modelsLine, installs: installsLine, gpus: gpuTakeaway(data.gpus) };
 }

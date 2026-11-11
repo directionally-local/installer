@@ -7,9 +7,9 @@ import { DAY_MS, weekStart } from "./week.js";
  * The admin home screen's numbers (GET /admin): a handful of small, indexed reads, so the page
  * that opens first stays fast. Nothing here scans the whole request log: spend comes from the
  * per-day upstream roll-up, people from the per-day activity roll-up, failures from this week's
- * slice of the request log and session starts, installs from the per-day install counts.
- * Admins are left out except in the per-provider spend and failure counts, which have no
- * person attached. Counts, dollars and logins only: never content.
+ * slice of the request log and session starts, installs and GPUs from the per-day anonymous counts.
+ * Admins are left out except in the per-provider spend and failure counts and the GPU counts,
+ * which have no person attached. Counts, dollars and logins only: never content.
  */
 
 /** Days of spend in the home screen's chart. */
@@ -51,8 +51,24 @@ export interface HomeData {
   installs: Array<{ os: string; arch: string; mode: string; ok: number; failed: number }>;
   /** Sessions started this week: how many we can judge (ended, or quiet for OPEN_GRACE_MS), and how many ended abnormally. */
   sessions: { judged: number; abnormal: number };
+  /** GPU first runs over the last GPU_DAYS UTC days, today included (anonymous: admins included). */
+  gpus: HomeGpus;
   /** Requests and failures per provider, today and this week (admins included: no person here). */
   providers: Array<{ upstream: "openai" | "luminal" | "openrouter"; window: "today" | "week"; requests: number; errors: number }>;
+}
+
+/** Days of GPU first runs on the home screen. */
+export const GPU_DAYS = 7;
+
+export interface HomeGpus {
+  /** First runs that found each vendor's GPU. */
+  nvidia: number;
+  amd: number;
+  ascend: number;
+  /** Picked "own GPUs" as their option. */
+  ownGpus: number;
+  /** Said yes to early access (AMD or Ascend). */
+  earlyAccess: number;
 }
 
 /** Every home query starts with this comment, so a test can hold them to `HOME_COLUMNS`. */
@@ -67,6 +83,7 @@ export const HOME_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   requests: ["github_id", "is_admin", "at", "model", "status"],
   install_daily: ["day", "os", "arch", "mode", "result", "installs"],
   events: ["github_id", "type", "session_id", "at", "props"],
+  gpu_daily: ["day", "event", "vendor", "answer", "option", "n"],
 };
 
 export function homeData(store: Sql, input: { now: number; adminIds: readonly number[] }): HomeData {
@@ -161,6 +178,20 @@ export function homeData(store: Sql, input: { now: number; adminIds: readonly nu
     )
     .toArray();
 
+  const gpus: HomeGpus = { nvidia: 0, amd: 0, ascend: 0, ownGpus: 0, earlyAccess: 0 };
+  for (const row of sql
+    .exec<{ event: string; vendor: string; answer: string; option: string; n: number }>(
+      `SELECT event, vendor, answer, option, SUM(n) AS n FROM gpu_daily
+       WHERE day >= ? AND (event = 'detected' OR (event = 'option' AND option = 'gpus') OR (event = 'early_access' AND answer = 'yes'))
+       GROUP BY event, vendor, answer, option`,
+      today - GPU_DAYS + 1,
+    )
+    .toArray()) {
+    if (row.event === "detected" && (row.vendor === "nvidia" || row.vendor === "amd" || row.vendor === "ascend")) gpus[row.vendor] += row.n;
+    else if (row.event === "option") gpus.ownGpus += row.n;
+    else if (row.event === "early_access") gpus.earlyAccess += row.n;
+  }
+
   // Sessions started this week, as the Health view counts their ends: normal is exit or clear;
   // no end event is abnormal once the session has been quiet for OPEN_GRACE_MS (else it may be open).
   let judged = 0;
@@ -193,6 +224,7 @@ export function homeData(store: Sql, input: { now: number; adminIds: readonly nu
     models: [...models.values()].sort((a, b) => b.requests - a.requests || a.model.localeCompare(b.model)),
     installs,
     sessions: { judged, abnormal },
+    gpus,
     providers,
   };
 }
