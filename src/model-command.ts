@@ -75,7 +75,7 @@ async function selectModel(options: ModelCommandOptions, id: string | undefined,
   return recipe(selected.value);
 }
 
-async function configureProvider(options: ModelCommandOptions, deployment: ModelDeployment, path: string): Promise<void> {
+export async function configureProvider(options: Pick<ModelCommandOptions, "system">, deployment: ModelDeployment, path: string): Promise<void> {
   const raw = await options.system.readFile(path);
   let config: Record<string, unknown> = {};
   if (raw) {

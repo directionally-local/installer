@@ -1,0 +1,170 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { firstRunModelUp, modelChoices, modelUpErrorType, TESTED_MODELS, type FirstRunModelUpOptions } from "./model-first-run.js";
+import { FakeModelSystem } from "./test-support/fake-model-system.js";
+import { PlainUi } from "./ui.js";
+import { PromptCancelled, type Prompter, type SelectOption } from "./prompt.js";
+import type { RunOptions, RunResult } from "./system.js";
+
+/** A GPU machine where installing the toolkit (sh -c … under sudo or as root) makes it appear. */
+class ToolkitSystem extends FakeModelSystem {
+  installFails = false;
+  override async run(command: string, args: string[], options: RunOptions = {}): Promise<RunResult> {
+    if (command === "sudo" || command === "sh") {
+      this.commands.push({ command, args });
+      if (args.includes("-c")) {
+        if (this.installFails) throw new Error("apt-get install failed (exit 100)");
+        this.toolkit = true;
+        this.runtimes = '{"nvidia":{},"runc":{}}';
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    return super.run(command, args, options);
+  }
+}
+
+function fixture(o: { gpu?: string; picks?: string[]; texts?: string[]; toolkit?: boolean; docker?: boolean; os?: string } = {}) {
+  const system = new ToolkitSystem();
+  if (o.gpu !== undefined) system.gpu = o.gpu;
+  if (o.toolkit === false) {
+    system.toolkit = false;
+    system.runtimes = '{"runc":{}}';
+  }
+  if (o.docker === false) system.docker = false;
+  if (o.os) system.files.set("/etc/os-release", { content: `ID=${o.os}\n`, mode: 0o644 });
+  const lines: string[] = [];
+  const picks = [...(o.picks ?? [])];
+  const texts = [...(o.texts ?? [])];
+  const shown: SelectOption[][] = [];
+  const initials: Array<number | undefined> = [];
+  const prompter: Prompter = {
+    choose: async () => "",
+    select: async (_question, options, initial) => {
+      shown.push(options);
+      initials.push(initial);
+      const value = picks.shift();
+      if (value === "cancel") throw new PromptCancelled();
+      return { value: value ?? options[initial ?? 0]!.value };
+    },
+    secret: async () => "",
+    text: async () => texts.shift() ?? "",
+  };
+  const ups: Array<{ action: string; args: string[]; interactive: boolean | undefined }> = [];
+  let upResult: number | Error = 0;
+  const options: FirstRunModelUpOptions = {
+    system,
+    ui: new PlainUi((line) => lines.push(line)),
+    prompter,
+    statePath: "/tmp/model.json",
+    configPath: "/tmp/autopilot/config.json",
+    modelUp: async (action, args, opts) => {
+      ups.push({ action, args, interactive: opts.interactive });
+      if (upResult instanceof Error) throw upResult;
+      return upResult;
+    },
+  };
+  return { system, lines, shown, initials, ups, options, setUp: (r: number | Error) => (upResult = r) };
+}
+
+test("the picker shows every model with fits or doesn't fit, and tested or untested; dl model up runs the pick with defaults", async () => {
+  const f = fixture({ gpu: "0, NVIDIA GeForce RTX 4090, 24564, 24000, 570.86\n" });
+  const result = await firstRunModelUp(f.options);
+  assert.deepEqual(result, { ok: true, model: "Qwen/Qwen3-4B" });
+  const rows = f.shown[0]!;
+  assert.deepEqual(rows.map((row) => row.detail), ["12 GB · fits · tested", "16 GB · fits · tested", "48 GB · doesn't fit · untested"]);
+  assert.equal(f.initials[0], 0, "the first tested model that fits is the default");
+  assert.deepEqual(f.ups, [{ action: "up", args: ["qwen-old"], interactive: false }], "dl model up's own entry point, default context and port");
+  assert.match(f.lines.join(""), /GPU 0: NVIDIA GeForce RTX 4090 · 24 GB/);
+  assert.match(f.lines.join(""), /Docker: Nvidia container toolkit ready/);
+});
+
+test("a model that doesn't fit can't be started: it says why and asks again", async () => {
+  const f = fixture({ gpu: "0, NVIDIA GeForce RTX 4090, 24564, 24000, 570.86\n", picks: ["glm-flash", "qwen-new"] });
+  assert.deepEqual(await firstRunModelUp(f.options), { ok: true, model: "Qwen/Qwen3-4B-Instruct-2507" });
+  assert.match(f.lines.join(""), /glm-flash needs 48 GB; this GPU has 24 GB\. Pick one that fits\./);
+  assert.deepEqual(f.ups.map((up) => up.args), [["qwen-new"]]);
+});
+
+test("nothing in the catalog fits a small GPU", async () => {
+  const f = fixture({ gpu: "0, NVIDIA GeForce RTX 3050, 8192, 8000, 570.86\n" });
+  const result = await firstRunModelUp(f.options);
+  assert.equal(result.ok, false);
+  assert.equal(!result.ok && result.errorType, "no_fit");
+  assert.equal(f.ups.length, 0);
+});
+
+test("a missing toolkit is offered for install with sudo; yes installs it and goes on", async () => {
+  const f = fixture({ toolkit: false, texts: [""] });
+  assert.equal((await firstRunModelUp(f.options)).ok, true);
+  assert.deepEqual(f.system.commands.filter((c) => c.command === "sudo").map((c) => c.args.slice(0, 2)), [["-v"], ["-n", "sh"]], "sudo asks for the password first, then installs");
+  assert.match(f.system.commands.find((c) => c.args.includes("-c"))!.args.at(-1)!, /apt-get install -y -qq nvidia-container-toolkit[\s\S]*nvidia-ctk runtime configure --runtime=docker/);
+  assert.equal(f.ups.length, 1);
+});
+
+test("as root, the toolkit installs without sudo", async () => {
+  const f = fixture({ toolkit: false, texts: ["y"] });
+  assert.equal((await firstRunModelUp({ ...f.options, root: true })).ok, true);
+  assert.deepEqual(f.system.commands.filter((c) => c.command === "sudo"), []);
+  assert.equal(f.system.commands.filter((c) => c.command === "sh").length, 1);
+});
+
+test("declining the toolkit, or a failed install, ends without starting anything", async () => {
+  const no = fixture({ toolkit: false, texts: ["n"] });
+  const declined = await firstRunModelUp(no.options);
+  assert.equal(!declined.ok && declined.errorType, "no_toolkit");
+  assert.equal(no.ups.length, 0);
+  const broken = fixture({ toolkit: false, texts: [""] });
+  broken.system.installFails = true;
+  const failed = await firstRunModelUp(broken.options);
+  assert.equal(!failed.ok && failed.errorType, "toolkit_install_failed");
+  assert.match(!failed.ok ? failed.message : "", /apt-get install failed/);
+});
+
+test("off Ubuntu and Debian the toolkit isn't installed for you: the guide is named", async () => {
+  const f = fixture({ toolkit: false, os: "fedora" });
+  const result = await firstRunModelUp(f.options);
+  assert.equal(!result.ok && result.errorType, "no_toolkit");
+  assert.match(!result.ok ? result.message : "", /container-toolkit\/latest\/install-guide/);
+});
+
+test("no Docker: says so with where to get it", async () => {
+  const f = fixture({ docker: false });
+  const result = await firstRunModelUp(f.options);
+  assert.equal(!result.ok && result.errorType, "no_docker");
+  assert.match(!result.ok ? result.message : "", /docs\.docker\.com/);
+});
+
+test("a model already serving here is reused: Autopilot's provider points at it", async () => {
+  const f = fixture();
+  f.system.files.set("/tmp/model.json", { mode: 0o600, content: JSON.stringify({ version: 1, active: { id: "qwen-new", repo: "Qwen/Qwen3-4B-Instruct-2507", container: "dl-model-1", port: 8000, context: 32768, image: "x", flags: [], minVramMiB: 16384, lastTest: { chat: true, tools: true, json: true, tokensPerSecond: 1, at: "" } } }) });
+  f.system.running.add("dl-model-1");
+  assert.deepEqual(await firstRunModelUp(f.options), { ok: true, model: "Qwen/Qwen3-4B-Instruct-2507" });
+  const config = JSON.parse(f.system.files.get("/tmp/autopilot/config.json")!.content);
+  assert.equal(config.provider, "vllm");
+  assert.equal(config.providers.vllm.baseUrl, "http://127.0.0.1:8000/v1");
+  assert.equal(f.ups.length, 0);
+  f.system.running.delete("dl-model-1");
+  const stopped = await firstRunModelUp(f.options);
+  assert.equal(!stopped.ok && stopped.errorType, "already_running");
+});
+
+test("failures from dl model up become short error types; Esc is cancelled", async () => {
+  const smoke = fixture();
+  smoke.setUp(new Error("Smoke test failed for Qwen/Qwen3-4B: Tool call did not return ping(1)"));
+  const failed = await firstRunModelUp(smoke.options);
+  assert.equal(!failed.ok && failed.errorType, "smoke_failed");
+  const cancelled = fixture({ picks: ["cancel"] });
+  const esc = await firstRunModelUp(cancelled.options);
+  assert.equal(!esc.ok && esc.errorType, "cancelled");
+  assert.equal(modelUpErrorType(new Error("Could not start vLLM: boom")), "launch_failed");
+  assert.equal(modelUpErrorType(new Error("glm-flash reserves 44 GB of GPU VRAM but the largest GPU has 20 GB free.")), "no_fit");
+  assert.equal(modelUpErrorType(new Error("something else")), "other");
+  const noGpu = fixture({ gpu: "" });
+  const none = await firstRunModelUp(noGpu.options);
+  assert.equal(!none.ok && none.errorType, "other");
+});
+
+test("tested models are the ones verified on a real GPU", () => {
+  assert.deepEqual([...TESTED_MODELS].sort(), ["qwen-new", "qwen-old"]);
+  assert.deepEqual(modelChoices(49152).map((c) => [c.recipe.id, c.fits]), [["qwen-old", true], ["qwen-new", true], ["glm-flash", true]]);
+});
