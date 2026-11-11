@@ -41,7 +41,13 @@ async function me(service: Service, token: string): Promise<Record<string, any>>
 
 const chat = (service: Service, token: string, model = MODEL) => service.request("POST", "/v1/chat/completions", { token, body: body(model) });
 
-/** Fifteen accounts created within a day of each other, already signed up: the next one like them is in a batch. */
+/** A creation day `days` before the service's clock, as GitHub gives it. */
+const daysAgo = (service: Service, days: number) => new Date(service.clock.now - days * DAY).toISOString();
+
+/**
+ * Fifteen accounts created within a day of each other, already signed up: the next one like them
+ * is in a batch when it is younger than the public bar's age.
+ */
 async function batch(service: Service, day: string): Promise<void> {
   for (let id = 300; id < 315; id++) await service.signIn(belowBar(id, day));
 }
@@ -65,16 +71,22 @@ describe("the basic level", () => {
     assert.equal(service.calls.openai.length, 1);
   });
 
-  it("keeps a young account, and a batch-flagged old one, on Starter", async () => {
-    const { service, admin } = await open();
+  it("keeps a young account, and a batch-flagged one old enough for basic, on Starter; an established account from a busy day isn't flagged", async () => {
+    const { service, admin } = await open({ BASIC_MIN_ACCOUNT_AGE_DAYS: "180" });
     await service.signIn(belowBar(100, YOUNG));
-    const day = "2024-03-10T00:00:00Z";
+    const day = daysAgo(service, 200);
     await batch(service, day);
-    await service.signIn(belowBar(101, day));
+    await service.signIn(belowBar(101, day, { followers: 11, outsideCommits: 1, social: 30 }));
+    for (let id = 400; id < 415; id++) await service.signIn(belowBar(id, OLD));
+    await service.signIn(belowBar(102, OLD));
     const people = ((await (await service.request("GET", "/admin/people", { token: admin })).json()) as { people: Array<Record<string, any>> }).people;
     const level = (id: number) => people.find((row) => row.githubId === id)?.level;
     assert.equal(level(100), "starter");
-    assert.equal(level(101), "starter", "old, but in a creation batch");
+    assert.equal(level(101), "starter", "old enough for basic, but in a creation batch, followers or not");
+    // Older than the public bar's age: never in a batch (its level here is the network cap's business).
+    const established = people.find((row) => row.githubId === 102)!;
+    assert.equal(established.checks.batchPeers, 15);
+    assert.equal(established.checks.creationBatch, false);
   });
 
   it("is off with basicWeeklyTokens 0: the same account is Starter and refused like today", async () => {
@@ -191,7 +203,7 @@ describe("the Starter allowance", () => {
 
   it("gives a batch-flagged account nothing, with the usual below_bar refusal and never the reason", async () => {
     const { service } = await open({ STARTER_WEEKLY_TOKENS: "2000000" });
-    const day = "2024-03-10T00:00:00Z";
+    const day = daysAgo(service, 200);
     await batch(service, day);
     const { access_token: token } = await service.signIn(belowBar(100, day));
     const mine = await me(service, token);
@@ -213,11 +225,11 @@ describe("the Starter allowance", () => {
 
 describe("re-check below-bar accounts", () => {
   it("raises qualifying Starter accounts to basic from stored signals, and stores the batch flag", async () => {
-    const { service, admin } = await open({ BASIC_WEEKLY_TOKENS: "0" });
+    const { service, admin } = await open({ BASIC_WEEKLY_TOKENS: "0", BASIC_MIN_ACCOUNT_AGE_DAYS: "180" });
     await service.signIn(belowBar(100, OLD)); // qualifies once basic is on
     await service.signIn(belowBar(101, YOUNG)); // too young
-    const day = "2024-03-10T00:00:00Z";
-    await batch(service, day); // 300..314: old, mostly not flagged when they signed up
+    const day = daysAgo(service, 200);
+    await batch(service, day); // 300..314: old enough for basic, mostly not flagged when they signed up
     await service.signIn(belowBar(102, day)); // flagged
     await service.signIn(belowBar(103, OLD)); // blocked: left alone
     assert.equal((await service.request("POST", "/admin/people/103/block", { token: admin })).status, 200);
@@ -315,7 +327,7 @@ describe("what each level is told", () => {
 
     // A batch-flagged sign-up gets the no-tokens welcome even with a Starter allowance.
     const flagged = await open({ ...vars, STARTER_WEEKLY_TOKENS: "2000000" });
-    const day = "2024-03-10T00:00:00Z";
+    const day = daysAgo(flagged.service, 200);
     await batch(flagged.service, day);
     const before = flagged.service.calls.resend.length;
     await startBrowserFlow(flagged.service.request, { ...belowBar(103, day), email: "d@work.example" });

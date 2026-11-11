@@ -60,7 +60,12 @@ unprofitable without turning away real developers.
   contributions in the last year (private ones count when the person shows them).
 - **Additional account signals**: on top of that public bar, Full also needs a few more
   account signals from the same public GitHub data, read at sign-in with the same token, and
-  an account must not come from a batch of accounts created together. Their thresholds are
+  an account must not come from a batch of accounts created together. These signals can only
+  keep an account out of Full: without the public bar no number of them gives Full, because a
+  sign-up farm can fake them together (accounts following and contributing to each other). The
+  creation-batch check flags an account younger than the public bar's age when many accounts
+  already signed up were created around the same day, whether or not it follows or is followed
+  by anyone; an established account created on a busy day is never flagged. Their thresholds are
   runtime settings (`humanSignalsNeeded`, `minActiveWeeks`, `minRepoAgeDays`, `minSocial`,
   `minFollowers`, `batchWindowDays`, `batchSize`; see `src/admission.ts` `levelChecks`) whose
   real values live in the admin settings. Nothing a person is shown names them: an account
@@ -87,6 +92,10 @@ unprofitable without turning away real developers.
 - **Promotion**: at sign-in, weekly from the public profile (promote only, once per person per
   week: Starter to Basic or Full, Basic to Full), with an invite code, by an access request, or
   by an admin. An admin can also demote or block; their choice stands until they change it.
+- **Re-levelling**: each sign-in sets the level from the rules again, so an account that no
+  longer qualifies moves down then; the weekly re-check moves a Basic account the creation-batch
+  check now flags to Starter (no free tokens). Neither ever touches a level an admin or an
+  invite set. Nothing re-levels accounts in bulk: the owner blocks by hand.
 - **Re-check below-bar accounts** (Tools tab, or `POST /admin/recheck-below-bar`): looks at
   every active non-admin Starter account from its stored signals (age counted to today), raises
   the ones that qualify to Basic, and stores the batch flag again. Never lowers anyone, never
@@ -1079,10 +1088,12 @@ which records settings, pause, block and unblock.
   events (`POST /v1/events`) while the free tier is its provider, so a sign-in token used from
   another tool sends requests and no events. A chat request from a free-plan account is
   refused with 403 `dl_only` ("Free tokens work inside dl only. Run dl to keep using them, or
-  use your own API key in any tool.") when, in the last 24 hours, the account made at least 20
-  free chat requests with a sign-in token and no session event arrived. Autopilot batches
-  events for a few seconds, so a real session's first requests come before its first event:
-  the threshold leaves room for that. Not counted and never refused: admins, requests with a
+  use your own API key in any tool.") when no session event (one with a session id) arrived in
+  the last 24 hours and the account has made at least 20 free chat requests with a sign-in token
+  that no session event covers: a session event covers the 24 hours after it, so these are the
+  requests made more than 24 hours after the latest one (all of them, for an account that never
+  sent one). Autopilot batches events for a few seconds, so a new session's first requests come
+  before its first event: the threshold leaves room for that, once, not every day. Not counted and never refused: admins, requests with a
   server key (`dlk_`, dl's server mode) and paid usage (Pro and top-ups; a refused free account
   with a top-up is served from it). The check reads the caller's events and request log in the
   Directory read every chat request already makes; the only new write is a `via_key` flag on the

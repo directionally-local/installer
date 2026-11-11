@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { levelChecks, levelFor, levelReason, type GithubSignals } from "../src/admission.js";
 import { newInviteCode, newUserCode, normalizeInviteCode, normalizeUserCode } from "../src/codes.js";
 import { ConfigError, readFreeConfig } from "../src/config.js";
 import { cleanBatch, cleanProps } from "../src/events.js";
@@ -8,6 +9,43 @@ import { meterStream, type StreamOutcome } from "../src/sse.js";
 import { weekEnd, weekStart } from "../src/week.js";
 
 const BASE_ENV = { OPENROUTER_API_KEY: "k", GITHUB_CLIENT_ID: "c", GITHUB_CLIENT_SECRET: "s", TOKEN_SIGNING_KEY: "x".repeat(32) };
+
+describe("level checks", () => {
+  // Test values only: the real thresholds are private runtime settings.
+  const bar = { minAccountAgeDays: 365, minPublicRepos: 100_000, minContributions: 100 };
+  const rules = { humanSignalsNeeded: 3, minActiveWeeks: 8, minRepoAgeDays: 180, minSocial: 10, minFollowers: 3, batchWindowDays: 1, batchSize: 15 };
+  const now = Date.parse("2026-11-11T00:00:00Z");
+  const basic = { minAccountAgeDays: 30, weeklyTokens: 10_000_000 };
+  const signals = (extra: Partial<GithubSignals>): GithubSignals => ({ accountAgeDays: 100, publicRepos: 0, followers: 0, contributions: 0, restrictedContributions: 0, ...extra });
+
+  it("keeps a sign-up farm account (young, following each other, one outside contribution, in a batch) off Full and off basic", () => {
+    const farm = signals({ accountAgeDays: 100, followers: 11, outsideContributions: 1, social: 30, contributions: 5 });
+    const checks = levelChecks(farm, bar, rules, { now, batchPeers: 20 });
+    assert.equal(checks.humanSignals, 3);
+    assert.equal(checks.creationBatch, true);
+    assert.equal(checks.full, false);
+    assert.equal(levelFor(checks, farm, basic), "starter");
+    assert.equal(levelReason(farm, bar, checks), "account_too_new");
+  });
+
+  it("never gives Full without the public bar, however many additional signals pass", () => {
+    const hidden = signals({ accountAgeDays: 200, followers: 50, outsideContributions: 9, social: 99, activeWeeks: 40, oldestRepoCreatedAt: now - 190 * 86_400_000 });
+    const checks = levelChecks(hidden, bar, rules, { now, batchPeers: 0 });
+    assert.equal(checks.humanSignals, 5);
+    assert.equal(checks.full, false);
+  });
+
+  it("gives Full to an established account with the public bar and enough signals, even when it was created on a busy day", () => {
+    const real = signals({ accountAgeDays: 3000, contributions: 400, followers: 12, activeWeeks: 30 });
+    const checks = levelChecks(real, bar, rules, { now, batchPeers: 40 });
+    assert.equal(checks.creationBatch, false);
+    assert.equal(checks.full, true);
+    // The additional signals still keep one out: the public bar with too few of them isn't Full.
+    const thin = levelChecks(signals({ accountAgeDays: 3000, contributions: 400, followers: 12 }), bar, rules, { now, batchPeers: 0 });
+    assert.equal(thin.full, false);
+    assert.equal(levelReason(signals({ accountAgeDays: 3000, contributions: 400 }), bar, thin), "few_repos_and_contributions");
+  });
+});
 
 describe("reservation planning", () => {
   it("reserves the prompt estimate plus the output cap", () => {

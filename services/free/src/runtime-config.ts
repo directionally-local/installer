@@ -32,7 +32,7 @@ export const RUNTIME_SETTINGS = {
   fullMinPublicRepos: { kind: "count", env: "FULL_MIN_PUBLIC_REPOS" },
   /** ... or this many contributions in the last year. */
   fullMinContributions: { kind: "count", env: "FULL_MIN_CONTRIBUTIONS" },
-  /** Additional account signals for Full (admission.ts levelChecks): needed without the public bar, one fewer with it. */
+  /** Additional account signals for Full (admission.ts levelChecks): with the public bar, one fewer than this is needed; never Full without it. */
   humanSignalsNeeded: { kind: "count", env: "HUMAN_SIGNALS_NEEDED" },
   /** ... weeks with a contribution in the last year ... */
   minActiveWeeks: { kind: "count", env: "MIN_ACTIVE_WEEKS" },

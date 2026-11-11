@@ -14,7 +14,9 @@
  *
  * On top of that public bar, a handful of additional account signals (from the same public
  * GitHub data, read with the sign-in token) with thresholds that live in the private admin
- * settings: see `levelChecks`. None of them is named in anything a person is shown.
+ * settings: see `levelChecks`. They can only keep an account out of Full, never let one in
+ * without the public bar: each of them is cheap for a sign-up farm to fake together (accounts
+ * following and contributing to each other). None of them is named in anything a person is shown.
  */
 
 import { DAY_MS } from "./week.js";
@@ -52,7 +54,7 @@ export interface LevelThresholds {
  * admin settings. Never shown to the person.
  */
 export interface SignalThresholds {
-  /** Signals needed without the public bar; one fewer with it. */
+  /** With the public bar, Full needs at least one fewer than this many signals. */
   humanSignalsNeeded: number;
   minActiveWeeks: number;
   minRepoAgeDays: number;
@@ -60,7 +62,10 @@ export interface SignalThresholds {
   minFollowers: number;
   /** Days either side of an account's creation day that count as the same batch. */
   batchWindowDays: number;
-  /** Accounts already signed up in that window that make a batch; 0 turns the check off. */
+  /**
+   * Accounts already signed up in that window that make a batch; 0 turns the check off. Only
+   * accounts younger than the public bar's age are flagged.
+   */
   batchSize: number;
 }
 
@@ -93,8 +98,14 @@ export function meetsPublicBar(signals: GithubSignals, thresholds: LevelThreshol
  * Every check, from the signals, the public bar, the additional thresholds, the time and how
  * many accounts already signed up were created in the same window (`batchPeers`).
  *
- * Full = not in a creation batch, and either enough additional signals on their own or the
- * public bar plus one fewer. A missing signal counts as not passing.
+ * Full = the public bar, not in a creation batch, and enough additional signals (one fewer than
+ * `humanSignalsNeeded`). The additional signals only ever keep an account out: without the
+ * public bar no number of them gives Full. A missing signal counts as not passing.
+ *
+ * Creation batch = many accounts already signed up were created in the same window, and this
+ * account is younger than the public bar's age. Following other accounts doesn't get an account
+ * out of a batch (a farm follows itself); an established account created on a busy day isn't
+ * flagged.
  */
 export function levelChecks(signals: GithubSignals, bar: LevelThresholds, rules: SignalThresholds, context: { now: number; batchPeers: number }): LevelChecks {
   const atLeast = (value: number | null | undefined, min: number) => typeof value === "number" && value >= min;
@@ -106,8 +117,8 @@ export function levelChecks(signals: GithubSignals, bar: LevelThresholds, rules:
   const social = atLeast(signals.social, rules.minSocial);
   const followers = atLeast(signals.followers, rules.minFollowers);
   const humanSignals = [activeWeeks, outsideContributions, oldRepo, social, followers].filter(Boolean).length;
-  const creationBatch = rules.batchSize > 0 && context.batchPeers >= rules.batchSize && signals.followers === 0;
-  const full = !creationBatch && (humanSignals >= rules.humanSignalsNeeded || (publicBar && humanSignals >= rules.humanSignalsNeeded - 1));
+  const creationBatch = rules.batchSize > 0 && context.batchPeers >= rules.batchSize && signals.accountAgeDays < bar.minAccountAgeDays;
+  const full = !creationBatch && publicBar && humanSignals >= rules.humanSignalsNeeded - 1;
   return { publicBar, activeWeeks, outsideContributions, oldRepo, social, followers, humanSignals, batchPeers: context.batchPeers, creationBatch, full };
 }
 
@@ -134,7 +145,8 @@ export function levelFor(checks: LevelChecks, signals?: GithubSignals, basic?: B
 
 /**
  * Why the level is what it is, for the admin page and the person's own message. A Starter
- * account is given one of the public reasons only: the additional checks are never named.
+ * account is given one of the public reasons only: the additional checks are never named (an
+ * account that clears the public bar but not them reads as "few_repos_and_contributions").
  */
 export function levelReason(signals: GithubSignals, thresholds: LevelThresholds, checks: LevelChecks): LevelReason {
   if (checks.full) return "qualifies";

@@ -228,8 +228,9 @@ export interface PersonState {
     checkedAt: number | null;
   } | null;
   /**
-   * Free tokens used outside dl (see `outsideDl` in abuse.ts): in the last 24 hours, at least
-   * DL_ONLY_MIN_REQUESTS free chat requests with a sign-in token and no session event at all.
+   * Free tokens used outside dl (see `outsideDl` in abuse.ts): no session event in the last 24
+   * hours, and at least DL_ONLY_MIN_REQUESTS free chat requests with a sign-in token that no
+   * session event covers (made more than 24 hours after the latest one, or with none ever).
    */
   outsideDl: boolean;
 }
@@ -823,7 +824,8 @@ export class DirectoryObject extends DurableObject {
       const levelValues = [level, reason, sig?.accountAgeDays ?? null, sig?.publicRepos ?? null, sig?.followers ?? null, sig?.contributions ?? null, sig?.restrictedContributions ?? null, sig ? input.now : null] as const;
       const admitted = (via: "existing" | "admin" | "open" | "invite" | "grant", created: boolean): AdmitResult => {
         if (sig) this.#storeExtraSignals(input.githubId, sig);
-        if (sig) sql.exec("UPDATE people SET batch_flag = ? WHERE github_id = ?", input.batchFlagged ? 1 : 0, input.githubId);
+        // The batch flag follows the rules, except on a level an admin or an invite set: that stands as it is.
+        if (sig) sql.exec("UPDATE people SET batch_flag = ? WHERE github_id = ? AND (level_reason IS NULL OR level_reason NOT IN ('admin', 'invite'))", input.batchFlagged ? 1 : 0, input.githubId);
         // Whether the person had free tokens at sign-up, for retention: who could use dl from the start.
         if (created) {
           sql.exec(
@@ -1483,9 +1485,10 @@ export class DirectoryObject extends DurableObject {
   /**
    * Re-reads a person's signals and promotes a Starter account to basic or Full, or a basic one
    * to Full, when they now qualify (admission.ts levelChecks; `signals` carries the stored
-   * additional signals). Never demotes, and never overrides an admin's own choice of level or a
-   * redeemed invite. The creation-batch flag is stored again for a Starter account. Returns the
-   * level after.
+   * additional signals). The one move down: a basic account the creation-batch check now flags
+   * goes to Starter with the flag (no free tokens), as it would at sign-in. Never overrides an
+   * admin's own choice of level or a redeemed invite. The creation-batch flag is stored again for
+   * a Starter account. Returns the level after.
    */
   async recheckLevel(githubId: number, signals: GithubSignals, thresholds: LevelThresholds, rules: SignalThresholds, now: number, basic?: BasicRule): Promise<Level | undefined> {
     return this.ctx.storage.transactionSync(() => {
@@ -1507,6 +1510,10 @@ export class DirectoryObject extends DurableObject {
       const checks = levelChecks(signals, thresholds, rules, { now, batchPeers: this.#batchPeers(signals.createdDay, rules.batchWindowDays, githubId) });
       const next = levelFor(checks, signals, basic);
       if (row.level === "starter") sql.exec("UPDATE people SET batch_flag = ? WHERE github_id = ?", checks.creationBatch ? 1 : 0, githubId);
+      if (row.level === "basic" && checks.creationBatch && !checks.full) {
+        sql.exec("UPDATE people SET level = 'starter', batch_flag = 1 WHERE github_id = ?", githubId);
+        return "starter";
+      }
       if (next === "full" || (next === "basic" && row.level === "starter")) {
         sql.exec("UPDATE people SET level = ? WHERE github_id = ?", next, githubId);
         if (next === "full") sql.exec("UPDATE people SET level_reason = 'qualifies' WHERE github_id = ?", githubId);
