@@ -267,6 +267,8 @@ describe("the weekly re-check with the additional signals", () => {
     const day = new Date(service.clock.now - 100 * 86_400_000).toISOString();
     const keyFor = async (user: GitHubUserFixture) => {
       const { access_token } = await service.signIn(user);
+      // A server key outlives the access token, so the clock can move a week.
+      allowServerKeys(service, user.id);
       return ((await (await service.request("POST", "/v1/keys", { token: access_token, body: { name: "test" } })).json()) as { key: string }).key;
     };
     // Signed up before the rest of its batch: basic.
