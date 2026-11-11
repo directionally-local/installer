@@ -12,6 +12,7 @@ function fixture() {
   const lines: string[] = [];
   const answers: string[] = [];
   let failNew = false;
+  let failOld = false;
   const prompter: Prompter = {
     choose: async () => "qwen-old", select: async (_question, choices) => ({ value: choices[0]!.value }),
     secret: async () => "", text: async () => answers.shift() ?? "",
@@ -20,9 +21,14 @@ function fixture() {
     configPath: "/tmp/autopilot/config.json", statePath: "/tmp/model.json",
     smoke: async (deployment: Pick<ModelDeployment, "repo" | "port" | "container">) => {
       if (failNew && deployment.repo.includes("2507")) throw new Error("smoke failed: model loading\nvLLM logs: crash");
+      if (failOld && !deployment.repo.includes("2507")) throw new Error("smoke failed: JSON mode did not return {ok:true}\nvLLM logs: ok");
       return { chat: true, tools: true, json: true, tokensPerSecond: deployment.repo.includes("2507") ? 25 : 10, at: "now" };
+    },
+    bench: async (deployment, _system, _fetch, benchOptions) => {
+      assert.deepEqual(benchOptions?.levels, [1]);
+      return { levels: [{ concurrency: 1, requests: 1, ttftP50: 0.1, ttftP95: 0.1, decodeTokPerSec: deployment.repo.includes("2507") ? 126.3 : 120.1 }] };
     } };
-  return { system, lines, answers, options, failNew: () => { failNew = true; } };
+  return { system, lines, answers, options, failNew: () => { failNew = true; }, failOld: () => { failOld = true; } };
 }
 
 test("up configures vllm provider and state; status shows GPU and tests", async () => {
@@ -43,12 +49,37 @@ test("update compares both, switches provider, and rollback restores old deploym
   assert.equal(await modelCommand("update", ["qwen-new"], options), 0);
   assert.ok(system.running.has("dl-model-2"));
   assert.ok(!system.running.has("dl-model-1"));
-  assert.match(lines.join(""), /old .*10 tok\/s.*new .*25 tok\/s/);
+  assert.match(lines.join(""), /old .*120\.1 tok\/s decode.*new .*126\.3 tok\/s decode \(fixed 512-token bench\)/);
   assert.equal(JSON.parse(system.files.get("/tmp/model.json")!.content).previous.port, 8000);
   assert.equal(await modelCommand("rollback", [], options), 0);
   assert.ok(system.running.has("dl-model-1"));
   assert.ok(!system.running.has("dl-model-2"));
   assert.equal(JSON.parse(system.files.get("/tmp/autopilot/config.json")!.content).providers.vllm.baseUrl, "http://127.0.0.1:8000/v1");
+  assert.equal((lines.join(" ").match(/fixed 512-token bench/g) ?? []).length, 2, "update and rollback each benchmark both live models");
+});
+
+test("update chooses side-by-side when the GPU reservation fits in free VRAM", async () => {
+  const { system, options, lines } = fixture();
+  await modelCommand("up", ["qwen-old"], options);
+  system.gpu = "0, GPU, 49152, 29491, 570.86\n"; // qwen-old reserves 0.4 * 49152, rest free
+  assert.equal(await modelCommand("update", ["qwen-new"], options), 0);
+  assert.match(lines.join(""), /side-by-side/);
+  assert.ok(!lines.join("").match(/Accept downtime/));
+  assert.ok(system.running.has("dl-model-2"));
+  assert.ok(!system.running.has("dl-model-1"));
+});
+
+test("an incumbent that fails its smoke re-test warns but does not stop the switch", async () => {
+  const { system, options, lines, failOld } = fixture();
+  await modelCommand("up", ["qwen-old"], options);
+  failOld();
+  assert.equal(await modelCommand("update", ["qwen-new"], options), 0);
+  assert.ok(system.running.has("dl-model-2"));
+  assert.ok(!system.running.has("dl-model-1"));
+  assert.match(lines.join(""), /failed its smoke re-test|Switching anyway/);
+  assert.ok(lines.join(" ").includes("old Qwen/Qwen3-4B: 120.1 tok/s decode | new Qwen/Qwen3-4B-Instruct-2507: 126.3 tok/s decode"));
+  assert.equal(JSON.parse(system.files.get("/tmp/model.json")!.content).active.id, "qwen-new");
+  assert.equal(JSON.parse(system.files.get("/tmp/autopilot/config.json")!.content).providers.vllm.baseUrl, "http://127.0.0.1:8001/v1");
 });
 
 test("failed update removes candidate and preserves old provider and state", async () => {
@@ -63,7 +94,7 @@ test("failed update removes candidate and preserves old provider and state", asy
 });
 
 test("insufficient free VRAM asks before downtime and restores old after failure", async () => {
-  const { system, options, answers, failNew } = fixture();
+  const { system, options, answers, lines, failNew } = fixture();
   await modelCommand("up", ["qwen-old"], options);
   system.gpu = "0, GPU, 49152, 1024, 570\n";
   answers.push("", "", "n");
@@ -72,6 +103,13 @@ test("insufficient free VRAM asks before downtime and restores old after failure
   answers.push("", "", "yes"); failNew();
   await assert.rejects(modelCommand("update", ["qwen-new"], options), /smoke failed/);
   assert.ok(system.running.has("dl-model-1"));
+
+  const downtime = fixture();
+  await modelCommand("up", ["qwen-old"], downtime.options);
+  downtime.system.gpu = "0, GPU, 49152, 1024, 570\n";
+  downtime.answers.push("", "", "yes");
+  assert.equal(await modelCommand("update", ["qwen-new"], downtime.options), 0);
+  assert.ok(downtime.lines.join(" ").includes("old Qwen/Qwen3-4B: not re-measured (stopped for downtime)"));
 });
 
 test("dry run prints every planned Docker command without writing state or provider", async () => {
@@ -98,7 +136,7 @@ test("non-interactive up uses defaults and names a model when none is given", as
   assert.equal(await modelCommand("up", ["qwen-old"], options), 0);
   const state = JSON.parse(system.files.get("/tmp/model.json")!.content);
   assert.equal(state.active.port, 8000);
-  assert.equal(state.active.context, 8192);
+  assert.equal(state.active.context, 32768);
 });
 
 test("a stale spare container stops the update before the current model is touched", async () => {
@@ -108,6 +146,37 @@ test("a stale spare container stops the update before the current model is touch
   await assert.rejects(modelCommand("update", ["qwen-new"], options), /Spare container dl-model-2 is running/);
   assert.ok(system.running.has("dl-model-1"));
   assert.ok(system.running.has("dl-model-2"));
+});
+
+test("a failed run leaves a timestamped log file with the path in the error", async () => {
+  const { system, options, failNew } = fixture();
+  options.logDir = "/tmp/logs";
+  await modelCommand("up", ["qwen-old"], options);
+  failNew();
+  const error = await modelCommand("update", ["qwen-new"], options).catch((caught: Error) => caught);
+  assert.match(String(error), /Full log: \/tmp\/logs\/.*-update\.log/);
+  const path = [...system.files.keys()].find((key) => key.startsWith("/tmp/logs/") && key.includes("update"));
+  assert.ok(path, "log file written");
+  assert.match(system.files.get(path!)!.content, /smoke failed/);
+  assert.match(system.files.get(path!)!.content, /WARN|FAIL/);
+});
+
+test("bench sweeps concurrency levels and reports TTFT and decode throughput", async () => {
+  const { system, options, lines } = fixture();
+  const stream = (tokens: number) => new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      const encode = new TextEncoder();
+      for (let index = 0; index < tokens; index++) controller.enqueue(encode.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "x" } }] })}\n\n`));
+      controller.enqueue(encode.encode(`data: ${JSON.stringify({ choices: [{ delta: {} }], usage: { completion_tokens: tokens } })}\n\n`));
+      controller.enqueue(encode.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  }), { status: 200 });
+  options.fetch = async () => stream(8);
+  await modelCommand("up", ["qwen-old"], options);
+  assert.equal(await modelCommand("bench", [], { ...options, fetch: options.fetch }), 0);
+  assert.match(lines.join(""), /concurrency 1/);
+  assert.match(lines.join(""), /TTFT p50/);
 });
 
 test("status with no model says how to start one", async () => {

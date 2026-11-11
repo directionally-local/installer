@@ -1,0 +1,10 @@
+{
+  "provider": "vllm",
+  "model": "Qwen/Qwen3-4B",
+  "providers": {
+    "vllm": {
+      "model": "Qwen/Qwen3-4B",
+      "baseUrl": "http://127.0.0.1:8002/v1"
+    }
+  }
+}

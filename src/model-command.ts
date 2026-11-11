@@ -1,7 +1,9 @@
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { autopilotConfigFile } from "./laptop/free-tier.js";
 import { fittingModels, recipe, type ModelRecipe } from "./model-catalog.js";
 import { checkGpuDocker, containerRunning, detectHardware, dockerArgs, logTail, removeContainer } from "./model-runtime.js";
+import { bench as benchModel } from "./model-bench.js";
 import { smokeTest, type FetchModel } from "./model-smoke.js";
 import { modelStatePath, readModelState, writeModelState, type ModelDeployment } from "./state.js";
 import type { System } from "./system.js";
@@ -19,6 +21,34 @@ export interface ModelCommandOptions {
   interactive?: boolean;
   /** For tests; production waits for the model to download and start. */
   smoke?: typeof smokeTest;
+  bench?: typeof benchModel;
+  /** Directory for per-run logs; defaults to ~/.directionallylocal/logs. */
+  logDir?: string;
+}
+
+/** Tee every UI event into a per-run log file so a failed switch can be diagnosed afterwards. */
+function loggingUi(ui: Ui, record: (line: string) => void): Ui {
+  const stamp = (text: string) => record(`${new Date().toISOString()} ${text}`);
+  return {
+    get interactive() { return ui.interactive; },
+    title: (text) => { stamp(`== ${text}`); ui.title(text); },
+    line: (status, label, detail) => { stamp(`${status} ${label}${detail ? `: ${detail}` : ""}`); ui.line(status, label, detail); },
+    plan: (steps) => { stamp(`plan ${steps.map((step) => step.label).join(" | ")}`); ui.plan(steps); },
+    start: (id, detail) => { stamp(`.. ${id}${detail ? `: ${detail}` : ""}`); ui.start(id, detail); },
+    done: (id, detail) => { stamp(`ok ${id}${detail ? `: ${detail}` : ""}`); ui.done(id, detail); },
+    fail: (id, message) => { stamp(`FAIL ${id}: ${message}`); ui.fail(id, message); },
+    questions: (intro) => ui.questions(intro),
+    answered: (label, detail) => ui.answered(label, detail),
+    rejected: (message) => ui.rejected(message),
+    prompt: (label, hint) => ui.prompt(label, hint),
+    ready: (headline, items, extra) => ui.ready(headline, items, extra),
+    warn: (text) => { stamp(`WARN ${text}`); ui.warn(text); },
+    finish: () => ui.finish(),
+  };
+}
+
+export function runLogDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(env.HOME || homedir(), ".directionallylocal", "logs");
 }
 
 function isInteractive(options: ModelCommandOptions): boolean {
@@ -65,7 +95,7 @@ async function configureProvider(options: ModelCommandOptions, deployment: Model
 async function launch(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number): Promise<ModelDeployment> {
   const container = `dl-model-${slot}`;
   const deployment: ModelDeployment = { id: model.id, repo: model.repo, container, port, context,
-    image: model.image, flags: model.flags, minVramMiB: model.minVramMiB,
+    image: model.image, flags: model.flags, minVramMiB: model.minVramMiB, gpuMemoryUtilization: model.gpuMemoryUtilization,
     lastTest: { chat: false, tools: false, json: false, tokensPerSecond: 0, at: "" } };
   options.ui.plan([{ id: "launch", label: `Download and start ${model.id}` }, { id: "test", label: "Chat, tool call and JSON smoke tests" }]);
   options.ui.start("launch", model.image);
@@ -90,10 +120,38 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
   }
 }
 
-/** The existing `dl model [ID]` picker lives in laptop/settings.ts; only subcommands come here. */
 export async function modelCommand(action: string, args: string[], options: ModelCommandOptions): Promise<number> {
+  const records: string[] = [];
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const wrapped: ModelCommandOptions = { ...options, ui: loggingUi(options.ui, (line) => records.push(line)) };
+  const persist = async (): Promise<string | undefined> => {
+    if (options.system.dryRun) return undefined;
+    try {
+      const dir = options.logDir ?? runLogDir();
+      const path = join(dir, `${stamp}-${action}.log`);
+      await options.system.mkdir(dir, { mode: 0o700 });
+      await options.system.writeFile(path, `${records.join("\n")}\n`, { mode: 0o644 });
+      return path;
+    } catch { return undefined; }
+  };
+  try {
+    const code = await modelCommandInner(action, args, wrapped);
+    await persist();
+    return code;
+  } catch (error) {
+    const path = await persist();
+    if (error instanceof Error) {
+      if (path) error.message += `\nFull log: ${path}`;
+      throw error;
+    }
+    throw new Error(`${String(error)}${path ? `\nFull log: ${path}` : ""}`);
+  }
+}
+
+/** The existing `dl model [ID]` picker lives in laptop/settings.ts; only subcommands come here. */
+async function modelCommandInner(action: string, args: string[], options: ModelCommandOptions): Promise<number> {
   const { system, ui } = options;
-  if ((action === "up" || action === "update") && args.length > 1 || (action === "status" || action === "rollback") && args.length > 0) {
+  if ((action === "up" || action === "update") && args.length > 1 || (action === "status" || action === "rollback" || action === "bench") && args.length > 0) {
     ui.line("failed", "Usage", `dl model ${action}${action === "up" || action === "update" ? " [model] [--dry-run]" : ""}`);
     return 2;
   }
@@ -108,6 +166,14 @@ export async function modelCommand(action: string, args: string[], options: Mode
     ui.line("info", "Last test", `${state.active.lastTest.chat ? "chat ✓" : "chat ✗"} · ${state.active.lastTest.tools ? "tools ✓" : "tools ✗"} · ${state.active.lastTest.json ? "JSON ✓" : "JSON ✗"} · ${state.active.lastTest.tokensPerSecond} tokens/sec · ${state.active.lastTest.at}`);
     if (state.previous) ui.line("info", "Rollback", `${state.previous.repo} · dl model rollback`);
     return running ? 0 : 1;
+  }
+  if (action === "bench") {
+    if (!state) throw new Error("No model is installed. Run dl model up first.");
+    if (!(await containerRunning(system, state.active.container))) throw new Error(`Model container ${state.active.container} is stopped; bench needs a running model.`);
+    const result = await benchModel(state.active, system, options.fetch);
+    for (const level of result.levels) ui.line("info", `concurrency ${level.concurrency}`, `${level.requests} reqs · TTFT p50 ${level.ttftP50}s · p95 ${level.ttftP95}s · ${level.decodeTokPerSec} tok/s decode`);
+    if (result.prefixCacheHitRate !== undefined) ui.line("info", "Prefix cache", `${result.prefixCacheHitRate}% hit rate (from vLLM logs)`);
+    return 0;
   }
   if (action !== "up" && action !== "update" && action !== "rollback") return 2;
   if (action === "up" && state) {
@@ -124,7 +190,7 @@ export async function modelCommand(action: string, args: string[], options: Mode
   const maxTotal = Math.max(...hardware.gpus.map((gpu) => gpu.totalMiB));
   const previous = state?.previous;
   const selected: ModelRecipe = action === "rollback"
-    ? { id: previous!.id, repo: previous!.repo, minVramMiB: previous!.minVramMiB, image: previous!.image, flags: previous!.flags, defaultContext: previous!.context }
+    ? { id: previous!.id, repo: previous!.repo, minVramMiB: previous!.minVramMiB, gpuMemoryUtilization: previous!.gpuMemoryUtilization ?? 0.9, image: previous!.image, flags: previous!.flags, defaultContext: previous!.context }
     : await selectModel(options, args[0], maxTotal);
   const old = state?.active;
   if (old && !(await containerRunning(system, old.container))) throw new Error(`Current model container ${old.container} is stopped; restart it before changing models.`);
@@ -139,7 +205,13 @@ export async function modelCommand(action: string, args: string[], options: Mode
   // Check the spare slot before stopping anything: a stale candidate must not cause downtime.
   if (old && await containerRunning(system, candidateContainer)) throw new Error(`Spare container ${candidateContainer} is running; stop it manually before changing models.`);
   // nvidia-smi free memory is per GPU. Do not sum several cards: vLLM is configured for one GPU.
-  const enoughFree = hardware.gpus.some((gpu) => gpu.freeMiB >= selected.minVramMiB);
+  // vLLM reserves gpuMemoryUtilization * total VRAM, not minVramMiB: that is what side-by-side must fit.
+  const reserveMiB = Math.ceil(selected.gpuMemoryUtilization * maxTotal);
+  if (reserveMiB < selected.minVramMiB) throw new Error(`${selected.id} gpu-memory-utilization ${selected.gpuMemoryUtilization} reserves ${Math.floor(reserveMiB / 1024)} GB, less than the ${Math.ceil(selected.minVramMiB / 1024)} GB the model needs.`);
+  const enoughFree = hardware.gpus.some((gpu) => gpu.freeMiB >= reserveMiB);
+  if (old) ui.line("info", "Update strategy", enoughFree
+    ? `side-by-side: the old model keeps serving while ${selected.id} starts (${Math.ceil(reserveMiB / 1024)} GB new + ${Math.ceil((old.gpuMemoryUtilization ?? 0.9) * maxTotal / 1024)} GB old)`
+    : `downtime: ${Math.ceil(Math.max(...hardware.gpus.map((gpu) => gpu.freeMiB)) / 1024)} GB free, ${selected.id} reserves ${Math.ceil(reserveMiB / 1024)} GB`);
   let stoppedOld = false;
   if (old && !enoughFree) {
     ui.warn("Not enough free GPU memory for both models. The current model must stop while the new one starts; there will be downtime.");
@@ -149,7 +221,7 @@ export async function modelCommand(action: string, args: string[], options: Mode
     await system.run("docker", ["stop", old.container]);
     stoppedOld = true;
   }
-  if (!old && !enoughFree) throw new Error(`${selected.id} needs ${Math.ceil(selected.minVramMiB / 1024)} GB free GPU VRAM.`);
+  if (!old && !enoughFree) throw new Error(`${selected.id} reserves ${Math.ceil(reserveMiB / 1024)} GB of GPU VRAM but the largest GPU has ${Math.ceil(Math.max(...hardware.gpus.map((gpu) => gpu.freeMiB)) / 1024)} GB free.`);
   if (old) await removeContainer(system, candidateContainer);
   const configPath = options.configPath ?? autopilotConfigFile();
   const previousConfig = await system.readFile(configPath);
@@ -161,12 +233,27 @@ export async function modelCommand(action: string, args: string[], options: Mode
       ui.line("info", "Dry run", "No model, provider or state changed.");
       return 0;
     }
-    // Test the previous endpoint too; failure must leave it serving and keep the provider unchanged.
+    // Test the previous endpoint too — but only the candidate gates the switch: a broken incumbent is a reason to switch, not to abort.
     if (old && !stoppedOld) {
-      const oldResult = await (options.smoke ?? smokeTest)(old, system, options.fetch);
-      ui.line("info", "Comparison", `old ${old.repo}: ${oldResult.tokensPerSecond} tok/s | new ${candidate.repo}: ${candidate.lastTest.tokensPerSecond} tok/s`);
-      ui.line("info", "Checks", "old chat/tools/JSON ✓ ✓ ✓ | new chat/tools/JSON ✓ ✓ ✓");
-    } else if (old) ui.line("info", "Comparison", `old ${old.repo}: ${old.lastTest.tokensPerSecond} tok/s (last test) | new ${candidate.repo}: ${candidate.lastTest.tokensPerSecond} tok/s`);
+      try {
+        const oldResult = await (options.smoke ?? smokeTest)(old, system, options.fetch);
+        ui.line("info", "Checks", `old chat/tools/JSON ${oldResult.chat ? "✓" : "✗"} ${oldResult.tools ? "✓" : "✗"} ${oldResult.json ? "✓" : "✗"} | new chat/tools/JSON ✓ ✓ ✓`);
+      } catch (error) {
+        ui.warn(`The current model failed its smoke re-test (${error instanceof Error ? error.message.split("\n")[0] : String(error)}). Switching anyway.`);
+      }
+      try {
+        const measure = options.bench ?? benchModel;
+        const oldBench = await measure(old, system, options.fetch, { levels: [1] });
+        const newBench = await measure(candidate, system, options.fetch, { levels: [1] });
+        const oldRate = oldBench.levels[0]?.decodeTokPerSec;
+        const newRate = newBench.levels[0]?.decodeTokPerSec;
+        if (oldRate === undefined || newRate === undefined) throw new Error("single-request bench returned no result");
+        ui.line("info", "Comparison", `old ${old.repo}: ${oldRate} tok/s decode | new ${candidate.repo}: ${newRate} tok/s decode (fixed 512-token bench)`);
+      } catch (error) {
+        ui.warn(`Single-request comparison bench failed (${error instanceof Error ? error.message : String(error)}). Switching anyway.`);
+        ui.line("info", "Comparison", `old ${old.repo}: unavailable | new ${candidate.repo}: unavailable (bench failed)`);
+      }
+    } else if (old) ui.line("info", "Comparison", `old ${old.repo}: not re-measured (stopped for downtime) | new ${candidate.repo}: ${candidate.lastTest.tokensPerSecond} tok/s (fixed-length smoke)`);
     await configureProvider(options, candidate, configPath);
     await writeModelState(system, { version: 1, active: candidate, ...(old ? { previous: old } : {}) }, statePath);
     if (old) await system.run("docker", ["stop", old.container]);

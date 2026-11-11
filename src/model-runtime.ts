@@ -23,7 +23,7 @@ export async function detectHardware(system: System): Promise<Hardware> {
 export async function checkGpuDocker(system: System): Promise<void> {
   const docker = await system.probe("docker", ["info", "--format", "{{json .Runtimes}}"]);
   if (docker.code !== 0) throw new Error("Docker is missing or its daemon is stopped. Install/start Docker before running dl model up.");
-  const toolkit = await system.probe("nvidia-container-cli", ["--version"]);
+  const toolkit = await system.probe("nvidia-ctk", ["--version"]);
   if (toolkit.code !== 0 || !/nvidia/i.test(toolkit.stdout + toolkit.stderr)) throw new Error("nvidia-container-toolkit is missing. Install and configure it for Docker, then restart Docker.");
   if (!/"nvidia"\s*:/.test(docker.stdout)) throw new Error("Docker has no nvidia runtime. Run nvidia-ctk runtime configure --runtime=docker and restart Docker.");
 }
@@ -36,7 +36,8 @@ export function dockerArgs(model: ModelRecipe, port: number, context: number, sl
   if (index !== -1) flags.splice(index, 2);
   return ["run", "-d", "--name", `dl-model-${slot}`, "--gpus", "all", "--ipc=host",
     "-p", `127.0.0.1:${port}:8000`, "-v", "dl-model-hf-cache:/root/.cache/huggingface",
-    model.image, "--model", model.repo, "--served-model-name", model.repo, ...flags, "--max-model-len", String(context)];
+    model.image, "--model", model.repo, "--served-model-name", model.repo, ...flags, "--max-model-len", String(context),
+    "--gpu-memory-utilization", String(model.gpuMemoryUtilization)];
 }
 
 export async function containerRunning(system: System, container: string): Promise<boolean> {
