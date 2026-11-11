@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.25.0](https://github.com/directionally-local/installer/compare/v0.24.0...v0.25.0) (2026-11-11)
+
+
+### Features
+
+* **free:** a plain-language admin home screen ([#209](https://github.com/directionally-local/installer/issues/209)) ([215161c](https://github.com/directionally-local/installer/commit/215161cd2e8b35e408e10d62fe203483dbef90dc))
+* **model:** dl model bench with concurrency sweep\n\n1/8/32 concurrent streaming requests against the active model: TTFT p50/p95\nand aggregate decode tok/s per level, plus prefix cache hit rate from vLLM\nlogs.\n\nCo-authored-by: dl &lt;dl@directionallylocal.com&gt; ([5249a93](https://github.com/directionally-local/installer/commit/5249a933fedbe3df33a54df3bb501dd0db2940eb))
+* **model:** per-model GPU reservation and VRAM-aware side-by-side updates ([70ad56a](https://github.com/directionally-local/installer/commit/70ad56a80a70a74008318895b93189b9002f6ada))
+* **model:** per-run logs in ~/.directionallylocal/logs ([ed523fd](https://github.com/directionally-local/installer/commit/ed523fd2bb157b0d671edeb86381df63400a091e))
+
+
+### Bug Fixes
+
+* **free:** close three free tier sign-up farm holes ([#214](https://github.com/directionally-local/installer/issues/214)) ([108f11f](https://github.com/directionally-local/installer/commit/108f11f595186d3b2375e8f40f720e4c6f615f24))
+* **free:** look up GitHub users with the OAuth app's credentials ([#212](https://github.com/directionally-local/installer/issues/212)) ([9b3e81e](https://github.com/directionally-local/installer/commit/9b3e81ea6517863073c1015ac27dfa14cfa687ef))
+* **free:** make free tier server keys by request ([#216](https://github.com/directionally-local/installer/issues/216)) ([ea3b043](https://github.com/directionally-local/installer/commit/ea3b043d3bea04b64ec3dfb2a1c0061d3548760d))
+* **free:** record OpenAI's credit in the daily per-provider spend ([#211](https://github.com/directionally-local/installer/issues/211)) ([adf0fbc](https://github.com/directionally-local/installer/commit/adf0fbc0839da32306880f69689201a00b46e62b))
+* **model:** floor the decode window so short replies can't inflate tok/s ([50f1043](https://github.com/directionally-local/installer/commit/50f1043059af862156bd717e2fa8b3f27bf347f1))
+* **model:** incumbent smoke re-test warns instead of aborting the switch ([6f29b3e](https://github.com/directionally-local/installer/commit/6f29b3e556e3cbe92f432736d5e66680026dc071))
+* **model:** measure decode-only tok/s in the smoke test ([a1fc7cf](https://github.com/directionally-local/installer/commit/a1fc7cf01a9772852c7b6d6ef0d7df5fb42eba8e))
+* **model:** probe nvidia-ctk instead of nvidia-container-cli ([1a5d7cd](https://github.com/directionally-local/installer/commit/1a5d7cd8a20e5ce783a152533e8b73ac507d3f1e))
+* **model:** route dl model bench to the GPU dispatcher; fix bench output length\n\ndl model bench was swallowed by the model picker. Bench now pins output\nlength with ignore_eos so decode tok/s is measured over a fixed 512-token\nwindow.\n\nCo-authored-by: dl &lt;dl@directionallylocal.com&gt; ([ad2c037](https://github.com/directionally-local/installer/commit/ad2c037924e46b8381c95e71a67a528843451a24))
+* **model:** use fixed-length bench for update comparisons ([55f3666](https://github.com/directionally-local/installer/commit/55f3666790cdfe28dee26a8533bca7dfade28467))
+* **model:** use fixed-length bench for update comparisons ([ac20d3c](https://github.com/directionally-local/installer/commit/ac20d3c8f9561d48ee3c221bb9beeaa5e4f75ca2))
+
 ## [0.24.0](https://github.com/directionally-local/installer/compare/v0.23.0...v0.24.0) (2026-11-10)
 
 
