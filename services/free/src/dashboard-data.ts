@@ -13,7 +13,8 @@ import { DAY_MS, weekStart } from "./week.js";
  * install scripts served and installs finished, which can't be joined to people (telemetry.ts).
  *
  * The upstream section reads `upstream_daily` and `upstream_timings` instead: per upstream,
- * counts, tokens, dollars and milliseconds, with no person attached (admins included there).
+ * counts, tokens, dollars and milliseconds, with no person attached (admins included there),
+ * and `upstream_people` for the people each upstream served (ids and days only, admins left out).
  *
  * Admins are left out of every number: anyone in ADMIN_GITHUB_IDS (passed in) and anyone
  * admitted as an admin. Their requests aren't rolled up in the first place.
@@ -52,7 +53,9 @@ export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   ],
   grants: ["github_id", "weekly_tokens", "weekly_usd"],
   spend_weeks: ["week_start", "usd", "tokens", "requests", "admin_usd", "admin_tokens", "admin_requests", "paid_usd", "paid_tokens", "paid_requests", "credit_usd", "free_credit_usd", "openai_credit_usd", "openai_free_credit_usd"],
-  upstream_daily: ["day", "upstream", "requests", "errors", "prompt_tokens", "cached_tokens", "cash_usd", "credit_usd"],
+  upstream_daily: ["day", "upstream", "requests", "errors", "prompt_tokens", "cached_tokens", "completion_tokens", "cash_usd", "credit_usd"],
+  // Who an upstream served, first and last day: ids and days only, for the people per upstream.
+  upstream_people: ["upstream", "github_id", "first_day", "last_day"],
   upstream_timings: ["at", "upstream", "ttfb_ms", "ttft_ms"],
   settings: ["key", "value"],
   queue: ["github_id", "queued_at", "admitted_at", "admitted_how"],
@@ -213,11 +216,20 @@ export interface PaidView {
   paidRequestsWeek: number;
 }
 
-/** One upstream over one window (today, UTC, this Monday-to-Sunday week, or the Health view's last N days). Admins included. */
+/**
+ * One upstream over one window (today, UTC, this Monday-to-Sunday week, all time, or the Health
+ * view's last N days). Admins included, except in `users`.
+ */
 export interface UpstreamStats {
   upstream: "openai" | "luminal" | "openrouter";
-  window: "today" | "week" | `${number}d`;
+  window: UpstreamWindowName;
   requests: number;
+  /** Distinct people served (admins left out); null where not counted (the Health view). */
+  users: number | null;
+  /** Prompt tokens (cached ones included), the cached share of them, and completion tokens. */
+  promptTokens: number;
+  cachedTokens: number;
+  completionTokens: number;
   /** Requests the upstream failed: 429, 5xx, a timeout, a network error or a failed stream. */
   errors: number;
   medianTtftMs: number | null;
@@ -231,6 +243,11 @@ export interface UpstreamStats {
 }
 
 export const UPSTREAM_NAMES = ["openai", "luminal", "openrouter"] as const;
+
+export type UpstreamWindowName = "today" | "week" | "all_time" | `${number}d`;
+
+/** All upstreams together over one window: sums, and people counted once however many upstreams served them. */
+export type UpstreamTotal = Omit<UpstreamStats, "upstream" | "medianTtftMs" | "p90TtftMs" | "medianTtfbMs">;
 
 export interface FunnelRow {
   /** Monday of the sign-up week; null for the all-time row. */
@@ -292,8 +309,12 @@ export interface DashboardData {
   funnel: FunnelRow[];
   /** Downloads → installs → sign-ups → first request → active, per day and per week. */
   installFunnel: InstallFunnel;
-  /** Per upstream, today and this week. */
+  /** Per upstream, today, this week and all time (timings only today and this week: they're kept 15 days). */
   upstreams: UpstreamStats[];
+  /** The same windows, all upstreams together. */
+  upstreamTotals: UpstreamTotal[];
+  /** The first UTC day with a request (Unix ms), for "All time, since"; null before any. */
+  upstreamsSince: number | null;
 }
 
 /** The slice of `ctx.storage.sql` the queries need. */
@@ -569,7 +590,10 @@ export function dashboardData(
     paidRequestsWeek: paidWeek?.n ?? 0,
   };
 
-  const upstreams = upstreamStats(sql, input.now);
+  const upstreamWindows = fullViewWindows(input.now);
+  const upstreams = upstreamStats(sql, input.now, upstreamWindows, admins);
+  const upstreamTotals = upstreamTotalStats(sql, upstreamWindows, admins);
+  const firstUpstreamDay = sql.exec<{ day: number | null }>("SELECT MIN(day) AS day FROM upstream_daily").toArray()[0]?.day ?? null;
   // Weekly actives by requests (3+ request days) and each person's first request day, from the
   // scans above, so the install funnel doesn't read daily_activity again.
   const requestRegulars = new Map<number, number>();
@@ -580,6 +604,8 @@ export function dashboardData(
   return {
     now: input.now,
     upstreams,
+    upstreamTotals,
+    upstreamsSince: firstUpstreamDay === null ? null : toMs(firstUpstreamDay),
     currentWeek,
     queue,
     paid,
@@ -794,52 +820,104 @@ export function installBreakdown(
   return { platforms, failedSteps };
 }
 
-/** One window of `upstreamStats`: counts from UTC day `fromDay` on, timings from `since` (default: that day's start). */
+/**
+ * One window of `upstreamStats`: counts from UTC day `fromDay` on, timings from `since` (default:
+ * that day's start). `timings: false` leaves the percentiles out (all time: timings are kept 15 days).
+ */
 export interface UpstreamWindow {
-  window: UpstreamStats["window"];
+  window: UpstreamWindowName;
   fromDay: number;
   since?: number;
+  timings?: boolean;
+}
+
+/** The Full view's windows: today (UTC), this week, all time. */
+export function fullViewWindows(now: number): UpstreamWindow[] {
+  return [
+    { window: "today", fromDay: Math.floor(now / DAY_MS) },
+    { window: "week", fromDay: weekStart(now) / DAY_MS },
+    { window: "all_time", fromDay: 0, timings: false },
+  ];
+}
+
+interface UpstreamSums {
+  requests: number | null;
+  errors: number | null;
+  prompt: number | null;
+  cached: number | null;
+  completion: number | null;
+  cash: number | null;
+  credit: number | null;
+}
+
+const UPSTREAM_SUMS = `SUM(requests) AS requests, SUM(errors) AS errors, SUM(prompt_tokens) AS prompt, SUM(cached_tokens) AS cached,
+  SUM(completion_tokens) AS completion, SUM(cash_usd) AS cash, SUM(credit_usd) AS credit`;
+
+function fromSums(row: UpstreamSums | undefined, users: number | null) {
+  return {
+    requests: row?.requests ?? 0,
+    errors: row?.errors ?? 0,
+    users,
+    promptTokens: row?.prompt ?? 0,
+    cachedTokens: row?.cached ?? 0,
+    completionTokens: row?.completion ?? 0,
+    cacheHitShare: row?.prompt ? (row.cached ?? 0) / row.prompt : null,
+    cashUsd: row?.cash ?? 0,
+    creditUsd: row?.credit ?? 0,
+  };
 }
 
 /**
- * Per upstream, today and this week (or the windows given): counts from `upstream_daily`,
- * percentiles from `upstream_timings` (kept TIMINGS_MAX_AGE_MS, 15 days, by the Directory).
+ * Per upstream, today and this week (or the windows given): counts and tokens from `upstream_daily`,
+ * percentiles from `upstream_timings` (kept TIMINGS_MAX_AGE_MS, 15 days, by the Directory), and
+ * with `admins` (ADMIN_GITHUB_IDS as a JSON array) the people served from `upstream_people`.
  */
-export function upstreamStats(sql: Sql, now: number, windows?: readonly UpstreamWindow[]): UpstreamStats[] {
-  const today = Math.floor(now / DAY_MS);
-  const week = weekStart(now) / DAY_MS;
+export function upstreamStats(sql: Sql, now: number, windows?: readonly UpstreamWindow[], admins?: string): UpstreamStats[] {
   const out: UpstreamStats[] = [];
-  const list: readonly UpstreamWindow[] = windows ?? [
-    { window: "today", fromDay: today },
-    { window: "week", fromDay: week },
-  ];
-  for (const { window, fromDay, since: from } of list) {
+  const list: readonly UpstreamWindow[] = windows ?? fullViewWindows(now).slice(0, 2);
+  for (const { window, fromDay, since: from, timings = true } of list) {
+    // Everyone an upstream served since fromDay: the windows all run to today.
+    const people =
+      admins === undefined
+        ? undefined
+        : new Map(
+            sql
+              .exec<{ upstream: string; n: number }>(
+                `SELECT upstream, COUNT(*) AS n FROM upstream_people WHERE last_day >= ? AND ${notAdmin("github_id")} GROUP BY upstream`,
+                fromDay,
+                admins,
+              )
+              .toArray()
+              .map((row) => [row.upstream, row.n]),
+          );
     for (const upstream of UPSTREAM_NAMES) {
-      const row = sql
-        .exec<{ requests: number | null; errors: number | null; prompt: number | null; cached: number | null; cash: number | null; credit: number | null }>(
-          `SELECT SUM(requests) AS requests, SUM(errors) AS errors, SUM(prompt_tokens) AS prompt, SUM(cached_tokens) AS cached,
-                  SUM(cash_usd) AS cash, SUM(credit_usd) AS credit
-           FROM upstream_daily WHERE upstream = ? AND day >= ?`,
-          upstream,
-          fromDay,
-        )
-        .toArray()[0];
+      const row = sql.exec<UpstreamSums>(`SELECT ${UPSTREAM_SUMS} FROM upstream_daily WHERE upstream = ? AND day >= ?`, upstream, fromDay).toArray()[0];
+      const users = people === undefined ? null : (people.get(upstream) ?? 0);
       const since = from ?? fromDay * DAY_MS;
+      const { requests, errors, ...rest } = fromSums(row, users);
       out.push({
         upstream,
         window,
-        requests: row?.requests ?? 0,
-        errors: row?.errors ?? 0,
-        medianTtftMs: percentile(sql, "ttft_ms", upstream, since, 0.5),
-        p90TtftMs: percentile(sql, "ttft_ms", upstream, since, 0.9),
-        medianTtfbMs: percentile(sql, "ttfb_ms", upstream, since, 0.5),
-        cacheHitShare: row?.prompt ? (row.cached ?? 0) / row.prompt : null,
-        cashUsd: row?.cash ?? 0,
-        creditUsd: row?.credit ?? 0,
+        requests,
+        errors,
+        medianTtftMs: timings ? percentile(sql, "ttft_ms", upstream, since, 0.5) : null,
+        p90TtftMs: timings ? percentile(sql, "ttft_ms", upstream, since, 0.9) : null,
+        medianTtfbMs: timings ? percentile(sql, "ttfb_ms", upstream, since, 0.5) : null,
+        ...rest,
       });
     }
   }
   return out;
+}
+
+/** All upstreams together per window: one sum over `upstream_daily`, and each person counted once. */
+export function upstreamTotalStats(sql: Sql, windows: readonly UpstreamWindow[], admins: string): UpstreamTotal[] {
+  return windows.map(({ window, fromDay }) => {
+    const row = sql.exec<UpstreamSums>(`SELECT ${UPSTREAM_SUMS} FROM upstream_daily WHERE day >= ?`, fromDay).toArray()[0];
+    const users =
+      sql.exec<{ n: number }>(`SELECT COUNT(DISTINCT github_id) AS n FROM upstream_people WHERE last_day >= ? AND ${notAdmin("github_id")}`, fromDay, admins).toArray()[0]?.n ?? 0;
+    return { window, ...fromSums(row, users) };
+  });
 }
 
 /** The nearest-rank percentile of one timing column since `since`; null without values. */

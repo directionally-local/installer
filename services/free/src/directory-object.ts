@@ -518,6 +518,16 @@ const SCHEMA = [
      credit_usd    REAL NOT NULL,
      PRIMARY KEY (day, upstream)
    ) WITHOUT ROWID`,
+  // Who each upstream served (admins left out): the first and last UTC day, for the people per
+  // upstream on the dashboard (anyone with last_day in a window that runs to today) without
+  // reading the request log. One row per person per upstream; ids and days only.
+  `CREATE TABLE IF NOT EXISTS upstream_people (
+     upstream  TEXT NOT NULL,
+     github_id INTEGER NOT NULL,
+     first_day INTEGER NOT NULL,
+     last_day  INTEGER NOT NULL,
+     PRIMARY KEY (upstream, github_id)
+   ) WITHOUT ROWID`,
   // Per request with a response: time to the first byte (headers) and to the first content
   // chunk, by upstream, for the median and p90. No person, no content; rows older than 15 days go.
   `CREATE TABLE IF NOT EXISTS upstream_timings (
@@ -710,6 +720,8 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["people", "signup_tokens", "INTEGER"],
   // A pre-grant's personal weekly dollar cap, set on the account at the first sign-in.
   ["pregrants", "weekly_usd", "REAL"],
+  // Completion tokens per upstream per day (filled from the request log once, below).
+  ["upstream_daily", "completion_tokens", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 /** Timings older than this are dropped: the dashboard shows today and this week. */
@@ -717,6 +729,8 @@ const TIMINGS_MAX_AGE_MS = 15 * DAY_MS;
 
 /** Set in `settings` once `daily_activity` has been built from the existing log. */
 const ROLLUP_READY = "rollup:daily_activity";
+/** Set in `settings` once `upstream_daily` (with completion tokens) and `upstream_people` have been built from the existing log. */
+const UPSTREAM_ROLLUP_READY = "rollup:upstream_tokens_people";
 
 /** What the sign-up GitHub activity check's contribution lookup found (app.ts). */
 export type GithubCheckOutcome = "contributions" | "none" | "error";
@@ -742,6 +756,38 @@ export class DirectoryObject extends DurableObject {
       );
       const rebuilt = this.#backfillDailyActivity();
       if (rebuilt || added.has("daily_activity.sessions")) this.#backfillSessions();
+      this.#backfillUpstreams();
+    });
+  }
+
+  /**
+   * Builds `upstream_daily` and `upstream_people` from the request log once: completion tokens
+   * weren't kept per upstream before, nor were the people, and days before `upstream_daily`
+   * existed (all OpenRouter) weren't in it at all. Each request row records the upstream that
+   * served it (OpenRouter for rows from before upstreams were recorded, when it served them
+   * all), so that is what's used. Every (day, upstream) row is set to the log's sums, the same
+   * as `recordRequest` keeps them, so running it again changes nothing.
+   */
+  #backfillUpstreams(): void {
+    const sql = this.ctx.storage.sql;
+    if (sql.exec("SELECT 1 FROM settings WHERE key = ?", UPSTREAM_ROLLUP_READY).toArray().length > 0) return;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec(
+        `INSERT INTO upstream_daily (day, upstream, requests, errors, prompt_tokens, cached_tokens, completion_tokens, cash_usd, credit_usd)
+         SELECT at / ${DAY_MS}, upstream, COUNT(*), SUM(upstream_error), SUM(prompt_tokens), SUM(cached_tokens), SUM(completion_tokens),
+                SUM(CASE WHEN upstream = 'openrouter' THEN cost_usd ELSE 0 END), SUM(CASE WHEN upstream = 'openrouter' THEN 0 ELSE credit_usd END)
+         FROM requests WHERE true GROUP BY 1, 2
+         ON CONFLICT (day, upstream) DO UPDATE SET requests = excluded.requests, errors = excluded.errors,
+           prompt_tokens = excluded.prompt_tokens, cached_tokens = excluded.cached_tokens, completion_tokens = excluded.completion_tokens,
+           cash_usd = excluded.cash_usd, credit_usd = excluded.credit_usd`,
+      );
+      sql.exec(
+        `INSERT INTO upstream_people (upstream, github_id, first_day, last_day)
+         SELECT upstream, github_id, MIN(at) / ${DAY_MS}, MAX(at) / ${DAY_MS} FROM requests WHERE is_admin = 0 GROUP BY 1, 2
+         ON CONFLICT (upstream, github_id) DO UPDATE SET
+           first_day = MIN(first_day, excluded.first_day), last_day = MAX(last_day, excluded.last_day)`,
+      );
+      sql.exec("INSERT INTO settings (key, value) VALUES (?, '1')", UPSTREAM_ROLLUP_READY);
     });
   }
 
@@ -2148,19 +2194,32 @@ export class DirectoryObject extends DurableObject {
         });
       }
       this.ctx.storage.sql.exec(
-        `INSERT INTO upstream_daily (day, upstream, requests, errors, prompt_tokens, cached_tokens, cash_usd, credit_usd) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+        `INSERT INTO upstream_daily (day, upstream, requests, errors, prompt_tokens, cached_tokens, completion_tokens, cash_usd, credit_usd) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (day, upstream) DO UPDATE SET requests = requests + 1, errors = errors + excluded.errors,
            prompt_tokens = prompt_tokens + excluded.prompt_tokens, cached_tokens = cached_tokens + excluded.cached_tokens,
+           completion_tokens = completion_tokens + excluded.completion_tokens,
            cash_usd = cash_usd + excluded.cash_usd, credit_usd = credit_usd + excluded.credit_usd`,
         Math.floor(record.at / DAY_MS),
         upstream,
         record.upstreamError ? 1 : 0,
         record.promptTokens,
         record.cachedTokens,
+        record.completionTokens,
         cash,
         // Each upstream's own credit: Luminal's, or OpenAI's (only one is non-zero per request).
         credit + openaiCredit,
       );
+      if (!admin) {
+        const day = Math.floor(record.at / DAY_MS);
+        this.ctx.storage.sql.exec(
+          `INSERT INTO upstream_people (upstream, github_id, first_day, last_day) VALUES (?, ?, ?, ?)
+           ON CONFLICT (upstream, github_id) DO UPDATE SET first_day = MIN(first_day, excluded.first_day), last_day = MAX(last_day, excluded.last_day)`,
+          upstream,
+          record.githubId,
+          day,
+          day,
+        );
+      }
       if (record.ttfbMs != null || record.ttftMs != null) {
         this.ctx.storage.sql.exec("INSERT INTO upstream_timings (at, upstream, ttfb_ms, ttft_ms) VALUES (?, ?, ?, ?)", record.at, upstream, record.ttfbMs ?? null, record.ttftMs ?? null);
         this.ctx.storage.sql.exec("DELETE FROM upstream_timings WHERE at < ?", record.at - TIMINGS_MAX_AGE_MS);
