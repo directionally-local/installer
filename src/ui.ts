@@ -94,8 +94,9 @@ export class TerminalUi implements Ui {
 
   start(id: string, detail?: string): void {
     const step = this.step(id);
+    // A progress update to the running step keeps its timer.
+    if (step.status !== "active") step.startedAt = Date.now();
     step.status = "active";
-    step.startedAt = Date.now();
     if (detail !== undefined) step.detail = detail;
     // Animate only while something is running; unref so a finished run exits.
     this.timer ??= setInterval(() => { this.frame++; this.render(); }, 80);

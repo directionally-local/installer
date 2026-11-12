@@ -39,7 +39,7 @@ test("up configures vllm provider and state; status shows GPU and tests", async 
   assert.equal(config.provider, "vllm");
   assert.equal(config.providers.vllm.baseUrl, "http://127.0.0.1:8000/v1");
   assert.equal(await modelCommand("status", [], options), 0);
-  assert.match(lines.join(""), /GPU 0.*49152.*Last test.*10 tokens\/sec/s);
+  assert.match(lines.join(""), /GPU: NVIDIA RTX 6000 · 48 GB.*Last test: chat ✓ · tools ✓ · JSON ✓ · 10 tok\/s/s);
   assert.equal(system.modelCommands.length, 1);
 });
 
@@ -49,13 +49,13 @@ test("update compares both, switches provider, and rollback restores old deploym
   assert.equal(await modelCommand("update", ["qwen-new"], options), 0);
   assert.ok(system.running.has("dl-model-2"));
   assert.ok(!system.running.has("dl-model-1"));
-  assert.match(lines.join(""), /old .*120\.1 tok\/s decode.*new .*126\.3 tok\/s decode \(fixed 512-token bench\)/);
+  assert.match(lines.join(""), /Speed \(512 tokens\): old 120\.1 · new 126\.3 tok\/s/);
   assert.equal(JSON.parse(system.files.get("/tmp/model.json")!.content).previous.port, 8000);
   assert.equal(await modelCommand("rollback", [], options), 0);
   assert.ok(system.running.has("dl-model-1"));
   assert.ok(!system.running.has("dl-model-2"));
   assert.equal(JSON.parse(system.files.get("/tmp/autopilot/config.json")!.content).providers.vllm.baseUrl, "http://127.0.0.1:8000/v1");
-  assert.equal((lines.join(" ").match(/fixed 512-token bench/g) ?? []).length, 2, "update and rollback each benchmark both live models");
+  assert.equal((lines.join(" ").match(/Speed \(512 tokens\)/g) ?? []).length, 2, "update and rollback each benchmark both live models");
 });
 
 test("update chooses side-by-side when the GPU reservation fits in free VRAM", async () => {
@@ -76,8 +76,8 @@ test("an incumbent that fails its smoke re-test warns but does not stop the swit
   assert.equal(await modelCommand("update", ["qwen-new"], options), 0);
   assert.ok(system.running.has("dl-model-2"));
   assert.ok(!system.running.has("dl-model-1"));
-  assert.match(lines.join(""), /failed its smoke re-test|Switching anyway/);
-  assert.ok(lines.join(" ").includes("old Qwen/Qwen3-4B: 120.1 tok/s decode | new Qwen/Qwen3-4B-Instruct-2507: 126.3 tok/s decode"));
+  assert.match(lines.join(""), /Old model failed its re-test, switching anyway/);
+  assert.ok(lines.join(" ").includes("Speed (512 tokens): old 120.1 · new 126.3 tok/s"));
   assert.equal(JSON.parse(system.files.get("/tmp/model.json")!.content).active.id, "qwen-new");
   assert.equal(JSON.parse(system.files.get("/tmp/autopilot/config.json")!.content).providers.vllm.baseUrl, "http://127.0.0.1:8001/v1");
 });
@@ -109,7 +109,7 @@ test("insufficient free VRAM asks before downtime and restores old after failure
   downtime.system.gpu = "0, GPU, 49152, 1024, 570\n";
   downtime.answers.push("", "", "yes");
   assert.equal(await modelCommand("update", ["qwen-new"], downtime.options), 0);
-  assert.ok(downtime.lines.join(" ").includes("old Qwen/Qwen3-4B: not re-measured (stopped for downtime)"));
+  assert.ok(downtime.lines.join(" ").includes("Speed: new 25 tok/s (old was stopped)"));
 });
 
 test("dry run prints every planned Docker command without writing state or provider", async () => {
@@ -175,7 +175,7 @@ test("bench sweeps concurrency levels and reports TTFT and decode throughput", a
   options.fetch = async () => stream(8);
   await modelCommand("up", ["qwen-old"], options);
   assert.equal(await modelCommand("bench", [], { ...options, fetch: options.fetch }), 0);
-  assert.match(lines.join(""), /concurrency 1/);
+  assert.match(lines.join(""), /1 at once, 1 reqs/);
   assert.match(lines.join(""), /TTFT p50/);
 });
 
