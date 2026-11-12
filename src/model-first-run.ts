@@ -1,5 +1,6 @@
 import { MODEL_CATALOG, type ModelRecipe } from "./model-catalog.js";
-import { configureProvider, modelCommand, type ModelCommandOptions } from "./model-command.js";
+import { configureProvider, logPathOf, modelCommand, showHardware, type ModelCommandOptions } from "./model-command.js";
+import { SmokeError } from "./model-smoke.js";
 import { checkGpuDocker, containerRunning, detectHardware, type Hardware } from "./model-runtime.js";
 import { modelStatePath, readModelState } from "./state.js";
 import { autopilotConfigFile } from "./laptop/free-tier.js";
@@ -13,7 +14,9 @@ import { PromptCancelled } from "./prompt.js";
  * 1. Docker and the Nvidia container toolkit: checked, and the toolkit offered for install
  *    (Ubuntu/Debian, with sudo) when it's missing.
  * 2. A model picker over the whole catalog: each model says whether it fits this GPU and
- *    whether it was tested on real hardware. Only one that fits can be started.
+ *    whether it was tested on real hardware. Only one that fits can be started; when only one
+ *    fits, it is picked and the line says why. A retry (Autopilot's "Retry") names the model
+ *    and skips the picker.
  * 3. `modelCommand("up", [id])` non-interactively (default context and port): live progress,
  *    smoke tests, and the vllm provider written to Autopilot's config.
  *
@@ -32,7 +35,14 @@ export type ModelUpErrorType =
   | "smoke_failed"
   | "other";
 
-export type ModelUpResult = { ok: true; model: string } | { ok: false; errorType: ModelUpErrorType; message: string };
+/**
+ * How the setup went. A failure's `message` is one short line ("Chat test: the model returned
+ * no text, thinking mode used all tokens"); `log` is the run log with the details, `model` the
+ * catalog id that was tried.
+ */
+export type ModelUpResult =
+  | { ok: true; model: string }
+  | { ok: false; errorType: ModelUpErrorType; message: string; log?: string; model?: string };
 
 /**
  * Catalog models verified end to end (launch, chat, tool call and JSON smoke tests, an Autopilot
@@ -57,6 +67,10 @@ export interface FirstRunModelUpOptions extends Omit<ModelCommandOptions, "inter
   root?: boolean;
   /** For tests; production runs `dl model up`'s own entry point. */
   modelUp?: typeof modelCommand;
+  /** Run this catalog model again without the picker (a retry). */
+  model?: string;
+  /** The model that just failed: marked in the picker, and not the default. */
+  avoid?: string;
 }
 
 const gb = (mib: number) => Math.ceil(mib / 1024);
@@ -69,6 +83,7 @@ export function modelChoices(largestMiB: number): Array<{ recipe: ModelRecipe; f
 /** Map `dl model up`'s error to a short type. */
 export function modelUpErrorType(error: unknown): ModelUpErrorType {
   if (error instanceof PromptCancelled) return "cancelled";
+  if (error instanceof SmokeError) return error.check === "ready" ? "launch_failed" : "smoke_failed";
   const message = error instanceof Error ? error.message : String(error);
   if (/Smoke test failed/i.test(message)) return "smoke_failed";
   if (/Could not start vLLM/i.test(message)) return "launch_failed";
@@ -142,14 +157,29 @@ async function pickModel(options: FirstRunModelUpOptions, hardware: Hardware): P
   if (fitting.length === 0) {
     return { ok: false, errorType: "no_fit", message: `No model in dl's catalog fits ${gb(largest)} GB of GPU memory yet.` };
   }
-  const initial = Math.max(0, choices.findIndex((choice) => choice.fits && choice.tested));
+  const again = options.model ? fitting.find((choice) => choice.recipe.id === options.model) : undefined;
+  if (again) {
+    options.ui.line("info", "Model", `${again.recipe.id}, trying again`);
+    return again.recipe;
+  }
+  if (fitting.length === 1) {
+    options.ui.line("info", "Model", `Only one model fits this GPU: ${fitting[0]!.recipe.id}`);
+    return fitting[0]!.recipe;
+  }
+  // The default: the first tested model that fits and didn't just fail (the catalog lists qwen-new first).
+  const preferred = [
+    (choice: (typeof choices)[number]) => choice.fits && choice.tested && choice.recipe.id !== options.avoid,
+    (choice: (typeof choices)[number]) => choice.fits && choice.recipe.id !== options.avoid,
+    (choice: (typeof choices)[number]) => choice.fits,
+  ];
+  const initial = preferred.map((test) => choices.findIndex(test)).find((index) => index >= 0) ?? 0;
   for (;;) {
     const picked = await options.prompter.select(
-      options.ui.prompt("Model", "fits this GPU or not · tested on a real GPU or not"),
+      options.ui.prompt("Pick a model"),
       choices.map(({ recipe, fits, tested }) => ({
         value: recipe.id,
         label: `${recipe.id}  ${recipe.repo}`,
-        detail: `${gb(recipe.minVramMiB)} GB · ${fits ? "fits" : "doesn't fit"} · ${tested ? "tested" : "untested"}`,
+        detail: `${gb(recipe.minVramMiB)} GB · ${fits ? "fits" : "doesn't fit"} · ${tested ? "tested" : "untested"}${recipe.id === options.avoid ? " · failed" : ""}`,
       })),
       initial,
     );
@@ -168,14 +198,15 @@ export async function firstRunModelUp(options: FirstRunModelUpOptions): Promise<
   try {
     ui.title("Private model on this GPU");
     const hardware = await detectHardware(system);
-    for (const gpu of hardware.gpus) ui.line("info", `GPU ${gpu.index}`, `${gpu.name} · ${gb(gpu.totalMiB)} GB · driver ${gpu.driver} · CUDA ${hardware.cuda}`);
+    showHardware(ui, hardware);
     const statePath = options.statePath ?? modelStatePath();
     const state = await readModelState(system, statePath);
     if (state) {
       if (await containerRunning(system, state.active.container)) {
         // Already serving here (an earlier dl model up): point Autopilot at it.
         await configureProvider(options, state.active, options.configPath ?? autopilotConfigFile());
-        ui.line("done", "Model serving", `${state.active.repo} · http://127.0.0.1:${state.active.port}/v1`);
+        ui.line("done", "Model serving", state.active.repo);
+        ui.line("info", "API", `http://127.0.0.1:${state.active.port}/v1`);
         return { ok: true, model: state.active.repo };
       }
       return {
@@ -188,12 +219,24 @@ export async function firstRunModelUp(options: FirstRunModelUpOptions): Promise<
     if (blocked) return blocked;
     const picked = await pickModel(options, hardware);
     if (!("id" in picked)) return picked;
-    const code = await (options.modelUp ?? modelCommand)("up", [picked.id], { ...options, statePath, interactive: false });
-    if (code === 130) return { ok: false, errorType: "cancelled", message: "Cancelled." };
-    if (code !== 0) return { ok: false, errorType: "other", message: `dl model up exited with ${code}.` };
-    return { ok: true, model: picked.repo };
+    try {
+      const code = await (options.modelUp ?? modelCommand)("up", [picked.id], { ...options, statePath, interactive: false, hardwareShown: true });
+      if (code === 130) return { ok: false, errorType: "cancelled", message: "Cancelled.", model: picked.id };
+      if (code !== 0) return { ok: false, errorType: "other", message: `dl model up exited with ${code}.`, model: picked.id };
+      return { ok: true, model: picked.repo };
+    } catch (error) {
+      return { ...failure(error), model: picked.id };
+    }
   } catch (error) {
-    const errorType = modelUpErrorType(error);
-    return { ok: false, errorType, message: errorType === "cancelled" ? "Cancelled." : error instanceof Error ? error.message : String(error) };
+    return failure(error);
   }
+}
+
+/** A thrown error as a result: its first line (never server logs), and its run log. */
+function failure(error: unknown): Extract<ModelUpResult, { ok: false }> {
+  const errorType = modelUpErrorType(error);
+  if (errorType === "cancelled") return { ok: false, errorType, message: "Cancelled." };
+  const message = (error instanceof Error ? error.message : String(error)).split("\n")[0]!.trim();
+  const log = logPathOf(error);
+  return { ok: false, errorType, message, ...(log ? { log } : {}) };
 }

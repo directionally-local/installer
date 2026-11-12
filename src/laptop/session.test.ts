@@ -875,7 +875,7 @@ describe("dl the first time on a laptop", () => {
 
   /** Autopilot that asks dl for `dl model up` (writes the GPU handoff) on the launches listed. */
   const asking = (on: number[], text = JSON.stringify({ version: 1, action: "model-up", gpu: { vendor: "nvidia", model: "NVIDIA GeForce RTX 4090", count: 2, vramGb: 24 } })): SessionSpawner => (command, args, env, options) => {
-    if (on.includes(plain.launches.length)) writeFileSync(env.DL_GPU_HANDOFF!, text, { mode: 0o600 });
+    if (on.includes(plain.launches.length) && env.DL_GPU_HANDOFF) writeFileSync(env.DL_GPU_HANDOFF, text, { mode: 0o600 });
     return plain.spawn(command, args, env, options);
   };
   const gpuLaptop = (spawn: SessionSpawner, modelUp: SessionInput["modelUp"]) =>
@@ -910,6 +910,33 @@ describe("dl the first time on a laptop", () => {
     assert.match(plainText(io.text()), /✗ Smoke test failed for Qwen\/Qwen3-4B/);
   });
 
+  it("a failure passes the model, the reason and the log; Retry and Pick another come back to dl model up", async () => {
+    const dir = join(root, "fresh");
+    await mkdir(dir);
+    const io = capture();
+    const requests: unknown[] = [];
+    const retry = JSON.stringify({ version: 1, action: "model-up", model: "qwen-old" });
+    const pick = JSON.stringify({ version: 1, action: "model-up", pick: true });
+    let launch = 0;
+    const spawn: SessionSpawner = (command, args, env, options) => {
+      const text = [JSON.stringify({ version: 1, action: "model-up" }), retry, pick][launch++];
+      if (text && env.DL_GPU_HANDOFF) writeFileSync(env.DL_GPU_HANDOFF, text, { mode: 0o600 });
+      return plain.spawn(command, args, env, options);
+    };
+    const failed = { ok: false as const, errorType: "smoke_failed" as const, message: "Chat test: the model returned no text,\nthinking mode used all tokens", log: "/home/me/.directionallylocal/logs/x-up.log", model: "qwen-old" };
+    assert.equal(await inside(dir, () => main([], io, gpuLaptop(spawn, async (request) => { requests.push(request); return failed; }))), 0);
+    const env = plain.launches[1]!.env;
+    assert.equal(env.DL_GPU_MODEL, "qwen-old");
+    assert.equal(env.DL_GPU_REASON, "Chat test: the model returned no text, thinking mode used all tokens", "one line");
+    assert.equal(env.DL_GPU_LOG, "/home/me/.directionallylocal/logs/x-up.log");
+    assert.deepEqual(requests, [
+      { version: 1, action: "model-up" },
+      { version: 1, action: "model-up", model: "qwen-old" },
+      { version: 1, action: "model-up", pick: true, avoid: "qwen-old" },
+    ], "Retry names the model; Pick another marks the one that failed");
+    assert.match(plainText(io.text()), /Log: \/home\/me\/\.directionallylocal\/logs\/x-up\.log/);
+  });
+
   it("an Autopilot that never asks (older, or no GPU) runs once, as before; a bad request is ignored", async () => {
     const dir = join(root, "fresh");
     await mkdir(dir);
@@ -931,6 +958,7 @@ describe("dl the first time on a laptop", () => {
     assert.equal(await inside(dir, () => main([], capture(), gpuLaptop(asking([0, 1, 2, 3, 4, 5]), async () => { called++; return { ok: false, errorType: "cancelled", message: "Cancelled." }; }))), 7);
     assert.equal(called, MAX_HANDOFFS);
     assert.equal(plain.launches.length, MAX_HANDOFFS + 1);
+    assert.equal(plain.launches.at(-1)!.env.DL_GPU_HANDOFF, undefined, "the last relaunch can't ask again, so Autopilot doesn't offer a retry");
   });
 
   it("dl --from-claude-code is autopilot --from-claude-code in this folder", async () => {
