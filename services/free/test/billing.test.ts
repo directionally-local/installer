@@ -240,7 +240,8 @@ describe("Pro through its payment events", () => {
     let body = await me(svc, key);
     assert.equal(body.plan, "pro");
     assert.equal(body.allowance.tokensPerWeek, 300_000_000);
-    assert.equal(body.allowance.usdPerWeek, 10, "Pro's weekly dollar ceiling (PRO_WEEKLY_USD_CAP, default $10)");
+    assert.equal(body.allowance.usdPerWeek, 6, "Pro's weekly GPT-6 budget (PRO_WEEKLY_USD_CAP, default $6)");
+    assert.equal(body.budgets.deepseek.usdPerWeek, 40, "Pro's weekly DeepSeek budget (PRO_DEEPSEEK_WEEKLY_USD_CAP, default $40)");
 
     const periodEnd = Math.floor((NOW + 30 * DAY) / 1000);
     await deliver(svc, "invoice.paid", invoice(100, "in_1", periodEnd));
@@ -342,7 +343,8 @@ describe("Pro through its payment events", () => {
 
 describe("top-ups", () => {
   it("an old token top-up checkout adds 50M tokens for 30 days, used after the weekly allowance, then expires", async () => {
-    const svc = await service({ WEEKLY_TOKENS: "40000" });
+    // DeepSeek has no token cap: its week ends at its dollar budget.
+    const svc = await service({ DEEPSEEK_WEEKLY_USD_CAP: "0.01" });
     const { key } = await person(svc);
     svc.setOpenRouter(() => completion(usage(20_000, 20_000, 0, 0.01)));
     assert.equal((await chat(svc, key)).status, 200, "the weekly allowance first");
@@ -355,7 +357,7 @@ describe("top-ups", () => {
     assert.equal((await chat(svc, key)).status, 200, "now from the top-up");
     const after = await me(svc, key);
     assert.equal(after.topupTokensLeft, 50_000_000 - 40_000);
-    assert.equal(after.allowance.usedThisWeek, 40_000, "the week's counter is unchanged");
+    assert.equal(after.pools.deepseek.usedThisWeek, 40_000, "the week's counter is unchanged");
     assert.equal((await svc.directory().spend(svc.clock.now)).paidRequests, 1, "top-up use is paid usage");
 
     // A second delivery of the same purchase (a new event id, same session) doesn't add twice.

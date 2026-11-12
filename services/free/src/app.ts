@@ -35,6 +35,7 @@ import {
   UPSTREAM_TIMEOUT_MESSAGE,
   UPSTREAM_UNAVAILABLE_MESSAGE,
   queuedMessage,
+  gptLimitMessage,
   quotaMessage,
   signInRefusal,
   TOTAL_BUDGET_MESSAGE,
@@ -43,7 +44,7 @@ import {
 } from "./messages.js";
 import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
-import { ALLOWED_MODELS, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, modelById, type FreeModel, type Pool } from "./models.js";
+import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, familyOfPool, modelById, type FreeModel, type Pool } from "./models.js";
 import { emailBlocked, emailDomain, normalizeEmail, plausibleEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
 import {
   ACCESS_REQUEST_PATH,
@@ -454,10 +455,19 @@ function basicRule(config: FreeConfig): BasicRule {
  */
 function limitsFor(config: FreeConfig, bonusTokens = 0, level: Level = "full", batchFlagged = false): Limits {
   const served = servedLevel(level, config);
-  const base = { weeklyTokens: config.weeklyTokens, proTokensPerWeek: config.offers.pro.tokensPerWeek, proUsdPerWeek: config.proWeeklyUsdCap };
-  if (served === "full") return { ...base, weeklyUsd: config.perPersonWeeklyUsdCap, level: "full", ...(bonusTokens > 0 ? { bonusTokens } : {}) };
-  if (served === "basic") return { ...base, weeklyUsd: config.basicWeeklyUsdCap, level: "basic", levelTokens: config.basicWeeklyTokens };
-  return { ...base, weeklyUsd: config.starterWeeklyUsdCap, level: "starter", levelTokens: batchFlagged ? 0 : config.starterWeeklyTokens };
+  // Two weekly dollar budgets: `weeklyUsd` is GPT-6's (every GPT-6 model), `deepseekWeeklyUsd`
+  // DeepSeek's. A setting of "none" is no cap (null).
+  const base = {
+    weeklyTokens: config.weeklyTokens,
+    proTokensPerWeek: config.offers.pro.tokensPerWeek,
+    proUsdPerWeek: config.proWeeklyUsdCap,
+    proDeepseekUsdPerWeek: config.proDeepseekWeeklyUsdCap ?? null,
+  };
+  if (served === "full") return { ...base, weeklyUsd: config.perPersonWeeklyUsdCap, deepseekWeeklyUsd: config.deepseekWeeklyUsdCap ?? null, level: "full", ...(bonusTokens > 0 ? { bonusTokens } : {}) };
+  if (served === "basic") return { ...base, weeklyUsd: config.basicWeeklyUsdCap, deepseekWeeklyUsd: config.basicDeepseekWeeklyUsdCap ?? null, level: "basic", levelTokens: config.basicWeeklyTokens };
+  // A batch-flagged Starter account gets nothing of either.
+  if (batchFlagged) return { ...base, weeklyUsd: 0, deepseekWeeklyUsd: 0, level: "starter", levelTokens: 0 };
+  return { ...base, weeklyUsd: config.starterWeeklyUsdCap, deepseekWeeklyUsd: config.starterDeepseekWeeklyUsdCap ?? null, level: "starter", levelTokens: config.starterWeeklyTokens };
 }
 
 /**
@@ -720,6 +730,20 @@ export function topupUsage(paidCents: number, multiplier: number): number {
   return Math.round(paidCents * multiplier) / 100;
 }
 
+/**
+ * POST /admin/reset-week: starts this week over for everyone not blocked, both budgets (GPT-6 and
+ * DeepSeek): tokens and dollars back to 0. Top-ups, plans and personal caps stay. `dryRun` only
+ * counts. One account call per person, at most ADMIN_PEOPLE_CONCURRENCY at once.
+ */
+async function resetWeek(c: Ctx, now: number, dryRun: boolean): Promise<{ dryRun: boolean; people: number; reset: number; skippedBlocked: number }> {
+  const people = await directory(c).listPeople();
+  const open = people.filter((person) => person.status !== "blocked");
+  const skippedBlocked = people.length - open.length;
+  if (dryRun) return { dryRun, people: open.length, reset: 0, skippedBlocked };
+  const done = await mapLimited(open, ADMIN_PEOPLE_CONCURRENCY, (person) => account(c, person.github_id).resetWeek(now));
+  return { dryRun, people: open.length, reset: done.filter(Boolean).length, skippedBlocked };
+}
+
 /** Account calls the admin people list keeps in flight at once. */
 export const ADMIN_PEOPLE_CONCURRENCY = 16;
 /** The most people one page of the admin people list holds (`?limit=`). */
@@ -763,7 +787,8 @@ export function usdLabel(amount: number): string {
 /**
  * The paid offers, from config (Stripe billing sells them). `price` is the exact text to show
  * ("$3.99/month"), so a client never formats or rounds the number itself; `usdPerWeek` is Pro's
- * weekly dollar ceiling (null: tokens only) and `valueLine` one short sentence to show with it.
+ * weekly GPT-6 budget and `deepseekUsdPerWeek` its DeepSeek one (null: no dollar cap), and
+ * `valueLine` one short sentence to show with it.
  */
 export function offers(config: FreeConfig) {
   const { pro, topup } = config.offers;
@@ -772,7 +797,9 @@ export function offers(config: FreeConfig) {
       priceUsdMonthly: pro.priceUsdMonthly,
       price: `${usdLabel(pro.priceUsdMonthly)}/month`,
       tokensPerWeek: pro.tokensPerWeek,
+      // Pro's GPT-6 budget (the field older clients read) and its DeepSeek budget.
       usdPerWeek: config.proWeeklyUsdCap ?? null,
+      deepseekUsdPerWeek: config.proDeepseekWeeklyUsdCap ?? null,
       valueLine: pro.valueLine,
     },
     // A dollar top-up: whole units of `unitPriceUsd`, each adding `usageMultiplier` times its price in usage.
@@ -1194,9 +1221,9 @@ function effectiveLevel(person: { level: Level; level_reason: LevelReason | null
 async function levelDetails(c: Ctx, person: PersonRow | undefined, signIn: SignInLevel): Promise<{ line: string }> {
   const { config } = await runtime(c);
   const level = servedLevel(effectiveLevel(person, signIn), config);
-  if (level === "basic") return { line: basicLine(config.basicWeeklyTokens, config.basicWeeklyUsdCap) };
+  if (level === "basic") return { line: basicLine(config.basicWeeklyTokens, config.basicWeeklyUsdCap, config.basicDeepseekWeeklyUsdCap) };
   const flagged = signIn.batchFlagged === true || person?.batch_flag === 1;
-  return { line: starterLine(levelThresholds(config), flagged ? 0 : config.starterWeeklyTokens, config.starterWeeklyUsdCap) };
+  return { line: starterLine(levelThresholds(config), flagged ? 0 : config.starterWeeklyTokens, config.starterWeeklyUsdCap, config.starterDeepseekWeeklyUsdCap) };
 }
 
 /** The welcome email for the level a new sign-up was admitted at. */
@@ -1497,14 +1524,32 @@ async function apiGuard(c: Ctx, identity: Identity, headers: () => Promise<Recor
   return retry === undefined ? undefined : rateLimited(retry, await headers());
 }
 
+/**
+ * An allowance as /v1/me and the admin API show it. The top-level fields describe the Luna pool
+ * and the GPT-6 budget, as older clients read them; `budgets` has both weekly dollar budgets.
+ */
 function allowanceView(allowance: Allowance) {
   return {
     tokensPerWeek: allowance.tokensPerWeek,
     usedThisWeek: allowance.usedThisWeek,
     remaining: allowance.remaining,
     resetsAt: new Date(allowance.resetsAt).toISOString(),
-    usdPerWeek: allowance.usdPerWeek,
-    spentUsdThisWeek: allowance.spentUsdThisWeek,
+    usdPerWeek: allowance.budgets.gpt6.usdPerWeek,
+    spentUsdThisWeek: allowance.budgets.gpt6.spentUsd,
+    budgets: budgetsView(allowance),
+  };
+}
+
+/**
+ * Both weekly dollar budgets: `{gpt6: {usdPerWeek, spentUsd, tokensThisWeek}, deepseek: {...}}`
+ * (usdPerWeek null: no cap). `tokensThisWeek` counts every token processed the normal way (prompt
+ * with cached, plus completion), not the weighted count the token allowances use.
+ */
+function budgetsView(allowance: Allowance) {
+  const { gpt6, deepseek } = allowance.budgets;
+  return {
+    gpt6: { usdPerWeek: gpt6.usdPerWeek, spentUsd: gpt6.spentUsd, tokensThisWeek: gpt6.tokensThisWeek },
+    deepseek: { usdPerWeek: deepseek.usdPerWeek, spentUsd: deepseek.spentUsd, tokensThisWeek: deepseek.tokensThisWeek },
   };
 }
 
@@ -1560,16 +1605,16 @@ async function me(c: Ctx): Promise<Response> {
     login: identity.login,
     githubId: identity.githubId,
     status: allowance.status,
-    /** "full", "basic" or "starter": what this account may use. */
-    level: servedLevel(person?.level ?? "full", config),
-    /** Why the level is what it is, so a client can explain without guessing. */
-    levelReason: person?.levelReason ?? null,
+    // No level here: publicly there is only Free and Pro (`plan`). The internal level shows only
+    // in the budgets it sets.
     /** The thresholds a Full account must clear, from the effective config. */
     thresholds: levelThresholds(config),
     /** The GitHub signals the level came from, as numbers only. */
     signals: person?.signals ?? null,
     allowance: queue ? { ...view, remaining: 0 } : view,
-    /** Each model's weekly allowance, so a client can show what each one has left. */
+    /** Both weekly dollar budgets (also in `allowance.budgets`): GPT-6 (every GPT-6 model) and DeepSeek. */
+    budgets: view.budgets,
+    /** Each model's weekly allowance, so a client can show what each one has left; null tokens: no token cap. */
     pools: Object.fromEntries(
       POOLS.map((pool) => [
         pool,
@@ -1577,6 +1622,7 @@ async function me(c: Ctx): Promise<Response> {
           tokensPerWeek: allowance.pools[pool].tokensPerWeek,
           usedThisWeek: allowance.pools[pool].usedThisWeek,
           remaining: queue ? 0 : allowance.pools[pool].remaining,
+          family: familyOfPool(pool),
           resetsAt: new Date(allowance.resetsAt).toISOString(),
           models: FREE_MODELS.filter((model) => model.pool === pool).map((model) => model.id),
         },
@@ -1852,7 +1898,7 @@ async function accessRequest(c: Ctx, method: string): Promise<Response> {
   }
   // Full without server keys may still ask: that is how keys are granted.
   if (c.config.adminGithubIds.has(identity.githubId) || (stored.level === "full" && (await serverKeysAllowed(c, identity.githubId, stored)))) {
-    return apiError(409, "already_full", "You already have the full free tier.");
+    return apiError(409, "already_full", "You already have free tokens.");
   }
   if (Number(c.request.headers.get("content-length") ?? 0) > ACCESS_REQUEST_MAX_BYTES) return apiError(400, "invalid_request", ACCESS_REQUEST_USAGE);
   const text = await c.request.text();
@@ -2008,8 +2054,10 @@ async function saveEarlyAccessLead(c: Ctx, body: unknown, count: GpuCount): Prom
 
 // ─── Inference ──────────────────────────────────────────────────────────────
 
+/** No `x-dl-tokens-remaining` for a pool without a token cap (DeepSeek): its dollar budget is the limit. */
 function quotaHeaders(allowance: Allowance): Record<string, string> {
-  return { "x-dl-tokens-remaining": String(allowance.remaining), "x-dl-quota-resets-at": new Date(allowance.resetsAt).toISOString() };
+  const resets = { "x-dl-quota-resets-at": new Date(allowance.resetsAt).toISOString() };
+  return allowance.remaining === null ? resets : { "x-dl-tokens-remaining": String(allowance.remaining), ...resets };
 }
 
 async function chat(c: Ctx): Promise<Response> {
@@ -2132,12 +2180,22 @@ async function chat(c: Ctx): Promise<Response> {
     if (reservation.code === "quota_exceeded") {
       if (freeBlock && reservation.allowance.plan === "free") return freeBlock();
       const resetsAt = new Date(reservation.allowance.resetsAt).toISOString();
+      // GPT-6's week used up while DeepSeek's isn't: point there instead of a dead end.
+      if (reservation.family === "gpt6" && reservation.deepseekLeft && modelAvailable(modelById(DEEPSEEK_MODEL)!, gate.config, gate)) {
+        return apiError(
+          402,
+          "gpt_limit",
+          gptLimitMessage(reservation.allowance.plan),
+          { family: "gpt6", resetsAt, reason: reservation.reason, alternative: DEEPSEEK_MODEL, offers: offers(gate.config) },
+          quota,
+        );
+      }
       // A basic or Starter week used up: what the level gets, when it resets, and the ways to more.
       if (!isAdmin && reservation.allowance.plan === "free" && (level === "basic" || level === "starter")) {
         return apiError(
           402,
           `${level}_limit`,
-          limitLine(level, limits.levelTokens ?? 0, limits.weeklyUsd),
+          limitLine(level, limits.levelTokens ?? 0, limits.weeklyUsd, limits.deepseekWeeklyUsd ?? undefined),
           { resetsAt, reason: reservation.reason, request: ACCESS_REQUEST_PATH, offers: offers(gate.config), referralLink: link },
           quota,
         );
@@ -2173,7 +2231,8 @@ async function chat(c: Ctx): Promise<Response> {
     if (host && failure && cooldownMs > 0) await hosts(c).markHostFailing(host, c.now());
     const charged = chargeNothing ? 0 : usage ? chargedTokens(usage, gate.config.cachedTokenWeight) : undefined;
     const cost = chargeNothing ? 0 : usage ? (provider === "openrouter" ? costOf(usage, 0) : costAtPrices(usage, model.prices)) : undefined;
-    const settled = await person.settle({ reservationId, charged, costUsd: cost, limits, now: c.now() });
+    const rawTokens = chargeNothing ? 0 : usage ? usage.promptTokens + usage.completionTokens : undefined;
+    const settled = await person.settle({ reservationId, charged, costUsd: cost, ...(rawTokens !== undefined ? { rawTokens } : {}), limits, now: c.now() });
     // Without usage, the credit is charged what the allowance was: the reservation at the fallback price.
     const creditUsd = chargeNothing || provider === "openrouter" ? 0 : usage ? costAtPrices(usage, creditPrices(model)) : settled.costUsd;
     const record: RequestRecord = {
@@ -2198,6 +2257,8 @@ async function chat(c: Ctx): Promise<Response> {
       ...(options.upstreamError ? { upstreamError: true } : {}),
       ...(options.outcome ? { upstreamOutcome: options.outcome } : {}),
       ...(identity.via === "key" ? { viaKey: true } : {}),
+      // The requested model's budget paid, even when its fallback served.
+      family: effective.family,
     };
     await alert(c, await directory(c).recordRequest(record, policyOf(gate.config), servingContext(c, gate.config)));
     // Most of the week's free tokens used: one email a week, on the settlement that crossed 80%.
@@ -2676,7 +2737,9 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       caps: {
         globalWeeklyUsd: config.globalWeeklyUsdCap ?? null,
         globalTotalUsd: config.globalTotalUsdCap ?? null,
+        // The per-person weekly budgets of a Full account: GPT-6 (every GPT-6 model) and DeepSeek.
         perPersonWeeklyUsd: config.perPersonWeeklyUsdCap ?? null,
+        deepseekWeeklyUsd: config.deepseekWeeklyUsdCap ?? null,
         weeklyTokens: config.weeklyTokens,
       },
       paused,
@@ -2721,6 +2784,11 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       const note = typeof body.note === "string" ? body.note.slice(0, 200) : null;
       return json({ invites: await directory(c).createInvites({ count, note, createdBy: identity.githubId, now }) }, 201);
     }
+  }
+  if (method === "POST" && rest === "reset-week") {
+    const body = (await readJson(c)) ?? {};
+    if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") return apiError(400, "invalid_request", "Send {dryRun: true} to count first, or {} to reset.");
+    return json(await resetWeek(c, now, body.dryRun === true));
   }
   if (method === "GET" && rest === "people") {
     const levelFilter = c.url.searchParams.get("level");
@@ -2825,14 +2893,20 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       const usdPerWeek = nullableAmount(body.usdPerWeek);
       const usedThisWeek = nullableWhole(body.usedThisWeek);
       const spentUsdThisWeek = nullableAmount(body.spentUsdThisWeek);
-      if ([tokensPerWeek, usdPerWeek, usedThisWeek, spentUsdThisWeek].includes("invalid") || usedThisWeek === null || spentUsdThisWeek === null) {
-        return apiError(400, "invalid_request", "Send any of {tokensPerWeek, usdPerWeek} (a number, or null for the default) and {usedThisWeek, spentUsdThisWeek} (numbers).");
+      const deepseekSpentUsdThisWeek = nullableAmount(body.deepseekSpentUsdThisWeek);
+      if ([tokensPerWeek, usdPerWeek, usedThisWeek, spentUsdThisWeek, deepseekSpentUsdThisWeek].includes("invalid") || usedThisWeek === null || spentUsdThisWeek === null || deepseekSpentUsdThisWeek === null) {
+        return apiError(
+          400,
+          "invalid_request",
+          "Send any of {tokensPerWeek, usdPerWeek} (a number, or null for the default) and {usedThisWeek, spentUsdThisWeek, deepseekSpentUsdThisWeek} (numbers; usdPerWeek and spentUsdThisWeek are GPT-6's).",
+        );
       }
       const allowance = await account(c, githubId).setGrant({
         tokensPerWeek: tokensPerWeek as number | null | undefined,
         usdPerWeek: usdPerWeek as number | null | undefined,
         usedThisWeek: usedThisWeek as number | undefined,
         spentUsdThisWeek: spentUsdThisWeek as number | undefined,
+        deepseekSpentUsdThisWeek: deepseekSpentUsdThisWeek as number | undefined,
         limits: (await personLimits(c, config, githubId, now)).limits,
         now,
       });
@@ -3358,6 +3432,7 @@ function spendView(c: Ctx, config: FreeConfig, paused: boolean, spend: SpendSumm
     maxActiveUsers: config.maxActiveUsers,
     weeklyTokens: config.weeklyTokens,
     perPersonWeeklyUsd: config.perPersonWeeklyUsdCap ?? null,
+    deepseekWeeklyUsd: config.deepseekWeeklyUsdCap ?? null,
     queueThreshold: config.queueThreshold,
     primaryUpstream: config.primaryUpstream,
     luminalConfigured: c.config.luminalApiKey !== undefined,
@@ -3376,8 +3451,10 @@ function spendView(c: Ctx, config: FreeConfig, paused: boolean, spend: SpendSumm
     openaiWeeklyCreditUsd: config.openaiWeeklyCreditUsd ?? null,
     starterWeeklyTokens: config.starterWeeklyTokens,
     starterWeeklyUsd: config.starterWeeklyUsdCap ?? null,
+    starterDeepseekWeeklyUsd: config.starterDeepseekWeeklyUsdCap ?? null,
     basicWeeklyTokens: config.basicWeeklyTokens,
     basicWeeklyUsd: config.basicWeeklyUsdCap ?? null,
+    basicDeepseekWeeklyUsd: config.basicDeepseekWeeklyUsdCap ?? null,
     basicMinAccountAgeDays: config.basicMinAccountAgeDays,
     fullMinAccountAgeDays: config.fullMinAccountAgeDays,
     fullMinPublicRepos: config.fullMinPublicRepos,

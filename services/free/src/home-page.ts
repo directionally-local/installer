@@ -188,8 +188,13 @@ export interface PersonRow {
   githubId: number;
   login: string | null;
   tier: Tier;
+  /** This week's free cost, both budgets; `gptCostUsd` and `deepseekCostUsd` split it. */
   costUsd: number;
+  gptCostUsd: number;
+  deepseekCostUsd: number;
+  /** The GPT-6 budget and the DeepSeek budget (null: no cap). */
   capUsd: number | null;
+  deepseekCapUsd: number | null;
   /** The cap is an admin's personal one (a grant), not the level's. */
   ownCap: boolean;
   atCap: boolean;
@@ -198,7 +203,19 @@ export interface PersonRow {
 export function personRows(people: readonly HomePerson[], spend: SpendView): PersonRow[] {
   return people.map((person) => {
     const allowance = realAllowance(person, spend);
-    return { githubId: person.githubId, login: person.login, tier: allowance.tier, costUsd: person.costUsd, capUsd: allowance.usd, ownCap: person.grantUsd !== null, atCap: atCap(person, allowance) };
+    const deepseekCostUsd = person.deepseekCostUsd ?? 0;
+    return {
+      githubId: person.githubId,
+      login: person.login,
+      tier: allowance.tier,
+      costUsd: person.costUsd,
+      gptCostUsd: Math.max(0, person.costUsd - deepseekCostUsd),
+      deepseekCostUsd,
+      capUsd: allowance.usd,
+      deepseekCapUsd: allowance.deepseekUsd,
+      ownCap: person.grantUsd !== null,
+      atCap: atCap(person, allowance),
+    };
   });
 }
 
@@ -446,8 +463,11 @@ ${spendChart(home.spendDays, [...keys], 340, "narrow")}
   const rows = top.map((row) => {
     const name = row.login ?? `#${row.githubId}`;
     const link = row.login ? `<a href="https://github.com/${encodeURIComponent(row.login)}" rel="noopener noreferrer nofollow" target="_blank">${escapeHtml(name)}</a>` : `<a href="/admin?view=full#top">${escapeHtml(name)}</a>`;
-    const amount = row.capUsd === null ? `<b>${escapeHtml(money(row.costUsd))}</b>, no cap` : `<b>${escapeHtml(money(row.costUsd))}</b> of ${escapeHtml(money(row.capUsd))}${row.ownCap ? " (own cap)" : ""}`;
-    return `<li><span class="who">${link} <span class="tier">${escapeHtml(TIER_WORDS[row.tier])}</span></span><span class="amt">${row.atCap ? `<span class="capword">at cap</span> ` : ""}${amount}</span>${capBar(row.costUsd, row.capUsd, row.atCap)}</li>`;
+    // GPT-6 first (the tighter budget, and the one a personal cap sets), then DeepSeek when used.
+    const amount = row.capUsd === null ? `GPT-6 <b>${escapeHtml(money(row.gptCostUsd))}</b>, no cap` : `GPT-6 <b>${escapeHtml(money(row.gptCostUsd))}</b> of ${escapeHtml(money(row.capUsd))}${row.ownCap ? " (own cap)" : ""}`;
+    const deepseek =
+      row.deepseekCostUsd > 0 ? ` · DeepSeek <b>${escapeHtml(money(row.deepseekCostUsd))}</b>${row.deepseekCapUsd === null ? ", no cap" : ` of ${escapeHtml(money(row.deepseekCapUsd))}`}` : "";
+    return `<li><span class="who">${link} <span class="tier">${escapeHtml(TIER_WORDS[row.tier])}</span></span><span class="amt">${row.atCap ? `<span class="capword">at cap</span> ` : ""}${amount}${deepseek}</span>${capBar(row.gptCostUsd, row.capUsd, row.atCap)}</li>`;
   });
   const gpuLine = gpuSentence(home);
   const using = `<section class="card" id="using" aria-labelledby="using-h">

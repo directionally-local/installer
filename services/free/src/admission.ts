@@ -183,13 +183,18 @@ export function thresholdText(thresholds: LevelThresholds): string {
 }
 
 /**
- * The honest sentence for a Starter account: what it gets, why, and the ways up. No
- * accusation, and no hint that anything was done wrong. With no Starter tokens (the setting at
- * 0, or an account that gets none), the below-the-bar line.
+ * The sign-in line for a Starter account. Publicly there is only Free and Pro, so it never
+ * names a level: what the free allowance is and the ways to more. With no Starter tokens (the
+ * setting at 0, or an account that gets none), the below-the-bar line.
  */
-export function starterLine(thresholds: LevelThresholds, starterTokens: number, starterUsd?: number): string {
+export function starterLine(thresholds: LevelThresholds, starterTokens: number, starterUsd?: number, starterDeepseekUsd?: number): string {
   if (starterTokens <= 0) return belowBarLine(thresholds);
-  return `Starter access: a small free allowance to try dl, ${allowanceText(starterTokens, starterUsd)}. It resets every Monday. The full free tier is for established GitHub accounts: ${barText(thresholds)}. Want more? Type /request in dl and tell us what you're building. Or use your own API key with /provider.`;
+  return freeLine(starterTokens, starterUsd, starterDeepseekUsd);
+}
+
+/** The free allowance in plain words, with no level name: Free and Pro are the only public plans. */
+function freeLine(weeklyTokens: number, weeklyUsd: number | undefined, deepseekUsd?: number): string {
+  return `Free: ${allowanceText(weeklyTokens, weeklyUsd, deepseekUsd)}. It resets every Monday. Want more? Get dl Pro, type /request in dl and tell us what you're building, or use your own API key with /provider.`;
 }
 
 /** The bar in plain words: "1 year old with 100+ contributions in the last year". */
@@ -215,24 +220,28 @@ export function belowBarLine(thresholds: LevelThresholds): string {
   return `Free tokens are for established GitHub accounts: ${barText(thresholds)}. Not there yet? Type /request in dl and tell us what you're building, and we may give you free tokens (or email ${CREDITS_REQUEST_EMAIL}). Or use your own API key with /provider.`;
 }
 
-/** "10M tokens a week of every model, GPT-6 included, up to $3" (no dollar part without a cap). */
-function allowanceText(weeklyTokens: number, weeklyUsd: number | undefined): string {
-  const usd = weeklyUsd === undefined ? "" : `, up to $${Number.isInteger(weeklyUsd) ? weeklyUsd : weeklyUsd.toFixed(2)}`;
+/**
+ * "every model, up to $2 of GPT-6 and $8 of DeepSeek a week" with both dollar budgets, else
+ * "10M tokens a week of every model, GPT-6 included, up to $3" (no dollar part without a cap).
+ */
+function allowanceText(weeklyTokens: number, weeklyUsd: number | undefined, deepseekUsd?: number): string {
+  const dollars = (usd: number) => `$${Number.isInteger(usd) ? usd : usd.toFixed(2)}`;
+  if (weeklyUsd !== undefined && deepseekUsd !== undefined) return `every model, up to ${dollars(weeklyUsd)} of GPT-6 and ${dollars(deepseekUsd)} of DeepSeek a week`;
+  const usd = weeklyUsd === undefined ? "" : `, up to ${dollars(weeklyUsd)}`;
   return `${formatTokens(weeklyTokens)} tokens a week of every model, GPT-6 included${usd}`;
 }
 
 /**
- * The sign-in page's line for a basic account: what it gets and how to ask for more. Never why:
- * the rule behind the level is private.
+ * The sign-in page's line for a basic account: what it gets and how to ask for more. Never why
+ * (the rule behind the level is private), and never the level's name: publicly it is Free.
  */
-export function basicLine(weeklyTokens: number, weeklyUsd: number | undefined): string {
-  return `Basic access: a smaller free allowance, ${allowanceText(weeklyTokens, weeklyUsd)}. It resets every Monday. Want more? Type /request in dl and tell us what you're building. Or use your own API key with /provider.`;
+export function basicLine(weeklyTokens: number, weeklyUsd: number | undefined, deepseekUsd?: number): string {
+  return freeLine(weeklyTokens, weeklyUsd, deepseekUsd);
 }
 
-/** What a basic or Starter account is told when this week's allowance is used up. */
-export function limitLine(level: "basic" | "starter", weeklyTokens: number, weeklyUsd: number | undefined): string {
-  const name = level === "basic" ? "Basic" : "Starter";
-  return `You've used this week's free ${name} allowance (${allowanceText(weeklyTokens, weeklyUsd)}). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.`;
+/** What a basic or Starter account is told when this week's allowance is used up: "free", never the level's name. */
+export function limitLine(_level: "basic" | "starter", weeklyTokens: number, weeklyUsd: number | undefined, deepseekUsd?: number): string {
+  return `You've used this week's free allowance (${allowanceText(weeklyTokens, weeklyUsd, deepseekUsd)}). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.`;
 }
 
 /** "5M", "1.2M", "800k". */

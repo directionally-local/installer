@@ -25,7 +25,7 @@ import { DAY_MS, weekStart } from "./week.js";
 
 /** Tables and columns the dashboard may read. Everything is counts, tokens, cost, time or who. */
 export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
-  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd", "paid_cost_usd", "credit_usd", "sessions"],
+  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd", "paid_cost_usd", "credit_usd", "sessions", "deepseek_cost_usd"],
   // Levels and the GitHub signals behind them, numbers only (the Starter accounts table).
   people: [
     "github_id",
@@ -430,6 +430,8 @@ export function dashboardData(
 
   // Who reached their allowance this week or last, and on which day: running totals per week,
   // against each person's own level (basic with its tokens off is Starter, as app.ts serves it).
+  // The dollars are GPT-6's (cost less DeepSeek's part), against the GPT-6 budget: the one a
+  // personal cap sets and the one that runs out first.
   const levels = input.limits.levels;
   const limitRows = sql
     .exec<{
@@ -446,7 +448,7 @@ export function dashboardData(
       `WITH running AS (
          SELECT github_id, day, ${WEEK_OF_DAY} AS week,
                 SUM(charged_tokens) OVER (PARTITION BY github_id, ${WEEK_OF_DAY} ORDER BY day) AS tokens,
-                SUM(cost_usd) OVER (PARTITION BY github_id, ${WEEK_OF_DAY} ORDER BY day) AS cost
+                SUM(cost_usd - deepseek_cost_usd) OVER (PARTITION BY github_id, ${WEEK_OF_DAY} ORDER BY day) AS cost
          FROM daily_activity WHERE day >= ? AND requests > 0 AND ${notAdmin("github_id")}),
        served AS (
          SELECT r.github_id AS github_id, r.day AS day, r.week AS week, r.tokens AS tokens, r.cost AS cost, g.weekly_tokens AS grant_tokens, g.weekly_usd AS grant_usd,

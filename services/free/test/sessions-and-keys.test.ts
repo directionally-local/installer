@@ -103,8 +103,8 @@ describe("server keys", () => {
     service.clock.now += 5000;
     const used = await chat(service, body.key);
     assert.equal(used.status, 200);
-    const allowance = ((await (await me(service, alice.access_token)).json()) as { allowance: { usedThisWeek: number } }).allowance;
-    assert.equal(allowance.usedThisWeek, 110, "the key's usage is the account's usage");
+    const pools = ((await (await me(service, alice.access_token)).json()) as { pools: Record<string, { usedThisWeek: number }> }).pools;
+    assert.equal(pools.deepseek!.usedThisWeek, 110, "the key's usage is the account's usage");
 
     const listed = await service.request("GET", "/v1/keys", { token: alice.access_token });
     const text = await listed.text();

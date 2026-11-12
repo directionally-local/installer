@@ -32,7 +32,9 @@ export interface HomePerson {
   /** An admin's per-person caps (the grants table); null for the level's own. */
   grantTokens: number | null;
   grantUsd: number | null;
+  /** This week's free cost, both budgets, and DeepSeek's part of it (GPT-6's is the rest). */
   costUsd: number;
+  deepseekCostUsd?: number;
   tokens: number;
 }
 
@@ -77,7 +79,7 @@ export const HOME_QUERY_TAG = "/* home */";
 /** Tables and columns the home screen may read. */
 export const HOME_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   upstream_daily: ["day", "upstream", "requests", "errors", "cash_usd", "credit_usd"],
-  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd"],
+  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd", "deepseek_cost_usd"],
   people: ["github_id", "login", "admitted_at", "admitted_via", "level", "batch_flag"],
   grants: ["github_id", "weekly_tokens", "weekly_usd"],
   requests: ["github_id", "is_admin", "at", "model", "status"],
@@ -132,9 +134,9 @@ export function homeData(store: Sql, input: { now: number; adminIds: readonly nu
     sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM people WHERE admitted_at >= ? AND ${notAdmin("github_id")}`, today * DAY_MS, admins).toArray()[0]?.n ?? 0;
 
   const spenders = sql
-    .exec<{ github_id: number; login: string | null; level: string | null; batch_flag: number | null; grant_tokens: number | null; grant_usd: number | null; cost: number; tokens: number }>(
+    .exec<{ github_id: number; login: string | null; level: string | null; batch_flag: number | null; grant_tokens: number | null; grant_usd: number | null; cost: number; deepseek: number; tokens: number }>(
       `SELECT d.github_id AS github_id, p.login AS login, p.level AS level, p.batch_flag AS batch_flag, g.weekly_tokens AS grant_tokens, g.weekly_usd AS grant_usd,
-              SUM(d.cost_usd) AS cost, SUM(d.charged_tokens) AS tokens
+              SUM(d.cost_usd) AS cost, SUM(d.deepseek_cost_usd) AS deepseek, SUM(d.charged_tokens) AS tokens
        FROM daily_activity d LEFT JOIN people p ON p.github_id = d.github_id LEFT JOIN grants g ON g.github_id = d.github_id
        WHERE d.day >= ? AND d.requests > 0 AND ${notAdmin("d.github_id")}
        GROUP BY d.github_id ORDER BY cost DESC, tokens DESC, d.github_id`,
@@ -151,6 +153,7 @@ export function homeData(store: Sql, input: { now: number; adminIds: readonly nu
         grantTokens: row.grant_tokens,
         grantUsd: row.grant_usd,
         costUsd: row.cost,
+        deepseekCostUsd: row.deepseek,
         tokens: row.tokens,
       }),
     );
@@ -234,11 +237,15 @@ export function homeData(store: Sql, input: { now: number; adminIds: readonly nu
 /** The settings a person's weekly allowance comes from (effective values). */
 export interface LevelSettings {
   weeklyTokens: number;
+  /** Each level's GPT-6 budget (`...Usd`) and DeepSeek budget (`...DeepseekUsd`, absent: the GPT-6 one). */
   perPersonWeeklyUsd: number | null;
+  deepseekWeeklyUsd?: number | null;
   basicWeeklyTokens: number;
   basicWeeklyUsd: number | null;
+  basicDeepseekWeeklyUsd?: number | null;
   starterWeeklyTokens: number;
   starterWeeklyUsd: number | null;
+  starterDeepseekWeeklyUsd?: number | null;
 }
 
 /** The tier in plain words: full, middle (basic), small (Starter) or no tokens. */
@@ -246,30 +253,43 @@ export type Tier = "full" | "middle" | "small" | "no tokens";
 
 /**
  * A person's real weekly allowance, as app.ts `limitsFor` and the AccountObject compute it: basic
- * with its tokens at 0 is served as Starter; a batch-flagged Starter account gets 0 tokens; an
- * admin's grant sets Full's tokens and any level's dollar cap. Referral bonuses aren't counted.
+ * with its tokens at 0 is served as Starter; a batch-flagged Starter account gets 0 tokens and 0
+ * of both budgets; an admin's grant sets Full's tokens and any level's GPT-6 budget, and DeepSeek
+ * then gets the larger of the grant and the level's DeepSeek budget. Referral bonuses aren't counted.
  */
 export function realAllowance(
   person: { level: string | null; batchFlagged: boolean; grantTokens: number | null; grantUsd: number | null },
   settings: LevelSettings,
-): { tier: Tier; tokens: number; usd: number | null } {
+): { tier: Tier; tokens: number; usd: number | null; deepseekUsd: number | null } {
   const level = person.level === "basic" && settings.basicWeeklyTokens <= 0 ? "starter" : person.level;
   const grantUsd = person.grantUsd;
-  if (level === "basic") return { tier: "middle", tokens: settings.basicWeeklyTokens, usd: grantUsd ?? settings.basicWeeklyUsd };
+  const deepseek = (levelUsd: number | null, own: number | null | undefined) => {
+    const base = own === undefined ? levelUsd : own;
+    return base === null ? null : grantUsd === null ? base : Math.max(grantUsd, base);
+  };
+  if (level === "basic") return { tier: "middle", tokens: settings.basicWeeklyTokens, usd: grantUsd ?? settings.basicWeeklyUsd, deepseekUsd: deepseek(settings.basicWeeklyUsd, settings.basicDeepseekWeeklyUsd) };
   if (level === "starter") {
     const tokens = person.batchFlagged ? 0 : settings.starterWeeklyTokens;
-    return { tier: tokens > 0 ? "small" : "no tokens", tokens, usd: tokens > 0 ? (grantUsd ?? settings.starterWeeklyUsd) : 0 };
+    if (tokens <= 0) return { tier: "no tokens", tokens, usd: 0, deepseekUsd: 0 };
+    return { tier: "small", tokens, usd: grantUsd ?? settings.starterWeeklyUsd, deepseekUsd: deepseek(settings.starterWeeklyUsd, settings.starterDeepseekWeeklyUsd) };
   }
-  return { tier: "full", tokens: person.grantTokens ?? settings.weeklyTokens, usd: grantUsd ?? settings.perPersonWeeklyUsd };
+  return { tier: "full", tokens: person.grantTokens ?? settings.weeklyTokens, usd: grantUsd ?? settings.perPersonWeeklyUsd, deepseekUsd: deepseek(settings.perPersonWeeklyUsd, settings.deepseekWeeklyUsd) };
 }
 
 /** Within this share of the token allowance counts as reached (see dashboard-data.ts TOKEN_LIMIT_SHARE). */
 const AT_CAP_TOKEN_SHARE = 0.99;
 
-/** Whether this week's use reached the dollar cap, or (nearly) the tokens. Nobody with no tokens counts. */
-export function atCap(person: Pick<HomePerson, "costUsd" | "tokens">, allowance: { tokens: number; usd: number | null }): boolean {
+/**
+ * Whether this week's use reached either dollar budget (GPT-6's or DeepSeek's), or (nearly) the
+ * tokens. The tokens count only for someone with no DeepSeek spend: the roll-up doesn't split
+ * tokens by model, and DeepSeek has no token cap. Nobody with no tokens counts.
+ */
+export function atCap(person: Pick<HomePerson, "costUsd" | "tokens"> & { deepseekCostUsd?: number }, allowance: { tokens: number; usd: number | null; deepseekUsd?: number | null }): boolean {
   if (allowance.tokens <= 0) return false;
-  return (allowance.usd !== null && allowance.usd > 0 && person.costUsd >= allowance.usd - 1e-9) || person.tokens >= allowance.tokens * AT_CAP_TOKEN_SHARE;
+  const deepseekCost = person.deepseekCostUsd ?? 0;
+  const gptCost = person.costUsd - deepseekCost;
+  const reached = (cost: number, cap: number | null | undefined) => cap !== null && cap !== undefined && cap > 0 && cost >= cap - 1e-9;
+  return reached(gptCost, allowance.usd) || reached(deepseekCost, allowance.deepseekUsd) || (deepseekCost === 0 && person.tokens >= allowance.tokens * AT_CAP_TOKEN_SHARE);
 }
 
 /** A model id in plain words: its name ("GPT-6 Astra") when the free tier knows it. */

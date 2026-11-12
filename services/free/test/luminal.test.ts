@@ -222,8 +222,9 @@ describe("Luminal credit", () => {
     const row = rows(service).at(-1)!;
     assert.ok(Math.abs(row.credit_usd - BIG_CREDIT) < 1e-9, `${row.credit_usd}`);
     assert.ok(Math.abs(row.cost_usd - BIG_EQUIVALENT) < 1e-9, `${row.cost_usd}`);
-    const me = (await (await service.request("GET", "/v1/me", { token })).json()) as { allowance: { spentUsdThisWeek: number } };
-    assert.ok(Math.abs(me.allowance.spentUsdThisWeek - BIG_EQUIVALENT) < 1e-6);
+    const me = (await (await service.request("GET", "/v1/me", { token })).json()) as { allowance: { spentUsdThisWeek: number }; budgets: { deepseek: { spentUsd: number } } };
+    assert.ok(Math.abs(me.budgets.deepseek.spentUsd - BIG_EQUIVALENT) < 1e-6, "DeepSeek's own budget");
+    assert.equal(me.allowance.spentUsdThisWeek, 0, "not GPT-6's");
     const spend = (await (await service.request("GET", "/admin/spend", { token: adminToken })).json()) as Record<string, any>;
     assert.equal(spend.spentUsd, 0, "no cash");
     assert.ok(Math.abs(spend.luminalCredit.usedUsd - BIG_CREDIT) < 1e-6);
@@ -320,8 +321,8 @@ describe("cash caps and the queue with Luminal", () => {
     assert.equal(spend.spentUsd, 0.25);
   });
 
-  it("charges the per-person dollar allowance at OpenRouter prices on Luminal", async () => {
-    const { service, token } = await member({ PER_PERSON_WEEKLY_USD_CAP: "0.1" });
+  it("charges the per-person DeepSeek dollar allowance at OpenRouter prices on Luminal", async () => {
+    const { service, token } = await member({ DEEPSEEK_WEEKLY_USD_CAP: "0.1" });
     service.setLuminal(() => completion(luminalUsage(BIG.prompt, BIG.completion, BIG.cached)));
     assert.equal((await chat(service, token)).status, 200); // 0.0607 at the billed OpenRouter prices
     assert.equal((await chat(service, token)).status, 200); // 0.1214: past the cap

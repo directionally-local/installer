@@ -27,12 +27,17 @@ export interface FreeConfig {
   /** USD across everyone but admins, for the whole experiment. Undefined means no total stop. */
   globalTotalUsdCap: number | undefined;
   /**
-   * A person's week ends at their pool's tokens or at this much real cost, whichever comes
-   * first. At the mix the free tier actually sees (95% of input tokens cached, output under
-   * 1% of all tokens) a person who uses every pool costs about $9.35 a week at list prices,
-   * so $20 leaves room for a much less cache-friendly week before the cap binds.
+   * A Full person's weekly GPT-6 budget (every GPT-6 model): their GPT-6 week ends at a pool's
+   * tokens or at this much real cost, whichever comes first. DeepSeek has its own budget,
+   * `deepseekWeeklyUsdCap`: it is much cheaper per token, so there is far more of it.
    */
   perPersonWeeklyUsdCap: number | undefined;
+  /**
+   * A Full person's weekly DeepSeek budget (DEEPSEEK_WEEKLY_USD_CAP). DeepSeek has no token cap,
+   * so this is its only per-person limit. A personal cap (an admin's grant) applies to GPT-6;
+   * DeepSeek then gets the larger of the personal cap and this.
+   */
+  deepseekWeeklyUsdCap: number | undefined;
   /**
    * The personal weekly dollar cap an admin's grant gives (GRANT_WEEKLY_USD_CAP): the Tools tab's
    * "Give free tokens", POST /admin/grant and granting a /request. A grant never lowers a higher
@@ -69,12 +74,16 @@ export interface FreeConfig {
   starterWeeklyTokens: number;
   /** A Starter account's weekly dollar cap (STARTER_WEEKLY_USD_CAP); undefined: tokens only. */
   starterWeeklyUsdCap: number | undefined;
+  /** A Starter account's weekly DeepSeek budget (STARTER_DEEPSEEK_WEEKLY_USD_CAP); `starterWeeklyUsdCap` is its GPT-6 one. */
+  starterDeepseekWeeklyUsdCap: number | undefined;
   /** The basic level (admission.ts BasicRule) needs an account at least this old (BASIC_MIN_ACCOUNT_AGE_DAYS). */
   basicMinAccountAgeDays: number;
   /** A basic account's weekly tokens, of every model (BASIC_WEEKLY_TOKENS); 0 turns the level off. */
   basicWeeklyTokens: number;
   /** A basic account's weekly dollar cap (BASIC_WEEKLY_USD_CAP); undefined: tokens only. */
   basicWeeklyUsdCap: number | undefined;
+  /** A basic account's weekly DeepSeek budget (BASIC_DEEPSEEK_WEEKLY_USD_CAP); `basicWeeklyUsdCap` is its GPT-6 one. */
+  basicDeepseekWeeklyUsdCap: number | undefined;
   /** New sign-ins one network gets a day before the rest are Starter (NETWORK_SIGNUPS_PER_DAY). */
   networkSignupsPerDay: number;
   /** Inboxes (`name@domain`) and domains (`@domain`) that can't sign up (BLOCKED_EMAILS, comma-separated). */
@@ -141,10 +150,12 @@ export interface FreeConfig {
   /** Stripe billing (stripe.ts). Without the secret key, the billing endpoints answer 503 billing_unavailable. */
   stripe: StripeConfig;
   /**
-   * Pro's weekly dollar ceiling (PRO_WEEKLY_USD_CAP, default $10; "none" for tokens only). It is
+   * Pro's weekly GPT-6 budget (PRO_WEEKLY_USD_CAP, default $6; "none" for tokens only). It is
    * held exactly like the free caps: settled spend plus the estimate of every request in flight.
    */
   proWeeklyUsdCap: number | undefined;
+  /** Pro's weekly DeepSeek budget (PRO_DEEPSEEK_WEEKLY_USD_CAP, default $40; "none" for no cap). */
+  proDeepseekWeeklyUsdCap: number | undefined;
   /**
    * Which provider serves chat requests first (PRIMARY_UPSTREAM): "openai" (the default),
    * "luminal" or "openrouter". A model's own provider always wins: this only decides what
@@ -248,7 +259,12 @@ export const DEFAULTS = {
   countCachedTokens: true,
   globalWeeklyUsdCap: 2000,
   globalTotalUsdCap: 7000,
-  perPersonWeeklyUsdCap: 20,
+  /**
+   * Two weekly dollar budgets per person. GPT-6 (every GPT-6 model) is the tighter one; DeepSeek
+   * is much cheaper per token for us and fast, so its budget is several times larger.
+   */
+  perPersonWeeklyUsdCap: 2,
+  deepseekWeeklyUsdCap: 8,
   grantWeeklyUsdCap: 20,
   minGithubAccountAgeDays: 30,
   fullMinAccountAgeDays: 90,
@@ -261,11 +277,15 @@ export const DEFAULTS = {
   minFollowers: 3,
   batchWindowDays: 1,
   batchSize: 15,
-  starterWeeklyTokens: 5_000_000,
-  starterWeeklyUsdCap: 0.5,
+  // Publicly there is only Free and Pro: by default basic and Starter get exactly Full's weekly
+  // tokens and dollar budgets (the settings can still differ later).
+  starterWeeklyTokens: 50_000_000,
+  starterWeeklyUsdCap: 2,
+  starterDeepseekWeeklyUsdCap: 8,
   basicMinAccountAgeDays: 365,
-  basicWeeklyTokens: 10_000_000,
-  basicWeeklyUsdCap: 3,
+  basicWeeklyTokens: 50_000_000,
+  basicWeeklyUsdCap: 2,
+  basicDeepseekWeeklyUsdCap: 8,
   networkSignupsPerDay: 3,
   blockedEmails: [],
   domainSignupsPerDay: 5,
@@ -301,8 +321,9 @@ export const DEFAULTS = {
    * so the dollar ceiling is the limit that binds, on cheap and expensive models alike.
    */
   proTokensPerWeek: 300_000_000,
-  proWeeklyUsdCap: 10,
-  proValueLine: "About 3x the free usage every week, every model.",
+  proWeeklyUsdCap: 6,
+  proDeepseekWeeklyUsdCap: 40,
+  proValueLine: "Lots of DeepSeek every week, plus more GPT-6.",
   /** Top-ups: $1 units, 2 to 20 of them; each $1 adds $1.25 of usage, for 90 days. */
   topupUnitPriceUsd: 1,
   topupMinQuantity: 2,
@@ -356,6 +377,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     globalWeeklyUsdCap: usd(env.GLOBAL_WEEKLY_USD_CAP, DEFAULTS.globalWeeklyUsdCap, "GLOBAL_WEEKLY_USD_CAP"),
     globalTotalUsdCap: usd(env.GLOBAL_TOTAL_USD_CAP, DEFAULTS.globalTotalUsdCap, "GLOBAL_TOTAL_USD_CAP"),
     perPersonWeeklyUsdCap: usd(env.PER_PERSON_WEEKLY_USD_CAP, DEFAULTS.perPersonWeeklyUsdCap, "PER_PERSON_WEEKLY_USD_CAP"),
+    deepseekWeeklyUsdCap: usd(env.DEEPSEEK_WEEKLY_USD_CAP, DEFAULTS.deepseekWeeklyUsdCap, "DEEPSEEK_WEEKLY_USD_CAP"),
     grantWeeklyUsdCap: usd(env.GRANT_WEEKLY_USD_CAP, DEFAULTS.grantWeeklyUsdCap, "GRANT_WEEKLY_USD_CAP"),
     minGithubAccountAgeDays: whole(env.MIN_GITHUB_ACCOUNT_AGE_DAYS, DEFAULTS.minGithubAccountAgeDays, "MIN_GITHUB_ACCOUNT_AGE_DAYS"),
     fullMinAccountAgeDays: whole(env.FULL_MIN_ACCOUNT_AGE_DAYS, DEFAULTS.fullMinAccountAgeDays, "FULL_MIN_ACCOUNT_AGE_DAYS"),
@@ -370,9 +392,11 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     batchSize: whole(env.BATCH_SIZE, DEFAULTS.batchSize, "BATCH_SIZE"),
     starterWeeklyTokens: whole(env.STARTER_WEEKLY_TOKENS, DEFAULTS.starterWeeklyTokens, "STARTER_WEEKLY_TOKENS"),
     starterWeeklyUsdCap: usd(env.STARTER_WEEKLY_USD_CAP, DEFAULTS.starterWeeklyUsdCap, "STARTER_WEEKLY_USD_CAP"),
+    starterDeepseekWeeklyUsdCap: usd(env.STARTER_DEEPSEEK_WEEKLY_USD_CAP, DEFAULTS.starterDeepseekWeeklyUsdCap, "STARTER_DEEPSEEK_WEEKLY_USD_CAP"),
     basicMinAccountAgeDays: whole(env.BASIC_MIN_ACCOUNT_AGE_DAYS, DEFAULTS.basicMinAccountAgeDays, "BASIC_MIN_ACCOUNT_AGE_DAYS"),
     basicWeeklyTokens: whole(env.BASIC_WEEKLY_TOKENS, DEFAULTS.basicWeeklyTokens, "BASIC_WEEKLY_TOKENS"),
     basicWeeklyUsdCap: usd(env.BASIC_WEEKLY_USD_CAP, DEFAULTS.basicWeeklyUsdCap, "BASIC_WEEKLY_USD_CAP"),
+    basicDeepseekWeeklyUsdCap: usd(env.BASIC_DEEPSEEK_WEEKLY_USD_CAP, DEFAULTS.basicDeepseekWeeklyUsdCap, "BASIC_DEEPSEEK_WEEKLY_USD_CAP"),
     networkSignupsPerDay: whole(env.NETWORK_SIGNUPS_PER_DAY, DEFAULTS.networkSignupsPerDay, "NETWORK_SIGNUPS_PER_DAY"),
     blockedEmails: env.BLOCKED_EMAILS === undefined ? [...DEFAULTS.blockedEmails] : String(env.BLOCKED_EMAILS).split(",").map((v) => v.trim()).filter(Boolean),
     domainSignupsPerDay: whole(env.DOMAIN_SIGNUPS_PER_DAY, DEFAULTS.domainSignupsPerDay, "DOMAIN_SIGNUPS_PER_DAY"),
@@ -418,6 +442,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
       portalReturnUrl: httpsUrl(env.BILLING_PORTAL_RETURN_URL, "BILLING_PORTAL_RETURN_URL") ?? DEFAULTS.billingPortalReturnUrl,
     },
     proWeeklyUsdCap: usd(env.PRO_WEEKLY_USD_CAP, DEFAULTS.proWeeklyUsdCap, "PRO_WEEKLY_USD_CAP"),
+    proDeepseekWeeklyUsdCap: usd(env.PRO_DEEPSEEK_WEEKLY_USD_CAP, DEFAULTS.proDeepseekWeeklyUsdCap, "PRO_DEEPSEEK_WEEKLY_USD_CAP"),
     primaryUpstream: upstream(env.PRIMARY_UPSTREAM),
     openaiApiKey: text(env.OPENAI_API_KEY),
     openaiFirstByteTimeoutSeconds: timeoutSeconds(env.OPENAI_FIRST_BYTE_TIMEOUT_SECONDS, DEFAULTS.openaiFirstByteTimeoutSeconds, "OPENAI_FIRST_BYTE_TIMEOUT_SECONDS"),

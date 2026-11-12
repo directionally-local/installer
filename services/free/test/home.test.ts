@@ -143,17 +143,22 @@ describe("home: real allowance per level", () => {
   const person = (level: string | null, extra: Partial<{ batchFlagged: boolean; grantTokens: number | null; grantUsd: number | null }> = {}) => ({ level, batchFlagged: false, grantTokens: null, grantUsd: null, ...extra });
 
   it("gives each level its own tokens and dollars, not the default 50M and $20", () => {
-    assert.deepEqual(realAllowance(person("full"), settings), { tier: "full", tokens: 50_000_000, usd: 20 });
-    assert.deepEqual(realAllowance(person(null), settings), { tier: "full", tokens: 50_000_000, usd: 20 });
-    assert.deepEqual(realAllowance(person("basic"), settings), { tier: "middle", tokens: 10_000_000, usd: 3 });
-    assert.deepEqual(realAllowance(person("starter"), settings), { tier: "small", tokens: 2_000_000, usd: 0.5 });
-    assert.deepEqual(realAllowance(person("starter", { batchFlagged: true }), settings), { tier: "no tokens", tokens: 0, usd: 0 });
+    // Without DeepSeek settings, DeepSeek's budget is the GPT-6 one.
+    assert.deepEqual(realAllowance(person("full"), settings), { tier: "full", tokens: 50_000_000, usd: 20, deepseekUsd: 20 });
+    assert.deepEqual(realAllowance(person(null), settings), { tier: "full", tokens: 50_000_000, usd: 20, deepseekUsd: 20 });
+    assert.deepEqual(realAllowance(person("basic"), settings), { tier: "middle", tokens: 10_000_000, usd: 3, deepseekUsd: 3 });
+    assert.deepEqual(realAllowance(person("starter"), settings), { tier: "small", tokens: 2_000_000, usd: 0.5, deepseekUsd: 0.5 });
+    assert.deepEqual(realAllowance(person("starter", { batchFlagged: true }), settings), { tier: "no tokens", tokens: 0, usd: 0, deepseekUsd: 0 });
     // Basic switched off is served as Starter; Starter at 0 tokens is no tokens.
-    assert.deepEqual(realAllowance(person("basic"), { ...settings, basicWeeklyTokens: 0 }), { tier: "small", tokens: 2_000_000, usd: 0.5 });
-    assert.deepEqual(realAllowance(person("starter"), { ...settings, starterWeeklyTokens: 0 }), { tier: "no tokens", tokens: 0, usd: 0 });
-    // An admin's grant sets Full's tokens and any level's dollars.
-    assert.deepEqual(realAllowance(person("full", { grantTokens: 80_000_000, grantUsd: 40 }), settings), { tier: "full", tokens: 80_000_000, usd: 40 });
-    assert.deepEqual(realAllowance(person("basic", { grantTokens: 80_000_000, grantUsd: 5 }), settings), { tier: "middle", tokens: 10_000_000, usd: 5 });
+    assert.deepEqual(realAllowance(person("basic"), { ...settings, basicWeeklyTokens: 0 }), { tier: "small", tokens: 2_000_000, usd: 0.5, deepseekUsd: 0.5 });
+    assert.deepEqual(realAllowance(person("starter"), { ...settings, starterWeeklyTokens: 0 }), { tier: "no tokens", tokens: 0, usd: 0, deepseekUsd: 0 });
+    // An admin's grant sets Full's tokens and any level's GPT-6 dollars; DeepSeek gets the larger of the grant and its own.
+    assert.deepEqual(realAllowance(person("full", { grantTokens: 80_000_000, grantUsd: 40 }), settings), { tier: "full", tokens: 80_000_000, usd: 40, deepseekUsd: 40 });
+    assert.deepEqual(realAllowance(person("basic", { grantTokens: 80_000_000, grantUsd: 5 }), settings), { tier: "middle", tokens: 10_000_000, usd: 5, deepseekUsd: 5 });
+    const two = { ...settings, perPersonWeeklyUsd: 2, deepseekWeeklyUsd: 8 };
+    assert.deepEqual(realAllowance(person("full"), two), { tier: "full", tokens: 50_000_000, usd: 2, deepseekUsd: 8 });
+    assert.deepEqual(realAllowance(person("full", { grantUsd: 20 }), two), { tier: "full", tokens: 50_000_000, usd: 20, deepseekUsd: 20 });
+    assert.deepEqual(realAllowance(person("full", { grantUsd: 5 }), two), { tier: "full", tokens: 50_000_000, usd: 5, deepseekUsd: 8 });
   });
 
   it("is at cap at the dollar cap or within 1% of the tokens, never with no tokens", () => {
@@ -161,6 +166,10 @@ describe("home: real allowance per level", () => {
     assert.equal(atCap({ costUsd: 2.9, tokens: 9_900_000 }, { tokens: 10_000_000, usd: 3 }), true);
     assert.equal(atCap({ costUsd: 2.9, tokens: 9_800_000 }, { tokens: 10_000_000, usd: 3 }), false);
     assert.equal(atCap({ costUsd: 0, tokens: 0 }, { tokens: 0, usd: 0 }), false);
+    // Per budget: GPT-6 is the cost less DeepSeek's part; DeepSeek's tokens never count.
+    assert.equal(atCap({ costUsd: 5, deepseekCostUsd: 4, tokens: 60_000_000 }, { tokens: 10_000_000, usd: 2, deepseekUsd: 8 }), false);
+    assert.equal(atCap({ costUsd: 6, deepseekCostUsd: 4, tokens: 0 }, { tokens: 10_000_000, usd: 2, deepseekUsd: 8 }), true);
+    assert.equal(atCap({ costUsd: 8, deepseekCostUsd: 8, tokens: 0 }, { tokens: 10_000_000, usd: 2, deepseekUsd: 8 }), true);
   });
 });
 
@@ -237,7 +246,18 @@ describe("home: is anything broken?", () => {
 
 // ─── The page ─────────────────────────────────────────────────────────────
 
-const VARS = { OPENAI_API_KEY: "sk-test", LUMINAL_API_KEY: "lm-test", OPEN_ADMISSION: "true", ALERT_WEBHOOK_URL: "https://alerts.test/hook" };
+// The GPT-6 budgets pinned per level, so each person's own cap shows; DeepSeek keeps its default ($8).
+const VARS = {
+  OPENAI_API_KEY: "sk-test",
+  LUMINAL_API_KEY: "lm-test",
+  OPEN_ADMISSION: "true",
+  ALERT_WEBHOOK_URL: "https://alerts.test/hook",
+  PER_PERSON_WEEKLY_USD_CAP: "20",
+  BASIC_WEEKLY_TOKENS: "10000000",
+  BASIC_WEEKLY_USD_CAP: "3",
+  STARTER_WEEKLY_TOKENS: "5000000",
+  STARTER_WEEKLY_USD_CAP: "0.5",
+};
 
 function db(service: Service): DatabaseSync {
   service.directory();
@@ -259,10 +279,11 @@ async function scenario(vars: Record<string, string> = {}): Promise<{ service: S
   sql.exec("UPDATE people SET level = 'basic' WHERE github_id = 101");
   sql.exec("UPDATE people SET level = 'starter' WHERE github_id IN (102, 103)");
   sql.exec("UPDATE people SET batch_flag = 1 WHERE github_id = 103");
-  const request = (githubId: number, costUsd: number, at = NOW - 3_600_000) =>
-    directory.recordRequest({ githubId, isAdmin: githubId === ADMIN_ID, at, model: MODEL, promptTokens: 1000, completionTokens: 0, cachedTokens: 0, chargedTokens: 1000, costUsd, status: "ok", latencyMs: 100 });
+  const request = (githubId: number, costUsd: number, at = NOW - 3_600_000, model = "gpt-6-luna") =>
+    directory.recordRequest({ githubId, isAdmin: githubId === ADMIN_ID, at, model, promptTokens: 1000, completionTokens: 0, cachedTokens: 0, chargedTokens: 1000, costUsd, status: "ok", latencyMs: 100 });
   await request(ADMIN_ID, 99);
   await request(100, 12.4);
+  await request(100, 1.5, NOW - 3_600_000, MODEL); // DeepSeek: its own budget
   await request(101, 3);
   await request(102, 0.2);
   await request(103, 0.01);
@@ -284,9 +305,10 @@ describe("home: the page", () => {
     assert.match(html, /<span class="verdict fine">Fine\.<\/span>/);
     assert.match(html, /4 people used dl today, 4 this week\. No new sign-ups today\./);
     assert.doesNotMatch(html, />owner</);
-    assert.match(html, /fullfay<\/a> <span class="tier">full<\/span><\/span><span class="amt"><b>\$12<\/b> of \$20<\/span>/);
-    assert.match(html, /basicbo<\/a> <span class="tier">middle<\/span><\/span><span class="amt"><span class="capword">at cap<\/span> <b>\$3\.00<\/b> of \$3\.00<\/span>/);
-    assert.match(html, /smallsam<\/a> <span class="tier">small<\/span><\/span><span class="amt"><b>\$0\.20<\/b> of \$0\.50<\/span>/);
+    // Spend split by budget: GPT-6 against its cap, then DeepSeek when used.
+    assert.match(html, /fullfay<\/a> <span class="tier">full<\/span><\/span><span class="amt">GPT-6 <b>\$12<\/b> of \$20 · DeepSeek <b>\$1\.50<\/b> of \$8\.00<\/span>/);
+    assert.match(html, /basicbo<\/a> <span class="tier">middle<\/span><\/span><span class="amt"><span class="capword">at cap<\/span> GPT-6 <b>\$3\.00<\/b> of \$3\.00<\/span>/);
+    assert.match(html, /smallsam<\/a> <span class="tier">small<\/span><\/span><span class="amt">GPT-6 <b>\$0\.20<\/b> of \$0\.50<\/span>/);
     assert.match(html, /flaggedfy<\/a> <span class="tier">no tokens<\/span>/);
     assert.match(html, /basicbo is at their weekly cap\. <a href="\/admin\?view=full#limits">see details<\/a>/);
     assert.match(html, /<p class="say">Nothing\. No one is waiting for an answer\.<\/p>/);

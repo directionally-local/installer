@@ -30,13 +30,18 @@ describe("admin endpoints", () => {
     service.setOpenRouter(() => completion(usage(300, 20, 100, 0.002)));
     await service.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [] } });
     const body = (await (await service.request("GET", "/admin/people", { token: adminToken })).json()) as {
-      people: Array<{ login: string; isAdmin: boolean; admittedVia: string; allowance: { usedThisWeek: number; spentUsdThisWeek: number } }>;
+      people: Array<{ login: string; isAdmin: boolean; admittedVia: string; allowance: { usedThisWeek: number; spentUsdThisWeek: number; budgets: Record<string, { spentUsd: number }> } }>;
     };
     assert.deepEqual(body.people.map((person) => person.login), ["owner", "alice"]);
     assert.equal(body.people[0]!.isAdmin, true);
     assert.match(body.people[1]!.admittedVia, /^invite:/);
-    assert.equal(body.people[1]!.allowance.usedThisWeek, 200 + 20 + 2);
-    assert.equal(body.people[1]!.allowance.spentUsdThisWeek, 0.002);
+    // A DeepSeek request: DeepSeek's budget, not GPT-6's (the top-level fields).
+    assert.equal(body.people[1]!.allowance.budgets.deepseek!.spentUsd, 0.002);
+    assert.equal(body.people[1]!.allowance.budgets.gpt6!.spentUsd, 0);
+    assert.equal(body.people[1]!.allowance.spentUsdThisWeek, 0);
+    assert.equal(body.people[1]!.allowance.usedThisWeek, 0, "Luna's tokens are untouched");
+    const pools = (await service.account(100).allowance(service.clock.now, { weeklyTokens: 50_000_000, weeklyUsd: undefined }, "deepseek")).pools;
+    assert.equal(pools.deepseek.usedThisWeek, 200 + 20 + 2);
   });
 
   it("creates and lists invites without revealing stored codes", async () => {
@@ -73,7 +78,7 @@ describe("admin endpoints", () => {
     await service.request("POST", "/admin/people/100/grant", { token: adminToken, body: { tokensPerWeek: null, usdPerWeek: null } });
     const me = (await (await service.request("GET", "/v1/me", { token })).json()) as { allowance: { tokensPerWeek: number; usdPerWeek: number } };
     assert.equal(me.allowance.tokensPerWeek, 50_000_000);
-    assert.equal(me.allowance.usdPerWeek, 20);
+    assert.equal(me.allowance.usdPerWeek, 2);
     assert.equal((await service.request("POST", "/admin/people/100/grant", { token: adminToken, body: { tokensPerWeek: -1 } })).status, 400);
   });
 
@@ -82,7 +87,7 @@ describe("admin endpoints", () => {
     const body = (await (await service.request("GET", "/admin/spend", { token: adminToken })).json()) as Record<string, unknown>;
     assert.equal(body.weekStart, "2026-11-02T00:00:00.000Z");
     assert.equal(body.spentUsd, 0);
-    assert.deepEqual(body.caps, { globalWeeklyUsd: 2000, globalTotalUsd: 7000, perPersonWeeklyUsd: 20, weeklyTokens: 50_000_000 });
+    assert.deepEqual(body.caps, { globalWeeklyUsd: 2000, globalTotalUsd: 7000, perPersonWeeklyUsd: 2, deepseekWeeklyUsd: 8, weeklyTokens: 50_000_000 });
     assert.equal(body.paused, false);
   });
 });

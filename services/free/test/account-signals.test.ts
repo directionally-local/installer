@@ -206,7 +206,7 @@ describe("additional account signals", () => {
     const me = (await (await service.request("GET", "/v1/me", { token: tokens.access_token })).json()) as Record<string, any>;
     assert.deepEqual(Object.keys(me.thresholds).sort(), ["minAccountAgeDays", "minContributions", "minPublicRepos"]);
     assert.deepEqual(Object.keys(me.signals).sort(), ["accountAgeDays", "checkedAt", "contributions", "followers", "publicRepos", "restrictedContributions"]);
-    assert.doesNotMatch(JSON.stringify(me.levelReason), hidden);
+    assert.equal(me.levelReason, undefined, "no level, and no reason for one, in /v1/me");
   });
 });
 

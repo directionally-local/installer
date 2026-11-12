@@ -148,22 +148,25 @@ describe("what a Starter account gets", () => {
     assert.ok(after.pools.luna!.usedThisWeek > before.pools.luna!.usedThisWeek, "the Starter allowance paid");
   });
 
-  it("gets 5M tokens a week in every pool, Sol and Astra at most their own, and the Starter dollar cap", async () => {
+  it("gets the Starter tokens in every GPT-6 pool, Sol and Astra at most their own, and the free dollar budgets", async () => {
     const { service, token } = await starter();
     const me = (await (await service.request("GET", "/v1/me", { token })).json()) as {
-      level: string;
-      levelReason: string;
+      level?: string;
+      levelReason?: string;
       thresholds: Record<string, number>;
       pools: Record<string, { tokensPerWeek: number }>;
       signals: Record<string, unknown>;
     };
-    assert.equal(me.level, "starter");
-    assert.equal(me.levelReason, "account_too_new");
+    // Publicly there is only Free and Pro: no level in /v1/me.
+    assert.equal(me.level, undefined);
+    assert.equal(me.levelReason, undefined);
+    assert.equal((await service.directory().getPerson(100))?.level, "starter");
     assert.deepEqual(me.thresholds, { minAccountAgeDays: 90, minPublicRepos: 3, minContributions: 50 });
-    assert.equal(me.pools.luna!.tokensPerWeek, 5_000_000);
-    assert.equal(me.pools.sol!.tokensPerWeek, 5_000_000);
+    assert.equal(me.pools.luna!.tokensPerWeek, 50_000_000);
+    assert.equal(me.pools.sol!.tokensPerWeek, 10_000_000);
     assert.equal(me.pools.astra!.tokensPerWeek, 3_000_000);
-    assert.equal((me as unknown as { allowance: { usdPerWeek: number } }).allowance.usdPerWeek, 0.5);
+    assert.equal(me.pools.deepseek!.tokensPerWeek, null, "no token cap on DeepSeek");
+    assert.equal((me as unknown as { allowance: { usdPerWeek: number } }).allowance.usdPerWeek, 2);
     assert.equal(me.signals.publicRepos, 0);
     // The person sees the public bar and its signals only.
     assert.deepEqual(Object.keys(me.signals).sort(), ["accountAgeDays", "checkedAt", "contributions", "followers", "publicRepos", "restrictedContributions"]);
@@ -171,7 +174,11 @@ describe("what a Starter account gets", () => {
 
   it("is promoted by an admin, and demoted again", async () => {
     const { service, token, admin } = await starter();
-    const level = async () => ((await (await service.request("GET", "/v1/me", { token })).json()) as { level: string; allowance: { tokensPerWeek: number } });
+    const level = async () => ({
+      level: (await service.directory().getPerson(100))?.level as string,
+      ...((await (await service.request("GET", "/v1/me", { token })).json()) as { allowance: { tokensPerWeek: number } }),
+    });
+    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { starterWeeklyTokens: 5_000_000 } })).status, 200);
     assert.equal((await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "full" } })).status, 200);
     assert.equal((await level()).level, "full");
     assert.equal((await level()).allowance.tokensPerWeek, 50_000_000);

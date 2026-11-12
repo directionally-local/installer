@@ -168,9 +168,11 @@ describe("the weekly dollar cap with requests in flight", () => {
 });
 
 describe("parallel requests through the API", () => {
-  it("refuses a basic person's parallel Sol requests once the in-flight estimates fill the $3 cap", async () => {
+  it("refuses a basic person's parallel Sol requests once the in-flight estimates fill the $3 GPT-6 cap, pointing at DeepSeek", async () => {
     const service = await createService({
       OPENAI_API_KEY: "sk-test",
+      BASIC_WEEKLY_TOKENS: "10000000",
+      BASIC_WEEKLY_USD_CAP: "3",
       OPEN_ADMISSION: "true",
       STARTER_WEEKLY_TOKENS: "0",
       FULL_MIN_ACCOUNT_AGE_DAYS: "365",
@@ -180,7 +182,7 @@ describe("parallel requests through the API", () => {
     });
     const { access_token: token } = await service.signIn({ id: 100, login: "user100", createdAt: "2019-01-01T00:00:00Z", publicRepos: 0, contributions: 10, social: 0 });
     const me = (await (await service.request("GET", "/v1/me", { token })).json()) as Record<string, any>;
-    assert.equal(me.level, "basic");
+    assert.equal((await service.directory().getPerson(100))?.level, "basic");
     assert.equal(me.allowance.usdPerWeek, 3);
 
     // Every answer waits until released: they are all in flight together.
@@ -200,7 +202,8 @@ describe("parallel requests through the API", () => {
     assert.equal(refused.length, 6);
     for (const response of refused) {
       const error = ((await response.json()) as { error: Record<string, any> }).error;
-      assert.equal(error.code, "basic_limit");
+      // GPT-6's budget is full; DeepSeek's week has room, so not a dead end.
+      assert.equal(error.code, "gpt_limit");
       assert.equal(error.reason, "spend");
     }
     // Settled at what they really cost, the cap has room again.

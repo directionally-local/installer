@@ -165,7 +165,7 @@ describe("answering access requests", () => {
     const sent = s.calls.resend.slice(before);
     assert.equal(sent.length, 1);
     assert.equal(sent[0]!.headers["idempotency-key"], `dl-user-email-access_granted-100-${request!.id}`);
-    assert.match(String(sent[0]!.body.text), /^hey,\n\nyou're in\. you now have the full free tier: /);
+    assert.match(String(sent[0]!.body.text), /^hey,\n\nyou're in\. you now have free tokens: /);
     assert.deepEqual(await pending(s, admin), []);
     // Answered once only.
     assert.equal((await decide(s, admin, request!.id, "decline")).status, 404);

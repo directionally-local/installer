@@ -2,9 +2,10 @@
  * The models the free tier serves, and the weekly allowance each one draws from.
  *
  * Two providers, each on its own prepaid credit: OpenAI (the default) and Luminal, which
- * serves DeepSeek. A model's `pool` is the weekly token allowance it spends: GPT-6 Luna and
- * DeepSeek share one pool, so switching between them (by hand, or by the automatic fallback)
- * doesn't hand anyone a second allowance.
+ * serves DeepSeek. A model's `family` is the weekly dollar budget it spends: every GPT-6 model
+ * shares the GPT-6 budget, and DeepSeek has its own, much larger one (it costs a fraction as
+ * much per token). A model's `pool` is its weekly token allowance inside that: Luna, Sol and
+ * Astra each have one; DeepSeek has no token cap, only its dollar budget.
  *
  * Prices are USD per million tokens, from the providers' own pages on 2026-11-06:
  *   - OpenAI: https://developers.openai.com/api/docs/models/<id> (input / cached input / output)
@@ -19,17 +20,27 @@ import type { Prices } from "./config.js";
 /** Who serves a model. OpenRouter stays for the old setting; the free tier doesn't use it. */
 export type Provider = "openai" | "luminal" | "openrouter";
 
-/** A weekly token allowance. Luna and DeepSeek share one. */
-export type Pool = "luna" | "sol" | "astra";
+/** A weekly token allowance: one per model. */
+export type Pool = "luna" | "sol" | "astra" | "deepseek";
 
-export const POOLS: readonly Pool[] = ["luna", "sol", "astra"];
+export const POOLS: readonly Pool[] = ["luna", "sol", "astra", "deepseek"];
 
-/** Tokens a week in each pool, per person. */
-export const POOL_TOKENS: Readonly<Record<Pool, number>> = {
+/**
+ * Tokens a week in each pool, per person; null for no token cap. Luna's is the `weeklyTokens`
+ * setting (this is its default). DeepSeek has none: its dollar budget is the only limit, so a
+ * token count can never stop it before the dollars do.
+ */
+export const POOL_TOKENS: Readonly<Record<Pool, number | null>> = {
   luna: 50_000_000,
   sol: 10_000_000,
   astra: 3_000_000,
+  deepseek: null,
 };
+
+/** A weekly dollar budget: every GPT-6 model shares "gpt6"; DeepSeek has "deepseek". */
+export type Family = "gpt6" | "deepseek";
+
+export const FAMILIES: readonly Family[] = ["gpt6", "deepseek"];
 
 export interface FreeModel {
   /** The id clients send and see. Stable: it doesn't change when the wire id does. */
@@ -39,6 +50,8 @@ export interface FreeModel {
   /** The id the provider's API takes. */
   upstreamModel: string;
   pool: Pool;
+  /** The weekly dollar budget its usage counts against. */
+  family: Family;
   /** USD per million tokens charged to the person's weekly dollar allowance. */
   prices: Prices;
   /** USD per million tokens charged to the provider's credit pool; `prices` when unset. */
@@ -58,6 +71,7 @@ export const FREE_MODELS: readonly FreeModel[] = [
     provider: "openai",
     upstreamModel: "gpt-6-luna",
     pool: "luna",
+    family: "gpt6",
     prices: { input: 0.1, cached: 0.01, output: 0.5 },
     contextWindow: 1_050_000,
     maxOutputTokens: 128_000,
@@ -71,6 +85,7 @@ export const FREE_MODELS: readonly FreeModel[] = [
     provider: "openai",
     upstreamModel: "gpt-6.1-sol",
     pool: "sol",
+    family: "gpt6",
     prices: { input: 2, cached: 0.1, output: 10 },
     contextWindow: 1_050_000,
     maxOutputTokens: 128_000,
@@ -84,6 +99,7 @@ export const FREE_MODELS: readonly FreeModel[] = [
     provider: "openai",
     upstreamModel: "gpt-6-astra",
     pool: "astra",
+    family: "gpt6",
     prices: { input: 10, cached: 1, output: 50 },
     contextWindow: 1_050_000,
     maxOutputTokens: 128_000,
@@ -96,7 +112,8 @@ export const FREE_MODELS: readonly FreeModel[] = [
     name: "DeepSeek V4.1 Flash 1017",
     provider: "luminal",
     upstreamModel: "deepseek-ai/DeepSeek-V4.1-Flash-1017",
-    pool: "luna",
+    pool: "deepseek",
+    family: "deepseek",
     // What OpenRouter billed us for the same model: the person's allowance means the same
     // whichever provider served.
     prices: { input: 0.035, cached: 0.006, output: 0.315 },
@@ -128,6 +145,16 @@ export function isFreeModelId(id: unknown): id is string {
 /** The pool a model's tokens come from; undefined for a model the free tier doesn't serve. */
 export function poolOf(id: unknown): Pool | undefined {
   return modelById(id)?.pool;
+}
+
+/** The dollar budget a model's usage counts against; undefined for a model the free tier doesn't serve. */
+export function familyOf(id: unknown): Family | undefined {
+  return modelById(id)?.family;
+}
+
+/** The dollar budget a pool's usage counts against. */
+export function familyOfPool(pool: Pool): Family {
+  return pool === "deepseek" ? "deepseek" : "gpt6";
 }
 
 /** The models that draw from one pool. */
