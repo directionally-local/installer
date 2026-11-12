@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.29.0](https://github.com/directionally-local/installer/compare/v0.28.0...v0.29.0) (2026-11-12)
+
+
+### Features
+
+* **free:** dl Pro at $3.99/month, dollar top-ups, and a bounded admin people list ([#232](https://github.com/directionally-local/installer/issues/232)) ([dcd850c](https://github.com/directionally-local/installer/commit/dcd850cbaa9355a91d0077c9d8e6f19d36136270))
+
+
+### Bug Fixes
+
+* accept GPU detections whose tool didn't answer in the free tier's GPU counts ([#231](https://github.com/directionally-local/installer/issues/231)) ([cc04c0f](https://github.com/directionally-local/installer/commit/cc04c0f2ca54d2862fc56d0686d4cfd1c836de6c))
+* **deps:** install Autopilot 3.21.0 ([#234](https://github.com/directionally-local/installer/issues/234)) ([e757ed0](https://github.com/directionally-local/installer/commit/e757ed09bdf4001e6b36fd7da3e16c7f26e94aff))
+* **free:** GET /admin/people no longer starts three Durable Object calls per ([dcd850c](https://github.com/directionally-local/installer/commit/dcd850cbaa9355a91d0077c9d8e6f19d36136270))
+
 ## [0.28.0](https://github.com/directionally-local/installer/compare/v0.27.0...v0.28.0) (2026-11-12)
 
 
