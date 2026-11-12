@@ -605,7 +605,7 @@ describe("admin dashboard install funnel", () => {
 describe("admin dashboard privacy", () => {
   // Columns that hold anything but counts, tokens, cost, time or who: never read by the dashboard.
   const FORBIDDEN = ["props", "session_id", "type", "model", "status", "received_at", "latency_ms", "note", "code_hash", "device_id", "old_value", "new_value", "changed_by_login"];
-  const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_timings", "download_daily", "install_daily", "refused_days"]);
+  const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_people", "upstream_timings", "download_daily", "install_daily", "refused_days"]);
 
   // The abuse section reads network hashes, device ids, status and the admin log on purpose:
   // its queries carry ABUSE_QUERY_TAG and are held to ABUSE_COLUMNS instead.
@@ -669,5 +669,145 @@ describe("admin dashboard privacy", () => {
         }
       }
     }
+  });
+});
+
+describe("admin dashboard tokens and people per upstream", () => {
+  /**
+   * NOW is Wednesday 2026-11-04 (the week from Monday 11-02). Last week: alice on OpenRouter
+   * (10-28) and carol on Luminal (10-29). This week: alice on Luminal and OpenAI, bob on Luminal
+   * twice, and the admin on OpenAI (in the tokens, not in the people).
+   */
+  async function upstreamScenario(): Promise<{ service: Service; cookie: string }> {
+    const service = await createService();
+    const directory = service.directory();
+    const admit = (githubId: number, login: string, isAdmin = false) =>
+      directory.admit({ githubId, login, isAdmin, inviteCode: undefined, clientDeviceId: null, accountTooNew: false, openAdmission: true, maxActive: 100, now: at("2026-10-20") });
+    await admit(ADMIN_ID, "owner", true);
+    await admit(100, "alice");
+    await admit(101, "bob");
+    await admit(102, "carol");
+    const request = (githubId: number, when: string, upstream: "openai" | "luminal" | "openrouter", prompt: number, cached: number, out: number, usd: number) =>
+      directory.recordRequest({
+        githubId,
+        isAdmin: githubId === ADMIN_ID,
+        at: at(when),
+        model: upstream === "openai" ? "openai/gpt-6-mini" : MODEL,
+        promptTokens: prompt,
+        completionTokens: out,
+        cachedTokens: cached,
+        chargedTokens: prompt + out,
+        costUsd: usd,
+        status: "ok",
+        latencyMs: 100,
+        upstream,
+        creditUsd: upstream === "openrouter" ? 0 : usd,
+      });
+    await request(100, "2026-10-28", "openrouter", 1000, 200, 50, 0.01);
+    await request(102, "2026-10-29", "luminal", 500, 0, 10, 0.001);
+    await request(100, "2026-11-03", "luminal", 2000, 1500, 300, 0.02);
+    await request(100, "2026-11-04", "openai", 4000, 0, 600, 0.05);
+    await request(101, "2026-11-04T01:00:00Z", "luminal", 1000, 500, 40, 0.005);
+    await request(101, "2026-11-04T02:00:00Z", "luminal", 2000, 500, 60, 0.005);
+    await request(ADMIN_ID, "2026-11-04", "openai", 10_000, 0, 1000, 0.1);
+    return { service, cookie: await adminCookie(service) };
+  }
+
+  const pick = (rows: Array<Record<string, string>>, window: string, upstream: string) => {
+    const row = rows.find((r) => r.window === window && r.upstream === upstream)!;
+    return [row.users, row.requests, row.prompt_tokens, row.cached_tokens, row.completion_tokens];
+  };
+
+  it("sums tokens in, cached and out, and counts people (admins left out), per upstream and in total", async () => {
+    const { service, cookie } = await upstreamScenario();
+    const rows = await csv(service, cookie, "upstreams");
+    // This week.
+    assert.deepEqual(pick(rows, "week", "openai"), ["1", "2", "14000", "0", "1600"]);
+    assert.deepEqual(pick(rows, "week", "luminal"), ["2", "3", "5000", "2500", "400"]);
+    assert.deepEqual(pick(rows, "week", "openrouter"), ["0", "0", "0", "0", "0"]);
+    assert.deepEqual(pick(rows, "week", "total"), ["2", "5", "19000", "2500", "2000"], "alice counted once across two upstreams");
+    // All time, from the first request.
+    assert.deepEqual(pick(rows, "all_time", "openrouter"), ["1", "1", "1000", "200", "50"]);
+    assert.deepEqual(pick(rows, "all_time", "luminal"), ["3", "4", "5500", "2500", "410"]);
+    assert.deepEqual(pick(rows, "all_time", "openai"), ["1", "2", "14000", "0", "1600"]);
+    assert.deepEqual(pick(rows, "all_time", "total"), ["3", "7", "20500", "2700", "2060"]);
+    // Today.
+    assert.deepEqual(pick(rows, "today", "luminal"), ["1", "2", "3000", "1000", "100"]);
+    // All time has no timings (kept 15 days); the totals' cash and credit add up.
+    const allTotal = rows.find((r) => r.window === "all_time" && r.upstream === "total")!;
+    assert.equal(allTotal.ttft_median_ms, "");
+    assert.equal(Number(allTotal.cash_usd), 0.01);
+    assert.ok(Math.abs(Number(allTotal.credit_usd) - 0.181) < 1e-9);
+
+    const html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
+    const section = html.slice(html.indexOf('<section id="upstream">'), html.indexOf("</section>", html.indexOf('<section id="upstream">')));
+    assert.match(section, /<th>Users<\/th><th>Tokens in<\/th><th>Cached<\/th><th>Tokens out<\/th>/);
+    assert.match(section, /<th>All time, since 2026-10-28<\/th>/);
+    assert.match(section, /<tr class="group sel"><td>Total<\/td><td>7<\/td>.*?<td>3<\/td><td>20.5k<\/td><td>2.7k<\/td><td>2.06k<\/td>/);
+    assert.match(section, /<td>Luminal<\/td><td>3<\/td>.*?<td>2<\/td><td>5k<\/td><td>2.5k<\/td><td>400<\/td>/);
+  });
+
+  it("keeps completion tokens and people with each request", async () => {
+    const { service } = await upstreamScenario();
+    const db = directoryEntry(service).state.db;
+    const today = Math.floor(NOW / DAY);
+    assert.deepEqual({ ...db.prepare("SELECT completion_tokens FROM upstream_daily WHERE day = ? AND upstream = 'openai'").get(today) }, { completion_tokens: 1600 });
+    const day = (iso: string) => Math.floor(at(iso) / DAY);
+    assert.deepEqual(
+      db.prepare("SELECT upstream, github_id, first_day, last_day FROM upstream_people ORDER BY upstream, github_id").all().map((row) => ({ ...row })),
+      [
+        { upstream: "luminal", github_id: 100, first_day: day("2026-11-03"), last_day: day("2026-11-03") },
+        { upstream: "luminal", github_id: 101, first_day: day("2026-11-04"), last_day: day("2026-11-04") },
+        { upstream: "luminal", github_id: 102, first_day: day("2026-10-29"), last_day: day("2026-10-29") },
+        { upstream: "openai", github_id: 100, first_day: day("2026-11-04"), last_day: day("2026-11-04") },
+        { upstream: "openrouter", github_id: 100, first_day: day("2026-10-28"), last_day: day("2026-10-28") },
+      ],
+      "one row per person per upstream with the first and last day, and none for admins",
+    );
+    // A later request moves the last day on.
+    await service.directory().recordRequest({ githubId: 102, isAdmin: false, at: NOW, model: MODEL, promptTokens: 1, completionTokens: 1, cachedTokens: 0, chargedTokens: 2, costUsd: 0, status: "ok", latencyMs: 1, upstream: "luminal" });
+    assert.deepEqual({ ...db.prepare("SELECT first_day, last_day FROM upstream_people WHERE upstream = 'luminal' AND github_id = 102").get() }, { first_day: day("2026-10-29"), last_day: day("2026-11-04") });
+  });
+
+  it("builds completion tokens, missing days and people from the request log once, the same as it keeps them", async () => {
+    const { service, cookie } = await upstreamScenario();
+    const entry = directoryEntry(service);
+    const db = entry.state.db;
+    const read = () => ({
+      daily: db.prepare("SELECT * FROM upstream_daily ORDER BY day, upstream").all().map((row) => ({ ...row })),
+      people: db.prepare("SELECT * FROM upstream_people ORDER BY upstream, github_id").all().map((row) => ({ ...row })),
+    });
+    const live = read();
+    assert.equal(live.daily.length, 5);
+    const restart = () => {
+      entry.object = new entry.object.constructor(entry.state, service.env);
+    };
+    // The log as it was before this change: no completion tokens, no people, and the days before
+    // upstream_daily existed missing from it.
+    const before = () => {
+      db.exec(`UPDATE upstream_daily SET completion_tokens = 0; DELETE FROM upstream_daily WHERE day < ${Math.floor(at("2026-11-03") / DAY)}; DELETE FROM upstream_people`);
+      db.exec("DELETE FROM settings WHERE key = 'rollup:upstream_tokens_people'");
+    };
+    before();
+    restart();
+    assert.deepEqual(read(), live);
+    // Once only: a later start leaves the tables alone.
+    db.exec("DELETE FROM upstream_people");
+    restart();
+    assert.equal(read().people.length, 0);
+    // And running it again on built tables changes nothing.
+    db.exec("DELETE FROM settings WHERE key = 'rollup:upstream_tokens_people'");
+    restart();
+    restart();
+    assert.deepEqual(read(), live);
+    assert.deepEqual(pick(await csv(service, cookie, "upstreams"), "all_time", "total"), ["3", "7", "20500", "2700", "2060"]);
+  });
+
+  it("shows compact numbers", async () => {
+    const { compact } = await import("../src/dashboard-page.js");
+    assert.deepEqual(
+      [0, 412, 999, 1000, 2060, 12_345, 412_000_000, 2_300_000_000, 999_999, 41_249_999].map(compact),
+      ["0", "412", "999", "1k", "2.06k", "12.3k", "412M", "2.3B", "1M", "41.2M"],
+    );
   });
 });

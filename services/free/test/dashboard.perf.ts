@@ -73,8 +73,8 @@ describe("admin dashboard speed", () => {
     db.exec("COMMIT");
     const generateMs = performance.now() - generated;
 
-    // A deploy of this code on an existing log: the roll-up is built once, as the object starts.
-    db.exec("DELETE FROM daily_activity; DELETE FROM settings WHERE key = 'rollup:daily_activity'");
+    // A deploy of this code on an existing log: the roll-ups are built once, as the object starts.
+    db.exec("DELETE FROM daily_activity; DELETE FROM settings WHERE key IN ('rollup:daily_activity', 'rollup:upstream_tokens_people')");
     const backfill = performance.now();
     entry.object = new entry.object.constructor(entry.state, service.env);
     const backfillMs = performance.now() - backfill;

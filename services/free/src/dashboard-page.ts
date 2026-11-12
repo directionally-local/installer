@@ -320,6 +320,22 @@ function tokens(value: number): string {
   return String(Math.round(value));
 }
 
+/** Compact counts for big numbers: 412, 12.3k, 41.2M, 2.3B (three significant digits, trailing zeros dropped). */
+export function compact(value: number): string {
+  const units: Array<[number, string]> = [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "k"]];
+  const rounded = Math.round(value);
+  for (const [size, unit] of units) {
+    if (Math.abs(rounded) < size) continue;
+    const scaled = rounded / size;
+    const digits = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2;
+    const text = Number(scaled.toFixed(digits));
+    // 999.95k rounds to 1000k: say 1M.
+    if (text >= 1000 && size < 1e12) return compact(1000 * size * Math.sign(rounded));
+    return `${text}${unit}`;
+  }
+  return String(rounded);
+}
+
 function percent(share: number): string {
   return `${(share * 100).toFixed(share > 0 && share < 0.1 ? 1 : 0)}%`;
 }
@@ -796,13 +812,41 @@ ${meteredRow}
 <p class="note">Effective values, with admin overrides applied. Credit is each provider's prepaid credit at its list prices; admins and paid plans count against it. "Free" is usage outside admins and paid plans, what the weekly budgets and the waiting line watch.</p>
 </section>`;
 
-  const upstreamRow = (row: DashboardData["upstreams"][number]) =>
-    `<tr><td>${row.upstream === "openai" ? "OpenAI" : row.upstream === "luminal" ? "Luminal" : "OpenRouter"}</td><td>${count(row.requests)}</td><td>${count(row.errors)}${row.requests > 0 ? ` <span class="muted">(${percent(row.errors / row.requests)})</span>` : ""}</td><td>${ms(row.medianTtftMs)}</td><td>${ms(row.p90TtftMs)}</td><td>${ms(row.medianTtfbMs)}</td><td>${row.cacheHitShare === null ? "–" : percent(row.cacheHitShare)}</td><td>${usd(row.creditUsd)}</td><td>${usd(row.cashUsd)}</td></tr>`;
-  const upstreamTable = (window: "today" | "week") => `<div class="scroll"><table>
-<thead><tr><th>${window === "today" ? "Today (UTC)" : `This week, since ${escapeHtml(day(currentWeek))}`}</th><th>Requests</th><th>Errors</th><th>TTFT median</th><th>TTFT p90</th><th>TTFB median</th><th>Cache hits</th><th>Credit</th><th>Cash</th></tr></thead>
+  const UPSTREAM_NAMES_SHOWN = { openai: "OpenAI", luminal: "Luminal", openrouter: "OpenRouter" } as const;
+  type UpstreamRowData = DashboardData["upstreamTotals"][number] & Partial<Pick<DashboardData["upstreams"][number], "medianTtftMs" | "p90TtftMs" | "medianTtfbMs">>;
+  const upstreamRow = (label: string, row: UpstreamRowData, total = false) => {
+    const cells = [
+      escapeHtml(label),
+      count(row.requests),
+      `${count(row.errors)}${row.requests > 0 ? ` <span class="muted">(${percent(row.errors / row.requests)})</span>` : ""}`,
+      ms(row.medianTtftMs ?? null),
+      ms(row.p90TtftMs ?? null),
+      ms(row.medianTtfbMs ?? null),
+      row.users === null ? "–" : count(row.users),
+      compact(row.promptTokens),
+      compact(row.cachedTokens),
+      compact(row.completionTokens),
+      row.cacheHitShare === null ? "–" : percent(row.cacheHitShare),
+      usd(row.creditUsd),
+      usd(row.cashUsd),
+    ];
+    // The Total row: bold, with a rule above it.
+    return `<tr${total ? ` class="group sel"` : ""}>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`;
+  };
+  const upstreamTable = (window: "today" | "week" | "all_time") => {
+    const heading =
+      window === "today" ? "Today (UTC)" : window === "week" ? `This week, since ${escapeHtml(day(currentWeek))}` : `All time${data.upstreamsSince === null ? "" : `, since ${escapeHtml(day(data.upstreamsSince))}`}`;
+    const total = data.upstreamTotals.find((row) => row.window === window);
+    return `<div class="scroll"><table>
+<thead><tr><th>${heading}</th><th>Requests</th><th>Errors</th><th>TTFT median</th><th>TTFT p90</th><th>TTFB median</th><th>Users</th><th>Tokens in</th><th>Cached</th><th>Tokens out</th><th>Cache hits</th><th>Credit</th><th>Cash</th></tr></thead>
 <tbody>
-${data.upstreams.filter((row) => row.window === window).map(upstreamRow).join("\n")}
+${data.upstreams
+  .filter((row) => row.window === window)
+  .map((row) => upstreamRow(UPSTREAM_NAMES_SHOWN[row.upstream], row))
+  .join("\n")}
+${total ? upstreamRow("Total", total, true) : ""}
 </tbody></table></div>`;
+  };
   const upstreamSection = `<section id="upstream">
 <div class="head"><h2>Upstreams</h2>${csvLink("upstreams")}</div>
 <div class="tiles">
@@ -812,7 +856,8 @@ ${data.upstreams.filter((row) => row.window === window).map(upstreamRow).join("\
 ${upstreamSwitch(spend, input.csrf)}
 ${upstreamTable("today")}
 ${upstreamTable("week")}
-<p class="note">Admins included. TTFT: time to the first content chunk (text, reasoning or a tool call); TTFB: time to the response headers. Errors: 429, 5xx, timeouts, unreachable and failed streams. Credit is the provider's prepaid credit (OpenAI or Luminal) at its list prices; cash is OpenRouter's reported cost, when OpenRouter serves.</p>
+${upstreamTable("all_time")}
+<p class="note">Admins included, except in Users: the distinct people each upstream served (the Total counts each person once). Tokens in are prompt tokens, cached ones included; Cached is how many of them were cache hits; tokens out are completion tokens. All time has no timings: they're kept 15 days. TTFT: time to the first content chunk (text, reasoning or a tool call); TTFB: time to the response headers. Errors: 429, 5xx, timeouts, unreachable and failed streams. Credit is the provider's prepaid credit (OpenAI or Luminal) at its list prices; cash is OpenRouter's reported cost, when OpenRouter serves.</p>
 </section>`;
 
   const activeSection = `<section>
@@ -2134,11 +2179,42 @@ export function dashboardCsv(table: Exclude<CsvTable, HealthCsvTable | "early-ac
     }
     case "upstreams":
       body = csv(
-        ["window", "upstream", "requests", "errors", "ttft_median_ms", "ttft_p90_ms", "ttfb_median_ms", "cache_hit_share", "credit_usd", "cash_usd"],
+        ["window", "upstream", "requests", "errors", "ttft_median_ms", "ttft_p90_ms", "ttfb_median_ms", "cache_hit_share", "credit_usd", "cash_usd", "users", "prompt_tokens", "cached_tokens", "completion_tokens"],
         [
-          ...data.upstreams.map((row) => [row.window, row.upstream, row.requests, row.errors, row.medianTtftMs, row.p90TtftMs, row.medianTtfbMs, row.cacheHitShare, row.creditUsd, row.cashUsd]),
-          ["all_time", "luminal_credit", null, null, null, null, null, null, spend.creditUsedUsd, null],
-          ["all_time", "openai_credit", null, null, null, null, null, null, spend.openaiCreditUsedUsd, null],
+          ...data.upstreams.map((row) => [
+            row.window,
+            row.upstream,
+            row.requests,
+            row.errors,
+            row.medianTtftMs,
+            row.p90TtftMs,
+            row.medianTtfbMs,
+            row.cacheHitShare,
+            row.creditUsd,
+            row.cashUsd,
+            row.users,
+            row.promptTokens,
+            row.cachedTokens,
+            row.completionTokens,
+          ]),
+          ...data.upstreamTotals.map((row) => [
+            row.window,
+            "total",
+            row.requests,
+            row.errors,
+            null,
+            null,
+            null,
+            row.cacheHitShare,
+            row.creditUsd,
+            row.cashUsd,
+            row.users,
+            row.promptTokens,
+            row.cachedTokens,
+            row.completionTokens,
+          ]),
+          ["all_time", "luminal_credit", null, null, null, null, null, null, spend.creditUsedUsd, null, null, null, null, null],
+          ["all_time", "openai_credit", null, null, null, null, null, null, spend.openaiCreditUsedUsd, null, null, null, null, null],
         ],
       );
       break;

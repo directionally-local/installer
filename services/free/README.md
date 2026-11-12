@@ -898,7 +898,13 @@ the owner can do that by hand.
 **Telemetry.** Each request records the time to the response headers (TTFB) and to the first
 chunk with content (TTFT: text, reasoning or a tool call), per upstream, in `upstream_timings`
 (time, upstream and the two numbers; no person, kept 15 days), and per-day counts in
-`upstream_daily` (requests, upstream errors, prompt and cached tokens, cash and credit).
+`upstream_daily` (requests, upstream errors, prompt, cached and completion tokens, cash and
+credit). `upstream_people` keeps, per upstream, who it served and their first and last day (ids
+and days only, admins left out), for the people per upstream. The dashboard's upstream tables
+(today, this week, all time, each with a total row) show users and tokens in, cached and out
+next to the requests, timings and dollars; `upstreams.csv` has the same columns. Completion
+tokens per upstream, the days before `upstream_daily` existed, and `upstream_people` are built
+once from the request log (the upstream each row recorded) the first time this version starts.
 
 ## Which OpenRouter host serves requests
 
@@ -1165,7 +1171,8 @@ which records settings, pause, block and unblock.
   counts, charged tokens and cost, plus GitHub logins, sign-up times, per-person grants and the
   spend totals, and for the launch sections the queue (ids and times), the Monday runs (counts
   and the forecast) and referrals (ids, time and outcome), and for the upstreams `upstream_daily`
-  and `upstream_timings` (counts, tokens, dollars and milliseconds per upstream, no person), and
+  and `upstream_timings` (counts, tokens, dollars and milliseconds per upstream, no person) and
+  `upstream_people` (ids and first and last days per upstream), and
   for the install funnel `download_daily` and `install_daily` (anonymous counts). No model, event type or properties,
   session ids, prompts or code. A test runs
   the dashboard under an SQLite authorizer that allows only those columns. The abuse section
