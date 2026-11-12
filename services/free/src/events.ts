@@ -74,6 +74,11 @@ export const GPU_ANSWERS = ["yes", "no"] as const;
 export const GPU_OPTIONS = ["free", "own_key", "gpus", "this_machine", "remote_server", "endpoint"] as const;
 export const GPU_PATHS = ["this_machine", "remote_server", "endpoint"] as const;
 export const GPU_OUTCOMES = ["ok", "failed"] as const;
+/**
+ * A "detected" whose vendor tool is on PATH but didn't answer (Autopilot tries it twice): it
+ * timed out, or failed. Sent with that vendor, so the machine isn't counted as "none".
+ */
+export const GPU_DETECT_OUTCOMES = ["probe_timeout", "probe_failed"] as const;
 export const GPU_ERROR_TYPES = [
   "cancelled",
   "no_docker",
@@ -111,8 +116,11 @@ function plainObject(input: unknown): Record<string, unknown> | undefined {
   return input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : undefined;
 }
 
-/** The GPU fields, each checked; anything missing, malformed or unknown is left out, and errorType without outcome failed. */
-export function cleanGpuProps(input: unknown): Record<string, unknown> {
+/**
+ * The GPU fields, each checked; anything missing, malformed or unknown is left out, and errorType
+ * without outcome failed. The detection outcomes (GPU_DETECT_OUTCOMES) count only on `detected`.
+ */
+export function cleanGpuProps(input: unknown, event?: GpuEvent): Record<string, unknown> {
   const props: Record<string, unknown> = {};
   const raw = plainObject(input);
   if (!raw) return props;
@@ -131,6 +139,10 @@ export function cleanGpuProps(input: unknown): Record<string, unknown> {
     const value = oneOf<string>(list, raw[key]);
     if (value) props[key] = value;
   }
+  if (event === "detected") {
+    const detectOutcome = oneOf(GPU_DETECT_OUTCOMES, raw.outcome);
+    if (detectOutcome) props.outcome = detectOutcome;
+  }
   // An error type goes only with a failed outcome.
   if (props.outcome !== "failed") delete props.errorType;
   return props;
@@ -146,15 +158,16 @@ export interface GpuCount {
   answer: (typeof GPU_ANSWERS)[number] | "";
   option: (typeof GPU_OPTIONS)[number] | "";
   path: (typeof GPU_PATHS)[number] | "";
-  outcome: (typeof GPU_OUTCOMES)[number] | "";
+  outcome: (typeof GPU_OUTCOMES)[number] | (typeof GPU_DETECT_OUTCOMES)[number] | "";
   errorType: (typeof GPU_ERROR_TYPES)[number] | "";
 }
 
 /**
  * The anonymous body `{event, gpuVendor?, gpuModel?, gpuVramGb?, gpuCount?, answer?, option?,
  * path?, outcome?, errorType?}`, or a reason it was refused. Each event needs its own fields
- * (detected: gpuVendor; prompt: gpuVendor and answer; early_access: gpuVendor amd or ascend and
- * answer; option: option; result: outcome and path); a malformed optional field is dropped, as is
+ * (detected: gpuVendor, and outcome probe_timeout or probe_failed when that vendor's tool didn't
+ * answer; prompt: gpuVendor and answer; early_access: gpuVendor amd or ascend and answer; option:
+ * option; result: outcome ok or failed, and path); a malformed optional field is dropped, as is
  * errorType unless the outcome is failed (where it defaults to "other"). Other keys are ignored.
  */
 export function cleanGpuTelemetry(input: unknown): GpuCount | string {
@@ -162,7 +175,7 @@ export function cleanGpuTelemetry(input: unknown): GpuCount | string {
   if (!raw) return "Send {event, gpuVendor?, gpuModel?, gpuVramGb?, gpuCount?, answer?, option?, path?, outcome?, errorType?}.";
   const event = oneOf(GPU_EVENTS, raw.event);
   if (!event) return `event is one of ${GPU_EVENTS.join(", ")}.`;
-  const props = cleanGpuProps(raw);
+  const props = cleanGpuProps(raw, event);
   const need = (key: string, list: readonly string[]): string | undefined => (props[key] === undefined ? `${key} is one of ${list.join(", ")}.` : undefined);
   const missing =
     event === "detected"
@@ -173,7 +186,9 @@ export function cleanGpuTelemetry(input: unknown): GpuCount | string {
           ? (oneOf(GPU_EARLY_ACCESS_VENDORS, raw.gpuVendor) ? undefined : `gpuVendor is one of ${GPU_EARLY_ACCESS_VENDORS.join(", ")}.`) ?? need("answer", GPU_ANSWERS)
           : event === "option"
             ? need("option", GPU_OPTIONS)
-            : (need("outcome", GPU_OUTCOMES) ?? need("path", GPU_PATHS));
+            : oneOf(GPU_OUTCOMES, props.outcome)
+              ? need("path", GPU_PATHS)
+              : `outcome is one of ${GPU_OUTCOMES.join(", ")}.`;
   if (missing) return missing;
   const word = <T extends string>(key: string) => (props[key] as T | undefined) ?? "";
   const outcome = word<GpuCount["outcome"]>("outcome");
@@ -215,7 +230,7 @@ export function cleanEvent(input: unknown, now: number): CleanEvent | undefined 
   const parsedAt = typeof raw.at === "string" ? Date.parse(raw.at) : Number.NaN;
   const at = Number.isFinite(parsedAt) && parsedAt <= now + FUTURE_SKEW_MS ? parsedAt : now;
   // gpu.* events carry only the GPU fields; the others only the session fields.
-  const props = raw.type.startsWith("gpu.") ? cleanGpuProps(raw.props) : cleanProps(raw.props);
+  const props = raw.type.startsWith("gpu.") ? cleanGpuProps(raw.props, raw.type.slice(4) as GpuEvent) : cleanProps(raw.props);
   return { id: raw.id, type: raw.type as EventType, sessionId, at, props };
 }
 
