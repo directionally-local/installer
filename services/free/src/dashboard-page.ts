@@ -66,7 +66,9 @@ export interface SpendView {
   requireGithubActivity: boolean;
   maxActiveUsers: number;
   weeklyTokens: number;
+  /** A Full person's GPT-6 budget, and DeepSeek budget (absent: the same). */
   perPersonWeeklyUsd: number | null;
+  deepseekWeeklyUsd?: number | null;
   /** Share of the weekly cap at which sign-ups queue. */
   queueThreshold: number;
   /** The provider setting, and whether each provider has a key. */
@@ -94,9 +96,11 @@ export interface SpendView {
   /** A Starter account's weekly tokens (a batch-flagged one gets none), and its dollar cap. */
   starterWeeklyTokens: number;
   starterWeeklyUsd: number | null;
+  starterDeepseekWeeklyUsd?: number | null;
   /** The basic level: weekly tokens (0: off), dollar cap, and the account age it needs. Admin-only. */
   basicWeeklyTokens: number;
   basicWeeklyUsd: number | null;
+  basicDeepseekWeeklyUsd?: number | null;
   basicMinAccountAgeDays: number;
   /** The public bar for Full (free tokens): account age, and public repositories or contributions. */
   fullMinAccountAgeDays: number;
@@ -800,7 +804,7 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
       ? ""
       : `New open sign-ups get an account but wait in line for free tokens once this week's free Luminal credit spend (${usd(queue.watchedUsd)} so far) reaches this: ${escapeHtml(percent(spend.queueThreshold))} of the ${usd(queue.budgetUsd)} ${escapeHtml(queue.provider ?? "")} weekly credit budget. Invites skip the line; Mondays let it in as far as the budget allows. `
   }${escapeHtml(queue.text)}${spend.weeklyCapUsd === null ? "" : ` Free OpenRouter cash past ${usd(spend.queueThreshold * spend.weeklyCapUsd)} this week also starts it.`}</span></div>
-<div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">${escapeHtml(admissionText(spend, data.people.admitted))} Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} a week.</span></div>
+<div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">${escapeHtml(admissionText(spend, data.people.admitted))} Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} of GPT-6 a week${spend.deepseekWeeklyUsd !== undefined ? `, ${escapeHtml(cap(spend.deepseekWeeklyUsd))} of DeepSeek` : ""}.</span></div>
 </div>
 <h3>By provider</h3>
 <div class="scroll"><table>

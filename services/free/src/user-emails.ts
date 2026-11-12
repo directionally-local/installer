@@ -17,15 +17,12 @@ export interface UserEmailCopy {
   body: string;
 }
 
-export const USER_EMAILS: Record<UserEmailKind, UserEmailCopy> = {
-  // 1. Right after a new sign-up gives their email on the sign-in page.
-  welcome: {
-    subject: "you're in",
-    body: `hey,
+/** The welcome email: no amounts (they are runtime settings) and no level names. */
+const WELCOME_BODY = `hey,
 
 sina here, i build dl.
 
-you're on the free tier now. every week you get gpt-6 and deepseek tokens on me, up to $20 worth. it resets every monday.
+you're on the free tier now. every week you get free gpt-6 and lots of deepseek, on me. it resets every monday.
 
 three things worth trying first:
 - open dl in a repo and ask it how the project fits together
@@ -36,29 +33,20 @@ if anything breaks or feels off, just reply to this. it comes straight to me and
 
 there's also a discord where people share what they're building and help each other out: https://discord.gg/zeBnJTgcRK
 
-sina`,
+sina`;
+
+export const USER_EMAILS: Record<UserEmailKind, UserEmailCopy> = {
+  // 1. Right after a new sign-up gives their email on the sign-in page.
+  welcome: {
+    subject: "you're in",
+    body: WELCOME_BODY,
   },
 
-  // 1b. The same moment, for a new sign-up at the basic level: below the bar, a smaller allowance.
-  // Never say why: the rule behind the level is private.
+  // 1b. The same moment, for a new sign-up at the basic level. Publicly there is only Free and
+  // Pro, and by default every free level gets the same allowance: the same email as `welcome`.
   welcome_basic: {
     subject: "you're in",
-    body: `hey,
-
-sina here, i build dl.
-
-you're on the free tier now, with a smaller weekly allowance of every model, gpt-6 included. it resets every monday.
-
-if you need more, type /request inside dl and tell me what you're building. i read every one.
-
-three things worth trying first:
-- open dl in a repo and ask it how the project fits together
-- give it a small bug you've been putting off
-- ask it to write tests for one file
-
-there's also a discord where people share what they're building and help each other out: https://discord.gg/zeBnJTgcRK
-
-sina`,
+    body: WELCOME_BODY,
   },
 
   // 1c. The same moment, for a new sign-up below the bar with no free tokens.
@@ -79,22 +67,11 @@ there's also a discord where people share what they're building: https://discord
 sina`,
   },
 
-  // 1d. The same moment, for a new sign-up below the bar while Starter has a small allowance.
+  // 1d. The same moment, for a new sign-up below the bar while Starter has an allowance: the
+  // same email as `welcome` (no level names; the allowance is the free one).
   welcome_starter_small: {
     subject: "you're in",
-    body: `hey,
-
-sina here, i build dl.
-
-you're signed in, with a small weekly allowance to try every model, gpt-6 included. it resets every monday. the full free tier is for github accounts over a year old with 100+ contributions in the last year.
-
-if you need more, type /request inside dl and tell me what you're building, and i'll sort you out. or plug in your own key with /provider.
-
-if /request isn't in your dl yet, email contact@directionallylocal.com with your github username instead.
-
-there's also a discord where people share what they're building: https://discord.gg/zeBnJTgcRK
-
-sina`,
+    body: WELCOME_BODY,
   },
 
   // 1e. An admin granted the person's access request (/request in dl).
@@ -102,7 +79,7 @@ sina`,
     subject: "you're in",
     body: `hey,
 
-you're in. you now have the full free tier: every model, gpt-6 included, and more free usage each week than the standard allowance. it resets every monday.
+you're in. you now have free tokens: every model, gpt-6 included, and more free usage each week than the standard allowance. it resets every monday.
 
 thanks for telling me what you're building. if anything breaks or feels off, just reply to this.
 

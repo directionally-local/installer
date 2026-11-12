@@ -16,8 +16,10 @@ import { isProviderSlugList, isQuantizationList } from "./routing.js";
 export const RUNTIME_SETTINGS = {
   /** Tokens per person per week. */
   weeklyTokens: { kind: "tokens", env: "WEEKLY_TOKENS" },
-  /** USD per person per week (real reported cost). */
+  /** A Full person's weekly GPT-6 budget, USD (real reported cost, every GPT-6 model). */
   perPersonWeeklyUsdCap: { kind: "usd", env: "PER_PERSON_WEEKLY_USD_CAP" },
+  /** A Full person's weekly DeepSeek budget, USD (DeepSeek has no token cap). */
+  deepseekWeeklyUsdCap: { kind: "usd", env: "DEEPSEEK_WEEKLY_USD_CAP" },
   /** The personal weekly USD cap an admin's grant gives (never lowers a higher one); 0 or "none": a grant sets only the level. */
   grantWeeklyUsdCap: { kind: "usd", env: "GRANT_WEEKLY_USD_CAP" },
   /** USD across everyone but admins, per week. */
@@ -50,14 +52,22 @@ export const RUNTIME_SETTINGS = {
   batchSize: { kind: "count", env: "BATCH_SIZE" },
   /** A Starter account's weekly tokens, every model; 0 for none. Batch-flagged accounts get none either way. */
   starterWeeklyTokens: { kind: "tokens", env: "STARTER_WEEKLY_TOKENS" },
-  /** A Starter account's weekly USD cap. */
+  /** A Starter account's weekly GPT-6 budget, USD. */
   starterWeeklyUsdCap: { kind: "usd", env: "STARTER_WEEKLY_USD_CAP" },
+  /** A Starter account's weekly DeepSeek budget, USD. */
+  starterDeepseekWeeklyUsdCap: { kind: "usd", env: "STARTER_DEEPSEEK_WEEKLY_USD_CAP" },
   /** Below the public bar, accounts at least this many days old and not in a creation batch are basic. */
   basicMinAccountAgeDays: { kind: "count", env: "BASIC_MIN_ACCOUNT_AGE_DAYS" },
   /** A basic account's weekly tokens, every model; 0 turns the basic level off (Starter instead). */
   basicWeeklyTokens: { kind: "tokens", env: "BASIC_WEEKLY_TOKENS" },
-  /** A basic account's weekly USD cap. */
+  /** A basic account's weekly GPT-6 budget, USD. */
   basicWeeklyUsdCap: { kind: "usd", env: "BASIC_WEEKLY_USD_CAP" },
+  /** A basic account's weekly DeepSeek budget, USD. */
+  basicDeepseekWeeklyUsdCap: { kind: "usd", env: "BASIC_DEEPSEEK_WEEKLY_USD_CAP" },
+  /** Pro's weekly GPT-6 budget, USD. */
+  proWeeklyUsdCap: { kind: "usd", env: "PRO_WEEKLY_USD_CAP" },
+  /** Pro's weekly DeepSeek budget, USD. */
+  proDeepseekWeeklyUsdCap: { kind: "usd", env: "PRO_DEEPSEEK_WEEKLY_USD_CAP" },
   /** New sign-ins one network gets a day before the rest are Starter. */
   networkSignupsPerDay: { kind: "count", env: "NETWORK_SIGNUPS_PER_DAY" },
   /** Inboxes and domains that can't sign up for the free tier. */

@@ -10,6 +10,7 @@ import { healthData, type HealthData, type HealthWindow } from "./health-data.js
 import { homeData, type HomeData } from "./home-data.js";
 import { milestoneCrossed, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
+import { DEEPSEEK_MODEL, familyOf, type Family } from "./models.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
@@ -166,6 +167,8 @@ export interface RequestRecord {
   upstreamOutcome?: UpstreamOutcome;
   /** Sent with a server key (dlk_, dl's server mode) rather than a sign-in's access token. */
   viaKey?: boolean;
+  /** The weekly dollar budget it was charged to (the requested model's); unset: the served model's. */
+  family?: Family;
 }
 
 /**
@@ -722,7 +725,12 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["pregrants", "weekly_usd", "REAL"],
   // Completion tokens per upstream per day (filled from the request log once, below).
   ["upstream_daily", "completion_tokens", "INTEGER NOT NULL DEFAULT 0"],
+  // Two weekly dollar budgets: the part of `cost_usd` (free cost) that DeepSeek's budget paid.
+  ["daily_activity", "deepseek_cost_usd", "REAL NOT NULL DEFAULT 0"],
 ];
+
+/** Days of `daily_activity` whose DeepSeek cost is filled in from the request log when the column is added. */
+const DEEPSEEK_BACKFILL_DAYS = 14;
 
 /** Timings older than this are dropped: the dashboard shows today and this week. */
 const TIMINGS_MAX_AGE_MS = 15 * DAY_MS;
@@ -757,6 +765,7 @@ export class DirectoryObject extends DurableObject {
       const rebuilt = this.#backfillDailyActivity();
       if (rebuilt || added.has("daily_activity.sessions")) this.#backfillSessions();
       this.#backfillUpstreams();
+      if (rebuilt || added.has("daily_activity.deepseek_cost_usd")) this.#backfillDeepseekCost();
     });
   }
 
@@ -789,6 +798,23 @@ export class DirectoryObject extends DurableObject {
       );
       sql.exec("INSERT INTO settings (key, value) VALUES (?, '1')", UPSTREAM_ROLLUP_READY);
     });
+  }
+
+  /**
+   * Fills `daily_activity.deepseek_cost_usd` for the last DEEPSEEK_BACKFILL_DAYS days from the
+   * request log (by the model that served), once, when the column is added: enough for this
+   * week's and last week's split in the admin views.
+   */
+  #backfillDeepseekCost(): void {
+    const since = Math.floor(Date.now() / DAY_MS) - DEEPSEEK_BACKFILL_DAYS;
+    this.ctx.storage.sql.exec(
+      `UPDATE daily_activity SET deepseek_cost_usd = (SELECT COALESCE(SUM(r.cost_usd), 0) FROM requests r
+         WHERE r.github_id = daily_activity.github_id AND r.at >= daily_activity.day * ${DAY_MS} AND r.at < (daily_activity.day + 1) * ${DAY_MS}
+           AND r.is_admin = 0 AND r.paid = 0 AND r.model = ?)
+       WHERE day >= ? AND requests > 0`,
+      DEEPSEEK_MODEL,
+      since,
+    );
   }
 
   /** Builds `daily_activity` from the request log and events once, the first time this code runs. True when it did. */
@@ -831,14 +857,15 @@ export class DirectoryObject extends DurableObject {
   #addActivity(
     githubId: number,
     at: number,
-    change: { requests: number; events: number; chargedTokens: number; costUsd: number; paidCostUsd?: number; creditUsd?: number; sessions?: number },
+    change: { requests: number; events: number; chargedTokens: number; costUsd: number; paidCostUsd?: number; creditUsd?: number; sessions?: number; deepseekCostUsd?: number },
   ): void {
     this.ctx.storage.sql.exec(
-      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd, paid_cost_usd, credit_usd, sessions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd, paid_cost_usd, credit_usd, sessions, deepseek_cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (day, github_id) DO UPDATE SET
          requests = requests + excluded.requests, events = events + excluded.events, sessions = sessions + excluded.sessions,
          charged_tokens = charged_tokens + excluded.charged_tokens, cost_usd = cost_usd + excluded.cost_usd,
-         paid_cost_usd = paid_cost_usd + excluded.paid_cost_usd, credit_usd = credit_usd + excluded.credit_usd`,
+         paid_cost_usd = paid_cost_usd + excluded.paid_cost_usd, credit_usd = credit_usd + excluded.credit_usd,
+         deepseek_cost_usd = deepseek_cost_usd + excluded.deepseek_cost_usd`,
       Math.floor(at / DAY_MS),
       githubId,
       change.requests,
@@ -848,6 +875,7 @@ export class DirectoryObject extends DurableObject {
       change.paidCostUsd ?? 0,
       change.creditUsd ?? 0,
       change.sessions ?? 0,
+      change.deepseekCostUsd ?? 0,
     );
   }
 
@@ -2191,6 +2219,7 @@ export class DirectoryObject extends DurableObject {
           costUsd: free ? record.costUsd : 0,
           paidCostUsd: paid ? cash : 0,
           creditUsd: free ? credit : 0,
+          deepseekCostUsd: free && (record.family ?? familyOf(record.model)) === "deepseek" ? record.costUsd : 0,
         });
       }
       this.ctx.storage.sql.exec(

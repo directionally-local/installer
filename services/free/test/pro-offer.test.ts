@@ -19,15 +19,18 @@ function config(vars: Record<string, string> = {}) {
 }
 
 describe("the Pro offer", () => {
-  it("defaults to $3.99 a month with a $10 weekly ceiling, and dollar top-ups from $2", () => {
+  it("defaults to $3.99 a month with $6 of GPT-6 and $40 of DeepSeek a week, and dollar top-ups from $2", () => {
     const shown = offers(config());
     assert.deepEqual(shown.pro, {
       priceUsdMonthly: 3.99,
       price: "$3.99/month",
       tokensPerWeek: 300_000_000,
-      usdPerWeek: 10,
-      valueLine: "About 3x the free usage every week, every model.",
+      usdPerWeek: 6,
+      deepseekUsdPerWeek: 40,
+      valueLine: "Lots of DeepSeek every week, plus more GPT-6.",
     });
+    // The value line names no amounts: they are runtime settings.
+    assert.doesNotMatch(shown.pro.valueLine, /\$|\d+x|\d+M/);
     assert.deepEqual(shown.topup, { unitPriceUsd: 1, minQuantity: 2, maxQuantity: 20, usageMultiplier: 1.25, validDays: 90, fromPrice: "$2" });
   });
 
@@ -52,19 +55,21 @@ describe("the Pro offer", () => {
     assert.throws(() => config({ PRO_VALUE_LINE: "x".repeat(81) }), ConfigError);
   });
 
-  it("has a $10 weekly ceiling by default; \"none\" means tokens only", () => {
-    assert.equal(config().proWeeklyUsdCap, 10);
+  it("has a $6 weekly GPT-6 ceiling and $40 of DeepSeek by default; \"none\" means tokens only", () => {
+    assert.equal(config().proWeeklyUsdCap, 6);
+    assert.equal(config().proDeepseekWeeklyUsdCap, 40);
+    assert.equal(config({ PRO_DEEPSEEK_WEEKLY_USD_CAP: "none" }).proDeepseekWeeklyUsdCap, undefined);
     assert.equal(config({ PRO_WEEKLY_USD_CAP: "12.5" }).proWeeklyUsdCap, 12.5);
     assert.equal(config({ PRO_WEEKLY_USD_CAP: "none" }).proWeeklyUsdCap, undefined);
     assert.equal(offers(config({ PRO_WEEKLY_USD_CAP: "none" })).pro.usdPerWeek, null);
   });
 
-  it("matches the deployed config: Pro $3.99 with a $10 ceiling, top-ups $2 to $20 at 1.25x for 90 days", async () => {
+  it("matches the deployed config: Pro $3.99 with a $6 GPT-6 ceiling, top-ups $2 to $20 at 1.25x for 90 days", async () => {
     const { readFile } = await import("node:fs/promises");
     const raw = await readFile(new URL("../wrangler.cloudflare.jsonc", import.meta.url), "utf8");
     const vars = (JSON.parse(raw.replace(/^\s*\/\/.*$/gm, "")) as { vars: Record<string, string> }).vars;
     assert.equal(vars.PRO_PRICE_USD_MONTHLY, "3.99");
-    assert.equal(vars.PRO_WEEKLY_USD_CAP, "10");
+    assert.equal(vars.PRO_WEEKLY_USD_CAP, "6");
     assert.equal(vars.TOPUP_UNIT_PRICE_USD, "1");
     assert.equal(vars.TOPUP_MIN_QUANTITY, "2");
     assert.equal(vars.TOPUP_MAX_QUANTITY, "20");
@@ -98,7 +103,7 @@ async function goPro(svc: Service, githubId: number): Promise<void> {
 }
 
 describe("Pro's weekly dollar ceiling", () => {
-  it("stops Pro at $10 a week through the API, as a spend limit, and says it is Pro's", async () => {
+  it("stops Pro's DeepSeek at $40 a week through the API, as a spend limit, and says it is Pro's", async () => {
     const svc = await createService({ ...BILLING, OPEN_ADMISSION: "true" });
     const admin = (await svc.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
     const tokens = await svc.signIn({ id: 100, login: "user100" });
@@ -107,12 +112,15 @@ describe("Pro's weekly dollar ceiling", () => {
     await goPro(svc, 100);
     const me = (await (await svc.request("GET", "/v1/me", { token: key })).json()) as { plan: string; allowance: { usdPerWeek: number | null } };
     assert.equal(me.plan, "pro");
-    assert.equal(me.allowance.usdPerWeek, 10);
+    assert.equal(me.allowance.usdPerWeek, 6);
 
     svc.setOpenRouter(() => completion(usage(1000, 1000, 0, 0.01)));
     const chat = () => svc.request("POST", "/v1/chat/completions", { token: key, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } });
     assert.equal((await chat()).status, 200);
-    await svc.request("POST", "/admin/people/100/grant", { token: admin, body: { spentUsdThisWeek: 10 } });
+    // GPT-6's Pro week used up doesn't touch DeepSeek's.
+    await svc.request("POST", "/admin/people/100/grant", { token: admin, body: { spentUsdThisWeek: 6 } });
+    assert.equal((await chat()).status, 200);
+    await svc.request("POST", "/admin/people/100/grant", { token: admin, body: { deepseekSpentUsdThisWeek: 40 } });
     const refused = await chat();
     assert.equal(refused.status, 402);
     const error = ((await refused.json()) as { error: { code: string; reason: string; message: string } }).error;

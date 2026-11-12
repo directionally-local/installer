@@ -207,12 +207,13 @@ describe("admin dashboard numbers", () => {
     await admit(100, "alice", "2026-10-12");
     await admit(101, "bob", "2026-10-13");
     await admit(102, "carol", "2026-10-26");
+    // GPT-6 requests: the limits table holds them to the GPT-6 budget.
     const request = (githubId: number, when: string, costUsd: number, chargedTokens = 1000) =>
       directory.recordRequest({
         githubId,
         isAdmin: githubId === ADMIN_ID,
         at: at(when),
-        model: MODEL,
+        model: "gpt-6-luna",
         promptTokens: chargedTokens,
         completionTokens: 0,
         cachedTokens: 0,

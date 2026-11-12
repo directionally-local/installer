@@ -12,20 +12,28 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
 
 ## Providers, models and pools
 
-| model id | provider | wire id | weekly pool | USD per Mtok (input / cached / output) |
-|---|---|---|---|---|
-| `gpt-6-luna` (default) | OpenAI | `gpt-6-luna` | `luna`, 50M | 0.10 / 0.01 / 0.50 |
-| `gpt-6.1-sol` | OpenAI | `gpt-6.1-sol` | `sol`, 10M | 2 / 0.10 / 10 |
-| `gpt-6-astra` | OpenAI | `gpt-6-astra` | `astra`, 3M | 10 / 1 / 50 |
-| `deepseek/deepseek-v4.1-flash-1017` | Luminal | `deepseek-ai/DeepSeek-V4.1-Flash-1017` | `luna`, 50M | 0.035 / 0.006 / 0.315 |
+| model id | provider | wire id | weekly dollar budget | weekly token pool | USD per Mtok (input / cached / output) |
+|---|---|---|---|---|---|
+| `gpt-6-luna` (default) | OpenAI | `gpt-6-luna` | GPT-6 | `luna`, 50M | 0.10 / 0.01 / 0.50 |
+| `gpt-6.1-sol` | OpenAI | `gpt-6.1-sol` | GPT-6 | `sol`, 10M | 2 / 0.10 / 10 |
+| `gpt-6-astra` | OpenAI | `gpt-6-astra` | GPT-6 | `astra`, 3M | 10 / 1 / 50 |
+| `deepseek/deepseek-v4.1-flash-1017` | Luminal | `deepseek-ai/DeepSeek-V4.1-Flash-1017` | DeepSeek | `deepseek`, no token cap | 0.035 / 0.006 / 0.315 |
 
-- **One pool per tier.** GPT-6 Luna and DeepSeek share the `luna` pool, so switching between them
-  (by hand or by the fallback) doesn’t hand anyone a second allowance. Sol and Astra have their own.
+- **Two weekly dollar budgets.** Every person has a GPT-6 budget (all GPT-6 models together) and a
+  DeepSeek budget. DeepSeek is much cheaper per token for us and fast, so we give far more of it:
+  by default $2 of GPT-6 and $8 of DeepSeek a week on the free plan, $6 and $40 on Pro. Each
+  request counts against its own model's budget only, held the same way (settled spend plus the
+  estimates of that budget's requests in flight).
+- **Token pools inside the budgets.** Luna, Sol and Astra keep their own weekly token pools (the
+  dollar budget they share is usually what binds). DeepSeek has no token cap: its dollar budget is
+  its only limit, so a token count never stops it first.
+- **GPT-6 out, DeepSeek left.** A GPT-6 request past GPT-6's week gets 402 `gpt_limit` pointing at
+  DeepSeek, not a dead end; with both weeks used up, the usual limit codes.
 - **Fallback.** Every OpenAI model is served by OpenAI first. On a 429, a 5xx, a network error,
   no response before `OPENAI_FIRST_BYTE_TIMEOUT_SECONDS`, or OpenAI’s credit running out, the same
   request is retried once on DeepSeek/Luminal, and the response carries
-  `x-dl-fallback: deepseek/deepseek-v4.1-flash-1017`. The requested model’s pool pays for it, so
-  someone who asks for Sol spends Sol’s allowance, not Luna’s. DeepSeek picked by hand goes
+  `x-dl-fallback: deepseek/deepseek-v4.1-flash-1017`. The requested model’s pool and budget pay
+  for it (at DeepSeek’s prices), so someone who asks for Sol spends Sol’s allowance, not Luna’s. DeepSeek picked by hand goes
   straight to Luminal.
 - **Separate credit pools.** OpenAI’s `OPENAI_CREDIT_USD` ($5,000) and Luminal’s
   `LUMINAL_CREDIT_USD` ($2,000) are tracked apart (`/admin/spend` shows both). A provider at or past
@@ -33,9 +41,7 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
 - **Prices.** `prices` is what the person’s weekly dollar allowance is charged; `creditPrices` is
   what the provider’s credit is charged (they differ for DeepSeek, whose Luminal list price is
   higher than what OpenRouter billed us for the same model). OpenAI reports no cost, so its
-  requests are priced at list. At the mix the free tier actually sees (95% of input tokens
-  cached, output under 1% of all tokens) a person who uses every pool costs about $9.35 a week,
-  so the $20 per-person cap leaves room for a much less cache-friendly week.
+  requests are priced at list.
 - **Responses API.** OpenAI’s chat completions API refuses function tools while a GPT-6 model
   reasons, so OpenAI requests go to `https://api.openai.com/v1/responses`. Clients still speak
   Chat Completions: `src/openai-responses.ts` turns `messages` into `input` items (assistant
@@ -154,14 +160,21 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
 ```jsonc
 {
   "login": "alice", "githubId": 123, "status": "active",
+  // The Luna pool and the GPT-6 budget, as older clients read them; `budgets` has both.
   "allowance": { "tokensPerWeek": 50000000, "usedThisWeek": 0, "remaining": 50000000,
-                 "resetsAt": "2026-11-09T00:00:00.000Z", "usdPerWeek": 60, "spentUsdThisWeek": 0 },
-  "pools": {                            // one weekly token pool per model tier
+                 "resetsAt": "2026-11-09T00:00:00.000Z", "usdPerWeek": 2, "spentUsdThisWeek": 0,
+                 "budgets": { "…": "as below" } },
+  // Both weekly dollar budgets. tokensThisWeek: every token processed (prompt with cached, plus
+  // completion), not the weighted count the token pools are charged.
+  "budgets": { "gpt6":     { "usdPerWeek": 2, "spentUsd": 0.4, "tokensThisWeek": 6000000 },
+               "deepseek": { "usdPerWeek": 8, "spentUsd": 1.2, "tokensThisWeek": 58000000 } },
+  "pools": {                            // one weekly token pool per model; null: no token cap
     "luna":  { "tokensPerWeek": 50000000, "usedThisWeek": 0, "remaining": 50000000,
-                 "resetsAt": "2026-11-09T00:00:00.000Z",
-                 "models": ["gpt-6-luna", "deepseek/deepseek-v4.1-flash-1017"] },
-    "sol":   { "tokensPerWeek": 10000000, "usedThisWeek": 0, "remaining": 10000000, "resetsAt": "…", "models": ["gpt-6.1-sol"] },
-    "astra": { "tokensPerWeek": 3000000,  "usedThisWeek": 0, "remaining": 3000000,  "resetsAt": "…", "models": ["gpt-6-astra"] }
+                 "resetsAt": "2026-11-09T00:00:00.000Z", "family": "gpt6", "models": ["gpt-6-luna"] },
+    "sol":   { "tokensPerWeek": 10000000, "usedThisWeek": 0, "remaining": 10000000, "resetsAt": "…", "family": "gpt6", "models": ["gpt-6.1-sol"] },
+    "astra": { "tokensPerWeek": 3000000,  "usedThisWeek": 0, "remaining": 3000000,  "resetsAt": "…", "family": "gpt6", "models": ["gpt-6-astra"] },
+    "deepseek": { "tokensPerWeek": null, "usedThisWeek": 0, "remaining": null, "resetsAt": "…", "family": "deepseek",
+                  "models": ["deepseek/deepseek-v4.1-flash-1017"] }
   },
   "models": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "deepseek/deepseek-v4.1-flash-1017"],
   "plan": "free",                       // "free" | "pro"
@@ -172,16 +185,19 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
   "queue": null,                        // or { "position": 214, "etaAt": "2026-11-16T00:00:00.000Z", "waiting": 300 }
   "referral": { "code": "alice", "link": "https://dl.new/r/alice", "joined": 2, "activeThisWeek": 1,
                 "bonusTokensPerWeek": 10000000, "bonusCapPerWeek": 50000000 },
-  "offers": { "pro": { "priceUsdMonthly": 3.99, "price": "$3.99/month", "tokensPerWeek": 300000000, "usdPerWeek": 10,
-                       "valueLine": "About 3x the free usage every week, every model." },
+  "offers": { "pro": { "priceUsdMonthly": 3.99, "price": "$3.99/month", "tokensPerWeek": 300000000, "usdPerWeek": 6,
+                       "deepseekUsdPerWeek": 40, "valueLine": "Lots of DeepSeek every week, plus more GPT-6." },
               "topup": { "unitPriceUsd": 1, "minQuantity": 2, "maxQuantity": 20, "usageMultiplier": 1.25, "validDays": 90, "fromPrice": "$2" } }
 }
 ```
 
-- `allowance.tokensPerWeek` includes this week's referral bonus; the dollar allowance grows in the
-  same proportion. While queued, `allowance.remaining` is 0.
+- No level appears here: publicly there is only Free and Pro (`plan`).
+- `allowance.tokensPerWeek` includes this week's referral bonus; the GPT-6 dollar budget grows in
+  the same proportion. While queued, `allowance.remaining` is 0.
+- A personal cap (an admin's grant) replaces the GPT-6 budget; DeepSeek's is then the larger of
+  the personal cap and the plan's DeepSeek budget.
 - With Pro, `allowance` is Pro's: 300M tokens a week (`PRO_TOKENS_PER_WEEK`), no referral bonus,
-  and a $10 weekly dollar ceiling (`PRO_WEEKLY_USD_CAP`; "none" for tokens only), held like the
+  and $6 of GPT-6 and $40 of DeepSeek a week (`PRO_WEEKLY_USD_CAP`, `PRO_DEEPSEEK_WEEKLY_USD_CAP`), held like the
   free caps (settled spend plus the estimates of requests in flight). `queue` is null for Pro (a place in
   line is kept in case Pro ends).
 - `referral.joined`: sign-ups with this person's code that count. `activeThisWeek`: those friends
@@ -202,6 +218,16 @@ Out of tokens (a free user):
              "referralLink": "https://dl.new/r/alice" } }
 ```
 
+GPT-6's week used up while DeepSeek's isn't (free or Pro; Pro's message leaves the offer out):
+
+```json
+{ "error": { "code": "gpt_limit",
+             "message": "You've used this week's GPT-6 allowance. DeepSeek V4.1 Flash still has free usage this week: switch with /model, or get dl Pro.",
+             "family": "gpt6", "reason": "spend", "resetsAt": "2026-11-09T00:00:00.000Z",
+             "alternative": "deepseek/deepseek-v4.1-flash-1017",
+             "offers": { "...": "as above" } } }
+```
+
 Queued:
 
 ```json
@@ -214,12 +240,13 @@ Queued:
 
 The wait reads "about N days" under two weeks, else "about N weeks".
 
-A Basic or Starter week used up (a free user): `basic_limit` or `starter_limit`, with what the
-level gets, that it resets Monday, and the two ways on. `request` is the access-request endpoint.
+A basic or Starter account's week used up (both budgets; a free user): `basic_limit` or
+`starter_limit`, with what the free plan gets (never the level's name), that it resets Monday,
+and the ways on. `request` is the access-request endpoint.
 
 ```json
 { "error": { "code": "basic_limit",
-             "message": "You've used this week's free Basic allowance (10M tokens a week of every model, GPT-6 included, up to $3). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.",
+             "message": "You've used this week's free allowance (every model, up to $2 of GPT-6 and $8 of DeepSeek a week). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.",
              "reason": "tokens", "resetsAt": "2026-11-09T00:00:00.000Z", "request": "/v1/access-request",
              "offers": { "...": "as above" }, "referralLink": "https://dl.new/r/alice" } }
 ```
@@ -363,9 +390,9 @@ Sent by the free tier service. The message and the reply address aren't stored a
 
 ## Paid plans (Stripe)
 
-- **Pro**, $3.99 a month: up to $10 of usage a week (`PRO_WEEKLY_USD_CAP`) on every model, in
-  place of the free allowance; its 300M weekly tokens sit above what $10 buys, so the dollar
-  ceiling is what binds. Pro starts when its Checkout completes and stays on while the subscription is active and
+- **Pro**, $3.99 a month: up to $6 of GPT-6 (`PRO_WEEKLY_USD_CAP`) and $40 of DeepSeek
+  (`PRO_DEEPSEEK_WEEKLY_USD_CAP`) a week, in place of the free allowance; its 300M weekly tokens
+  sit above what the GPT-6 budget buys, so the dollars are what bind. Pro starts when its Checkout completes and stays on while the subscription is active and
   its paid period (plus 3 days' grace for a late renewal webhook) hasn't ended.
 - **Top-up**, $2 to $20 once (2 to 20 units of a $1 price, adjustable on Checkout): each $1
   adds $1.25 of usage dollars (`TOPUP_USAGE_MULTIPLIER`), valid 90 days, spent only after the
@@ -658,6 +685,7 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `service_paused` | device code, device token, chat | `reason: "paused"`, `pausedForEveryone: true`, `resetsAt: null` |
 | `global_weekly_budget_reached` | chat (503) | `reason: "weekly_budget"`, `pausedForEveryone: true`, `resetsAt` (ISO time), `Retry-After` header |
 | `global_total_budget_reached` | chat (503) | `reason: "total_budget"`, `pausedForEveryone: true`, `resetsAt: null` |
+| `gpt_limit` | chat (402) | `family: "gpt6"`, `reason`, `resetsAt`, `alternative` (the DeepSeek model id), `offers`: GPT-6's week used up, DeepSeek's not |
 | `quota_exceeded` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `offers`, `referralLink` |
 | `basic_limit`, `starter_limit` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `request`, `offers`, `referralLink` |
 | `below_bar` | chat (403) | `contact`, `request` |
@@ -683,7 +711,10 @@ with who made it and when.
 | setting | env | default |
 |---|---|---|
 | `weeklyTokens` | `WEEKLY_TOKENS` | 50,000,000 |
-| `perPersonWeeklyUsdCap` | `PER_PERSON_WEEKLY_USD_CAP` | 20 |
+| `perPersonWeeklyUsdCap` | `PER_PERSON_WEEKLY_USD_CAP` | 2: a Full person's weekly GPT-6 budget (every GPT-6 model) |
+| `deepseekWeeklyUsdCap` | `DEEPSEEK_WEEKLY_USD_CAP` | 8: a Full person's weekly DeepSeek budget |
+| `proWeeklyUsdCap` | `PRO_WEEKLY_USD_CAP` | 6: Pro's weekly GPT-6 budget |
+| `proDeepseekWeeklyUsdCap` | `PRO_DEEPSEEK_WEEKLY_USD_CAP` | 40: Pro's weekly DeepSeek budget |
 | `grantWeeklyUsdCap` | `GRANT_WEEKLY_USD_CAP` | 20: the personal weekly dollar cap an admin's grant gives (never lowers a higher one); 0 or `none`: a grant sets only the level |
 | `globalWeeklyUsdCap` | `GLOBAL_WEEKLY_USD_CAP` | 2000 |
 | `globalTotalUsdCap` | `GLOBAL_TOTAL_USD_CAP` | 7000 |
@@ -705,11 +736,17 @@ with who made it and when.
 | `userEmails` | `USER_EMAILS` | true (sends only with the `USER_EMAIL` binding or `RESEND_API_KEY`) |
 | `dlOnly` | `DL_ONLY` | true (free tokens inside dl only; see below) |
 | `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request); `daily` (one line in the daily digest); `off` |
-| `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 5,000,000 (0: no free tokens below Basic) |
-| `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 0.5 |
+| `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 50,000,000, as Full (0: no free tokens below Basic) |
+| `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
+| `starterDeepseekWeeklyUsdCap` | `STARTER_DEEPSEEK_WEEKLY_USD_CAP` | 8, as Full |
 | `basicMinAccountAgeDays` | `BASIC_MIN_ACCOUNT_AGE_DAYS` | see `src/config.ts` |
-| `basicWeeklyTokens` | `BASIC_WEEKLY_TOKENS` | 10,000,000 (0 turns Basic off) |
-| `basicWeeklyUsdCap` | `BASIC_WEEKLY_USD_CAP` | 3 |
+| `basicWeeklyTokens` | `BASIC_WEEKLY_TOKENS` | 50,000,000, as Full (0 turns Basic off) |
+| `basicWeeklyUsdCap` | `BASIC_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
+| `basicDeepseekWeeklyUsdCap` | `BASIC_DEEPSEEK_WEEKLY_USD_CAP` | 8, as Full |
+
+Publicly there is only Free and Pro: by default every free level gets the same budgets, and
+nothing a person is shown names a level. The levels stay internal so the settings can differ
+later. A batch-flagged account gets 0 of both budgets.
 
 Env only: `REFERRAL_LINK_BASE` (`https://dl.new/r/`), the offers above, `ALERT_EMAIL_TO`,
 `ALERT_EMAIL_FROM` (`alerts@dl.new`), `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_KIND`,
@@ -1000,7 +1037,13 @@ and each failure adds a row to `host_failures` (time, host, `http_5xx` | `error_
   - **Errors:** a wrong or revoked key gets 401 `invalid_key`. Signing out leaves keys working.
   - **Admin view:** `/admin/people` shows how many keys each person has, never the keys.
 
-A per-person grant (`POST /admin/people/:id/grant`) still wins over the weekly defaults. The kill
+A per-person grant (`POST /admin/people/:id/grant`) still wins over the weekly defaults: `usdPerWeek`
+and `spentUsdThisWeek` are GPT-6's; `deepseekSpentUsdThisWeek` sets DeepSeek's spend.
+
+`POST /admin/reset-week {dryRun?}` starts this week over for everyone who isn't blocked: both
+budgets' dollars and tokens and every token pool back to 0 (requests in flight still settle).
+Top-ups, plans and personal caps stay. `{dryRun: true}` only counts. It answers
+`{dryRun, people, reset, skippedBlocked}`. The kill
 switch is `POST /admin/pause` and `/admin/unpause`; `PAUSED=true` in env pauses as well.
 
 ## Install counts

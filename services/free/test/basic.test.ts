@@ -39,6 +39,14 @@ async function me(service: Service, token: string): Promise<Record<string, any>>
   return (await (await service.request("GET", "/v1/me", { token })).json()) as Record<string, any>;
 }
 
+/** The stored level: internal only, /v1/me never shows it (publicly there is only Free and Pro). */
+async function storedLevel(service: Service, githubId: number): Promise<string | undefined> {
+  return (await service.directory().getPerson(githubId))?.level;
+}
+
+// Level names never reach the person: not in copy, not in /v1/me.
+const LEVEL_NAMES = /\bbasic\b|\bstarter\b/i;
+
 const chat = (service: Service, token: string, model = MODEL) => service.request("POST", "/v1/chat/completions", { token, body: body(model) });
 
 /** A creation day `days` before the service's clock, as GitHub gives it. */
@@ -60,9 +68,13 @@ describe("the basic level", () => {
     const { service } = await open();
     const { access_token: token } = await service.signIn(belowBar(100, OLD));
     const mine = await me(service, token);
-    assert.equal(mine.level, "basic");
-    assert.equal(mine.allowance.tokensPerWeek, 10_000_000);
-    assert.equal(mine.allowance.usdPerWeek, 3);
+    assert.equal(await storedLevel(service, 100), "basic");
+    assert.equal(mine.level, undefined, "no level in /v1/me");
+    assert.doesNotMatch(JSON.stringify(mine), LEVEL_NAMES);
+    // By default every free level gets the same as Full: 50M Luna tokens, $2 of GPT-6 and $8 of DeepSeek.
+    assert.equal(mine.allowance.tokensPerWeek, 50_000_000);
+    assert.equal(mine.allowance.usdPerWeek, 2);
+    assert.deepEqual(mine.budgets, { gpt6: { usdPerWeek: 2, spentUsd: 0, tokensThisWeek: 0 }, deepseek: { usdPerWeek: 8, spentUsd: 0, tokensThisWeek: 0 } });
     assert.equal(mine.pools.sol.tokensPerWeek, 10_000_000);
     assert.equal(mine.pools.astra.tokensPerWeek, 3_000_000);
     const response = await chat(service, token, "gpt-6-luna");
@@ -92,7 +104,7 @@ describe("the basic level", () => {
   it("is off with basicWeeklyTokens 0: the same account is Starter and refused like today", async () => {
     const { service } = await open({ BASIC_WEEKLY_TOKENS: "0" });
     const { access_token: token } = await service.signIn(belowBar(100, OLD));
-    assert.equal((await me(service, token)).level, "starter");
+    assert.equal(await storedLevel(service, 100), "starter");
     const response = await chat(service, token);
     assert.equal(response.status, 403);
     assert.equal(await errorCode(response), "below_bar");
@@ -103,32 +115,36 @@ describe("the basic level", () => {
     const { access_token: token } = await service.signIn(belowBar(100, OLD));
     assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { basicWeeklyTokens: 0 } })).status, 200);
     assert.equal(await errorCode(await chat(service, token)), "below_bar");
-    assert.equal((await me(service, token)).level, "starter");
     assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { basicWeeklyTokens: null } })).status, 200);
     assert.equal((await chat(service, token)).status, 200);
   });
 
-  it("answers basic_limit when the week is used up: what it gets, Monday, /request and /provider", async () => {
-    const { service } = await open({ BASIC_WEEKLY_TOKENS: "100" });
+  it("answers basic_limit when both weeks are used up: what it gets (as free), Monday, /request and /provider", async () => {
+    const { service, admin } = await open({ BASIC_WEEKLY_TOKENS: "100" });
     const { access_token: token } = await service.signIn(belowBar(100, OLD));
-    const response = await chat(service, token);
+    // GPT-6's tokens are too few for a request, and DeepSeek's dollars are spent.
+    await service.request("POST", "/admin/people/100/grant", { token: admin, body: { deepseekSpentUsdThisWeek: 8 } });
+    const response = await chat(service, token, "gpt-6-luna");
     assert.equal(response.status, 402);
     const error = ((await response.json()) as { error: Record<string, any> }).error;
     assert.equal(error.code, "basic_limit");
     assert.equal(error.request, "/v1/access-request");
     assert.equal(
       error.message,
-      "You've used this week's free Basic allowance (100 tokens a week of every model, GPT-6 included, up to $3). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.",
+      "You've used this week's free allowance (every model, up to $2 of GPT-6 and $8 of DeepSeek a week). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.",
     );
     assert.doesNotMatch(error.message, HIDDEN);
+    assert.doesNotMatch(error.message, LEVEL_NAMES);
   });
 
-  it("shows the basic line and the invite field on the sign-in page, and never the rule", async () => {
+  it("shows the free line and the invite field on the sign-in page, never the rule or the level's name", async () => {
     const { service } = await open();
     const flow = await startBrowserFlow(service.request, belowBar(100, OLD), undefined, { stopAtDetails: true });
-    assert.match(flow.page, /Basic access: a smaller free allowance, 10M tokens a week of every model, GPT-6 included, up to \$3\. It resets every Monday\. Want more\? Type \/request in dl/);
+    assert.match(flow.page, /Free: every model, up to \$2 of GPT-6 and \$8 of DeepSeek a week\. It resets every Monday\. Want more\? Get dl Pro, type \/request in dl/);
     assert.match(flow.page, /name="invite_code"/);
-    const line = /Basic access:[^<]*/.exec(flow.page)![0];
+    assert.doesNotMatch(flow.page, /Basic access|Starter access/);
+    const line = /Free: every model[^<]*/.exec(flow.page)![0];
+    assert.doesNotMatch(line, LEVEL_NAMES);
     assert.doesNotMatch(line, HIDDEN);
     assert.doesNotMatch(line, /365|year/);
   });
@@ -172,26 +188,28 @@ describe("the Starter allowance", () => {
     const { service } = await open({ STARTER_WEEKLY_TOKENS: "2000000", BASIC_WEEKLY_TOKENS: "0" });
     const { access_token: token } = await service.signIn(belowBar(100, YOUNG));
     const mine = await me(service, token);
-    assert.equal(mine.level, "starter");
+    assert.equal(await storedLevel(service, 100), "starter");
     assert.equal(mine.allowance.tokensPerWeek, 2_000_000);
-    assert.equal(mine.allowance.usdPerWeek, 0.5);
+    assert.equal(mine.allowance.usdPerWeek, 2);
+    assert.equal(mine.budgets.deepseek.usdPerWeek, 8);
     const response = await chat(service, token, "gpt-6-luna");
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("x-dl-fallback"), null);
     // The token cap: the next week's allowance is too small for a request.
     const small = await open({ STARTER_WEEKLY_TOKENS: "100", BASIC_WEEKLY_TOKENS: "0" });
     const { access_token: other } = await small.service.signIn(belowBar(101, YOUNG));
-    const refused = await chat(small.service, other);
+    await small.service.request("POST", "/admin/people/101/grant", { token: small.admin, body: { deepseekSpentUsdThisWeek: 8 } });
+    const refused = await chat(small.service, other, "gpt-6-luna");
     assert.equal(refused.status, 402);
     const error = ((await refused.json()) as { error: Record<string, any> }).error;
     assert.equal(error.code, "starter_limit");
     assert.equal(error.reason, "tokens");
     assert.equal(error.request, "/v1/access-request");
-    assert.match(error.message, /^You've used this week's free Starter allowance \(100 tokens a week of every model, GPT-6 included, up to \$0\.50\)\. It resets on Monday\./);
+    assert.match(error.message, /^You've used this week's free allowance \(every model, up to \$2 of GPT-6 and \$8 of DeepSeek a week\)\. It resets on Monday\./);
   });
 
   it("stops at the Starter dollar cap", async () => {
-    const { service } = await open({ STARTER_WEEKLY_TOKENS: "2000000", STARTER_WEEKLY_USD_CAP: "0.000001", BASIC_WEEKLY_TOKENS: "0" });
+    const { service } = await open({ STARTER_WEEKLY_TOKENS: "2000000", STARTER_DEEPSEEK_WEEKLY_USD_CAP: "0.000001", BASIC_WEEKLY_TOKENS: "0" });
     const { access_token: token } = await service.signIn(belowBar(100, YOUNG));
     assert.equal((await chat(service, token)).status, 200);
     const refused = await chat(service, token);
@@ -207,8 +225,11 @@ describe("the Starter allowance", () => {
     await batch(service, day);
     const { access_token: token } = await service.signIn(belowBar(100, day));
     const mine = await me(service, token);
-    assert.equal(mine.level, "starter");
+    assert.equal(await storedLevel(service, 100), "starter");
     assert.equal(mine.allowance.tokensPerWeek, 0);
+    assert.equal(mine.budgets.gpt6.usdPerWeek, 0, "nothing of GPT-6");
+    assert.equal(mine.budgets.deepseek.usdPerWeek, 0, "nothing of DeepSeek");
+    assert.equal(mine.pools.deepseek.tokensPerWeek, 0);
     assert.doesNotMatch(JSON.stringify(mine), /batch|creat/i);
     const response = await chat(service, token);
     assert.equal(response.status, 403);
@@ -280,25 +301,25 @@ describe("re-check below-bar accounts", () => {
 
 describe("what each level is told", () => {
   const bar = { minAccountAgeDays: 365, minPublicRepos: 100_000, minContributions: 100 };
-  it("words the Starter line for a small allowance and for none", () => {
+  it("words the free line (never a level's name) for an allowance and for none", () => {
     assert.equal(
-      starterLine(bar, 2_000_000, 0.5),
-      "Starter access: a small free allowance to try dl, 2M tokens a week of every model, GPT-6 included, up to $0.50. It resets every Monday. The full free tier is for established GitHub accounts: at least 1 year old with 100+ contributions in the last year. Want more? Type /request in dl and tell us what you're building. Or use your own API key with /provider.",
+      starterLine(bar, 2_000_000, 2, 8),
+      "Free: every model, up to $2 of GPT-6 and $8 of DeepSeek a week. It resets every Monday. Want more? Get dl Pro, type /request in dl and tell us what you're building, or use your own API key with /provider.",
     );
+    assert.equal(basicLine(50_000_000, 2, 8), starterLine(bar, 2_000_000, 2, 8), "the same words for every free level");
     assert.equal(starterLine(bar, 0, 0.5), belowBarLine(bar));
     assert.equal(
       belowBarLine(bar),
       "Free tokens are for established GitHub accounts: at least 1 year old with 100+ contributions in the last year. Not there yet? Type /request in dl and tell us what you're building, and we may give you free tokens (or email contact@directionallylocal.com). Or use your own API key with /provider.",
     );
-    assert.equal(
-      basicLine(10_000_000, 3),
-      "Basic access: a smaller free allowance, 10M tokens a week of every model, GPT-6 included, up to $3. It resets every Monday. Want more? Type /request in dl and tell us what you're building. Or use your own API key with /provider.",
-    );
-    assert.equal(basicLine(10_000_000, undefined), "Basic access: a smaller free allowance, 10M tokens a week of every model, GPT-6 included. It resets every Monday. Want more? Type /request in dl and tell us what you're building. Or use your own API key with /provider.");
-    for (const line of [starterLine(bar, 2_000_000, 0.5), belowBarLine(bar), basicLine(10_000_000, 3), limitLine("basic", 10_000_000, 3), limitLine("starter", 2_000_000, 0.5)]) assert.doesNotMatch(line, HIDDEN);
+    assert.equal(basicLine(10_000_000, undefined), "Free: 10M tokens a week of every model, GPT-6 included. It resets every Monday. Want more? Get dl Pro, type /request in dl and tell us what you're building, or use your own API key with /provider.");
+    for (const line of [starterLine(bar, 2_000_000, 2, 8), belowBarLine(bar), basicLine(10_000_000, 3), limitLine("basic", 10_000_000, 2, 8), limitLine("starter", 2_000_000, 2, 8)]) {
+      assert.doesNotMatch(line, HIDDEN);
+      assert.doesNotMatch(line, LEVEL_NAMES);
+    }
   });
 
-  it("sends the welcome for the level: basic, a small Starter allowance, or none", async () => {
+  it("sends the free welcome to every level with an allowance, the no-tokens one otherwise, never a level's name", async () => {
     const vars = { RESEND_API_KEY: "re_test_key" };
     const text = (s: Service, index = 0) => String(s.calls.resend[index]!.body.text);
     const key = (s: Service, index = 0) => s.calls.resend[index]!.headers["idempotency-key"];
@@ -306,17 +327,14 @@ describe("what each level is told", () => {
     const basic = await open(vars);
     await startBrowserFlow(basic.service.request, { ...belowBar(100, OLD), email: "a@work.example" });
     assert.equal(key(basic.service), "dl-user-email-welcome_basic-100-once");
-    assert.match(text(basic.service), /smaller weekly allowance of every model, gpt-6 included/);
-    assert.match(text(basic.service), /type \/request inside dl/);
+    assert.match(text(basic.service), /you're on the free tier now\. every week you get free gpt-6 and lots of deepseek/);
     assert.match(text(basic.service), /discord\.gg/);
     assert.doesNotMatch(text(basic.service), /\$20|year old|365/);
 
     const small = await open({ ...vars, STARTER_WEEKLY_TOKENS: "2000000" });
     await startBrowserFlow(small.service.request, { ...belowBar(101, YOUNG), email: "b@work.example" });
     assert.equal(key(small.service), "dl-user-email-welcome_starter_small-101-once");
-    assert.match(text(small.service), /small weekly allowance to try every model/);
-    assert.match(text(small.service), /type \/request inside dl/);
-    assert.match(text(small.service), /contact@directionallylocal\.com/);
+    assert.match(text(small.service), /you're on the free tier now\. every week you get free gpt-6 and lots of deepseek/, "the same free welcome");
 
     const none = await open(vars);
     await startBrowserFlow(none.service.request, { ...belowBar(102, YOUNG), email: "c@work.example" });
@@ -332,6 +350,11 @@ describe("what each level is told", () => {
     const before = flagged.service.calls.resend.length;
     await startBrowserFlow(flagged.service.request, { ...belowBar(103, day), email: "d@work.example" });
     assert.equal(key(flagged.service, before), "dl-user-email-welcome_starter-103-once");
-    for (const s of [basic.service, small.service, none.service, flagged.service]) for (const call of s.calls.resend) assert.doesNotMatch(String(call.body.text), /batch|follow|signal/);
+    for (const s of [basic.service, small.service, none.service, flagged.service]) {
+      for (const call of s.calls.resend) {
+        assert.doesNotMatch(String(call.body.text), /batch|follow|signal/);
+        assert.doesNotMatch(String(call.body.text), LEVEL_NAMES);
+      }
+    }
   });
 });

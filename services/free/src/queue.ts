@@ -32,7 +32,9 @@ import { DAY_MS, WEEK_MS, weekEnd } from "./week.js";
 export interface Policy {
   adminIds: number[];
   weeklyTokens: number;
+  /** A Full person's GPT-6 budget, and DeepSeek budget: together, the most a new person costs a week. */
   perPersonWeeklyUsdCap: number | undefined;
+  deepseekWeeklyUsdCap?: number | undefined;
   globalWeeklyUsdCap: number | undefined;
   globalTotalUsdCap: number | undefined;
   queueThreshold: number;
@@ -81,6 +83,7 @@ export function policyOf(config: FreeConfig): Policy {
     adminIds: [...config.adminGithubIds],
     weeklyTokens: config.weeklyTokens,
     perPersonWeeklyUsdCap: config.perPersonWeeklyUsdCap,
+    deepseekWeeklyUsdCap: config.deepseekWeeklyUsdCap,
     globalWeeklyUsdCap: config.globalWeeklyUsdCap,
     globalTotalUsdCap: config.globalTotalUsdCap,
     queueThreshold: config.queueThreshold,
@@ -115,11 +118,13 @@ export interface Forecast {
 export function forecast(input: {
   lastWeekUsd: number;
   lastWeekActives: number;
-  policy: Pick<Policy, "globalWeeklyUsdCap" | "globalTotalUsdCap" | "queueThreshold" | "perPersonWeeklyUsdCap">;
+  policy: Pick<Policy, "globalWeeklyUsdCap" | "globalTotalUsdCap" | "queueThreshold" | "perPersonWeeklyUsdCap"> & Partial<Pick<Policy, "deepseekWeeklyUsdCap">>;
   totalSpentUsd: number;
 }): Forecast {
   const { policy } = input;
-  const avgUsd = input.lastWeekActives > 0 && input.lastWeekUsd > 0 ? input.lastWeekUsd / input.lastWeekActives : (policy.perPersonWeeklyUsdCap ?? FALLBACK_AVG_USD) || FALLBACK_AVG_USD;
+  // With no spend to go on, a new person is assumed to use both weekly budgets in full.
+  const perPerson = policy.perPersonWeeklyUsdCap === undefined ? undefined : policy.perPersonWeeklyUsdCap + (policy.deepseekWeeklyUsdCap ?? 0);
+  const avgUsd = input.lastWeekActives > 0 && input.lastWeekUsd > 0 ? input.lastWeekUsd / input.lastWeekActives : (perPerson ?? FALLBACK_AVG_USD) || FALLBACK_AVG_USD;
   if (policy.globalWeeklyUsdCap === undefined) return { avgUsd, actives: input.lastWeekActives, budgetUsd: null, room: Number.MAX_SAFE_INTEGER };
   let budgetUsd = policy.queueThreshold * policy.globalWeeklyUsdCap;
   if (policy.globalTotalUsdCap !== undefined) budgetUsd = Math.min(budgetUsd, Math.max(0, policy.globalTotalUsdCap - input.totalSpentUsd));
@@ -135,7 +140,7 @@ export function forecast(input: {
 export function creditForecast(input: {
   lastWeekCreditUsd: number;
   lastWeekActives: number;
-  policy: Pick<Policy, "queueThreshold" | "perPersonWeeklyUsdCap" | "luminalCreditUsd" | "luminalWeeklyCreditUsd"> & Partial<Pick<Policy, "primaryUpstream" | "openaiCreditUsd" | "openaiWeeklyCreditUsd">>;
+  policy: Pick<Policy, "queueThreshold" | "perPersonWeeklyUsdCap" | "luminalCreditUsd" | "luminalWeeklyCreditUsd"> & Partial<Pick<Policy, "primaryUpstream" | "openaiCreditUsd" | "openaiWeeklyCreditUsd" | "deepseekWeeklyUsdCap">>;
   creditUsedUsd: number;
 }): Forecast {
   const { policy } = input;
@@ -147,7 +152,7 @@ export function creditForecast(input: {
   return forecast({
     lastWeekUsd: input.lastWeekCreditUsd,
     lastWeekActives: input.lastWeekActives,
-    policy: { globalWeeklyUsdCap: budget.weeklyUsd, globalTotalUsdCap: budget.balanceUsd, queueThreshold: policy.queueThreshold, perPersonWeeklyUsdCap: policy.perPersonWeeklyUsdCap },
+    policy: { globalWeeklyUsdCap: budget.weeklyUsd, globalTotalUsdCap: budget.balanceUsd, queueThreshold: policy.queueThreshold, perPersonWeeklyUsdCap: policy.perPersonWeeklyUsdCap, deepseekWeeklyUsdCap: policy.deepseekWeeklyUsdCap },
     totalSpentUsd: input.creditUsedUsd,
   });
 }

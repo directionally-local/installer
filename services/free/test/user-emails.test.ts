@@ -201,9 +201,10 @@ describe("emails to users: most of the week used", () => {
     return (await s.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } })).status;
   }
 
-  it("goes on the request that crosses 80% of the week's tokens, once a week, and waits a day after another email", async () => {
-    const s = await service({ WEEKLY_TOKENS: "10000000" });
-    s.setOpenRouter(() => completion(usage(3_000_000, 10)));
+  it("goes on the request that crosses 80% of the week, once a week, and waits a day after another email", async () => {
+    // DeepSeek has no token cap: its week is its dollar budget.
+    const s = await service({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
+    s.setOpenRouter(() => completion(usage(3_000_000, 10, 0, 0.3)));
     const nora = { id: 500, login: "nora" };
     let token = (await s.signIn(nora)).access_token;
     assert.deepEqual(subjects(s), ["you're in"]);
@@ -213,7 +214,7 @@ describe("emails to users: most of the week used", () => {
     assert.equal(s.calls.resend.length, 1, "at most one email a day");
     s.clock.now = NOW + DAY;
     token = (await s.signIn(nora)).access_token;
-    s.setOpenRouter(() => completion(usage(10, 1)));
+    s.setOpenRouter(() => completion(usage(10, 1, 0, 0.0001)));
     assert.equal(await chat(s, token), 200);
     assert.deepEqual(subjects(s), ["you're in", "you've used most of this week's tokens"]);
     assert.match(String(s.calls.resend[1]!.body.text), /they reset on monday 9 nov\./);
@@ -224,7 +225,7 @@ describe("emails to users: most of the week used", () => {
   });
 
   it("goes when the dollar cap is 80% used first", async () => {
-    const s = await service({ PER_PERSON_WEEKLY_USD_CAP: "1" });
+    const s = await service({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
     await s.signIn({ id: 501, login: "olga" });
     s.clock.now = NOW + DAY;
     const { access_token: token } = await s.signIn({ id: 501, login: "olga" });

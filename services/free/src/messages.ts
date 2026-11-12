@@ -97,6 +97,16 @@ export function quotaMessage(reason: "tokens" | "spend", resetsAt: string, plan:
   return `This week's ${plan === "pro" ? "Pro" : "free"} ${what} is used up. It resets at ${resetsAt}.`;
 }
 
+/**
+ * GPT-6's weekly budget is used up but DeepSeek's isn't (402 gpt_limit): not a dead end. Pro
+ * already has Pro, so its line leaves the offer out.
+ */
+export function gptLimitMessage(plan: "free" | "pro" = "free"): string {
+  return plan === "pro"
+    ? "You've used this week's Pro GPT-6 allowance. DeepSeek V4.1 Flash still has usage this week: switch with /model."
+    : "You've used this week's GPT-6 allowance. DeepSeek V4.1 Flash still has free usage this week: switch with /model, or get dl Pro.";
+}
+
 export const QUEUED_SIGNED_IN =
   "Free tokens are busy this week, so you're in line for them; your terminal shows your place. Your own key and paid plans work now.";
 

@@ -272,9 +272,9 @@ export function weekMostlyUsed(allowance: {
   plan: string;
   usdPerWeek: number | null;
   spentUsdThisWeek: number;
-  pools: Record<string, { tokensPerWeek: number; usedThisWeek: number }>;
+  pools: Record<string, { tokensPerWeek: number | null; usedThisWeek: number }>;
 }): boolean {
   if (allowance.plan !== "free") return false;
   if (allowance.usdPerWeek !== null && allowance.usdPerWeek > 0 && allowance.spentUsdThisWeek >= allowance.usdPerWeek * WEEK_EMAIL_SHARE) return true;
-  return Object.values(allowance.pools).some((pool) => pool.tokensPerWeek > 0 && pool.usedThisWeek >= pool.tokensPerWeek * WEEK_EMAIL_SHARE);
+  return Object.values(allowance.pools).some((pool) => pool.tokensPerWeek !== null && pool.tokensPerWeek > 0 && pool.usedThisWeek >= pool.tokensPerWeek * WEEK_EMAIL_SHARE);
 }
