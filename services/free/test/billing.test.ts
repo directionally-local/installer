@@ -239,8 +239,8 @@ describe("Pro through its payment events", () => {
     assert.equal((await deliver(svc, "checkout.session.completed", proSession(100))).status, 200);
     let body = await me(svc, key);
     assert.equal(body.plan, "pro");
-    assert.equal(body.allowance.tokensPerWeek, 100_000_000);
-    assert.equal(body.allowance.usdPerWeek, null, "Pro has no dollar ceiling unless PRO_WEEKLY_USD_CAP is set");
+    assert.equal(body.allowance.tokensPerWeek, 300_000_000);
+    assert.equal(body.allowance.usdPerWeek, 10, "Pro's weekly dollar ceiling (PRO_WEEKLY_USD_CAP, default $10)");
 
     const periodEnd = Math.floor((NOW + 30 * DAY) / 1000);
     await deliver(svc, "invoice.paid", invoice(100, "in_1", periodEnd));
@@ -320,7 +320,7 @@ describe("Pro through its payment events", () => {
     assert.match(spend[1]!, /^1,0,0,10,10,/, "one subscriber, $10 revenue once (before tax)");
   });
 
-  it("uses Pro's 100M a week as paid usage, outside the free budget", async () => {
+  it("uses Pro's weekly allowance as paid usage, outside the free budget", async () => {
     const svc = await service({ GLOBAL_WEEKLY_USD_CAP: "1" });
     const free = await person(svc, 100);
     const pro = await person(svc, 101);
@@ -341,7 +341,7 @@ describe("Pro through its payment events", () => {
 });
 
 describe("top-ups", () => {
-  it("adds 50M tokens for 30 days, used after the weekly allowance, then expires", async () => {
+  it("an old token top-up checkout adds 50M tokens for 30 days, used after the weekly allowance, then expires", async () => {
     const svc = await service({ WEEKLY_TOKENS: "40000" });
     const { key } = await person(svc);
     svc.setOpenRouter(() => completion(usage(20_000, 20_000, 0, 0.01)));

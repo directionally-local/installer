@@ -1606,6 +1606,12 @@ export class DirectoryObject extends DurableObject {
     );
   }
 
+  /** Every person's distinct network count in one query (the admin people list), by GitHub id; people with none are absent. */
+  async networkCounts(): Promise<Map<number, number>> {
+    const rows = this.ctx.storage.sql.exec<{ github_id: number; n: number }>("SELECT github_id, COUNT(*) AS n FROM person_networks GROUP BY github_id").toArray();
+    return new Map(rows.map((row) => [row.github_id, row.n]));
+  }
+
   /** How many distinct networks this person has signed in from (for the admin page). */
   async networkCount(githubId: number): Promise<number> {
     return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM person_networks WHERE github_id = ?", githubId).toArray()[0]?.n ?? 0;

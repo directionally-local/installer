@@ -140,7 +140,10 @@ export interface FreeConfig {
   alertTelegramChatId: string | undefined;
   /** Stripe billing (stripe.ts). Without the secret key, the billing endpoints answer 503 billing_unavailable. */
   stripe: StripeConfig;
-  /** Pro's weekly dollar ceiling (PRO_WEEKLY_USD_CAP); undefined (the default) means tokens only. */
+  /**
+   * Pro's weekly dollar ceiling (PRO_WEEKLY_USD_CAP, default $10; "none" for tokens only). It is
+   * held exactly like the free caps: settled spend plus the estimate of every request in flight.
+   */
   proWeeklyUsdCap: number | undefined;
   /**
    * Which provider serves chat requests first (PRIMARY_UPSTREAM): "openai" (the default),
@@ -219,8 +222,14 @@ export interface Prices {
 export type AlertKind = "auto" | "discord" | "slack" | "telegram";
 
 export interface Offers {
-  pro: { priceUsdMonthly: number; tokensPerWeek: number };
-  topup: { priceUsd: number; tokens: number; validDays: number };
+  /** `valueLine`: one short sentence a client shows next to the price (PRO_VALUE_LINE). */
+  pro: { priceUsdMonthly: number; tokensPerWeek: number; valueLine: string };
+  /**
+   * Top-ups add usage dollars: `quantity` units of `unitPriceUsd` (from `minQuantity` to
+   * `maxQuantity`), each adding `usageMultiplier` times its price, valid `validDays`.
+   * `legacyTokens`: what a checkout started under the old token top-up still grants.
+   */
+  topup: { unitPriceUsd: number; minQuantity: number; maxQuantity: number; usageMultiplier: number; validDays: number; legacyTokens: number };
 }
 
 export interface StripeConfig {
@@ -285,11 +294,23 @@ export const DEFAULTS = {
   referralBonusTokens: 10_000_000,
   referralBonusCap: 50_000_000,
   referralLinkBase: "https://dl.new/r/",
-  proPriceUsdMonthly: 10,
-  proTokensPerWeek: 100_000_000,
-  topupPriceUsd: 3,
-  topupTokens: 50_000_000,
-  topupValidDays: 30,
+  /** Dollars and cents: $3.99 a month. */
+  proPriceUsdMonthly: 3.99,
+  /**
+   * Pro's weekly tokens sit well above what its weekly dollar ceiling buys on the default model,
+   * so the dollar ceiling is the limit that binds, on cheap and expensive models alike.
+   */
+  proTokensPerWeek: 300_000_000,
+  proWeeklyUsdCap: 10,
+  proValueLine: "About 3x the free usage every week, every model.",
+  /** Top-ups: $1 units, 2 to 20 of them; each $1 adds $1.25 of usage, for 90 days. */
+  topupUnitPriceUsd: 1,
+  topupMinQuantity: 2,
+  topupMaxQuantity: 20,
+  topupUsageMultiplier: 1.25,
+  topupValidDays: 90,
+  /** The old token top-up ($3 for 50M tokens): checkouts started before dollar top-ups still get what they paid for. */
+  topupLegacyTokens: 50_000_000,
   alertEmailFrom: "alerts@dl.new",
   billingSuccessUrl: "https://dl.new/billing/success",
   billingCancelUrl: "https://dl.new/billing/cancel",
@@ -370,13 +391,16 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     referralLinkBase: text(env.REFERRAL_LINK_BASE) ?? DEFAULTS.referralLinkBase,
     offers: {
       pro: {
-        priceUsdMonthly: amount(env.PRO_PRICE_USD_MONTHLY, DEFAULTS.proPriceUsdMonthly, "PRO_PRICE_USD_MONTHLY"),
+        priceUsdMonthly: price(env.PRO_PRICE_USD_MONTHLY, DEFAULTS.proPriceUsdMonthly, "PRO_PRICE_USD_MONTHLY"),
         tokensPerWeek: whole(env.PRO_TOKENS_PER_WEEK, DEFAULTS.proTokensPerWeek, "PRO_TOKENS_PER_WEEK"),
+        valueLine: valueLine(env.PRO_VALUE_LINE),
       },
       topup: {
-        priceUsd: amount(env.TOPUP_PRICE_USD, DEFAULTS.topupPriceUsd, "TOPUP_PRICE_USD"),
-        tokens: whole(env.TOPUP_TOKENS, DEFAULTS.topupTokens, "TOPUP_TOKENS"),
+        unitPriceUsd: price(env.TOPUP_UNIT_PRICE_USD, DEFAULTS.topupUnitPriceUsd, "TOPUP_UNIT_PRICE_USD"),
+        ...quantities(env),
+        usageMultiplier: multiplier(env.TOPUP_USAGE_MULTIPLIER),
         validDays: whole(env.TOPUP_VALID_DAYS, DEFAULTS.topupValidDays, "TOPUP_VALID_DAYS"),
+        legacyTokens: whole(env.TOPUP_TOKENS, DEFAULTS.topupLegacyTokens, "TOPUP_TOKENS"),
       },
     },
     alertWebhookUrl: webhookUrl(env.ALERT_WEBHOOK_URL),
@@ -393,7 +417,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
       cancelUrl: httpsUrl(env.BILLING_CANCEL_URL, "BILLING_CANCEL_URL") ?? DEFAULTS.billingCancelUrl,
       portalReturnUrl: httpsUrl(env.BILLING_PORTAL_RETURN_URL, "BILLING_PORTAL_RETURN_URL") ?? DEFAULTS.billingPortalReturnUrl,
     },
-    proWeeklyUsdCap: text(env.PRO_WEEKLY_USD_CAP) === undefined ? undefined : usd(env.PRO_WEEKLY_USD_CAP, 0, "PRO_WEEKLY_USD_CAP"),
+    proWeeklyUsdCap: usd(env.PRO_WEEKLY_USD_CAP, DEFAULTS.proWeeklyUsdCap, "PRO_WEEKLY_USD_CAP"),
     primaryUpstream: upstream(env.PRIMARY_UPSTREAM),
     openaiApiKey: text(env.OPENAI_API_KEY),
     openaiFirstByteTimeoutSeconds: timeoutSeconds(env.OPENAI_FIRST_BYTE_TIMEOUT_SECONDS, DEFAULTS.openaiFirstByteTimeoutSeconds, "OPENAI_FIRST_BYTE_TIMEOUT_SECONDS"),
@@ -451,6 +475,41 @@ function amount(value: unknown, fallback: number, name: string): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) throw new ConfigError(`${name} must be a number of dollars (got "${raw}").`);
   return parsed;
+}
+
+/** A price in dollars and cents ("3.99", "10"): never more than two decimals, so it shows exactly. */
+function price(value: unknown, fallback: number, name: string): number {
+  const raw = text(value);
+  if (raw === undefined) return fallback;
+  if (!/^\d+(\.\d{1,2})?$/.test(raw)) throw new ConfigError(`${name} must be dollars and cents, e.g. "3.99" (got "${raw}").`);
+  return Number(raw);
+}
+
+/** TOPUP_MIN_QUANTITY and TOPUP_MAX_QUANTITY: 1 to 100 units, the minimum no more than the maximum. */
+function quantities(env: Record<string, unknown>): { minQuantity: number; maxQuantity: number } {
+  const minQuantity = whole(env.TOPUP_MIN_QUANTITY, DEFAULTS.topupMinQuantity, "TOPUP_MIN_QUANTITY");
+  const maxQuantity = whole(env.TOPUP_MAX_QUANTITY, DEFAULTS.topupMaxQuantity, "TOPUP_MAX_QUANTITY");
+  if (minQuantity < 1 || maxQuantity > 100 || minQuantity > maxQuantity) {
+    throw new ConfigError(`TOPUP_MIN_QUANTITY and TOPUP_MAX_QUANTITY must be 1 to 100 with the minimum no more than the maximum (got ${minQuantity} and ${maxQuantity}).`);
+  }
+  return { minQuantity, maxQuantity };
+}
+
+/** TOPUP_USAGE_MULTIPLIER: usage dollars per dollar paid, 0.5 to 5. */
+function multiplier(value: unknown): number {
+  const raw = text(value);
+  if (raw === undefined) return DEFAULTS.topupUsageMultiplier;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0.5 || parsed > 5) throw new ConfigError(`TOPUP_USAGE_MULTIPLIER must be a number from 0.5 to 5 (got "${raw}").`);
+  return parsed;
+}
+
+/** PRO_VALUE_LINE: one short sentence, at most 80 characters. */
+function valueLine(value: unknown): string {
+  const raw = text(value);
+  if (raw === undefined) return DEFAULTS.proValueLine;
+  if (raw.length > 80 || /[\r\n]/.test(raw)) throw new ConfigError(`PRO_VALUE_LINE must be one line of at most 80 characters (got "${raw}").`);
+  return raw;
 }
 
 function stripeId(value: unknown, prefix: string, name: string): string | undefined {

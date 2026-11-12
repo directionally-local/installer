@@ -114,7 +114,10 @@ async function spendLive(service: Service, usd: number): Promise<void> {
 }
 const chat = (service: Service, token: string) => service.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } });
 
-const OFFERS = { pro: { priceUsdMonthly: 10, tokensPerWeek: 100_000_000 }, topup: { priceUsd: 3, tokens: 50_000_000, validDays: 30 } };
+const OFFERS = {
+  pro: { priceUsdMonthly: 3.99, price: "$3.99/month", tokensPerWeek: 300_000_000, usdPerWeek: 10, valueLine: "About 3x the free usage every week, every model." },
+  topup: { unitPriceUsd: 1, minQuantity: 2, maxQuantity: 20, usageMultiplier: 1.25, validDays: 90, fromPrice: "$2" },
+};
 
 describe("queue maths", () => {
   const policy = { globalWeeklyUsdCap: 250, globalTotalUsdCap: 1000, queueThreshold: 0.8, perPersonWeeklyUsdCap: 5 };
