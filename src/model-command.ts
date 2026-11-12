@@ -2,9 +2,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { autopilotConfigFile } from "./laptop/free-tier.js";
 import { fittingModels, recipe, type ModelRecipe } from "./model-catalog.js";
-import { checkGpuDocker, containerRunning, detectHardware, dockerArgs, downloadedBytes, gpuLine, logTail, modelDownloadBytes, removeContainer, type Hardware } from "./model-runtime.js";
+import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Hardware } from "./model-runtime.js";
 import { bench as benchModel } from "./model-bench.js";
-import { SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
+import { localFetch, modelApiBase, SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
 import { modelStatePath, readModelState, writeModelState, type ModelDeployment } from "./state.js";
 import type { System } from "./system.js";
 import type { Ui } from "./ui.js";
@@ -118,7 +118,7 @@ export async function configureProvider(options: Pick<ModelCommandOptions, "syst
   const saved = providers.vllm && typeof providers.vllm === "object" && !Array.isArray(providers.vllm) ? providers.vllm as Record<string, unknown> : {};
   await options.system.mkdir(dirname(path), { mode: 0o700 });
   await options.system.writeFile(path, `${JSON.stringify({ ...config, provider: "vllm", model: deployment.repo,
-    providers: { ...providers, vllm: { ...saved, model: deployment.repo, baseUrl: `http://127.0.0.1:${deployment.port}/v1` } } }, null, 2)}\n`, { mode: 0o600 });
+    providers: { ...providers, vllm: { ...saved, model: deployment.repo, baseUrl: modelApiBase(deployment) } } }, null, 2)}\n`, { mode: 0o600 });
 }
 
 const GB = 1024 ** 3;
@@ -173,7 +173,24 @@ async function recordLogs(options: ModelCommandOptions, container: string): Prom
   for (const line of tail.split("\n")) options.record(`  ${line}`);
 }
 
-async function launch(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number): Promise<ModelDeployment> {
+/**
+ * Whether a container left running by an earlier, failed attempt can be used as is: it runs the
+ * same recipe (same image, model, flags, port and context) and its API answers.
+ */
+async function reusable(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number): Promise<"reuse" | "replace" | "none"> {
+  const existing = await inspectContainer(options.system, `dl-model-${slot}`);
+  if (!existing) return "none";
+  if (!existing.running || existing.spec !== containerSpec(model, port, context, slot)) return "replace";
+  try {
+    const response = await (options.fetch ?? localFetch)(`${modelApiBase({ port })}/models`, { signal: AbortSignal.timeout(5000) });
+    await response.arrayBuffer().catch(() => undefined);
+    return response.ok ? "reuse" : "replace";
+  } catch {
+    return "replace";
+  }
+}
+
+async function launch(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, reuse = false, progress: { started: boolean } = { started: false }): Promise<ModelDeployment> {
   const { system, ui } = options;
   const container = `dl-model-${slot}`;
   const deployment: ModelDeployment = { id: model.id, repo: model.repo, container, port, context,
@@ -190,8 +207,14 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
   ]);
   ui.start("launch", model.image);
   try {
-    await system.run("docker", dockerArgs(model, port, context, slot));
-    ui.done("launch", `port ${port}`);
+    if (reuse) {
+      options.record?.(`reusing ${container}: it runs the same recipe and its API answers`);
+      ui.done("launch", `port ${port} · already running`);
+    } else {
+      await system.run("docker", dockerArgs(model, port, context, slot));
+      ui.done("launch", `port ${port}`);
+    }
+    progress.started = true;
   } catch (error) {
     ui.fail("launch", firstLine(error));
     ui.finish();
@@ -203,11 +226,13 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
   const watch = downloadWatch(options, model, container);
   let current: SmokeCheck | "download" = "download";
   ui.start("download", "waiting for vLLM");
+  if (reuse) watch.ready();
   try {
     deployment.lastTest = await (options.smoke ?? smokeTest)(deployment, system, options.fetch, {
       waiting: watch.poll,
       ...(options.delay ? { delay: options.delay } : {}),
       running: () => containerRunning(system, container),
+      ...(options.record ? { record: options.record } : {}),
       onCheck: (check, status, detail) => {
         if (check === "ready") {
           if (status === "done") { watch.ready(); ui.done("ready"); }
@@ -272,7 +297,7 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     if (!state) { ui.line("info", "Model", "none · dl model up"); return 0; }
     const running = await containerRunning(system, state.active.container);
     ui.line(running ? "done" : "failed", "Model", state.active.repo);
-    ui.line("info", "API", `http://127.0.0.1:${state.active.port}/v1 · ${running ? "running" : "stopped"}`);
+    ui.line("info", "API", `${modelApiBase(state.active)} · ${running ? "running" : "stopped"}`);
     const hardware = await detectHardware(system).catch(() => undefined);
     if (hardware) {
       showHardware(ui, hardware);
@@ -322,13 +347,26 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   if (old && port === old.port) throw new Error("The new model needs a different port from the current model.");
   const slot = old?.container === "dl-model-1" ? 2 : 1;
   const candidateContainer = `dl-model-${slot}`;
+  // A container a failed attempt left running for inspection is reused when it runs this exact
+  // recipe and answers; otherwise it is replaced (and the GPU memory it held is counted again).
+  const existing = await reusable(options, selected, port, context, slot);
+  const reuse = existing === "reuse";
   // Check the spare slot before stopping anything: a stale candidate must not cause downtime.
-  if (old && await containerRunning(system, candidateContainer)) throw new Error(`Spare container ${candidateContainer} is running; stop it manually before changing models.`);
+  if (old && !reuse && await containerRunning(system, candidateContainer)) {
+    const spare = await inspectContainer(system, candidateContainer);
+    if (spare?.spec !== containerSpec(selected, port, context, slot)) throw new Error(`Spare container ${candidateContainer} is running; stop it manually before changing models.`);
+  }
+  if (existing === "replace") {
+    const wasRunning = await containerRunning(system, candidateContainer);
+    await removeContainer(system, candidateContainer);
+    if (wasRunning && !system.dryRun) hardware.gpus = (await detectHardware(system)).gpus;
+  }
   // nvidia-smi free memory is per GPU. Do not sum several cards: vLLM is configured for one GPU.
   // vLLM reserves gpuMemoryUtilization * total VRAM, not minVramMiB: that is what side-by-side must fit.
   const reserveMiB = Math.ceil(selected.gpuMemoryUtilization * maxTotal);
   if (reserveMiB < selected.minVramMiB) throw new Error(`${selected.id} gpu-memory-utilization ${selected.gpuMemoryUtilization} reserves ${Math.floor(reserveMiB / 1024)} GB, less than the ${Math.ceil(selected.minVramMiB / 1024)} GB the model needs.`);
-  const enoughFree = hardware.gpus.some((gpu) => gpu.freeMiB >= reserveMiB);
+  // A reused candidate already holds its memory.
+  const enoughFree = reuse || hardware.gpus.some((gpu) => gpu.freeMiB >= reserveMiB);
   if (old) ui.line("info", "Update", enoughFree
     ? `side-by-side, ${Math.ceil(reserveMiB / 1024)} GB new + ${Math.ceil((old.gpuMemoryUtilization ?? 0.9) * maxTotal / 1024)} GB old`
     : `downtime: ${Math.ceil(Math.max(...hardware.gpus.map((gpu) => gpu.freeMiB)) / 1024)} GB free, needs ${Math.ceil(reserveMiB / 1024)} GB`);
@@ -342,12 +380,13 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     stoppedOld = true;
   }
   if (!old && !enoughFree) throw new Error(`${selected.id} reserves ${Math.ceil(reserveMiB / 1024)} GB of GPU VRAM but the largest GPU has ${Math.ceil(Math.max(...hardware.gpus.map((gpu) => gpu.freeMiB)) / 1024)} GB free.`);
-  if (old) await removeContainer(system, candidateContainer);
+  if (old && existing === "none") await removeContainer(system, candidateContainer);
   const configPath = options.configPath ?? autopilotConfigFile();
   const previousConfig = await system.readFile(configPath);
   const previousState = await system.readFile(statePath);
+  const progress = { started: false };
   try {
-    const candidate = await launch(options, selected, port, context, slot);
+    const candidate = await launch(options, selected, port, context, slot, reuse, progress);
     if (system.dryRun) {
       if (old && !stoppedOld) await system.run("docker", ["stop", old.container]);
       ui.line("info", "Dry run", "No model, provider or state changed.");
@@ -378,17 +417,29 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     await writeModelState(system, { version: 1, active: candidate, ...(old ? { previous: old } : {}) }, statePath);
     if (old) await system.run("docker", ["stop", old.container]);
     ui.line("done", "Model serving", candidate.repo);
-    ui.line("info", "API", `http://127.0.0.1:${candidate.port}/v1`);
+    ui.line("info", "API", modelApiBase(candidate));
     return 0;
   } catch (error) {
     if (!system.dryRun) {
-      await removeContainer(system, candidateContainer);
+      // A container that started is kept so it can be inspected (and reused by a retry), unless
+      // the old model was stopped for it and needs the GPU back.
+      const keep = progress.started && !(stoppedOld && old);
+      const notes: string[] = [];
+      if (keep) {
+        const running = await containerRunning(system, candidateContainer);
+        notes.push(running ? `The vLLM container is still running: docker logs ${candidateContainer}` : `The vLLM container stopped: docker logs ${candidateContainer}`,
+          `${running ? "Stop" : "Remove"} it with docker rm -f ${candidateContainer}${running ? `; dl model ${action} reuses it while it answers` : ""}`);
+      } else await removeContainer(system, candidateContainer);
+      if (error instanceof SmokeError && error.curl) notes.push(`Reproduce: ${error.curl}`);
       if (stoppedOld && old) await system.run("docker", ["start", old.container]);
       // Put the provider and state back if either was written before the failure.
       if (previousConfig !== undefined) await system.writeFile(configPath, previousConfig, { mode: 0o600 });
       else await system.remove(configPath);
       if (previousState !== undefined) await system.writeFile(statePath, previousState, { mode: 0o600 });
       else await system.remove(statePath);
+      // After the reason (first line), before "Full log": never server logs, only what to run.
+      for (const note of notes) options.record?.(note);
+      if (notes.length && error instanceof Error) error.message += `\n${notes.join("\n")}`;
     }
     throw error;
   }

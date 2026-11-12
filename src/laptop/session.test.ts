@@ -923,7 +923,8 @@ describe("dl the first time on a laptop", () => {
       if (text && env.DL_GPU_HANDOFF) writeFileSync(env.DL_GPU_HANDOFF, text, { mode: 0o600 });
       return plain.spawn(command, args, env, options);
     };
-    const failed = { ok: false as const, errorType: "smoke_failed" as const, message: "Chat test: the model returned no text,\nthinking mode used all tokens", log: "/home/me/.directionallylocal/logs/x-up.log", model: "qwen-old" };
+    const failed = { ok: false as const, errorType: "smoke_failed" as const, message: "Chat test: the model returned no text,\nthinking mode used all tokens", log: "/home/me/.directionallylocal/logs/x-up.log", model: "qwen-old",
+      details: ["The vLLM container is still running: docker logs dl-model-1", "Reproduce: curl -sS --max-time 30 -X POST 'http://127.0.0.1:8000/v1/chat/completions' -H 'content-type: application/json' -d '{}'"] };
     assert.equal(await inside(dir, () => main([], io, gpuLaptop(spawn, async (request) => { requests.push(request); return failed; }))), 0);
     const env = plain.launches[1]!.env;
     assert.equal(env.DL_GPU_MODEL, "qwen-old");
@@ -935,6 +936,7 @@ describe("dl the first time on a laptop", () => {
       { version: 1, action: "model-up", pick: true, avoid: "qwen-old" },
     ], "Retry names the model; Pick another marks the one that failed");
     assert.match(plainText(io.text()), /Log: \/home\/me\/\.directionallylocal\/logs\/x-up\.log/);
+    assert.match(plainText(io.text()), /\n {4}The vLLM container is still running: docker logs dl-model-1\n {4}Reproduce: curl -sS --max-time 30 -X POST 'http:\/\/127\.0\.0\.1:8000\/v1\/chat\/completions' -H 'content-type: application\/json' -d '\{\}'\n/, "uncut, one line each");
   });
 
   it("an Autopilot that never asks (older, or no GPU) runs once, as before; a bad request is ignored", async () => {

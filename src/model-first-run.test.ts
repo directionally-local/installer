@@ -220,3 +220,19 @@ test("a failed setup is one short line, the run log and the model tried; never t
     model: "qwen-new",
   });
 });
+
+test("a failed setup passes on what to run next: the kept container and the curl that reproduces it", async () => {
+  const f = fixture({ gpu: PRO_5000 });
+  const curl = "curl -sS --max-time 30 -X POST 'http://127.0.0.1:8000/v1/chat/completions' -H 'content-type: application/json' -d '{\"model\":\"m\"}'";
+  const error = Object.assign(new SmokeError("chat", "no answer in 30 s", "no answer in 30 s", curl), { logPath: "/home/me/x-up.log" });
+  error.message += `\nThe vLLM container is still running: docker logs dl-model-1\nStop it with docker rm -f dl-model-1; dl model up reuses it while it answers\nReproduce: ${curl}\nFull log: /home/me/x-up.log`;
+  f.setUp(error);
+  const result = await firstRunModelUp(f.options);
+  assert.ok(!result.ok);
+  assert.equal(result.message, "Chat test: no answer in 30 s", "one line for Autopilot");
+  assert.deepEqual(result.details, [
+    "The vLLM container is still running: docker logs dl-model-1",
+    "Stop it with docker rm -f dl-model-1; dl model up reuses it while it answers",
+    `Reproduce: ${curl}`,
+  ]);
+});

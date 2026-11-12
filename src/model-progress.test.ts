@@ -3,6 +3,7 @@ import { afterEach, describe, it } from "node:test";
 import { modelCommand, type ModelCommandOptions } from "./model-command.js";
 import { firstRunModelUp } from "./model-first-run.js";
 import { gpuLine, shortGpuName } from "./model-runtime.js";
+import { smokeTest } from "./model-smoke.js";
 import { FakeModelSystem } from "./test-support/fake-model-system.js";
 import { fakeVllm, type FakeVllm } from "./test-support/fake-vllm.js";
 import { PlainUi, TerminalUi, type Ui } from "./ui.js";
@@ -68,15 +69,63 @@ describe("dl model up against a fake vLLM", () => {
     const { system, lines, options } = setup();
     const error = await modelCommand("up", ["qwen-old"], options(server)).catch((caught: Error) => caught);
     assert.ok(error instanceof Error);
-    const [first, second] = error.message.split("\n");
+    const [first, kept, stop, reproduce, logLine, ...more] = error.message.split("\n");
     assert.equal(first, "Chat test: the model returned no text, thinking mode used all tokens");
-    assert.match(second!, /^Full log: \/tmp\/logs\/.*-up\.log$/);
-    assert.equal(error.message.split("\n").length, 2, "nothing more in the message");
+    assert.equal(kept, "The vLLM container is still running: docker logs dl-model-1");
+    assert.equal(stop, "Stop it with docker rm -f dl-model-1; dl model up reuses it while it answers");
+    assert.match(reproduce!, /^Reproduce: curl -sS --max-time 30 -X POST 'http:\/\/127\.0\.0\.1:8000\/v1\/chat\/completions' -H 'content-type: application\/json' -d '\{"model":"Qwen\/Qwen3-4B","chat_template_kwargs":\{"enable_thinking":false\},"max_tokens":256,"messages":.*\}'$/);
+    assert.match(logLine!, /^Full log: \/tmp\/logs\/.*-up\.log$/);
+    assert.deepEqual(more, [], "nothing more in the message: no server logs");
     assert.match(lines.join(""), /!! Chat test: only thinking, out of tokens|FAIL|failed/i);
     assert.doesNotMatch(lines.join(""), /traceback|starting engine/, "no server logs on screen");
-    const log = system.files.get(second!.slice("Full log: ".length))!.content;
+    const log = system.files.get(logLine!.slice("Full log: ".length))!.content;
     assert.match(log, /vLLM logs \(dl-model-1, last 200 lines\):\n {2}INFO 11-12 starting engine\n {2}ERROR 11-12 a long vLLM traceback line/);
     assert.match(log, /FAILED Chat test: the model returned no text/);
+  });
+
+  it("a failed check keeps the container running and logs every request; Retry reuses it while it answers", async () => {
+    const vllm = { thinking: "none" as const, hangChat: true };
+    server = await fakeVllm(vllm);
+    const { system, options } = setup();
+    const opts = { ...options(server), smoke: ((deployment, sys, call, smokeOptions) => smokeTest(deployment, sys, call, { ...smokeOptions, answerMs: 300 })) as typeof smokeTest };
+    const error = await modelCommand("up", ["qwen-new"], opts).catch((caught: Error) => caught);
+    assert.ok(error instanceof Error);
+    assert.equal(error.message.split("\n")[0], "Chat test: no answer in 0.3 s");
+    assert.ok(system.running.has("dl-model-1"), "the container is kept for inspection");
+    assert.ok(!system.modelCommands.some((command) => command.startsWith("rm")), "not torn down");
+    assert.match(error.message, /\nThe vLLM container is still running: docker logs dl-model-1\n/);
+    const log = system.files.get(error.message.match(/Full log: (\S+)/)![1]!)!.content;
+    assert.match(log, /smoke ready GET http:\/\/127\.0\.0\.1:8000\/v1\/models started \S+Z: HTTP 200 after \d+ ms/);
+    assert.match(log, /smoke chat POST http:\/\/127\.0\.0\.1:8000\/v1\/chat\/completions started \S+Z: FAILED after \d+ ms: no answer in 0\.3 s/);
+    assert.match(log, /Reproduce: curl -sS --max-time 1 -X POST 'http:\/\/127\.0\.0\.1:8000\/v1\/chat\/completions'/);
+    assert.equal(await system.readFile("/tmp/model.json"), undefined, "no state written");
+
+    // Retry: the same recipe, still answering, is reused (no second docker run).
+    vllm.hangChat = false;
+    const runs = system.modelCommands.filter((command) => command.startsWith("run")).length;
+    assert.equal(await modelCommand("up", ["qwen-new"], opts), 0);
+    assert.equal(system.modelCommands.filter((command) => command.startsWith("run")).length, runs, "reused, not recreated");
+    assert.ok(!system.modelCommands.some((command) => command.startsWith("rm")));
+  });
+
+  it("Retry replaces a kept container that doesn't answer, or runs another model", async () => {
+    server = await fakeVllm({ thinking: "reasoning_content", alwaysThinks: true });
+    const { system, options } = setup();
+    const opts = options(server);
+    await assert.rejects(modelCommand("up", ["qwen-new"], opts), /: Chat test: the model returned no text/);
+    assert.ok(system.running.has("dl-model-1"));
+    // Its API stopped answering: replaced.
+    let answered = false;
+    const dead = { ...opts, fetch: async (url: string, init?: RequestInit) => {
+      if (!answered && url.endsWith("/v1/models")) { answered = true; throw new Error("connect ECONNREFUSED"); }
+      return opts.fetch!(url, init);
+    } };
+    await assert.rejects(modelCommand("up", ["qwen-new"], dead), /: Chat test: the model returned no text/);
+    assert.deepEqual(system.modelCommands.filter((command) => /^(run|rm)/.test(command)).map((command) => command.split(" ").slice(0, 2).join(" ")), ["run -d", "rm -f", "run -d"]);
+    // Another model: replaced too.
+    await assert.rejects(modelCommand("up", ["qwen-old"], opts), /: Chat test: the model returned no text/);
+    assert.deepEqual(system.modelCommands.filter((command) => /^(run|rm)/.test(command)).map((command) => command.split(" ").slice(0, 2).join(" ")), ["run -d", "rm -f", "run -d", "rm -f", "run -d"]);
+    assert.match(system.modelCommands.at(-1)!, /Qwen\/Qwen3-4B /);
   });
 
   it("every line of dl model up, status, update, rollback and bench fits 80 columns", async () => {

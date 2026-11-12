@@ -45,6 +45,8 @@ export interface ModelDeployment {
   repo: string;
   container: string;
   port: number;
+  /** Where the API listens on this machine; 127.0.0.1 (the published address) when unset. */
+  host?: string;
   context: number;
   /** Kept so rollback can restart this exact recipe even if the catalog changes. */
   image: string;

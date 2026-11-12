@@ -18,12 +18,16 @@ export interface FakeVllmOptions {
   thinkingFinish?: "length" | "stop";
   /** Content for a non-thinking chat reply. */
   chatText?: string;
+  /** Chat completions are read but never answered (a request that hangs). */
+  hangChat?: boolean;
+  /** Chat completions answer this HTTP status with a short error body. */
+  chatStatus?: number;
 }
 
 export interface FakeVllm {
   url: string;
   port: number;
-  requests: Array<{ path: string; body?: Record<string, unknown> }>;
+  requests: Array<{ method: string; path: string; host: string; body?: Record<string, unknown> }>;
   close: () => Promise<void>;
 }
 
@@ -40,7 +44,7 @@ export async function fakeVllm(options: FakeVllmOptions = {}): Promise<FakeVllm>
   const server: Server = createServer((req, res) => {
     void (async () => {
       const body = await readBody(req);
-      requests.push({ path: req.url ?? "", ...(body ? { body } : {}) });
+      requests.push({ method: req.method ?? "", path: req.url ?? "", host: req.headers.host ?? "", ...(body ? { body } : {}) });
       const json = (status: number, value: unknown) => {
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(value));
@@ -50,6 +54,8 @@ export async function fakeVllm(options: FakeVllmOptions = {}): Promise<FakeVllm>
         return json(200, { object: "list", data: [{ id: "Qwen/Qwen3-4B", object: "model" }] });
       }
       if (req.url !== "/v1/chat/completions" || !body) return json(404, {});
+      if (options.hangChat) return;
+      if (options.chatStatus) return json(options.chatStatus, { error: { message: "model is overloaded, try later" } });
       const kwargs = body.chat_template_kwargs as { enable_thinking?: boolean } | undefined;
       const thinks = thinking !== "none" && (options.alwaysThinks || kwargs?.enable_thinking !== false);
       const thought = "Okay, the user wants a short reply. Let me think about what to say";
@@ -79,5 +85,5 @@ export async function fakeVllm(options: FakeVllmOptions = {}): Promise<FakeVllm>
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
-  return { url: `http://127.0.0.1:${port}`, port, requests, close: () => new Promise((resolve) => server.close(() => resolve())) };
+  return { url: `http://127.0.0.1:${port}`, port, requests, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }) };
 }

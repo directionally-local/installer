@@ -237,7 +237,8 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
       const result = await (input.modelUp ?? realModelUp)({ ...request, ...(lastFailed && !request.model ? { avoid: lastFailed } : {}) }, io);
       if (!result.ok && result.errorType !== "cancelled") {
         // One short line and where the details are; vLLM's own logs stay in the log file.
-        io.err(`\n  ${c.red("✗")} ${result.message}\n${result.log ? `    ${c.dim(`Log: ${result.log}`)}\n` : ""}`);
+        // Then what to run next: the kept container and a curl that reproduces the failure (one line each, uncut).
+        io.err(`\n  ${c.red("✗")} ${result.message}\n${(result.details ?? []).map((line) => `    ${line}\n`).join("")}${result.log ? `    ${c.dim(`Log: ${result.log}`)}\n` : ""}`);
       }
       lastFailed = result.ok ? undefined : result.model;
       gpuEnv = resultEnv(result, request.gpu);

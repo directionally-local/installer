@@ -82,13 +82,15 @@ test("an incumbent that fails its smoke re-test warns but does not stop the swit
   assert.equal(JSON.parse(system.files.get("/tmp/autopilot/config.json")!.content).providers.vllm.baseUrl, "http://127.0.0.1:8001/v1");
 });
 
-test("failed update removes candidate and preserves old provider and state", async () => {
+test("failed update keeps the candidate for inspection and preserves old provider and state", async () => {
   const { system, options, failNew } = fixture();
   await modelCommand("up", ["qwen-old"], options);
   failNew();
-  await assert.rejects(modelCommand("update", ["qwen-new"], options), /vLLM logs/);
+  const error = await modelCommand("update", ["qwen-new"], options).catch((caught: Error) => caught);
+  assert.match(String(error), /vLLM logs/);
+  assert.match(String(error), /The vLLM container is still running: docker logs dl-model-2\nStop it with docker rm -f dl-model-2; dl model update reuses it while it answers/);
   assert.ok(system.running.has("dl-model-1"));
-  assert.ok(!system.running.has("dl-model-2"));
+  assert.ok(system.running.has("dl-model-2"), "kept: the old model is still serving beside it");
   assert.equal(JSON.parse(system.files.get("/tmp/model.json")!.content).active.id, "qwen-old");
   assert.equal(JSON.parse(system.files.get("/tmp/autopilot/config.json")!.content).providers.vllm.baseUrl, "http://127.0.0.1:8000/v1");
 });
