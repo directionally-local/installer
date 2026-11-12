@@ -83,7 +83,7 @@ describe("POST /v1/admin/grant", () => {
     const before = s.calls.githubProfiles.length;
     const { status, body } = await grant(s, admin, ["@Alice"]);
     assert.equal(status, 200);
-    assert.deepEqual(body.results, [{ input: "Alice", outcome: "granted", login: "alice", githubId: 100 }]);
+    assert.deepEqual(body.results, [{ input: "Alice", outcome: "granted", login: "alice", githubId: 100, usdPerWeek: 20 }]);
     const lookup = s.calls.githubProfiles.slice(before);
     assert.deepEqual(lookup.map((call) => call.login), ["Alice"]);
     assert.equal(lookup[0]!.headers["user-agent"], "directionallylocal-free");
@@ -111,7 +111,7 @@ describe("POST /v1/admin/grant", () => {
   it("pre-grants someone who hasn't signed up: Full with reason admin at the first sign-up, used once", async () => {
     const { s, admin } = await setup();
     const { body } = await grant(s, admin, ["carol"]);
-    assert.deepEqual(body.results, [{ input: "carol", outcome: "pregranted", login: "carol", githubId: 102 }]);
+    assert.deepEqual(body.results, [{ input: "carol", outcome: "pregranted", login: "carol", githubId: 102, usdPerWeek: 20 }]);
     assert.equal(await s.directory().getPerson(102), undefined);
     // Below the bar on its own signals, so the details step would offer the Starter invite field: it doesn't.
     const flow = await startBrowserFlow(s.request, { id: 102, login: "carol", createdAt: YOUNG }, undefined, { stopAtDetails: true });

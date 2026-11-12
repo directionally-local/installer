@@ -215,7 +215,7 @@ describe("answering access requests", () => {
     assert.match(page, /Starter · \d+ days · 3 contributions · 0 dl sessions this week/);
     const id = /name="id" value="(\d+)"/.exec(page.slice(page.indexOf("@user100")))![1]!;
     const { html } = await tools(s, cookie, { tool: "request", id, action: "grant", note: "looks real" });
-    assert.match(html, /Granted: user100 is Full now, and gets an email\./);
+    assert.match(html, /Granted: user100 is Full now with \$20 a week, and gets an email\./);
     assert.doesNotMatch(html, /@user100<\/code>/);
     assert.match(html, /@user101<\/code>/);
     const declined = await tools(s, cookie, { tool: "request", id: /name="id" value="(\d+)"/.exec(html)![1]!, action: "decline" });

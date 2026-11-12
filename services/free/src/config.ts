@@ -33,6 +33,12 @@ export interface FreeConfig {
    * so $20 leaves room for a much less cache-friendly week before the cap binds.
    */
   perPersonWeeklyUsdCap: number | undefined;
+  /**
+   * The personal weekly dollar cap an admin's grant gives (GRANT_WEEKLY_USD_CAP): the Tools tab's
+   * "Give free tokens", POST /admin/grant and granting a /request. A grant never lowers a higher
+   * personal cap. Undefined or 0: a grant only sets Full, with no personal cap.
+   */
+  grantWeeklyUsdCap: number | undefined;
   /** GitHub accounts younger than this need an invite code even when admission is open. */
   minGithubAccountAgeDays: number;
   /** Full access needs an account at least this old (FULL_MIN_ACCOUNT_AGE_DAYS). */
@@ -234,6 +240,7 @@ export const DEFAULTS = {
   globalWeeklyUsdCap: 2000,
   globalTotalUsdCap: 7000,
   perPersonWeeklyUsdCap: 20,
+  grantWeeklyUsdCap: 20,
   minGithubAccountAgeDays: 30,
   fullMinAccountAgeDays: 90,
   fullMinPublicRepos: 3,
@@ -328,6 +335,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     globalWeeklyUsdCap: usd(env.GLOBAL_WEEKLY_USD_CAP, DEFAULTS.globalWeeklyUsdCap, "GLOBAL_WEEKLY_USD_CAP"),
     globalTotalUsdCap: usd(env.GLOBAL_TOTAL_USD_CAP, DEFAULTS.globalTotalUsdCap, "GLOBAL_TOTAL_USD_CAP"),
     perPersonWeeklyUsdCap: usd(env.PER_PERSON_WEEKLY_USD_CAP, DEFAULTS.perPersonWeeklyUsdCap, "PER_PERSON_WEEKLY_USD_CAP"),
+    grantWeeklyUsdCap: usd(env.GRANT_WEEKLY_USD_CAP, DEFAULTS.grantWeeklyUsdCap, "GRANT_WEEKLY_USD_CAP"),
     minGithubAccountAgeDays: whole(env.MIN_GITHUB_ACCOUNT_AGE_DAYS, DEFAULTS.minGithubAccountAgeDays, "MIN_GITHUB_ACCOUNT_AGE_DAYS"),
     fullMinAccountAgeDays: whole(env.FULL_MIN_ACCOUNT_AGE_DAYS, DEFAULTS.fullMinAccountAgeDays, "FULL_MIN_ACCOUNT_AGE_DAYS"),
     fullMinPublicRepos: whole(env.FULL_MIN_PUBLIC_REPOS, DEFAULTS.fullMinPublicRepos, "FULL_MIN_PUBLIC_REPOS"),

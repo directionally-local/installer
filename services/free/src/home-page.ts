@@ -1,5 +1,5 @@
 import { escapeHtml } from "../../shared/src/html.js";
-import { barPath, creditProviders, shell, SIMPLE_STYLE, type SpendView } from "./dashboard-page.js";
+import { barPath, creditProviders, grantUsdInput, ownCapText, shell, SIMPLE_STYLE, type SpendView } from "./dashboard-page.js";
 import { atCap, GPU_DAYS, modelName, realAllowance, type HomeData, type HomePerson, type Tier } from "./home-data.js";
 import { BRAND_ORIGIN, PRODUCT_NAME } from "./pages.js";
 import type { PendingAccessRequest } from "./directory-object.js";
@@ -190,13 +190,15 @@ export interface PersonRow {
   tier: Tier;
   costUsd: number;
   capUsd: number | null;
+  /** The cap is an admin's personal one (a grant), not the level's. */
+  ownCap: boolean;
   atCap: boolean;
 }
 
 export function personRows(people: readonly HomePerson[], spend: SpendView): PersonRow[] {
   return people.map((person) => {
     const allowance = realAllowance(person, spend);
-    return { githubId: person.githubId, login: person.login, tier: allowance.tier, costUsd: person.costUsd, capUsd: allowance.usd, atCap: atCap(person, allowance) };
+    return { githubId: person.githubId, login: person.login, tier: allowance.tier, costUsd: person.costUsd, capUsd: allowance.usd, ownCap: person.grantUsd !== null, atCap: atCap(person, allowance) };
   });
 }
 
@@ -371,7 +373,11 @@ svg.cap .full { fill: var(--k-stop); }
 .req-head a { color: var(--k-text); font: 600 14px var(--mono); text-decoration: none; overflow-wrap: anywhere; }
 .hint { margin: 0; font-size: 12.5px; color: var(--k-muted); }
 .req-text { font-size: 14px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.req form { display: flex; gap: 8px; margin: 4px 0 0; }
+.req form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 0; }
+.usd-in { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--k-muted); }
+.usd-in input { width: 5.5rem; font: 16px/1.45 var(--body); color: var(--k-text); background: var(--k-card); border: 1px solid var(--k-border); border-radius: 8px; padding: 7px 10px; margin: 0; min-height: 40px; }
+.usd-in input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .btn { font: 600 14px var(--body); padding: 8px 16px; border-radius: 8px; border: 1px solid var(--k-border); background: var(--k-card); color: var(--k-text); cursor: pointer; min-height: 40px; }
 .btn:hover { border-color: var(--k-muted); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #FFFFFF; }
@@ -388,6 +394,8 @@ export interface HomeInput {
   home: HomeData;
   spend: SpendView;
   requests: PendingAccessRequest[];
+  /** The grantWeeklyUsdCap setting: the Grant forms' default weekly dollar cap (0: Full only). */
+  grantUsd: number;
   signOut: boolean;
   /** Only with a browser session: the Grant and Decline forms need it. */
   csrf?: string;
@@ -398,14 +406,14 @@ export interface HomeInput {
 /** Longest "what they're building" shown before the two-line clamp; the full text is on the Tools tab. */
 const BUILDING_CHARS = 180;
 
-function requestCard(request: PendingAccessRequest, now: number, csrf: string | undefined): string {
+function requestCard(request: PendingAccessRequest, now: number, csrf: string | undefined, grantUsd: number): string {
   const building = request.building.length > BUILDING_CHARS ? `${request.building.slice(0, BUILDING_CHARS - 1).trimEnd()}…` : request.building;
   const form = csrf
-    ? `<form method="post" action="/admin/dashboard/tools"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="request"><input type="hidden" name="from" value="home"><input type="hidden" name="id" value="${request.id}"><button class="btn primary" type="submit" name="action" value="grant">Grant</button><button class="btn" type="submit" name="action" value="decline">Decline</button></form>`
+    ? `<form method="post" action="/admin/dashboard/tools"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="request"><input type="hidden" name="from" value="home"><input type="hidden" name="id" value="${request.id}">${grantUsdInput(grantUsd, `Weekly dollar cap for ${request.login}`)}<button class="btn primary" type="submit" name="action" value="grant">Grant</button><button class="btn" type="submit" name="action" value="decline">Decline</button></form>`
     : "";
   return `<li class="req">
 <div class="req-head"><a href="https://github.com/${encodeURIComponent(request.login)}" rel="noopener noreferrer nofollow" target="_blank">@${escapeHtml(request.login)}</a><span class="hint">${escapeHtml(ago(request.at, now))}</span></div>
-<p class="hint">${escapeHtml(accountAge(request.accountAgeDays))}</p>
+<p class="hint">${escapeHtml(accountAge(request.accountAgeDays))}${request.personalUsdPerWeek !== null ? ` · ${escapeHtml(ownCapText(request.personalUsdPerWeek))}` : ""}</p>
 <p class="req-text">${escapeHtml(building)}</p>
 ${form}
 </li>`;
@@ -438,7 +446,7 @@ ${spendChart(home.spendDays, [...keys], 340, "narrow")}
   const rows = top.map((row) => {
     const name = row.login ?? `#${row.githubId}`;
     const link = row.login ? `<a href="https://github.com/${encodeURIComponent(row.login)}" rel="noopener noreferrer nofollow" target="_blank">${escapeHtml(name)}</a>` : `<a href="/admin?view=full#top">${escapeHtml(name)}</a>`;
-    const amount = row.capUsd === null ? `<b>${escapeHtml(money(row.costUsd))}</b>, no cap` : `<b>${escapeHtml(money(row.costUsd))}</b> of ${escapeHtml(money(row.capUsd))}`;
+    const amount = row.capUsd === null ? `<b>${escapeHtml(money(row.costUsd))}</b>, no cap` : `<b>${escapeHtml(money(row.costUsd))}</b> of ${escapeHtml(money(row.capUsd))}${row.ownCap ? " (own cap)" : ""}`;
     return `<li><span class="who">${link} <span class="tier">${escapeHtml(TIER_WORDS[row.tier])}</span></span><span class="amt">${row.atCap ? `<span class="capword">at cap</span> ` : ""}${amount}</span>${capBar(row.costUsd, row.capUsd, row.atCap)}</li>`;
   });
   const gpuLine = gpuSentence(home);
@@ -466,9 +474,9 @@ ${notice}${
     requests.length === 0
       ? `<p class="say">Nothing. No one is waiting for an answer.</p>`
       : `<p class="say">${requests.length === 1 ? "1 person asks" : `${requests.length.toLocaleString("en-US")} people ask`} for free tokens.</p>
-<ul class="reqs">${shown.map((request) => requestCard(request, home.now, csrf)).join("\n")}</ul>
+<ul class="reqs">${shown.map((request) => requestCard(request, home.now, csrf, input.grantUsd)).join("\n")}</ul>
 ${requests.length > shown.length ? `<p class="more"><a href="/admin?view=tools#requests">${plural(requests.length - shown.length, "more request")} on the Tools tab</a></p>` : ""}
-${csrf ? `<p class="more">Grant gives full free tokens and emails them. Decline sends nothing.</p>` : `<p class="more">Sign in at /admin in a browser to answer them.</p>`}`
+${csrf ? `<p class="more">Grant gives full free tokens with the weekly dollar cap next to it, and emails them. Decline sends nothing.</p>` : `<p class="more">Sign in at /admin in a browser to answer them.</p>`}`
   }
 </section>`;
 

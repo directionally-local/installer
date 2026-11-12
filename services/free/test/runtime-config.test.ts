@@ -32,6 +32,7 @@ describe("runtime settings (units)", () => {
     assert.deepEqual(settingsView(config), {
       weeklyTokens: 50_000_000,
       perPersonWeeklyUsdCap: 20,
+      grantWeeklyUsdCap: 20,
       globalWeeklyUsdCap: 2000,
       globalTotalUsdCap: 7000,
       maxActiveUsers: 50,

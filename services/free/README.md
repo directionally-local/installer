@@ -238,7 +238,13 @@ signed-in person who isn't blocked.
 What a person writes is user content: stored as plain text, shown only on the admin Tools tab
 (escaped), never logged, never in an alert, a metric or an export. Admins:
 `GET /admin/access-requests` (pending, newest first) and
-`POST /admin/access-requests/:id/grant` or `/decline` (`{note?}`).
+`POST /admin/access-requests/:id/grant` (`{note?, usdPerWeek?}`) or `/decline` (`{note?}`).
+
+A grant (this one, `POST /admin/grant {logins, usdPerWeek?}`, and the Tools tab and home screen
+forms) sets Full with reason "admin" and a personal weekly dollar cap: `usdPerWeek`, or the
+`grantWeeklyUsdCap` setting (default 20) when it's left out. It never lowers a higher personal
+cap already set; 0 sets no personal cap (only the level). Someone not signed up yet gets the cap
+at their first sign-in.
 
 ### Sign-up with a referral code
 
@@ -663,6 +669,7 @@ with who made it and when.
 |---|---|---|
 | `weeklyTokens` | `WEEKLY_TOKENS` | 50,000,000 |
 | `perPersonWeeklyUsdCap` | `PER_PERSON_WEEKLY_USD_CAP` | 20 |
+| `grantWeeklyUsdCap` | `GRANT_WEEKLY_USD_CAP` | 20: the personal weekly dollar cap an admin's grant gives (never lowers a higher one); 0 or `none`: a grant sets only the level |
 | `globalWeeklyUsdCap` | `GLOBAL_WEEKLY_USD_CAP` | 2000 |
 | `globalTotalUsdCap` | `GLOBAL_TOTAL_USD_CAP` | 7000 |
 | `maxActiveUsers` | `MAX_ACTIVE_USERS` (invite-only only) | 50 |

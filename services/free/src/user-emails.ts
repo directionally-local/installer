@@ -102,7 +102,7 @@ sina`,
     subject: "you're in",
     body: `hey,
 
-you're in. you now have the full free tier: every model, gpt-6 included, with the full weekly allowance. it resets every monday.
+you're in. you now have the full free tier: every model, gpt-6 included, and more free usage each week than the standard allowance. it resets every monday.
 
 thanks for telling me what you're building. if anything breaks or feels off, just reply to this.
 

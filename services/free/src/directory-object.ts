@@ -40,6 +40,8 @@ export type AdmitResult =
       queued: boolean;
       queueStarted: boolean;
       referralCode: string;
+      /** A pre-grant's personal weekly dollar cap, to set on the account now (via "grant" only). */
+      grantUsdPerWeek?: number;
       /** Set once, ever: this was the first person admitted who isn't an admin. */
       firstSignup?: Alert;
     }
@@ -68,6 +70,8 @@ export interface PendingAccessRequest {
   accountAgeDays: number | null;
   contributions: number | null;
   sessionsThisWeek: number;
+  /** An admin's personal weekly dollar cap (the grants table, or a pre-grant's), or null for the level's own. */
+  personalUsdPerWeek: number | null;
 }
 
 /** "blocked" is an admin's abuse block: no requests, no refresh, no new sign-in. */
@@ -704,6 +708,8 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   // The creation-batch flag (admission.ts levelChecks), and the level at sign-up for retention.
   ["people", "batch_flag", "INTEGER NOT NULL DEFAULT 0"],
   ["people", "signup_tokens", "INTEGER"],
+  // A pre-grant's personal weekly dollar cap, set on the account at the first sign-in.
+  ["pregrants", "weekly_usd", "REAL"],
 ];
 
 /** Timings older than this are dropped: the dashboard shows today and this week. */
@@ -939,7 +945,7 @@ export class DirectoryObject extends DurableObject {
       }
       // An admin gave this GitHub id free tokens before it signed up: Full, reason "admin", used
       // once. The owner's own choice, like an invite, and it skips the cohort cap and the queue.
-      const pregrant = sql.exec<{ github_id: number }>("SELECT github_id FROM pregrants WHERE github_id = ? AND used_at IS NULL", input.githubId).toArray()[0];
+      const pregrant = sql.exec<{ github_id: number; weekly_usd: number | null }>("SELECT github_id, weekly_usd FROM pregrants WHERE github_id = ? AND used_at IS NULL", input.githubId).toArray()[0];
       if (pregrant) {
         sql.exec("UPDATE pregrants SET used_at = ? WHERE github_id = ?", input.now, input.githubId);
         sql.exec(
@@ -949,7 +955,8 @@ export class DirectoryObject extends DurableObject {
           input.now,
           ...levelValues.slice(2),
         );
-        return admitted("grant", true);
+        const result = admitted("grant", true);
+        return result.ok && pregrant.weekly_usd !== null && pregrant.weekly_usd > 0 ? { ...result, grantUsdPerWeek: pregrant.weekly_usd } : result;
       }
       if (input.inviteOnly !== false) {
         const active = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM people WHERE status = 'active' AND admitted_via != 'admin'").toArray()[0]?.n ?? 0;
@@ -1621,16 +1628,31 @@ export class DirectoryObject extends DurableObject {
    * reason "admin" (logged like setLevel; a waiting place in the queue is let in), a blocked one is
    * left alone, and an id with no account gets a pre-grant used at its first sign-up.
    */
-  async grantFull(githubId: number, login: string, actor: { githubId: number; login: string; now: number }): Promise<"granted" | "already_full" | "pregranted" | "blocked"> {
-    return this.ctx.storage.transactionSync(() => this.#grantFullSync(githubId, login, actor));
+  async grantFull(githubId: number, login: string, actor: { githubId: number; login: string; now: number }, usdPerWeek?: number): Promise<"granted" | "already_full" | "pregranted" | "blocked"> {
+    return this.ctx.storage.transactionSync(() => this.#grantFullSync(githubId, login, actor, usdPerWeek));
   }
 
-  #grantFullSync(githubId: number, login: string, actor: { githubId: number; login: string; now: number }): "granted" | "already_full" | "pregranted" | "blocked" {
+  /**
+   * `usdPerWeek` (more than 0) is kept on a pre-grant as the personal weekly dollar cap for the
+   * first sign-in; a second pre-grant never lowers it. Signed-up people get theirs from the
+   * caller (AccountObject.raiseUsdCap).
+   */
+  #grantFullSync(githubId: number, login: string, actor: { githubId: number; login: string; now: number }, usdPerWeek?: number): "granted" | "already_full" | "pregranted" | "blocked" {
     {
       const sql = this.ctx.storage.sql;
       const found = sql.exec<{ login: string; status: string; level: Level; level_reason: string | null }>("SELECT login, status, level, level_reason FROM people WHERE github_id = ?", githubId).toArray()[0];
       if (!found) {
-        sql.exec("INSERT INTO pregrants (github_id, login, created_at, created_by, used_at) VALUES (?, ?, ?, ?, NULL) ON CONFLICT (github_id) DO UPDATE SET login = excluded.login", githubId, login, actor.now, actor.githubId);
+        const usd = usdPerWeek !== undefined && usdPerWeek > 0 ? usdPerWeek : null;
+        sql.exec(
+          `INSERT INTO pregrants (github_id, login, created_at, created_by, used_at, weekly_usd) VALUES (?, ?, ?, ?, NULL, ?)
+           ON CONFLICT (github_id) DO UPDATE SET login = excluded.login,
+             weekly_usd = CASE WHEN pregrants.weekly_usd IS NULL THEN excluded.weekly_usd WHEN excluded.weekly_usd IS NULL THEN pregrants.weekly_usd ELSE MAX(pregrants.weekly_usd, excluded.weekly_usd) END`,
+          githubId,
+          login,
+          actor.now,
+          actor.githubId,
+          usd,
+        );
         this.#log(`pregrant:${githubId}:${login}`, null, "full", actor);
         return "pregranted";
       }
@@ -1725,10 +1747,12 @@ export class DirectoryObject extends DurableObject {
         account_age_days: number | null;
         contributions: number | null;
         sessions: number | null;
+        personal_usd: number | null;
       }>(
         `SELECT r.id, r.github_id, COALESCE(p.login, r.login) AS login, r.at, r.building, r.link, p.level, p.account_age_days, p.contributions,
-                (SELECT SUM(d.sessions) FROM daily_activity d WHERE d.github_id = r.github_id AND d.day >= ?) AS sessions
-         FROM access_requests r LEFT JOIN people p ON p.github_id = r.github_id
+                (SELECT SUM(d.sessions) FROM daily_activity d WHERE d.github_id = r.github_id AND d.day >= ?) AS sessions,
+                COALESCE(g.weekly_usd, (SELECT pg.weekly_usd FROM pregrants pg WHERE pg.github_id = r.github_id AND pg.used_at IS NULL)) AS personal_usd
+         FROM access_requests r LEFT JOIN people p ON p.github_id = r.github_id LEFT JOIN grants g ON g.github_id = r.github_id
          WHERE r.status = 'pending' ORDER BY r.at DESC, r.id DESC LIMIT 200`,
         weekStart(now) / DAY_MS,
       )
@@ -1744,7 +1768,14 @@ export class DirectoryObject extends DurableObject {
         accountAgeDays: row.account_age_days,
         contributions: row.contributions,
         sessionsThisWeek: row.sessions ?? 0,
+        personalUsdPerWeek: row.personal_usd,
       }));
+  }
+
+  /** Every admin-set personal weekly cap (the grants table), by GitHub id. */
+  async personalCaps(): Promise<Map<number, { tokensPerWeek: number | null; usdPerWeek: number | null }>> {
+    const rows = this.ctx.storage.sql.exec<{ github_id: number; weekly_tokens: number | null; weekly_usd: number | null }>("SELECT github_id, weekly_tokens, weekly_usd FROM grants").toArray();
+    return new Map(rows.map((row) => [row.github_id, { tokensPerWeek: row.weekly_tokens, usdPerWeek: row.weekly_usd }]));
   }
 
   /**
@@ -1752,7 +1783,7 @@ export class DirectoryObject extends DurableObject {
    * as the Tools tab's grant (a blocked account is left alone and the request stays pending).
    * Undefined for no such pending request.
    */
-  async decideAccessRequest(input: { id: number; decision: "grant" | "decline"; note: string | null; actor: { githubId: number; login: string; now: number } }): Promise<
+  async decideAccessRequest(input: { id: number; decision: "grant" | "decline"; note: string | null; actor: { githubId: number; login: string; now: number }; usdPerWeek?: number }): Promise<
     { githubId: number; login: string; status: "granted" | "declined"; outcome?: "granted" | "already_full" | "pregranted" } | { githubId: number; login: string; status: "blocked" } | undefined
   > {
     return this.ctx.storage.transactionSync(() => {
@@ -1761,7 +1792,7 @@ export class DirectoryObject extends DurableObject {
       if (!row) return undefined;
       let outcome: "granted" | "already_full" | "pregranted" | undefined;
       if (input.decision === "grant") {
-        const granted = this.#grantFullSync(row.github_id, row.login, input.actor);
+        const granted = this.#grantFullSync(row.github_id, row.login, input.actor, input.usdPerWeek);
         if (granted === "blocked") return { githubId: row.github_id, login: row.login, status: "blocked" as const };
         outcome = granted;
       }
@@ -1775,6 +1806,11 @@ export class DirectoryObject extends DurableObject {
   /** A chat request was refused below the bar today (the sign-up funnel). Ids and days only. */
   async recordRefusal(githubId: number, now: number): Promise<void> {
     this.ctx.storage.sql.exec("INSERT OR IGNORE INTO refused_days (github_id, day) VALUES (?, ?)", githubId, Math.floor(now / DAY_MS));
+  }
+
+  /** The personal weekly dollar cap an unused pre-grant carries, or null for none. */
+  async pregrantUsd(githubId: number): Promise<number | null> {
+    return this.ctx.storage.sql.exec<{ weekly_usd: number | null }>("SELECT weekly_usd FROM pregrants WHERE github_id = ? AND used_at IS NULL", githubId).toArray()[0]?.weekly_usd ?? null;
   }
 
   /** Whether this GitHub id has an unused pre-grant: sign-in then skips the Starter step. */

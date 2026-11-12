@@ -468,6 +468,18 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return this.#allowance(this.#current(input.now), input.now, input.limits);
   }
 
+  /**
+   * Admin grant: raises the personal weekly dollar cap to `usd`, never lowering a higher one
+   * already set. Returns the personal cap now in place, or undefined for no account.
+   */
+  async raiseUsdCap(usd: number): Promise<number | undefined> {
+    const row = this.#row();
+    if (!row) return undefined;
+    if (row.weekly_usd !== null && row.weekly_usd >= usd) return row.weekly_usd;
+    this.ctx.storage.sql.exec("UPDATE account SET weekly_usd = ? WHERE github_id = ?", usd, row.github_id);
+    return usd;
+  }
+
   // ─── Sessions and server keys ─────────────────────────────────────────────
 
   /**
