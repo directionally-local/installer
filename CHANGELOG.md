@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.28.0](https://github.com/directionally-local/installer/compare/v0.27.0...v0.28.0) (2026-11-12)
+
+
+### Features
+
+* **free:** a grant also sets a personal weekly dollar cap ([#227](https://github.com/directionally-local/installer/issues/227)) ([8b671af](https://github.com/directionally-local/installer/commit/8b671afa56c09d05484e824f69e0e9be1385d461))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.20.1 ([#230](https://github.com/directionally-local/installer/issues/230)) ([5a1277e](https://github.com/directionally-local/installer/commit/5a1277e040e7749a2a1e046fde8b7e7d0fae9d0c))
+* **model:** GPU run findings: thinking-safe smoke tests, progress, picker, short lines, failure details ([#229](https://github.com/directionally-local/installer/issues/229)) ([5a344cf](https://github.com/directionally-local/installer/commit/5a344cf8d7bde6f611d3d9a9da5a9a3bb1f6f658))
+
 ## [0.27.0](https://github.com/directionally-local/installer/compare/v0.26.0...v0.27.0) (2026-11-11)
 
 
