@@ -205,9 +205,14 @@ export interface Env {
   REFERRAL_LINK_BASE?: string;
   PRO_PRICE_USD_MONTHLY?: string;
   PRO_TOKENS_PER_WEEK?: string;
-  TOPUP_PRICE_USD?: string;
-  TOPUP_TOKENS?: string;
+  PRO_VALUE_LINE?: string;
+  TOPUP_UNIT_PRICE_USD?: string;
+  TOPUP_MIN_QUANTITY?: string;
+  TOPUP_MAX_QUANTITY?: string;
+  TOPUP_USAGE_MULTIPLIER?: string;
   TOPUP_VALID_DAYS?: string;
+  /** Tokens a checkout started under the old token top-up still grants (default 50M). */
+  TOPUP_TOKENS?: string;
   ALERT_WEBHOOK_URL?: string;
   ALERT_WEBHOOK_KIND?: string;
   ALERT_TELEGRAM_CHAT_ID?: string;
@@ -707,11 +712,78 @@ async function deliver(c: Pick<Ctx, "config" | "env" | "fetch" | "base" | "now">
   await deliverAlerts({ alerts, config: c.config, emailBinding: c.env.ALERT_EMAIL, fetch: c.fetch, adminUrl: `${c.base}/admin`, now: c.now() });
 }
 
-/** The paid offers, from config (Stripe billing sells them). */
-function offers(config: FreeConfig) {
+/** The old token top-up lasted 30 days; a late webhook for one still grants it that long. */
+const LEGACY_TOPUP_DAYS = 30;
+
+/** Usage dollars a dollar top-up adds: the paid amount (cents, before tax) times the multiplier, to the cent. */
+export function topupUsage(paidCents: number, multiplier: number): number {
+  return Math.round(paidCents * multiplier) / 100;
+}
+
+/** Account calls the admin people list keeps in flight at once. */
+export const ADMIN_PEOPLE_CONCURRENCY = 16;
+/** The most people one page of the admin people list holds (`?limit=`). */
+export const ADMIN_PEOPLE_MAX_LIMIT = 500;
+
+/** `fn` over `items`, at most `limit` at a time, results in the items' order. */
+export async function mapLimited<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      out[index] = await fn(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+/** A person's place in the admin people list (admitted first, then GitHub id): `<admittedAt>-<githubId>`. */
+function peopleCursor(person: { admitted_at: number; github_id: number }): string {
+  return `${String(person.admitted_at).padStart(15, "0")}-${String(person.github_id).padStart(16, "0")}`;
+}
+
+/** `?limit=` (1 to ADMIN_PEOPLE_MAX_LIMIT; none: everyone) and `?cursor=` (a previous page's `nextCursor`). */
+function peoplePage(params: URLSearchParams): { limit: number | undefined; after: string | undefined } | { error: string } {
+  const rawLimit = params.get("limit");
+  const rawCursor = params.get("cursor");
+  const limit = rawLimit === null || rawLimit === "" ? undefined : Number(rawLimit);
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > ADMIN_PEOPLE_MAX_LIMIT)) return { error: `limit must be 1 to ${ADMIN_PEOPLE_MAX_LIMIT}.` };
+  if (rawCursor !== null && rawCursor !== "" && !/^\d{15}-\d{16}$/.test(rawCursor)) return { error: "cursor must be a nextCursor from a previous page." };
+  return { limit, after: rawCursor === null || rawCursor === "" ? undefined : rawCursor };
+}
+
+/** "$3.99", "$3", "$10": dollars and cents as a client shows them, never rounded to whole dollars. */
+export function usdLabel(amount: number): string {
+  const cents = Math.round(amount * 100);
+  return cents % 100 === 0 ? `$${cents / 100}` : `$${(cents / 100).toFixed(2)}`;
+}
+
+/**
+ * The paid offers, from config (Stripe billing sells them). `price` is the exact text to show
+ * ("$3.99/month"), so a client never formats or rounds the number itself; `usdPerWeek` is Pro's
+ * weekly dollar ceiling (null: tokens only) and `valueLine` one short sentence to show with it.
+ */
+export function offers(config: FreeConfig) {
+  const { pro, topup } = config.offers;
   return {
-    pro: { priceUsdMonthly: config.offers.pro.priceUsdMonthly, tokensPerWeek: config.offers.pro.tokensPerWeek },
-    topup: { priceUsd: config.offers.topup.priceUsd, tokens: config.offers.topup.tokens, validDays: config.offers.topup.validDays },
+    pro: {
+      priceUsdMonthly: pro.priceUsdMonthly,
+      price: `${usdLabel(pro.priceUsdMonthly)}/month`,
+      tokensPerWeek: pro.tokensPerWeek,
+      usdPerWeek: config.proWeeklyUsdCap ?? null,
+      valueLine: pro.valueLine,
+    },
+    // A dollar top-up: whole units of `unitPriceUsd`, each adding `usageMultiplier` times its price in usage.
+    topup: {
+      unitPriceUsd: topup.unitPriceUsd,
+      minQuantity: topup.minQuantity,
+      maxQuantity: topup.maxQuantity,
+      usageMultiplier: topup.usageMultiplier,
+      validDays: topup.validDays,
+      fromPrice: usdLabel(topup.unitPriceUsd * topup.minQuantity),
+    },
   };
 }
 
@@ -1513,6 +1585,9 @@ async function me(c: Ctx): Promise<Response> {
     models: [...ALLOWED_MODELS],
     plan: allowance.plan,
     topupTokensLeft: allowance.topupTokensLeft,
+    /** Dollar top-ups: usage dollars left and when the soonest-expiring one with usage left ends. */
+    topupUsdLeft: allowance.topupUsdLeft,
+    topupUsdExpiresAt: allowance.topupUsdExpiresAt === null ? null : new Date(allowance.topupUsdExpiresAt).toISOString(),
     pro: allowance.plan === "pro" || allowance.proPeriodEnd !== null
       ? { periodEnd: allowance.proPeriodEnd === null ? null : new Date(allowance.proPeriodEnd).toISOString(), cancelAtPeriodEnd: allowance.proCancelAtPeriodEnd }
       : null,
@@ -1552,6 +1627,12 @@ async function billingCheckout(c: Ctx): Promise<Response> {
   const body = (await readJson(c)) ?? {};
   const product = body.product;
   if (product !== "pro" && product !== "topup") return apiError(400, "invalid_request", 'Send {product: "pro"} or {product: "topup"}.');
+  // A top-up's quantity in $1 units (default the minimum); the buyer can still change it on Checkout, within the range.
+  const range = c.config.offers.topup;
+  const quantity = body.quantity === undefined || body.quantity === null ? range.minQuantity : Number(body.quantity);
+  if (product === "topup" && (!Number.isInteger(quantity) || quantity < range.minQuantity || quantity > range.maxQuantity)) {
+    return apiError(400, "invalid_request", `quantity must be a whole number from ${range.minQuantity} to ${range.maxQuantity}.`);
+  }
   const unavailable = billingReady(c, product);
   if (unavailable) return unavailable;
   const person = account(c, identity.githubId);
@@ -1569,6 +1650,7 @@ async function billingCheckout(c: Ctx): Promise<Response> {
       login: identity.login,
       customerId: billing.customerId,
       idempotencyKey: crypto.randomUUID(),
+      ...(product === "topup" ? { topup: { quantity, minQuantity: range.minQuantity, maxQuantity: range.maxQuantity } } : {}),
     });
     return json({ url: session.url });
   } catch (error) {
@@ -1640,10 +1722,20 @@ async function applyBillingEvent(c: Ctx, event: StripeEvent): Promise<string> {
       const product = object.metadata?.product ?? (object.mode === "subscription" ? "pro" : "topup");
       if (product === "topup") {
         if (object.payment_status !== "paid") return "unpaid";
-        const { tokens, validDays } = c.config.offers.topup;
+        const { legacyTokens, usageMultiplier, validDays } = c.config.offers.topup;
         const createdAt = eventAt * 1000;
-        await account(c, githubId).grantTopup({ id: String(object.id), tokens, createdAt, expiresAt: createdAt + validDays * DAY_MS });
-        await directory(c).recordPayment({ id: String(object.id), githubId, kind: "topup", amountCents: cents(object.amount_subtotal ?? object.amount_total), at: createdAt });
+        const paidCents = cents(object.amount_subtotal ?? object.amount_total);
+        if (object.metadata?.topup_kind === "usd") {
+          // Usage dollars: what was paid before tax (quantity × the unit price) times the multiplier.
+          const usd = topupUsage(paidCents, usageMultiplier);
+          if (usd <= 0) return "ignored";
+          await account(c, githubId).grantCredit({ id: String(object.id), usd, createdAt, expiresAt: createdAt + validDays * DAY_MS });
+          await directory(c).recordPayment({ id: String(object.id), githubId, kind: "topup", amountCents: paidCents, at: createdAt });
+          return "topup_granted";
+        }
+        // A checkout started under the old token top-up: the tokens it was sold with, for 30 days.
+        await account(c, githubId).grantTopup({ id: String(object.id), tokens: legacyTokens, createdAt, expiresAt: createdAt + LEGACY_TOPUP_DAYS * DAY_MS });
+        await directory(c).recordPayment({ id: String(object.id), githubId, kind: "topup", amountCents: paidCents, at: createdAt });
         return "topup_granted";
       }
       const subscriptionId = idOf(object.subscription);
@@ -2633,51 +2725,61 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
   if (method === "GET" && rest === "people") {
     const levelFilter = c.url.searchParams.get("level");
     const sharedOnly = c.url.searchParams.get("shared") === "1";
+    const page = peoplePage(c.url.searchParams);
+    if ("error" in page) return apiError(400, "invalid_request", page.error);
+    // The Directory's per-person data in a few whole-table reads, not one call per person.
     const people = await directory(c).listPeople();
-    const caps = await directory(c).personalCaps();
+    const [caps, networks, sessions] = await Promise.all([directory(c).personalCaps(), directory(c).networkCounts(), directory(c).weekSessions(now)]);
     const checks = peopleChecks(people, config, now);
-    const sessions = await directory(c).weekSessions(now);
-    const rows = await Promise.all(
-      people.map(async (person) => {
-        const allowance = await account(c, person.github_id).allowance(now, limitsFor(config, 0, person.level, person.batch_flag === 1));
-        return {
-          githubId: person.github_id,
-          login: person.login,
-          status: person.status,
-          isAdmin: c.config.adminGithubIds.has(person.github_id),
-          admittedAt: new Date(person.admitted_at).toISOString(),
-          admittedVia: person.admitted_via,
-          level: person.level,
-          levelReason: person.level_reason,
-          signals: {
-            accountAgeDays: person.account_age_days,
-            publicRepos: person.public_repos,
-            followers: person.followers,
-            contributions: person.contributions,
-            restrictedContributions: person.restricted_contributions,
-            githubCreatedDay: person.github_created_day === null ? null : isoDay(person.github_created_day * DAY_MS),
-            activeWeeks: person.active_weeks,
-            outsideContributions: person.outside_contributions,
-            oldestRepoCreatedAt: person.oldest_repo_at === null ? null : new Date(person.oldest_repo_at).toISOString(),
-            social: person.social,
-            checkedAt: person.signals_at === null ? null : new Date(person.signals_at).toISOString(),
-          },
-          // Which checks the stored signals pass under today's settings: why someone is Starter.
-          checks: checks.get(person.github_id),
-          // The contact email from the sign-in step, and whether they asked for product updates.
-          contact: { address: person.email ?? null, updates: person.email_updates === null ? null : person.email_updates === 1 },
-          networks: await directory(c).networkCount(person.github_id),
-          allowance: allowanceView(allowance),
-          // An admin's own weekly caps for this person (a grant, or POST /admin/people/:id/grant); null: the level's.
-          personalCap: caps.get(person.github_id) ?? null,
-          serverKeys: await account(c, person.github_id).keyCount(),
-          // Distinct dl sessions (from Autopilot's session events) since Monday 00:00 UTC.
-          dlSessionsThisWeek: sessions.get(person.github_id) ?? 0,
-        };
-      }),
-    );
-    const filtered = rows.filter((row) => (levelFilter === null || row.level === levelFilter) && (!sharedOnly || row.networks > 1));
-    return json({ people: filtered });
+    // Filter and page before any account call, so a page costs one account call per person on it.
+    const ordered = people
+      .filter((person) => (levelFilter === null || person.level === levelFilter) && (!sharedOnly || (networks.get(person.github_id) ?? 0) > 1))
+      .sort((a, b) => a.admitted_at - b.admitted_at || a.github_id - b.github_id);
+    const from = page.after === undefined ? 0 : ordered.findIndex((person) => peopleCursor(person) > page.after!);
+    const slice = from < 0 ? [] : page.limit === undefined ? ordered.slice(from) : ordered.slice(from, from + page.limit);
+    const last = slice.at(-1);
+    const nextCursor = page.limit !== undefined && last !== undefined && from + slice.length < ordered.length ? peopleCursor(last) : null;
+    // One account call per person (allowance and key count together), at most ADMIN_PEOPLE_CONCURRENCY at once:
+    // hundreds of Durable Object calls started together drop connections (Cloudflare error 1101).
+    const rows = await mapLimited(slice, ADMIN_PEOPLE_CONCURRENCY, async (person) => {
+      const { allowance, serverKeys } = await account(c, person.github_id).adminSummary(now, limitsFor(config, 0, person.level, person.batch_flag === 1));
+      return {
+        githubId: person.github_id,
+        login: person.login,
+        status: person.status,
+        isAdmin: c.config.adminGithubIds.has(person.github_id),
+        admittedAt: new Date(person.admitted_at).toISOString(),
+        admittedVia: person.admitted_via,
+        level: person.level,
+        levelReason: person.level_reason,
+        signals: {
+          accountAgeDays: person.account_age_days,
+          publicRepos: person.public_repos,
+          followers: person.followers,
+          contributions: person.contributions,
+          restrictedContributions: person.restricted_contributions,
+          githubCreatedDay: person.github_created_day === null ? null : isoDay(person.github_created_day * DAY_MS),
+          activeWeeks: person.active_weeks,
+          outsideContributions: person.outside_contributions,
+          oldestRepoCreatedAt: person.oldest_repo_at === null ? null : new Date(person.oldest_repo_at).toISOString(),
+          social: person.social,
+          checkedAt: person.signals_at === null ? null : new Date(person.signals_at).toISOString(),
+        },
+        // Which checks the stored signals pass under today's settings: why someone is Starter.
+        checks: checks.get(person.github_id),
+        // The contact email from the sign-in step, and whether they asked for product updates.
+        contact: { address: person.email ?? null, updates: person.email_updates === null ? null : person.email_updates === 1 },
+        networks: networks.get(person.github_id) ?? 0,
+        allowance: allowanceView(allowance),
+        // An admin's own weekly caps for this person (a grant, or POST /admin/people/:id/grant); null: the level's.
+        personalCap: caps.get(person.github_id) ?? null,
+        serverKeys,
+        // Distinct dl sessions (from Autopilot's session events) since Monday 00:00 UTC.
+        dlSessionsThisWeek: sessions.get(person.github_id) ?? 0,
+      };
+    });
+    // Without `limit`, everyone (as before) and `nextCursor: null`; with it, pass `nextCursor` back as `cursor`.
+    return json({ people: rows, nextCursor, total: ordered.length });
   }
 
   const match = /^people\/(\d+)(?:\/(suspend|unsuspend|block|unblock|grant|revoke-tokens|level))?$/.exec(rest);

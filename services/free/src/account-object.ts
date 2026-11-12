@@ -54,8 +54,11 @@ export interface AccountEnv {
 export type AccountStatus = "active" | "suspended" | "blocked";
 
 export type Plan = "free" | "pro";
-/** Where a request's tokens come from: the weekly allowance (free or Pro), or top-ups. */
-export type Source = "weekly" | "topup";
+/**
+ * Where a request is paid from: the weekly allowance (free or Pro), the old token top-ups
+ * ("topup"), or dollar top-ups ("credit": usage dollars, charged at the dollar caps' cost).
+ */
+export type Source = "weekly" | "topup" | "credit";
 
 /** One weekly token allowance: what a model's tokens come from. */
 export interface PoolAllowance {
@@ -68,8 +71,12 @@ export interface PoolAllowance {
 export interface Allowance {
   exists: boolean;
   plan: Plan;
-  /** Unexpired top-up tokens not yet used or held. */
+  /** Unexpired top-up tokens (the old token top-ups) not yet used or held. */
   topupTokensLeft: number;
+  /** Unexpired top-up usage dollars not yet spent or held by requests in flight. */
+  topupUsdLeft: number;
+  /** When the soonest-expiring dollar top-up with usage left expires (Unix ms), or null. */
+  topupUsdExpiresAt: number | null;
   /** Pro's paid period end (Unix ms), or null. */
   proPeriodEnd: number | null;
   proCancelAtPeriodEnd: boolean;
@@ -222,6 +229,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
       // The reservation's estimated cost in USD, held against the dollar cap while it is in
       // flight. Null on reservations made before (they count as nothing).
       if (!columns.includes("cost_estimate")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN cost_estimate REAL");
+      // Dollar top-ups: `usd` is the usage dollars bought (null on a token top-up), `used_usd` what is spent.
+      const topupColumns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('topups')").toArray().map((column) => column.name);
+      if (!topupColumns.includes("usd")) this.ctx.storage.sql.exec("ALTER TABLE topups ADD COLUMN usd REAL");
+      if (!topupColumns.includes("used_usd")) this.ctx.storage.sql.exec("ALTER TABLE topups ADD COLUMN used_usd REAL NOT NULL DEFAULT 0");
     });
   }
 
@@ -279,7 +290,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
     let plan = planReservation(input.promptEstimate, input.requestedMaxTokens, weeklyRoom);
     let spendFull = false;
     if (plan && before.usdPerWeek !== null) {
-      const inFlight = this.#inFlightWeekly();
+      const inFlight = this.#inFlight("weekly");
       spendFull = inFlight.count > 0 && before.spentUsdThisWeek + inFlight.usd + estimate(plan.maxTokens) > before.usdPerWeek;
       if (spendFull) plan = undefined;
     }
@@ -287,8 +298,19 @@ export class AccountObject extends DurableObject<AccountEnv> {
       source = "topup";
       plan = planReservation(input.promptEstimate, input.requestedMaxTokens, before.topupTokensLeft);
     }
+    if (!plan) {
+      // Dollar top-ups last, held like the dollar caps: what is spent plus the estimates in flight.
+      // With nothing else in flight a request goes through while any of the balance is left.
+      const credit = this.#creditLeft(input.now);
+      const inFlight = this.#inFlight("credit");
+      const wanted = planReservation(input.promptEstimate, input.requestedMaxTokens, Number.MAX_SAFE_INTEGER);
+      if (wanted && credit > 0 && (inFlight.count === 0 || inFlight.usd + estimate(wanted.maxTokens) <= credit)) {
+        source = "credit";
+        plan = wanted;
+      }
+    }
     if (!plan) return { ok: false, code: "quota_exceeded", reason: spendReached || spendFull ? "spend" : "tokens", allowance: before };
-    const paid = source === "topup" || before.plan === "pro";
+    const paid = source !== "weekly" || before.plan === "pro";
     const reservationId = crypto.randomUUID();
     const expiresAt = input.now + RESERVATION_TTL_MS;
     this.ctx.storage.sql.exec(
@@ -341,6 +363,28 @@ export class AccountObject extends DurableObject<AccountEnv> {
       );
       return;
     }
+    if (source === "credit") {
+      // Usage dollars from dollar top-ups, earliest expiry first; any cost past the last one goes
+      // on the week (tokens in proportion), like an overshoot past token top-ups.
+      let leftUsd = costUsd;
+      for (const topup of sql.exec<{ id: string; usd: number; used_usd: number }>("SELECT id, usd, used_usd FROM topups WHERE usd IS NOT NULL AND expires_at > ? AND used_usd < usd ORDER BY expires_at, id", now).toArray()) {
+        if (leftUsd <= 0) break;
+        const take = Math.min(leftUsd, topup.usd - topup.used_usd);
+        sql.exec("UPDATE topups SET used_usd = used_usd + ? WHERE id = ?", take, topup.id);
+        leftUsd -= take;
+      }
+      if (leftUsd > 1e-12) {
+        const tokens = costUsd > 0 ? Math.round((charged * leftUsd) / costUsd) : 0;
+        sql.exec("UPDATE account SET used = used + ?, cost_used = cost_used + ? WHERE github_id = ?", tokens, leftUsd, githubId);
+        sql.exec(
+          "INSERT INTO pool_usage (week_start, pool, used) VALUES (?, ?, ?) ON CONFLICT(week_start, pool) DO UPDATE SET used = used + excluded.used",
+          weekStart(now),
+          pool,
+          tokens,
+        );
+      }
+      return;
+    }
     let left = charged;
     for (const topup of sql.exec<{ id: string; tokens: number; used: number }>("SELECT id, tokens, used FROM topups WHERE expires_at > ? AND used < tokens ORDER BY expires_at, id", now).toArray()) {
       if (left <= 0) break;
@@ -348,8 +392,19 @@ export class AccountObject extends DurableObject<AccountEnv> {
       sql.exec("UPDATE topups SET used = used + ? WHERE id = ?", take, topup.id);
       left -= take;
     }
-    // Usage past the last top-up (an overshoot the reservation didn't foresee) goes on the week.
-    if (left > 0) sql.exec("UPDATE account SET used = used + ? WHERE github_id = ?", left, githubId);
+    // Usage past the last top-up (an overshoot the reservation didn't foresee) goes on the week,
+    // tokens and its share of the cost, so top-ups never buy more than their tokens: the excess
+    // counts against the weekly token and dollar caps like any other weekly use.
+    if (left > 0) {
+      const overshootUsd = charged > 0 ? (costUsd * left) / charged : 0;
+      sql.exec("UPDATE account SET used = used + ?, cost_used = cost_used + ? WHERE github_id = ?", left, overshootUsd, githubId);
+      sql.exec(
+        "INSERT INTO pool_usage (week_start, pool, used) VALUES (?, ?, ?) ON CONFLICT(week_start, pool) DO UPDATE SET used = used + excluded.used",
+        weekStart(now),
+        pool,
+        left,
+      );
+    }
   }
 
   // ─── Billing ──────────────────────────────────────────────────────────────
@@ -422,7 +477,22 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return true;
   }
 
-  /** Adds a top-up once per id (the Checkout Session). False when it was already added. */
+  /** Adds a dollar top-up (usage dollars) once per id (the Checkout Session). False when it was already added. */
+  async grantCredit(input: { id: string; usd: number; createdAt: number; expiresAt: number }): Promise<boolean> {
+    return (
+      this.ctx.storage.sql
+        .exec(
+          "INSERT INTO topups (id, tokens, used, created_at, expires_at, usd, used_usd) VALUES (?, 0, 0, ?, ?, ?, 0) ON CONFLICT(id) DO NOTHING RETURNING id",
+          input.id,
+          input.createdAt,
+          input.expiresAt,
+          input.usd,
+        )
+        .toArray().length > 0
+    );
+  }
+
+  /** Adds a token top-up (the old product) once per id (the Checkout Session). False when it was already added. */
   async grantTopup(input: { id: string; tokens: number; createdAt: number; expiresAt: number }): Promise<boolean> {
     return (
       this.ctx.storage.sql
@@ -530,6 +600,11 @@ export class AccountObject extends DurableObject<AccountEnv> {
       .map((key) => ({ id: key.id, name: key.name, createdAt: key.created_at, lastUsedAt: key.last_used_at }));
   }
 
+  /** The allowance and the server key count in one call, for the admin people list (one RPC per person, not two). */
+  async adminSummary(now: number, limits: Limits): Promise<{ allowance: Allowance; serverKeys: number }> {
+    return { allowance: this.#allowance(this.#current(now), now, limits), serverKeys: await this.keyCount() };
+  }
+
   async keyCount(): Promise<number> {
     return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM server_keys").toArray()[0]?.n ?? 0;
   }
@@ -614,12 +689,20 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return stale.length;
   }
 
-  /** Weekly reservations in flight (top-ups don't count toward the dollar cap) and their estimated cost. */
-  #inFlightWeekly(): { count: number; usd: number } {
+  /**
+   * Reservations in flight from one source and their estimated cost: weekly ones count toward
+   * the weekly dollar cap, "credit" ones toward the dollar top-up balance.
+   */
+  #inFlight(source: Source): { count: number; usd: number } {
     const row = this.ctx.storage.sql
-      .exec<{ n: number; usd: number | null }>("SELECT COUNT(*) AS n, SUM(cost_estimate) AS usd FROM reservations WHERE source = 'weekly'")
+      .exec<{ n: number; usd: number | null }>("SELECT COUNT(*) AS n, SUM(cost_estimate) AS usd FROM reservations WHERE source = ?", source)
       .toArray()[0];
     return { count: row?.n ?? 0, usd: row?.usd ?? 0 };
+  }
+
+  /** Unexpired dollar top-up usage not yet spent (in-flight estimates not taken off). */
+  #creditLeft(now: number): number {
+    return this.ctx.storage.sql.exec<{ left: number | null }>("SELECT SUM(usd - used_usd) AS left FROM topups WHERE usd IS NOT NULL AND expires_at > ?", now).toArray()[0]?.left ?? 0;
   }
 
   #row(): AccountRow | undefined {
@@ -646,6 +729,9 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const billing = this.#billing();
     const topups = sql.exec<{ left: number | null }>("SELECT SUM(tokens - used) AS left FROM topups WHERE expires_at > ?", now).toArray()[0]?.left ?? 0;
     const topupTokensLeft = Math.max(0, topups - reservedBy("topup"));
+    const topupUsdLeft = Math.max(0, Math.round((this.#creditLeft(now) - this.#inFlight("credit").usd) * 1e6) / 1e6);
+    const topupUsdExpiresAt =
+      sql.exec<{ at: number | null }>("SELECT MIN(expires_at) AS at FROM topups WHERE usd IS NOT NULL AND expires_at > ? AND used_usd < usd", now).toArray()[0]?.at ?? null;
     const pro = plan === "pro";
     // Pro replaces the free allowance (no referral bonus: that is free tokens); grants apply to free.
     const bonus = pro ? 0 : Math.max(0, limits.bonusTokens ?? 0);
@@ -660,6 +746,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
       exists: row !== undefined,
       plan,
       topupTokensLeft,
+      topupUsdLeft,
+      topupUsdExpiresAt,
       proPeriodEnd: billing.periodEnd,
       proCancelAtPeriodEnd: billing.cancelAtPeriodEnd,
       status: row?.status ?? null,

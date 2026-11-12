@@ -105,7 +105,10 @@ unprofitable without turning away real developers.
   Beyond that the account still gets in, as Starter.
 - **Existing users** are re-checked lazily on their next request; nobody is cut off mid-session.
 - **Admin**: `GET /admin/people` shows each person's level, signals and network count, and
-  takes `?level=starter` and `?shared=1`. `POST /admin/people/:id/level {level}` sets it
+  takes `?level=starter` and `?shared=1`. It pages with `?limit=` (1 to 500) and `?cursor=` (the
+  previous page's `nextCursor`); without `limit` it lists everyone, as before. The answer is
+  `{people, nextCursor, total}`. Network counts come from one Directory query and each person
+  costs one account call, at most 16 in flight at once. `POST /admin/people/:id/level {level}` sets it
   (`full`, `basic` or `starter`).
 
 ## Admission
@@ -162,25 +165,31 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
   },
   "models": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "deepseek/deepseek-v4.1-flash-1017"],
   "plan": "free",                       // "free" | "pro"
-  "topupTokensLeft": 0,                 // unexpired top-up tokens not yet used
+  "topupTokensLeft": 0,                 // unexpired tokens from old token top-ups not yet used
+  "topupUsdLeft": 0,                    // unexpired dollar top-up usage not yet spent or held
+  "topupUsdExpiresAt": null,            // when the soonest-expiring dollar top-up with usage left ends
   "pro": null,                          // or { "periodEnd": ISO string | null, "cancelAtPeriodEnd": false }
   "queue": null,                        // or { "position": 214, "etaAt": "2026-11-16T00:00:00.000Z", "waiting": 300 }
   "referral": { "code": "alice", "link": "https://dl.new/r/alice", "joined": 2, "activeThisWeek": 1,
                 "bonusTokensPerWeek": 10000000, "bonusCapPerWeek": 50000000 },
-  "offers": { "pro": { "priceUsdMonthly": 10, "tokensPerWeek": 100000000 },
-              "topup": { "priceUsd": 3, "tokens": 50000000, "validDays": 30 } }
+  "offers": { "pro": { "priceUsdMonthly": 3.99, "price": "$3.99/month", "tokensPerWeek": 300000000, "usdPerWeek": 10,
+                       "valueLine": "About 3x the free usage every week, every model." },
+              "topup": { "unitPriceUsd": 1, "minQuantity": 2, "maxQuantity": 20, "usageMultiplier": 1.25, "validDays": 90, "fromPrice": "$2" } }
 }
 ```
 
 - `allowance.tokensPerWeek` includes this week's referral bonus; the dollar allowance grows in the
   same proportion. While queued, `allowance.remaining` is 0.
-- With Pro, `allowance` is Pro's: 100M tokens a week (`PRO_TOKENS_PER_WEEK`), no referral bonus,
-  and no dollar ceiling unless `PRO_WEEKLY_USD_CAP` is set. `queue` is null for Pro (a place in
+- With Pro, `allowance` is Pro's: 300M tokens a week (`PRO_TOKENS_PER_WEEK`), no referral bonus,
+  and a $10 weekly dollar ceiling (`PRO_WEEKLY_USD_CAP`; "none" for tokens only), held like the
+  free caps (settled spend plus the estimates of requests in flight). `queue` is null for Pro (a place in
   line is kept in case Pro ends).
 - `referral.joined`: sign-ups with this person's code that count. `activeThisWeek`: those friends
   whose pair counts toward this week's bonus (see [Referrals](#referrals)).
-- `offers` come from config (`PRO_PRICE_USD_MONTHLY`, `PRO_TOKENS_PER_WEEK`, `TOPUP_PRICE_USD`,
-  `TOPUP_TOKENS`, `TOPUP_VALID_DAYS`).
+- `offers` come from config (`PRO_PRICE_USD_MONTHLY` in dollars and cents, `PRO_TOKENS_PER_WEEK`,
+  `PRO_WEEKLY_USD_CAP`, `PRO_VALUE_LINE`, `TOPUP_UNIT_PRICE_USD`, `TOPUP_MIN_QUANTITY`,
+  `TOPUP_MAX_QUANTITY`, `TOPUP_USAGE_MULTIPLIER`, `TOPUP_VALID_DAYS`). `pro.price` is the exact
+  text to show ("$3.99/month"): clients never round it.
 
 ### Refusals for free tokens (`POST /v1/chat/completions`, HTTP 402)
 
@@ -189,7 +198,7 @@ Out of tokens (a free user):
 ```json
 { "error": { "code": "quota_exceeded", "message": "This week's free token allowance is used up. It resets at 2026-11-09T00:00:00.000Z.",
              "reason": "tokens", "resetsAt": "2026-11-09T00:00:00.000Z",
-             "offers": { "pro": { "priceUsdMonthly": 10, "tokensPerWeek": 100000000 }, "topup": { "priceUsd": 3, "tokens": 50000000, "validDays": 30 } },
+             "offers": { "pro": { "priceUsdMonthly": 3.99, "price": "$3.99/month", "...": "…" }, "topup": { "unitPriceUsd": 1, "minQuantity": 2, "...": "…" } },
              "referralLink": "https://dl.new/r/alice" } }
 ```
 
@@ -199,7 +208,7 @@ Queued:
 { "error": { "code": "free_tier_queued",
              "message": "You're #214 in line for free tokens (about 3 days). Each friend who starts using dl moves you up. Your own key works now.",
              "position": 214, "etaAt": "2026-11-09T00:00:00.000Z",
-             "offers": { "pro": { "priceUsdMonthly": 10, "tokensPerWeek": 100000000 }, "topup": { "priceUsd": 3, "tokens": 50000000, "validDays": 30 } },
+             "offers": { "pro": { "priceUsdMonthly": 3.99, "price": "$3.99/month", "...": "…" }, "topup": { "unitPriceUsd": 1, "minQuantity": 2, "...": "…" } },
              "referralLink": "https://dl.new/r/alice" } }
 ```
 
@@ -354,11 +363,17 @@ Sent by the free tier service. The message and the reply address aren't stored a
 
 ## Paid plans (Stripe)
 
-- **Pro**, $10 a month: 100M tokens a week of DeepSeek V4.1 Flash 1017, in place of the free
-  50M. Pro starts when its Checkout completes and stays on while the subscription is active and
+- **Pro**, $3.99 a month: up to $10 of usage a week (`PRO_WEEKLY_USD_CAP`) on every model, in
+  place of the free allowance; its 300M weekly tokens sit above what $10 buys, so the dollar
+  ceiling is what binds. Pro starts when its Checkout completes and stays on while the subscription is active and
   its paid period (plus 3 days' grace for a late renewal webhook) hasn't ended.
-- **Top-up**, $3 once: 50M tokens, valid 30 days from purchase, used only after the week's
-  allowance (free or Pro) runs out, earliest expiry first. A free person who is queued, or meets
+- **Top-up**, $2 to $20 once (2 to 20 units of a $1 price, adjustable on Checkout): each $1
+  adds $1.25 of usage dollars (`TOPUP_USAGE_MULTIPLIER`), valid 90 days, spent only after the
+  week's allowance (free or Pro) runs out, earliest expiry first, at the same cost as the dollar
+  caps (requests in flight hold their estimate). `POST /v1/billing/checkout {"product": "topup",
+  "quantity": 5}` starts at that quantity (default 2). Token top-ups bought before (50M tokens,
+  30 days) are used as bought, before dollar ones; a checkout started under the old product
+  still grants its tokens (its session has no `topup_kind` metadata). A free person who is queued, or meets
   a global free cap, can still use top-ups.
 - **Paid usage** (anything under Pro, and top-up tokens) is logged like any request, with
   `requests.paid = 1`, and counted apart: `spend_weeks.paid_usd/paid_tokens/paid_requests` and
@@ -378,7 +393,7 @@ Sent by the free tier service. The message and the reply address aren't stored a
 
   | event | effect |
   |---|---|
-  | `checkout.session.completed` | saves the customer; Pro: active; top-up: +50M for 30 days (only when `payment_status` is `paid`) |
+  | `checkout.session.completed` | saves the customer; Pro: active; top-up (only when `payment_status` is `paid`): `amount_subtotal` × 1.25 in usage dollars for 90 days, or an old token checkout's 50M for 30 days |
   | `invoice.paid` | Pro active until the invoice's period end; revenue recorded |
   | `invoice.payment_failed` | back to free (the free allowance, never no access) |
   | `customer.subscription.updated` | `active`/`trialing` → Pro; `past_due`, `unpaid`, `incomplete` → free; period end and cancel-at-period-end kept |
@@ -391,7 +406,7 @@ Sent by the free tier service. The message and the reply address aren't stored a
 
 1. **Products and prices.** In test mode first:
    `STRIPE_SECRET_KEY=sk_test_… node services/free/scripts/stripe-setup.mjs --webhook https://free.directionallylocal.com/v1/billing/webhook`
-   creates "dl Pro" ($10.00/month) and "dl top-up, 50M tokens" ($3.00 once), both tax-exclusive
+   creates "dl Pro" ($3.99/month) and "dl top-up" ($1.00 once, bought 2 to 20 at a time), both tax-exclusive
    with tax code `txcd_10000000`, and the webhook endpoint, and prints `STRIPE_PRICE_PRO`,
    `STRIPE_PRICE_TOPUP` and `STRIPE_WEBHOOK_SECRET`. For live mode, create the same in the
    Dashboard (the script refuses live keys).
