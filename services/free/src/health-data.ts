@@ -1,5 +1,5 @@
 import { DASHBOARD_COLUMNS, installBreakdown, notAdmin, upstreamStats, type InstallFunnel, type Sql, type UpstreamStats } from "./dashboard-data.js";
-import { GPU_EARLY_ACCESS_VENDORS, GPU_OPTIONS, GPU_PATHS, GPU_VENDORS } from "./events.js";
+import { GPU_DETECT_OUTCOMES, GPU_EARLY_ACCESS_VENDORS, GPU_OPTIONS, GPU_PATHS, GPU_VENDORS } from "./events.js";
 import { DAY_MS } from "./week.js";
 
 /**
@@ -152,6 +152,8 @@ export interface HealthGpus {
   detected: Array<{ vendor: string; count: number }>;
   /** First runs that found a GPU (any vendor but none). */
   withGpu: number;
+  /** Of those, first runs where the vendor's tool was there but didn't answer (timed out or failed, twice). */
+  unanswered: number;
   /** "Run a private model on this GPU?" */
   prompt: { yes: number; no: number };
   /** Options picked, every option. */
@@ -505,8 +507,12 @@ export function gpuSummary(rows: HealthGpus["rows"]): HealthGpus {
   const early = new Map<string, { yes: number; no: number }>(GPU_EARLY_ACCESS_VENDORS.map((vendor) => [vendor, { yes: 0, no: 0 }]));
   const results = new Map<string, { ok: number; failed: number; errors: Map<string, number> }>(GPU_PATHS.map((path) => [path, { ok: 0, failed: 0, errors: new Map() }]));
   const prompt = { yes: 0, no: 0 };
+  let unanswered = 0;
   for (const row of rows) {
-    if (row.event === "detected" && detected.has(row.vendor)) tally(detected, row.vendor, row.count);
+    if (row.event === "detected" && detected.has(row.vendor)) {
+      tally(detected, row.vendor, row.count);
+      if ((GPU_DETECT_OUTCOMES as readonly string[]).includes(row.outcome) && row.vendor !== "none") unanswered += row.count;
+    }
     else if (row.event === "prompt" && (row.answer === "yes" || row.answer === "no")) prompt[row.answer] += row.count;
     else if (row.event === "option" && options.has(row.option)) tally(options, row.option, row.count);
     else if (row.event === "early_access" && (row.answer === "yes" || row.answer === "no")) {
@@ -525,6 +531,7 @@ export function gpuSummary(rows: HealthGpus["rows"]): HealthGpus {
   return {
     detected: [...detected.entries()].map(([vendor, count]) => ({ vendor, count })),
     withGpu: [...detected.entries()].filter(([vendor]) => vendor !== "none").reduce((sum, [, n]) => sum + n, 0),
+    unanswered,
     prompt,
     options: [...options.entries()].map(([option, count]) => ({ option, count })),
     earlyAccess: [...early.entries()].map(([vendor, counts]) => ({ vendor, ...counts })),
@@ -557,7 +564,8 @@ export function gpuTakeaway(gpus: HealthGpus): string {
   if (runs === 0 && gpus.rows.length === 0) return "No GPU first runs counted.";
   const count = (vendor: string) => gpus.detected.find((row) => row.vendor === vendor)?.count ?? 0;
   const chose = gpus.options.find((row) => row.option === "gpus")?.count ?? 0;
-  let line = `${plural(gpus.withGpu, "machine")} with GPUs: ${count("nvidia").toLocaleString("en-US")} Nvidia, ${count("amd").toLocaleString("en-US")} AMD, ${count("ascend").toLocaleString("en-US")} Ascend; ${chose.toLocaleString("en-US")} chose own GPUs.`;
+  const unanswered = gpus.unanswered > 0 ? ` (${gpus.unanswered.toLocaleString("en-US")} whose GPU tool didn't answer)` : "";
+  let line = `${plural(gpus.withGpu, "machine")} with GPUs${unanswered}: ${count("nvidia").toLocaleString("en-US")} Nvidia, ${count("amd").toLocaleString("en-US")} AMD, ${count("ascend").toLocaleString("en-US")} Ascend; ${chose.toLocaleString("en-US")} chose own GPUs.`;
   const ok = gpus.results.reduce((sum, row) => sum + row.ok, 0);
   const failed = gpus.results.reduce((sum, row) => sum + row.failed, 0);
   if (ok + failed > 0) {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, createInvite, createService, errorCode, NOW, type Service } from "./harness.js";
 import { adminCookie, tools } from "./admin-web.js";
-import { cleanEvent, cleanGpuProps, cleanGpuTelemetry, earlyAccessEmail, GPU_ERROR_TYPES, GPU_EVENTS, GPU_OPTIONS, GPU_VENDORS, type GpuCount } from "../src/events.js";
+import { cleanEvent, cleanGpuProps, cleanGpuTelemetry, earlyAccessEmail, GPU_DETECT_OUTCOMES, GPU_ERROR_TYPES, GPU_EVENTS, GPU_OPTIONS, GPU_VENDORS, type GpuCount } from "../src/events.js";
 import { gpuSentence } from "../src/home-page.js";
 
 /**
@@ -38,6 +38,17 @@ describe("GPU allowlist", () => {
     // An error type with outcome ok is dropped, not stored.
     assert.equal((cleanGpuTelemetry({ event: "result", outcome: "ok", path: "this_machine", errorType: "no_docker" }) as GpuCount).errorType, "");
     for (const vendor of GPU_VENDORS) assert.equal(typeof cleanGpuTelemetry({ event: "detected", gpuVendor: vendor }), "object");
+  });
+
+  it("takes a detection whose tool didn't answer (probe_timeout, probe_failed) only on detected", () => {
+    for (const outcome of GPU_DETECT_OUTCOMES) {
+      assert.deepEqual(cleanGpuTelemetry({ event: "detected", gpuVendor: "nvidia", outcome }), { ...BLANK, event: "detected", gpuVendor: "nvidia", outcome });
+      assert.equal(typeof cleanGpuTelemetry({ event: "result", outcome, path: "this_machine" }), "string", "not a result's outcome");
+      assert.equal((cleanGpuTelemetry({ event: "option", option: "gpus", outcome }) as GpuCount).outcome, "");
+      assert.deepEqual(cleanEvent({ id: "d1", type: "gpu.detected", props: { gpuVendor: "nvidia", outcome } }, NOW)?.props, { gpuVendor: "nvidia", outcome });
+      assert.deepEqual(cleanEvent({ id: "r1", type: "gpu.result", props: { path: "this_machine", outcome } }, NOW)?.props, { path: "this_machine" });
+    }
+    assert.equal((cleanGpuTelemetry({ event: "detected", gpuVendor: "nvidia", outcome: "slow" }) as GpuCount).outcome, "");
   });
 
   it("drops malformed optional fields and other keys", () => {
@@ -214,7 +225,8 @@ describe("GPUs on the admin screens", () => {
       for (let i = 0; i < times; i++) assert.equal((await service.request("POST", "/v1/telemetry/gpu", { body, ip: `192.0.2.${i}` })).status, 204);
     };
     await post({ event: "detected", gpuVendor: "nvidia", gpuVramGb: 24 }, 8);
-    await post({ event: "detected", gpuVendor: "nvidia", gpuVramGb: 80 }, 4, 3);
+    await post({ event: "detected", gpuVendor: "nvidia", gpuVramGb: 80 }, 3, 3);
+    await post({ event: "detected", gpuVendor: "nvidia", outcome: "probe_timeout" }, 1, 3);
     await post({ event: "detected", gpuVendor: "amd" }, 3);
     await post({ event: "detected", gpuVendor: "ascend" }, 1);
     await post({ event: "detected", gpuVendor: "none" }, 6);
@@ -239,7 +251,7 @@ describe("GPUs on the admin screens", () => {
     const { service, cookie } = await scenario();
     const html = await (await service.request("GET", "/admin?view=health", { headers: { cookie } })).text();
     assert.match(html, /<h2>GPUs<\/h2>/);
-    assert.match(html, /16 machines with GPUs: 12 Nvidia, 3 AMD, 1 Ascend; 5 chose own GPUs\. 2 of 6 setups worked; most failures: unauthorized\./);
+    assert.match(html, /16 machines with GPUs \(1 whose GPU tool didn&#39;t answer\): 12 Nvidia, 3 AMD, 1 Ascend; 5 chose own GPUs\. 2 of 6 setups worked; most failures: unauthorized\./);
     assert.match(html, /<td>No GPU<\/td><td>6<\/td>/);
     assert.match(html, /<td>Yes<\/td><td>7<\/td>/);
     assert.match(html, /<td>No<\/td><td>5<\/td>/);
@@ -255,11 +267,12 @@ describe("GPUs on the admin screens", () => {
 
     const csv = (await (await service.request("GET", "/admin/dashboard/health-gpus.csv", { headers: { cookie } })).text()).trim().split("\r\n");
     assert.equal(csv[0], "event,vendor,answer,option,path,outcome,error_type,count");
-    assert.ok(csv.includes("detected,nvidia,,,,,,12"), csv.join("\n"));
+    assert.ok(csv.includes("detected,nvidia,,,,,,11"), csv.join("\n"));
+    assert.ok(csv.includes("detected,nvidia,,,,probe_timeout,,1"), csv.join("\n"));
     assert.ok(csv.includes("result,,,,endpoint,failed,unauthorized,2"));
     // 30 days: the older AMD machines too.
     const month = await (await service.request("GET", "/admin?view=health&days=30", { headers: { cookie } })).text();
-    assert.match(month, /25 machines with GPUs: 12 Nvidia, 12 AMD, 1 Ascend;/);
+    assert.match(month, /25 machines with GPUs \(1 whose GPU tool didn&#39;t answer\): 12 Nvidia, 12 AMD, 1 Ascend;/);
     // 1 day: not the ones 3 days ago.
     const today = await (await service.request("GET", "/admin?view=health&days=1", { headers: { cookie } })).text();
     assert.match(today, /12 machines with GPUs: 8 Nvidia, 3 AMD, 1 Ascend;/);
