@@ -31,6 +31,28 @@ export interface GrantResult {
   /** GitHub's current spelling and id, when it was found. */
   login?: string;
   githubId?: number;
+  /** The personal weekly dollar cap in place after the grant (a pre-grant's, at sign-in), when there is one. */
+  usdPerWeek?: number;
+}
+
+/** The highest personal weekly dollar cap one grant can give. */
+export const MAX_GRANT_USD = 1000;
+
+/**
+ * A grant's personal weekly dollar cap as the admin sent it: a number (JSON) or a form field's
+ * text, 0 to MAX_GRANT_USD. Undefined (left out, or an empty field) means the
+ * grantWeeklyUsdCap setting; 0 means no personal cap, only the level.
+ */
+export function parseGrantUsd(value: unknown): number | undefined | "invalid" {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string" && value.trim() === "") return undefined;
+  const amount = typeof value === "number" ? value : typeof value === "string" ? Number(value.trim().replace(/^\$/, "")) : Number.NaN;
+  return Number.isFinite(amount) && amount >= 0 && amount <= MAX_GRANT_USD ? Math.round(amount * 100) / 100 : "invalid";
+}
+
+/** "$20", "$2.50": a weekly dollar amount for the admin pages. */
+export function grantUsdText(usd: number): string {
+  return Number.isInteger(usd) ? `$${usd}` : `$${usd.toFixed(2)}`;
 }
 
 /** GitHub's rule: letters, digits and single hyphens, not at either end, 1 to 39 characters. */

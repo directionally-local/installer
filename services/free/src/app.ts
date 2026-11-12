@@ -91,7 +91,7 @@ import {
 } from "./user-email-send.js";
 import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind } from "./user-emails.js";
 import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
-import { MAX_GRANT_LOGINS, parseLogins, type GrantResult } from "./grant.js";
+import { grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, parseGrantUsd, parseLogins, type GrantResult } from "./grant.js";
 
 /**
  * The free managed tier's HTTP surface: device-flow sign-in with GitHub, the account and
@@ -1347,6 +1347,8 @@ async function admitAndFinish(
   if (result.ok) {
     if (result.created && (result.via === "invite" || result.via === "open")) await c.env.RATE_LIMITER.getByName(signupKey).spend(signupKey, LIMITS.signupIp, 1, c.now());
     await account(c, identity.githubId).activate({ githubId: identity.githubId, login: identity.login, isAdmin, now: c.now() });
+    // A pre-grant's personal weekly dollar cap, now that the account exists.
+    if (result.grantUsdPerWeek !== undefined) await raiseGrantCap(c, identity.githubId, result.grantUsdPerWeek);
     await auth(c).decide(deviceRef, "approved", identity, c.now());
     if (result.queueStarted) await alert(c, [await directory(c).queueStartedAlert(c.now(), policyOf(c.config))]);
     if (result.firstSignup) await alert(c, [result.firstSignup]);
@@ -2533,7 +2535,9 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
   if (decide && method === "POST") {
     const body = (await readJson(c)) ?? {};
     const note = typeof body.note === "string" && body.note.trim() !== "" ? body.note.trim().slice(0, 300) : null;
-    const result = await decideAccessRequest(c, config, Number(decide[1]), decide[2] as "grant" | "decline", note, actor);
+    const usd = parseGrantUsd(body.usdPerWeek);
+    if (usd === "invalid" || (usd !== undefined && typeof body.usdPerWeek !== "number")) return apiError(400, "invalid_request", GRANT_USD_USAGE);
+    const result = await decideAccessRequest(c, config, Number(decide[1]), decide[2] as "grant" | "decline", note, actor, usd);
     return "code" in result ? failed(result) : json(result);
   }
   if (method === "POST" && rest === "emails/test") return adminTestEmail(c, identity.githubId);
@@ -2543,7 +2547,9 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     const logins = body.logins;
     const usage = `Send {logins: ["octocat", ...]}: 1 to ${MAX_GRANT_LOGINS} GitHub usernames (a leading @ or a github.com URL is fine).`;
     if (!Array.isArray(logins) || logins.length === 0 || logins.length > MAX_GRANT_LOGINS || !logins.every((login) => typeof login === "string")) return apiError(400, "invalid_request", usage);
-    const results = await grantLogins(c, logins.join("\n"), actor);
+    const usd = parseGrantUsd(body.usdPerWeek);
+    if (usd === "invalid" || (usd !== undefined && typeof body.usdPerWeek !== "number")) return apiError(400, "invalid_request", GRANT_USD_USAGE);
+    const results = await grantLogins(c, config, logins.join("\n"), actor, usd);
     return "status" in results ? failed(results) : json({ results });
   }
   if (method === "GET" && rest === "spend") {
@@ -2628,6 +2634,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     const levelFilter = c.url.searchParams.get("level");
     const sharedOnly = c.url.searchParams.get("shared") === "1";
     const people = await directory(c).listPeople();
+    const caps = await directory(c).personalCaps();
     const checks = peopleChecks(people, config, now);
     const sessions = await directory(c).weekSessions(now);
     const rows = await Promise.all(
@@ -2661,6 +2668,8 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
           contact: { address: person.email ?? null, updates: person.email_updates === null ? null : person.email_updates === 1 },
           networks: await directory(c).networkCount(person.github_id),
           allowance: allowanceView(allowance),
+          // An admin's own weekly caps for this person (a grant, or POST /admin/people/:id/grant); null: the level's.
+          personalCap: caps.get(person.github_id) ?? null,
           serverKeys: await account(c, person.github_id).keyCount(),
           // Distinct dl sessions (from Autopilot's session events) since Monday 00:00 UTC.
           dlSessionsThisWeek: sessions.get(person.github_id) ?? 0,
@@ -2680,7 +2689,8 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       if (!detail) return apiError(404, "not_found", "No such person.");
       const own = await personLimits(c, config, githubId, now);
       const allowance = await account(c, githubId).allowance(now, own.limits);
-      return json({ ...detail, level: own.level, allowance: allowanceView(allowance), serverKeys: await account(c, githubId).keyCount() });
+      const personalCap = (await directory(c).personalCaps()).get(githubId) ?? null;
+      return json({ ...detail, level: own.level, allowance: allowanceView(allowance), personalCap, serverKeys: await account(c, githubId).keyCount() });
     }
     if (action === "revoke-tokens" && method === "POST") {
       // Ends every sign-in session and deletes every server key; the person can sign in again.
@@ -2864,10 +2874,11 @@ async function runBroadcast(c: Ctx, config: FreeConfig, request: BroadcastReques
  * through GitHub's public API, then raised to Full, left alone when blocked, or pre-granted when
  * it has no account yet. Logs counts only.
  */
-async function grantLogins(c: Ctx, text: string, actor: { githubId: number; login: string; now: number }): Promise<GrantResult[] | AdminFailure> {
+async function grantLogins(c: Ctx, config: FreeConfig, text: string, actor: { githubId: number; login: string; now: number }, requestedUsd?: number): Promise<GrantResult[] | AdminFailure> {
   const { logins, invalid } = parseLogins(text);
   if (logins.length + invalid.length === 0) return { status: 400, code: "invalid_request", message: "Paste one or more GitHub usernames." };
   if (logins.length > MAX_GRANT_LOGINS) return { status: 400, code: "invalid_request", message: `At most ${MAX_GRANT_LOGINS} usernames at a time; this has ${logins.length}.` };
+  const usd = grantUsd(config, requestedUsd);
   const results: GrantResult[] = [];
   for (const input of logins) {
     const user = await githubUserByLogin(input, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS, githubApp(c.config));
@@ -2875,14 +2886,55 @@ async function grantLogins(c: Ctx, text: string, actor: { githubId: number; logi
       results.push({ input, outcome: user === "error" ? "github_error" : "not_found" });
       continue;
     }
-    const outcome = await directory(c).grantFull(user.id, user.login, actor);
-    results.push({ input, outcome, login: user.login, githubId: user.id });
+    const outcome = await directory(c).grantFull(user.id, user.login, actor, usd);
+    const cap = await grantCapAfter(c, user.id, outcome, usd);
+    results.push({ input, outcome, login: user.login, githubId: user.id, ...(cap !== undefined ? { usdPerWeek: cap } : {}) });
   }
   for (const input of invalid) results.push({ input, outcome: "not_found" });
   const counts = new Map<string, number>();
   for (const result of results) counts.set(result.outcome, (counts.get(result.outcome) ?? 0) + 1);
   console.log(`admin grant: ${[...counts].map(([outcome, n]) => `${n} ${outcome}`).join(", ") || "nothing"}`);
   return results;
+}
+
+/**
+ * The personal weekly dollar cap a grant gives: the admin's amount, or the grantWeeklyUsdCap
+ * setting. Undefined for none (0, or the setting off): the grant only sets the level.
+ */
+function grantUsd(config: FreeConfig, requested: number | undefined): number | undefined {
+  const usd = requested ?? config.grantWeeklyUsdCap;
+  return usd !== undefined && usd > 0 ? usd : undefined;
+}
+
+/**
+ * Raises a signed-up person's personal weekly dollar cap to `usd` (never lowers a higher one)
+ * and mirrors it in the Directory's grants table. Returns the cap now in place.
+ */
+async function raiseGrantCap(c: Ctx, githubId: number, usd: number | undefined): Promise<number | undefined> {
+  if (usd === undefined) return undefined;
+  const cap = await account(c, githubId).raiseUsdCap(usd);
+  if (cap !== undefined) await directory(c).recordGrant({ githubId, tokensPerWeek: undefined, usdPerWeek: cap });
+  return cap;
+}
+
+/**
+ * After a grant's level change: the personal cap for a signed-up person (granted or already
+ * Full), or the one a pre-grant keeps for the first sign-in. Undefined for none.
+ */
+async function grantCapAfter(c: Ctx, githubId: number, outcome: "granted" | "already_full" | "pregranted" | "blocked", usd: number | undefined): Promise<number | undefined> {
+  if (outcome === "granted" || outcome === "already_full") return raiseGrantCap(c, githubId, usd);
+  if (outcome === "pregranted") return (await directory(c).pregrantUsd(githubId)) ?? undefined;
+  return undefined;
+}
+
+const GRANT_USD_USAGE = `usdPerWeek is optional: a number of dollars, 0 to ${MAX_GRANT_USD} (0: no personal cap, only Full). Left out: the grantWeeklyUsdCap setting.`;
+const GRANT_USD_FORM_ERROR = `The weekly dollar cap must be 0 to ${MAX_GRANT_USD} (0: only Full, no personal cap).`;
+
+/** The line after answering a request on the Tools tab or the home screen. */
+function requestAnswerText(result: { login: string; status: "granted" | "declined"; usdPerWeek?: number }): string {
+  if (result.status === "declined") return `Declined ${result.login}'s request.`;
+  const cap = result.usdPerWeek !== undefined ? ` with ${grantUsdText(result.usdPerWeek)} a week` : "";
+  return `Granted: ${result.login} is Full now${cap}, and gets an email.`;
 }
 
 /** What the admin's "re-check below-bar accounts" did: counts only. */
@@ -2942,13 +2994,16 @@ async function decideAccessRequest(
   decision: "grant" | "decline",
   note: string | null,
   actor: { githubId: number; login: string; now: number },
-): Promise<{ id: number; githubId: number; login: string; status: "granted" | "declined" } | AdminFailure> {
-  const result = await directory(c).decideAccessRequest({ id, decision, note, actor });
+  requestedUsd?: number,
+): Promise<{ id: number; githubId: number; login: string; status: "granted" | "declined"; usdPerWeek?: number } | AdminFailure> {
+  const usd = decision === "grant" ? grantUsd(config, requestedUsd) : undefined;
+  const result = await directory(c).decideAccessRequest({ id, decision, note, actor, ...(usd !== undefined ? { usdPerWeek: usd } : {}) });
   if (!result) return { status: 404, code: "not_found", message: "No such pending request." };
   if (result.status === "blocked") return { status: 409, code: "blocked", message: `${result.login} is blocked; unblock the account first.` };
+  const cap = result.outcome ? await grantCapAfter(c, result.githubId, result.outcome, usd) : undefined;
   if (result.status === "granted") await userEmail(c, config, "access_granted", result.githubId, String(id));
   console.log(`admin access request ${result.status}`);
-  return { id, githubId: result.githubId, login: result.login, status: result.status };
+  return { id, githubId: result.githubId, login: result.login, status: result.status, ...(cap !== undefined ? { usdPerWeek: cap } : {}) };
 }
 
 /**
@@ -3181,7 +3236,7 @@ async function homeResponse(c: Ctx, config: FreeConfig, paused: boolean, now: nu
     directory(c).spend(now),
     directory(c).pendingAccessRequests(now),
   ]);
-  return homePage({ home, spend: spendView(c, config, paused, spend), requests, signOut, ...(csrf ? { csrf } : {}), ...(notice ? { notice } : {}) });
+  return homePage({ home, spend: spendView(c, config, paused, spend), requests, grantUsd: config.grantWeeklyUsdCap ?? 0, signOut, ...(csrf ? { csrf } : {}), ...(notice ? { notice } : {}) });
 }
 
 /** The dashboard's spend, caps and settings, from the effective config and the spend counters. */
@@ -3260,6 +3315,7 @@ async function toolsState(
     cohorts,
     requests,
     leads,
+    grantUsd: config.grantWeeklyUsdCap ?? 0,
     ...posted,
   };
 }
@@ -3310,17 +3366,17 @@ async function adminWebTools(c: Ctx): Promise<Response> {
     const answer = (requestNotice: { error: boolean; text: string }) =>
       home ? homeResponse(c, config, paused, c.now(), csrf, true, requestNotice) : state({ grant: { text: "" }, compose: emptyEmailForm(), requestNotice });
     if (!Number.isSafeInteger(id) || (action !== "grant" && action !== "decline")) return answer({ error: true, text: "Pick Grant or Decline on a request." });
-    const result = await decideAccessRequest(c, config, id, action, note, actor);
-    return answer(
-      "code" in result
-        ? { error: true, text: result.message }
-        : { error: false, text: result.status === "granted" ? `Granted: ${result.login} is Full now, and gets an email.` : `Declined ${result.login}'s request.` },
-    );
+    const usd = action === "grant" ? parseGrantUsd(form.get("usd") ?? undefined) : undefined;
+    if (usd === "invalid") return answer({ error: true, text: GRANT_USD_FORM_ERROR });
+    const result = await decideAccessRequest(c, config, id, action, note, actor, usd);
+    return answer("code" in result ? { error: true, text: result.message } : { error: false, text: requestAnswerText(result) });
   }
 
   if (form.get("tool") === "grant") {
     const text = (form.get("logins") ?? "").slice(0, 20_000);
-    const results = await grantLogins(c, text, actor);
+    const usd = parseGrantUsd(form.get("usd") ?? undefined);
+    if (usd === "invalid") return state({ grant: { text, error: GRANT_USD_FORM_ERROR }, compose: emptyEmailForm() });
+    const results = await grantLogins(c, config, text, actor, usd);
     return state({ grant: "status" in results ? { text, error: results.message } : { text: "", results }, compose: emptyEmailForm() });
   }
 

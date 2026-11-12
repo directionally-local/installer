@@ -7,7 +7,7 @@ import { isoDay } from "./week.js";
 import type { LevelChecks } from "./admission.js";
 import type { EarlyAccessLead, PendingAccessRequest } from "./directory-object.js";
 import { hasCapitals, type BroadcastAudience } from "./broadcast.js";
-import { GRANT_LABELS, MAX_GRANT_LOGINS, type GrantResult } from "./grant.js";
+import { GRANT_LABELS, grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, type GrantResult } from "./grant.js";
 import { FREE_MODELS } from "./models.js";
 import { creditBudget, creditMode } from "./queue.js";
 import { GPU_OPTION_NAMES, GPU_VENDOR_NAMES, HEALTH_WINDOWS, healthTakeaways, INSTALL_STEPS, NORMAL_SESSION_ENDS, NO_END, STILL_OPEN, type HealthData } from "./health-data.js";
@@ -1443,6 +1443,8 @@ export interface ToolsState {
   /** Sign-up days, newest first, with the people a broadcast can reach at each level. */
   cohorts: Array<{ day: number; full: number; basic: number; starter: number }>;
   grant: { text: string; results?: GrantResult[]; error?: string };
+  /** The grantWeeklyUsdCap setting: the grant forms' default weekly dollar cap (0: Full only). */
+  grantUsd: number;
   /** Pending access requests (/request in dl), newest first. `building` and `link` are user content. */
   requests: PendingAccessRequest[];
   /** What the last Grant or Decline did. */
@@ -1492,6 +1494,9 @@ textarea { resize: vertical; min-height: 6rem; }
 textarea.letter { min-height: 14rem; }
 input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.usd-in { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--k-muted); }
+.usd-in input { width: 6.5rem; font: 16px/1.45 var(--body); color: var(--k-text); background: var(--k-card); border: 1px solid var(--k-border); border-radius: 8px; padding: 8px 10px; margin: 0; min-height: 40px; }
+.usd-in input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .dates { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
 .btn { font: 600 14px var(--body); padding: 9px 14px; border-radius: 8px; border: 1px solid var(--k-border); background: var(--k-card); color: var(--k-text); cursor: pointer; min-height: 40px; }
 .btn:hover { border-color: var(--k-muted); }
@@ -1563,25 +1568,40 @@ function plural(n: number, one: string, many = `${one}s`): string {
   return `${count(n)} ${n === 1 ? one : many}`;
 }
 
+/**
+ * The grant forms' weekly dollar cap: a small number field, prefilled with the
+ * grantWeeklyUsdCap setting. Shared with the home screen's request cards.
+ */
+export function grantUsdInput(defaultUsd: number, label = "Weekly dollar cap"): string {
+  return `<label class="usd-in"><span class="sr">${escapeHtml(label)}</span>$<input type="number" name="usd" min="0" max="${MAX_GRANT_USD}" step="any" inputmode="decimal" value="${escapeHtml(String(defaultUsd))}"> a week</label>`;
+}
+
+/** "own cap $20 a week": a person's personal weekly dollar cap, for the admin lists. */
+export function ownCapText(usd: number): string {
+  return `own cap ${grantUsdText(usd)} a week`;
+}
+
 function grantCard(state: ToolsState): string {
   const { grant, csrf } = state;
   const results = grant.results
     ? `<ul class="results" aria-label="Results">${grant.results
         .map(
           (result) =>
-            `<li><code>${escapeHtml(result.login ?? result.input)}</code><span class="chip ${GRANT_TONE[result.outcome]}">${escapeHtml(GRANT_LABELS[result.outcome])}</span></li>`,
+            `<li><code>${escapeHtml(result.login ?? result.input)}</code><span class="chip ${GRANT_TONE[result.outcome]}">${escapeHtml(GRANT_LABELS[result.outcome])}</span>${result.usdPerWeek !== undefined ? `<span class="hint">${escapeHtml(ownCapText(result.usdPerWeek))}</span>` : ""}</li>`,
         )
         .join("")}</ul>`
     : "";
   return `<section class="card" id="grant" aria-label="Give free tokens">
 <h2>Give free tokens</h2>
-<p class="lede">Full level for these GitHub accounts, as an admin's choice. Someone who hasn't signed up yet gets it at their first sign-up. Blocked accounts are left alone.</p>
+<p class="lede">Full level for these GitHub accounts, as an admin's choice, with their own weekly dollar cap. Someone who hasn't signed up yet gets both at their first sign-up. Blocked accounts are left alone.</p>
 ${
   csrf
     ? `<form method="post" action="/admin/dashboard/tools#grant">
 <input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="grant">
 <label class="field"><span>GitHub usernames</span><textarea name="logins" rows="3" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="octocat, @hubot&#10;github.com/someone">${escapeHtml(grant.text)}</textarea></label>
 <p class="hint">Separated by spaces, commas or new lines; @name and github.com links work. Up to ${MAX_GRANT_LOGINS} at a time.</p>
+<div class="field"><span>Weekly dollar cap</span><div class="row">${grantUsdInput(state.grantUsd)}</div></div>
+<p class="hint">Their own cap each week, e.g. $3 for a hobbyist, $20 for a serious builder. It never lowers a higher cap they already have; 0 gives Full only.</p>
 <div class="row"><button class="btn primary" type="submit">Give free tokens</button></div>
 ${grant.error ? `<p class="msg err" role="alert">${escapeHtml(grant.error)}</p>` : ""}
 ${results}
@@ -1616,11 +1636,12 @@ function requestsCard(state: ToolsState): string {
   const items = requests.map((request) => {
     const level = request.level === null ? "not signed up" : request.level === "basic" ? "Basic" : request.level === "starter" ? "Starter" : "Full";
     const facts = [level, ageText(request.accountAgeDays), `${request.contributions === null ? "–" : count(request.contributions)} contributions`, plural(request.sessionsThisWeek, "dl session") + " this week"];
+    if (request.personalUsdPerWeek !== null) facts.push(ownCapText(request.personalUsdPerWeek));
     const actions = csrf
       ? `<form method="post" action="/admin/dashboard/tools#requests" class="req-actions">
 <input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="request"><input type="hidden" name="id" value="${request.id}">
 <label class="field"><span class="sr">Note (optional)</span><input type="text" name="note" maxlength="300" placeholder="Note (optional, only you see it)" autocomplete="off"></label>
-<div class="row"><button class="btn primary" type="submit" name="action" value="grant">Grant</button><button class="btn" type="submit" name="action" value="decline">Decline</button></div>
+<div class="row">${grantUsdInput(state.grantUsd, `Weekly dollar cap for ${request.login}`)}<button class="btn primary" type="submit" name="action" value="grant">Grant</button><button class="btn" type="submit" name="action" value="decline">Decline</button></div>
 </form>`
       : "";
     return `<li class="req">
@@ -1633,7 +1654,7 @@ ${actions}
   });
   return `<section class="card" id="requests" aria-label="Requests">
 <h2>Requests</h2>
-<p class="lede">People asking for free tokens from inside dl (/request). Grant gives Full, as an admin's choice, and emails them; Decline sends nothing.</p>
+<p class="lede">People asking for free tokens from inside dl (/request). Grant gives Full, as an admin's choice, with the weekly dollar cap next to it, and emails them; Decline sends nothing.</p>
 ${notice}
 ${requests.length === 0 ? `<p class="hint">No pending requests.</p>` : `<ul class="reqs">${items.join("\n")}</ul>`}
 ${csrf ? "" : `<p class="hint">Sign in at /admin in a browser to answer them.</p>`}

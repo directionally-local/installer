@@ -18,6 +18,8 @@ export const RUNTIME_SETTINGS = {
   weeklyTokens: { kind: "tokens", env: "WEEKLY_TOKENS" },
   /** USD per person per week (real reported cost). */
   perPersonWeeklyUsdCap: { kind: "usd", env: "PER_PERSON_WEEKLY_USD_CAP" },
+  /** The personal weekly USD cap an admin's grant gives (never lowers a higher one); 0 or "none": a grant sets only the level. */
+  grantWeeklyUsdCap: { kind: "usd", env: "GRANT_WEEKLY_USD_CAP" },
   /** USD across everyone but admins, per week. */
   globalWeeklyUsdCap: { kind: "usd", env: "GLOBAL_WEEKLY_USD_CAP" },
   /** USD across everyone but admins, in total. */
