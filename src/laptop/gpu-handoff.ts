@@ -16,13 +16,27 @@ import type { ModelUpErrorType, ModelUpResult } from "../model-first-run.js";
  * - On the relaunch after that, also DL_GPU_RESULT=ok|failed, DL_GPU_ERROR=<error type> (failed
  *   only) and DL_GPU=<the detected GPU as JSON>, so Autopilot says how it went, sends the result
  *   count and doesn't probe the GPUs again.
+ * - When it failed, also (since dl 0.28, all optional):
+ *   DL_GPU_MODEL=<catalog id that was tried, e.g. qwen-old>,
+ *   DL_GPU_REASON=<one short line: the test and why, e.g. "Chat test: the model returned no
+ *   text, thinking mode used all tokens">,
+ *   DL_GPU_LOG=<path of the run log, with vLLM's own log lines>.
+ *   Autopilot shows its failure menu with these (Retry, See what failed, Pick another model,
+ *   Continue without a local model). Autopilot owns that menu: it owns the screens and the
+ *   other choices; dl owns running the setup again when asked.
+ * - DL_GPU_HANDOFF is left out on the last relaunch dl allows (MAX_HANDOFFS), so Autopilot
+ *   doesn't offer a retry dl wouldn't run.
  *
  * Autopilot → dl, the file at DL_GPU_HANDOFF:
  *   {"version":1,"action":"model-up","gpu":{"vendor":"nvidia","model":"NVIDIA RTX 4090","count":2,"vramGb":24}}
- * `gpu` is optional and only passed back. Anything else (no file, another version or action)
- * is ignored, so an older Autopilot that never writes the file just runs as before, and an
- * older dl that never sets DL_GPU_HANDOFF gets Autopilot's screens without the "this machine"
- * model setup (Autopilot then says to run dl model up).
+ * `gpu` is optional and only passed back. Two more optional fields (dl 0.28):
+ *   "model":"qwen-old"  run this catalog model again, without the picker (Retry);
+ *   "pick":true         show the picker, the model that just failed marked (Pick another model).
+ * Anything else (no file, another version or action) is ignored, so an older Autopilot that
+ * never writes the file just runs as before, and an older dl that never sets DL_GPU_HANDOFF
+ * gets Autopilot's screens without the "this machine" model setup (Autopilot then says to run
+ * dl model up). An older dl ignores "model" and "pick" and shows its picker; an older
+ * Autopilot ignores the new variables and says the setup failed, as before.
  */
 
 export const HANDOFF_VERSION = 1;
@@ -39,10 +53,14 @@ export interface ModelUpRequest {
   version: 1;
   action: "model-up";
   gpu?: GpuSummary;
+  /** A catalog id to run again without the picker. */
+  model?: string;
+  /** Show the picker. */
+  pick?: boolean;
 }
 
 /** Relaunches after a model-up request, at most: a loop of failures ends in plain Autopilot. */
-export const MAX_HANDOFFS = 3;
+export const MAX_HANDOFFS = 5;
 
 /** A private directory for the request file; `cleanup` removes it. */
 export async function handoffFile(tmp: string = tmpdir()): Promise<{ path: string; cleanup: () => Promise<void> }> {
@@ -72,7 +90,8 @@ export function parseHandoff(text: string): ModelUpRequest | undefined {
   const object = raw as Record<string, unknown>;
   if (object.version !== HANDOFF_VERSION || object.action !== "model-up") return undefined;
   const gpu = gpuFrom(object.gpu);
-  return { version: 1, action: "model-up", ...(gpu ? { gpu } : {}) };
+  const model = typeof object.model === "string" && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(object.model) ? object.model : undefined;
+  return { version: 1, action: "model-up", ...(gpu ? { gpu } : {}), ...(model ? { model } : {}), ...(object.pick === true ? { pick: true } : {}) };
 }
 
 /** Reads and removes the request, so each one is acted on once. */
@@ -83,11 +102,21 @@ export async function takeHandoff(path: string): Promise<ModelUpRequest | undefi
   return parseHandoff(text);
 }
 
+/** One printable line of at most `max` characters: no control characters, no line breaks. */
+function oneLine(text: string, max: number): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
 /** The environment for the relaunch after a model-up request. */
 export function resultEnv(result: ModelUpResult, gpu: GpuSummary | undefined): Record<string, string> {
+  const reason = result.ok ? "" : oneLine(result.message, 200);
   return {
     DL_GPU_RESULT: result.ok ? "ok" : "failed",
     ...(result.ok ? {} : { DL_GPU_ERROR: result.errorType satisfies ModelUpErrorType }),
     ...(gpu ? { DL_GPU: JSON.stringify(gpu) } : {}),
+    ...(!result.ok && result.model ? { DL_GPU_MODEL: result.model } : {}),
+    ...(reason ? { DL_GPU_REASON: reason } : {}),
+    ...(!result.ok && result.log ? { DL_GPU_LOG: result.log } : {}),
   };
 }

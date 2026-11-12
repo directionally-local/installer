@@ -86,7 +86,7 @@ export interface SessionInput {
   /** The Node.js version plain Autopilot will run on; this process's unless replaced (tests). */
   nodeVersion?: string;
   /** Runs `dl model up` when Autopilot asks for it (gpu-handoff.ts); the real one unless replaced (tests). */
-  modelUp?: (request: ModelUpRequest, io: LaptopIO) => Promise<ModelUpResult>;
+  modelUp?: (request: ModelUpRequest & { avoid?: string }, io: LaptopIO) => Promise<ModelUpResult>;
   /** Where the GPU handoff's private directory is made; the OS temp dir unless replaced (tests). */
   handoffTmp?: string;
 }
@@ -196,6 +196,7 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
   const handoff = await handoffFile(input.handoffTmp).catch(() => undefined);
   try {
     let gpuEnv: Record<string, string> = {};
+    let lastFailed: string | undefined;
     for (let round = 0; ; round++) {
       const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | Error>((resolve) => {
         // AUTOPILOT_LAUNCHED_BY tells Autopilot dl started it, so its own hints (the exit line's
@@ -211,7 +212,8 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
           AUTOPILOT_LAUNCHED_BY: "dl",
           DL_VERSION: dlVersion(),
           DL_UPDATE_COMMAND: DL_UPDATE,
-          ...(handoff ? { DL_GPU_HANDOFF: handoff.path } : {}),
+          // Not on the last relaunch allowed: Autopilot mustn't offer a retry dl wouldn't run.
+          ...(handoff && round < MAX_HANDOFFS ? { DL_GPU_HANDOFF: handoff.path } : {}),
           ...gpuEnv,
         }, referral);
         const started = (input.spawn ?? realSpawn)(autopilot.command, args, env, { cwd: input.cwd });
@@ -230,9 +232,14 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
       }
       // Autopilot asked for a private model on this GPU: dl model up, then Autopilot again,
       // which opens on the new provider (or, when it failed, says so and asks again).
+      // The request may name a model to retry, or ask for the picker with the last failure marked.
       child = undefined;
-      const result = await (input.modelUp ?? realModelUp)(request, io);
-      if (!result.ok && result.errorType !== "cancelled") io.err(`\n  ${c.red("✗")} ${result.message}\n`);
+      const result = await (input.modelUp ?? realModelUp)({ ...request, ...(lastFailed && !request.model ? { avoid: lastFailed } : {}) }, io);
+      if (!result.ok && result.errorType !== "cancelled") {
+        // One short line and where the details are; vLLM's own logs stay in the log file.
+        io.err(`\n  ${c.red("✗")} ${result.message}\n${result.log ? `    ${c.dim(`Log: ${result.log}`)}\n` : ""}`);
+      }
+      lastFailed = result.ok ? undefined : result.model;
       gpuEnv = resultEnv(result, request.gpu);
     }
   } finally {
@@ -243,10 +250,16 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
 }
 
 /** The real first-run model setup, on this terminal (model-first-run.ts). */
-async function realModelUp(_request: ModelUpRequest, io: LaptopIO): Promise<ModelUpResult> {
+async function realModelUp(request: ModelUpRequest & { avoid?: string }, io: LaptopIO): Promise<ModelUpResult> {
   const [{ firstRunModelUp }, { RealSystem }, { TerminalUi }] = await Promise.all([import("../model-first-run.js"), import("../system.js"), import("../ui.js")]);
   const root = typeof process.getuid === "function" && process.getuid() === 0;
-  return firstRunModelUp({ system: new RealSystem(), ui: new TerminalUi(io.out, undefined, io.color === true), prompter: new TtyPrompter(), root });
+  // Keys typed while Autopilot was closing (an extra Enter) or the terminal's late replies to
+  // its queries must not answer dl's first question: the prompts ignore input for a moment.
+  return firstRunModelUp({
+    system: new RealSystem(), ui: new TerminalUi(io.out, undefined, io.color === true), prompter: new TtyPrompter({ settleMs: 300 }), root,
+    ...(request.model && !request.pick ? { model: request.model } : {}),
+    ...(request.avoid ? { avoid: request.avoid } : {}),
+  });
 }
 
 async function startSession(plan: SessionPlan, target: { remote: RemoteServer; reason: TargetReason }, input: SessionInput, io: LaptopIO): Promise<number | undefined> {
