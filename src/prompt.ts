@@ -82,10 +82,17 @@ export class TtyPrompter implements Prompter {
   private readonly open: () => PromptTerminal;
   private readonly color: boolean;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly settleMs: number;
 
-  constructor(options: { open?: () => PromptTerminal; color?: boolean; env?: NodeJS.ProcessEnv } = {}) {
+  /**
+   * `settleMs`: input arriving this soon after a question appears is dropped. Use it right after
+   * another full-screen program exits: keys typed ahead while it closed, or the terminal's late
+   * replies to its queries, would otherwise answer the question before anyone saw it.
+   */
+  constructor(options: { open?: () => PromptTerminal; color?: boolean; env?: NodeJS.ProcessEnv; settleMs?: number } = {}) {
     this.open = options.open ?? openDevTty;
     this.env = options.env ?? process.env;
+    this.settleMs = options.settleMs ?? 0;
     this.color = options.color ?? (!this.env.NO_COLOR && this.env.TERM !== "dumb");
   }
 
@@ -106,7 +113,7 @@ export class TtyPrompter implements Prompter {
       terminal.close();
       return this.numbered(question, options, start);
     }
-    return new ArrowSelect(terminal, question, options, start, this.color).run();
+    return new ArrowSelect(terminal, question, options, start, this.color, this.settleMs).run();
   }
 
   secret(question: string): Promise<string> {
@@ -138,8 +145,9 @@ export class TtyPrompter implements Prompter {
     }
   }
 
-  private ask(question: string, hidden: boolean): Promise<string> {
+  private async ask(question: string, hidden: boolean): Promise<string> {
     const { input, output, close } = this.open();
+    if (this.settleMs > 0) await drain(input, this.settleMs);
     // A styled prompt is "label line\n› ": print the label line ourselves and give readline
     // only the last line, so its redraws (and the hidden-input filter) stay on one line.
     const split = question.lastIndexOf("\n");
@@ -164,6 +172,16 @@ export class TtyPrompter implements Prompter {
   }
 }
 
+/** Reads and drops whatever arrives on `input` for `ms` (typed-ahead keys, late terminal replies). */
+async function drain(input: NodeJS.ReadableStream, ms: number): Promise<void> {
+  const drop = () => {};
+  input.on("data", drop);
+  input.resume();
+  await new Promise((resolve) => setTimeout(resolve, ms));
+  input.off("data", drop);
+  input.pause();
+}
+
 export type Key = "up" | "down" | "enter" | "escape" | "cancel" | "backspace" | "clear" | { text: string };
 
 /** Splits a chunk of terminal input into keys (one chunk can hold several, e.g. a paste). */
@@ -179,7 +197,12 @@ export function parseKeys(chunk: string): Key[] {
     const ch = chunk[i]!;
     if (ch === "\x1b") {
       const next = chunk[i + 1];
-      if (next === "[" || next === "O") {
+      if (next === "]" || next === "P" || next === "_" || next === "^") {
+        // OSC, DCS, APC, PM (a terminal's reply to a query, e.g. its colours): skip to BEL or ESC \.
+        let end = i + 2;
+        while (end < chunk.length && chunk[end] !== "\x07" && !(chunk[end] === "\x1b" && chunk[end + 1] === "\\")) end++;
+        i = chunk[end] === "\x1b" ? end + 1 : end;
+      } else if (next === "[" || next === "O") {
         // CSI / SS3: skip the parameters up to the final byte.
         let end = i + 2;
         while (end < chunk.length && !/[A-Za-z~]/.test(chunk[end]!)) end++;
@@ -229,6 +252,7 @@ class ArrowSelect {
     private readonly options: SelectOption[],
     start: number,
     color: boolean,
+    private readonly settleMs = 0,
   ) {
     this.c = palette(color);
     this.cursor = start;
@@ -259,7 +283,10 @@ class ArrowSelect {
         this.terminal.close();
         outcome();
       };
+      const readyAt = Date.now() + this.settleMs;
       const onData = (chunk: Buffer | string) => {
+        // Input from before the list was on screen long enough to be read isn't an answer.
+        if (Date.now() < readyAt) return;
         try {
           for (const key of parseKeys(typeof chunk === "string" ? chunk : chunk.toString("utf8"))) {
             const result = this.handle(key);
