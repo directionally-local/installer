@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.31.0](https://github.com/directionally-local/installer/compare/v0.30.1...v0.31.0) (2026-11-13)
+
+
+### Features
+
+* catalog entries for DeepSeek V4.1 Flash (1017) and GLM-5.3-Flash ([cdb2249](https://github.com/directionally-local/installer/commit/cdb2249ad9b17ba6a93cae02b499bd363a946d61))
+* detect every GPU and its links, and pick a multi-GPU layout ([5a9bf53](https://github.com/directionally-local/installer/commit/5a9bf53565f28a91908b4b87acb7ed141ac79cd3))
+* dl model up --plan prints the command and memory math, running nothing ([3a47d4f](https://github.com/directionally-local/installer/commit/3a47d4f9d93be0821c10d9910ce04e2256352db2))
+* named model deployments, each pinned to its own GPUs ([2254660](https://github.com/directionally-local/installer/commit/22546608f3a49f34e27f286f1b14027e724cf2fe))
+* preflight GPU memory, host RAM, disk and driver before any download ([e0bd835](https://github.com/directionally-local/installer/commit/e0bd835287f3d8c6eb8d7119c51f48524409dbfc))
+* SGLang as a second engine behind the same interface as vLLM ([82eb6c4](https://github.com/directionally-local/installer/commit/82eb6c4be9d01b8859c3b7efa0e471687e1c9452))
+
 ## [0.30.1](https://github.com/directionally-local/installer/compare/v0.30.0...v0.30.1) (2026-11-13)
 
 
