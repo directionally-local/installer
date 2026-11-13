@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.0](https://github.com/directionally-local/installer/compare/v0.31.0...v0.32.0) (2026-11-13)
+
+
+### Features
+
+* dl model up/update --image runs a catalog entry in another container image ([#243](https://github.com/directionally-local/installer/issues/243)) ([124b53c](https://github.com/directionally-local/installer/commit/124b53c351c130528740a7652fa554a6133c629c))
+
 ## [0.31.0](https://github.com/directionally-local/installer/compare/v0.30.1...v0.31.0) (2026-11-13)
 
 
