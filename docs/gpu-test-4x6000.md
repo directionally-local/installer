@@ -122,7 +122,7 @@ exec bash -l        # picks up dl on PATH
 dl --version | tee $R/facts/dl-version.txt
 ```
 
-**PASS:** prints 0.33.0 or later. If it prints 0.32.0, see "Versions": stop, or do the partial run only if the owner asked for it.
+**PASS:** prints 0.34.0 or later. If it prints anything older, see "Versions": stop.
 
 Then the server install, which sets up Hotcell, Autopilot's sandbox image and the services that `--workspace` needs. It doesn't need a provider key or a GitHub token for this test, so pass an empty answer set, and keep access to this machine (no Tailscale):
 
