@@ -1,5 +1,5 @@
 /**
- * The emails the free tier sends to the people who use it, all four in one place so the copy is
+ * The emails the free tier sends to the people who use it, all of them in one place so the copy is
  * easy to edit. Keep it lowercase everywhere (subjects too), and use no em or en dashes and no
  * other dashes as punctuation: a test checks this file.
  *
@@ -10,22 +10,19 @@
  * When each one goes out is in user-email-send.ts.
  */
 
-export type UserEmailKind = "welcome" | "didnt_start" | "week_80" | "gone_quiet";
+export type UserEmailKind = "welcome" | "welcome_basic" | "welcome_starter" | "welcome_starter_small" | "access_granted" | "didnt_start" | "week_80" | "gone_quiet";
 
 export interface UserEmailCopy {
   subject: string;
   body: string;
 }
 
-export const USER_EMAILS: Record<UserEmailKind, UserEmailCopy> = {
-  // 1. Right after a new sign-up gives their email on the sign-in page.
-  welcome: {
-    subject: "you're in",
-    body: `hey,
+/** The welcome email: no amounts (they are runtime settings) and no level names. */
+const WELCOME_BODY = `hey,
 
 sina here, i build dl.
 
-you're on the free tier now. every week you get gpt-6 and deepseek tokens on me, about $17 worth. it resets every monday.
+you're on the free tier now. every week you get free gpt-6 and lots of deepseek, on me. it resets every monday.
 
 three things worth trying first:
 - open dl in a repo and ask it how the project fits together
@@ -33,6 +30,58 @@ three things worth trying first:
 - ask it to write tests for one file
 
 if anything breaks or feels off, just reply to this. it comes straight to me and i read every one.
+
+there's also a discord where people share what they're building and help each other out: https://discord.gg/zeBnJTgcRK
+
+sina`;
+
+export const USER_EMAILS: Record<UserEmailKind, UserEmailCopy> = {
+  // 1. Right after a new sign-up gives their email on the sign-in page.
+  welcome: {
+    subject: "you're in",
+    body: WELCOME_BODY,
+  },
+
+  // 1b. The same moment, for a new sign-up at the basic level. Publicly there is only Free and
+  // Pro, and by default every free level gets the same allowance: the same email as `welcome`.
+  welcome_basic: {
+    subject: "you're in",
+    body: WELCOME_BODY,
+  },
+
+  // 1c. The same moment, for a new sign-up below the bar with no free tokens.
+  welcome_starter: {
+    subject: "you're in",
+    body: `hey,
+
+sina here, i build dl.
+
+you're signed in. free tokens are for github accounts over a year old with 100+ contributions in the last year, and yours doesn't meet that yet, so for now you'll need your own key: run /provider in dl.
+
+if you're a real dev building something, type /request inside dl and tell me what you're working on, and i'll sort you out with free tokens.
+
+if /request isn't in your dl yet, email contact@directionallylocal.com with your github username instead.
+
+there's also a discord where people share what they're building: https://discord.gg/zeBnJTgcRK
+
+sina`,
+  },
+
+  // 1d. The same moment, for a new sign-up below the bar while Starter has an allowance: the
+  // same email as `welcome` (no level names; the allowance is the free one).
+  welcome_starter_small: {
+    subject: "you're in",
+    body: WELCOME_BODY,
+  },
+
+  // 1e. An admin granted the person's access request (/request in dl).
+  access_granted: {
+    subject: "you're in",
+    body: `hey,
+
+you're in. you now have free tokens: every model, gpt-6 included, and more free usage each week than the standard allowance. it resets every monday.
+
+thanks for telling me what you're building. if anything breaks or feels off, just reply to this.
 
 sina`,
   },
@@ -60,7 +109,7 @@ sina`,
 
 you've used about 80% of this week's free tokens. honestly that's great, it means dl is doing real work for you.
 
-they reset on {resets}. if you need more before then, you can plug in your own key with /provider and keep going, or send a friend your link from /invite and you both get extra tokens.
+they reset on {resets}. if you need more before then, you can plug in your own key with /provider and keep going.
 
 if you're building something cool with it, reply and tell me. i'm curious.
 

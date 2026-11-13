@@ -24,6 +24,14 @@ export const INSTALL_RESULTS = ["ok", "failed"] as const;
 export const INSTALL_VIA = ["home", "invite", "continue", "run"] as const;
 /** The step install.sh was on when it failed (see `stage` in install.sh). */
 export const INSTALL_STEPS = ["preflight", "node", "install_dl", "path", "dl_up"] as const;
+/**
+ * What went wrong within the step, when install.sh knows (`REASON` in install.sh): Android's
+ * Termux, a 32-bit ARM system, musl Linux, missing tar/gzip, a glibc too old for Node.js 24, and
+ * the Node.js download's phases (fetch, download, checksum, unpack, run, unpatched). Stored with
+ * the step as `step:reason` (node:run), so the table and its key are unchanged; a reason that
+ * isn't in this list is dropped and the step is kept, so a newer script is still counted.
+ */
+export const INSTALL_FAIL_REASONS = ["termux", "arm32", "musl", "tools", "glibc", "fetch", "download", "checksum", "unpack", "run", "unpatched"] as const;
 
 /** A body bigger than this is refused unread: a real one is under 200 bytes. */
 export const MAX_TELEMETRY_BYTES = 1024;
@@ -41,8 +49,8 @@ export interface InstallCount {
   /** x.y.z, or "unknown" when the install failed before dl was there to ask. */
   dlVersion: string;
   result: (typeof INSTALL_RESULTS)[number];
-  /** "" for an install that finished, or failed without saying where. */
-  failedStep: (typeof INSTALL_STEPS)[number] | "";
+  /** "" for an install that finished, or failed without saying where; `step:reason` when it said why. */
+  failedStep: (typeof INSTALL_STEPS)[number] | `${(typeof INSTALL_STEPS)[number]}:${(typeof INSTALL_FAIL_REASONS)[number]}` | "";
   via: (typeof INSTALL_VIA)[number];
 }
 
@@ -68,7 +76,7 @@ export function cleanDownload(input: unknown): DownloadCount | string {
 /** One finished install, every field allowlisted, or a reason it was refused. Other keys are ignored. */
 export function cleanInstall(input: unknown): InstallCount | string {
   const raw = object(input);
-  if (!raw) return "Send {os, arch, mode, dlVersion, result, failedStep?, via}.";
+  if (!raw) return "Send {os, arch, mode, dlVersion, result, failedStep?, failedReason?, via}.";
   const os = oneOf(INSTALL_OS, raw.os);
   if (!os) return `os is one of ${INSTALL_OS.join(", ")}.`;
   const arch = oneOf(INSTALL_ARCH, raw.arch);
@@ -89,7 +97,8 @@ export function cleanInstall(input: unknown): InstallCount | string {
     const step = oneOf(INSTALL_STEPS, raw.failedStep);
     if (!step) return `failedStep is one of ${INSTALL_STEPS.join(", ")}.`;
     if (result === "ok") return "failedStep goes only with result failed.";
-    failedStep = step;
+    const reason = oneOf(INSTALL_FAIL_REASONS, raw.failedReason);
+    failedStep = reason ? `${step}:${reason}` : step;
   }
   return { os, arch, mode, dlVersion, result, failedStep, via };
 }

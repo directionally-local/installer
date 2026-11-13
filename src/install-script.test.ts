@@ -95,7 +95,7 @@ describe("install.sh", () => {
  * Node that is patched or not, npm installing a fake dl into --prefix, and curl serving a
  * Node.js download from `dist`. DL_TTY names a missing file, so there's no terminal to start dl in.
  */
-function laptopInstall(options: { os?: "Darwin" | "Linux"; uid?: number; nodePatched?: boolean; shell?: string; env?: Record<string, string>; dist?: (dir: string) => void; npmFails?: boolean; npmOutput?: string; terminal?: boolean; extraPath?: string | ((home: string) => string); home?: (home: string) => void; dlExit?: number } = {}) {
+function laptopInstall(options: { os?: "Darwin" | "Linux"; machine?: string; android?: boolean; getconf?: { LONG_BIT?: string; GNU_LIBC_VERSION?: string }; uid?: number; nodePatched?: boolean; shell?: string; env?: Record<string, string>; dist?: (dir: string) => void; npmFails?: boolean; npmOutput?: string; terminal?: boolean; extraPath?: string | ((home: string) => string); home?: (home: string) => void; dlExit?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dl-install-laptop-"));
   const bin = join(dir, "stubs");
   const home = join(dir, "home");
@@ -106,7 +106,10 @@ function laptopInstall(options: { os?: "Darwin" | "Linux"; uid?: number; nodePat
     chmodSync(join(where, name), 0o755);
   };
   stub("id", `echo ${options.uid ?? 501}`);
-  stub("uname", `case "$1" in -m) echo arm64 ;; *) echo ${options.os ?? "Darwin"} ;; esac`);
+  stub("uname", `case "$1" in -m) echo ${options.machine ?? "arm64"} ;; -o) echo ${options.android ? "Android" : "GNU/Linux"} ;; *) echo ${options.os ?? "Darwin"} ;; esac`);
+  // What this system's libc says: a 64-bit one with a new enough glibc unless a test says otherwise.
+  const getconf = { LONG_BIT: "64", GNU_LIBC_VERSION: "glibc 2.39", ...options.getconf };
+  stub("getconf", `case "$1" in LONG_BIT) echo ${getconf.LONG_BIT} ;; GNU_LIBC_VERSION) echo "${getconf.GNU_LIBC_VERSION}" ;; *) exit 1 ;; esac`);
   // A Node: -e is the CVE check; anything else runs dl's entry, which answers --version.
   const node = (patched: boolean) => `case "$1" in -e) exit ${patched ? 0 : 1} ;; -v) echo v24.22.1 ;; *) [ "$2" = --version ] && echo 0.10.0 || { echo "dl $* in $(pwd)" >> "${dir}/started.log"; echo "\${DL_REFERRAL-unset}" >> "${dir}/referral.log"; exit ${options.dlExit ?? 0}; } ;; esac`;
   stub("node", node(options.nodePatched ?? true));
@@ -142,15 +145,16 @@ if [ -n "$head" ]; then printf 'HTTP/2 200\\r\\ncontent-length: %s\\r\\n\\r\\n' 
 }
 
 /** A Node.js 24 download and its SHASUMS256.txt, as nodejs.org lays them out. */
-function nodeDist(dist: string, options: { corrupt?: boolean } = {}): void {
-  const name = "node-v24.22.1-darwin-arm64";
+function nodeDist(dist: string, options: { corrupt?: boolean; platform?: string; cantRun?: string } = {}): void {
+  const name = `node-v24.22.1-${options.platform ?? "darwin-arm64"}`;
   const build = join(dist, "build");
   mkdirSync(join(build, name, "bin"), { recursive: true });
   const write = (file: string, body: string) => {
     writeFileSync(join(build, name, "bin", file), `#!/bin/sh\n${body}\n`);
     chmodSync(join(build, name, "bin", file), 0o755);
   };
-  write("node", 'case "$1" in -e) exit 0 ;; -v) echo v24.22.1 ;; *) echo 0.10.0 ;; esac');
+  // cantRun: a Node that can't start here, saying so the way the system does.
+  write("node", options.cantRun ? `echo "${options.cantRun}" >&2; exit 127` : 'case "$1" in -e) exit 0 ;; -v) echo v24.22.1 ;; *) echo 0.10.0 ;; esac');
   // What dl never uses, which the install drops: C headers and docs.
   mkdirSync(join(build, name, "include", "node"), { recursive: true });
   writeFileSync(join(build, name, "include", "node", "node.h"), "");
@@ -487,6 +491,50 @@ describe("install.sh on a laptop", () => {
     assert.doesNotMatch(failed.stderr, /npm http fetch/, "the error, without npm's progress lines");
   });
 
+  it("on Linux without a patched Node, gets nodejs.org's Linux build for this CPU", () => {
+    const result = run({ os: "Linux", machine: "aarch64", nodePatched: false, dist: (dist) => nodeDist(dist, { platform: "linux-arm64" }) });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.curl ?? "", /nodejs\.example\/dist\/node-v24\.22\.1-linux-arm64\.tar\.(xz|gz)/);
+    assert.match(result.stdout, /ok Installing Node\.js 24: v24\.22\.1/);
+  });
+
+  it("stops before any download on Android (Termux), 32-bit ARM, or a glibc too old for Node.js 24, saying what to do", () => {
+    const dist = (d: string) => nodeDist(d, { platform: "linux-arm64" });
+    const termux = run({ os: "Linux", machine: "aarch64", nodePatched: false, dist, env: { TERMUX_VERSION: "0.118.1", PREFIX: "/data/data/com.termux/files/usr" } });
+    assert.equal(termux.status, 1);
+    assert.match(termux.stderr, /Android \(Termux\) can't run dl directly[\s\S]*pkg install proot-distro && proot-distro install ubuntu && proot-distro login ubuntu/);
+    assert.equal(run({ os: "Linux", machine: "aarch64", android: true, dist }).status, 1, "Termux's uname says Android");
+    // A Raspberry Pi 4 or 5 on 32-bit Raspberry Pi OS: a 64-bit kernel, so uname says aarch64.
+    const pi = run({ os: "Linux", machine: "aarch64", nodePatched: false, dist, getconf: { LONG_BIT: "32" } });
+    assert.equal(pi.status, 1);
+    assert.match(pi.stderr, /64-bit processor running a 32-bit system[\s\S]*64-bit Raspberry Pi OS/);
+    for (const machine of ["armv7l", "armv6l", "armv8l"]) {
+      const arm = run({ os: "Linux", machine, nodePatched: false, dist });
+      assert.equal(arm.status, 1);
+      assert.match(arm.stderr, new RegExp(`32-bit ARM \\(${machine}\\)[\\s\\S]*64-bit Raspberry Pi OS`));
+    }
+    const old = run({ os: "Linux", machine: "aarch64", nodePatched: false, dist, getconf: { GNU_LIBC_VERSION: "glibc 2.27" } });
+    assert.equal(old.status, 1);
+    assert.match(old.stderr, /Node\.js 24 needs glibc 2\.28 or newer, and this system has 2\.27/);
+    for (const result of [termux, pi, old]) {
+      assert.doesNotMatch(result.curl ?? "", /nodejs\.example/, "nothing downloaded");
+      assert.ok(!existsSync(join(result.home, ".directionallylocal", "node")));
+    }
+    // A patched Node already on PATH is used as before: the glibc check is only for the download.
+    assert.equal(run({ os: "Linux", machine: "aarch64", getconf: { GNU_LIBC_VERSION: "glibc 2.27" } }).status, 0);
+  });
+
+  it("when the Node.js download can't start here, says why and how to fix it, and doesn't keep it", () => {
+    const glibc = run({ os: "Linux", machine: "aarch64", nodePatched: false, dist: (d) => nodeDist(d, { platform: "linux-arm64", cantRun: "node: /lib/aarch64-linux-gnu/libc.so.6: version GLIBC_2.28 not found (required by node)" }) });
+    assert.equal(glibc.status, 1);
+    assert.match(glibc.stderr, /Node\.js 24 doesn't run on this system: it needs glibc 2\.28 or newer/);
+    const other = run({ os: "Linux", machine: "aarch64", nodePatched: false, dist: (d) => nodeDist(d, { platform: "linux-arm64", cantRun: "sh: 1: node: not found" }) });
+    assert.equal(other.status, 1);
+    assert.match(other.stderr, /Node\.js 24 from nodejs\.org doesn't run on this computer \(Linux aarch64: node: not found\)\. Install Node\.js 22\.23\.4\+ or 24\.22\.1\+ yourself/);
+    assert.doesNotMatch(other.stderr, /CVE/, "not mistaken for a Node without the fix");
+    for (const result of [glibc, other]) assert.ok(!existsSync(join(result.home, ".directionallylocal", "node")), "the Node that can't run is removed");
+  });
+
   it("DL_MODE must be server or laptop", () => {
     const result = run({ env: { DL_MODE: "desktop" } });
     assert.equal(result.status, 1);
@@ -529,6 +577,25 @@ describe("install.sh: the anonymous install count", () => {
     const root = run({ uid: 0 });
     assert.equal(root.status, 1);
     assert.equal(root.counts()[0]!.body.failedStep, "preflight");
+  });
+
+  it("says why a step failed, when it knows, as one word from a fixed list", () => {
+    const why = (options: Parameters<typeof laptopInstall>[0]) => {
+      const result = run({ os: "Linux", machine: "aarch64", nodePatched: false, ...options });
+      assert.equal(result.status, 1);
+      const body = result.counts()[0]!.body;
+      return [body.failedStep, body.failedReason];
+    };
+    const dist = (d: string) => nodeDist(d, { platform: "linux-arm64" });
+    assert.deepEqual(why({ dist, env: { TERMUX_VERSION: "0.118.1" } }), ["preflight", "termux"]);
+    assert.deepEqual(why({ dist, getconf: { LONG_BIT: "32" } }), ["preflight", "arm32"]);
+    assert.deepEqual(why({ dist, getconf: { GNU_LIBC_VERSION: "glibc 2.17" } }), ["node", "glibc"]);
+    assert.deepEqual(why({ dist: (d) => nodeDist(d, { platform: "linux-arm64", corrupt: true }) }), ["node", "checksum"]);
+    assert.deepEqual(why({ dist: (d) => nodeDist(d, { platform: "linux-arm64", cantRun: "cannot execute binary file" }) }), ["node", "run"]);
+    assert.deepEqual(why({}), ["node", "fetch"], "nodejs.org not reachable");
+    // A failure it has no word for sends the step alone.
+    const npm = run({ npmFails: true });
+    assert.equal(npm.counts()[0]!.body.failedReason, undefined);
   });
 
   it("maps the progress phases onto the same steps: the Node.js download is node, npm's phases are install_dl", () => {

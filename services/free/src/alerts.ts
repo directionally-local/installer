@@ -100,6 +100,44 @@ export function totalSpendAlert(spentUsd: number, capUsd: number, threshold: num
   };
 }
 
+/** All-time spend milestones that send an email, in dollars across every provider. */
+export const SPEND_MILESTONES_USD = [50, 100, 200, 300, 500, 750, 1000, 1500, 2000, 2500, 3000, 4000, 5000, 6000, 7000] as const;
+
+/** The highest milestone at or below `totalUsd`, if it hasn't been announced yet. */
+export function milestoneCrossed(totalUsd: number, sent: ReadonlySet<number>): { milestone: number; mark: number[] } | undefined {
+  const reached = SPEND_MILESTONES_USD.filter((m) => totalUsd >= m);
+  const fresh = reached.filter((m) => !sent.has(m));
+  if (fresh.length === 0) return undefined;
+  return { milestone: reached[reached.length - 1]!, mark: fresh };
+}
+
+/** A spend milestone: the total, where it went, this week's spend and who spent most this week. */
+export function spendMilestoneAlert(input: {
+  milestone: number;
+  totalUsd: number;
+  openaiUsd: number;
+  luminalUsd: number;
+  cashUsd: number;
+  weekUsd: number;
+  top: Array<{ login: string; usd: number }>;
+}): Alert {
+  const top = input.top.length ? ` Top this week: ${input.top.map((t) => `${t.login} ${dollars(t.usd)}`).join(", ")}.` : "";
+  const cash = input.cashUsd > 0 ? `, OpenRouter cash ${dollars(input.cashUsd)}` : "";
+  return {
+    subject: `dl free tier: ${dollars(input.milestone)} spent so far`,
+    text: `dl free tier: ${dollars(input.totalUsd)} spent in total (OpenAI ${dollars(input.openaiUsd)}, Luminal ${dollars(input.luminalUsd)}${cash}). This week: ${dollars(input.weekUsd)}.${top}`,
+  };
+}
+
+/** A new access request (/request in dl): who, and how many wait. Never what they wrote. */
+export function accessRequestAlert(login: string, pending: number): Alert {
+  return {
+    subject: `dl free tier: new access request from @${login}`,
+    text: `dl free tier: new access request from @${login} (${pending} pending). Answer it on the admin Tools tab.`,
+    footer: 'Sent for every new access request. Set accessRequestAlerts to "daily" for one line in the daily digest instead, or "off".',
+  };
+}
+
 export function pauseAlert(paused: boolean, login: string): Alert {
   return paused
     ? { subject: "dl free tier: free tokens paused (kill switch)", text: `dl free tier: free tokens paused for everyone by ${login} (kill switch).` }
@@ -190,7 +228,7 @@ export interface LuminalWindow {
 export interface ServingContext {
   serving: "openai" | "luminal" | "openrouter" | "none";
   openRouterConfigured: boolean;
-  /** The dashboard's upstream switch: <base>/admin#upstream. */
+  /** The dashboard's upstream switch: <base>/admin?view=full#upstream. */
   switchUrl: string;
 }
 
@@ -338,6 +376,8 @@ export interface DailyDigest {
   credit: { balanceUsd: number; leftUsd: number };
   queueWaiting: number;
   paused: boolean;
+  /** Only with accessRequestAlerts "daily": requests made that day (logins, at most DIGEST_MAX_LOGINS) and how many wait now. */
+  accessRequests?: { count: number; logins: string[]; pending: number };
 }
 
 /** Requests and tokens of people who aren't admins; dollars of free usage only. */
@@ -406,6 +446,11 @@ export function dailyDigestAlert(digest: DailyDigest): Alert {
   lines.push(`  Sign-ups: ${count(week.signups)}`, `  Active people: ${count(week.active)}`, ...usageLines(week.usage, "  ", `Free credit spent: ${dollars(week.usage.freeCreditUsd)}${budget}`));
   lines.push(`  Paid: ${payments(week.payments)}`);
   lines.push("", `Queue: ${count(digest.queueWaiting)} waiting`, `Free tokens: ${digest.paused ? "PAUSED (kill switch)" : "on"}`);
+  const asks = digest.accessRequests;
+  if (asks) {
+    lines.push(`Access requests: ${count(asks.count)} new, ${count(asks.pending)} waiting for an answer${asks.pending > 0 ? " (answer them on the admin home screen)" : ""}`);
+    if (asks.logins.length > 0) lines.push(`  ${asks.logins.map((login) => `@${login}`).join(", ")}${asks.count > asks.logins.length ? ` and ${count(asks.count - asks.logins.length)} more` : ""}`);
+  }
   return {
     subject: `dl free tier: daily, ${digest.date}: ${count(signups.count)} new, ${count(digest.active)} active`,
     text: lines.join("\n"),

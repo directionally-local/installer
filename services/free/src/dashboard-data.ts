@@ -13,7 +13,8 @@ import { DAY_MS, weekStart } from "./week.js";
  * install scripts served and installs finished, which can't be joined to people (telemetry.ts).
  *
  * The upstream section reads `upstream_daily` and `upstream_timings` instead: per upstream,
- * counts, tokens, dollars and milliseconds, with no person attached (admins included there).
+ * counts, tokens, dollars and milliseconds, with no person attached (admins included there),
+ * and `upstream_people` for the people each upstream served (ids and days only, admins left out).
  *
  * Admins are left out of every number: anyone in ADMIN_GITHUB_IDS (passed in) and anyone
  * admitted as an admin. Their requests aren't rolled up in the first place.
@@ -24,11 +25,37 @@ import { DAY_MS, weekStart } from "./week.js";
 
 /** Tables and columns the dashboard may read. Everything is counts, tokens, cost, time or who. */
 export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
-  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd", "paid_cost_usd", "credit_usd"],
-  people: ["github_id", "login", "admitted_at", "admitted_via"],
+  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd", "paid_cost_usd", "credit_usd", "sessions", "deepseek_cost_usd"],
+  // Levels and the GitHub signals behind them, numbers only (the Starter accounts table).
+  people: [
+    "github_id",
+    "login",
+    // Only to leave blocked accounts out of the daily cohorts.
+    "status",
+    "admitted_at",
+    "admitted_via",
+    "level",
+    "level_reason",
+    // Whether the person had free tokens at sign-up: retention counts only people who could use dl.
+    "signup_tokens",
+    "account_age_days",
+    "public_repos",
+    "followers",
+    "contributions",
+    "restricted_contributions",
+    "github_created_day",
+    // The creation-batch flag: a flagged Starter account has no allowance (the limits table).
+    "batch_flag",
+    "active_weeks",
+    "outside_contributions",
+    "oldest_repo_at",
+    "social",
+  ],
   grants: ["github_id", "weekly_tokens", "weekly_usd"],
   spend_weeks: ["week_start", "usd", "tokens", "requests", "admin_usd", "admin_tokens", "admin_requests", "paid_usd", "paid_tokens", "paid_requests", "credit_usd", "free_credit_usd", "openai_credit_usd", "openai_free_credit_usd"],
-  upstream_daily: ["day", "upstream", "requests", "errors", "prompt_tokens", "cached_tokens", "cash_usd", "credit_usd"],
+  upstream_daily: ["day", "upstream", "requests", "errors", "prompt_tokens", "cached_tokens", "completion_tokens", "cash_usd", "credit_usd"],
+  // Who an upstream served, first and last day: ids and days only, for the people per upstream.
+  upstream_people: ["upstream", "github_id", "first_day", "last_day"],
   upstream_timings: ["at", "upstream", "ttfb_ms", "ttft_ms"],
   settings: ["key", "value"],
   queue: ["github_id", "queued_at", "admitted_at", "admitted_how"],
@@ -38,6 +65,8 @@ export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   download_daily: ["day", "route", "client", "downloads"],
   install_daily: ["day", "os", "arch", "mode", "dl_version", "result", "failed_step", "via", "installs"],
   payments: ["github_id", "kind", "amount_cents", "at"],
+  // Days someone was refused free tokens below the bar: the sign-up funnel. Ids and days only.
+  refused_days: ["github_id", "day"],
 };
 
 /** Pro counts as subscribed this long past its period end (as in account-object.ts). */
@@ -49,6 +78,10 @@ export const WEEKS_SHOWN = 8;
 export const COHORT_WEEKS = 12;
 /** Retention is shown for these weeks after the sign-up week (week 0). */
 export const RETENTION_OFFSETS = [1, 2, 4] as const;
+/** Daily retention: the last this many sign-up days (UTC days with at least one sign-up). */
+export const DAILY_COHORTS = 21;
+/** Daily retention is shown for these days after the sign-up day (day 0). */
+export const RETENTION_DAYS = [0, 1, 2, 3, 4, 5, 6, 7, 14] as const;
 /** Days of activity in one week that make someone a regular. */
 export const REGULAR_DAYS = 3;
 /**
@@ -63,6 +96,11 @@ export interface DashboardLimits {
   weeklyTokens: number;
   /** null: no per-person spend cap. */
   weeklyUsd: number | null;
+  /**
+   * The smaller levels' allowances, so the limits table holds basic and Starter accounts to their
+   * own (a batch-flagged Starter account has none). Without them everyone is held to Full's.
+   */
+  levels?: { basicTokens: number; basicUsd: number | null; starterTokens: number; starterUsd: number | null };
 }
 
 export interface WeekActive {
@@ -77,6 +115,29 @@ export interface Cohort {
   weekStart: number;
   size: number;
   /** One entry per RETENTION_OFFSETS; null when that week hasn't finished yet. */
+  retained: Array<{ offset: number; active: number; share: number } | null>;
+}
+
+/**
+ * One sign-up day's funnel: everyone admitted that UTC day (admins and blocked accounts left
+ * out), how many had free tokens at sign-up (Full or basic, an admin's grant, or Starter with an
+ * allowance), how many were refused (no free tokens), and how many of those still opened dl that
+ * day (a dl session, or a refused chat request).
+ */
+export interface SignupFunnelDay {
+  day: number;
+  signedUp: number;
+  gotTokens: number;
+  refused: number;
+  refusedOpened: number;
+}
+
+/** People admitted on one UTC day, and who made a request on given days after it. */
+export interface DailyCohort {
+  /** The sign-up day, as Unix ms (00:00 UTC). */
+  day: number;
+  size: number;
+  /** One entry per RETENTION_DAYS; null until that day has ended (UTC). */
   retained: Array<{ offset: number; active: number; share: number } | null>;
 }
 
@@ -155,11 +216,20 @@ export interface PaidView {
   paidRequestsWeek: number;
 }
 
-/** One upstream over one window (today, UTC, or this Monday-to-Sunday week). Admins included. */
+/**
+ * One upstream over one window (today, UTC, this Monday-to-Sunday week, all time, or the Health
+ * view's last N days). Admins included, except in `users`.
+ */
 export interface UpstreamStats {
   upstream: "openai" | "luminal" | "openrouter";
-  window: "today" | "week";
+  window: UpstreamWindowName;
   requests: number;
+  /** Distinct people served (admins left out); null where not counted (the Health view). */
+  users: number | null;
+  /** Prompt tokens (cached ones included), the cached share of them, and completion tokens. */
+  promptTokens: number;
+  cachedTokens: number;
+  completionTokens: number;
   /** Requests the upstream failed: 429, 5xx, a timeout, a network error or a failed stream. */
   errors: number;
   medianTtftMs: number | null;
@@ -173,6 +243,11 @@ export interface UpstreamStats {
 }
 
 export const UPSTREAM_NAMES = ["openai", "luminal", "openrouter"] as const;
+
+export type UpstreamWindowName = "today" | "week" | "all_time" | `${number}d`;
+
+/** All upstreams together over one window: sums, and people counted once however many upstreams served them. */
+export type UpstreamTotal = Omit<UpstreamStats, "upstream" | "medianTtftMs" | "p90TtftMs" | "medianTtfbMs">;
 
 export interface FunnelRow {
   /** Monday of the sign-up week; null for the all-time row. */
@@ -218,6 +293,10 @@ export interface DashboardData {
   currentWeek: number;
   weeklyActive: WeekActive[];
   cohorts: Cohort[];
+  /** Daily retention: the last DAILY_COHORTS sign-up days, newest first. Only people who had free tokens at sign-up. */
+  dailyCohorts: DailyCohort[];
+  /** The same sign-up days' funnel (everyone who signed up), newest first. */
+  signupFunnel: SignupFunnelDay[];
   weeklyCost: WeekCost[];
   topWeek: number;
   top: TopSpender[];
@@ -230,8 +309,12 @@ export interface DashboardData {
   funnel: FunnelRow[];
   /** Downloads → installs → sign-ups → first request → active, per day and per week. */
   installFunnel: InstallFunnel;
-  /** Per upstream, today and this week. */
+  /** Per upstream, today, this week and all time (timings only today and this week: they're kept 15 days). */
   upstreams: UpstreamStats[];
+  /** The same windows, all upstreams together. */
+  upstreamTotals: UpstreamTotal[];
+  /** The first UTC day with a request (Unix ms), for "All time, since"; null before any. */
+  upstreamsSince: number | null;
 }
 
 /** The slice of `ctx.storage.sql` the queries need. */
@@ -345,7 +428,11 @@ export function dashboardData(
     .toArray()
     .map((row) => ({ githubId: row.github_id, login: row.login, requests: row.requests, tokens: row.tokens, costUsd: row.cost, activeDays: row.days }));
 
-  // Who reached their allowance this week or last, and on which day: running totals per week.
+  // Who reached their allowance this week or last, and on which day: running totals per week,
+  // against each person's own level (basic with its tokens off is Starter, as app.ts serves it).
+  // The dollars are GPT-6's (cost less DeepSeek's part), against the GPT-6 budget: the one a
+  // personal cap sets and the one that runs out first.
+  const levels = input.limits.levels;
   const limitRows = sql
     .exec<{
       week: number;
@@ -361,14 +448,20 @@ export function dashboardData(
       `WITH running AS (
          SELECT github_id, day, ${WEEK_OF_DAY} AS week,
                 SUM(charged_tokens) OVER (PARTITION BY github_id, ${WEEK_OF_DAY} ORDER BY day) AS tokens,
-                SUM(cost_usd) OVER (PARTITION BY github_id, ${WEEK_OF_DAY} ORDER BY day) AS cost
+                SUM(cost_usd - deepseek_cost_usd) OVER (PARTITION BY github_id, ${WEEK_OF_DAY} ORDER BY day) AS cost
          FROM daily_activity WHERE day >= ? AND requests > 0 AND ${notAdmin("github_id")}),
+       served AS (
+         SELECT r.github_id AS github_id, r.day AS day, r.week AS week, r.tokens AS tokens, r.cost AS cost, g.weekly_tokens AS grant_tokens, g.weekly_usd AS grant_usd,
+                CASE WHEN ? = 0 OR p.level IS NULL OR p.level = 'full' THEN 'full' WHEN p.level = 'basic' AND ? > 0 THEN 'basic'
+                     WHEN p.batch_flag = 1 THEN 'none' ELSE 'starter' END AS level
+         FROM running r LEFT JOIN grants g ON g.github_id = r.github_id LEFT JOIN people p ON p.github_id = r.github_id),
        limited AS (
-         SELECT r.github_id AS github_id, r.day AS day, r.week AS week, r.tokens AS tokens, r.cost AS cost,
-                COALESCE(g.weekly_tokens, ?) AS token_limit, COALESCE(g.weekly_usd, ?) AS usd_limit
-         FROM running r LEFT JOIN grants g ON g.github_id = r.github_id)
+         SELECT github_id, day, week, tokens, cost,
+                CASE level WHEN 'basic' THEN ? WHEN 'starter' THEN ? WHEN 'none' THEN 0 ELSE COALESCE(grant_tokens, ?) END AS token_limit,
+                COALESCE(grant_usd, CASE level WHEN 'basic' THEN ? WHEN 'starter' THEN ? WHEN 'none' THEN NULL ELSE ? END) AS usd_limit
+         FROM served)
        SELECT l.week AS week, l.github_id AS github_id, p.login AS login,
-              MIN(CASE WHEN l.tokens >= l.token_limit * ${TOKEN_LIMIT_SHARE} THEN l.day END) AS token_day,
+              MIN(CASE WHEN l.token_limit > 0 AND l.tokens >= l.token_limit * ${TOKEN_LIMIT_SHARE} THEN l.day END) AS token_day,
               MIN(CASE WHEN l.cost >= l.usd_limit THEN l.day END) AS usd_day,
               MAX(l.tokens) AS tokens, MAX(l.cost) AS cost, MAX(l.token_limit) AS token_limit, MAX(l.usd_limit) AS usd_limit
        FROM limited l LEFT JOIN people p ON p.github_id = l.github_id
@@ -376,7 +469,13 @@ export function dashboardData(
        HAVING token_day IS NOT NULL OR usd_day IS NOT NULL`,
       currentWeekDay - 7,
       admins,
+      levels ? 1 : 0,
+      levels?.basicTokens ?? 0,
+      levels?.basicTokens ?? 0,
+      levels?.starterTokens ?? 0,
       input.limits.weeklyTokens,
+      levels?.basicUsd ?? null,
+      levels?.starterUsd ?? null,
       input.limits.weeklyUsd,
     )
     .toArray();
@@ -493,7 +592,10 @@ export function dashboardData(
     paidRequestsWeek: paidWeek?.n ?? 0,
   };
 
-  const upstreams = upstreamStats(sql, input.now);
+  const upstreamWindows = fullViewWindows(input.now);
+  const upstreams = upstreamStats(sql, input.now, upstreamWindows, admins);
+  const upstreamTotals = upstreamTotalStats(sql, upstreamWindows, admins);
+  const firstUpstreamDay = sql.exec<{ day: number | null }>("SELECT MIN(day) AS day FROM upstream_daily").toArray()[0]?.day ?? null;
   // Weekly actives by requests (3+ request days) and each person's first request day, from the
   // scans above, so the install funnel doesn't read daily_activity again.
   const requestRegulars = new Map<number, number>();
@@ -504,6 +606,8 @@ export function dashboardData(
   return {
     now: input.now,
     upstreams,
+    upstreamTotals,
+    upstreamsSince: firstUpstreamDay === null ? null : toMs(firstUpstreamDay),
     currentWeek,
     queue,
     paid,
@@ -512,12 +616,117 @@ export function dashboardData(
     installFunnel,
     weeklyActive,
     cohorts,
+    dailyCohorts: dailyCohorts(sql, input.now, admins),
+    signupFunnel: signupFunnel(sql, input.now, admins),
     weeklyCost,
     topWeek: toMs(topWeekDay),
     top,
     limitHits,
     people: { admitted, activeThisWeek: weeklyActive[weeklyActive.length - 1]?.active ?? 0 },
   };
+}
+
+/**
+ * Whether a person had free tokens at sign-up, as SQL over `people p`. For sign-ups from before
+ * `signup_tokens` was stored, the current level stands in: anyone not Starter counts.
+ */
+const HAD_TOKENS = "COALESCE(p.signup_tokens, p.level != 'starter')";
+
+/**
+ * Daily retention: people who could use dl (they had free tokens at sign-up: Full, basic, an
+ * admin's grant, or Starter with an allowance) grouped by the UTC day they were admitted (the
+ * last DAILY_COHORTS such days), admins and blocked accounts left out, and how many of them made
+ * at least one request on each of RETENTION_DAYS days after it. People refused free tokens are
+ * left out: they can't make a request, so they would only dilute the share. A day is null until
+ * it has ended (UTC), so today's partial numbers never show or count in the averages. `admins`:
+ * ADMIN_GITHUB_IDS as a JSON array. Two indexed reads.
+ */
+export function dailyCohorts(sql: Sql, now: number, admins: string): DailyCohort[] {
+  const today = Math.floor(now / DAY_MS);
+  const counted = `p.status != 'blocked' AND ${HAD_TOKENS} = 1 AND ${notAdmin("p.github_id")}`;
+  const sizes = sql
+    .exec<{ day: number; n: number }>(
+      `SELECT p.admitted_at / ${DAY_MS} AS day, COUNT(*) AS n FROM people p WHERE p.admitted_at < ? AND ${counted} GROUP BY 1 ORDER BY 1 DESC LIMIT ?`,
+      (today + 1) * DAY_MS,
+      admins,
+      DAILY_COHORTS,
+    )
+    .toArray();
+  if (sizes.length === 0) return [];
+  const first = sizes[sizes.length - 1]!.day;
+  const last = RETENTION_DAYS[RETENTION_DAYS.length - 1]!;
+  const active = new Map<string, number>();
+  // CROSS JOIN keeps people as the outer loop: the few recent sign-ups, each looked up in
+  // daily_activity by (github_id, day), instead of a scan of every person's every day.
+  for (const row of sql
+    .exec<{ cohort: number; after: number; n: number }>(
+      `SELECT p.admitted_at / ${DAY_MS} AS cohort, d.day - p.admitted_at / ${DAY_MS} AS after, COUNT(*) AS n
+       FROM people p CROSS JOIN daily_activity d ON d.github_id = p.github_id AND d.day >= p.admitted_at / ${DAY_MS} AND d.day <= p.admitted_at / ${DAY_MS} + ${last}
+       WHERE p.admitted_at >= ? AND p.admitted_at < ? AND d.requests > 0 AND ${counted} GROUP BY 1, 2`,
+      first * DAY_MS,
+      (today + 1) * DAY_MS,
+      admins,
+    )
+    .toArray()) {
+    active.set(`${row.cohort}:${row.after}`, row.n);
+  }
+  return sizes.map((cohort) => ({
+    day: cohort.day * DAY_MS,
+    size: cohort.n,
+    retained: RETENTION_DAYS.map((offset) => {
+      if (cohort.day + offset >= today) return null;
+      const n = active.get(`${cohort.day}:${offset}`) ?? 0;
+      return { offset, active: n, share: n / cohort.n };
+    }),
+  }));
+}
+
+/**
+ * The sign-up funnel per UTC sign-up day (the last DAILY_COHORTS days with any sign-up, newest
+ * first): see SignupFunnelDay. "Opened dl" is a dl session or a refused request on the sign-up day.
+ */
+export function signupFunnel(sql: Sql, now: number, admins: string): SignupFunnelDay[] {
+  const today = Math.floor(now / DAY_MS);
+  const counted = `p.status != 'blocked' AND ${notAdmin("p.github_id")}`;
+  // The oldest of the last DAILY_COHORTS sign-up days first, so the funnel reads only those days.
+  const days = sql
+    .exec<{ day: number }>(`SELECT DISTINCT p.admitted_at / ${DAY_MS} AS day FROM people p WHERE p.admitted_at < ? AND ${counted} ORDER BY 1 DESC LIMIT ?`, (today + 1) * DAY_MS, admins, DAILY_COHORTS)
+    .toArray();
+  if (days.length === 0) return [];
+  const first = days[days.length - 1]!.day;
+  return sql
+    .exec<{ day: number; signed_up: number; got: number; opened: number | null }>(
+      `SELECT p.admitted_at / ${DAY_MS} AS day, COUNT(*) AS signed_up, SUM(${HAD_TOKENS}) AS got,
+              SUM(${HAD_TOKENS} = 0 AND (
+                EXISTS (SELECT 1 FROM daily_activity d WHERE d.github_id = p.github_id AND d.day = p.admitted_at / ${DAY_MS} AND d.sessions > 0)
+                OR EXISTS (SELECT 1 FROM refused_days r WHERE r.github_id = p.github_id AND r.day = p.admitted_at / ${DAY_MS}))) AS opened
+       FROM people p WHERE p.admitted_at >= ? AND p.admitted_at < ? AND ${counted}
+       GROUP BY 1 ORDER BY 1 DESC`,
+      first * DAY_MS,
+      (today + 1) * DAY_MS,
+      admins,
+    )
+    .toArray()
+    .map((row) => ({ day: row.day * DAY_MS, signedUp: row.signed_up, gotTokens: row.got ?? 0, refused: row.signed_up - (row.got ?? 0), refusedOpened: row.opened ?? 0 }));
+}
+
+/**
+ * Day `offset`'s retention over the cohorts that have reached it, weighted by cohort size (all
+ * their active people over all their people); null when none has.
+ */
+export function averageRetention(cohorts: readonly DailyCohort[], offset: (typeof RETENTION_DAYS)[number]): { share: number; cohorts: number; people: number } | null {
+  const index = RETENTION_DAYS.indexOf(offset);
+  let people = 0;
+  let active = 0;
+  let counted = 0;
+  for (const cohort of cohorts) {
+    const cell = cohort.retained[index];
+    if (!cell) continue;
+    people += cohort.size;
+    active += cell.active;
+    counted++;
+  }
+  return counted === 0 || people === 0 ? null : { share: active / people, cohorts: counted, people };
 }
 
 /**
@@ -613,38 +822,104 @@ export function installBreakdown(
   return { platforms, failedSteps };
 }
 
-/** Per upstream, today and this week: counts from `upstream_daily`, percentiles from `upstream_timings`. */
-export function upstreamStats(sql: Sql, now: number): UpstreamStats[] {
-  const today = Math.floor(now / DAY_MS);
-  const week = weekStart(now) / DAY_MS;
+/**
+ * One window of `upstreamStats`: counts from UTC day `fromDay` on, timings from `since` (default:
+ * that day's start). `timings: false` leaves the percentiles out (all time: timings are kept 15 days).
+ */
+export interface UpstreamWindow {
+  window: UpstreamWindowName;
+  fromDay: number;
+  since?: number;
+  timings?: boolean;
+}
+
+/** The Full view's windows: today (UTC), this week, all time. */
+export function fullViewWindows(now: number): UpstreamWindow[] {
+  return [
+    { window: "today", fromDay: Math.floor(now / DAY_MS) },
+    { window: "week", fromDay: weekStart(now) / DAY_MS },
+    { window: "all_time", fromDay: 0, timings: false },
+  ];
+}
+
+interface UpstreamSums {
+  requests: number | null;
+  errors: number | null;
+  prompt: number | null;
+  cached: number | null;
+  completion: number | null;
+  cash: number | null;
+  credit: number | null;
+}
+
+const UPSTREAM_SUMS = `SUM(requests) AS requests, SUM(errors) AS errors, SUM(prompt_tokens) AS prompt, SUM(cached_tokens) AS cached,
+  SUM(completion_tokens) AS completion, SUM(cash_usd) AS cash, SUM(credit_usd) AS credit`;
+
+function fromSums(row: UpstreamSums | undefined, users: number | null) {
+  return {
+    requests: row?.requests ?? 0,
+    errors: row?.errors ?? 0,
+    users,
+    promptTokens: row?.prompt ?? 0,
+    cachedTokens: row?.cached ?? 0,
+    completionTokens: row?.completion ?? 0,
+    cacheHitShare: row?.prompt ? (row.cached ?? 0) / row.prompt : null,
+    cashUsd: row?.cash ?? 0,
+    creditUsd: row?.credit ?? 0,
+  };
+}
+
+/**
+ * Per upstream, today and this week (or the windows given): counts and tokens from `upstream_daily`,
+ * percentiles from `upstream_timings` (kept TIMINGS_MAX_AGE_MS, 15 days, by the Directory), and
+ * with `admins` (ADMIN_GITHUB_IDS as a JSON array) the people served from `upstream_people`.
+ */
+export function upstreamStats(sql: Sql, now: number, windows?: readonly UpstreamWindow[], admins?: string): UpstreamStats[] {
   const out: UpstreamStats[] = [];
-  for (const [window, fromDay] of [["today", today], ["week", week]] as const) {
+  const list: readonly UpstreamWindow[] = windows ?? fullViewWindows(now).slice(0, 2);
+  for (const { window, fromDay, since: from, timings = true } of list) {
+    // Everyone an upstream served since fromDay: the windows all run to today.
+    const people =
+      admins === undefined
+        ? undefined
+        : new Map(
+            sql
+              .exec<{ upstream: string; n: number }>(
+                `SELECT upstream, COUNT(*) AS n FROM upstream_people WHERE last_day >= ? AND ${notAdmin("github_id")} GROUP BY upstream`,
+                fromDay,
+                admins,
+              )
+              .toArray()
+              .map((row) => [row.upstream, row.n]),
+          );
     for (const upstream of UPSTREAM_NAMES) {
-      const row = sql
-        .exec<{ requests: number | null; errors: number | null; prompt: number | null; cached: number | null; cash: number | null; credit: number | null }>(
-          `SELECT SUM(requests) AS requests, SUM(errors) AS errors, SUM(prompt_tokens) AS prompt, SUM(cached_tokens) AS cached,
-                  SUM(cash_usd) AS cash, SUM(credit_usd) AS credit
-           FROM upstream_daily WHERE upstream = ? AND day >= ?`,
-          upstream,
-          fromDay,
-        )
-        .toArray()[0];
-      const since = fromDay * DAY_MS;
+      const row = sql.exec<UpstreamSums>(`SELECT ${UPSTREAM_SUMS} FROM upstream_daily WHERE upstream = ? AND day >= ?`, upstream, fromDay).toArray()[0];
+      const users = people === undefined ? null : (people.get(upstream) ?? 0);
+      const since = from ?? fromDay * DAY_MS;
+      const { requests, errors, ...rest } = fromSums(row, users);
       out.push({
         upstream,
         window,
-        requests: row?.requests ?? 0,
-        errors: row?.errors ?? 0,
-        medianTtftMs: percentile(sql, "ttft_ms", upstream, since, 0.5),
-        p90TtftMs: percentile(sql, "ttft_ms", upstream, since, 0.9),
-        medianTtfbMs: percentile(sql, "ttfb_ms", upstream, since, 0.5),
-        cacheHitShare: row?.prompt ? (row.cached ?? 0) / row.prompt : null,
-        cashUsd: row?.cash ?? 0,
-        creditUsd: row?.credit ?? 0,
+        requests,
+        errors,
+        medianTtftMs: timings ? percentile(sql, "ttft_ms", upstream, since, 0.5) : null,
+        p90TtftMs: timings ? percentile(sql, "ttft_ms", upstream, since, 0.9) : null,
+        medianTtfbMs: timings ? percentile(sql, "ttfb_ms", upstream, since, 0.5) : null,
+        ...rest,
       });
     }
   }
   return out;
+}
+
+/** All upstreams together per window: one sum over `upstream_daily`, and each person counted once. */
+export function upstreamTotalStats(sql: Sql, windows: readonly UpstreamWindow[], admins: string): UpstreamTotal[] {
+  return windows.map(({ window, fromDay }) => {
+    const row = sql.exec<UpstreamSums>(`SELECT ${UPSTREAM_SUMS} FROM upstream_daily WHERE day >= ?`, fromDay).toArray()[0];
+    const users =
+      sql.exec<{ n: number }>(`SELECT COUNT(DISTINCT github_id) AS n FROM upstream_people WHERE last_day >= ? AND ${notAdmin("github_id")}`, fromDay, admins).toArray()[0]?.n ?? 0;
+    return { window, ...fromSums(row, users) };
+  });
 }
 
 /** The nearest-rank percentile of one timing column since `since`; null without values. */

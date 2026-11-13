@@ -1,17 +1,18 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, completion, createInvite, createService, MODEL, startBrowserFlow, type GitHubUserFixture, type Service } from "./harness.js";
+import { ADMIN_ID, allowServerKeys, completion, createInvite, createService, MODEL, startBrowserFlow, type GitHubUserFixture, type Service } from "./harness.js";
 
 /**
  * Account levels: Full for accounts that look like working developers, Starter for everyone
- * else. Starter gets DeepSeek only and a small weekly allowance; it is never refused.
+ * else. Starter gets every model on a small weekly allowance; it is never refused. The basic
+ * level is off here (basic.test.ts covers it).
  */
 
 const NEW = "2026-10-20T00:00:00Z"; // 15 days before the harness clock
 const OLD = "2015-01-01T00:00:00Z";
 
 async function open(vars: Record<string, string> = {}): Promise<{ service: Service; admin: string }> {
-  const service = await createService({ OPEN_ADMISSION: "true", OPENAI_API_KEY: "sk-test", ...vars });
+  const service = await createService({ OPEN_ADMISSION: "true", OPENAI_API_KEY: "sk-test", BASIC_WEEKLY_TOKENS: "0", ...vars });
   const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
   return { service, admin };
 }
@@ -44,7 +45,7 @@ describe("account levels at sign-in", () => {
 
   it("gives Full to an account with 50 contributions in the last year", async () => {
     const { service, admin } = await open();
-    const flow = await startBrowserFlow(service.request, { id: 100, login: "contrib", publicRepos: 0, contributions: 50 });
+    const flow = await startBrowserFlow(service.request, { id: 100, login: "contrib", publicRepos: 0, contributions: 50, activeWeeks: 20 });
     assert.ok(signedIn(flow.page));
     const row = await person(service, admin, 100);
     assert.equal(row?.level, "full");
@@ -72,7 +73,7 @@ describe("account levels at sign-in", () => {
 
   it("counts private contributions the person shows", async () => {
     const { service, admin } = await open();
-    const flow = await startBrowserFlow(service.request, { id: 100, login: "private", publicRepos: 0, contributions: 60, restrictedContributions: 55 });
+    const flow = await startBrowserFlow(service.request, { id: 100, login: "private", publicRepos: 0, contributions: 60, restrictedContributions: 55, activeWeeks: 20 });
     assert.ok(signedIn(flow.page));
     const row = await person(service, admin, 100);
     assert.equal(row?.level, "full");
@@ -128,57 +129,70 @@ describe("account levels at sign-in", () => {
 });
 
 describe("what a Starter account gets", () => {
-  async function starter(): Promise<{ service: Service; token: string; admin: string }> {
+  async function starter(extra: Partial<GitHubUserFixture> = {}): Promise<{ service: Service; token: string; admin: string }> {
     const { service, admin } = await open({ LUMINAL_API_KEY: "sk-luminal-test" });
-    const user: GitHubUserFixture = { id: 100, login: "starter", createdAt: NEW, publicRepos: 0, contributions: 0 };
+    const user: GitHubUserFixture = { id: 100, login: "starter", createdAt: NEW, publicRepos: 0, contributions: 0, ...extra };
     const { access_token } = await service.signIn(user);
     return { service, token: access_token, admin };
   }
 
-  it("serves a GPT-6 request on DeepSeek with x-dl-fallback: starter, and charges the Starter allowance", async () => {
+  it("serves GPT-6 itself (every model), and charges the Starter allowance", async () => {
     const { service, token } = await starter();
     const before = (await (await service.request("GET", "/v1/me", { token })).json()) as { pools: Record<string, { usedThisWeek: number }> };
     const response = await chat(service, token, "gpt-6-luna");
     assert.equal(response.status, 200);
-    assert.equal(response.headers.get("x-dl-fallback"), "starter");
-    assert.equal(service.calls.luminal.length, 1);
-    assert.equal(service.calls.openai.length, 0);
+    assert.equal(response.headers.get("x-dl-fallback"), null);
+    assert.equal(service.calls.openai.length, 1);
+    assert.equal(service.calls.luminal.length, 0);
     const after = (await (await service.request("GET", "/v1/me", { token })).json()) as { pools: Record<string, { usedThisWeek: number }> };
     assert.ok(after.pools.luna!.usedThisWeek > before.pools.luna!.usedThisWeek, "the Starter allowance paid");
-    // DeepSeek itself gets no fallback header.
-    assert.equal((await chat(service, token, MODEL)).headers.get("x-dl-fallback"), null);
   });
 
-  it("gets 5M tokens a week on the Luna pool, and nothing on Sol or Astra", async () => {
+  it("gets the Starter tokens in every GPT-6 pool, Sol and Astra at most their own, and the free dollar budgets", async () => {
     const { service, token } = await starter();
     const me = (await (await service.request("GET", "/v1/me", { token })).json()) as {
-      level: string;
-      levelReason: string;
+      level?: string;
+      levelReason?: string;
       thresholds: Record<string, number>;
       pools: Record<string, { tokensPerWeek: number }>;
       signals: Record<string, unknown>;
     };
-    assert.equal(me.level, "starter");
-    assert.equal(me.levelReason, "account_too_new");
+    // Publicly there is only Free and Pro: no level in /v1/me.
+    assert.equal(me.level, undefined);
+    assert.equal(me.levelReason, undefined);
+    assert.equal((await service.directory().getPerson(100))?.level, "starter");
     assert.deepEqual(me.thresholds, { minAccountAgeDays: 90, minPublicRepos: 3, minContributions: 50 });
-    assert.equal(me.pools.luna!.tokensPerWeek, 5_000_000);
-    assert.equal(me.pools.sol!.tokensPerWeek, 0);
-    assert.equal(me.pools.astra!.tokensPerWeek, 0);
+    assert.equal(me.pools.luna!.tokensPerWeek, 50_000_000);
+    assert.equal(me.pools.sol!.tokensPerWeek, 10_000_000);
+    assert.equal(me.pools.astra!.tokensPerWeek, 3_000_000);
+    assert.equal(me.pools.deepseek!.tokensPerWeek, null, "no token cap on DeepSeek");
+    assert.equal((me as unknown as { allowance: { usdPerWeek: number } }).allowance.usdPerWeek, 2);
     assert.equal(me.signals.publicRepos, 0);
+    // The person sees the public bar and its signals only.
+    assert.deepEqual(Object.keys(me.signals).sort(), ["accountAgeDays", "checkedAt", "contributions", "followers", "publicRepos", "restrictedContributions"]);
   });
 
   it("is promoted by an admin, and demoted again", async () => {
     const { service, token, admin } = await starter();
+    const level = async () => ({
+      level: (await service.directory().getPerson(100))?.level as string,
+      ...((await (await service.request("GET", "/v1/me", { token })).json()) as { allowance: { tokensPerWeek: number } }),
+    });
+    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { starterWeeklyTokens: 5_000_000 } })).status, 200);
     assert.equal((await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "full" } })).status, 200);
-    assert.equal((await chat(service, token, "gpt-6-luna")).headers.get("x-dl-fallback"), null);
+    assert.equal((await level()).level, "full");
+    assert.equal((await level()).allowance.tokensPerWeek, 50_000_000);
     assert.equal((await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "starter" } })).status, 200);
-    assert.equal((await chat(service, token, "gpt-6-luna")).headers.get("x-dl-fallback"), "starter");
+    assert.equal((await level()).level, "starter");
+    assert.equal((await level()).allowance.tokensPerWeek, 5_000_000);
     assert.equal((await service.request("POST", "/admin/people/100/level", { token: admin, body: { level: "nope" } })).status, 400);
   });
 
   it("is re-checked weekly from the public profile, and promoted when it qualifies", async () => {
-    const { service, token, admin } = await starter();
+    // Below the public bar, with two of the additional signals stored at sign-in.
+    const { service, token } = await starter({ activeWeeks: 20 });
     // A server key outlives the access token, so the clock can move a week.
+    allowServerKeys(service, 100);
     const key = ((await (await service.request("POST", "/v1/keys", { token, body: { name: "test" } })).json()) as { key: string }).key;
     // The public profile now says 5 repositories.
     service.setGithubProfile((login) => Response.json({ login, email: null, created_at: OLD, public_repos: 5, followers: 0 }));

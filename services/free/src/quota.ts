@@ -18,6 +18,12 @@ export const MIN_OUTPUT_TOKENS = 256;
  * token on code and English; 2 overestimates on purpose, so a reservation covers the prompt.
  */
 export const BYTES_PER_TOKEN_ESTIMATE = 2;
+/**
+ * Output tokens a reservation's estimated cost counts at most. The forwarded `max_tokens` can be
+ * up to MAX_OUTPUT_TOKENS, but agent turns rarely write more than a few thousand tokens, and
+ * counting the whole cap would stop people well short of their dollar allowance.
+ */
+export const ESTIMATE_OUTPUT_TOKENS = 8_192;
 /** Charged when the provider reports no cost (USD per million tokens, deliberately high). */
 export const FALLBACK_USD_PER_MILLION_TOKENS = 1;
 
@@ -111,4 +117,15 @@ export interface TokenPrices {
 export function costAtPrices(usage: Usage, prices: TokenPrices): number {
   const uncached = usage.promptTokens - usage.cachedTokens;
   return (uncached * prices.input + usage.cachedTokens * prices.cached + usage.completionTokens * prices.output) / 1_000_000;
+}
+
+/**
+ * What a reservation is expected to cost at most, for the dollar cap while it is in flight: the
+ * prompt estimate (already an overestimate) at the uncached input price, since how much of it
+ * the provider will have cached isn't known yet, plus the output it may write, counted up to
+ * ESTIMATE_OUTPUT_TOKENS, at the output price.
+ */
+export function estimateCostUsd(promptEstimate: number, maxTokens: number, prices: TokenPrices): number {
+  const output = Math.min(Math.max(0, maxTokens), ESTIMATE_OUTPUT_TOKENS);
+  return (Math.max(0, promptEstimate) * prices.input + output * prices.output) / 1_000_000;
 }

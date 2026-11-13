@@ -30,6 +30,8 @@ describe("a reservation the request never settled", () => {
     // Before the fix: $0.033 of "OpenRouter cash" and 32,824 tokens charged for a two-word prompt.
     assert.equal(spend.spentUsd, 0, "nothing went to OpenRouter, so no cash");
     assert.ok((spend.creditUsedUsd as number) > 0, "the prompt counts against Luminal's credit, the provider that was serving it");
-    assert.ok(alice.allowance.usedThisWeek > 0 && alice.allowance.usedThisWeek < 1000, `charged ${alice.allowance.usedThisWeek} tokens for a two-word prompt`);
+    assert.ok(alice);
+    const deepseek = (await service.account(100).allowance(service.clock.now, { weeklyTokens: 50_000_000, weeklyUsd: undefined }, "deepseek")).pools.deepseek;
+    assert.ok(deepseek.usedThisWeek > 0 && deepseek.usedThisWeek < 1000, `charged ${deepseek.usedThisWeek} tokens for a two-word prompt`);
   });
 });

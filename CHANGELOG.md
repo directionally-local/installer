@@ -1,5 +1,159 @@
 # Changelog
 
+## [0.30.1](https://github.com/directionally-local/installer/compare/v0.30.0...v0.30.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* model smoke tests share one IPv4 base URL, log every request, and keep the container on failure ([#238](https://github.com/directionally-local/installer/issues/238)) ([5759b6b](https://github.com/directionally-local/installer/commit/5759b6b3981dbff92a5e25fc8c86f766ba7feac3))
+
+## [0.30.0](https://github.com/directionally-local/installer/compare/v0.29.0...v0.30.0) (2026-11-13)
+
+
+### Features
+
+* **free:** tokens and users per upstream on the admin dashboard, with an all-time view ([#235](https://github.com/directionally-local/installer/issues/235)) ([31c6d10](https://github.com/directionally-local/installer/commit/31c6d101d66440e0117619760e3e7ecf33f67e83))
+* **free:** two weekly budgets, generous DeepSeek and tighter GPT-6 ([#237](https://github.com/directionally-local/installer/issues/237)) ([b8561ed](https://github.com/directionally-local/installer/commit/b8561ed5beea878c426ce27097bb1a9ae8db498e))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.22.0 ([#239](https://github.com/directionally-local/installer/issues/239)) ([ee565a6](https://github.com/directionally-local/installer/commit/ee565a6bbe3aec6a437e968f9bf6eac2c25bae9a))
+
+## [0.29.0](https://github.com/directionally-local/installer/compare/v0.28.0...v0.29.0) (2026-11-12)
+
+
+### Features
+
+* **free:** dl Pro at $3.99/month, dollar top-ups, and a bounded admin people list ([#232](https://github.com/directionally-local/installer/issues/232)) ([dcd850c](https://github.com/directionally-local/installer/commit/dcd850cbaa9355a91d0077c9d8e6f19d36136270))
+
+
+### Bug Fixes
+
+* accept GPU detections whose tool didn't answer in the free tier's GPU counts ([#231](https://github.com/directionally-local/installer/issues/231)) ([cc04c0f](https://github.com/directionally-local/installer/commit/cc04c0f2ca54d2862fc56d0686d4cfd1c836de6c))
+* **deps:** install Autopilot 3.21.0 ([#234](https://github.com/directionally-local/installer/issues/234)) ([e757ed0](https://github.com/directionally-local/installer/commit/e757ed09bdf4001e6b36fd7da3e16c7f26e94aff))
+* **free:** GET /admin/people no longer starts three Durable Object calls per ([dcd850c](https://github.com/directionally-local/installer/commit/dcd850cbaa9355a91d0077c9d8e6f19d36136270))
+
+## [0.28.0](https://github.com/directionally-local/installer/compare/v0.27.0...v0.28.0) (2026-11-12)
+
+
+### Features
+
+* **free:** a grant also sets a personal weekly dollar cap ([#227](https://github.com/directionally-local/installer/issues/227)) ([8b671af](https://github.com/directionally-local/installer/commit/8b671afa56c09d05484e824f69e0e9be1385d461))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.20.1 ([#230](https://github.com/directionally-local/installer/issues/230)) ([5a1277e](https://github.com/directionally-local/installer/commit/5a1277e040e7749a2a1e046fde8b7e7d0fae9d0c))
+* **model:** GPU run findings: thinking-safe smoke tests, progress, picker, short lines, failure details ([#229](https://github.com/directionally-local/installer/issues/229)) ([5a344cf](https://github.com/directionally-local/installer/commit/5a344cf8d7bde6f611d3d9a9da5a9a3bb1f6f658))
+
+## [0.27.0](https://github.com/directionally-local/installer/compare/v0.26.0...v0.27.0) (2026-11-11)
+
+
+### Features
+
+* keep an optional email with a GPU early-access yes ([#224](https://github.com/directionally-local/installer/issues/224)) ([70940eb](https://github.com/directionally-local/installer/commit/70940eb6965bd1645c8b20ce9a98d437a51eb007))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.20.0 ([#226](https://github.com/directionally-local/installer/issues/226)) ([247dfbe](https://github.com/directionally-local/installer/commit/247dfbebf51e54ea436cb97a500eb617fac95a21))
+
+## [0.26.0](https://github.com/directionally-local/installer/compare/v0.25.0...v0.26.0) (2026-11-11)
+
+
+### Features
+
+* run dl model up from Autopilot's GPU first run, and count it ([#219](https://github.com/directionally-local/installer/issues/219)) ([0cfd965](https://github.com/directionally-local/installer/commit/0cfd9656c827d9bd041d938486e841fdaf908db1))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.19.0 ([#220](https://github.com/directionally-local/installer/issues/220)) ([a154505](https://github.com/directionally-local/installer/commit/a154505b7a8d8ed70d63d6d847f20dc6a4adca99))
+
+## [0.25.0](https://github.com/directionally-local/installer/compare/v0.24.0...v0.25.0) (2026-11-11)
+
+
+### Features
+
+* **free:** a plain-language admin home screen ([#209](https://github.com/directionally-local/installer/issues/209)) ([215161c](https://github.com/directionally-local/installer/commit/215161cd2e8b35e408e10d62fe203483dbef90dc))
+* **model:** dl model bench with concurrency sweep\n\n1/8/32 concurrent streaming requests against the active model: TTFT p50/p95\nand aggregate decode tok/s per level, plus prefix cache hit rate from vLLM\nlogs.\n\nCo-authored-by: dl &lt;dl@directionallylocal.com&gt; ([5249a93](https://github.com/directionally-local/installer/commit/5249a933fedbe3df33a54df3bb501dd0db2940eb))
+* **model:** per-model GPU reservation and VRAM-aware side-by-side updates ([70ad56a](https://github.com/directionally-local/installer/commit/70ad56a80a70a74008318895b93189b9002f6ada))
+* **model:** per-run logs in ~/.directionallylocal/logs ([ed523fd](https://github.com/directionally-local/installer/commit/ed523fd2bb157b0d671edeb86381df63400a091e))
+
+
+### Bug Fixes
+
+* **free:** close three free tier sign-up farm holes ([#214](https://github.com/directionally-local/installer/issues/214)) ([108f11f](https://github.com/directionally-local/installer/commit/108f11f595186d3b2375e8f40f720e4c6f615f24))
+* **free:** look up GitHub users with the OAuth app's credentials ([#212](https://github.com/directionally-local/installer/issues/212)) ([9b3e81e](https://github.com/directionally-local/installer/commit/9b3e81ea6517863073c1015ac27dfa14cfa687ef))
+* **free:** make free tier server keys by request ([#216](https://github.com/directionally-local/installer/issues/216)) ([ea3b043](https://github.com/directionally-local/installer/commit/ea3b043d3bea04b64ec3dfb2a1c0061d3548760d))
+* **free:** record OpenAI's credit in the daily per-provider spend ([#211](https://github.com/directionally-local/installer/issues/211)) ([adf0fbc](https://github.com/directionally-local/installer/commit/adf0fbc0839da32306880f69689201a00b46e62b))
+* **model:** floor the decode window so short replies can't inflate tok/s ([50f1043](https://github.com/directionally-local/installer/commit/50f1043059af862156bd717e2fa8b3f27bf347f1))
+* **model:** incumbent smoke re-test warns instead of aborting the switch ([6f29b3e](https://github.com/directionally-local/installer/commit/6f29b3e556e3cbe92f432736d5e66680026dc071))
+* **model:** measure decode-only tok/s in the smoke test ([a1fc7cf](https://github.com/directionally-local/installer/commit/a1fc7cf01a9772852c7b6d6ef0d7df5fb42eba8e))
+* **model:** probe nvidia-ctk instead of nvidia-container-cli ([1a5d7cd](https://github.com/directionally-local/installer/commit/1a5d7cd8a20e5ce783a152533e8b73ac507d3f1e))
+* **model:** route dl model bench to the GPU dispatcher; fix bench output length\n\ndl model bench was swallowed by the model picker. Bench now pins output\nlength with ignore_eos so decode tok/s is measured over a fixed 512-token\nwindow.\n\nCo-authored-by: dl &lt;dl@directionallylocal.com&gt; ([ad2c037](https://github.com/directionally-local/installer/commit/ad2c037924e46b8381c95e71a67a528843451a24))
+* **model:** use fixed-length bench for update comparisons ([55f3666](https://github.com/directionally-local/installer/commit/55f3666790cdfe28dee26a8533bca7dfade28467))
+* **model:** use fixed-length bench for update comparisons ([ac20d3c](https://github.com/directionally-local/installer/commit/ac20d3c8f9561d48ee3c221bb9beeaa5e4f75ca2))
+
+## [0.24.0](https://github.com/directionally-local/installer/compare/v0.23.0...v0.24.0) (2026-11-10)
+
+
+### Features
+
+* **free:** Health view on the admin dashboard ([#206](https://github.com/directionally-local/installer/issues/206)) ([8ddcdf4](https://github.com/directionally-local/installer/commit/8ddcdf4bc3a9aad4d34a0f1da424e127ae30a5e1))
+* **free:** re-check admin-set Starter accounts when asked ([#200](https://github.com/directionally-local/installer/issues/200)) ([319c0cd](https://github.com/directionally-local/installer/commit/319c0cd2fc5b508ae642b849d3aff061ba527c93))
+
+
+### Bug Fixes
+
+* **free:** hold in-flight estimates against the weekly dollar cap ([#208](https://github.com/directionally-local/installer/issues/208)) ([3abed56](https://github.com/directionally-local/installer/commit/3abed5694cecfe982bc6a5e5d0d877c3a68e59e5))
+* **install:** clear errors on Linux systems nodejs.org's Node can't run, with a reason in the count ([#207](https://github.com/directionally-local/installer/issues/207)) ([04f3a3b](https://github.com/directionally-local/installer/commit/04f3a3bf44c8a71e7ba9f750759758832ab6a6da))
+* register vLLM's keyless route with --keyless ([#196](https://github.com/directionally-local/installer/issues/196)) ([976feb3](https://github.com/directionally-local/installer/commit/976feb37ebbfb4a2f1d878f0b5b3c1e5eb120c99))
+
+## [0.23.0](https://github.com/directionally-local/installer/compare/v0.22.1...v0.23.0) (2026-11-10)
+
+
+### Features
+
+* **free:** basic level, access requests from dl, retention on people who could use dl ([#198](https://github.com/directionally-local/installer/issues/198)) ([84cc6b8](https://github.com/directionally-local/installer/commit/84cc6b81f0d7854ff19a08c0f604e5038168445e))
+* **free:** daily cohort retention on the admin dashboard ([#188](https://github.com/directionally-local/installer/issues/188)) ([fbc0453](https://github.com/directionally-local/installer/commit/fbc045367add789217204ba6ac4ce0ee9cc94fbf))
+* **free:** link the community discord in the welcome emails ([#193](https://github.com/directionally-local/installer/issues/193)) ([ce37ee5](https://github.com/directionally-local/installer/commit/ce37ee59d8634f3b34739347f78161ce2fe1c98a))
+* **free:** send user emails through Cloudflare Email Service ([#190](https://github.com/directionally-local/installer/issues/190)) ([d14d046](https://github.com/directionally-local/installer/commit/d14d04602ee673c6d67a34671c507379af288095))
+* **free:** Tools tab to give free tokens by GitHub username and write an email ([#192](https://github.com/directionally-local/installer/issues/192)) ([d6d381f](https://github.com/directionally-local/installer/commit/d6d381fb48c41fbf1ac3628e52c7bb88203d2294))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.17.0 ([#199](https://github.com/directionally-local/installer/issues/199)) ([d9cc0e2](https://github.com/directionally-local/installer/commit/d9cc0e2f2acc9f3a5c3dca60e4a82fe407ae4d7c))
+* **free:** one Spend card across providers on the admin dashboard ([#195](https://github.com/directionally-local/installer/issues/195)) ([8b331b8](https://github.com/directionally-local/installer/commit/8b331b8ffee0e5fe7c70a5295bc4928ead63af0b))
+
+## [0.22.1](https://github.com/directionally-local/installer/compare/v0.22.0...v0.22.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **free:** send GPT-6 through OpenAI's Responses API so tools and reasoning work together ([#186](https://github.com/directionally-local/installer/issues/186)) ([2c65501](https://github.com/directionally-local/installer/commit/2c655012b605a29f34f52963dcc7dc318354fb3d))
+
+## [0.22.0](https://github.com/directionally-local/installer/compare/v0.21.0...v0.22.0) (2026-11-09)
+
+
+### Features
+
+* add dl model up/update/rollback/status for local vLLM ([93e39cd](https://github.com/directionally-local/installer/commit/93e39cd2a60273bc783bee3fea476a5fa2a0296e))
+* add dl model up/update/rollback/status for local vLLM ([8c965d1](https://github.com/directionally-local/installer/commit/8c965d1cf956423f570780e672e71e3e08c608c6))
+* **free:** accounts below the bar are told who free tokens are for and how to ask for credits ([#181](https://github.com/directionally-local/installer/issues/181)) ([e16c6cb](https://github.com/directionally-local/installer/commit/e16c6cb2767c4094662c6e0814c36440cec5e314))
+* **free:** additional account signals with private thresholds for Full ([#183](https://github.com/directionally-local/installer/issues/183)) ([34083dc](https://github.com/directionally-local/installer/commit/34083dc486e919137855f218fd7dd581e401a002))
+* **free:** an email at each spend milestone: $50, $100, $200 and on ([#182](https://github.com/directionally-local/installer/issues/182)) ([2fc8607](https://github.com/directionally-local/installer/commit/2fc8607048365ba0d77fe73690dcda6ed08a176f))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.16.0 ([#184](https://github.com/directionally-local/installer/issues/184)) ([56840b2](https://github.com/directionally-local/installer/commit/56840b281fd3413dd9a37a8dfa7375b0317eea18))
+* **free:** one free account per inbox, blocked inboxes and domains, and a daily cap per email domain ([#180](https://github.com/directionally-local/installer/issues/180)) ([d3ebc96](https://github.com/directionally-local/installer/commit/d3ebc969f9643d05abd760d5659f1d28d387cd64))
+* **setup:** reuse Autopilot's provider instead of asking again ([62870c8](https://github.com/directionally-local/installer/commit/62870c8d2d2183742411da76ab086a9b95468dca))
+* **setup:** reuse Autopilot's provider instead of asking again ([5243507](https://github.com/directionally-local/installer/commit/5243507c20f249cf763c9ad1769179581c65767c)), closes [#103](https://github.com/directionally-local/installer/issues/103) [#111](https://github.com/directionally-local/installer/issues/111)
+
 ## [0.21.0](https://github.com/directionally-local/installer/compare/v0.20.0...v0.21.0) (2026-11-08)
 
 

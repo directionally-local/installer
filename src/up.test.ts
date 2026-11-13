@@ -7,7 +7,7 @@ import { FakeSystem } from "./test-support/fake-system.js";
 import { JsonUi } from "./ui.js";
 import { hotcellRoutes, needs, parseAccessMode, parseProvidedAnswers, providerFromEnv, up, validateGitHubToken, validateOpenRouterKey } from "./up.js";
 import { withCatalog } from "./test-support/fake-catalog.js";
-import { openrouterAnswer, type ProviderAnswer } from "./provider.js";
+import { hotcellKeysAddArgs, openrouterAnswer, type ProviderAnswer } from "./provider.js";
 import { pinnedAutopilotVersion, pinnedHotcellVersion } from "./versions.js";
 
 const OPENROUTER_KEY = `sk-or-v1-${"a".repeat(40)}`;
@@ -239,6 +239,10 @@ describe("directionallylocal up", () => {
     assert.deepEqual(providerFromEnv({ DL_PROVIDER: "myproxy", DL_PROVIDER_API_KEY: "k", DL_PROVIDER_BASE_URL: "https://llm.example.com/v1" }).provider, { id: "myproxy", baseUrl: "https://llm.example.com/v1", apiKey: "k", apiKeyEnv: "MYPROXY_API_KEY" });
     assert.deepEqual(providerFromEnv({ DL_PROVIDER: "myproxy", DL_PROVIDER_API_KEY: "k" }), { provider: undefined, providerId: "myproxy" }, "no address: asked for a key only, nothing to store");
     assert.deepEqual(providerFromEnv({ DL_PROVIDER: "ollama" }).provider, { id: "ollama", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null, apiKeyEnv: "OLLAMA_API_KEY" });
+    // vLLM is keyless but not a Hotcell built-in: its route needs --base-url and --keyless.
+    const vllm = providerFromEnv({ DL_PROVIDER: "vllm" }).provider!;
+    assert.deepEqual(vllm, { id: "vllm", baseUrl: "http://127.0.0.1:8000/v1", apiKey: null, apiKeyEnv: "VLLM_API_KEY" });
+    assert.deepEqual(hotcellKeysAddArgs(vllm), ["keys", "add", "vllm", "--base-url", "http://127.0.0.1:8000/v1", "--keyless"]);
     assert.deepEqual(providerFromEnv({}), { provider: undefined, providerId: undefined });
   });
 

@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { main, splitPassthrough, type MainOptions } from "../cli.js";
@@ -16,6 +16,7 @@ import { DEFAULT_MODEL, type LaptopIO } from "./commands.js";
 import { loadRemotes, saveRemote, type RemoteServer } from "./config.js";
 import type { SetupOptions } from "./setup.js";
 import { autopilotOnPath, bundledAutopilot, openSession, planSession, startHere, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput, type SessionSpawner } from "./session.js";
+import { MAX_HANDOFFS } from "./gpu-handoff.js";
 import { loadSessions, rememberSession } from "./session-store.js";
 import { loadSettings, placeModel } from "./settings.js";
 import { createOpener, type RemoteOpener } from "./tunnel.js";
@@ -870,6 +871,96 @@ describe("dl the first time on a laptop", () => {
     assert.equal(await inside(dir, () => main(["new", "--", "--verbose"], capture(), laptop())), 0);
     assert.deepEqual(plain.launches[2]!.args, [...AUTOPILOT.args, "--verbose"]);
     assert.equal(api.requests.length, 0);
+  });
+
+  /** Autopilot that asks dl for `dl model up` (writes the GPU handoff) on the launches listed. */
+  const asking = (on: number[], text = JSON.stringify({ version: 1, action: "model-up", gpu: { vendor: "nvidia", model: "NVIDIA GeForce RTX 4090", count: 2, vramGb: 24 } })): SessionSpawner => (command, args, env, options) => {
+    if (on.includes(plain.launches.length) && env.DL_GPU_HANDOFF) writeFileSync(env.DL_GPU_HANDOFF, text, { mode: 0o600 });
+    return plain.spawn(command, args, env, options);
+  };
+  const gpuLaptop = (spawn: SessionSpawner, modelUp: SessionInput["modelUp"]) =>
+    laptop(undefined, { session: { nodeVersion: PATCHED_NODE, autopilot: async () => AUTOPILOT, spawn, signals: new EventEmitter(), handoffTmp: root, ...(modelUp ? { modelUp } : {}) } });
+
+  it("the install script's auto-start (bare dl): Autopilot's yes to a private model runs dl model up, then Autopilot again on it", async () => {
+    const dir = join(root, "fresh");
+    await mkdir(dir);
+    const requests: unknown[] = [];
+    plain.code = 0;
+    const io = capture();
+    assert.equal(await inside(dir, () => main([], io, gpuLaptop(asking([0]), async (request) => { requests.push(request); return { ok: true, model: "Qwen/Qwen3-4B" }; }))), 0);
+    assert.equal(plain.launches.length, 2, "Autopilot, dl model up, Autopilot again");
+    const handoff = plain.launches[0]!.env.DL_GPU_HANDOFF!;
+    assert.match(handoff, /dl-gpu-[^/]+\/handoff\.json$/, "a private file Autopilot can write the request to");
+    assert.deepEqual(requests, [{ version: 1, action: "model-up", gpu: { vendor: "nvidia", model: "NVIDIA GeForce RTX 4090", count: 2, vramGb: 24 } }]);
+    assert.equal(plain.launches[0]!.env.DL_GPU_RESULT, undefined);
+    assert.equal(plain.launches[1]!.env.DL_GPU_RESULT, "ok", "the relaunch knows it worked (and opens on the vllm provider dl model up saved)");
+    assert.equal(plain.launches[1]!.env.DL_GPU_ERROR, undefined);
+    assert.deepEqual(JSON.parse(plain.launches[1]!.env.DL_GPU!), { vendor: "nvidia", model: "NVIDIA GeForce RTX 4090", count: 2, vramGb: 24 }, "and doesn't probe the GPUs again");
+    assert.deepEqual(plain.launches[1]!.args, plain.launches[0]!.args);
+    assert.equal(existsSync(dirname(handoff)), false, "the private directory is removed");
+  });
+
+  it("a failed dl model up says why and relaunches Autopilot with the error type", async () => {
+    const dir = join(root, "fresh");
+    await mkdir(dir);
+    const io = capture();
+    assert.equal(await inside(dir, () => main([], io, gpuLaptop(asking([0]), async () => ({ ok: false, errorType: "smoke_failed", message: "Smoke test failed for Qwen/Qwen3-4B" })))), 0);
+    assert.equal(plain.launches[1]!.env.DL_GPU_RESULT, "failed");
+    assert.equal(plain.launches[1]!.env.DL_GPU_ERROR, "smoke_failed");
+    assert.match(plainText(io.text()), /✗ Smoke test failed for Qwen\/Qwen3-4B/);
+  });
+
+  it("a failure passes the model, the reason and the log; Retry and Pick another come back to dl model up", async () => {
+    const dir = join(root, "fresh");
+    await mkdir(dir);
+    const io = capture();
+    const requests: unknown[] = [];
+    const retry = JSON.stringify({ version: 1, action: "model-up", model: "qwen-old" });
+    const pick = JSON.stringify({ version: 1, action: "model-up", pick: true });
+    let launch = 0;
+    const spawn: SessionSpawner = (command, args, env, options) => {
+      const text = [JSON.stringify({ version: 1, action: "model-up" }), retry, pick][launch++];
+      if (text && env.DL_GPU_HANDOFF) writeFileSync(env.DL_GPU_HANDOFF, text, { mode: 0o600 });
+      return plain.spawn(command, args, env, options);
+    };
+    const failed = { ok: false as const, errorType: "smoke_failed" as const, message: "Chat test: the model returned no text,\nthinking mode used all tokens", log: "/home/me/.directionallylocal/logs/x-up.log", model: "qwen-old",
+      details: ["The vLLM container is still running: docker logs dl-model-1", "Reproduce: curl -sS --max-time 30 -X POST 'http://127.0.0.1:8000/v1/chat/completions' -H 'content-type: application/json' -d '{}'"] };
+    assert.equal(await inside(dir, () => main([], io, gpuLaptop(spawn, async (request) => { requests.push(request); return failed; }))), 0);
+    const env = plain.launches[1]!.env;
+    assert.equal(env.DL_GPU_MODEL, "qwen-old");
+    assert.equal(env.DL_GPU_REASON, "Chat test: the model returned no text, thinking mode used all tokens", "one line");
+    assert.equal(env.DL_GPU_LOG, "/home/me/.directionallylocal/logs/x-up.log");
+    assert.deepEqual(requests, [
+      { version: 1, action: "model-up" },
+      { version: 1, action: "model-up", model: "qwen-old" },
+      { version: 1, action: "model-up", pick: true, avoid: "qwen-old" },
+    ], "Retry names the model; Pick another marks the one that failed");
+    assert.match(plainText(io.text()), /Log: \/home\/me\/\.directionallylocal\/logs\/x-up\.log/);
+    assert.match(plainText(io.text()), /\n {4}The vLLM container is still running: docker logs dl-model-1\n {4}Reproduce: curl -sS --max-time 30 -X POST 'http:\/\/127\.0\.0\.1:8000\/v1\/chat\/completions' -H 'content-type: application\/json' -d '\{\}'\n/, "uncut, one line each");
+  });
+
+  it("an Autopilot that never asks (older, or no GPU) runs once, as before; a bad request is ignored", async () => {
+    const dir = join(root, "fresh");
+    await mkdir(dir);
+    let called = 0;
+    const modelUp = async () => { called++; return { ok: true as const, model: "x" }; };
+    assert.equal(await inside(dir, () => main([], capture(), gpuLaptop(plain.spawn, modelUp))), 0);
+    assert.equal(plain.launches.length, 1);
+    assert.equal(await inside(dir, () => main([], capture(), gpuLaptop(asking([1], JSON.stringify({ version: 2, action: "model-up" })), modelUp))), 0);
+    assert.equal(await inside(dir, () => main([], capture(), gpuLaptop(asking([2], "not json"), modelUp))), 0);
+    assert.equal(plain.launches.length, 3);
+    assert.equal(called, 0);
+  });
+
+  it("stops relaunching after a few model-up requests, and keeps Autopilot's exit code", async () => {
+    const dir = join(root, "fresh");
+    await mkdir(dir);
+    plain.code = 7;
+    let called = 0;
+    assert.equal(await inside(dir, () => main([], capture(), gpuLaptop(asking([0, 1, 2, 3, 4, 5]), async () => { called++; return { ok: false, errorType: "cancelled", message: "Cancelled." }; }))), 7);
+    assert.equal(called, MAX_HANDOFFS);
+    assert.equal(plain.launches.length, MAX_HANDOFFS + 1);
+    assert.equal(plain.launches.at(-1)!.env.DL_GPU_HANDOFF, undefined, "the last relaunch can't ask again, so Autopilot doesn't offer a retry");
   });
 
   it("dl --from-claude-code is autopilot --from-claude-code in this folder", async () => {

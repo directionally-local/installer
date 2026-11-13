@@ -12,20 +12,28 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
 
 ## Providers, models and pools
 
-| model id | provider | wire id | weekly pool | USD per Mtok (input / cached / output) |
-|---|---|---|---|---|
-| `gpt-6-luna` (default) | OpenAI | `gpt-6-luna` | `luna`, 50M | 0.10 / 0.01 / 0.50 |
-| `gpt-6.1-sol` | OpenAI | `gpt-6.1-sol` | `sol`, 10M | 2 / 0.10 / 10 |
-| `gpt-6-astra` | OpenAI | `gpt-6-astra` | `astra`, 3M | 10 / 1 / 50 |
-| `deepseek/deepseek-v4.1-flash-1017` | Luminal | `deepseek-ai/DeepSeek-V4.1-Flash-1017` | `luna`, 50M | 0.035 / 0.006 / 0.315 |
+| model id | provider | wire id | weekly dollar budget | weekly token pool | USD per Mtok (input / cached / output) |
+|---|---|---|---|---|---|
+| `gpt-6-luna` (default) | OpenAI | `gpt-6-luna` | GPT-6 | `luna`, 50M | 0.10 / 0.01 / 0.50 |
+| `gpt-6.1-sol` | OpenAI | `gpt-6.1-sol` | GPT-6 | `sol`, 10M | 2 / 0.10 / 10 |
+| `gpt-6-astra` | OpenAI | `gpt-6-astra` | GPT-6 | `astra`, 3M | 10 / 1 / 50 |
+| `deepseek/deepseek-v4.1-flash-1017` | Luminal | `deepseek-ai/DeepSeek-V4.1-Flash-1017` | DeepSeek | `deepseek`, no token cap | 0.035 / 0.006 / 0.315 |
 
-- **One pool per tier.** GPT-6 Luna and DeepSeek share the `luna` pool, so switching between them
-  (by hand or by the fallback) doesn’t hand anyone a second allowance. Sol and Astra have their own.
+- **Two weekly dollar budgets.** Every person has a GPT-6 budget (all GPT-6 models together) and a
+  DeepSeek budget. DeepSeek is much cheaper per token for us and fast, so we give far more of it:
+  by default $2 of GPT-6 and $8 of DeepSeek a week on the free plan, $6 and $40 on Pro. Each
+  request counts against its own model's budget only, held the same way (settled spend plus the
+  estimates of that budget's requests in flight).
+- **Token pools inside the budgets.** Luna, Sol and Astra keep their own weekly token pools (the
+  dollar budget they share is usually what binds). DeepSeek has no token cap: its dollar budget is
+  its only limit, so a token count never stops it first.
+- **GPT-6 out, DeepSeek left.** A GPT-6 request past GPT-6's week gets 402 `gpt_limit` pointing at
+  DeepSeek, not a dead end; with both weeks used up, the usual limit codes.
 - **Fallback.** Every OpenAI model is served by OpenAI first. On a 429, a 5xx, a network error,
   no response before `OPENAI_FIRST_BYTE_TIMEOUT_SECONDS`, or OpenAI’s credit running out, the same
   request is retried once on DeepSeek/Luminal, and the response carries
-  `x-dl-fallback: deepseek/deepseek-v4.1-flash-1017`. The requested model’s pool pays for it, so
-  someone who asks for Sol spends Sol’s allowance, not Luna’s. DeepSeek picked by hand goes
+  `x-dl-fallback: deepseek/deepseek-v4.1-flash-1017`. The requested model’s pool and budget pay
+  for it (at DeepSeek’s prices), so someone who asks for Sol spends Sol’s allowance, not Luna’s. DeepSeek picked by hand goes
   straight to Luminal.
 - **Separate credit pools.** OpenAI’s `OPENAI_CREDIT_USD` ($5,000) and Luminal’s
   `LUMINAL_CREDIT_USD` ($2,000) are tracked apart (`/admin/spend` shows both). A provider at or past
@@ -33,36 +41,81 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
 - **Prices.** `prices` is what the person’s weekly dollar allowance is charged; `creditPrices` is
   what the provider’s credit is charged (they differ for DeepSeek, whose Luminal list price is
   higher than what OpenRouter billed us for the same model). OpenAI reports no cost, so its
-  requests are priced at list. At the mix the free tier actually sees (95% of input tokens
-  cached, output under 1% of all tokens) a person who uses every pool costs about $9.35 a week,
-  so the $20 per-person cap leaves room for a much less cache-friendly week.
+  requests are priced at list.
+- **Responses API.** OpenAI’s chat completions API refuses function tools while a GPT-6 model
+  reasons, so OpenAI requests go to `https://api.openai.com/v1/responses`. Clients still speak
+  Chat Completions: `src/openai-responses.ts` turns `messages` into `input` items (assistant
+  `tool_calls` into `function_call`, `tool` messages into `function_call_output`, image parts into
+  `input_image`), `tools` and `tool_choice` into their Responses form (`strict` false unless the
+  client set it), `reasoning_effort` (or OpenRouter’s `reasoning.effort`) into
+  `reasoning.effort`, and the reserved output cap into `max_output_tokens`, with `store: false`.
+  `temperature` and `top_p` are dropped: GPT-6 refuses them. The answer comes back as a
+  `chat.completion` (tool calls with `finish_reason: "tool_calls"`, an output-capped response
+  with `"length"`) or, streamed, as chat chunks ending in a usage chunk and `data: [DONE]`.
+  Usage maps `input_tokens`, `output_tokens` (reasoning included), cached and reasoning tokens
+  to the chat names, so charging is unchanged. Luminal and OpenRouter stay on Chat Completions.
 - Any other model or provider needs the person’s own key (`model_not_allowed`).
 
 ## Account levels
 
-Every account is `full` or `starter`. The point is to make account farming unprofitable
-without turning away real developers.
+Every account is `full`, `basic` or `starter`. The point is to make account farming
+unprofitable without turning away real developers.
 
 - **Full**: the account is at least `FULL_MIN_ACCOUNT_AGE_DAYS` (90) days old **and** has
   `FULL_MIN_PUBLIC_REPOS` (3) public repositories **or** `FULL_MIN_CONTRIBUTIONS` (50)
   contributions in the last year (private ones count when the person shows them).
-- **Starter**: everyone else. DeepSeek only, `STARTER_WEEKLY_TOKENS` (5M) tokens a week, no
-  GPT-6. Asking for a GPT-6 model is a 403 `starter_model_not_allowed` with an honest
-  sentence: what Starter gets, why, and the three ways up (keep using GitHub, an invite code,
-  your own key). Starter accounts are admitted, never refused.
+- **Additional account signals**: on top of that public bar, Full also needs a few more
+  account signals from the same public GitHub data, read at sign-in with the same token, and
+  an account must not come from a batch of accounts created together. These signals can only
+  keep an account out of Full: without the public bar no number of them gives Full, because a
+  sign-up farm can fake them together (accounts following and contributing to each other). The
+  creation-batch check flags an account younger than the public bar's age when many accounts
+  already signed up were created around the same day, whether or not it follows or is followed
+  by anyone; an established account created on a busy day is never flagged. Their thresholds are
+  runtime settings (`humanSignalsNeeded`, `minActiveWeeks`, `minRepoAgeDays`, `minSocial`,
+  `minFollowers`, `batchWindowDays`, `batchSize`; see `src/admission.ts` `levelChecks`) whose
+  real values live in the admin settings. Nothing a person is shown names them: an account
+  that misses them gets the same message as one below the public bar. `GET /admin/people` and
+  the dashboard's Starter table show the stored signals and which checks pass.
+- **Basic**: below the public bar, but an account at least `basicMinAccountAgeDays` old that the
+  creation-batch check didn't flag. Every model (GPT-6 included) on its own allowance:
+  `basicWeeklyTokens` tokens and `basicWeeklyUsdCap` dollars a week (Sol and Astra at most their
+  own pool sizes). `basicWeeklyTokens` 0 turns the level off: those accounts are then served as
+  Starter. Nothing a person is shown says who gets Basic, only what it gets.
+- **Starter**: everyone else. Every model on `STARTER_WEEKLY_TOKENS` tokens and
+  `starterWeeklyUsdCap` dollars a week, or no free tokens at all when the setting is 0. An
+  account the creation-batch check flagged (`people.batch_flag`) gets no free tokens whatever
+  the setting, and is told the same as everyone with none (`below_bar`). Starter accounts are
+  admitted, never refused at sign-in.
+- **Access requests**: anyone below Full can ask for more from inside dl with `/request`
+  (`POST /v1/access-request`, below). The admin answers on the Tools tab: Grant sets Full with
+  reason `admin` and emails the person; Decline sends nothing.
 - **Signals** are read at sign-in with the token sign-in already has (no new scopes): account
-  age and public repositories from `/user`, then one GraphQL call for followers, contributions
-  and `restrictedContributionsCount`. Only the numbers and when they were read are stored:
+  age and public repositories from `/user`, then one GraphQL call for followers, contributions,
+  `restrictedContributionsCount` and the additional signals. Only the numbers and when they were read are stored:
   never repository names or contents. If GitHub can't answer, the account gets Full (fail open)
   and the failure is counted.
 - **Promotion**: at sign-in, weekly from the public profile (promote only, once per person per
-  week), with an invite code, or by an admin. An admin can also demote or block; their choice
-  stands until they change it.
+  week: Starter to Basic or Full, Basic to Full), with an invite code, by an access request, or
+  by an admin. An admin can also demote or block; their choice stands until they change it.
+- **Re-levelling**: each sign-in sets the level from the rules again, so an account that no
+  longer qualifies moves down then; the weekly re-check moves a Basic account the creation-batch
+  check now flags to Starter (no free tokens). Neither ever touches a level an admin or an
+  invite set. Nothing re-levels accounts in bulk: the owner blocks by hand.
+- **Re-check below-bar accounts** (Tools tab, or `POST /admin/recheck-below-bar`): looks at
+  every active non-admin Starter account from its stored signals (age counted to today), raises
+  the ones that qualify to Basic, and stores the batch flag again. Never lowers anyone, never
+  touches blocked accounts, admin-set levels or redeemed invites. Answers
+  `{checked, raised, flagged, starter}`.
 - **Network cap**: at most `NETWORK_SIGNUPS_PER_DAY` (3) new sign-ins per network per day.
   Beyond that the account still gets in, as Starter.
 - **Existing users** are re-checked lazily on their next request; nobody is cut off mid-session.
 - **Admin**: `GET /admin/people` shows each person's level, signals and network count, and
-  takes `?level=starter` and `?shared=1`. `POST /admin/people/:id/level {level}` sets it.
+  takes `?level=starter` and `?shared=1`. It pages with `?limit=` (1 to 500) and `?cursor=` (the
+  previous page's `nextCursor`); without `limit` it lists everyone, as before. The answer is
+  `{people, nextCursor, total}`. Network counts come from one Directory query and each person
+  costs one account call, at most 16 in flight at once. `POST /admin/people/:id/level {level}` sets it
+  (`full`, `basic` or `starter`).
 
 ## Admission
 
@@ -107,36 +160,52 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
 ```jsonc
 {
   "login": "alice", "githubId": 123, "status": "active",
+  // The Luna pool and the GPT-6 budget, as older clients read them; `budgets` has both.
   "allowance": { "tokensPerWeek": 50000000, "usedThisWeek": 0, "remaining": 50000000,
-                 "resetsAt": "2026-11-09T00:00:00.000Z", "usdPerWeek": 60, "spentUsdThisWeek": 0 },
-  "pools": {                            // one weekly token pool per model tier
+                 "resetsAt": "2026-11-09T00:00:00.000Z", "usdPerWeek": 2, "spentUsdThisWeek": 0,
+                 "budgets": { "…": "as below" } },
+  // Both weekly dollar budgets. tokensThisWeek: every token processed (prompt with cached, plus
+  // completion), not the weighted count the token pools are charged.
+  "budgets": { "gpt6":     { "usdPerWeek": 2, "spentUsd": 0.4, "tokensThisWeek": 6000000 },
+               "deepseek": { "usdPerWeek": 8, "spentUsd": 1.2, "tokensThisWeek": 58000000 } },
+  "pools": {                            // one weekly token pool per model; null: no token cap
     "luna":  { "tokensPerWeek": 50000000, "usedThisWeek": 0, "remaining": 50000000,
-                 "resetsAt": "2026-11-09T00:00:00.000Z",
-                 "models": ["gpt-6-luna", "deepseek/deepseek-v4.1-flash-1017"] },
-    "sol":   { "tokensPerWeek": 10000000, "usedThisWeek": 0, "remaining": 10000000, "resetsAt": "…", "models": ["gpt-6.1-sol"] },
-    "astra": { "tokensPerWeek": 3000000,  "usedThisWeek": 0, "remaining": 3000000,  "resetsAt": "…", "models": ["gpt-6-astra"] }
+                 "resetsAt": "2026-11-09T00:00:00.000Z", "family": "gpt6", "models": ["gpt-6-luna"] },
+    "sol":   { "tokensPerWeek": 10000000, "usedThisWeek": 0, "remaining": 10000000, "resetsAt": "…", "family": "gpt6", "models": ["gpt-6.1-sol"] },
+    "astra": { "tokensPerWeek": 3000000,  "usedThisWeek": 0, "remaining": 3000000,  "resetsAt": "…", "family": "gpt6", "models": ["gpt-6-astra"] },
+    "deepseek": { "tokensPerWeek": null, "usedThisWeek": 0, "remaining": null, "resetsAt": "…", "family": "deepseek",
+                  "models": ["deepseek/deepseek-v4.1-flash-1017"] }
   },
   "models": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "deepseek/deepseek-v4.1-flash-1017"],
   "plan": "free",                       // "free" | "pro"
-  "topupTokensLeft": 0,                 // unexpired top-up tokens not yet used
+  "topupTokensLeft": 0,                 // unexpired tokens from old token top-ups not yet used
+  "topupUsdLeft": 0,                    // unexpired dollar top-up usage not yet spent or held
+  "topupUsdExpiresAt": null,            // when the soonest-expiring dollar top-up with usage left ends
   "pro": null,                          // or { "periodEnd": ISO string | null, "cancelAtPeriodEnd": false }
   "queue": null,                        // or { "position": 214, "etaAt": "2026-11-16T00:00:00.000Z", "waiting": 300 }
   "referral": { "code": "alice", "link": "https://dl.new/r/alice", "joined": 2, "activeThisWeek": 1,
                 "bonusTokensPerWeek": 10000000, "bonusCapPerWeek": 50000000 },
-  "offers": { "pro": { "priceUsdMonthly": 10, "tokensPerWeek": 100000000 },
-              "topup": { "priceUsd": 3, "tokens": 50000000, "validDays": 30 } }
+  "offers": { "pro": { "priceUsdMonthly": 3.99, "price": "$3.99/month", "tokensPerWeek": 300000000, "usdPerWeek": 6,
+                       "deepseekUsdPerWeek": 40, "valueLine": "Lots of DeepSeek every week, plus more GPT-6." },
+              "topup": { "unitPriceUsd": 1, "minQuantity": 2, "maxQuantity": 20, "usageMultiplier": 1.25, "validDays": 90, "fromPrice": "$2" } }
 }
 ```
 
-- `allowance.tokensPerWeek` includes this week's referral bonus; the dollar allowance grows in the
-  same proportion. While queued, `allowance.remaining` is 0.
-- With Pro, `allowance` is Pro's: 100M tokens a week (`PRO_TOKENS_PER_WEEK`), no referral bonus,
-  and no dollar ceiling unless `PRO_WEEKLY_USD_CAP` is set. `queue` is null for Pro (a place in
+- No level appears here: publicly there is only Free and Pro (`plan`).
+- `allowance.tokensPerWeek` includes this week's referral bonus; the GPT-6 dollar budget grows in
+  the same proportion. While queued, `allowance.remaining` is 0.
+- A personal cap (an admin's grant) replaces the GPT-6 budget; DeepSeek's is then the larger of
+  the personal cap and the plan's DeepSeek budget.
+- With Pro, `allowance` is Pro's: 300M tokens a week (`PRO_TOKENS_PER_WEEK`), no referral bonus,
+  and $6 of GPT-6 and $40 of DeepSeek a week (`PRO_WEEKLY_USD_CAP`, `PRO_DEEPSEEK_WEEKLY_USD_CAP`), held like the
+  free caps (settled spend plus the estimates of requests in flight). `queue` is null for Pro (a place in
   line is kept in case Pro ends).
 - `referral.joined`: sign-ups with this person's code that count. `activeThisWeek`: those friends
   whose pair counts toward this week's bonus (see [Referrals](#referrals)).
-- `offers` come from config (`PRO_PRICE_USD_MONTHLY`, `PRO_TOKENS_PER_WEEK`, `TOPUP_PRICE_USD`,
-  `TOPUP_TOKENS`, `TOPUP_VALID_DAYS`).
+- `offers` come from config (`PRO_PRICE_USD_MONTHLY` in dollars and cents, `PRO_TOKENS_PER_WEEK`,
+  `PRO_WEEKLY_USD_CAP`, `PRO_VALUE_LINE`, `TOPUP_UNIT_PRICE_USD`, `TOPUP_MIN_QUANTITY`,
+  `TOPUP_MAX_QUANTITY`, `TOPUP_USAGE_MULTIPLIER`, `TOPUP_VALID_DAYS`). `pro.price` is the exact
+  text to show ("$3.99/month"): clients never round it.
 
 ### Refusals for free tokens (`POST /v1/chat/completions`, HTTP 402)
 
@@ -145,8 +214,18 @@ Out of tokens (a free user):
 ```json
 { "error": { "code": "quota_exceeded", "message": "This week's free token allowance is used up. It resets at 2026-11-09T00:00:00.000Z.",
              "reason": "tokens", "resetsAt": "2026-11-09T00:00:00.000Z",
-             "offers": { "pro": { "priceUsdMonthly": 10, "tokensPerWeek": 100000000 }, "topup": { "priceUsd": 3, "tokens": 50000000, "validDays": 30 } },
+             "offers": { "pro": { "priceUsdMonthly": 3.99, "price": "$3.99/month", "...": "…" }, "topup": { "unitPriceUsd": 1, "minQuantity": 2, "...": "…" } },
              "referralLink": "https://dl.new/r/alice" } }
+```
+
+GPT-6's week used up while DeepSeek's isn't (free or Pro; Pro's message leaves the offer out):
+
+```json
+{ "error": { "code": "gpt_limit",
+             "message": "You've used this week's GPT-6 allowance. DeepSeek V4.1 Flash still has free usage this week: switch with /model, or get dl Pro.",
+             "family": "gpt6", "reason": "spend", "resetsAt": "2026-11-09T00:00:00.000Z",
+             "alternative": "deepseek/deepseek-v4.1-flash-1017",
+             "offers": { "...": "as above" } } }
 ```
 
 Queued:
@@ -155,11 +234,53 @@ Queued:
 { "error": { "code": "free_tier_queued",
              "message": "You're #214 in line for free tokens (about 3 days). Each friend who starts using dl moves you up. Your own key works now.",
              "position": 214, "etaAt": "2026-11-09T00:00:00.000Z",
-             "offers": { "pro": { "priceUsdMonthly": 10, "tokensPerWeek": 100000000 }, "topup": { "priceUsd": 3, "tokens": 50000000, "validDays": 30 } },
+             "offers": { "pro": { "priceUsdMonthly": 3.99, "price": "$3.99/month", "...": "…" }, "topup": { "unitPriceUsd": 1, "minQuantity": 2, "...": "…" } },
              "referralLink": "https://dl.new/r/alice" } }
 ```
 
 The wait reads "about N days" under two weeks, else "about N weeks".
+
+A basic or Starter account's week used up (both budgets; a free user): `basic_limit` or
+`starter_limit`, with what the free plan gets (never the level's name), that it resets Monday,
+and the ways on. `request` is the access-request endpoint.
+
+```json
+{ "error": { "code": "basic_limit",
+             "message": "You've used this week's free allowance (every model, up to $2 of GPT-6 and $8 of DeepSeek a week). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.",
+             "reason": "tokens", "resetsAt": "2026-11-09T00:00:00.000Z", "request": "/v1/access-request",
+             "offers": { "...": "as above" }, "referralLink": "https://dl.new/r/alice" } }
+```
+
+No free tokens at all (HTTP 403 `below_bar`): `contact` (the email fallback) and `request`.
+
+### Access requests (`/request` in dl; `Authorization: Bearer <access token or server key>`)
+
+`POST /v1/access-request {building, link?}`: `building` is required, 10 to 600 characters after
+trimming; `link` is optional, an `http://` or `https://` URL of at most 300 characters. Any
+signed-in person who isn't blocked.
+
+| answer | when |
+|---|---|
+| 201 `{"status": "pending"}` | stored; the owner gets an alert with the login and the pending count only |
+| 409 `already_pending` | a request is already waiting |
+| 409 `already_full` | Admins, and Full accounts that may already have server keys |
+| 429 `rate_limited` | more than 3 submissions in 24 hours |
+| 400 `invalid_request` | a clear message about what to fix |
+| 403 `blocked` | a blocked account |
+
+`GET /v1/access-request` → `{"status": "none" | "pending" | "granted" | "declined", "at"?: ISO}`
+(the newest request; `at` is when it was sent, or answered).
+
+What a person writes is user content: stored as plain text, shown only on the admin Tools tab
+(escaped), never logged, never in an alert, a metric or an export. Admins:
+`GET /admin/access-requests` (pending, newest first) and
+`POST /admin/access-requests/:id/grant` (`{note?, usdPerWeek?}`) or `/decline` (`{note?}`).
+
+A grant (this one, `POST /admin/grant {logins, usdPerWeek?}`, and the Tools tab and home screen
+forms) sets Full with reason "admin" and a personal weekly dollar cap: `usdPerWeek`, or the
+`grantWeeklyUsdCap` setting (default 20) when it's left out. It never lowers a higher personal
+cap already set; 0 sets no personal cap (only the level). Someone not signed up yet gets the cap
+at their first sign-in.
 
 ### Sign-up with a referral code
 
@@ -269,11 +390,17 @@ Sent by the free tier service. The message and the reply address aren't stored a
 
 ## Paid plans (Stripe)
 
-- **Pro**, $10 a month: 100M tokens a week of DeepSeek V4.1 Flash 1017, in place of the free
-  50M. Pro starts when its Checkout completes and stays on while the subscription is active and
+- **Pro**, $3.99 a month: up to $6 of GPT-6 (`PRO_WEEKLY_USD_CAP`) and $40 of DeepSeek
+  (`PRO_DEEPSEEK_WEEKLY_USD_CAP`) a week, in place of the free allowance; its 300M weekly tokens
+  sit above what the GPT-6 budget buys, so the dollars are what bind. Pro starts when its Checkout completes and stays on while the subscription is active and
   its paid period (plus 3 days' grace for a late renewal webhook) hasn't ended.
-- **Top-up**, $3 once: 50M tokens, valid 30 days from purchase, used only after the week's
-  allowance (free or Pro) runs out, earliest expiry first. A free person who is queued, or meets
+- **Top-up**, $2 to $20 once (2 to 20 units of a $1 price, adjustable on Checkout): each $1
+  adds $1.25 of usage dollars (`TOPUP_USAGE_MULTIPLIER`), valid 90 days, spent only after the
+  week's allowance (free or Pro) runs out, earliest expiry first, at the same cost as the dollar
+  caps (requests in flight hold their estimate). `POST /v1/billing/checkout {"product": "topup",
+  "quantity": 5}` starts at that quantity (default 2). Token top-ups bought before (50M tokens,
+  30 days) are used as bought, before dollar ones; a checkout started under the old product
+  still grants its tokens (its session has no `topup_kind` metadata). A free person who is queued, or meets
   a global free cap, can still use top-ups.
 - **Paid usage** (anything under Pro, and top-up tokens) is logged like any request, with
   `requests.paid = 1`, and counted apart: `spend_weeks.paid_usd/paid_tokens/paid_requests` and
@@ -293,7 +420,7 @@ Sent by the free tier service. The message and the reply address aren't stored a
 
   | event | effect |
   |---|---|
-  | `checkout.session.completed` | saves the customer; Pro: active; top-up: +50M for 30 days (only when `payment_status` is `paid`) |
+  | `checkout.session.completed` | saves the customer; Pro: active; top-up (only when `payment_status` is `paid`): `amount_subtotal` × 1.25 in usage dollars for 90 days, or an old token checkout's 50M for 30 days |
   | `invoice.paid` | Pro active until the invoice's period end; revenue recorded |
   | `invoice.payment_failed` | back to free (the free allowance, never no access) |
   | `customer.subscription.updated` | `active`/`trialing` → Pro; `past_due`, `unpaid`, `incomplete` → free; period end and cancel-at-period-end kept |
@@ -306,7 +433,7 @@ Sent by the free tier service. The message and the reply address aren't stored a
 
 1. **Products and prices.** In test mode first:
    `STRIPE_SECRET_KEY=sk_test_… node services/free/scripts/stripe-setup.mjs --webhook https://free.directionallylocal.com/v1/billing/webhook`
-   creates "dl Pro" ($10.00/month) and "dl top-up, 50M tokens" ($3.00 once), both tax-exclusive
+   creates "dl Pro" ($3.99/month) and "dl top-up" ($1.00 once, bought 2 to 20 at a time), both tax-exclusive
    with tax code `txcd_10000000`, and the webhook endpoint, and prints `STRIPE_PRICE_PRO`,
    `STRIPE_PRICE_TOPUP` and `STRIPE_WEBHOOK_SECRET`. For live mode, create the same in the
    Dashboard (the script refuses live keys).
@@ -558,13 +685,17 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `service_paused` | device code, device token, chat | `reason: "paused"`, `pausedForEveryone: true`, `resetsAt: null` |
 | `global_weekly_budget_reached` | chat (503) | `reason: "weekly_budget"`, `pausedForEveryone: true`, `resetsAt` (ISO time), `Retry-After` header |
 | `global_total_budget_reached` | chat (503) | `reason: "total_budget"`, `pausedForEveryone: true`, `resetsAt: null` |
+| `gpt_limit` | chat (402) | `family: "gpt6"`, `reason`, `resetsAt`, `alternative` (the DeepSeek model id), `offers`: GPT-6's week used up, DeepSeek's not |
 | `quota_exceeded` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `offers`, `referralLink` |
+| `basic_limit`, `starter_limit` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `request`, `offers`, `referralLink` |
+| `below_bar` | chat (403) | `contact`, `request` |
 | `free_tier_queued` | chat (402) | `position`, `etaAt`, `offers`, `referralLink` |
 | `upstream_credit_exhausted` | chat (503) | `reason: "credit_exhausted"`, `pausedForEveryone: true`, `resetsAt: null` |
 | `upstream_busy` | chat (429, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `upstream_unavailable` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `upstream_timeout` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `dl_only` | chat (403) | none |
+| `server_keys_unavailable` | `POST /v1/keys`, and any request with a server key (403) | none |
 | `not_invited` | API, and older sign-ins | none |
 
 The two global budget codes mean "free tokens are paused for everyone, and your own key still
@@ -580,7 +711,11 @@ with who made it and when.
 | setting | env | default |
 |---|---|---|
 | `weeklyTokens` | `WEEKLY_TOKENS` | 50,000,000 |
-| `perPersonWeeklyUsdCap` | `PER_PERSON_WEEKLY_USD_CAP` | 20 |
+| `perPersonWeeklyUsdCap` | `PER_PERSON_WEEKLY_USD_CAP` | 2: a Full person's weekly GPT-6 budget (every GPT-6 model) |
+| `deepseekWeeklyUsdCap` | `DEEPSEEK_WEEKLY_USD_CAP` | 8: a Full person's weekly DeepSeek budget |
+| `proWeeklyUsdCap` | `PRO_WEEKLY_USD_CAP` | 6: Pro's weekly GPT-6 budget |
+| `proDeepseekWeeklyUsdCap` | `PRO_DEEPSEEK_WEEKLY_USD_CAP` | 40: Pro's weekly DeepSeek budget |
+| `grantWeeklyUsdCap` | `GRANT_WEEKLY_USD_CAP` | 20: the personal weekly dollar cap an admin's grant gives (never lowers a higher one); 0 or `none`: a grant sets only the level |
 | `globalWeeklyUsdCap` | `GLOBAL_WEEKLY_USD_CAP` | 2000 |
 | `globalTotalUsdCap` | `GLOBAL_TOTAL_USD_CAP` | 7000 |
 | `maxActiveUsers` | `MAX_ACTIVE_USERS` (invite-only only) | 50 |
@@ -598,8 +733,20 @@ with who made it and when.
 | `luminalCreditUsd` | `LUMINAL_CREDIT_USD` | 2000 |
 | `luminalWeeklyCreditUsd` | `LUMINAL_WEEKLY_CREDIT_USD` | 250; `none` for no weekly credit budget |
 | `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
-| `userEmails` | `USER_EMAILS` | true (sends only with `RESEND_API_KEY`) |
+| `userEmails` | `USER_EMAILS` | true (sends only with the `USER_EMAIL` binding or `RESEND_API_KEY`) |
 | `dlOnly` | `DL_ONLY` | true (free tokens inside dl only; see below) |
+| `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request); `daily` (one line in the daily digest); `off` |
+| `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 50,000,000, as Full (0: no free tokens below Basic) |
+| `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
+| `starterDeepseekWeeklyUsdCap` | `STARTER_DEEPSEEK_WEEKLY_USD_CAP` | 8, as Full |
+| `basicMinAccountAgeDays` | `BASIC_MIN_ACCOUNT_AGE_DAYS` | see `src/config.ts` |
+| `basicWeeklyTokens` | `BASIC_WEEKLY_TOKENS` | 50,000,000, as Full (0 turns Basic off) |
+| `basicWeeklyUsdCap` | `BASIC_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
+| `basicDeepseekWeeklyUsdCap` | `BASIC_DEEPSEEK_WEEKLY_USD_CAP` | 8, as Full |
+
+Publicly there is only Free and Pro: by default every free level gets the same budgets, and
+nothing a person is shown names a level. The levels stay internal so the settings can differ
+later. A batch-flagged account gets 0 of both budgets.
 
 Env only: `REFERRAL_LINK_BASE` (`https://dl.new/r/`), the offers above, `ALERT_EMAIL_TO`,
 `ALERT_EMAIL_FROM` (`alerts@dl.new`), `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_KIND`,
@@ -620,23 +767,34 @@ curl -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json'
 
 ## Emails to users
 
-Four plain-text emails to the people on the free tier, sent through Resend
-(`POST https://api.resend.com/emails`). The copy is in `src/user-emails.ts`; when each goes
-out is in `src/user-email-send.ts`.
+Plain-text emails to the people on the free tier. The copy is in `src/user-emails.ts`;
+when each goes out is in `src/user-email-send.ts`. The provider:
+
+1. **Cloudflare Email Service**, when the `send_email` binding `USER_EMAIL` exists (the
+   Cloudflare config declares it: `"send_email": [..., { "name": "USER_EMAIL" }]`). It sends
+   with the binding's `send({from, to, replyTo, subject, text, headers})`
+   ([Workers API](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/)),
+   from `directionallylocal.com`, which must be onboarded in Email Service. Needs the Workers
+   Paid plan. Off Cloudflare the binding is simply absent.
+2. Otherwise **Resend** (`POST https://api.resend.com/emails`) when `RESEND_API_KEY` is set.
+3. Otherwise nothing is sent and nothing fails.
 
 | email | when |
 |---|---|
-| welcome | right after a new sign-up gives their email on the details step |
+| welcome | right after a new sign-up gives their email on the details step; by level: `welcome` (Full), `welcome_basic`, `welcome_starter_small` (a Starter allowance), `welcome_starter` (no free tokens) |
+| access granted | an admin grants the person's access request (`access_granted`; not held back by the one-a-day rule) |
 | didn't start | daily run: admitted 24 to 72 hours ago, no request yet |
 | most of the week used | the request whose settlement takes the week past 80% of a pool's tokens or of the weekly dollar cap; once a week |
 | gone quiet | daily run: requests on 2 or more days, none in the last 7 |
 
 Only to people with an email who haven't pressed stop; never to admins (unless
-`USER_EMAILS_TO_ADMINS=true`, for testing); at most one email per person per UTC day; each
+`USER_EMAILS_TO_ADMINS=true`, for testing); at most one email per person per UTC day (an
+access grant excepted); each
 kind once per person, the weekly one once per week. Nobody still waiting in the queue gets the
 welcome or the didn't-start email. Every send is recorded in the Directory's `user_emails`
-table before Resend is called, and Resend gets an `Idempotency-Key`, so nothing goes twice
-across retries or deploys. A failed send is retried once, by the next daily run (01:00 UTC);
+table before the provider is called and marked sent or failed after it, so nothing goes twice
+across retries or deploys (Resend also gets an `Idempotency-Key`; Email Service has none, so a
+crash between the send and the mark could, rarely, repeat one email on the retry). A failed send is retried once, by the next daily run (01:00 UTC);
 failures are logged as counts only.
 
 Each email ends with a stop link, `/email/stop?u=<github id>&t=<hmac>` (an HMAC of the id with
@@ -646,15 +804,47 @@ same URL. GET shows a page with one button; POST (the button, or a mail app's on
 
 | env | default |
 |---|---|
-| `RESEND_API_KEY` (secret) | unset: nothing is sent and nothing fails |
+| `USER_EMAIL` (binding) | absent: Resend, if `RESEND_API_KEY` is set |
+| `RESEND_API_KEY` (secret) | unset (and no binding): nothing is sent and nothing fails |
 | `EMAIL_FROM` | `sina <sina@directionallylocal.com>` |
 | `EMAIL_REPLY_TO` | `contact@directionallylocal.com` |
 | `USER_EMAILS` (also the runtime setting `userEmails`) | true |
 | `USER_EMAILS_TO_ADMINS` | false |
 
-Before anything is delivered, `directionallylocal.com` must be verified in Resend (its SPF and
-DKIM DNS records). To stop every email without a deploy:
-`POST /admin/config {"userEmails": false}`.
+With Resend, `directionallylocal.com` must be verified in Resend (its SPF and DKIM DNS
+records). To stop every email without a deploy: `POST /admin/config {"userEmails": false}`.
+
+### Test email (admins)
+
+`POST /admin/emails/test {"kind": "welcome" | "didnt_start" | "week_80" | "gone_quiet", "to": "<address>"}`
+sends one email of that kind to `to`, exactly as a person would get it (copy, sender, Reply-To,
+headers, provider), with the calling admin's own stop link. It records nothing for anyone and
+works while `userEmails` is off. Answers `{sent, provider, messageId}`, or 502 with the
+provider's error code (for example `E_SENDER_NOT_VERIFIED`).
+
+### Broadcasts (admins)
+
+```sh
+curl -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"subject": "a quick check-in", "text": "hey,\n\nhow is dl going?\n\nsina",
+       "audience": "all", "signedUpFrom": "2026-11-01", "signedUpTo": "2026-11-07", "dryRun": true}' \
+  https://free.example.com/admin/emails/broadcast
+```
+
+A one-off email to active people of a level (`full`, `starter` or `all`) who signed up in the
+range (`people.admitted_at`; a plain date includes that whole day). Never to blocked or
+suspended accounts, people who pressed stop, people with no email, or admins (unless
+`USER_EMAILS_TO_ADMINS`). The text gets the same stop footer as every user email, and the
+`List-Unsubscribe` headers. The copy must be lowercase outside URLs and addresses, with no em or
+en dashes, or the call is refused. `dryRun` is required: `true` answers `{count,
+waitingForTomorrow, sample}` (3 recipients) and sends nothing.
+
+The broadcast's id is a hash of the subject and text, recorded per person in `user_emails`
+(kind `broadcast`), so calling again never sends the same message to anyone twice, whatever the
+filters. The one-a-day cap applies: people who had another email today wait for a call
+tomorrow. A call sends at most 100, one every 600 ms, and stops at the provider's rate or
+daily limit (`stoppedBy`); call again for the `remaining` ones, failed ones included (3
+attempts each). Refused while `userEmails` is off.
 
 ## What counts against the weekly allowance
 
@@ -745,7 +935,13 @@ the owner can do that by hand.
 **Telemetry.** Each request records the time to the response headers (TTFB) and to the first
 chunk with content (TTFT: text, reasoning or a tool call), per upstream, in `upstream_timings`
 (time, upstream and the two numbers; no person, kept 15 days), and per-day counts in
-`upstream_daily` (requests, upstream errors, prompt and cached tokens, cash and credit).
+`upstream_daily` (requests, upstream errors, prompt, cached and completion tokens, cash and
+credit). `upstream_people` keeps, per upstream, who it served and their first and last day (ids
+and days only, admins left out), for the people per upstream. The dashboard's upstream tables
+(today, this week, all time, each with a total row) show users and tokens in, cached and out
+next to the requests, timings and dollars; `upstreams.csv` has the same columns. Completion
+tokens per upstream, the days before `upstream_daily` existed, and `upstream_people` are built
+once from the request log (the upstream each row recorded) the first time this version starts.
 
 ## Which OpenRouter host serves requests
 
@@ -829,10 +1025,25 @@ and each failure adds a row to `host_failures` (time, host, `http_5xx` | `error_
   - **Storage:** only the SHA-256 of the secret is kept.
   - **Limits:** at most 5 keys per account (409 `key_limit_reached`), and names must be unique
     within an account (409 `key_name_taken`).
+  - **Who may have keys:** admins, people whose level an admin set (`level_reason = 'admin'`:
+    a grant from the Tools tab or an answered `/request`) and Pro subscribers. Anyone else gets
+    403 `server_keys_unavailable` on `POST /v1/keys` ("Server keys on the free tier are by
+    request. Type /request in dl and say what server you want to run it on, or use your own API
+    key on the server."). Listing and revoking work for everyone. A key made before this rule
+    isn't deleted: requests with it get the same 403 until an admin grants the account, and then
+    it works again. The one exception is `/v1/access-request` (GET and POST), which takes any
+    key, so `/request` can be typed on the server itself. A Full account without keys may send a
+    request (no 409 `already_full`); granting it gives the account keys. A blocked or suspended account's key gets `blocked` or `suspended` as before.
   - **Errors:** a wrong or revoked key gets 401 `invalid_key`. Signing out leaves keys working.
   - **Admin view:** `/admin/people` shows how many keys each person has, never the keys.
 
-A per-person grant (`POST /admin/people/:id/grant`) still wins over the weekly defaults. The kill
+A per-person grant (`POST /admin/people/:id/grant`) still wins over the weekly defaults: `usdPerWeek`
+and `spentUsdThisWeek` are GPT-6's; `deepseekSpentUsdThisWeek` sets DeepSeek's spend.
+
+`POST /admin/reset-week {dryRun?}` starts this week over for everyone who isn't blocked: both
+budgets' dollars and tokens and every token pool back to 0 (requests in flight still settle).
+Top-ups, plans and personal caps stay. `{dryRun: true}` only counts. It answers
+`{dryRun, people, reset, skippedBlocked}`. The kill
 switch is `POST /admin/pause` and `/admin/unpause`; `PAUSED=true` in env pauses as well.
 
 ## Install counts
@@ -862,16 +1073,77 @@ lists, `413` over 1 KB, `429` when rate-limited.
 - Stored in the Directory's `download_daily` and `install_daily`. The counts are best effort:
   anyone can post one, so read them as trends, not exact numbers.
 
+**GPU first run.** Before sign-in, Autopilot's GPU-aware first run counts its steps the same way:
+`POST /v1/telemetry/gpu {"event", "gpuVendor"?, "gpuModel"?, "gpuVramGb"?, "gpuCount"?, "answer"?,
+"option"?, "path"?, "outcome"?, "errorType"?}`, where `event` is `detected` (needs `gpuVendor`
+`nvidia|amd|ascend|none`), `prompt` (`gpuVendor`, `answer` `yes|no`), `early_access` (`gpuVendor`
+`amd|ascend`, `answer`), `option` (`option` `free|own_key|gpus|this_machine|remote_server|endpoint`)
+or `result` (`outcome` `ok|failed`, `path` `this_machine|remote_server|endpoint`, and with `failed`
+an `errorType` from a fixed list, `other` by default). Kept per UTC day in `gpu_daily`: those
+words, the GPU's name (64 characters of letters, digits, space and `._()+/-`), its VRAM in whole
+GB and the GPU count; a malformed optional field is dropped. Same responses as above; 60 an hour
+per IP. Like installs it has no person attached, so admin machines can't be left out. Signed in,
+the same steps go to `/v1/events` as `gpu.*` events with only those fields kept. The Health
+view's GPUs section and one line on the home screen read the counts.
+
+**GPU early-access emails.** After a yes to early access, Autopilot asks for an optional email
+("Only used to tell you when <vendor> support is ready"), and sends it as `"email"` on that
+`early_access` body (never when telemetry is off). It is read only there, with `answer` `yes`: a
+plausible address of at most 254 characters, not on the `blockedEmails` list (checked on its
+normalized inbox). A malformed or blocked one is dropped silently; the count is made either way,
+and `gpu_daily` stays anonymous. A kept one goes to the Directory's `early_access_leads` (time,
+vendor, GPU model, VRAM, the address and its normalized inbox), one row per inbox and vendor, the
+latest kept. The address is never logged. Admins see the leads in the Tools tab's "GPU early
+access" card (email, vendor, GPU, VRAM, date, newest first, escaped; a box with every address to
+copy), download them at `GET /admin/dashboard/early-access.csv`, and delete one person's leads on
+request from the same card. The dl.new privacy policy says this.
+
 ## Admin dashboard
 
-`GET /admin` is a server-rendered page for admins: weekly active developers (3+ days and any
+**Home screen.** `GET /admin` opens on four questions, each answered in one plain sentence, made to
+be read on a phone in half a minute (`src/home-page.ts`, numbers from `src/home-data.ts`):
+
+1. **Are we OK?** "Fine", "Watch it" or "Act now", this week's free spend against the weekly budget
+   (the configured providers' weekly credit budgets added up), where it lands by Monday at this
+   pace, the credit left per provider and how many weeks it lasts. Act now: past 80% of the budget
+   by Monday, under 4 weeks of credit, a provider's credit used up, or no provider key. Watch it:
+   past 50%, under 8 weeks, or paused. A small chart of spend per day for 14 days, by provider.
+2. **Who's using it?** People with a request or session today and this week, sign-ups today, and
+   the five who spent most this week: tier in plain words (full, middle, small, no tokens), dollars
+   of their real cap (their level's, or an admin's grant; a creation-batch account has none), and
+   "at cap" when they reached it.
+3. **Is anything broken?** At most three problems, worst first, each linking to the Health or Full
+   view: a provider failing 10%+ of requests today and at least twice its week's share (20+
+   requests), a model failing more than 10% this week (20+ requests), installs on one platform
+   failing more than 15% (5+ installs), more than 25% of this week's sessions ending without a
+   normal exit (20+ sessions), spend or credit past the thresholds above, and people at their cap.
+4. **What needs me?** Pending `/request` asks with Grant and Decline (the Tools tab's form,
+   answered back on the home screen). This block comes first when anything is pending.
+
+Simple, Full (`?view=full`), Health and Tools are links in a "Details" row at the bottom.
+
+**Full view.** `GET /admin?view=full` is the full page: weekly active developers (3+ days and any
 day, last 8 weeks), cohort retention (weeks 1, 2 and 4 after sign-up), cost per person per week
 (total, median, mean, and the top 10 of any week), who reached their token or dollar allowance
 this week and last (and on which day), and the budget with the pause and admission state. The
 page wears the dl.new brand: its fonts and logo load from `https://dl.new` (the page's CSP allows
 `font-src` and `img-src` from there and nothing else; still no scripts). Each table has a CSV at `/admin/dashboard/<table>.csv`
-(`spend`, `weekly-active`, `retention`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`,
+(`spend`, `weekly-active`, `retention`, `retention-daily`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`,
 `queue`, `referrals`, `funnel`, `install-funnel`, `installs`, `paid`, `upstreams`).
+
+**Daily retention:** people grouped by the UTC day they were admitted (the last 21 days with
+sign-ups; admins and blocked accounts left out), and the share who made at least one request on
+day 0–7 and 14 after it. A day stays blank until it has ended (UTC), so today's partial
+numbers never show or count in the averages. The simple view (`/admin?view=simple`) draws it as a cohort triangle (the phone drawing
+drops D14) with the average D1 and D7 under it, weighted by cohort size; the full view has the
+table, `retention-daily.csv` has `cohort, size, d0…d7, d14` (shares), and `GET /admin/metrics`
+returns it as `cohorts: [{day, size, d: {0: share, …, 14: share}}]` (null for days that haven't ended).
+It counts only people who could use dl: they had free tokens at sign-up (`people.signup_tokens`:
+Full, Basic, an admin's grant, or a Starter allowance without the batch flag; for sign-ups from
+before it was stored, the current level stands in). Next to it, per sign-up day, a small funnel
+of everyone: signed up, got tokens, refused, and refused but opened dl that day (a dl session or
+a refused chat request, from `refused_days`); `GET /admin/metrics` has it as
+`signupFunnel: [{day, signedUp, gotTokens, refused, refusedOpened}]`.
 
 At the top: the **budget, which is the Luminal credit**: credit used and left of
 `luminalCreditUsd` ($2,000), this week's free credit against `luminalWeeklyCreditUsd` ($250), and
@@ -922,10 +1194,12 @@ which records settings, pause, block and unblock.
   events (`POST /v1/events`) while the free tier is its provider, so a sign-in token used from
   another tool sends requests and no events. A chat request from a free-plan account is
   refused with 403 `dl_only` ("Free tokens work inside dl only. Run dl to keep using them, or
-  use your own API key in any tool.") when, in the last 24 hours, the account made at least 20
-  free chat requests with a sign-in token and no session event arrived. Autopilot batches
-  events for a few seconds, so a real session's first requests come before its first event:
-  the threshold leaves room for that. Not counted and never refused: admins, requests with a
+  use your own API key in any tool.") when no session event (one with a session id) arrived in
+  the last 24 hours and the account has made at least 20 free chat requests with a sign-in token
+  that no session event covers: a session event covers the 24 hours after it, so these are the
+  requests made more than 24 hours after the latest one (all of them, for an account that never
+  sent one). Autopilot batches events for a few seconds, so a new session's first requests come
+  before its first event: the threshold leaves room for that, once, not every day. Not counted and never refused: admins, requests with a
   server key (`dlk_`, dl's server mode) and paid usage (Pro and top-ups; a refused free account
   with a top-up is served from it). The check reads the caller's events and request log in the
   Directory read every chat request already makes; the only new write is a `via_key` flag on the
@@ -940,7 +1214,8 @@ which records settings, pause, block and unblock.
   counts, charged tokens and cost, plus GitHub logins, sign-up times, per-person grants and the
   spend totals, and for the launch sections the queue (ids and times), the Monday runs (counts
   and the forecast) and referrals (ids, time and outcome), and for the upstreams `upstream_daily`
-  and `upstream_timings` (counts, tokens, dollars and milliseconds per upstream, no person), and
+  and `upstream_timings` (counts, tokens, dollars and milliseconds per upstream, no person) and
+  `upstream_people` (ids and first and last days per upstream), and
   for the install funnel `download_daily` and `install_daily` (anonymous counts). No model, event type or properties,
   session ids, prompts or code. A test runs
   the dashboard under an SQLite authorizer that allows only those columns. The abuse section

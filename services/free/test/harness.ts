@@ -142,6 +142,21 @@ export interface GitHubUserFixture {
    * a count, "error" (HTTP 502) or "throw" (the fetch itself fails).
    */
   contributions?: number | "error" | "throw";
+  /** Weeks of the contribution calendar with a contribution (default 0). */
+  activeWeeks?: number;
+  /** Pull requests opened in the last year, counted as contributions to others' work (default 0). */
+  pullRequests?: number;
+  /** Commits to repositories other accounts own (default 0). */
+  outsideCommits?: number;
+  /**
+   * When the oldest owned repository was created: default the account's creation, when it has
+   * public repositories (so an old account passes this check); null for none.
+   */
+  repoCreatedAt?: string | null;
+  /** The oldest owned repository is a fork (default false). */
+  repoIsFork?: boolean;
+  /** Accounts followed plus repositories starred (default 10). */
+  social?: number;
 }
 
 export type OpenRouterHandler = (body: Record<string, unknown>, init: RequestInit) => Response | Promise<Response>;
@@ -154,7 +169,7 @@ export interface Service {
     openRouter: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     /** Calls to Luminal's chat completions (a fake: nothing leaves the process). */
     luminal: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
-    /** Calls to OpenAI's chat completions (a fake: nothing leaves the process). */
+    /** Calls to OpenAI's Responses API (a fake: nothing leaves the process). */
     openai: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     githubTokens: Array<{ code: string; redirect_uri?: string }>;
     /** Contribution lookups on GitHub's GraphQL API, by login. */
@@ -169,7 +184,11 @@ export interface Service {
     stripe: Array<{ path: string; form: URLSearchParams; headers: Record<string, string> }>;
     /** Calls to Resend (https://api.resend.com/emails): JSON body and headers. Nothing leaves the process. */
     resend: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
+    /** Messages sent through the fake USER_EMAIL binding (Cloudflare Email Service, with `userEmail: true`). */
+    userEmail: Array<Record<string, unknown>>;
   };
+  /** Answers sends through the fake USER_EMAIL binding (default: `{messageId}`); throw to refuse one. */
+  setUserEmail(handler: (message: Record<string, unknown>) => { messageId: string } | Promise<{ messageId: string }>): void;
   /** Answers calls to Resend (default: 200 with an id). */
   setResend(handler: (body: Record<string, unknown>) => Response | Promise<Response>): void;
   /** Answers calls to api.stripe.com (default: a Checkout or portal session with a URL). */
@@ -179,7 +198,7 @@ export interface Service {
   setGithubProfile(handler: (login: string) => Response | Promise<Response>): void;
   /** Answers calls to Luminal (default: a completion with Luminal-shaped usage, no cost). */
   setLuminal(handler: OpenRouterHandler): void;
-  /** Answers calls to OpenAI (default: a completion with OpenAI-shaped usage, no cost). */
+  /** Answers calls to OpenAI's Responses API (default: a "hi" response, streamed when asked, with Responses usage). */
   setOpenAI(handler: OpenRouterHandler): void;
   request(method: string, path: string, options?: { body?: unknown; token?: string; headers?: Record<string, string>; form?: Record<string, string>; ip?: string }): Promise<Response>;
   signIn(user: GitHubUserFixture, options?: { invite?: string; deviceId?: string }): Promise<Tokens>;
@@ -205,15 +224,71 @@ export function luminalUsage(prompt: number, completion: number, cached = 0): Re
   return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion, prompt_tokens_details: { cached_tokens: cached } };
 }
 
-/** A usage object the way OpenAI reports it: cached tokens, no cost (the service prices it). */
-export function openaiUsage(prompt: number, completion: number, cached = 0): Record<string, unknown> {
+/** A usage object the way OpenAI's Responses API reports it: cached and reasoning tokens, no cost. */
+export function responsesUsage(input: number, output: number, cached = 0, reasoning = 0): Record<string, unknown> {
   return {
-    prompt_tokens: prompt,
-    completion_tokens: completion,
-    total_tokens: prompt + completion,
-    prompt_tokens_details: { cached_tokens: cached, cache_write_tokens: 0, audio_tokens: 0 },
-    completion_tokens_details: { reasoning_tokens: 0, audio_tokens: 0 },
+    input_tokens: input,
+    input_tokens_details: { cache_write_tokens: 0, cached_tokens: cached },
+    output_tokens: output,
+    output_tokens_details: { reasoning_tokens: reasoning },
+    total_tokens: input + output,
   };
+}
+
+/** A Responses `response` object; `output` defaults to one "hi" message. */
+export function responseObject(usageObject: Record<string, unknown> | undefined, options: { output?: unknown[]; status?: string; incompleteReason?: string; model?: string } = {}): Record<string, unknown> {
+  return {
+    id: "resp_1",
+    object: "response",
+    created_at: 1_790_000_000,
+    status: options.status ?? "completed",
+    error: null,
+    incomplete_details: options.incompleteReason ? { reason: options.incompleteReason } : null,
+    model: options.model ?? "gpt-6-luna",
+    output: options.output ?? [messageItem("hi")],
+    ...(usageObject ? { usage: usageObject } : {}),
+  };
+}
+
+/** A Responses output message with one output_text part. */
+export function messageItem(text: string): Record<string, unknown> {
+  return { type: "message", id: "msg_1", status: "completed", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] };
+}
+
+/** A Responses function_call output item. */
+export function functionCallItem(callId: string, name: string, args: string): Record<string, unknown> {
+  return { type: "function_call", id: `fc_${callId}`, call_id: callId, name, arguments: args, status: "completed" };
+}
+
+/** A non-streaming Responses answer. */
+export function openaiResponse(usageObject: Record<string, unknown> | undefined, options: Parameters<typeof responseObject>[1] = {}): Response {
+  return Response.json(responseObject(usageObject, options));
+}
+
+/** A Responses event stream (`event:` and `data:` lines, no `[DONE]`), as OpenAI sends it. */
+export function responsesSse(events: Array<Record<string, unknown>>, options: { split?: boolean } = {}): Response {
+  const text = events.map((event) => `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+  const bytes = new TextEncoder().encode(text);
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (options.split) for (let index = 0; index < bytes.length; index += 7) controller.enqueue(bytes.slice(index, index + 7));
+      else controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8" } });
+}
+
+/** The events of a streamed response that says `text`, then finishes with `usageObject`. */
+export function responsesTextEvents(text: string, usageObject: Record<string, unknown> | undefined, options: { status?: string; incompleteReason?: string } = {}): Array<Record<string, unknown>> {
+  const done = responseObject(usageObject, { output: [messageItem(text)], ...options });
+  return [
+    { type: "response.created", response: { ...done, status: "in_progress", output: [], usage: null } },
+    { type: "response.output_item.added", output_index: 0, item: { type: "message", id: "msg_1", role: "assistant", content: [] } },
+    ...[...text].map((character) => ({ type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: character })),
+    { type: "response.output_item.done", output_index: 0, item: messageItem(text) },
+    { type: options.status === "incomplete" ? "response.incomplete" : "response.completed", response: done },
+  ];
 }
 
 export function completion(usageObject: Record<string, unknown> | undefined): Response {
@@ -240,7 +315,7 @@ export function sse(chunks: string[], options: { split?: boolean } = {}): Respon
   return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
-export async function createService(vars: Record<string, string> = {}, options: { email?: boolean } = {}): Promise<Service> {
+export async function createService(vars: Record<string, string> = {}, options: { email?: boolean; userEmail?: boolean } = {}): Promise<Service> {
   const [{ createHandler }, { AuthObject }, { DirectoryObject }, { AccountObject }, { RateLimiterObject }] = await Promise.all([
     import("../src/app.js"),
     import("../src/auth-object.js"),
@@ -261,16 +336,27 @@ export async function createService(vars: Record<string, string> = {}, options: 
     GITHUB_CLIENT_SECRET: "gh-secret",
     TOKEN_SIGNING_KEY: SIGNING_KEY,
     ADMIN_GITHUB_IDS: String(ADMIN_ID),
+    // Tests sign many accounts up from @example.com; the per-domain daily cap has its own tests.
+    DOMAIN_SIGNUPS_PER_DAY: "100000",
     ...vars,
     ...namespaces,
   };
   const clock = { now: NOW };
-  const calls: Service["calls"] = { openRouter: [], luminal: [], openai: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [], resend: [] };
+  const calls: Service["calls"] = { openRouter: [], luminal: [], openai: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [], resend: [], userEmail: [] };
   let resend = (_body: Record<string, unknown>): Response | Promise<Response> => Response.json({ id: `email-${calls.resend.length}` });
   let stripe = (path: string, _form?: URLSearchParams): Response | Promise<Response> =>
     path === "/v1/checkout/sessions"
       ? Response.json({ id: `cs_test_${calls.stripe.length}`, url: `https://checkout.stripe.com/c/pay/cs_test_${calls.stripe.length}` })
       : Response.json({ id: "bps_test_1", url: "https://billing.stripe.com/p/session/test_1" });
+  let userEmail = (_message: Record<string, unknown>): { messageId: string } | Promise<{ messageId: string }> => ({ messageId: `cf-${calls.userEmail.length}` });
+  if (options.userEmail) {
+    envRef.env.USER_EMAIL = {
+      async send(message: Record<string, unknown>) {
+        calls.userEmail.push(structuredClone(message));
+        return userEmail(message);
+      },
+    };
+  }
   if (options.email) {
     envRef.env.ALERT_EMAIL = {
       async send(message: { from: string; to: string; raw: string }) {
@@ -281,7 +367,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
   let openRouter: OpenRouterHandler = () => completion(usage(100, 10));
   let githubProfile = (login: string): Response | Promise<Response> => Response.json({ login, email: null });
   let luminal: OpenRouterHandler = () => completion(luminalUsage(100, 10));
-  let openai: OpenRouterHandler = () => completion(openaiUsage(100, 10));
+  let openai: OpenRouterHandler = (body) => (body.stream ? responsesSse(responsesTextEvents("hi", responsesUsage(100, 10))) : openaiResponse(responsesUsage(100, 10)));
 
   const fetcher = async (input: string, init: RequestInit = {}): Promise<Response> => {
     const url = String(input);
@@ -299,7 +385,8 @@ export async function createService(vars: Record<string, string> = {}, options: 
     if (url === "https://api.github.com/user/emails") {
       const token = new Headers(init.headers).get("authorization")?.replace("Bearer token-for-", "") ?? "";
       const user = JSON.parse(decodeURIComponent(token)) as GitHubUserFixture;
-      const email = user.email === undefined ? `${user.login.toLowerCase()}@example.com` : user.email;
+      // One inbox per test account (the sign-up refuses a second account on the same inbox).
+      const email = user.email === undefined ? `${user.login.toLowerCase()}.${user.id}@example.com` : user.email;
       return Response.json(email === null ? [] : [{ email, primary: true, verified: true, visibility: "private" }]);
     }
     if (url.startsWith("https://api.github.com/users/")) {
@@ -311,16 +398,35 @@ export async function createService(vars: Record<string, string> = {}, options: 
       const token = new Headers(init.headers).get("authorization")?.replace("Bearer token-for-", "") ?? "";
       const user = JSON.parse(decodeURIComponent(token)) as GitHubUserFixture;
       calls.githubGraphql.push(user.login);
-      assert.match(String(init.body), /viewer \{ followers \{ totalCount \} contributionsCollection \{ restrictedContributionsCount contributionCalendar \{ totalContributions/);
+      assert.match(String(init.body), /viewer \{ login followers \{ totalCount \} following \{ totalCount \} starredRepositories \{ totalCount \}/);
+      assert.match(String(init.body), /repositories\(ownerAffiliations: OWNER, first: 5, orderBy: \{ field: CREATED_AT, direction: ASC \}\)/);
+      assert.match(String(init.body), /commitContributionsByRepository\(maxRepositories: 25\)/);
+      assert.match(String(init.body), /contributionCalendar \{ totalContributions weeks \{ contributionDays \{ contributionCount/);
       if (user.contributions === "throw") throw new TypeError("fetch failed");
       if (user.contributions === "error") return Response.json({ message: "Server Error" }, { status: 502 });
+      const repoAt = user.repoCreatedAt !== undefined ? user.repoCreatedAt : (user.publicRepos ?? 3) > 0 ? (user.createdAt ?? "2015-01-01T00:00:00Z") : null;
+      const social = user.social ?? 10;
       return Response.json({
         data: {
           viewer: {
+            login: user.login,
             followers: { totalCount: user.followers ?? 0 },
+            following: { totalCount: Math.floor(social / 2) },
+            starredRepositories: { totalCount: social - Math.floor(social / 2) },
+            repositories: { nodes: repoAt === null ? [] : [{ createdAt: repoAt, isFork: user.repoIsFork ?? false }] },
             contributionsCollection: {
               restrictedContributionsCount: user.restrictedContributions ?? 0,
-              contributionCalendar: { totalContributions: user.contributions ?? 0 },
+              totalPullRequestContributions: user.pullRequests ?? 0,
+              totalIssueContributions: 0,
+              totalPullRequestReviewContributions: 0,
+              commitContributionsByRepository: [
+                { repository: { owner: { login: user.login } }, contributions: { totalCount: 40 } },
+                ...((user.outsideCommits ?? 0) > 0 ? [{ repository: { owner: { login: "someone-else" } }, contributions: { totalCount: user.outsideCommits } }] : []),
+              ],
+              contributionCalendar: {
+                totalContributions: user.contributions ?? 0,
+                weeks: Array.from({ length: 53 }, (_, week) => ({ contributionDays: Array.from({ length: 7 }, (_, d) => ({ contributionCount: week < (user.activeWeeks ?? 0) && d === 0 ? 1 : 0 })) })),
+              },
             },
           },
         },
@@ -336,7 +442,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
       calls.luminal.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
       return luminal(body, init);
     }
-    if (url === "https://api.openai.com/v1/chat/completions") {
+    if (url === "https://api.openai.com/v1/responses") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       calls.openai.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
       return openai(body, init);
@@ -414,6 +520,9 @@ export async function createService(vars: Record<string, string> = {}, options: 
     setResend: (next) => {
       resend = next;
     },
+    setUserEmail: (next) => {
+      userEmail = next;
+    },
     request,
     signIn,
     directory: () => namespaces.DIRECTORY.getByName("directory"),
@@ -476,6 +585,15 @@ export async function authorize(request: Service["request"], userCode: string): 
 export async function errorCode(response: Response): Promise<string> {
   const body = (await response.json()) as { error?: { code?: string } };
   return body.error?.code ?? "";
+}
+
+/**
+ * Lets an account create and use server keys as a Pro subscriber may, for tests that use a key
+ * only because it outlives an access token. It changes nothing else: not the level (an admin's
+ * grant would stop the weekly Starter re-check) and not the allowance (Pro would raise it).
+ */
+export function allowServerKeys(service: Service, githubId: number): void {
+  service.account(githubId).plan = async () => "pro";
 }
 
 /** An invite code from the admin API, signing the admin in first if needed. */

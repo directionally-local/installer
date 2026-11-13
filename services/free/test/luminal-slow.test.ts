@@ -101,7 +101,7 @@ describe("Luminal slowing people down", () => {
     assert.match(body, /Timeouts \(no first byte in time\): 0\n/);
     assert.match(body, /People affected: 2\n/);
     assert.match(body, /Serving now: Luminal\n/);
-    assert.match(body, /To switch to OpenRouter: open https:\/\/free\.test\/admin#upstream → Upstream → OpenRouter \(it spends OpenRouter credit until you switch back\)/);
+    assert.match(body, /To switch to OpenRouter: open https:\/\/free\.test\/admin\?view=full#upstream → Upstream → OpenRouter \(it spends OpenRouter credit until you switch back\)/);
     assert.match(body, /Admin requests count here: they're real traffic\./);
 
     // More 429s within 30 minutes: no second email.
@@ -156,7 +156,7 @@ describe("Luminal slowing people down", () => {
     const closed = luminalEmails(service).at(-1)!;
     assert.equal(closed.subject, "dl free tier: Luminal alert cleared (no Luminal requests in 30 min)");
     assert.match(closed.body, /nothing tested it either/);
-    assert.match(closed.body, /Serving now: OpenRouter\. It spends OpenRouter credit until you switch back: open https:\/\/free\.test\/admin#upstream → Upstream → Luminal\./);
+    assert.match(closed.body, /Serving now: OpenRouter\. It spends OpenRouter credit until you switch back: open https:\/\/free\.test\/admin\?view=full#upstream → Upstream → Luminal\./);
     await chat(service, people[0]!);
     assert.equal(luminalEmails(service).length, 2);
   });
@@ -214,8 +214,9 @@ describe("switching upstream from /admin", () => {
   it("shows who serves, and switches with the session, the CSRF token and a same-origin post, logged", async () => {
     const { service, people, admin } = await setup();
     const cookie = await adminCookie(service);
-    const page = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
-    assert.match(page, /<p class="serving">Serving from <strong>Luminal<\/strong> <a href="#upstream">Switch upstream<\/a><\/p>/);
+    const page = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
+    assert.match(page, /<p class="serving"><span>Each model goes to its own provider:<\/span><span>GPT-6 → <strong>[^<]+<\/strong><\/span><span>DeepSeek → <strong>Luminal<\/strong><\/span><a href="#upstream">Routing<\/a><\/p>/);
+    assert.doesNotMatch(page, /Serving from|Switch upstream/);
     assert.match(page, /<section id="upstream">/);
     assert.match(page, /<button type="button" class="on" disabled aria-pressed="true">Luminal<\/button>/);
     assert.match(page, /<form method="post" action="\/admin\/dashboard\/upstream"><input type="hidden" name="csrf" value="[0-9a-f]{64}"><input type="hidden" name="upstream" value="openrouter"><button type="submit" class="danger">OpenRouter<\/button><\/form>/);
@@ -234,7 +235,7 @@ describe("switching upstream from /admin", () => {
 
     const done = await post({ upstream: "openrouter", csrf });
     assert.equal(done.status, 303);
-    assert.equal(done.headers.get("location"), "/admin#upstream");
+    assert.equal(done.headers.get("location"), "/admin?view=full#upstream");
     const after = await config();
     assert.equal(after.effective.primaryUpstream, "openrouter");
     assert.deepEqual(after.log[0], { ...after.log[0], key: "primaryUpstream", oldValue: "(env)", newValue: "openrouter", changedByLogin: "owner" });
@@ -243,8 +244,9 @@ describe("switching upstream from /admin", () => {
     assert.equal(service.calls.luminal.length, luminalCalls, "the next request goes to OpenRouter");
     assert.equal(service.calls.openRouter.length, 1);
 
-    const switched = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
-    assert.match(switched, /Serving from <strong>OpenRouter<\/strong>/);
+    const switched = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
+    assert.match(switched, /DeepSeek → <strong>OpenRouter<\/strong>/);
+    assert.match(switched, /DeepSeek goes to<b class="state">OpenRouter<\/b>/);
     assert.match(switched, /<input type="hidden" name="upstream" value="luminal"><button type="submit">Luminal<\/button>/);
     assert.match(switched, /primaryUpstream/);
     assert.equal((await post({ upstream: "luminal", csrf })).status, 303);
@@ -254,13 +256,13 @@ describe("switching upstream from /admin", () => {
   it("accepts a form post whose Origin the browser hid as null, and still refuses a cross-site one", async () => {
     const { service } = await setup();
     const cookie = await adminCookie(service);
-    const csrf = csrfOf(await (await service.request("GET", "/admin", { headers: { cookie } })).text());
+    const csrf = csrfOf(await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text());
     const post = (headers: Record<string, string>) =>
       service.request("POST", "/admin/dashboard/upstream", { headers: { cookie, ...headers }, form: { upstream: "openrouter", csrf } });
 
     const accepted = await post({ origin: "null", "sec-fetch-site": "same-origin" });
     assert.equal(accepted.status, 303);
-    assert.equal(accepted.headers.get("location"), "/admin#upstream");
+    assert.equal(accepted.headers.get("location"), "/admin?view=full#upstream");
 
     const refused = await post({ origin: "null", "sec-fetch-site": "cross-site" });
     assert.equal(refused.status, 403);
@@ -270,7 +272,7 @@ describe("switching upstream from /admin", () => {
   it("refuses OpenRouter when the service has no OpenRouter key", async () => {
     const { service } = await setup({ OPENROUTER_API_KEY: "" });
     const cookie = await adminCookie(service);
-    const page = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    const page = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
     assert.match(page, /<button type="button" disabled title="No OPENROUTER_API_KEY">OpenRouter<\/button>/);
     const refused = await service.request("POST", "/admin/dashboard/upstream", { headers: { cookie, origin: "https://free.test" }, form: { upstream: "openrouter", csrf: csrfOf(page) } });
     assert.equal(refused.status, 409);

@@ -1,0 +1,10 @@
+-- GPU 0: NVIDIA RTX PRO 5000 Blackwell · 48935 MiB · driver 580.95.05 · CUDA 13.0
+-- Models that fit: qwen-old (12 GB) · qwen-new (16 GB)
+-- Update strategy: side-by-side: the old model keeps serving while qwen-old starts (20 GB new + 20 GB old)
+.. Download and start qwen-old: vllm/vllm-openai:v0.20.0
+ok Download and start qwen-old: port 8002 · logs: docker logs -f dl-model-1
+.. Chat, tool call and JSON smoke tests: waiting for download and API readiness (up to 5 minutes)
+ok Chat, tool call and JSON smoke tests: 2651.4 tokens/sec
+-- Comparison: old Qwen/Qwen3-4B-Instruct-2507: 444.9 tok/s | new Qwen/Qwen3-4B: 2651.4 tok/s
+-- Checks: old chat/tools/JSON ✓ ✓ ✓ | new chat/tools/JSON ✓ ✓ ✓
+ok Model serving: Qwen/Qwen3-4B · http://127.0.0.1:8002/v1

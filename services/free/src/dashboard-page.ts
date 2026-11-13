@@ -1,9 +1,36 @@
 import { escapeHtml } from "../../shared/src/html.js";
 import { DOWNLOAD_ROUTES } from "./telemetry.js";
-import { COHORT_WEEKS, FUNNEL_DAYS, REGULAR_DAYS, RETENTION_OFFSETS, TOKEN_LIMIT_SHARE, WEEKS_SHOWN, type DashboardData, type InstallFunnelRow } from "./dashboard-data.js";
+import { averageRetention, COHORT_WEEKS, DAILY_COHORTS, FUNNEL_DAYS, REGULAR_DAYS, RETENTION_DAYS, RETENTION_OFFSETS, TOKEN_LIMIT_SHARE, WEEKS_SHOWN, type DailyCohort, type DashboardData, type InstallFunnelRow } from "./dashboard-data.js";
 import { ABUSE_DAYS, type AbuseData, type AbusePerson, type SimpleData } from "./abuse.js";
 import { BRAND_ORIGIN, BRAND_TOKENS, PRODUCT_NAME } from "./pages.js";
 import { isoDay } from "./week.js";
+import type { LevelChecks } from "./admission.js";
+import type { EarlyAccessLead, PendingAccessRequest } from "./directory-object.js";
+import { hasCapitals, type BroadcastAudience } from "./broadcast.js";
+import { GRANT_LABELS, grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, type GrantResult } from "./grant.js";
+import { FREE_MODELS } from "./models.js";
+import { creditBudget, creditMode } from "./queue.js";
+import { GPU_OPTION_NAMES, GPU_VENDOR_NAMES, HEALTH_WINDOWS, healthTakeaways, INSTALL_STEPS, NORMAL_SESSION_ENDS, NO_END, STILL_OPEN, type HealthData } from "./health-data.js";
+
+/** One Starter account on the full dashboard: its stored signals and which checks pass. Admin-only. */
+export interface StarterRow {
+  githubId: number;
+  login: string;
+  admittedAt: number;
+  levelReason: string | null;
+  accountAgeDays: number | null;
+  publicRepos: number | null;
+  contributions: number | null;
+  followers: number | null;
+  activeWeeks: number | null;
+  outsideContributions: number | null;
+  oldestRepoAt: number | null;
+  social: number | null;
+  checks: LevelChecks;
+}
+
+/** The full dashboard shows this many Starter accounts, newest first. */
+export const STARTER_ROWS = 50;
 
 /**
  * The admin dashboard as server-rendered HTML, plus a CSV of each table. No scripts and no
@@ -11,12 +38,16 @@ import { isoDay } from "./week.js";
  * under `default-src 'none'`. It wears the dl.new brand (tokens, Bricolage/Geist/Geist Mono and
  * the logo, loaded from dl.new and nothing else), light and dark following the device. Charts
  * are small inline SVGs with presentation attributes and a `<title>` per bar for the value.
- * The only forms are sign-out, block/unblock and the "Serve from" upstream switch; the last
- * two post back here with a CSRF token.
+ * The only forms are sign-out, block/unblock, the routing setting (primaryUpstream) switch and the Tools
+ * tab's two forms; all but sign-out post back here with a CSRF token.
  *
- * Two views: the full one (the default, every table) and a simple one at /admin?view=simple,
+ * The home screen (home-page.ts) is the default at /admin. Behind it, four tabs: the full view
+ * at /admin?view=full (every table), a simple one at /admin?view=simple,
  * four cards readable at a glance (sign-ups, growth, tokens per person, red flags), mostly
- * inline SVG charts. Switching is a plain link: no scripts.
+ * inline SVG charts, and Tools at /admin?view=tools (give free tokens by GitHub username, write
+ * an email to users), whose buttons post a form and get the page back, and Health at
+ * /admin?view=health (errors, crashes, versions, sessions, tools, models, installs and GPUs from
+ * Autopilot's session events and the anonymous counts; health-data.ts). Switching is a plain link: no scripts.
  */
 
 /** Global spend, caps and admission, for the first section. */
@@ -31,11 +62,13 @@ export interface SpendView {
   paused: boolean;
   pausedByEnv: boolean;
   openAdmission: boolean;
-  /** New accounts need a public repo or a contribution in the last year to skip the invite. */
+  /** The GitHub account check at sign-up: off gives everyone Full. */
   requireGithubActivity: boolean;
   maxActiveUsers: number;
   weeklyTokens: number;
+  /** A Full person's GPT-6 budget, and DeepSeek budget (absent: the same). */
   perPersonWeeklyUsd: number | null;
+  deepseekWeeklyUsd?: number | null;
   /** Share of the weekly cap at which sign-ups queue. */
   queueThreshold: number;
   /** The provider setting, and whether each provider has a key. */
@@ -52,20 +85,57 @@ export interface SpendView {
   creditUsedUsd: number;
   creditWeekUsd: number;
   freeCreditWeekUsd: number;
-  /** The weekly credit budget the queue protects; null for none. */
+  /** Luminal's weekly credit budget; null for none. */
   weeklyCreditUsd: number | null;
-  /** A Starter account's weekly tokens. */
+  /** OpenAI credit: the balance, used since the start, used this week (all, and free usage only), the weekly budget. */
+  openaiCreditUsd: number;
+  openaiCreditUsedUsd: number;
+  openaiCreditWeekUsd: number;
+  openaiFreeCreditWeekUsd: number;
+  openaiWeeklyCreditUsd: number | null;
+  /** A Starter account's weekly tokens (a batch-flagged one gets none), and its dollar cap. */
   starterWeeklyTokens: number;
+  starterWeeklyUsd: number | null;
+  starterDeepseekWeeklyUsd?: number | null;
+  /** The basic level: weekly tokens (0: off), dollar cap, and the account age it needs. Admin-only. */
+  basicWeeklyTokens: number;
+  basicWeeklyUsd: number | null;
+  basicDeepseekWeeklyUsd?: number | null;
+  basicMinAccountAgeDays: number;
+  /** The public bar for Full (free tokens): account age, and public repositories or contributions. */
+  fullMinAccountAgeDays: number;
+  fullMinPublicRepos: number;
+  fullMinContributions: number;
 }
 
 /** The red banner shows at this share of either cap. */
 export const BANNER_SHARE = 0.8;
 
-export const CSV_TABLES = ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"] as const;
+/** The Health view's tables (healthCsv); they take ?days= like the page. */
+export const HEALTH_CSV_TABLES = [
+  "health-errors",
+  "health-request-failures",
+  "health-ends",
+  "health-turns",
+  "health-versions",
+  "health-sessions",
+  "health-tools",
+  "health-models",
+  "health-upstreams",
+  "health-installs",
+  "health-gpus",
+] as const;
+export type HealthCsvTable = (typeof HEALTH_CSV_TABLES)[number];
+
+export const CSV_TABLES = ["early-access", "spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams", ...HEALTH_CSV_TABLES] as const;
 export type CsvTable = (typeof CSV_TABLES)[number];
 
 export function isCsvTable(name: string): name is CsvTable {
   return (CSV_TABLES as readonly string[]).includes(name);
+}
+
+export function isHealthCsvTable(name: string): name is HealthCsvTable {
+  return (HEALTH_CSV_TABLES as readonly string[]).includes(name);
 }
 
 /** Security headers every dashboard response carries. `nonce` allows the one stylesheet. */
@@ -146,6 +216,8 @@ svg text { fill: var(--muted); font: 11px var(--mono); }
 .key.soft { background: var(--soft); }
 .serving { margin: 12px 0 0; padding: 10px 14px; border: 1px solid var(--ink); border-radius: 10px; background: var(--surface); display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
 .serving strong { font: 700 17px var(--display); }
+td.wrap { white-space: normal; min-width: 11rem; }
+td.used svg { margin-top: 4px; min-width: 8rem; height: 6px; }
 .switch { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
 button.on { background: var(--ink); color: var(--on-ink); border-color: var(--ink); cursor: default; }
 .banner { background: var(--accent); color: #fff; border-radius: 10px; padding: 10px 14px; margin: 14px 0 0; font-weight: 600; }
@@ -155,13 +227,16 @@ button.on { background: var(--ink); color: var(--on-ink); border-color: var(--in
 .views { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
 .views a { font: 500 12px var(--body); padding: 2px 9px; border-radius: 6px; text-decoration: none; color: var(--muted); }
 .views a[aria-current="page"] { background: var(--ink); color: var(--on-ink); }
+.takeaway { margin: 0 0 4px; font-weight: 600; }
+tr.bad td { color: var(--accent); }
+.health-views { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 4px 0 0; }
 `;
 
 export function nonce(): string {
   return [...crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function shell(title: string, body: string, status = 200, headers: Record<string, string> = {}, head = "", style = STYLE): Response {
+export function shell(title: string, body: string, status = 200, headers: Record<string, string> = {}, head = "", style = STYLE): Response {
   const styleNonce = nonce();
   const html = `<!doctype html>
 <html lang="en">
@@ -247,6 +322,22 @@ function tokens(value: number): string {
   if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
   if (value >= 1e3) return `${(value / 1e3).toFixed(1)}k`;
   return String(Math.round(value));
+}
+
+/** Compact counts for big numbers: 412, 12.3k, 41.2M, 2.3B (three significant digits, trailing zeros dropped). */
+export function compact(value: number): string {
+  const units: Array<[number, string]> = [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "k"]];
+  const rounded = Math.round(value);
+  for (const [size, unit] of units) {
+    if (Math.abs(rounded) < size) continue;
+    const scaled = rounded / size;
+    const digits = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2;
+    const text = Number(scaled.toFixed(digits));
+    // 999.95k rounds to 1000k: say 1M.
+    if (text >= 1000 && size < 1e12) return compact(1000 * size * Math.sign(rounded));
+    return `${text}${unit}`;
+  }
+  return String(rounded);
 }
 
 function percent(share: number): string {
@@ -342,13 +433,44 @@ const STEP_LABELS: Record<string, string> = {
   path: "Putting dl on PATH",
   dl_up: "Server setup (dl up)",
 };
+/** Why a step failed, when install.sh said (`step:reason` in the failed-steps table). */
+const REASON_LABELS: Record<string, string> = {
+  termux: "Android (Termux)",
+  arm32: "32-bit ARM system",
+  musl: "musl Linux (Alpine)",
+  tools: "no tar or gzip",
+  glibc: "glibc older than 2.28",
+  fetch: "couldn't reach nodejs.org",
+  download: "download failed",
+  checksum: "checksum didn't match",
+  unpack: "couldn't unpack",
+  run: "Node.js doesn't run here",
+  unpatched: "Node.js missing the fix",
+};
+function stepLabel(step: string): string {
+  const [name = "", reason] = step.split(":");
+  const label = STEP_LABELS[name] ?? name;
+  return reason ? `${label}: ${REASON_LABELS[reason] ?? reason}` : label;
+}
 
 const short = (ms: number) => isoDay(ms).slice(5);
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** "Nov 8" (UTC). */
+const monthDay = (ms: number) => `${MONTHS[new Date(ms).getUTCMonth()]} ${new Date(ms).getUTCDate()}`;
+
+/** "Average D1 16% · D7 5%": day 1 and day 7 over the cohorts that have reached them, weighted by size. */
+function retentionAverages(cohorts: readonly DailyCohort[]): string {
+  const part = (offset: 1 | 7) => {
+    const average = averageRetention(cohorts, offset);
+    return average === null ? `D${offset} –` : `D${offset} <b>${percent(average.share)}</b> <span class="muted">(${count(average.cohorts)} cohort${average.cohorts === 1 ? "" : "s"}, ${count(average.people)} people)</span>`;
+  };
+  return `Average ${part(1)} · ${part(7)}, weighted by cohort size.`;
+}
 
 // ─── Abuse ────────────────────────────────────────────────────────────────
 
 /**
- * "Serve from: Luminal / OpenRouter": one button per upstream, the current one pressed. Only
+ * "Routing setting: OpenAI / Luminal / OpenRouter" (primaryUpstream): one button per upstream, the current one pressed. Only
  * with a CSRF token (a browser session); an upstream without a key can't be chosen.
  */
 function upstreamSwitch(spend: SpendView, csrf: string | undefined): string {
@@ -359,8 +481,8 @@ function upstreamSwitch(spend: SpendView, csrf: string | undefined): string {
     if (!configured) return `<button type="button" disabled title="No ${secret[upstream]}">${label}</button>`;
     return `<form method="post" action="/admin/dashboard/upstream"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="upstream" value="${upstream}"><button type="submit"${upstream === "openrouter" ? ` class="danger"` : ""}>${label}</button></form>`;
   };
-  return `<div class="switch"><span>Serve from:</span>${button("openai", "OpenAI", spend.openaiConfigured)}${button("luminal", "Luminal", spend.luminalConfigured)}${button("openrouter", "OpenRouter", spend.openRouterConfigured)}</div>
-<p class="note">Takes effect on the next request; nothing switches back on its own. OpenAI is the default; a model's own provider serves it, and GPT-6 Luna falls back to DeepSeek on Luminal when OpenAI fails or its credit runs out. OpenRouter spends OpenRouter credit (cash) until you switch back.${spend.openRouterConfigured ? "" : " OpenRouter can't be chosen: the service has no OPENROUTER_API_KEY."} Each switch is in the admin log.</p>`;
+  return `<div class="switch"><span>Routing setting:</span>${button("openai", "OpenAI", spend.openaiConfigured)}${button("luminal", "Luminal", spend.luminalConfigured)}${button("openrouter", "OpenRouter", spend.openRouterConfigured)}</div>
+<p class="note">This setting doesn't move GPT-6 traffic: GPT-6 models always go to OpenAI and DeepSeek to Luminal. OpenAI and Luminal route the same; they only pick whose weekly credit budget the waiting line watches (OpenAI is the default). OpenRouter sends DeepSeek requests to OpenRouter, paid in cash instead of Luminal credit, until you switch back; GPT-6 stays on OpenAI.${spend.openRouterConfigured ? "" : " OpenRouter can't be chosen: the service has no OPENROUTER_API_KEY."} This is the primaryUpstream setting; it takes effect on the next request, nothing switches back on its own, and each switch is in the admin log.</p>`;
 }
 
 /** Block (or Unblock, when blocked) for one person; nothing without a CSRF token (bearer views). */
@@ -466,6 +588,25 @@ ${checkRows.length === 0 ? empty(4, "No contribution lookups.") : checkRows.join
 </section>`;
 }
 
+/** Starter accounts and why: each stored signal, marked when its check passes. */
+function startersSection(rows: StarterRow[], total: number): string {
+  const num = (value: number | null) => (value === null ? "–" : count(value));
+  const mark = (text: string, pass: boolean) => (pass ? `<strong title="passes">${text}</strong>` : `<span class="muted">${text}</span>`);
+  const body = rows.map((row) => {
+    const c = row.checks;
+    return `<tr><td class="l">${who(row.login, row.githubId)}</td><td>${when(row.admittedAt)}</td><td class="l">${escapeHtml(row.levelReason ?? "–")}</td><td>${num(row.accountAgeDays)}</td><td>${num(row.publicRepos)}</td><td>${num(row.contributions)}</td><td>${mark(c.publicBar ? "yes" : "no", c.publicBar)}</td><td>${mark(num(row.activeWeeks), c.activeWeeks)}</td><td>${mark(num(row.outsideContributions), c.outsideContributions)}</td><td>${mark(row.oldestRepoAt === null ? "–" : escapeHtml(isoDay(row.oldestRepoAt)), c.oldRepo)}</td><td>${mark(num(row.social), c.social)}</td><td>${mark(num(row.followers), c.followers)}</td><td>${count(c.humanSignals)}</td><td>${c.creationBatch ? `<strong>yes</strong> <span class="muted">(${count(c.batchPeers)})</span>` : `<span class="muted">no (${count(c.batchPeers)})</span>`}</td><td>${c.full ? "<strong>yes</strong>" : "no"}</td></tr>`;
+  });
+  return `<section id="starters">
+<div class="head"><h2>Starter accounts</h2><span class="muted">${count(total)} in all${total > rows.length ? `, newest ${rows.length} shown` : ""}. Admins left out.</span></div>
+<div class="scroll"><table>
+<thead><tr><th class="l">GitHub login</th><th>Signed up (UTC)</th><th class="l">Reason</th><th>Age (days)</th><th>Public repos</th><th>Contributions</th><th>Public bar</th><th>Active weeks</th><th>Outside contributions</th><th>Oldest repo</th><th>Following + stars</th><th>Followers</th><th>Signals passing</th><th>Creation batch (peers)</th><th>Passes now</th></tr></thead>
+<tbody>
+${body.length === 0 ? `<tr><td colspan="15" class="l muted">No Starter accounts.</td></tr>` : body.join("\n")}
+</tbody></table></div>
+<p class="note">The signals stored at the last sign-in or re-check, under today's thresholds (the level settings in /admin/config). Bold: the check passes. "Passes now" yes on a Starter account means it would be promoted at its next re-check or sign-in; an admin-set level stands either way. Numbers only.</p>
+</section>`;
+}
+
 function adminLogSection(abuse: AbuseData): string {
   return `<section id="log">
 <div class="head"><h2>Admin log</h2><span class="muted">Settings, pause and block changes, newest first</span></div>
@@ -483,20 +624,64 @@ ${
 
 // ─── The page ─────────────────────────────────────────────────────────────
 
-/** When this week's free credit spend would reach the queue's start, at this week's pace so far. */
-function queueStart(spend: SpendView, data: DashboardData): { startUsd: number | null; text: string } {
-  const startUsd = spend.weeklyCreditUsd === null ? null : spend.queueThreshold * spend.weeklyCreditUsd;
-  if (data.queue.waiting > 0) return { startUsd, text: `On: ${count(data.queue.waiting)} waiting. New open sign-ups join the line.` };
-  if (startUsd === null) return { startUsd, text: "No weekly credit budget, so credit never starts the queue." };
-  if (spend.freeCreditWeekUsd >= startUsd) return { startUsd, text: "On: new open sign-ups wait for free tokens." };
-  const left = `${usd(startUsd - spend.freeCreditWeekUsd)} of free credit to go.`;
-  const elapsed = data.now - data.currentWeek;
-  if (spend.freeCreditWeekUsd <= 0 || elapsed < 3_600_000) return { startUsd, text: `${left} Too early in the week for a pace.` };
-  const at = data.currentWeek + (elapsed * startUsd) / spend.freeCreditWeekUsd;
-  return {
-    startUsd,
-    text: at < spend.resetsAt ? `${left} At this week's pace: ${weekday(at)} ${new Date(at).toISOString().slice(11, 16)} UTC.` : `${left} Not this week at this week's pace.`,
+/**
+ * The waiting line, as the code runs it (queue.ts `shouldQueue`, `creditBudget`): which weekly
+ * credit budget it watches, the spend at which new open sign-ups start to wait, the spend it
+ * compares, and when that spend would get there at this week's pace.
+ */
+export function queueStart(spend: SpendView, data: DashboardData): { startUsd: number | null; budgetUsd: number | null; provider: string | null; watchedUsd: number; text: string } {
+  const policy = {
+    primaryUpstream: spend.primaryUpstream,
+    openaiConfigured: spend.openaiConfigured,
+    luminalConfigured: spend.luminalConfigured,
+    openaiCreditUsd: spend.openaiCreditUsd,
+    openaiWeeklyCreditUsd: spend.openaiWeeklyCreditUsd ?? undefined,
+    luminalCreditUsd: spend.creditUsd,
+    luminalWeeklyCreditUsd: spend.weeklyCreditUsd ?? undefined,
   };
+  const budget = creditMode(policy) ? creditBudget(policy) : undefined;
+  const budgetUsd = budget?.weeklyUsd ?? null;
+  const provider = budget ? PROVIDER_NAMES[budget.provider] : null;
+  const startUsd = budgetUsd === null ? null : spend.queueThreshold * budgetUsd;
+  // shouldQueue compares this week's free Luminal credit spend, whichever budget it watches.
+  const watchedUsd = spend.freeCreditWeekUsd;
+  const result = (text: string) => ({ startUsd, budgetUsd, provider, watchedUsd, text });
+  if (data.queue.waiting > 0) return result(`On: ${count(data.queue.waiting)} waiting. New open sign-ups join the line.`);
+  if (startUsd === null) return result(budget ? "No weekly credit budget, so credit spend never starts the line." : spend.primaryUpstream === "openrouter" ? "Routed to OpenRouter: credit spend doesn't start the line." : "No OpenAI or Luminal key: credit spend doesn't start the line.");
+  if (watchedUsd >= startUsd) return result("On: new open sign-ups wait for free tokens.");
+  const left = `${usd(startUsd - watchedUsd)} to go.`;
+  const elapsed = data.now - data.currentWeek;
+  if (watchedUsd <= 0 || elapsed < 3_600_000) return result(`${left} Too early in the week for a pace.`);
+  const at = data.currentWeek + (elapsed * startUsd) / watchedUsd;
+  return result(at < spend.resetsAt ? `${left} At this week's pace: ${weekday(at)} ${new Date(at).toISOString().slice(11, 16)} UTC.` : `${left} Not this week at this week's pace.`);
+}
+
+/** Any repository count at or above this means the repositories path to Full is switched off. */
+export const REPOS_PATH_OFF = 100_000;
+
+/**
+ * Who gets in and who gets free tokens, from the effective settings. Only the public bar: the
+ * private account checks' thresholds are never shown here.
+ */
+export function admissionText(spend: SpendView, admitted: number): string {
+  const usd = (value: number | null) => (value === null ? "" : `, up to $${value}`);
+  const starter = spend.starterWeeklyTokens > 0 ? `${tokens(spend.starterWeeklyTokens)} tokens a week of every model${usd(spend.starterWeeklyUsd)} (none for creation-batch accounts)` : "no free tokens";
+  const basic =
+    spend.basicWeeklyTokens > 0
+      ? `Basic, for accounts at least ${count(spend.basicMinAccountAgeDays)} days old outside a creation batch: ${tokens(spend.basicWeeklyTokens)} tokens a week of every model${usd(spend.basicWeeklyUsd)}`
+      : "";
+  const parts: string[] = [];
+  if (spend.fullMinAccountAgeDays > 0) parts.push(`at least ${count(spend.fullMinAccountAgeDays)} days old`);
+  const paths = [`${count(spend.fullMinContributions)}+ contributions in the last year`];
+  if (spend.fullMinPublicRepos < REPOS_PATH_OFF) paths.push(`${count(spend.fullMinPublicRepos)}+ public repos`);
+  parts.push(`with ${paths.join(" or ")}`);
+  const bar = spend.requireGithubActivity
+    ? `Free tokens (Full) need a GitHub account ${parts.join(" ")}, and the private account checks count too; below that, ${basic ? `${basic}; everyone else, Starter` : "Starter"}: ${starter}.`
+    : "GitHub account check off: everyone gets Full.";
+  const who = spend.openAdmission
+    ? `Admission: open, any GitHub account can sign up; ${count(admitted)} admitted, no cap while open.`
+    : `Admission: invite-only; ${count(admitted)} of ${count(spend.maxActiveUsers)} admitted. An invite always gives Full.`;
+  return `${who} ${bar}`;
 }
 
 /** "Serving", or why free requests aren't served. */
@@ -521,34 +706,76 @@ function freeTierState(spend: SpendView): string {
         : "Serving";
 }
 
-/** The red banner's sentences: the Luminal credit, or this week's credit budget, past BANNER_SHARE. */
-function creditWarnings(spend: SpendView): string[] {
-  const creditShare = spend.creditUsd > 0 ? spend.creditUsedUsd / spend.creditUsd : spend.creditUsedUsd > 0 ? 1 : 0;
-  const weekCreditShare = spend.weeklyCreditUsd !== null && spend.weeklyCreditUsd > 0 ? spend.freeCreditWeekUsd / spend.weeklyCreditUsd : 0;
+const PROVIDER_NAMES = { openai: "OpenAI", luminal: "Luminal", openrouter: "OpenRouter" } as const;
+
+/** One row per prepaid-credit provider, from the effective config and the spend counters. */
+export function creditProviders(spend: SpendView): Array<{ id: "openai" | "luminal"; name: string; configured: boolean; balanceUsd: number; usedUsd: number; weekUsd: number; freeWeekUsd: number; weeklyBudgetUsd: number | null }> {
   return [
-    ...(creditShare >= BANNER_SHARE ? [`${percent(creditShare)} of the ${usd(spend.creditUsd)} Luminal credit used (${usd(spend.creditUsedUsd)}).`] : []),
-    ...(weekCreditShare >= BANNER_SHARE ? [`${percent(weekCreditShare)} of this week's ${usd(spend.weeklyCreditUsd)} credit budget used (${usd(spend.freeCreditWeekUsd)}).`] : []),
+    { id: "openai", name: "OpenAI", configured: spend.openaiConfigured, balanceUsd: spend.openaiCreditUsd, usedUsd: spend.openaiCreditUsedUsd, weekUsd: spend.openaiCreditWeekUsd, freeWeekUsd: spend.openaiFreeCreditWeekUsd, weeklyBudgetUsd: spend.openaiWeeklyCreditUsd },
+    { id: "luminal", name: "Luminal", configured: spend.luminalConfigured, balanceUsd: spend.creditUsd, usedUsd: spend.creditUsedUsd, weekUsd: spend.creditWeekUsd, freeWeekUsd: spend.freeCreditWeekUsd, weeklyBudgetUsd: spend.weeklyCreditUsd },
   ];
 }
 
-/** Who serves now, as the dashboard names it. */
-function servingName(spend: SpendView): string {
-  return spend.serving === "openai"
-    ? "OpenAI"
-    : spend.serving === "luminal"
-      ? "Luminal"
-      : spend.serving === "openrouter"
-        ? spend.primaryUpstream === "luminal" ? "OpenRouter (no LUMINAL_API_KEY)" : "OpenRouter"
-        : "None (no OPENAI_API_KEY, LUMINAL_API_KEY or OPENROUTER_API_KEY)";
+/** Spend across providers: the prepaid credit, plus the older metered OpenRouter cash (admins included). */
+export function spendTotals(spend: SpendView): { allTimeUsd: number; weekUsd: number; meteredAllTimeUsd: number; meteredWeekUsd: number } {
+  const providers = creditProviders(spend);
+  const round = (value: number) => Math.round(value * 1e6) / 1e6;
+  const meteredAllTimeUsd = round(spend.totalUsd + spend.adminTotalUsd);
+  const meteredWeekUsd = round(spend.weekUsd + spend.adminWeekUsd);
+  return {
+    allTimeUsd: round(providers.reduce((sum, row) => sum + row.usedUsd, 0) + meteredAllTimeUsd),
+    weekUsd: round(providers.reduce((sum, row) => sum + row.weekUsd, 0) + meteredWeekUsd),
+    meteredAllTimeUsd,
+    meteredWeekUsd,
+  };
 }
 
-/** The Simple / Full switch: two links, the current one marked. */
-function viewToggle(current: "simple" | "full"): string {
-  const link = (view: "simple" | "full", label: string) => `<a href="/admin?view=${view}"${current === view ? ` aria-current="page"` : ""}>${label}</a>`;
-  return `<nav class="views" aria-label="Dashboard view">${link("simple", "Simple")}${link("full", "Full")}</nav>`;
+/** The red banner's sentences: a provider's credit, or its weekly credit budget, past BANNER_SHARE. */
+function creditWarnings(spend: SpendView): string[] {
+  return creditProviders(spend).flatMap((row) => {
+    const share = row.balanceUsd > 0 ? row.usedUsd / row.balanceUsd : row.usedUsd > 0 ? 1 : 0;
+    const weekShare = row.weeklyBudgetUsd !== null && row.weeklyBudgetUsd > 0 ? row.freeWeekUsd / row.weeklyBudgetUsd : 0;
+    return [
+      ...(share >= BANNER_SHARE ? [`${percent(share)} of the ${usd(row.balanceUsd)} ${row.name} credit used (${usd(row.usedUsd)}).`] : []),
+      ...(weekShare >= BANNER_SHARE ? [`${percent(weekShare)} of this week's ${usd(row.weeklyBudgetUsd)} ${row.name} credit budget used (${usd(row.freeWeekUsd)}).`] : []),
+    ];
+  });
 }
 
-export function dashboardPage(input: { data: DashboardData; spend: SpendView; login: string; signOut: boolean; abuse?: AbuseData; csrf?: string }): Response {
+/**
+ * Where each model goes right now, as app.ts `servingModel` decides: GPT-6 models to OpenAI
+ * (DeepSeek on Luminal when OpenAI has no key or credit), DeepSeek to Luminal, or to OpenRouter
+ * when the routing setting says so or Luminal has no key.
+ */
+export function routes(spend: SpendView): { gpt: string; deepseek: string } {
+  const luminalReady = spend.luminalConfigured && spend.creditUsedUsd < spend.creditUsd;
+  const openaiReady = spend.openaiConfigured && spend.openaiCreditUsedUsd < spend.openaiCreditUsd;
+  const deepseek =
+    spend.primaryUpstream === "openrouter" && spend.openRouterConfigured
+      ? "OpenRouter"
+      : luminalReady
+        ? "Luminal"
+        : !spend.luminalConfigured && spend.openRouterConfigured
+          ? "OpenRouter"
+          : "nowhere";
+  const gpt = openaiReady ? "OpenAI" : luminalReady ? "DeepSeek on Luminal (fallback)" : "nowhere";
+  return { gpt, deepseek };
+}
+
+/** Model names per provider, from models.ts. */
+function modelNames(provider: "openai" | "luminal"): string {
+  return FREE_MODELS.filter((model) => model.provider === provider)
+    .map((model) => model.name)
+    .join(", ");
+}
+
+/** The Simple / Full / Tools / Health switch: four links, the current one marked. */
+function viewToggle(current: "simple" | "full" | "tools" | "health"): string {
+  const link = (view: "simple" | "full" | "tools" | "health", label: string) => `<a href="/admin?view=${view}"${current === view ? ` aria-current="page"` : ""}>${label}</a>`;
+  return `<nav class="views" aria-label="Dashboard view"><a href="/admin">Home</a>${link("simple", "Simple")}${link("full", "Full")}${link("tools", "Tools")}${link("health", "Health")}</nav>`;
+}
+
+export function dashboardPage(input: { data: DashboardData; spend: SpendView; login: string; signOut: boolean; abuse?: AbuseData; csrf?: string; starters?: { rows: StarterRow[]; total: number } }): Response {
   const { data, spend } = input;
   const currentWeek = data.currentWeek;
   const thisOrDate = (week: number) => (week === currentWeek ? `${day(week)} (this week)` : day(week));
@@ -557,34 +784,84 @@ export function dashboardPage(input: { data: DashboardData; spend: SpendView; lo
   const banner = warnings.length > 0 ? `<p class="banner" role="alert">${warnings.map(escapeHtml).join(" ")}</p>` : "";
   const queue = queueStart(spend, data);
 
+  const totals = spendTotals(spend);
+  const providers = creditProviders(spend);
+  const route = routes(spend);
+  const providerRow = (row: ReturnType<typeof creditProviders>[number]) => {
+    const serves = row.id === "openai" ? modelNames("openai") : `${modelNames("luminal")}; the GPT-6 fallback`;
+    const budget = row.weeklyBudgetUsd === null ? "" : ` <span class="muted">free ${usd(row.freeWeekUsd)} of ${usd(row.weeklyBudgetUsd)} budget</span>`;
+    return `<tr><td>${row.name}${row.configured ? "" : ` <span class="muted">(no key)</span>`}</td><td class="l wrap">${escapeHtml(serves)}</td><td class="used">${usd(row.usedUsd)} <span class="muted">of ${usd(row.balanceUsd)}</span>${meter(row.usedUsd, row.balanceUsd, `${row.name} credit used against the balance`)}</td><td>${usd(row.weekUsd)}${budget}</td><td>${usd(Math.max(0, row.balanceUsd - row.usedUsd))}</td></tr>`;
+  };
+  const meteredRow = `<tr><td>OpenRouter <span class="muted">(older, metered)</span></td><td class="l wrap">${route.deepseek === "OpenRouter" ? "DeepSeek, now" : "Nothing now; DeepSeek only when routed there"}</td><td>${usd(totals.meteredAllTimeUsd)} <span class="muted">cash, no balance</span></td><td>${usd(totals.meteredWeekUsd)}</td><td>–</td></tr>`;
+  const creditNames = providers.map((row) => `${row.name} ${usd(row.usedUsd)}`).join(" + ");
   const budgetSection = `<section id="budget">
-<div class="head"><h2>Budget: Luminal credit</h2>${csvLink("spend")}</div>
+<div class="head"><h2>Spend</h2>${csvLink("spend")}</div>
 <div class="tiles">
-<div class="tile lead">Luminal credit used<b>${usd(spend.creditUsedUsd)} <span class="muted">of ${usd(spend.creditUsd)}</span></b>${meter(spend.creditUsedUsd, spend.creditUsd, "Luminal credit used against the balance")}<span class="note">${usd(Math.max(0, spend.creditUsd - spend.creditUsedUsd))} left. Luminal-served usage pauses at the balance.</span></div>
-<div class="tile lead">Credit this week<b>${usd(spend.freeCreditWeekUsd)} <span class="muted">of ${escapeHtml(cap(spend.weeklyCreditUsd))}</span></b>${meter(spend.freeCreditWeekUsd, spend.weeklyCreditUsd, "free credit this week against the weekly credit budget")}<span class="note">Free usage since ${escapeHtml(day(currentWeek))}; ${usd(spend.creditWeekUsd)} with admins and paid plans. Resets ${escapeHtml(weekday(spend.resetsAt))} 00:00 UTC.</span></div>
-<div class="tile lead">Queue starts at<b>${queue.startUsd === null ? "–" : usd(queue.startUsd)}${spend.weeklyCreditUsd === null ? "" : ` <span class="muted">${escapeHtml(percent(spend.queueThreshold))} of ${usd(spend.weeklyCreditUsd)}</span>`}</b><span class="note">${escapeHtml(queue.text)}${spend.serving === "openrouter" ? " Luminal isn't serving, so the queue watches OpenRouter spend instead." : ""}</span></div>
-<div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">Admission: ${spend.openAdmission ? `open (old enough GitHub accounts${spend.requireGithubActivity ? " with a public repo or a contribution in the last year" : ""}); ${count(data.people.admitted)} admitted, no cap while open` : `invite-only; ${count(data.people.admitted)} of ${count(spend.maxActiveUsers)} admitted`}. GitHub activity check: ${spend.requireGithubActivity ? "on" : "off"}. Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} a week.</span></div>
+<div class="tile lead">Spent, all time<b>${usd(totals.allTimeUsd)}</b><span class="note">${creditNames} + ${usd(totals.meteredAllTimeUsd)} older metered OpenRouter spend, from before prepaid credit. Admins and paid plans included.</span></div>
+<div class="tile lead">Spent this week<b>${usd(totals.weekUsd)}</b><span class="note">${providers.map((row) => `${row.name} ${usd(row.weekUsd)}`).join(" + ")}${totals.meteredWeekUsd > 0 ? ` + OpenRouter ${usd(totals.meteredWeekUsd)}` : ""}, since ${escapeHtml(day(currentWeek))}. Resets ${escapeHtml(weekday(spend.resetsAt))} 00:00 UTC.</span></div>
+<div class="tile lead">Waiting line starts at<b>${queue.startUsd === null ? "–" : `${usd(queue.startUsd)} <span class="muted">a week</span>`}</b><span class="note">${
+    queue.startUsd === null
+      ? ""
+      : `New open sign-ups get an account but wait in line for free tokens once this week's free Luminal credit spend (${usd(queue.watchedUsd)} so far) reaches this: ${escapeHtml(percent(spend.queueThreshold))} of the ${usd(queue.budgetUsd)} ${escapeHtml(queue.provider ?? "")} weekly credit budget. Invites skip the line; Mondays let it in as far as the budget allows. `
+  }${escapeHtml(queue.text)}${spend.weeklyCapUsd === null ? "" : ` Free OpenRouter cash past ${usd(spend.queueThreshold * spend.weeklyCapUsd)} this week also starts it.`}</span></div>
+<div class="tile">State<b class="state">${escapeHtml(state)}</b><span class="note">${escapeHtml(admissionText(spend, data.people.admitted))} Per person: ${escapeHtml(tokens(spend.weeklyTokens))} tokens or ${escapeHtml(cap(spend.perPersonWeeklyUsd))} of GPT-6 a week${spend.deepseekWeeklyUsd !== undefined ? `, ${escapeHtml(cap(spend.deepseekWeeklyUsd))} of DeepSeek` : ""}.</span></div>
 </div>
-<p class="note">Effective values, with admin overrides applied. Credit is Luminal's prepaid credit at its list prices; admins count against it.</p>
+<h3>By provider</h3>
+<div class="scroll"><table>
+<thead><tr><th class="l">Provider</th><th class="l">Serves</th><th>Used / balance</th><th>This week</th><th>Left</th></tr></thead>
+<tbody>
+${providers.map(providerRow).join("\n")}
+${meteredRow}
+</tbody></table></div>
+<p class="note">Effective values, with admin overrides applied. Credit is each provider's prepaid credit at its list prices; admins and paid plans count against it. "Free" is usage outside admins and paid plans, what the weekly budgets and the waiting line watch.</p>
 </section>`;
 
-  const upstreamRow = (row: DashboardData["upstreams"][number]) =>
-    `<tr><td>${row.upstream === "openai" ? "OpenAI" : row.upstream === "luminal" ? "Luminal" : "OpenRouter"}</td><td>${count(row.requests)}</td><td>${count(row.errors)}${row.requests > 0 ? ` <span class="muted">(${percent(row.errors / row.requests)})</span>` : ""}</td><td>${ms(row.medianTtftMs)}</td><td>${ms(row.p90TtftMs)}</td><td>${ms(row.medianTtfbMs)}</td><td>${row.cacheHitShare === null ? "–" : percent(row.cacheHitShare)}</td><td>${usd(row.creditUsd)}</td><td>${usd(row.cashUsd)}</td></tr>`;
-  const upstreamTable = (window: "today" | "week") => `<div class="scroll"><table>
-<thead><tr><th>${window === "today" ? "Today (UTC)" : `This week, since ${escapeHtml(day(currentWeek))}`}</th><th>Requests</th><th>Errors</th><th>TTFT median</th><th>TTFT p90</th><th>TTFB median</th><th>Cache hits</th><th>Credit</th><th>Cash</th></tr></thead>
+  const UPSTREAM_NAMES_SHOWN = { openai: "OpenAI", luminal: "Luminal", openrouter: "OpenRouter" } as const;
+  type UpstreamRowData = DashboardData["upstreamTotals"][number] & Partial<Pick<DashboardData["upstreams"][number], "medianTtftMs" | "p90TtftMs" | "medianTtfbMs">>;
+  const upstreamRow = (label: string, row: UpstreamRowData, total = false) => {
+    const cells = [
+      escapeHtml(label),
+      count(row.requests),
+      `${count(row.errors)}${row.requests > 0 ? ` <span class="muted">(${percent(row.errors / row.requests)})</span>` : ""}`,
+      ms(row.medianTtftMs ?? null),
+      ms(row.p90TtftMs ?? null),
+      ms(row.medianTtfbMs ?? null),
+      row.users === null ? "–" : count(row.users),
+      compact(row.promptTokens),
+      compact(row.cachedTokens),
+      compact(row.completionTokens),
+      row.cacheHitShare === null ? "–" : percent(row.cacheHitShare),
+      usd(row.creditUsd),
+      usd(row.cashUsd),
+    ];
+    // The Total row: bold, with a rule above it.
+    return `<tr${total ? ` class="group sel"` : ""}>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`;
+  };
+  const upstreamTable = (window: "today" | "week" | "all_time") => {
+    const heading =
+      window === "today" ? "Today (UTC)" : window === "week" ? `This week, since ${escapeHtml(day(currentWeek))}` : `All time${data.upstreamsSince === null ? "" : `, since ${escapeHtml(day(data.upstreamsSince))}`}`;
+    const total = data.upstreamTotals.find((row) => row.window === window);
+    return `<div class="scroll"><table>
+<thead><tr><th>${heading}</th><th>Requests</th><th>Errors</th><th>TTFT median</th><th>TTFT p90</th><th>TTFB median</th><th>Users</th><th>Tokens in</th><th>Cached</th><th>Tokens out</th><th>Cache hits</th><th>Credit</th><th>Cash</th></tr></thead>
 <tbody>
-${data.upstreams.filter((row) => row.window === window).map(upstreamRow).join("\n")}
+${data.upstreams
+  .filter((row) => row.window === window)
+  .map((row) => upstreamRow(UPSTREAM_NAMES_SHOWN[row.upstream], row))
+  .join("\n")}
+${total ? upstreamRow("Total", total, true) : ""}
 </tbody></table></div>`;
-  const serving = servingName(spend);
+  };
   const upstreamSection = `<section id="upstream">
 <div class="head"><h2>Upstreams</h2>${csvLink("upstreams")}</div>
 <div class="tiles">
-<div class="tile lead">Serving<b class="state">${escapeHtml(serving)}</b><span class="note">primaryUpstream: ${escapeHtml(spend.primaryUpstream)}. ${spend.serving === "none" ? "Free requests get 503 no_upstream until a key is set." : "A model's own provider serves it; GPT-6 Luna falls back to DeepSeek when OpenAI fails."}</span></div>
+<div class="tile lead">GPT-6 models go to<b class="state">${escapeHtml(route.gpt)}</b><span class="note">Each model goes to its own provider. GPT-6 falls back to DeepSeek on Luminal when OpenAI fails or its credit runs out.</span></div>
+<div class="tile lead">DeepSeek goes to<b class="state">${escapeHtml(route.deepseek)}</b><span class="note">${route.deepseek === "nowhere" ? "No provider can serve DeepSeek: set LUMINAL_API_KEY, or route it to OpenRouter." : "Luminal, unless the routing setting below says OpenRouter or Luminal has no key."}</span></div>
 </div>
 ${upstreamSwitch(spend, input.csrf)}
 ${upstreamTable("today")}
 ${upstreamTable("week")}
-<p class="note">Admins included. TTFT: time to the first content chunk (text, reasoning or a tool call); TTFB: time to the response headers. Errors: 429, 5xx, timeouts, unreachable and failed streams. Credit is Luminal's prepaid credit at its list prices; cash is OpenRouter's reported cost, when OpenRouter serves.</p>
+${upstreamTable("all_time")}
+<p class="note">Admins included, except in Users: the distinct people each upstream served (the Total counts each person once). Tokens in are prompt tokens, cached ones included; Cached is how many of them were cache hits; tokens out are completion tokens. All time has no timings: they're kept 15 days. TTFT: time to the first content chunk (text, reasoning or a tool call); TTFB: time to the response headers. Errors: 429, 5xx, timeouts, unreachable and failed streams. Credit is the provider's prepaid credit (OpenAI or Luminal) at its list prices; cash is OpenRouter's reported cost, when OpenRouter serves.</p>
 </section>`;
 
   const activeSection = `<section>
@@ -632,6 +909,27 @@ ${
 }
 </tbody></table></div>
 <p class="note">People grouped by the week they were admitted (week 0); the share with any activity in the given week after it. Weeks that haven't ended show –.</p>
+</section>`;
+
+  const dailyRetentionSection = `<section id="retention-daily">
+<div class="head"><h2>Daily retention</h2>${csvLink("retention-daily")}</div>
+<div class="scroll"><table>
+<thead><tr><th>Signed up (UTC)</th><th>People</th>${RETENTION_DAYS.map((offset) => `<th>D${offset}</th>`).join("")}</tr></thead>
+<tbody>
+${
+  data.dailyCohorts.length === 0
+    ? `<tr><td colspan="${2 + RETENTION_DAYS.length}" class="l muted">No sign-ups yet.</td></tr>`
+    : data.dailyCohorts
+        .map(
+          (cohort) =>
+            `<tr><td>${escapeHtml(weekday(cohort.day))}</td><td>${count(cohort.size)}</td>${cohort.retained
+              .map((cell) => (cell ? `<td title="${cell.active} of ${cohort.size}">${percent(cell.share)} <span class="muted">(${cell.active})</span></td>` : `<td class="muted">–</td>`))
+              .join("")}</tr>`,
+        )
+        .join("\n")
+}
+</tbody></table></div>
+<p class="note">${retentionAverages(data.dailyCohorts)} People grouped by the UTC day they were admitted (the last ${DAILY_COHORTS} days with sign-ups; admins and blocked accounts left out); the share who made at least one request on day N after it. A day shows – until it has ended (UTC).</p>
 </section>`;
 
   const topWeek = data.topWeek;
@@ -764,7 +1062,7 @@ ${f.platforms.length === 0 ? `<tr><td colspan="4" class="l muted">No installs co
 <div class="tile">Top failed steps, last ${WEEKS_SHOWN} weeks*<div class="scroll"><table>
 <thead><tr><th>Step</th><th>Failed</th></tr></thead>
 <tbody>
-${f.failedSteps.length === 0 ? `<tr><td colspan="2" class="l muted">No failed installs.</td></tr>` : f.failedSteps.map((row) => `<tr><td>${escapeHtml(STEP_LABELS[row.step] ?? row.step)}</td><td>${count(row.failed)}</td></tr>`).join("\n")}
+${f.failedSteps.length === 0 ? `<tr><td colspan="2" class="l muted">No failed installs.</td></tr>` : f.failedSteps.map((row) => `<tr><td>${escapeHtml(stepLabel(row.step))}</td><td>${count(row.failed)}</td></tr>`).join("\n")}
 </tbody></table></div></div>
 </div>
 <h3>By sign-up week</h3>
@@ -787,12 +1085,13 @@ ${data.funnel
     }</span>`,
   )}
 <h1>Free tier</h1>
-<p class="serving">Serving from <strong>${escapeHtml(serving)}</strong> <a href="#upstream">Switch upstream</a></p>
-<p class="lede">${count(data.people.admitted)} people admitted, ${count(data.people.activeThisWeek)} active this week. Admins are left out of every number but the credit. Updated ${escapeHtml(new Date(data.now).toISOString().slice(0, 16).replace("T", " "))} UTC. Counts, tokens, cost and times only.</p>`;
+<p class="serving"><span>Each model goes to its own provider:</span><span>GPT-6 → <strong>${escapeHtml(route.gpt)}</strong></span><span>DeepSeek → <strong>${escapeHtml(route.deepseek)}</strong></span><a href="#upstream">Routing</a></p>
+<p class="lede">${count(data.people.admitted)} people admitted, ${count(data.people.activeThisWeek)} active this week. Admins are left out of every number but spend. Updated ${escapeHtml(new Date(data.now).toISOString().slice(0, 16).replace("T", " "))} UTC. Counts, tokens, cost and times only.</p>`;
 
   const abuse = input.abuse ? abuseSection(input.abuse, input.csrf) : "";
   const log = input.abuse ? adminLogSection(input.abuse) : "";
-  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, budgetSection, abuse, upstreamSection, queueSection, referralSection, paidSection, funnelSection, activeSection, retentionSection, costSection, limitsSection, log].join("\n"));
+  const starters = input.starters ? startersSection(input.starters.rows, input.starters.total) : "";
+  return shell(`Admin · ${PRODUCT_NAME}`, [header, banner, budgetSection, abuse, upstreamSection, queueSection, referralSection, paidSection, funnelSection, activeSection, retentionSection, dailyRetentionSection, costSection, limitsSection, starters, log].join("\n"));
 }
 
 // ─── The simple view ──────────────────────────────────────────────────────
@@ -802,19 +1101,19 @@ ${data.funnel
  * 10px radius, bold numbers over small muted labels) in the dl tokens, light and dark. Charts
  * come in two drawings, wide and narrow, so their text stays the same size on a phone.
  */
-const SIMPLE_STYLE = `${BRAND_TOKENS}
+export const SIMPLE_STYLE = `${BRAND_TOKENS}
 :root {
   --k-bg: #F9FAFB; --k-card: #FFFFFF; --k-text: #111827; --k-muted: #6B7280; --k-faint: #9CA3AF; --k-border: #E5E7EB; --k-axis: #D1D5DB;
   --k-shadow: 0 1px 2px 0 rgb(0 0 0 / .04); --k-up: #047857; --k-down: #B91C1C; --k-flag: #B45309; --k-flag-bg: rgba(245, 158, 11, .1);
   --k-ok: #047857; --k-ok-bg: rgba(16, 185, 129, .1); --k-stop: #B91C1C; --k-stop-bg: rgba(239, 68, 68, .09);
-  --c-1: #2A78D6; --c-2: #EB6834;
+  --c-1: #2A78D6; --c-2: #EB6834; --c-3: #1A9C7B;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --k-bg: #0B0E12; --k-card: #161A21; --k-text: #E6E9EE; --k-muted: #8A919E; --k-faint: #646B78; --k-border: #262B34; --k-axis: #3A404B;
     --k-shadow: none; --k-up: #34D399; --k-down: #F87171; --k-flag: #FBBF24; --k-flag-bg: rgba(251, 191, 36, .1);
     --k-ok: #34D399; --k-ok-bg: rgba(52, 211, 153, .12); --k-stop: #F87171; --k-stop-bg: rgba(248, 113, 113, .12);
-    --c-1: #3987E5; --c-2: #D95926;
+    --c-1: #3987E5; --c-2: #D95926; --c-3: #2BB592;
   }
 }
 * { box-sizing: border-box; }
@@ -841,6 +1140,7 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outlin
 main { max-width: 80rem; margin: 0 auto; padding: 28px 32px 48px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
 .card { background: var(--k-card); border: 1px solid var(--k-border); border-radius: 10px; padding: 24px; box-shadow: var(--k-shadow); min-width: 0; }
 .span2 { grid-column: span 2; }
+.span3 { grid-column: 1 / -1; }
 h2 { font-size: 15px; font-weight: 600; color: var(--k-muted); margin: 0 0 12px; }
 .big { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 16px; }
 .big b { font-size: 34px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
@@ -864,11 +1164,30 @@ svg.chart .hit { fill: transparent; }
 svg.chart g:hover .hit { fill: color-mix(in srgb, var(--k-text) 5%, transparent); }
 svg.chart .c1 { fill: var(--c-1); }
 svg.chart .c2 { fill: var(--c-2); }
+svg.chart .c3 { fill: var(--c-3); }
+svg.chart .cell { fill: var(--k-card); }
+svg.chart text.on { fill: #FFFFFF; font-weight: 600; }
+svg.chart.narrow text.on { font-weight: 500; }
+svg.chart.heat.narrow text.who, svg.chart.heat.narrow text.v { font-size: 11px; }
+svg.chart text.in { fill: var(--k-text); }
+svg.chart text.h { fill: var(--k-muted); font-weight: 600; }
+svg.chart.heat.wide { max-width: 1000px; }
+.avg { margin: 14px 0 0; font-size: 13px; color: var(--k-muted); }
+.caption { margin: -4px 0 12px; font-size: 13px; color: var(--k-muted); }
+.sub { margin: 20px 0 8px; font-size: 14px; font-weight: 600; color: var(--k-text); }
+.funnel { display: grid; max-width: 36rem; font-size: 13px; font-variant-numeric: tabular-nums; }
+.funnel > div { display: grid; grid-template-columns: minmax(3.5rem, 1.2fr) repeat(4, minmax(0, 1fr)); gap: 6px; padding: 5px 0; border-bottom: 1px solid var(--k-border); align-items: end; }
+.funnel span { text-align: right; min-width: 0; }
+.funnel span:first-child { text-align: left; }
+.funnel .fh span { color: var(--k-muted); font-weight: 600; font-size: 12px; line-height: 1.25; }
+.avg b { color: var(--k-text); font-variant-numeric: tabular-nums; }
+.avg .muted { color: var(--k-faint); }
 .legend { display: flex; gap: 16px; margin: 0 0 12px; font-size: 12px; color: var(--k-muted); }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 .legend i.c1 { background: var(--c-1); }
 .legend i.c2 { background: var(--c-2); }
+.legend i.c3 { background: var(--c-3); }
 .flags { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .flags li { display: flex; gap: 10px; align-items: baseline; padding: 9px 12px; border-radius: 8px; background: var(--k-flag-bg); font-size: 13.5px; line-height: 1.35; }
 .flags li::before { content: "!"; flex: none; width: 16px; height: 16px; border-radius: 50%; background: var(--k-flag); color: var(--k-card); font: 700 11px/16px var(--body); text-align: center; transform: translateY(2px); }
@@ -876,7 +1195,7 @@ svg.chart .c2 { fill: var(--c-2); }
 .flags a:hover { text-decoration: underline; }
 .none { color: var(--k-muted); margin: 0; }
 .empty { color: var(--k-muted); margin: 8px 0 0; }
-@media (max-width: 1100px) { main { grid-template-columns: minmax(0, 1fr); } .span2 { grid-column: auto; } .growth { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 1100px) { main { grid-template-columns: minmax(0, 1fr); } .span2, .span3 { grid-column: auto; } .growth { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 760px) {
   .bar > div { padding: 12px 16px; }
   main { padding: 16px 16px 40px; gap: 14px; }
@@ -888,7 +1207,7 @@ svg.chart .c2 { fill: var(--c-2); }
 `;
 
 /** A bar's path: square at the baseline, 3px rounded at the far end. */
-function barPath(x: number, y: number, width: number, height: number, horizontal = false): string {
+export function barPath(x: number, y: number, width: number, height: number, horizontal = false): string {
   const r = Math.min(3, horizontal ? width : height, horizontal ? height / 2 : width / 2);
   if (horizontal) return `M${x.toFixed(1)} ${y.toFixed(1)}h${(width - r).toFixed(1)}a${r} ${r} 0 0 1 ${r} ${r}v${(height - 2 * r).toFixed(1)}a${r} ${r} 0 0 1 -${r} ${r}h-${(width - r).toFixed(1)}z`;
   return `M${x.toFixed(1)} ${(y + height).toFixed(1)}v-${(height - r).toFixed(1)}a${r} ${r} 0 0 1 ${r} -${r}h${(width - 2 * r).toFixed(1)}a${r} ${r} 0 0 1 ${r} ${r}v${(height - r).toFixed(1)}z`;
@@ -938,14 +1257,74 @@ function tokenChart(rows: SimpleData["topTokens"], width: number, kind: "wide" |
     const w = Math.max(2, (row.tokens / max) * plot);
     const name = row.login ?? `#${row.githubId}`;
     const shown = name.length > chars ? `${name.slice(0, chars - 1)}…` : name;
-    const level = row.level === "starter" ? "Starter" : "Full";
-    return `<g><title>${escapeHtml(`${name}: ${tokens(row.tokens)} tokens this week (${level})`)}</title><rect class="hit" x="0" y="${y}" width="${width}" height="${rowHeight}"></rect><text class="who" x="${labelWidth - 10}" y="${y + rowHeight / 2 + 4}" text-anchor="end">${escapeHtml(shown)}</text><path class="${row.level === "starter" ? "c2" : "c1"}" d="${barPath(labelWidth, y + (rowHeight - barHeight) / 2, w, barHeight, true)}"></path>${
+    const level = row.level === "starter" ? "Starter" : row.level === "basic" ? "Basic" : "Full";
+    const colour = row.level === "starter" ? "c2" : row.level === "basic" ? "c3" : "c1";
+    return `<g><title>${escapeHtml(`${name}: ${tokens(row.tokens)} tokens this week (${level})`)}</title><rect class="hit" x="0" y="${y}" width="${width}" height="${rowHeight}"></rect><text class="who" x="${labelWidth - 10}" y="${y + rowHeight / 2 + 4}" text-anchor="end">${escapeHtml(shown)}</text><path class="${colour}" d="${barPath(labelWidth, y + (rowHeight - barHeight) / 2, w, barHeight, true)}"></path>${
       index === 0 ? `<text class="v" x="${(labelWidth + w + 6).toFixed(1)}" y="${y + rowHeight / 2 + 4}">${escapeHtml(tokens(row.tokens))}</text>` : ""
     }</g>`;
   });
   return `<svg class="chart ${kind}" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="Tokens used this week per person, top ${rows.length}">
 <line class="axis" x1="${labelWidth - 0.5}" x2="${labelWidth - 0.5}" y1="0" y2="${height}"></line>
 ${parts.join("\n")}
+</svg>`;
+}
+
+/** A cell's label: whole percents ("8%", "<1%"), so it fits a narrow cell; the tooltip has the exact share. */
+function wholePercent(share: number): string {
+  return share > 0 && share < 0.005 ? "<1%" : `${Math.round(share * 100)}%`;
+}
+
+/** Cell colour: one hue, more opaque for a higher share (square root, so small shares still differ). */
+function heatOpacity(share: number): number {
+  return 0.08 + 0.92 * Math.sqrt(Math.max(0, Math.min(1, share)));
+}
+
+/**
+ * The retention triangle: one row per sign-up day (newest at the top) with its size, one cell per
+ * day after it with the share who made a request, coloured by that share; days still to come are
+ * left blank. The narrow drawing drops the last column (D14) when there are more than eight.
+ */
+function retentionChart(cohorts: readonly DailyCohort[], width: number, kind: "wide" | "narrow"): string {
+  const wide = kind === "wide";
+  const offsets = wide || RETENTION_DAYS.length <= 8 ? [...RETENTION_DAYS] : RETENTION_DAYS.slice(0, 8);
+  const labelWidth = wide ? 110 : 42;
+  const sizeWidth = wide ? 64 : 30;
+  const lead = wide ? 14 : 4;
+  // A wider gap before a column that isn't the next day (D14 after D7).
+  const breaks = offsets.filter((offset, index) => index > 0 && offset !== offsets[index - 1]! + 1).length;
+  const breakGap = wide ? 10 : 6;
+  const gap = 2;
+  const cellWidth = (width - labelWidth - sizeWidth - lead - breaks * breakGap) / offsets.length;
+  const cellHeight = wide ? 30 : 24;
+  const header = 22;
+  const height = header + cohorts.length * (cellHeight + gap);
+  const font = wide ? 12 : 10;
+  const columnX: number[] = [];
+  let x = labelWidth + sizeWidth + lead;
+  offsets.forEach((offset, index) => {
+    if (index > 0 && offset !== offsets[index - 1]! + 1) x += breakGap;
+    columnX.push(x);
+    x += cellWidth;
+  });
+  const head = `<text class="h" x="0" y="${header - 8}">${wide ? "Signed up" : "Day"}</text><text class="h" x="${labelWidth + sizeWidth - 6}" y="${header - 8}" text-anchor="end">${wide ? "People" : "N"}</text>${offsets
+    .map((offset, index) => `<text class="h" x="${(columnX[index]! + cellWidth / 2).toFixed(1)}" y="${header - 8}" text-anchor="middle">D${offset}</text>`)
+    .join("")}`;
+  const rows = cohorts.map((cohort, row) => {
+    const y = header + row * (cellHeight + gap);
+    const middle = (y + cellHeight / 2 + font * 0.36).toFixed(1);
+    const name = monthDay(cohort.day);
+    const cells = offsets.map((offset, index) => {
+      const cell = cohort.retained[RETENTION_DAYS.indexOf(offset)];
+      if (!cell) return "";
+      const opacity = heatOpacity(cell.share);
+      const cx = columnX[index]!;
+      return `<g><title>${escapeHtml(`${name} · ${count(cohort.size)} ${cohort.size === 1 ? "person" : "people"} · D${offset} ${percent(cell.share)} (${count(cell.active)})`)}</title><rect class="c1" x="${(cx + gap / 2).toFixed(1)}" y="${y}" width="${(cellWidth - gap).toFixed(1)}" height="${cellHeight}" rx="3" fill-opacity="${opacity.toFixed(3)}"></rect><text class="${opacity > 0.62 ? "on" : "in"}" x="${(cx + cellWidth / 2).toFixed(1)}" y="${middle}" text-anchor="middle" font-size="${font}">${escapeHtml(wholePercent(cell.share))}</text></g>`;
+    });
+    return `<g><g><title>${escapeHtml(`${name} · ${count(cohort.size)} ${cohort.size === 1 ? "person" : "people"}`)}</title><rect class="hit" x="0" y="${y}" width="${labelWidth + sizeWidth}" height="${cellHeight}"></rect><text class="who" x="0" y="${middle}">${escapeHtml(name)}</text><text class="v" x="${labelWidth + sizeWidth - 6}" y="${middle}" text-anchor="end">${count(cohort.size)}</text></g>${cells.join("")}</g>`;
+  });
+  return `<svg class="chart heat ${kind}" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="Retention by sign-up day: share active on days ${offsets.join(", ")} after signing up">
+${head}
+${rows.join("\n")}
 </svg>`;
 }
 
@@ -970,7 +1349,7 @@ export function redFlags(data: DashboardData, spend: SpendView, simple: SimpleDa
   // At or near the weekly cap: who reached it (with per-person grants), and who is past 80% of their level's tokens.
   const hits = data.limitHits.filter((hit) => hit.weekStart === data.currentWeek);
   const hitIds = new Set(hits.map((hit) => hit.githubId));
-  const allowance = (level: string | null) => (level === "starter" ? spend.starterWeeklyTokens : spend.weeklyTokens);
+  const allowance = (level: string | null) => (level === "starter" ? spend.starterWeeklyTokens : level === "basic" ? spend.basicWeeklyTokens : spend.weeklyTokens);
   const near = simple.topTokens.filter((row) => !hitIds.has(row.githubId) && row.tokens >= BANNER_SHARE * allowance(row.level));
   const capped = [...hits.map((hit) => label(hit.login, hit.githubId)), ...near.map((row) => label(row.login, row.githubId))];
   if (capped.length > 0) flags.push({ text: `Near weekly cap: ${names(capped)}`, href: "/admin?view=full#limits" });
@@ -979,7 +1358,7 @@ export function redFlags(data: DashboardData, spend: SpendView, simple: SimpleDa
     flags.push({ text: `Used outside dl: ${names(simple.outsideDl.map((row) => `${label(row.login, row.githubId)} (${count(row.requests)} requests, 0 dl sessions)`))}`, href: "/admin?view=full#abuse" });
   }
   // Starter accounts using a lot: half their week or more, not already listed at the cap.
-  const busyStarters = simple.topTokens.filter((row) => row.level === "starter" && !hitIds.has(row.githubId) && !near.includes(row) && row.tokens >= 0.5 * spend.starterWeeklyTokens);
+  const busyStarters = simple.topTokens.filter((row) => row.level === "starter" && spend.starterWeeklyTokens > 0 && !hitIds.has(row.githubId) && !near.includes(row) && row.tokens >= 0.5 * spend.starterWeeklyTokens);
   if (busyStarters.length > 0) flags.push({ text: `Busy Starter: ${names(busyStarters.map((row) => `${label(row.login, row.githubId)} (${tokens(row.tokens)})`))}`, href: "/admin?view=full#abuse" });
   if (abuse && abuse.clusterCount > 0) {
     flags.push({ text: `${count(abuse.clusteredAccounts)} accounts share ${abuse.clusterCount === 1 ? "a network" : `${count(abuse.clusterCount)} networks`}`, href: "/admin?view=full#abuse" });
@@ -997,9 +1376,29 @@ export function redFlags(data: DashboardData, spend: SpendView, simple: SimpleDa
   return flags.slice(0, 5);
 }
 
+/** Sign-up days shown in the Simple view's funnel. */
+const FUNNEL_TABLE_DAYS = 7;
+
+/** The sign-up funnel per day, newest first: signed up, got tokens, refused, refused but opened dl. Compact for a phone. */
+function signupFunnelTable(rows: DashboardData["signupFunnel"]): string {
+  if (rows.length === 0) return "";
+  const cell = (text: string, role = "cell") => `<span role="${role}">${escapeHtml(text)}</span>`;
+  const body = rows
+    .slice(0, FUNNEL_TABLE_DAYS)
+    .map((row) => `<div role="row">${cell(monthDay(row.day), "rowheader")}${cell(count(row.signedUp))}${cell(count(row.gotTokens))}${cell(count(row.refused))}${cell(count(row.refusedOpened))}</div>`)
+    .join("");
+  return `<h3 class="sub">Sign-ups by day</h3>
+<div class="funnel" role="table" aria-label="Sign-ups by day: signed up, got free tokens, refused, refused but opened dl that day">
+<div role="row" class="fh">${cell("Day", "columnheader")}${cell("Signed up", "columnheader")}${cell("Got tokens", "columnheader")}${cell("Refused", "columnheader")}${cell("Refused, opened dl", "columnheader")}</div>
+${body}
+</div>
+<p class="avg">Opened dl: a dl session or a refused request on the sign-up day (UTC).</p>`;
+}
+
 /**
- * GET /admin?view=simple: four cards readable in a few seconds. Sign-ups per day with the total,
- * week-over-week growth, tokens this week per person by level, and red flags when there are any.
+ * GET /admin?view=simple: five cards readable in a few seconds. Sign-ups per day with the total,
+ * week-over-week growth, tokens this week per person by level, red flags when there are any, and
+ * retention by sign-up day.
  * The header carries the Simple / Full switch and whether the free tier is open.
  */
 export function simpleDashboardPage(input: { data: DashboardData; spend: SpendView; signOut: boolean; simple: SimpleData; abuse?: AbuseData }): Response {
@@ -1049,7 +1448,7 @@ ${stat("Weekly active people", activeNow, activeBefore, "last full week")}
 ${
   simple.topTokens.length === 0
     ? `<p class="empty">No tokens used this week.</p>`
-    : `<div class="legend"><span><i class="c1"></i>Full</span><span><i class="c2"></i>Starter</span></div>
+    : `<div class="legend"><span><i class="c1"></i>Full</span><span><i class="c3"></i>Basic</span><span><i class="c2"></i>Starter</span></div>
 ${tokenChart(simple.topTokens, 800, "wide")}
 ${tokenChart(simple.topTokens, 320, "narrow")}`
 }
@@ -1061,7 +1460,652 @@ ${tokenChart(simple.topTokens, 320, "narrow")}`
 ${flags.length === 0 ? `<p class="none">No red flags.</p>` : `<ul class="flags">\n${flags.map((flag) => `<li><a href="${flag.href}">${escapeHtml(flag.text)}</a></li>`).join("\n")}\n</ul>`}
 </section>`;
 
-  return shell(`Admin · ${PRODUCT_NAME}`, `${header}\n<main>\n${signups}\n${growthCard}\n${tokenCard}\n${flagCard}\n</main>`, 200, {}, "", SIMPLE_STYLE);
+  const retentionCard = `<section class="card span3" id="retention" aria-label="Retention">
+<h2>Retention</h2>
+<p class="caption">Counts only people who could use dl: they had free tokens at sign-up (Full, Basic, an admin's grant, or a Starter allowance). People refused free tokens are in the funnel below.</p>
+${
+  data.dailyCohorts.length === 0
+    ? `<p class="empty">No sign-ups with free tokens yet.</p>`
+    : `${retentionChart(data.dailyCohorts, 1000, "wide")}
+${retentionChart(data.dailyCohorts, 320, "narrow")}
+<p class="avg">${retentionAverages(data.dailyCohorts)}</p>`
+}
+${signupFunnelTable(data.signupFunnel)}
+</section>`;
+
+  return shell(`Admin · ${PRODUCT_NAME}`, `${header}\n<main>\n${signups}\n${growthCard}\n${tokenCard}\n${flagCard}\n${retentionCard}\n</main>`, 200, {}, "", SIMPLE_STYLE);
+}
+
+// ─── Tools ────────────────────────────────────────────────────────────────
+
+/** What the Tools tab shows: the forms as posted, and what the last button did. */
+export interface ToolsState {
+  login: string;
+  signOut: boolean;
+  /** Only with a browser session: the forms need it. A bearer view shows no forms. */
+  csrf?: string;
+  /** The admin's own contact email: where "send me a test" goes when no address is typed. */
+  adminEmail: string | null;
+  /** The userEmails setting; sending is refused while it's off (a test still goes). */
+  emailsOn: boolean;
+  provider: string | null;
+  /** Sign-up days, newest first, with the people a broadcast can reach at each level. */
+  cohorts: Array<{ day: number; full: number; basic: number; starter: number }>;
+  grant: { text: string; results?: GrantResult[]; error?: string };
+  /** The grantWeeklyUsdCap setting: the grant forms' default weekly dollar cap (0: Full only). */
+  grantUsd: number;
+  /** Pending access requests (/request in dl), newest first. `building` and `link` are user content. */
+  requests: PendingAccessRequest[];
+  /** What the last Grant or Decline did. */
+  requestNotice?: { error: boolean; text: string };
+  /** GPU early-access leads, newest first: emails people chose to leave (user content, escaped). */
+  leads: EarlyAccessLead[];
+  /** What the last "delete a lead" did. */
+  leadNotice?: { error: boolean; text: string };
+  /** What the last "re-check below-bar accounts" did. */
+  recheck?: { checked: number; raised: number; flagged: number; starter: number };
+  /** The email being written. */
+  compose: {
+    subject: string;
+    text: string;
+    audience: BroadcastAudience;
+    /** "YYYY-MM-DD" or "" for no bound; both inclusive. */
+    from: string;
+    to: string;
+    testTo: string;
+    notice?: { error: boolean; text: string };
+    preview?: { count: number; waitingForTomorrow: number; sample: string[] };
+    /** The token that lets "yes, send" (and "send the rest") through for this copy and audience. */
+    confirm?: string;
+    /** Show the in-page confirm step. */
+    confirming?: boolean;
+    sent?: { sent: number; failed: number; remaining: number; waitingForTomorrow: number; stoppedBy: string | null };
+  };
+}
+
+/** The simple view's look, plus forms: fields at 16px so a phone doesn't zoom in on them. */
+const TOOLS_STYLE = `${SIMPLE_STYLE}
+main.tools { max-width: 46rem; grid-template-columns: minmax(0, 1fr); }
+.card h2 { color: var(--k-text); font-size: 17px; margin: 0 0 4px; }
+.card .lede { margin: 0 0 14px; color: var(--k-muted); font-size: 13.5px; }
+.tools form { display: grid; gap: 14px; margin: 0; }
+.field { display: grid; gap: 6px; }
+.field > span, legend { font-size: 13px; font-weight: 600; color: var(--k-muted); }
+fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 8px; min-width: 0; }
+legend { padding: 0; margin-bottom: 6px; }
+input[type="text"], input[type="email"], input[type="date"], textarea {
+  width: 100%; font: 16px/1.45 var(--body); color: var(--k-text); background: var(--k-card);
+  border: 1px solid var(--k-border); border-radius: 8px; padding: 9px 11px; margin: 0;
+}
+input[type="date"] { min-height: 42px; min-width: 0; max-width: 100%; display: block; -webkit-appearance: none; appearance: none; }
+.dates .field { min-width: 0; }
+textarea { resize: vertical; min-height: 6rem; }
+textarea.letter { min-height: 14rem; }
+input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.usd-in { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--k-muted); }
+.usd-in input { width: 6.5rem; font: 16px/1.45 var(--body); color: var(--k-text); background: var(--k-card); border: 1px solid var(--k-border); border-radius: 8px; padding: 8px 10px; margin: 0; min-height: 40px; }
+.usd-in input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.dates { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.btn { font: 600 14px var(--body); padding: 9px 14px; border-radius: 8px; border: 1px solid var(--k-border); background: var(--k-card); color: var(--k-text); cursor: pointer; min-height: 40px; }
+.btn:hover { border-color: var(--k-muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #FFFFFF; }
+.btn.quiet { border-color: transparent; color: var(--k-muted); padding-left: 6px; padding-right: 6px; }
+.btn:disabled { opacity: .5; cursor: default; }
+.seg { display: inline-flex; gap: 4px; background: var(--k-bg); border: 1px solid var(--k-border); border-radius: 8px; padding: 3px; flex-wrap: wrap; }
+.seg label { position: relative; }
+.seg input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.seg span { display: block; padding: 6px 14px; border-radius: 6px; font-size: 14px; font-weight: 500; color: var(--k-muted); }
+.seg input:checked + span { background: var(--k-text); color: var(--k-card); }
+.seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+.days { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: 6px; }
+.day { text-align: left; font: 13px/1.3 var(--body); padding: 7px 10px; border-radius: 8px; border: 1px solid var(--k-border); background: var(--k-card); color: var(--k-text); cursor: pointer; display: grid; gap: 1px; }
+.day b { font-weight: 600; }
+.day small { color: var(--k-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.day[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.hint { margin: 0; font-size: 12.5px; color: var(--k-muted); }
+.caps { margin: 0; font-size: 12.5px; color: var(--k-flag); }
+.msg { margin: 0; padding: 10px 12px; border-radius: 8px; font-size: 14px; background: var(--k-ok-bg); color: var(--k-text); }
+.msg.err { background: var(--k-stop-bg); }
+.msg.flag { background: var(--k-flag-bg); }
+.panel { border: 1px solid var(--k-border); border-radius: 10px; padding: 14px; display: grid; gap: 10px; background: var(--k-bg); }
+.panel.confirm { border-color: var(--accent); }
+.panel p { margin: 0; }
+.big2 { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.nums { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.nums div { display: grid; gap: 2px; }
+.nums dt { font-size: 12px; color: var(--k-muted); }
+.nums dd { margin: 0; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.results { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.results li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 10px; padding: 7px 10px; border-radius: 8px; background: var(--k-bg); font-size: 14px; }
+.results code { font: 13.5px var(--mono); overflow-wrap: anywhere; }
+.chip { font-size: 12.5px; font-weight: 600; }
+.chip.ok { color: var(--k-ok); }
+.chip.no { color: var(--k-stop); }
+.chip.mid { color: var(--k-muted); }
+.reqs { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.req { border: 1px solid var(--k-border); border-radius: 10px; padding: 12px 14px; display: grid; gap: 6px; background: var(--k-bg); min-width: 0; }
+.req p { margin: 0; }
+.req-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 10px; align-items: baseline; }
+.req-head a { color: var(--k-text); text-decoration: none; }
+.req-head code { font: 600 14px var(--mono); overflow-wrap: anywhere; }
+.req-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+.req-link { font-size: 13.5px; overflow-wrap: anywhere; }
+.req-link a { color: var(--accent); }
+.req-actions { display: grid; gap: 8px; margin-top: 4px; }
+.leads-wrap { overflow-x: auto; }
+.leads { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.leads th, .leads td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--k-border); white-space: nowrap; }
+.leads th { font-size: 12px; font-weight: 600; color: var(--k-muted); }
+.leads td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.leads code { font: 13px var(--mono); }
+textarea.emails { font: 13px/1.5 var(--mono); min-height: 4rem; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (max-width: 520px) { .nums { grid-template-columns: repeat(2, minmax(0, 1fr)); } .actions .btn { flex: 1 1 auto; } }
+`;
+
+const GRANT_TONE: Record<GrantResult["outcome"], "ok" | "no" | "mid"> = {
+  granted: "ok",
+  already_full: "mid",
+  pregranted: "ok",
+  blocked: "no",
+  not_found: "no",
+  github_error: "no",
+};
+
+function plural(n: number, one: string, many = `${one}s`): string {
+  return `${count(n)} ${n === 1 ? one : many}`;
+}
+
+/**
+ * The grant forms' weekly dollar cap: a small number field, prefilled with the
+ * grantWeeklyUsdCap setting. Shared with the home screen's request cards.
+ */
+export function grantUsdInput(defaultUsd: number, label = "Weekly dollar cap"): string {
+  return `<label class="usd-in"><span class="sr">${escapeHtml(label)}</span>$<input type="number" name="usd" min="0" max="${MAX_GRANT_USD}" step="any" inputmode="decimal" value="${escapeHtml(String(defaultUsd))}"> a week</label>`;
+}
+
+/** "own cap $20 a week": a person's personal weekly dollar cap, for the admin lists. */
+export function ownCapText(usd: number): string {
+  return `own cap ${grantUsdText(usd)} a week`;
+}
+
+function grantCard(state: ToolsState): string {
+  const { grant, csrf } = state;
+  const results = grant.results
+    ? `<ul class="results" aria-label="Results">${grant.results
+        .map(
+          (result) =>
+            `<li><code>${escapeHtml(result.login ?? result.input)}</code><span class="chip ${GRANT_TONE[result.outcome]}">${escapeHtml(GRANT_LABELS[result.outcome])}</span>${result.usdPerWeek !== undefined ? `<span class="hint">${escapeHtml(ownCapText(result.usdPerWeek))}</span>` : ""}</li>`,
+        )
+        .join("")}</ul>`
+    : "";
+  return `<section class="card" id="grant" aria-label="Give free tokens">
+<h2>Give free tokens</h2>
+<p class="lede">Full level for these GitHub accounts, as an admin's choice, with their own weekly dollar cap. Someone who hasn't signed up yet gets both at their first sign-up. Blocked accounts are left alone.</p>
+${
+  csrf
+    ? `<form method="post" action="/admin/dashboard/tools#grant">
+<input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="grant">
+<label class="field"><span>GitHub usernames</span><textarea name="logins" rows="3" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="octocat, @hubot&#10;github.com/someone">${escapeHtml(grant.text)}</textarea></label>
+<p class="hint">Separated by spaces, commas or new lines; @name and github.com links work. Up to ${MAX_GRANT_LOGINS} at a time.</p>
+<div class="field"><span>Weekly dollar cap</span><div class="row">${grantUsdInput(state.grantUsd)}</div></div>
+<p class="hint">Their own cap each week, e.g. $3 for a hobbyist, $20 for a serious builder. It never lowers a higher cap they already have; 0 gives Full only.</p>
+<div class="row"><button class="btn primary" type="submit">Give free tokens</button></div>
+${grant.error ? `<p class="msg err" role="alert">${escapeHtml(grant.error)}</p>` : ""}
+${results}
+</form>`
+    : `<p class="hint">Sign in at /admin in a browser to use this.</p>`
+}
+</section>`;
+}
+
+/** "https://example.com/x" shown as text with a link; anything that isn't http(s) as text only. */
+function requestLink(link: string | null): string {
+  if (!link) return "";
+  const safe = /^https?:\/\//i.test(link);
+  return safe
+    ? `<p class="req-link"><a href="${escapeHtml(link)}" rel="noopener noreferrer nofollow" target="_blank">${escapeHtml(link)}</a></p>`
+    : `<p class="req-link">${escapeHtml(link)}</p>`;
+}
+
+/** Days, rounded down: "3 years", "200 days". */
+function ageText(days: number | null): string {
+  if (days === null) return "age unknown";
+  return days >= 730 ? `${Math.floor(days / 365)} years` : `${count(days)} days`;
+}
+
+/**
+ * Pending access requests, newest first: who, their level and numbers, what they're building
+ * (user content, escaped), and Grant (Full, as an admin's choice) or Decline with an optional note.
+ */
+function requestsCard(state: ToolsState): string {
+  const { csrf, requests } = state;
+  const notice = state.requestNotice ? `<p class="msg${state.requestNotice.error ? " err" : ""}" role="${state.requestNotice.error ? "alert" : "status"}">${escapeHtml(state.requestNotice.text)}</p>` : "";
+  const items = requests.map((request) => {
+    const level = request.level === null ? "not signed up" : request.level === "basic" ? "Basic" : request.level === "starter" ? "Starter" : "Full";
+    const facts = [level, ageText(request.accountAgeDays), `${request.contributions === null ? "–" : count(request.contributions)} contributions`, plural(request.sessionsThisWeek, "dl session") + " this week"];
+    if (request.personalUsdPerWeek !== null) facts.push(ownCapText(request.personalUsdPerWeek));
+    const actions = csrf
+      ? `<form method="post" action="/admin/dashboard/tools#requests" class="req-actions">
+<input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="request"><input type="hidden" name="id" value="${request.id}">
+<label class="field"><span class="sr">Note (optional)</span><input type="text" name="note" maxlength="300" placeholder="Note (optional, only you see it)" autocomplete="off"></label>
+<div class="row">${grantUsdInput(state.grantUsd, `Weekly dollar cap for ${request.login}`)}<button class="btn primary" type="submit" name="action" value="grant">Grant</button><button class="btn" type="submit" name="action" value="decline">Decline</button></div>
+</form>`
+      : "";
+    return `<li class="req">
+<div class="req-head"><a href="https://github.com/${encodeURIComponent(request.login)}" rel="noopener noreferrer nofollow" target="_blank"><code>@${escapeHtml(request.login)}</code></a><span class="hint">${escapeHtml(when(request.at))}</span></div>
+<p class="hint">${facts.map(escapeHtml).join(" · ")}</p>
+<p class="req-text">${escapeHtml(request.building)}</p>
+${requestLink(request.link)}
+${actions}
+</li>`;
+  });
+  return `<section class="card" id="requests" aria-label="Requests">
+<h2>Requests</h2>
+<p class="lede">People asking for free tokens from inside dl (/request). Grant gives Full, as an admin's choice, with the weekly dollar cap next to it, and emails them; Decline sends nothing.</p>
+${notice}
+${requests.length === 0 ? `<p class="hint">No pending requests.</p>` : `<ul class="reqs">${items.join("\n")}</ul>`}
+${csrf ? "" : `<p class="hint">Sign in at /admin in a browser to answer them.</p>`}
+</section>`;
+}
+
+/** "Re-check below-bar accounts": raises qualifying Starter accounts to basic from stored signals. */
+function recheckCard(state: ToolsState): string {
+  const { csrf, recheck } = state;
+  const result = recheck
+    ? `<div class="panel" role="status"><dl class="nums"><div><dt>Checked</dt><dd>${count(recheck.checked)}</dd></div><div><dt>Raised to Basic</dt><dd>${count(recheck.raised)}</dd></div><div><dt>Starter</dt><dd>${count(recheck.starter)}</dd></div><div><dt>Batch-flagged</dt><dd>${count(recheck.flagged)}</dd></div></dl></div>`
+    : "";
+  return `<section class="card" id="recheck" aria-label="Re-check below-bar accounts">
+<h2>Re-check below-bar accounts</h2>
+<p class="lede">Looks at every active Starter account (not admins, not admin-set levels) from its stored signals, raises the ones that now qualify to Basic, and stores the creation-batch flag again. Never lowers anyone; blocked accounts are left alone.</p>
+${
+  csrf
+    ? `<form method="post" action="/admin/dashboard/tools#recheck"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="recheck"><div class="row"><button class="btn primary" type="submit">Re-check below-bar accounts</button></div></form>`
+    : `<p class="hint">Sign in at /admin in a browser to use this.</p>`
+}
+${result}
+</section>`;
+}
+
+/** Leads shown in the table; the CSV and the copy box have them all. */
+const LEADS_SHOWN = 200;
+
+/**
+ * "GPU early access": the emails people left after saying yes to early access for their AMD or
+ * Ascend GPU (POST /v1/telemetry/gpu), newest first, with a CSV, a box holding every address to
+ * copy, and a form that deletes one person's leads on request. Emails are user content: escaped.
+ */
+function leadsCard(state: ToolsState): string {
+  const { leads, csrf } = state;
+  const notice = state.leadNotice ? `<p class="msg${state.leadNotice.error ? " err" : ""}" role="${state.leadNotice.error ? "alert" : "status"}">${escapeHtml(state.leadNotice.text)}</p>` : "";
+  const rows = leads
+    .slice(0, LEADS_SHOWN)
+    .map(
+      (lead) =>
+        `<tr><td><code>${escapeHtml(lead.email)}</code></td><td>${escapeHtml(GPU_VENDOR_NAMES[lead.vendor] ?? lead.vendor)}</td><td>${escapeHtml(lead.gpuModel || "–")}</td><td class="num">${lead.vramGb >= 0 ? `${count(lead.vramGb)} GB` : "–"}</td><td>${escapeHtml(isoDay(lead.at))}</td></tr>`,
+    );
+  const emails = [...new Set(leads.map((lead) => lead.email))];
+  const table =
+    leads.length === 0
+      ? `<p class="hint">No emails yet.</p>`
+      : `<div class="leads-wrap"><table class="leads"><thead><tr><th>Email</th><th>Vendor</th><th>GPU</th><th>VRAM</th><th>Date</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>
+${leads.length > LEADS_SHOWN ? `<p class="hint">The newest ${count(LEADS_SHOWN)} of ${count(leads.length)}; the CSV has them all.</p>` : ""}
+<p class="hint">${plural(leads.length, "lead")} · ${csvLink("early-access")}</p>
+<label class="field"><span>All ${plural(emails.length, "email")}, to copy</span><textarea class="emails" readonly rows="3" spellcheck="false">${escapeHtml(emails.join(", "))}</textarea></label>`;
+  const remove = csrf
+    ? `<form method="post" action="/admin/dashboard/tools#leads"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="early-access-delete">
+<label class="field"><span>Delete on request</span><input type="email" name="email" maxlength="254" placeholder="someone@example.com" autocomplete="off" autocapitalize="off"></label>
+<div class="row"><button class="btn" type="submit">Delete their leads</button></div></form>`
+    : "";
+  return `<section class="card" id="leads" aria-label="GPU early access">
+<h2>GPU early access</h2>
+<p class="lede">Emails people chose to leave after saying yes to early access for their AMD or Ascend GPU. Only for telling them when support is ready. The anonymous counts are in Health.</p>
+${notice}
+${table}
+${remove}
+</section>`;
+}
+
+/** GET /admin/dashboard/early-access.csv: every lead, newest first. */
+export function earlyAccessCsv(leads: EarlyAccessLead[], now: number): Response {
+  const body = csv(
+    ["email", "vendor", "gpu_model", "vram_gb", "date"],
+    leads.map((lead) => [lead.email, lead.vendor, lead.gpuModel, lead.vramGb >= 0 ? lead.vramGb : null, isoDay(lead.at)]),
+  );
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="free-early-access-${isoDay(now)}.csv"`, ...dashboardHeaders() },
+  });
+}
+
+function emailCard(state: ToolsState): string {
+  const { compose: email, csrf } = state;
+  if (!csrf) {
+    return `<section class="card" id="email" aria-label="Write an email"><h2>Write an email</h2><p class="hint">Sign in at /admin in a browser to use this.</p></section>`;
+  }
+  const radio = (value: BroadcastAudience, label: string) =>
+    `<label><input type="radio" name="audience" value="${value}"${email.audience === value ? " checked" : ""}><span>${label}</span></label>`;
+  const single = email.from !== "" && email.from === email.to ? email.from : "";
+  const dayButtons = state.cohorts.map((row) => {
+    const value = isoDay(row.day);
+    return `<button type="submit" class="day" name="action" value="pick:${value}" aria-pressed="${single === value}"><b>${escapeHtml(`${WEEKDAYS[new Date(row.day).getUTCDay()]} ${monthDay(row.day)}`)}</b><small>${count(row.full)} full · ${count(row.basic)} basic · ${count(row.starter)} starter</small></button>`;
+  });
+  const capitals = (email.subject !== "" || email.text !== "") && hasCapitals(email.subject, email.text);
+  const preview = email.preview;
+  const sent = email.sent;
+  const confirmField = email.confirm ? `<input type="hidden" name="confirm" value="${escapeHtml(email.confirm)}">` : "";
+  const sample = preview && preview.sample.length > 0 ? ` For example ${escapeHtml(preview.sample.join(", "))}.` : "";
+  const waiting = (n: number) => (n > 0 ? ` ${plural(n, "more person", "more people")} already had an email today; they can get it tomorrow.` : "");
+  const outcome = [
+    email.notice ? `<p class="msg${email.notice.error ? " err" : ""}" role="${email.notice.error ? "alert" : "status"}">${escapeHtml(email.notice.text)}</p>` : "",
+    preview && !email.confirming && !sent
+      ? `<div class="panel" role="status"><p><span class="big2">${count(preview.count)}</span> ${preview.count === 1 ? "person gets" : "people get"} it now.${sample}</p>${waiting(preview.waitingForTomorrow) ? `<p class="hint">${escapeHtml(waiting(preview.waitingForTomorrow).trim())}</p>` : ""}</div>`
+      : "",
+    preview && email.confirming
+      ? `<div class="panel confirm" role="alert"><p><strong>Send this to ${plural(preview.count, "person", "people")} now?</strong>${sample}</p>${waiting(preview.waitingForTomorrow) ? `<p class="hint">${escapeHtml(waiting(preview.waitingForTomorrow).trim())}</p>` : ""}${state.emailsOn ? "" : `<p class="msg err">Emails to users are off (the userEmails setting), so this will be refused.</p>`}<div class="row actions"><button class="btn primary" type="submit" name="action" value="send">Yes, send to ${plural(preview.count, "person", "people")}</button><button class="btn" type="submit" name="action" value="cancel">Cancel</button></div></div>`
+      : "",
+    sent
+      ? `<div class="panel" role="status"><dl class="nums"><div><dt>Sent</dt><dd>${count(sent.sent)}</dd></div><div><dt>Waiting for tomorrow</dt><dd>${count(sent.waitingForTomorrow)}</dd></div><div><dt>Remaining</dt><dd>${count(sent.remaining)}</dd></div><div><dt>Failed</dt><dd>${count(sent.failed)}</dd></div></dl>${
+          sent.stoppedBy ? `<p class="hint">The provider's limit stopped this batch (${escapeHtml(sent.stoppedBy)}); send the rest later.</p>` : ""
+        }${sent.failed > 0 ? `<p class="hint">Failed sends are tried again on the next send, up to 3 times.</p>` : ""}${
+          sent.remaining > 0 ? `<div class="row"><button class="btn primary" type="submit" name="action" value="send">Send the rest (${count(sent.remaining)})</button></div>` : ""
+        }</div>`
+      : "",
+  ].join("");
+  return `<section class="card" id="email" aria-label="Write an email">
+<h2>Write an email</h2>
+<p class="lede">Plain text, sent exactly as typed, from the usual sender with the stop link under it. Never to blocked accounts, people who pressed stop, or admins; at most one email a day each.</p>
+${state.emailsOn ? "" : `<p class="msg flag">Emails to users are off (the userEmails setting): tests and previews work, sending doesn't.</p>`}
+${state.provider ? "" : `<p class="msg err">No email provider is set up (USER_EMAIL or RESEND_API_KEY): nothing can be sent.</p>`}
+<form method="post" action="/admin/dashboard/tools#email-actions">
+<input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="email">${confirmField}
+<button type="submit" name="action" value="preview" class="sr" tabindex="-1" aria-hidden="true">Preview</button>
+<label class="field"><span>Subject</span><input type="text" name="subject" value="${escapeHtml(email.subject)}" maxlength="200" autocomplete="off"></label>
+<label class="field"><span>Text</span><textarea class="letter" name="text" rows="12">\n${escapeHtml(email.text)}</textarea></label>
+${capitals ? `<p class="caps">Has capitals. Fine for names like GPT-6 or OpenAI; it still sends.</p>` : ""}
+<fieldset><legend>Who gets it</legend><div class="seg">${radio("full", "Full")}${radio("basic", "Basic")}${radio("starter", "Starter")}${radio("all", "Everyone")}</div></fieldset>
+<fieldset><legend>Signed up (UTC, both days included)</legend>
+<div class="dates"><label class="field"><span>From</span><input type="date" name="from" value="${escapeHtml(email.from)}"></label><label class="field"><span>To</span><input type="date" name="to" value="${escapeHtml(email.to)}"></label></div>
+${
+  dayButtons.length > 0
+    ? `<p class="hint">Or pick a sign-up day. People an email can reach:</p><div class="days">${dayButtons.join("")}</div>`
+    : `<p class="hint">Nobody an email can reach has signed up yet.</p>`
+}
+${email.from || email.to ? `<div class="row"><button class="btn quiet" type="submit" name="action" value="clear">Any sign-up day</button></div>` : ""}
+</fieldset>
+<label class="field"><span>Send the test to</span><input type="email" name="test_to" value="${escapeHtml(email.testTo)}" placeholder="${escapeHtml(state.adminEmail ?? "you@example.com")}" autocomplete="email" autocapitalize="off"></label>
+<div class="row actions" id="email-actions"><button class="btn" type="submit" name="action" value="test">Send me a test</button><button class="btn" type="submit" name="action" value="preview">Preview who gets it</button><button class="btn primary" type="submit" name="action" value="confirm">Send…</button></div>
+${outcome}
+</form>
+</section>`;
+}
+
+/**
+ * GET /admin?view=tools, and what POST /admin/dashboard/tools answers: two cards, "Give free
+ * tokens" (paste GitHub usernames) and "Write an email" (a plain one-off email to a level and a
+ * sign-up range, with a test, a preview and an in-page confirm). Same look as the simple view.
+ */
+export function toolsPage(state: ToolsState): Response {
+  const header = `<header class="bar"><div>
+<a class="brand" href="/admin?view=simple"><span class="logo"><img src="${BRAND_ORIGIN}/logo-64.webp" alt="" width="22" height="22"></span><b>${escapeHtml(PRODUCT_NAME)} admin</b></a>
+${viewToggle("tools")}
+${state.signOut ? `<form method="post" action="/admin/signout"><button type="submit" class="out">Sign out</button></form>` : ""}
+</div></header>`;
+  return shell(`Tools · ${PRODUCT_NAME}`, `${header}\n<main class="tools">\n${requestsCard(state)}\n${grantCard(state)}\n${recheckCard(state)}\n${emailCard(state)}\n${leadsCard(state)}\n</main>`, 200, {}, "", TOOLS_STYLE);
+}
+
+// ─── Health ───────────────────────────────────────────────────────────────
+
+const OS_NAMES: Record<string, string> = { darwin: "macOS", linux: "Linux", win32: "Windows" };
+const osLabel = (os: string) => OS_NAMES[os] ?? os;
+const UPSTREAM_LABELS: Record<string, string> = { openai: "OpenAI", luminal: "Luminal", openrouter: "OpenRouter" };
+
+/** A compact table: header cells, body rows (already HTML), and what to say when there are none. */
+function healthTable(head: string[], rows: string[], empty: string): string {
+  return `<div class="scroll"><table>
+<thead><tr>${head.map((cell) => `<th>${escapeHtml(cell)}</th>`).join("")}</tr></thead>
+<tbody>
+${rows.length === 0 ? `<tr><td colspan="${head.length}" class="l muted">${escapeHtml(empty)}</td></tr>` : rows.join("\n")}
+</tbody></table></div>`;
+}
+
+/** A row; `bad` marks it (colour plus a word, so it doesn't rest on colour alone). */
+function healthRow(cells: string[], bad = false): string {
+  return `<tr${bad ? ` class="bad"` : ""}>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`;
+}
+
+const abnormalChip = ` <span class="status blocked">abnormal</span>`;
+const shareCell = (n: number, share: number) => `${count(n)} <span class="muted">(${percent(share)})</span>`;
+
+/**
+ * GET /admin?view=health: what Autopilot's session events and the request log say about bugs,
+ * crashes and what gets used (health-data.ts), over the last 1, 7 or 30 days. Eight sections,
+ * each a one-line takeaway, compact tables and a CSV. Same look as the full view.
+ */
+export function healthPage(input: { health: HealthData; login: string; signOut: boolean }): Response {
+  const h = input.health;
+  const say = healthTakeaways(h);
+  const query = `?days=${h.days}`;
+  const section = (id: string, title: string, csvs: Array<CsvTable>, takeaway: string, body: string, note: string) => `<section id="${id}">
+<div class="head"><h2>${escapeHtml(title)}</h2><span>${csvs.map((table) => csvLink(table, query)).join(" · ")}</span></div>
+<p class="takeaway">${escapeHtml(takeaway)}</p>
+${body}
+<p class="note">${note}</p>
+</section>`;
+  const windowSwitch = `<nav class="views" aria-label="Window">${HEALTH_WINDOWS.map(
+    (days) => `<a href="/admin?view=health&amp;days=${days}"${days === h.days ? ` aria-current="page"` : ""}>${days === 1 ? "1 day" : `${days} days`}</a>`,
+  ).join("")}</nav>`;
+
+  const header = `${markHeader(
+    `<span class="who">${viewToggle("health")}Signed in as <strong>${escapeHtml(input.login)}</strong>${
+      input.signOut ? `<form method="post" action="/admin/signout"><button type="submit">Sign out</button></form>` : ""
+    }</span>`,
+  )}
+<h1>Health</h1>
+<div class="health-views">${windowSwitch}<span class="muted">Last ${h.days === 1 ? "24 hours" : `${h.days} days`}, to ${escapeHtml(new Date(h.now).toISOString().slice(0, 16).replace("T", " "))} UTC.</span></div>
+<p class="lede">From Autopilot's session events (sent only while the free tier is the provider) and the free tier's request log. Admins left out except where a section says. Counts and outcomes only: never prompts, code, paths or repositories.</p>`;
+
+  const errors = section(
+    "errors",
+    "Errors",
+    ["health-errors", "health-request-failures"],
+    say.errors,
+    `<h3>Reported by Autopilot (${count(h.errors.total)}, ${count(h.errors.people)} people)</h3>
+${healthTable(
+  ["Error code", "Count", "People", "Autopilot versions"],
+  h.errors.codes.map((row) =>
+    healthRow([
+      escapeHtml(row.code),
+      count(row.count),
+      count(row.people),
+      escapeHtml(
+        row.versions
+          .slice(0, 4)
+          .map((version) => `${version.version} ×${version.count}`)
+          .join(", ") + (row.versions.length > 4 ? ", …" : ""),
+      ),
+    ]),
+  ),
+  "No errors reported.",
+)}
+<h3>Free tier requests that failed (${count(h.requests.failed)} of ${count(h.requests.total)})</h3>
+${healthTable(
+  ["Status", "Model", "Failed", "Of the model's requests"],
+  h.requests.failures.map((row) => healthRow([escapeHtml(row.status), escapeHtml(row.model), count(row.count), percent(row.share)])),
+  "No failed requests.",
+)}`,
+    "Error codes are what a failed turn carried: a provider code, an HTTP status (http_429) or an error class, never the message. Versions come from the session's start. Request statuses: upstream_busy (429), upstream_error (5xx), upstream_timeout, upstream_unreachable, stream_error, abandoned.",
+  );
+
+  const endLabel = (end: string) => escapeHtml(end);
+  const ends = section(
+    "ends",
+    "Crashes and abnormal ends",
+    ["health-ends", "health-turns"],
+    say.ends,
+    `<h3>How sessions ended (${count(h.ends.sessions)} started)</h3>
+${healthTable(
+  ["End", "Sessions", "Share"],
+  h.ends.overall.map((row) => healthRow([`${endLabel(row.end)}${row.normal ? "" : abnormalChip}`, count(row.count), percent(row.share)], !row.normal)),
+  "No sessions started.",
+)}
+<h3>By Autopilot version and OS</h3>
+${healthTable(
+  ["Version", "OS", "Sessions", "Abnormal", "Most common"],
+  h.ends.split.map((row) =>
+    healthRow([escapeHtml(row.version), escapeHtml(osLabel(row.os)), count(row.sessions), row.abnormal > 0 ? shareCell(row.abnormal, row.share) : "0", row.top === null ? "–" : escapeHtml(row.top)], row.abnormal > 0),
+  ),
+  "No sessions started.",
+)}
+<h3>How turns ended (${count(h.ends.turnTotal)})</h3>
+${healthTable(
+  ["Turn end", "Turns", "Share"],
+  h.ends.turns.map((row) => healthRow([`${endLabel(row.end)}${row.normal ? "" : abnormalChip}`, count(row.count), percent(row.share)], !row.normal)),
+  "No turns.",
+)}`,
+    `Sessions started in the window. Autopilot sends a session end only for ${NORMAL_SESSION_ENDS.map((end) => `"${end}"`).join(" and ")} (/clear); a crash or a killed terminal sends none, so ${escapeHtml(NO_END)} is a session with no end whose last event is over 6 hours old, and ${escapeHtml(STILL_OPEN)} one active more recently. Turns end complete, needs_input, aborted (Esc), guardrail or error.`,
+  );
+
+  const versions = section(
+    "versions",
+    "Versions",
+    ["health-versions"],
+    say.versions,
+    `<div class="tiles">
+<div class="tile">Autopilot version${healthTable(
+      ["Version", "Sessions", "People"],
+      h.versions.versions.map((row) => healthRow([`${escapeHtml(row.version)}${row.version === h.versions.latest ? ` <span class="muted">newest</span>` : ""}`, shareCell(row.count, row.share), count(row.people)])),
+      "No sessions.",
+    )}</div>
+<div class="tile">OS${healthTable(
+      ["OS", "Sessions", "People"],
+      h.versions.os.map((row) => healthRow([escapeHtml(osLabel(row.os)), shareCell(row.count, row.share), count(row.people)])),
+      "No sessions.",
+    )}</div>
+</div>`,
+    "From each session's start. A person on two versions counts under both.",
+  );
+
+  const s = h.sessions;
+  const durationText = (value: number | null) => (value === null ? "–" : value >= 60_000 ? `${(value / 60_000).toFixed(value >= 600_000 ? 0 : 1)} min` : ms(value));
+  const sessions = section(
+    "sessions",
+    "Sessions",
+    ["health-sessions"],
+    say.sessions,
+    `<div class="tiles">
+<div class="tile">Sessions<b>${count(s.sessions)}</b><span class="note">${count(s.people)} people; ${count(s.ended)} sent an end</span></div>
+<div class="tile">Turns per session<b>${s.turnsMedian === null ? "–" : count(s.turnsMedian)} <span class="muted">median</span></b><span class="note">p90 ${s.turnsP90 === null ? "–" : count(s.turnsP90)}</span></div>
+<div class="tile">Duration<b>${durationText(s.durationMedianMs)} <span class="muted">median</span></b><span class="note">p90 ${durationText(s.durationP90Ms)}; ended sessions only</span></div>
+<div class="tile">Opened and left<b>${count(s.zeroTurns)}</b><span class="note">${s.sessions > 0 ? `${percent(s.zeroTurns / s.sessions)} of sessions had no turn` : "no sessions"}</span></div>
+<div class="tile">PRs opened<b>${count(s.prs)}</b><span class="note">${s.prsPer100 === null ? "–" : s.prsPer100.toFixed(1)} per 100 sessions</span></div>
+</div>`,
+    "Sessions started in the window. Turns: the session end's count, or its turn events when it sent no end. PRs: a pull request URL a tool printed in that session.",
+  );
+
+  const tools = section(
+    "tools",
+    "Tools",
+    ["health-tools"],
+    say.tools,
+    healthTable(
+      ["Tool", "Calls", "Sessions using it"],
+      h.tools.tools.map((row) => healthRow([escapeHtml(row.tool), shareCell(row.calls, h.tools.calls > 0 ? row.calls / h.tools.calls : 0), shareCell(row.sessions, row.share)])),
+      "No tool calls reported.",
+    ),
+    `Summed from each turn's end (the session end repeats the same counts). Sessions using it: of the ${count(h.tools.sessions)} sessions with a turn in the window. Names only, never arguments.`,
+  );
+
+  const upstreams = h.models.upstreams.filter((row) => row.requests > 0 || row.medianTtftMs !== null);
+  const models = section(
+    "models",
+    "Models",
+    ["health-models", "health-upstreams"],
+    say.models,
+    `<div class="tiles">
+<div class="tile">Sessions by model${healthTable(
+      ["Model", "Sessions"],
+      h.models.sessions.map((row) => healthRow([escapeHtml(row.model), shareCell(row.count, row.share)])),
+      "No sessions.",
+    )}</div>
+<div class="tile">Requests by model${healthTable(
+      ["Model", "Requests", "Failed"],
+      h.models.requests.map((row) => healthRow([escapeHtml(row.model), shareCell(row.requests, row.share), row.requests > 0 ? shareCell(row.failed, row.failed / row.requests) : "0"])),
+      "No requests.",
+    )}</div>
+</div>
+<h3>Time to first token by upstream</h3>
+${healthTable(
+  ["Upstream", "Requests", "Errors", "TTFT median", "TTFT p90"],
+  upstreams.map((row) => healthRow([UPSTREAM_LABELS[row.upstream] ?? row.upstream, count(row.requests), count(row.errors), ms(row.medianTtftMs), ms(row.p90TtftMs)])),
+  "No upstream requests.",
+)}`,
+    "Sessions by the model at their start; requests from the free tier's log. The upstream table is the Full view's, over this window: admins included (no person is stored with it), counts by UTC day, timings kept 15 days.",
+  );
+
+  const installRows = h.installs.platforms.map((row) =>
+    healthRow(
+      [
+        escapeHtml(`${osLabel(row.os)} ${row.arch}`),
+        escapeHtml(row.mode),
+        count(row.ok),
+        count(row.failed),
+        row.ok + row.failed > 0 ? percent(row.failShare) : "–",
+        row.topStep === null ? "–" : escapeHtml(INSTALL_STEPS[row.topStep] ?? row.topStep),
+      ],
+      row.failed > 0,
+    ),
+  );
+  const installs = section(
+    "installs",
+    "Installs",
+    ["health-installs"],
+    say.installs,
+    `${healthTable(["System", "Mode", "Ok", "Failed", "Fail share", "Mostly fails at"], installRows, "No installs counted.")}
+<h3>Failed steps</h3>
+${healthTable(
+  ["Step", "Failed"],
+  h.installs.failedSteps.map((row) => healthRow([escapeHtml(STEP_LABELS[row.step] ?? row.step), count(row.failed)])),
+  "No failed installs.",
+)}`,
+    `Anonymous counts from install.sh, by UTC day since ${escapeHtml(day(h.fromDay))}: they can't be joined to people, so admins are in them.`,
+  );
+
+  const g = h.gpus;
+  const gpuName = (vendor: string) => escapeHtml(GPU_VENDOR_NAMES[vendor] ?? vendor);
+  const optionName = (option: string) => escapeHtml(GPU_OPTION_NAMES[option] ?? option);
+  const gpus = section(
+    "gpus",
+    "GPUs",
+    ["health-gpus"],
+    say.gpus,
+    `<div class="tiles">
+<div class="tile">First runs by GPU${healthTable(["GPU", "First runs"], g.detected.map((row) => healthRow([gpuName(row.vendor), count(row.count)])), "No first runs.")}</div>
+<div class="tile">Private model on this GPU?${healthTable(["Answer", "Count"], [healthRow(["Yes", count(g.prompt.yes)]), healthRow(["No", count(g.prompt.no)])], "No answers.")}</div>
+<div class="tile">Options picked${healthTable(["Option", "Count"], g.options.map((row) => healthRow([optionName(row.option), count(row.count)])), "No options picked.")}</div>
+<div class="tile">Early access${healthTable(["GPU", "Yes", "No"], g.earlyAccess.map((row) => healthRow([gpuName(row.vendor), count(row.yes), count(row.no)])), "No answers.")}</div>
+</div>
+<h3>Setups by path</h3>
+${healthTable(
+  ["Path", "Ok", "Failed", "Top errors"],
+  g.results.map((row) =>
+    healthRow(
+      [
+        optionName(row.path),
+        count(row.ok),
+        count(row.failed),
+        row.errors.length === 0 ? "–" : escapeHtml(row.errors.slice(0, 3).map((error) => `${error.errorType} (${error.count.toLocaleString("en-US")})`).join(", ")),
+      ],
+      row.failed > 0,
+    ),
+  ),
+  "No setups.",
+)}`,
+    `Anonymous counts from Autopilot's GPU first run before sign-in, by UTC day since ${escapeHtml(day(h.fromDay))}: one per step per machine, with no IP, account or device, so they can't be joined to people and admins are in them. A machine that runs the first run again is counted again.`,
+  );
+
+  return shell(`Health · ${PRODUCT_NAME}`, [header, errors, ends, versions, sessions, tools, models, installs, gpus].join("\n"));
 }
 
 // ─── CSV ──────────────────────────────────────────────────────────────────
@@ -1078,15 +2122,17 @@ function csv(header: string[], rows: unknown[][]): string {
   return [header, ...rows].map((row) => row.map(csvField).join(",")).join("\r\n") + "\r\n";
 }
 
-export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendView): Response {
+export function dashboardCsv(table: Exclude<CsvTable, HealthCsvTable | "early-access">, data: DashboardData, spend: SpendView): Response {
   let body: string;
   switch (table) {
-    case "spend":
+    case "spend": {
+      const totals = spendTotals(spend);
       body = csv(
-        ["week_start", "week_usd", "weekly_cap_usd", "total_usd", "total_cap_usd", "admin_week_usd", "admin_total_usd", "paused", "paused_by_env", "open_admission", "admitted", "max_active_users", "resets_at", "primary_upstream", "luminal_credit_usd", "luminal_credit_used_usd", "free_credit_week_usd", "weekly_credit_usd", "require_github_activity"],
-        [[day(data.currentWeek), spend.weekUsd, spend.weeklyCapUsd, spend.totalUsd, spend.totalCapUsd, spend.adminWeekUsd, spend.adminTotalUsd, spend.paused, spend.pausedByEnv, spend.openAdmission, data.people.admitted, spend.maxActiveUsers, new Date(spend.resetsAt).toISOString(), spend.primaryUpstream, spend.creditUsd, spend.creditUsedUsd, spend.freeCreditWeekUsd, spend.weeklyCreditUsd, spend.requireGithubActivity]],
+        ["week_start", "week_usd", "weekly_cap_usd", "total_usd", "total_cap_usd", "admin_week_usd", "admin_total_usd", "paused", "paused_by_env", "open_admission", "admitted", "max_active_users", "resets_at", "primary_upstream", "luminal_credit_usd", "luminal_credit_used_usd", "free_credit_week_usd", "weekly_credit_usd", "require_github_activity", "luminal_credit_week_usd", "openai_credit_usd", "openai_credit_used_usd", "openai_credit_week_usd", "openai_free_credit_week_usd", "openai_weekly_credit_usd", "metered_total_usd", "spent_all_time_usd", "spent_week_usd"],
+        [[day(data.currentWeek), spend.weekUsd, spend.weeklyCapUsd, spend.totalUsd, spend.totalCapUsd, spend.adminWeekUsd, spend.adminTotalUsd, spend.paused, spend.pausedByEnv, spend.openAdmission, data.people.admitted, spend.maxActiveUsers, new Date(spend.resetsAt).toISOString(), spend.primaryUpstream, spend.creditUsd, spend.creditUsedUsd, spend.freeCreditWeekUsd, spend.weeklyCreditUsd, spend.requireGithubActivity, spend.creditWeekUsd, spend.openaiCreditUsd, spend.openaiCreditUsedUsd, spend.openaiCreditWeekUsd, spend.openaiFreeCreditWeekUsd, spend.openaiWeeklyCreditUsd, totals.meteredAllTimeUsd, totals.allTimeUsd, totals.weekUsd]],
       );
       break;
+    }
     case "weekly-active":
       body = csv(["week_start", `active_${REGULAR_DAYS}_plus_days`, "active_any_day"], data.weeklyActive.map((week) => [day(week.weekStart), week.regular, week.active]));
       break;
@@ -1094,6 +2140,12 @@ export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendV
       body = csv(
         ["signup_week", "people", ...RETENTION_OFFSETS.flatMap((offset) => [`week_${offset}_active`, `week_${offset}_share`])],
         data.cohorts.map((cohort) => [day(cohort.weekStart), cohort.size, ...cohort.retained.flatMap((cell) => (cell ? [cell.active, cell.share] : [null, null]))]),
+      );
+      break;
+    case "retention-daily":
+      body = csv(
+        ["cohort", "size", ...RETENTION_DAYS.map((offset) => `d${offset}`)],
+        data.dailyCohorts.map((cohort) => [day(cohort.day), cohort.size, ...cohort.retained.map((cell) => cell?.share ?? null)]),
       );
       break;
     case "weekly-cost":
@@ -1131,10 +2183,42 @@ export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendV
     }
     case "upstreams":
       body = csv(
-        ["window", "upstream", "requests", "errors", "ttft_median_ms", "ttft_p90_ms", "ttfb_median_ms", "cache_hit_share", "credit_usd", "cash_usd"],
+        ["window", "upstream", "requests", "errors", "ttft_median_ms", "ttft_p90_ms", "ttfb_median_ms", "cache_hit_share", "credit_usd", "cash_usd", "users", "prompt_tokens", "cached_tokens", "completion_tokens"],
         [
-          ...data.upstreams.map((row) => [row.window, row.upstream, row.requests, row.errors, row.medianTtftMs, row.p90TtftMs, row.medianTtfbMs, row.cacheHitShare, row.creditUsd, row.cashUsd]),
-          ["all_time", "luminal_credit", null, null, null, null, null, null, spend.creditUsedUsd, null],
+          ...data.upstreams.map((row) => [
+            row.window,
+            row.upstream,
+            row.requests,
+            row.errors,
+            row.medianTtftMs,
+            row.p90TtftMs,
+            row.medianTtfbMs,
+            row.cacheHitShare,
+            row.creditUsd,
+            row.cashUsd,
+            row.users,
+            row.promptTokens,
+            row.cachedTokens,
+            row.completionTokens,
+          ]),
+          ...data.upstreamTotals.map((row) => [
+            row.window,
+            "total",
+            row.requests,
+            row.errors,
+            null,
+            null,
+            null,
+            row.cacheHitShare,
+            row.creditUsd,
+            row.cashUsd,
+            row.users,
+            row.promptTokens,
+            row.cachedTokens,
+            row.completionTokens,
+          ]),
+          ["all_time", "luminal_credit", null, null, null, null, null, null, spend.creditUsedUsd, null, null, null, null, null],
+          ["all_time", "openai_credit", null, null, null, null, null, null, spend.openaiCreditUsedUsd, null, null, null, null, null],
         ],
       );
       break;
@@ -1192,6 +2276,79 @@ export function dashboardCsv(table: CsvTable, data: DashboardData, spend: SpendV
     headers: {
       "content-type": "text/csv; charset=utf-8",
       "content-disposition": `attachment; filename="free-${table}-${day(data.now)}.csv"`,
+      ...dashboardHeaders(),
+    },
+  });
+}
+
+/** One Health table as CSV (see healthPage); the file name carries the window. */
+export function healthCsv(table: HealthCsvTable, h: HealthData): Response {
+  let body: string;
+  switch (table) {
+    case "health-errors":
+      body = csv(
+        ["error_code", "count", "people", "autopilot_version", "version_count"],
+        h.errors.codes.flatMap((row) =>
+          row.versions.length === 0 ? [[row.code, row.count, row.people, null, null]] : row.versions.map((version) => [row.code, row.count, row.people, version.version, version.count]),
+        ),
+      );
+      break;
+    case "health-request-failures":
+      body = csv(["status", "model", "failed", "share_of_model_requests"], h.requests.failures.map((row) => [row.status, row.model, row.count, row.share]));
+      break;
+    case "health-ends":
+      body = csv(
+        ["autopilot_version", "os", "end", "sessions", "share", "normal"],
+        [...h.ends.overall.map((row) => ["all", "all", row.end, row.count, row.share, row.normal]), ...h.ends.detail.map((row) => [row.version, row.os, row.end, row.count, row.share, row.normal])],
+      );
+      break;
+    case "health-turns":
+      body = csv(["turn_end", "turns", "share", "normal"], h.ends.turns.map((row) => [row.end, row.count, row.share, row.normal]));
+      break;
+    case "health-versions":
+      body = csv(
+        ["kind", "value", "sessions", "share", "people", "newest"],
+        [...h.versions.versions.map((row) => ["autopilot_version", row.version, row.count, row.share, row.people, row.version === h.versions.latest]), ...h.versions.os.map((row) => ["os", row.os, row.count, row.share, row.people, null])],
+      );
+      break;
+    case "health-sessions": {
+      const s = h.sessions;
+      body = csv(
+        ["sessions", "people", "ended", "turns_median", "turns_p90", "duration_median_ms", "duration_p90_ms", "zero_turn_sessions", "prs_opened", "prs_per_100_sessions"],
+        [[s.sessions, s.people, s.ended, s.turnsMedian, s.turnsP90, s.durationMedianMs, s.durationP90Ms, s.zeroTurns, s.prs, s.prsPer100]],
+      );
+      break;
+    }
+    case "health-tools":
+      body = csv(["tool", "calls", "sessions_using", "share_of_sessions"], h.tools.tools.map((row) => [row.tool, row.calls, row.sessions, row.share]));
+      break;
+    case "health-models":
+      body = csv(
+        ["kind", "model", "count", "share", "failed"],
+        [...h.models.sessions.map((row) => ["sessions", row.model, row.count, row.share, null]), ...h.models.requests.map((row) => ["requests", row.model, row.requests, row.share, row.failed])],
+      );
+      break;
+    case "health-upstreams":
+      body = csv(["upstream", "requests", "errors", "ttft_median_ms", "ttft_p90_ms", "ttfb_median_ms"], h.models.upstreams.map((row) => [row.upstream, row.requests, row.errors, row.medianTtftMs, row.p90TtftMs, row.medianTtfbMs]));
+      break;
+    case "health-installs":
+      body = csv(
+        ["kind", "os", "arch", "mode", "step", "ok", "failed", "fail_share", "top_failed_step"],
+        [
+          ...h.installs.platforms.map((row) => ["system", row.os, row.arch, row.mode, null, row.ok, row.failed, row.failShare, row.topStep]),
+          ...h.installs.failedSteps.map((row) => ["failed_step", null, null, null, row.step || "unknown", null, row.failed, null, null]),
+        ],
+      );
+      break;
+    case "health-gpus":
+      body = csv(["event", "vendor", "answer", "option", "path", "outcome", "error_type", "count"], h.gpus.rows.map((row) => [row.event, row.vendor, row.answer, row.option, row.path, row.outcome, row.errorType, row.count]));
+      break;
+  }
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename="free-${table}-${h.days}d-${day(h.now)}.csv"`,
       ...dashboardHeaders(),
     },
   });

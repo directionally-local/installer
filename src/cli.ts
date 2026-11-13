@@ -81,6 +81,7 @@ On your laptop:
   dl model update [MODEL] smoke-test a replacement before switching (--dry-run: plan only)
   dl model rollback       restore the previous deployment and provider
   dl model status         running model, GPU memory, and last smoke tests
+  dl model bench          TTFT p50/p95 and decode tok/s at concurrency 1/8/32, plus prefix cache
   dl update               update dl (when npm has a newer one) and the Autopilot it pins, then
                           the default place (--check: only say whether there's a newer dl)
   dl update NAME          update a place's Autopilot, Hotcell and sandbox image to the versions dl pins
@@ -503,7 +504,7 @@ export async function main(
         return await use(parsed.positionals.slice(1), laptopIO);
       case "model": {
         const [action, ...args] = parsed.positionals.slice(1);
-        if (action === "up" || action === "update" || action === "rollback" || action === "status") {
+        if (action === "up" || action === "update" || action === "rollback" || action === "status" || action === "bench") {
           if (values.server) { io.err("dl model deployment commands run on this machine; omit --server.\n"); return 2; }
           return await gpuModelCommand(action, args, { system, ui: terminal && !values["dry-run"] ? new TerminalUi(io.out, undefined, colorOn) : new PlainUi(io.out), prompter: options.prompter ?? new TtyPrompter(), interactive: terminal });
         }

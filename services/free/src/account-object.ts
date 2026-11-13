@@ -1,10 +1,10 @@
 import { DurableObject, type DurableObjectNamespace, type DurableObjectState } from "cloudflare:workers";
 import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.js";
 import type { DirectoryObject } from "./directory-object.js";
-import { DEFAULT_MODEL, POOLS, POOL_TOKENS, creditPrices, modelById, type Pool } from "./models.js";
+import { DEFAULT_MODEL, FAMILIES, POOLS, POOL_TOKENS, creditPrices, familyOfPool, modelById, type Family, type Pool } from "./models.js";
 import type { Upstream } from "./config.js";
 import type { Level } from "./admission.js";
-import { costAtPrices, costOf, planReservation } from "./quota.js";
+import { FALLBACK_USD_PER_MILLION_TOKENS, costAtPrices, costOf, estimateCostUsd, planReservation } from "./quota.js";
 import { weekEnd, weekStart } from "./week.js";
 
 /**
@@ -54,49 +54,90 @@ export interface AccountEnv {
 export type AccountStatus = "active" | "suspended" | "blocked";
 
 export type Plan = "free" | "pro";
-/** Where a request's tokens come from: the weekly allowance (free or Pro), or top-ups. */
-export type Source = "weekly" | "topup";
+/**
+ * Where a request is paid from: the weekly allowance (free or Pro), the old token top-ups
+ * ("topup"), or dollar top-ups ("credit": usage dollars, charged at the dollar caps' cost).
+ */
+export type Source = "weekly" | "topup" | "credit";
 
-/** One weekly token allowance: what a model's tokens come from. */
+/** One weekly token allowance: what a model's tokens come from. Null tokens: no token cap (DeepSeek). */
 export interface PoolAllowance {
-  tokensPerWeek: number;
+  tokensPerWeek: number | null;
   usedThisWeek: number;
   reserved: number;
-  remaining: number;
+  remaining: number | null;
+}
+
+/** One weekly dollar budget: every GPT-6 model shares one, DeepSeek has its own. */
+export interface FamilyBudget {
+  /** USD a week, or null for no cap. */
+  usdPerWeek: number | null;
+  /** Settled this week (in-flight estimates not included). */
+  spentUsd: number;
+  /**
+   * Every token processed this week on this budget's models, counted the normal way: prompt
+   * tokens (cached included) plus completion tokens, whatever paid for them. Not the weighted
+   * count the token allowances are charged.
+   */
+  tokensThisWeek: number;
 }
 
 export interface Allowance {
   exists: boolean;
   plan: Plan;
-  /** Unexpired top-up tokens not yet used or held. */
+  /** Unexpired top-up tokens (the old token top-ups) not yet used or held. */
   topupTokensLeft: number;
+  /** Unexpired top-up usage dollars not yet spent or held by requests in flight. */
+  topupUsdLeft: number;
+  /** When the soonest-expiring dollar top-up with usage left expires (Unix ms), or null. */
+  topupUsdExpiresAt: number | null;
   /** Pro's paid period end (Unix ms), or null. */
   proPeriodEnd: number | null;
   proCancelAtPeriodEnd: boolean;
   status: AccountStatus | null;
   isAdmin: boolean;
-  tokensPerWeek: number;
+  /** The asked pool's tokens; null tokensPerWeek and remaining: no token cap (its budget is the limit). */
+  tokensPerWeek: number | null;
   usedThisWeek: number;
   reserved: number;
-  remaining: number;
-  /** The weekly spend cap in USD, or null for none. */
+  /** 0 once the pool's tokens or its family's dollar budget are used up. */
+  remaining: number | null;
+  /** The asked pool's family: the budget `usdPerWeek` and `spentUsdThisWeek` describe. */
+  family: Family;
+  /** That family's weekly dollar budget in USD, or null for none. */
   usdPerWeek: number | null;
   spentUsdThisWeek: number;
   /** Unix ms. */
   resetsAt: number;
   /** Every pool's allowance, so a client can show what each model has left. */
   pools: Record<Pool, PoolAllowance>;
+  /** Both weekly dollar budgets. */
+  budgets: Record<Family, FamilyBudget>;
 }
 
 export type ReserveResult =
   | { ok: true; reservationId: string; amount: number; maxTokens: number; source: Source; paid: boolean; allowance: Allowance }
   | { ok: false; code: "not_invited" | "suspended" | "blocked"; allowance: Allowance }
-  | { ok: false; code: "quota_exceeded"; reason: "tokens" | "spend"; allowance: Allowance };
+  | {
+      ok: false;
+      code: "quota_exceeded";
+      reason: "tokens" | "spend";
+      allowance: Allowance;
+      /** The refused request's family, and whether DeepSeek still has weekly room for this person (it never does for a DeepSeek request). */
+      family: Family;
+      deepseekLeft: boolean;
+    };
 
 /** Caps a call applies; per-person overrides set by an admin win over these. */
 export interface Limits {
   weeklyTokens: number;
+  /** The GPT-6 weekly dollar budget (every GPT-6 model); undefined for none. A personal cap replaces it. */
   weeklyUsd: number | undefined;
+  /**
+   * The DeepSeek weekly dollar budget; null for none, left out: the same as `weeklyUsd`. With a
+   * personal cap it is the larger of the two.
+   */
+  deepseekWeeklyUsd?: number | null;
   /**
    * This week's referral bonus, added on top of the weekly tokens (default or grant). The USD
    * allowance grows in the same proportion, so the bonus isn't cut short by the dollar cap.
@@ -105,18 +146,22 @@ export interface Limits {
   /** Pro's weekly tokens and dollar ceiling (none when undefined). */
   proTokensPerWeek?: number;
   proUsdPerWeek?: number | undefined;
+  /** Pro's DeepSeek budget; null for none, left out: the same as `proUsdPerWeek`. */
+  proDeepseekUsdPerWeek?: number | null;
   /**
    * Free tokens are unavailable to a free-plan person for now (queued, or a global cap reached):
    * their requests can use top-ups only. Pro is unaffected.
    */
   freeBlocked?: boolean;
   /**
-   * "starter" caps the Luna pool at `starterTokens` and zeroes Sol and Astra, so a Starter
-   * account gets DeepSeek only. Pro is unaffected.
+   * "basic" and "starter" put every GPT-6 pool at `levelTokens` (Sol and Astra at most their own
+   * fixed grants): every model, a smaller allowance. DeepSeek has no token cap, except 0 when
+   * `levelTokens` is 0. The dollar cap for the level comes in
+   * `weeklyUsd`. Pro is unaffected.
    */
   level?: Level;
-  /** A Starter account's weekly tokens (STARTER_WEEKLY_TOKENS). */
-  starterTokens?: number;
+  /** A basic or Starter account's weekly tokens (BASIC_WEEKLY_TOKENS or STARTER_WEEKLY_TOKENS; 0 for a batch-flagged Starter). */
+  levelTokens?: number;
 }
 
 export interface BillingState {
@@ -136,7 +181,10 @@ interface AccountRow {
   weekly_usd: number | null;
   week_start: number;
   used: number;
+  /** This week's settled cost, both families. */
   cost_used: number;
+  /** ... of which DeepSeek's. GPT-6's is the rest. */
+  cost_used_deepseek: number;
 }
 
 const SCHEMA = [
@@ -192,6 +240,13 @@ const SCHEMA = [
      used       INTEGER NOT NULL,
      PRIMARY KEY (week_start, pool)
    ) WITHOUT ROWID`,
+  // Per budget per week: every token processed (prompt with cached, plus completion), for display.
+  `CREATE TABLE IF NOT EXISTS family_tokens (
+     week_start INTEGER NOT NULL,
+     family     TEXT NOT NULL,
+     tokens     INTEGER NOT NULL,
+     PRIMARY KEY (week_start, family)
+   ) WITHOUT ROWID`,
   // Top-ups: tokens bought once, used after the weekly allowance runs out, until they expire.
   `CREATE TABLE IF NOT EXISTS topups (
      id         TEXT PRIMARY KEY,
@@ -218,6 +273,17 @@ export class AccountObject extends DurableObject<AccountEnv> {
       if (!columns.includes("provider")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN provider TEXT");
       if (!columns.includes("model")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN model TEXT");
       if (!columns.includes("prompt_estimate")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN prompt_estimate INTEGER");
+      // The reservation's estimated cost in USD, held against the dollar cap while it is in
+      // flight. Null on reservations made before (they count as nothing).
+      if (!columns.includes("cost_estimate")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN cost_estimate REAL");
+      // Dollar top-ups: `usd` is the usage dollars bought (null on a token top-up), `used_usd` what is spent.
+      const topupColumns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('topups')").toArray().map((column) => column.name);
+      if (!topupColumns.includes("usd")) this.ctx.storage.sql.exec("ALTER TABLE topups ADD COLUMN usd REAL");
+      if (!topupColumns.includes("used_usd")) this.ctx.storage.sql.exec("ALTER TABLE topups ADD COLUMN used_usd REAL NOT NULL DEFAULT 0");
+      // Two weekly dollar budgets: DeepSeek's spend is kept apart; cost_used stays the total.
+      // Spend from before this column counts as GPT-6's for the rest of that week.
+      const accountColumns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('account')").toArray().map((column) => column.name);
+      if (!accountColumns.includes("cost_used_deepseek")) this.ctx.storage.sql.exec("ALTER TABLE account ADD COLUMN cost_used_deepseek REAL NOT NULL DEFAULT 0");
     });
   }
 
@@ -242,8 +308,13 @@ export class AccountObject extends DurableObject<AccountEnv> {
 
   /**
    * Holds tokens for one request. The token cap is exact (the reservation covers the worst
-   * case). The spend cap is checked against settled cost, so it can be passed by at most the
-   * cost of the requests in flight when it's reached.
+   * case). The dollar cap is the request's family's budget (GPT-6 or DeepSeek): it counts what
+   * that family settled plus the estimated cost of every weekly reservation of that family still
+   * in flight (`estimateCostUsd`): a request whose estimate doesn't fit next to those is
+   * refused, so parallel requests can't run past the cap together. A request with
+   * nothing else in flight still goes through while any of the cap is left, so the week ends at
+   * the cap rather than an estimate short of it: the overshoot is at most that one request.
+   * Settling or sweeping a reservation deletes it, which releases its estimate.
    */
   async reserve(input: {
     pool?: Pool;
@@ -262,20 +333,46 @@ export class AccountObject extends DurableObject<AccountEnv> {
     if (row.status === "blocked") return { ok: false, code: "blocked", allowance: before };
     if (row.status === "suspended") return { ok: false, code: "suspended", allowance: before };
     // The weekly allowance first (free or Pro), then top-ups.
+    const family = familyOfPool(pool);
     const spendReached = before.usdPerWeek !== null && before.spentUsdThisWeek >= before.usdPerWeek;
-    const weeklyRoom = spendReached || (before.plan === "free" && input.limits.freeBlocked) ? 0 : before.remaining;
+    const weeklyRoom = spendReached || (before.plan === "free" && input.limits.freeBlocked) ? 0 : (before.remaining ?? Number.MAX_SAFE_INTEGER);
+    const model = modelById(input.model ?? DEFAULT_MODEL);
+    const estimate = (maxTokens: number) =>
+      model ? estimateCostUsd(input.promptEstimate, maxTokens, model.prices) : ((Math.max(0, input.promptEstimate) + maxTokens) * FALLBACK_USD_PER_MILLION_TOKENS) / 1_000_000;
     let source: Source = "weekly";
     let plan = planReservation(input.promptEstimate, input.requestedMaxTokens, weeklyRoom);
+    let spendFull = false;
+    if (plan && before.usdPerWeek !== null) {
+      const inFlight = this.#inFlight("weekly", family);
+      spendFull = inFlight.count > 0 && before.spentUsdThisWeek + inFlight.usd + estimate(plan.maxTokens) > before.usdPerWeek;
+      if (spendFull) plan = undefined;
+    }
     if (!plan) {
       source = "topup";
       plan = planReservation(input.promptEstimate, input.requestedMaxTokens, before.topupTokensLeft);
     }
-    if (!plan) return { ok: false, code: "quota_exceeded", reason: spendReached ? "spend" : "tokens", allowance: before };
-    const paid = source === "topup" || before.plan === "pro";
+    if (!plan) {
+      // Dollar top-ups last, held like the dollar caps: what is spent plus the estimates in flight.
+      // With nothing else in flight a request goes through while any of the balance is left.
+      const credit = this.#creditLeft(input.now);
+      const inFlight = this.#inFlight("credit");
+      const wanted = planReservation(input.promptEstimate, input.requestedMaxTokens, Number.MAX_SAFE_INTEGER);
+      if (wanted && credit > 0 && (inFlight.count === 0 || inFlight.usd + estimate(wanted.maxTokens) <= credit)) {
+        source = "credit";
+        plan = wanted;
+      }
+    }
+    if (!plan) {
+      // Whether DeepSeek's week still has room, so a GPT-6 refusal can point there instead of a dead end.
+      const deepseek = family === "gpt6" && !(before.plan === "free" && input.limits.freeBlocked) ? this.#allowance(row, input.now, input.limits, "deepseek") : undefined;
+      const deepseekLeft = deepseek !== undefined && (deepseek.remaining === null || deepseek.remaining > 0);
+      return { ok: false, code: "quota_exceeded", reason: spendReached || spendFull ? "spend" : "tokens", allowance: before, family, deepseekLeft };
+    }
+    const paid = source !== "weekly" || before.plan === "pro";
     const reservationId = crypto.randomUUID();
     const expiresAt = input.now + RESERVATION_TTL_MS;
     this.ctx.storage.sql.exec(
-      "INSERT INTO reservations (id, amount, created_at, expires_at, source, paid, pool, provider, model, prompt_estimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO reservations (id, amount, created_at, expires_at, source, paid, pool, provider, model, prompt_estimate, cost_estimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       reservationId,
       plan.amount,
       input.now,
@@ -286,6 +383,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
       input.provider ?? null,
       input.model ?? null,
       Math.max(0, Math.round(input.promptEstimate)),
+      estimate(plan.maxTokens),
     );
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm === null || alarm > expiresAt) await this.ctx.storage.setAlarm(expiresAt);
@@ -297,7 +395,15 @@ export class AccountObject extends DurableObject<AccountEnv> {
    * reported nothing, so the whole reservation is charged. A reservation the alarm already
    * settled is not charged twice.
    */
-  async settle(input: { reservationId: string; charged: number | undefined; costUsd: number | undefined; limits: Limits; now: number }): Promise<{ charged: number; costUsd: number; paid: boolean; allowance: Allowance }> {
+  async settle(input: {
+    reservationId: string;
+    charged: number | undefined;
+    costUsd: number | undefined;
+    /** Tokens processed (prompt with cached, plus completion); undefined: `charged`. */
+    rawTokens?: number;
+    limits: Limits;
+    now: number;
+  }): Promise<{ charged: number; costUsd: number; paid: boolean; allowance: Allowance }> {
     const reservation = this.ctx.storage.sql
       .exec<{ amount: number; source: Source; paid: number; pool: Pool }>("SELECT amount, source, paid, pool FROM reservations WHERE id = ?", input.reservationId)
       .toArray()[0];
@@ -305,7 +411,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
     if (!reservation || !row) return { charged: 0, costUsd: 0, paid: false, allowance: this.#allowance(row, input.now, input.limits) };
     const charged = input.charged ?? reservation.amount;
     const costUsd = input.costUsd ?? costOf(undefined, charged);
-    this.ctx.storage.transactionSync(() => this.#charge(row.github_id, input.reservationId, reservation.source, reservation.pool, charged, costUsd, input.now));
+    this.ctx.storage.transactionSync(() => {
+      this.#charge(row.github_id, input.reservationId, reservation.source, reservation.pool, charged, costUsd, input.now);
+      this.#addTokens(reservation.pool, input.rawTokens ?? charged, input.now);
+    });
     return { charged, costUsd, paid: reservation.paid === 1, allowance: this.#allowance(this.#current(input.now), input.now, input.limits, reservation.pool) };
   }
 
@@ -314,13 +423,23 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const sql = this.ctx.storage.sql;
     sql.exec("DELETE FROM reservations WHERE id = ?", reservationId);
     if (source === "weekly") {
-      sql.exec("UPDATE account SET used = used + ?, cost_used = cost_used + ? WHERE github_id = ?", charged, costUsd, githubId);
-      sql.exec(
-        "INSERT INTO pool_usage (week_start, pool, used) VALUES (?, ?, ?) ON CONFLICT(week_start, pool) DO UPDATE SET used = used + excluded.used",
-        weekStart(now),
-        pool,
-        charged,
-      );
+      this.#addWeekly(githubId, pool, charged, costUsd, now);
+      return;
+    }
+    if (source === "credit") {
+      // Usage dollars from dollar top-ups, earliest expiry first; any cost past the last one goes
+      // on the week (tokens in proportion), like an overshoot past token top-ups.
+      let leftUsd = costUsd;
+      for (const topup of sql.exec<{ id: string; usd: number; used_usd: number }>("SELECT id, usd, used_usd FROM topups WHERE usd IS NOT NULL AND expires_at > ? AND used_usd < usd ORDER BY expires_at, id", now).toArray()) {
+        if (leftUsd <= 0) break;
+        const take = Math.min(leftUsd, topup.usd - topup.used_usd);
+        sql.exec("UPDATE topups SET used_usd = used_usd + ? WHERE id = ?", take, topup.id);
+        leftUsd -= take;
+      }
+      if (leftUsd > 1e-12) {
+        const tokens = costUsd > 0 ? Math.round((charged * leftUsd) / costUsd) : 0;
+        this.#addWeekly(githubId, pool, tokens, leftUsd, now);
+      }
       return;
     }
     let left = charged;
@@ -330,8 +449,53 @@ export class AccountObject extends DurableObject<AccountEnv> {
       sql.exec("UPDATE topups SET used = used + ? WHERE id = ?", take, topup.id);
       left -= take;
     }
-    // Usage past the last top-up (an overshoot the reservation didn't foresee) goes on the week.
-    if (left > 0) sql.exec("UPDATE account SET used = used + ? WHERE github_id = ?", left, githubId);
+    // Usage past the last top-up (an overshoot the reservation didn't foresee) goes on the week,
+    // tokens and its share of the cost, so top-ups never buy more than their tokens: the excess
+    // counts against the weekly token and dollar caps like any other weekly use.
+    if (left > 0) {
+      const overshootUsd = charged > 0 ? (costUsd * left) / charged : 0;
+      this.#addWeekly(githubId, pool, left, overshootUsd, now);
+    }
+  }
+
+  /** Adds tokens processed to this week's count for the pool's budget. */
+  #addTokens(pool: Pool, tokens: number, now: number): void {
+    if (tokens <= 0) return;
+    this.ctx.storage.sql.exec(
+      "INSERT INTO family_tokens (week_start, family, tokens) VALUES (?, ?, ?) ON CONFLICT(week_start, family) DO UPDATE SET tokens = tokens + excluded.tokens",
+      weekStart(now),
+      familyOfPool(pool),
+      Math.round(tokens),
+    );
+  }
+
+  /**
+   * Admin: starts this week over for this person: tokens and dollars of both budgets back to 0
+   * (requests in flight still settle). Top-ups, plan and personal caps are kept. False with no account.
+   */
+  async resetWeek(now: number): Promise<boolean> {
+    const row = this.#current(now);
+    if (!row) return false;
+    const start = weekStart(now);
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("UPDATE account SET used = 0, cost_used = 0, cost_used_deepseek = 0 WHERE github_id = ?", row.github_id);
+      this.ctx.storage.sql.exec("DELETE FROM pool_usage WHERE week_start = ?", start);
+      this.ctx.storage.sql.exec("DELETE FROM family_tokens WHERE week_start = ?", start);
+    });
+    return true;
+  }
+
+  /** Adds tokens and dollars to this week's counters: the total, the pool's tokens and, for DeepSeek, its own dollars. */
+  #addWeekly(githubId: number, pool: Pool, tokens: number, usd: number, now: number): void {
+    const sql = this.ctx.storage.sql;
+    const deepseekUsd = familyOfPool(pool) === "deepseek" ? usd : 0;
+    sql.exec("UPDATE account SET used = used + ?, cost_used = cost_used + ?, cost_used_deepseek = cost_used_deepseek + ? WHERE github_id = ?", tokens, usd, deepseekUsd, githubId);
+    sql.exec(
+      "INSERT INTO pool_usage (week_start, pool, used) VALUES (?, ?, ?) ON CONFLICT(week_start, pool) DO UPDATE SET used = used + excluded.used",
+      weekStart(now),
+      pool,
+      tokens,
+    );
   }
 
   // ─── Billing ──────────────────────────────────────────────────────────────
@@ -356,6 +520,11 @@ export class AccountObject extends DurableObject<AccountEnv> {
   #plan(now: number): Plan {
     const billing = this.#billing();
     return billing.proState === "active" && (billing.periodEnd === null || now < billing.periodEnd + PRO_GRACE_MS) ? "pro" : "free";
+  }
+
+  /** "pro" or "free" now (see #plan). */
+  async plan(now: number): Promise<Plan> {
+    return this.#plan(now);
   }
 
   async billing(): Promise<BillingState> {
@@ -399,7 +568,22 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return true;
   }
 
-  /** Adds a top-up once per id (the Checkout Session). False when it was already added. */
+  /** Adds a dollar top-up (usage dollars) once per id (the Checkout Session). False when it was already added. */
+  async grantCredit(input: { id: string; usd: number; createdAt: number; expiresAt: number }): Promise<boolean> {
+    return (
+      this.ctx.storage.sql
+        .exec(
+          "INSERT INTO topups (id, tokens, used, created_at, expires_at, usd, used_usd) VALUES (?, 0, 0, ?, ?, ?, 0) ON CONFLICT(id) DO NOTHING RETURNING id",
+          input.id,
+          input.createdAt,
+          input.expiresAt,
+          input.usd,
+        )
+        .toArray().length > 0
+    );
+  }
+
+  /** Adds a token top-up (the old product) once per id (the Checkout Session). False when it was already added. */
   async grantTopup(input: { id: string; tokens: number; createdAt: number; expiresAt: number }): Promise<boolean> {
     return (
       this.ctx.storage.sql
@@ -423,7 +607,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
     tokensPerWeek: number | null | undefined;
     usdPerWeek: number | null | undefined;
     usedThisWeek: number | undefined;
+    /** GPT-6's spend this week (the budget the older fields describe). */
     spentUsdThisWeek: number | undefined;
+    /** DeepSeek's spend this week. */
+    deepseekSpentUsdThisWeek?: number | undefined;
     limits: Limits;
     now: number;
   }): Promise<Allowance | undefined> {
@@ -441,8 +628,24 @@ export class AccountObject extends DurableObject<AccountEnv> {
         input.usedThisWeek,
       );
     }
-    if (input.spentUsdThisWeek !== undefined) sql.exec("UPDATE account SET cost_used = ? WHERE github_id = ?", input.spentUsdThisWeek, row.github_id);
+    // cost_used is the total: setting one family's spend keeps the other's.
+    if (input.deepseekSpentUsdThisWeek !== undefined) {
+      sql.exec("UPDATE account SET cost_used = MAX(0, cost_used - cost_used_deepseek) + ?, cost_used_deepseek = ? WHERE github_id = ?", input.deepseekSpentUsdThisWeek, input.deepseekSpentUsdThisWeek, row.github_id);
+    }
+    if (input.spentUsdThisWeek !== undefined) sql.exec("UPDATE account SET cost_used = cost_used_deepseek + ? WHERE github_id = ?", input.spentUsdThisWeek, row.github_id);
     return this.#allowance(this.#current(input.now), input.now, input.limits);
+  }
+
+  /**
+   * Admin grant: raises the personal weekly dollar cap to `usd`, never lowering a higher one
+   * already set. Returns the personal cap now in place, or undefined for no account.
+   */
+  async raiseUsdCap(usd: number): Promise<number | undefined> {
+    const row = this.#row();
+    if (!row) return undefined;
+    if (row.weekly_usd !== null && row.weekly_usd >= usd) return row.weekly_usd;
+    this.ctx.storage.sql.exec("UPDATE account SET weekly_usd = ? WHERE github_id = ?", usd, row.github_id);
+    return usd;
   }
 
   // ─── Sessions and server keys ─────────────────────────────────────────────
@@ -493,6 +696,11 @@ export class AccountObject extends DurableObject<AccountEnv> {
       .exec<{ id: string; name: string; created_at: number; last_used_at: number | null }>("SELECT id, name, created_at, last_used_at FROM server_keys ORDER BY created_at, id")
       .toArray()
       .map((key) => ({ id: key.id, name: key.name, createdAt: key.created_at, lastUsedAt: key.last_used_at }));
+  }
+
+  /** The allowance and the server key count in one call, for the admin people list (one RPC per person, not two). */
+  async adminSummary(now: number, limits: Limits): Promise<{ allowance: Allowance; serverKeys: number }> {
+    return { allowance: this.#allowance(this.#current(now), now, limits), serverKeys: await this.keyCount() };
   }
 
   async keyCount(): Promise<number> {
@@ -551,7 +759,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
       const provider: Upstream = reservation.provider ?? (model?.provider === "openai" ? "openai" : "luminal");
       const creditUsd = provider !== "openrouter" && model ? costAtPrices(usage, creditPrices(model)) : 0;
       this.ctx.storage.transactionSync(() => {
-        if (row) this.#charge(row.github_id, reservation.id, reservation.source, reservation.pool, charged, costUsd, now);
+        if (row) {
+          this.#charge(row.github_id, reservation.id, reservation.source, reservation.pool, charged, costUsd, now);
+          this.#addTokens(reservation.pool, charged, now);
+        }
         else this.ctx.storage.sql.exec("DELETE FROM reservations WHERE id = ?", reservation.id);
       });
       if (row && this.env.DIRECTORY) {
@@ -570,6 +781,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
           upstream: provider,
           creditUsd,
           ...(reservation.paid === 1 ? { paid: true } : {}),
+          family: familyOfPool(reservation.pool),
         });
       }
     }
@@ -577,6 +789,29 @@ export class AccountObject extends DurableObject<AccountEnv> {
     if (next === null || next === undefined) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(next);
     return stale.length;
+  }
+
+  /**
+   * Reservations in flight from one source and their estimated cost: weekly ones count toward
+   * their family's weekly dollar budget (`family`), "credit" ones toward the dollar top-up balance.
+   */
+  #inFlight(source: Source, family?: Family): { count: number; usd: number } {
+    const sql = this.ctx.storage.sql;
+    const row = (
+      family === undefined
+        ? sql.exec<{ n: number; usd: number | null }>("SELECT COUNT(*) AS n, SUM(cost_estimate) AS usd FROM reservations WHERE source = ?", source)
+        : sql.exec<{ n: number; usd: number | null }>(
+            "SELECT COUNT(*) AS n, SUM(cost_estimate) AS usd FROM reservations WHERE source = ? AND (pool = 'deepseek') = ?",
+            source,
+            family === "deepseek" ? 1 : 0,
+          )
+    ).toArray()[0];
+    return { count: row?.n ?? 0, usd: row?.usd ?? 0 };
+  }
+
+  /** Unexpired dollar top-up usage not yet spent (in-flight estimates not taken off). */
+  #creditLeft(now: number): number {
+    return this.ctx.storage.sql.exec<{ left: number | null }>("SELECT SUM(usd - used_usd) AS left FROM topups WHERE usd IS NOT NULL AND expires_at > ?", now).toArray()[0]?.left ?? 0;
   }
 
   #row(): AccountRow | undefined {
@@ -589,9 +824,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
     if (!row) return undefined;
     const start = weekStart(now);
     if (row.week_start < start) {
-      this.ctx.storage.sql.exec("UPDATE account SET week_start = ?, used = 0, cost_used = 0 WHERE github_id = ?", start, row.github_id);
+      this.ctx.storage.sql.exec("UPDATE account SET week_start = ?, used = 0, cost_used = 0, cost_used_deepseek = 0 WHERE github_id = ?", start, row.github_id);
       this.ctx.storage.sql.exec("DELETE FROM pool_usage WHERE week_start < ?", start);
-      return { ...row, week_start: start, used: 0, cost_used: 0 };
+      this.ctx.storage.sql.exec("DELETE FROM family_tokens WHERE week_start < ?", start);
+      return { ...row, week_start: start, used: 0, cost_used: 0, cost_used_deepseek: 0 };
     }
     return row;
   }
@@ -603,20 +839,24 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const billing = this.#billing();
     const topups = sql.exec<{ left: number | null }>("SELECT SUM(tokens - used) AS left FROM topups WHERE expires_at > ?", now).toArray()[0]?.left ?? 0;
     const topupTokensLeft = Math.max(0, topups - reservedBy("topup"));
+    const topupUsdLeft = Math.max(0, Math.round((this.#creditLeft(now) - this.#inFlight("credit").usd) * 1e6) / 1e6);
+    const topupUsdExpiresAt =
+      sql.exec<{ at: number | null }>("SELECT MIN(expires_at) AS at FROM topups WHERE usd IS NOT NULL AND expires_at > ? AND used_usd < usd", now).toArray()[0]?.at ?? null;
     const pro = plan === "pro";
     // Pro replaces the free allowance (no referral bonus: that is free tokens); grants apply to free.
     const bonus = pro ? 0 : Math.max(0, limits.bonusTokens ?? 0);
     const pools = this.#pools(row, now, limits, plan, bonus);
     const mine = pools[pool];
-    const baseUsd = pro ? (limits.proUsdPerWeek ?? null) : (row?.weekly_usd ?? limits.weeklyUsd ?? null);
-    // The referral bonus grows the dollar allowance in the same proportion as the Luna pool.
-    const usdPerWeek = baseUsd !== null && bonus > 0 && mine.tokensPerWeek > bonus ? Math.round(baseUsd * (mine.tokensPerWeek / (mine.tokensPerWeek - bonus)) * 1e6) / 1e6 : baseUsd;
-    const spent = row?.cost_used ?? 0;
+    const family = familyOfPool(pool);
+    const budgets = this.#budgets(row, now, limits, pro, bonus, pools.luna.tokensPerWeek);
+    const { usdPerWeek, spentUsd: spent } = budgets[family];
     const spendLeft = usdPerWeek === null || spent < usdPerWeek;
     return {
       exists: row !== undefined,
       plan,
       topupTokensLeft,
+      topupUsdLeft,
+      topupUsdExpiresAt,
       proPeriodEnd: billing.periodEnd,
       proCancelAtPeriodEnd: billing.cancelAtPeriodEnd,
       status: row?.status ?? null,
@@ -625,17 +865,56 @@ export class AccountObject extends DurableObject<AccountEnv> {
       usedThisWeek: mine.usedThisWeek,
       reserved: mine.reserved,
       remaining: row && spendLeft ? mine.remaining : 0,
+      family,
       usdPerWeek,
-      spentUsdThisWeek: Math.round(spent * 1e6) / 1e6,
+      spentUsdThisWeek: spent,
       resetsAt: weekEnd(now),
       pools,
+      budgets,
     };
+  }
+
+  /**
+   * Both weekly dollar budgets. GPT-6's is the level's cap (or Pro's), replaced by a personal cap
+   * when an admin set one, and grown by the referral bonus in the same proportion as the Luna
+   * pool. DeepSeek's is its own level's (or Pro's) budget; a personal cap gives it the larger of
+   * the personal cap and that budget, so a grant never leaves DeepSeek below the level.
+   */
+  #budgets(row: AccountRow | undefined, now: number, limits: Limits, pro: boolean, bonus: number, lunaTokens: number | null): Record<Family, FamilyBudget> {
+    const personal = pro ? null : (row?.weekly_usd ?? null);
+    const gptBase = pro ? (limits.proUsdPerWeek ?? null) : (personal ?? limits.weeklyUsd ?? null);
+    const gpt6 = gptBase !== null && bonus > 0 && lunaTokens !== null && lunaTokens > bonus ? Math.round(gptBase * (lunaTokens / (lunaTokens - bonus)) * 1e6) / 1e6 : gptBase;
+    const levelDeepseek = pro
+      ? limits.proDeepseekUsdPerWeek === undefined
+        ? (limits.proUsdPerWeek ?? null)
+        : limits.proDeepseekUsdPerWeek
+      : limits.deepseekWeeklyUsd === undefined
+        ? (limits.weeklyUsd ?? null)
+        : limits.deepseekWeeklyUsd;
+    const deepseek = levelDeepseek === null ? null : personal === null ? levelDeepseek : Math.max(personal, levelDeepseek);
+    const total = row?.cost_used ?? 0;
+    const deepseekSpent = row?.cost_used_deepseek ?? 0;
+    const round = (usd: number) => Math.round(usd * 1e6) / 1e6;
+    const tokens = new Map(
+      this.ctx.storage.sql.exec<{ family: string; tokens: number }>("SELECT family, tokens FROM family_tokens WHERE week_start = ?", weekStart(now)).toArray().map((r) => [r.family, r.tokens]),
+    );
+    const out = {} as Record<Family, FamilyBudget>;
+    for (const family of FAMILIES) {
+      const tokensThisWeek = row ? (tokens.get(family) ?? 0) : 0;
+      out[family] =
+        family === "gpt6"
+          ? { usdPerWeek: gpt6, spentUsd: round(Math.max(0, total - deepseekSpent)), tokensThisWeek }
+          : { usdPerWeek: deepseek, spentUsd: round(deepseekSpent), tokensThisWeek };
+    }
+    return out;
   }
 
   /**
    * Every pool's allowance this week. The Luna pool is the one the weekly grant and the
    * referral bonus apply to (it is the free tier's default model); Sol and Astra keep their
-   * own fixed grants. Pro's weekly tokens replace the Luna grant, as before.
+   * own fixed grants. Pro's weekly tokens replace the Luna grant, as before. DeepSeek has no
+   * token cap (null): its dollar budget is its limit, so tokens never stop it first. A level
+   * with 0 tokens (a batch-flagged Starter account) gets 0 DeepSeek tokens too.
    */
   #pools(row: AccountRow | undefined, now: number, limits: Limits, plan: Plan, bonus: number): Record<Pool, PoolAllowance> {
     const sql = this.ctx.storage.sql;
@@ -644,20 +923,29 @@ export class AccountObject extends DurableObject<AccountEnv> {
     for (const pool of POOLS) {
       const used = sql.exec<{ used: number }>("SELECT used FROM pool_usage WHERE week_start = ? AND pool = ?", start, pool).toArray()[0]?.used ?? 0;
       const reserved = sql.exec<{ total: number | null }>("SELECT SUM(amount) AS total FROM reservations WHERE pool = ? AND source = 'weekly'", pool).toArray()[0]?.total ?? 0;
-      // A Starter account gets DeepSeek only: the Luna pool at the Starter grant, nothing else.
-      // Pro replaces the level, as it replaces the free allowance.
-      const starter = limits.level === "starter" && plan !== "pro";
+      // A basic or Starter account gets every model on its level's smaller allowance: each pool
+      // at the level's tokens, Sol and Astra no more than their own grants. Pro replaces the
+      // level, as it replaces the free allowance.
+      const limited = (limits.level === "starter" || limits.level === "basic") && plan !== "pro";
+      const levelTokens = Math.max(0, limits.levelTokens ?? 0);
+      const fixed = POOL_TOKENS[pool];
+      if (fixed === null) {
+        const tokensPerWeek = limited && levelTokens === 0 ? 0 : null;
+        out[pool] = { tokensPerWeek, usedThisWeek: used, reserved, remaining: tokensPerWeek === null ? null : Math.max(0, tokensPerWeek - used - reserved) };
+        continue;
+      }
       const base =
         pool === "luna"
           ? plan === "pro"
             ? (limits.proTokensPerWeek ?? limits.weeklyTokens)
-            : starter
-              ? (limits.starterTokens ?? 5_000_000)
+            : limited
+              ? levelTokens
               : (row?.weekly_tokens ?? limits.weeklyTokens)
-          : starter
-            ? 0
-            : POOL_TOKENS[pool];
-      const tokensPerWeek = pool === "luna" && !starter ? base + bonus : base;
+          : limited
+            ? Math.min(fixed, levelTokens)
+            : fixed;
+      // The referral bonus is for Full only, as it was before the smaller levels had every model.
+      const tokensPerWeek = pool === "luna" && !limited ? base + bonus : base;
       out[pool] = { tokensPerWeek, usedThisWeek: used, reserved, remaining: Math.max(0, tokensPerWeek - used - reserved) };
     }
     return out;

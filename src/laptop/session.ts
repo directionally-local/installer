@@ -17,6 +17,8 @@ import { placeModel, saveModel } from "./settings.js";
 import { recordLastUsed, resolveTarget, type RemoteServer, type TargetReason } from "./config.js";
 import { detectGitHubRepository, snapshotWorkingTree, type WorkingTreeSnapshot } from "./git.js";
 import { describeSecretLocation, findLikelyProviderSecret, type SecretMatch } from "./secrets.js";
+import { handoffFile, MAX_HANDOFFS, resultEnv, takeHandoff, type ModelUpRequest } from "./gpu-handoff.js";
+import type { ModelUpResult } from "../model-first-run.js";
 import { forgetSession, latestSession, rememberSession, sessionsFor, sessionsPath, type SessionKey } from "./session-store.js";
 import { openRemoteForSession, withConnections, type RemoteOpener } from "./tunnel.js";
 
@@ -83,6 +85,10 @@ export interface SessionInput {
   referral?: ReferralOptions;
   /** The Node.js version plain Autopilot will run on; this process's unless replaced (tests). */
   nodeVersion?: string;
+  /** Runs `dl model up` when Autopilot asks for it (gpu-handoff.ts); the real one unless replaced (tests). */
+  modelUp?: (request: ModelUpRequest & { avoid?: string }, io: LaptopIO) => Promise<ModelUpResult>;
+  /** Where the GPU handoff's private directory is made; the OS temp dir unless replaced (tests). */
+  handoffTmp?: string;
 }
 
 const realSpawn: SessionSpawner = (command, args, env, options = {}) => spawn(command, args, { stdio: "inherit", env, ...(options.cwd ? { cwd: options.cwd } : {}) });
@@ -186,31 +192,75 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
     signals.on(name, handler);
     return [name, handler] as const;
   });
+  // The GPU first run (gpu-handoff.ts): where Autopilot asks dl to run `dl model up`.
+  const handoff = await handoffFile(input.handoffTmp).catch(() => undefined);
   try {
-    const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | Error>((resolve) => {
-      // AUTOPILOT_LAUNCHED_BY tells Autopilot dl started it, so its own hints (the exit line's
-      // "continue with") name dl's commands and the product, not `autopilot resume ID`.
-      // DL_REFERRAL: the invite link's code, from the environment or kept from an earlier run
-      // until the free tier sign-in (Autopilot's) credits it. See referral.ts.
-      // DL_VERSION and DL_UPDATE_COMMAND: Autopilot names dl (not itself) in its header and gives
-      // dl's own update command, never npm i -g autopilot-ai, which dl wouldn't use. Set here so a
-      // DL_VERSION left over from the install script (its version pin) can't leak through.
-      const env = withReferral({ ...process.env, AUTOPILOT_LAUNCHED_BY: "dl", DL_VERSION: dlVersion(), DL_UPDATE_COMMAND: DL_UPDATE }, referral);
-      const started = (input.spawn ?? realSpawn)(autopilot.command, args, env, { cwd: input.cwd });
-      child = started;
-      started.on("exit", (code, signal) => resolve({ code, signal }));
-      started.on("error", (error) => resolve(error));
-    });
-    if (referral) await settleReferral({ env: process.env, ...input.referral });
-    if (outcome instanceof Error) {
-      io.err(`  ${c.red("✗")} Couldn't start Autopilot: ${outcome.message}. Update: ${c.bold(DL_UPDATE)}\n`);
-      return 1;
+    let gpuEnv: Record<string, string> = {};
+    let lastFailed: string | undefined;
+    for (let round = 0; ; round++) {
+      const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | Error>((resolve) => {
+        // AUTOPILOT_LAUNCHED_BY tells Autopilot dl started it, so its own hints (the exit line's
+        // "continue with") name dl's commands and the product, not `autopilot resume ID`.
+        // DL_REFERRAL: the invite link's code, from the environment or kept from an earlier run
+        // until the free tier sign-in (Autopilot's) credits it. See referral.ts.
+        // DL_VERSION and DL_UPDATE_COMMAND: Autopilot names dl (not itself) in its header and gives
+        // dl's own update command, never npm i -g autopilot-ai, which dl wouldn't use. Set here so a
+        // DL_VERSION left over from the install script (its version pin) can't leak through.
+        // DL_GPU_HANDOFF and, after a model setup, DL_GPU_RESULT/DL_GPU_ERROR/DL_GPU: gpu-handoff.ts.
+        const env = withReferral({
+          ...process.env,
+          AUTOPILOT_LAUNCHED_BY: "dl",
+          DL_VERSION: dlVersion(),
+          DL_UPDATE_COMMAND: DL_UPDATE,
+          // Not on the last relaunch allowed: Autopilot mustn't offer a retry dl wouldn't run.
+          ...(handoff && round < MAX_HANDOFFS ? { DL_GPU_HANDOFF: handoff.path } : {}),
+          ...gpuEnv,
+        }, referral);
+        const started = (input.spawn ?? realSpawn)(autopilot.command, args, env, { cwd: input.cwd });
+        child = started;
+        started.on("exit", (code, signal) => resolve({ code, signal }));
+        started.on("error", (error) => resolve(error));
+      });
+      if (outcome instanceof Error) {
+        io.err(`  ${c.red("✗")} Couldn't start Autopilot: ${outcome.message}. Update: ${c.bold(DL_UPDATE)}\n`);
+        return 1;
+      }
+      const request = handoff && round < MAX_HANDOFFS ? await takeHandoff(handoff.path) : undefined;
+      if (!request) {
+        if (outcome.code !== null) return outcome.code;
+        return outcome.signal === "SIGINT" ? 130 : outcome.signal === "SIGHUP" ? 129 : outcome.signal === "SIGTERM" ? 143 : 1;
+      }
+      // Autopilot asked for a private model on this GPU: dl model up, then Autopilot again,
+      // which opens on the new provider (or, when it failed, says so and asks again).
+      // The request may name a model to retry, or ask for the picker with the last failure marked.
+      child = undefined;
+      const result = await (input.modelUp ?? realModelUp)({ ...request, ...(lastFailed && !request.model ? { avoid: lastFailed } : {}) }, io);
+      if (!result.ok && result.errorType !== "cancelled") {
+        // One short line and where the details are; vLLM's own logs stay in the log file.
+        // Then what to run next: the kept container and a curl that reproduces the failure (one line each, uncut).
+        io.err(`\n  ${c.red("✗")} ${result.message}\n${(result.details ?? []).map((line) => `    ${line}\n`).join("")}${result.log ? `    ${c.dim(`Log: ${result.log}`)}\n` : ""}`);
+      }
+      lastFailed = result.ok ? undefined : result.model;
+      gpuEnv = resultEnv(result, request.gpu);
     }
-    if (outcome.code !== null) return outcome.code;
-    return outcome.signal === "SIGINT" ? 130 : outcome.signal === "SIGHUP" ? 129 : outcome.signal === "SIGTERM" ? 143 : 1;
   } finally {
+    if (referral) await settleReferral({ env: process.env, ...input.referral });
+    await handoff?.cleanup().catch(() => {});
     for (const [name, handler] of handlers) signals.off(name, handler);
   }
+}
+
+/** The real first-run model setup, on this terminal (model-first-run.ts). */
+async function realModelUp(request: ModelUpRequest & { avoid?: string }, io: LaptopIO): Promise<ModelUpResult> {
+  const [{ firstRunModelUp }, { RealSystem }, { TerminalUi }] = await Promise.all([import("../model-first-run.js"), import("../system.js"), import("../ui.js")]);
+  const root = typeof process.getuid === "function" && process.getuid() === 0;
+  // Keys typed while Autopilot was closing (an extra Enter) or the terminal's late replies to
+  // its queries must not answer dl's first question: the prompts ignore input for a moment.
+  return firstRunModelUp({
+    system: new RealSystem(), ui: new TerminalUi(io.out, undefined, io.color === true), prompter: new TtyPrompter({ settleMs: 300 }), root,
+    ...(request.model && !request.pick ? { model: request.model } : {}),
+    ...(request.avoid ? { avoid: request.avoid } : {}),
+  });
 }
 
 async function startSession(plan: SessionPlan, target: { remote: RemoteServer; reason: TargetReason }, input: SessionInput, io: LaptopIO): Promise<number | undefined> {

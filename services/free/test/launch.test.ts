@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, authorize, completion, createService, MODEL, NOW, usage, type Service, type Tokens, submitDetails } from "./harness.js";
+import { ADMIN_ID, allowServerKeys, authorize, completion, createService, MODEL, NOW, usage, type Service, type Tokens, submitDetails } from "./harness.js";
 import { etaAt, forecast, queueOrder, shouldQueue, waitText } from "../src/queue.js";
 import { codeFor, normalizeReferralCode } from "../src/referrals.js";
 import { networkOf } from "../src/network.js";
@@ -62,6 +62,7 @@ async function signUp(
   assert.equal(token.status, 200, `${user.login}: ${page}`);
   const tokens = (await token.json()) as Tokens;
   // Tests jump weeks ahead, past an access token's hour: use a server key as the bearer.
+  allowServerKeys(service, user.id);
   const key = await request("POST", "/v1/keys", { token: tokens.access_token, body: { name: `test-${user.id}-${++keys}` } });
   assert.equal(key.status, 201, await key.clone().text());
   return { tokens: { ...tokens, access_token: ((await key.json()) as { key: string }).key }, page };
@@ -113,7 +114,10 @@ async function spendLive(service: Service, usd: number): Promise<void> {
 }
 const chat = (service: Service, token: string) => service.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } });
 
-const OFFERS = { pro: { priceUsdMonthly: 10, tokensPerWeek: 100_000_000 }, topup: { priceUsd: 3, tokens: 50_000_000, validDays: 30 } };
+const OFFERS = {
+  pro: { priceUsdMonthly: 3.99, price: "$3.99/month", tokensPerWeek: 300_000_000, usdPerWeek: 6, deepseekUsdPerWeek: 40, valueLine: "Lots of DeepSeek every week, plus more GPT-6." },
+  topup: { unitPriceUsd: 1, minQuantity: 2, maxQuantity: 20, usageMultiplier: 1.25, validDays: 90, fromPrice: "$2" },
+};
 
 describe("queue maths", () => {
   const policy = { globalWeeklyUsdCap: 250, globalTotalUsdCap: 1000, queueThreshold: 0.8, perPersonWeeklyUsdCap: 5 };
@@ -230,7 +234,7 @@ describe("open sign-up and the queue", () => {
   });
 
   it("admits from the queue on Monday as the forecast allows, front of the line first, with referral boosts", async () => {
-    const { service, admin } = await openService({ GLOBAL_WEEKLY_USD_CAP: "50", PER_PERSON_WEEKLY_USD_CAP: "20" });
+    const { service, admin } = await openService({ GLOBAL_WEEKLY_USD_CAP: "50", PER_PERSON_WEEKLY_USD_CAP: "12", DEEPSEEK_WEEKLY_USD_CAP: "8" });
     await spend(service, 40); // 80% of $50: the queue starts
     const tokens: Tokens[] = [];
     for (let id = 200; id < 205; id++) tokens.push((await signUp(service, { id, login: `q${id}` })).tokens);
@@ -247,7 +251,7 @@ describe("open sign-up and the queue", () => {
     let queue = (await (await service.request("GET", "/admin/queue", { token: await adminToken(service) })).json()) as QueueView;
     assert.deepEqual(queue.runs[0], { weekStart: "2026-11-09", ranAt: new Date(service.clock.now).toISOString(), admitted: 0, waitingBefore: 5, avgUsd: 20, actives: 2, budgetUsd: 40 });
 
-    // The Monday after a quiet week: no data, so the per-person cap ($20) is the estimate:
+    // The Monday after a quiet week: no data, so the per-person budgets ($12 GPT-6 + $8 DeepSeek) are the estimate:
     // floor(40 / 20) − 0 = 2 get in, front of the line first.
     service.clock.now = NEXT_MONDAY + WEEK + 3_600_000;
     const later = await adminToken(service);
@@ -278,11 +282,11 @@ describe("open sign-up and the queue", () => {
     // avg = 200 / 11 ≈ 18.18; budget 200 → floor(11) − 11 = 0. Too expensive: nobody new.
     assert.notEqual((await me(service, queued[0]!.access_token)).queue, null);
 
-    // Next week nobody spent anything: the fallback estimate ($20, the per-person cap) applies,
-    // 200 / 20 − 0 = 10.
+    // Next week nobody spent anything: the fallback estimate ($10: the GPT-6 and DeepSeek
+    // budgets together) applies, 200 / 10 − 0 = 20.
     service.clock.now = NEXT_MONDAY + WEEK + 60_000;
-    for (const token of queued.slice(0, 10)) assert.equal((await me(service, token.access_token)).queue, null);
-    assert.equal((await me(service, queued[10]!.access_token)).queue.position, 1);
+    for (const token of queued.slice(0, 20)) assert.equal((await me(service, token.access_token)).queue, null);
+    assert.equal((await me(service, queued[20]!.access_token)).queue.position, 1);
     service.setOpenRouter(() => completion(usage(10, 10)));
     assert.equal((await chat(service, queued[0]!.access_token)).status, 200);
   });
@@ -351,8 +355,9 @@ describe("referrals", () => {
     assert.equal(body.referral.bonusTokensPerWeek, 10_000_000);
     assert.equal(body.referral.activeThisWeek, 1);
     assert.equal(body.allowance.tokensPerWeek, 60_000_000);
-    // The dollar allowance grows with the bonus: $20 × 60M/50M.
-    assert.equal(body.allowance.usdPerWeek, 24);
+    // The GPT-6 dollar allowance grows with the bonus: $2 × 60M/50M. DeepSeek's stays.
+    assert.equal(body.allowance.usdPerWeek, 2.4);
+    assert.equal(body.budgets.deepseek.usdPerWeek, 8);
     const pal2 = await me(service, friend2.tokens.access_token);
     assert.equal(pal2.referral.bonusTokensPerWeek, 10_000_000);
     assert.equal(pal2.allowance.tokensPerWeek, 60_000_000);
@@ -461,7 +466,8 @@ describe("GET /v1/referrals/<code>", () => {
 
 describe("402 quota_exceeded", () => {
   it("carries the offers, the referral link and the reset time", async () => {
-    const { service } = await openService({ WEEKLY_TOKENS: "300" });
+    // A DeepSeek request with DeepSeek's budget at 0: its week is used up.
+    const { service } = await openService({ DEEPSEEK_WEEKLY_USD_CAP: "0" });
     const { tokens } = await signUp(service, { id: 100, login: "Alice" });
     const response = await chat(service, tokens.access_token);
     assert.equal(response.status, 402);
@@ -470,14 +476,14 @@ describe("402 quota_exceeded", () => {
     assert.deepEqual(error.offers, OFFERS);
     assert.equal(error.referralLink, "https://dl.new/r/alice");
     assert.equal(error.resetsAt, new Date(NEXT_MONDAY).toISOString());
-    assert.equal(error.reason, "tokens");
+    assert.equal(error.reason, "spend");
   });
 });
 
 describe("spend alerts", () => {
   it("fires once per threshold per week for the weekly cap, and once ever for the all-time cap", async () => {
-    const { service } = await openService({ PER_PERSON_WEEKLY_USD_CAP: "none" });
-    const texts = () => service.calls.webhooks.map((hook) => String(hook.body.text));
+    const { service } = await openService({ PER_PERSON_WEEKLY_USD_CAP: "none", DEEPSEEK_WEEKLY_USD_CAP: "none" });
+    const texts = () => service.calls.webhooks.map((hook) => String(hook.body.text)).filter((t) => !/ spent so far| spent in total/.test(t));
     await spendLive(service, 100);
     await spendLive(service, 20); // 48%: nothing yet
     assert.deepEqual(texts(), []);
@@ -525,7 +531,7 @@ describe("spend alerts", () => {
   it("posts to a Telegram bot URL end to end", async () => {
     const { service } = await openService({ ALERT_WEBHOOK_URL: "https://api.telegram.org/bot123:abc/sendMessage", ALERT_TELEGRAM_CHAT_ID: "-100" });
     await spendLive(service, 130);
-    assert.deepEqual(service.calls.webhooks, [
+    assert.deepEqual(service.calls.webhooks.filter((hook) => !/ spent (so far|in total)/.test(JSON.stringify(hook.body))), [
       { url: "https://api.telegram.org/bot123:abc/sendMessage", body: { chat_id: "-100", text: "dl free tier: $130 of the $250 weekly cap used (50%). Resets Mon 00:00 UTC.", disable_web_page_preview: true } },
     ]);
   });
@@ -535,7 +541,7 @@ describe("spend alerts", () => {
     await service.request("POST", "/admin/pause", { token: admin });
     await service.request("POST", "/admin/pause", { token: admin }); // no change, no alert
     await service.request("POST", "/admin/unpause", { token: admin });
-    assert.deepEqual(service.calls.webhooks.map((hook) => hook.body.text), [
+    assert.deepEqual(service.calls.webhooks.map((hook) => hook.body.text).filter((t) => !/ spent (so far|in total)/.test(String(t))), [
       "dl free tier: free tokens paused for everyone by owner (kill switch).",
       "dl free tier: free tokens resumed by owner (kill switch off).",
     ]);
@@ -566,6 +572,8 @@ describe("spend alerts", () => {
   it("sends email through the send_email binding, with the short line as the subject", async () => {
     const { service } = await openService({ ALERT_EMAIL_TO: "owner@example.com", ALERT_WEBHOOK_URL: "" }, { email: true });
     await spendLive(service, 200);
+    const milestoneFree = service.calls.emails.filter((e) => !/spent so far/.test(e.raw));
+    service.calls.emails.splice(0, service.calls.emails.length, ...milestoneFree);
     assert.equal(service.calls.emails.length, 1);
     const [email] = service.calls.emails;
     assert.equal(email!.from, "alerts@dl.new");
@@ -607,12 +615,12 @@ describe("dashboard additions", () => {
   it("shows the credit budget, when the queue starts, the queue, referrals and the funnel", async () => {
     const { service } = await openService();
     const cookie = await adminCookie(service);
-    let html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    let html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
     assert.doesNotMatch(html, /class="banner"/);
-    // The budget is the Luminal credit; the OpenRouter cash caps aren't shown as one.
-    assert.match(html, /Luminal credit used<b>\$0 <span class="muted">of \$2,000<\/span>/);
-    assert.match(html, /Credit this week<b>\$0 <span class="muted">of \$250<\/span>/);
-    assert.match(html, /Queue starts at<b>\$200 <span class="muted">80% of \$250<\/span>/);
+    // Spend is per provider; the OpenRouter cash caps aren't shown as a budget.
+    assert.match(html, /<tr><td>Luminal <span class="muted">\(no key\)<\/span><\/td><td class="l wrap">[^<]*<\/td><td class="used">\$0 <span class="muted">of \$2,000<\/span><svg[^]*?<\/svg><\/td><td>\$0 <span class="muted">free \$0 of \$250 budget<\/span><\/td>/);
+    // No credit provider has a key, so only OpenRouter cash can start the line (as shouldQueue does).
+    assert.match(html, /Waiting line starts at<b>–<\/b><span class="note">No OpenAI or Luminal key: credit spend doesn&#39;t start the line\. Free OpenRouter cash past \$200 this week also starts it\./);
     assert.doesNotMatch(html, /cash spend|weekly cap used|all-time cap/i);
 
     const referrer = await signUp(service, { id: 100, login: "ref", ip: "198.51.100.1" });
@@ -623,9 +631,9 @@ describe("dashboard additions", () => {
     await signUp(service, { id: 200, login: "waiting", ip: "198.51.100.3" });
     void referrer;
 
-    html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
     assert.doesNotMatch(html, /class="banner"/);
-    assert.match(html, /Queue starts at<b>[^<]*<span[^>]*>[^<]*<\/span><\/b><span class="note">On: 1 waiting\./);
+    assert.match(html, /Waiting line starts at<b>–<\/b><span class="note">On: 1 waiting\. New open sign-ups join the line\./);
     assert.match(html, /Waiting now<b>1<\/b>/);
     assert.match(html, /Links used<b>1<\/b>/);
     assert.match(html, /Sign-ups via referral<b>1<\/b><span class="note">1 became weekly active/);

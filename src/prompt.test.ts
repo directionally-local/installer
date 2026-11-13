@@ -159,6 +159,27 @@ describe("select on a terminal", () => {
   });
 });
 
+describe("right after another program closes (settleMs)", () => {
+  it("drops keys typed ahead and the terminal's late replies; then takes the answer", async () => {
+    const input = new PassThrough() as PassThrough & { isTTY?: boolean; setRawMode?: (mode: boolean) => unknown };
+    input.isTTY = true;
+    input.setRawMode = () => input;
+    const output = new Writable({ write(_chunk, _encoding, done) { done(); } }) as Writable & { columns?: number };
+    const prompter = new TtyPrompter({ open: () => ({ input, output, close: () => {} }), color: false, env: {}, settleMs: 40 });
+    const picked = prompter.select(QUESTION, PLACES, 0);
+    input.write("\r");
+    input.write("\x1b]11;rgb:0000/0000/0000\x1b\\");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    input.write("\x1b[B\r");
+    assert.deepEqual(await picked, { value: "server" }, "the early Enter didn't pick the default");
+  });
+
+  it("skips a terminal's OSC reply instead of reading it as Esc", () => {
+    assert.deepEqual(parseKeys("\x1b]11;rgb:0000/0000/0000\x07\r"), ["enter"]);
+    assert.deepEqual(parseKeys("\x1b]11;rgb:1/2/3\x1b\\j"), [{ text: "j" }]);
+  });
+});
+
 describe("select without a terminal that does raw mode", () => {
   it("falls back to the numbered prompt", async () => {
     const tty = fakeTerminal(false);

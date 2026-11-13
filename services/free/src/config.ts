@@ -27,12 +27,23 @@ export interface FreeConfig {
   /** USD across everyone but admins, for the whole experiment. Undefined means no total stop. */
   globalTotalUsdCap: number | undefined;
   /**
-   * A person's week ends at their pool's tokens or at this much real cost, whichever comes
-   * first. At the mix the free tier actually sees (95% of input tokens cached, output under
-   * 1% of all tokens) a person who uses every pool costs about $9.35 a week at list prices,
-   * so $20 leaves room for a much less cache-friendly week before the cap binds.
+   * A Full person's weekly GPT-6 budget (every GPT-6 model): their GPT-6 week ends at a pool's
+   * tokens or at this much real cost, whichever comes first. DeepSeek has its own budget,
+   * `deepseekWeeklyUsdCap`: it is much cheaper per token, so there is far more of it.
    */
   perPersonWeeklyUsdCap: number | undefined;
+  /**
+   * A Full person's weekly DeepSeek budget (DEEPSEEK_WEEKLY_USD_CAP). DeepSeek has no token cap,
+   * so this is its only per-person limit. A personal cap (an admin's grant) applies to GPT-6;
+   * DeepSeek then gets the larger of the personal cap and this.
+   */
+  deepseekWeeklyUsdCap: number | undefined;
+  /**
+   * The personal weekly dollar cap an admin's grant gives (GRANT_WEEKLY_USD_CAP): the Tools tab's
+   * "Give free tokens", POST /admin/grant and granting a /request. A grant never lowers a higher
+   * personal cap. Undefined or 0: a grant only sets Full, with no personal cap.
+   */
+  grantWeeklyUsdCap: number | undefined;
   /** GitHub accounts younger than this need an invite code even when admission is open. */
   minGithubAccountAgeDays: number;
   /** Full access needs an account at least this old (FULL_MIN_ACCOUNT_AGE_DAYS). */
@@ -41,10 +52,44 @@ export interface FreeConfig {
   fullMinPublicRepos: number;
   /** ... or this many contributions in the last year (FULL_MIN_CONTRIBUTIONS). */
   fullMinContributions: number;
-  /** A Starter account's weekly tokens (STARTER_WEEKLY_TOKENS): DeepSeek only. */
+  /**
+   * Additional account signals for Full (admission.ts `levelChecks`); the real values are set
+   * in the private admin settings. Full needs the public bar and at least one fewer than this
+   * many signals (HUMAN_SIGNALS_NEEDED); without the public bar, no number of them gives Full.
+   */
+  humanSignalsNeeded: number;
+  /** Weeks with a contribution in the last year (MIN_ACTIVE_WEEKS). */
+  minActiveWeeks: number;
+  /** Age of the oldest owned non-fork repository (MIN_REPO_AGE_DAYS). */
+  minRepoAgeDays: number;
+  /** Accounts followed plus repositories starred (MIN_SOCIAL). */
+  minSocial: number;
+  /** Followers (MIN_FOLLOWERS). */
+  minFollowers: number;
+  /** Days either side of an account's creation that count as one batch (BATCH_WINDOW_DAYS). */
+  batchWindowDays: number;
+  /** Signed-up accounts in that window that make a batch, for accounts younger than the public bar's age; 0 turns it off (BATCH_SIZE). */
+  batchSize: number;
+  /** A Starter account's weekly tokens (STARTER_WEEKLY_TOKENS), of every model. 0: no free tokens. */
   starterWeeklyTokens: number;
+  /** A Starter account's weekly dollar cap (STARTER_WEEKLY_USD_CAP); undefined: tokens only. */
+  starterWeeklyUsdCap: number | undefined;
+  /** A Starter account's weekly DeepSeek budget (STARTER_DEEPSEEK_WEEKLY_USD_CAP); `starterWeeklyUsdCap` is its GPT-6 one. */
+  starterDeepseekWeeklyUsdCap: number | undefined;
+  /** The basic level (admission.ts BasicRule) needs an account at least this old (BASIC_MIN_ACCOUNT_AGE_DAYS). */
+  basicMinAccountAgeDays: number;
+  /** A basic account's weekly tokens, of every model (BASIC_WEEKLY_TOKENS); 0 turns the level off. */
+  basicWeeklyTokens: number;
+  /** A basic account's weekly dollar cap (BASIC_WEEKLY_USD_CAP); undefined: tokens only. */
+  basicWeeklyUsdCap: number | undefined;
+  /** A basic account's weekly DeepSeek budget (BASIC_DEEPSEEK_WEEKLY_USD_CAP); `basicWeeklyUsdCap` is its GPT-6 one. */
+  basicDeepseekWeeklyUsdCap: number | undefined;
   /** New sign-ins one network gets a day before the rest are Starter (NETWORK_SIGNUPS_PER_DAY). */
   networkSignupsPerDay: number;
+  /** Inboxes (`name@domain`) and domains (`@domain`) that can't sign up (BLOCKED_EMAILS, comma-separated). */
+  blockedEmails: string[];
+  /** New accounts a day from one company or custom email domain; public providers are exempt (DOMAIN_SIGNUPS_PER_DAY). */
+  domainSignupsPerDay: number;
   /**
    * Open admission: GitHub accounts at least `minGithubAccountAgeDays` old get in without an
    * invite code (still within `maxActiveUsers`). Off by default: invite-only for everyone.
@@ -104,8 +149,13 @@ export interface FreeConfig {
   alertTelegramChatId: string | undefined;
   /** Stripe billing (stripe.ts). Without the secret key, the billing endpoints answer 503 billing_unavailable. */
   stripe: StripeConfig;
-  /** Pro's weekly dollar ceiling (PRO_WEEKLY_USD_CAP); undefined (the default) means tokens only. */
+  /**
+   * Pro's weekly GPT-6 budget (PRO_WEEKLY_USD_CAP, default $6; "none" for tokens only). It is
+   * held exactly like the free caps: settled spend plus the estimate of every request in flight.
+   */
   proWeeklyUsdCap: number | undefined;
+  /** Pro's weekly DeepSeek budget (PRO_DEEPSEEK_WEEKLY_USD_CAP, default $40; "none" for no cap). */
+  proDeepseekWeeklyUsdCap: number | undefined;
   /**
    * Which provider serves chat requests first (PRIMARY_UPSTREAM): "openai" (the default),
    * "luminal" or "openrouter". A model's own provider always wins: this only decides what
@@ -141,13 +191,16 @@ export interface FreeConfig {
   paused: boolean;
   /** The public origin for links, when the request's own origin isn't it (behind a proxy). */
   publicUrl: string | undefined;
-  /** Resend's API key (RESEND_API_KEY, a secret) for emails to users. Without it none are sent. Never logged. */
+  /**
+   * Resend's API key (RESEND_API_KEY, a secret) for emails to users, used only when the USER_EMAIL
+   * binding (Cloudflare Email Service) is absent. With neither, none are sent. Never logged.
+   */
   resendApiKey: string | undefined;
   /** The sender of emails to users (EMAIL_FROM), name and address. */
   emailFrom: string;
   /** Where replies to them go (EMAIL_REPLY_TO). */
   emailReplyTo: string;
-  /** Emails to users on or off (USER_EMAILS, default on); also a runtime setting. Needs `resendApiKey`. */
+  /** Emails to users on or off (USER_EMAILS, default on); also a runtime setting. Needs the USER_EMAIL binding or `resendApiKey`. */
   userEmails: boolean;
   /** Send them to admins too (USER_EMAILS_TO_ADMINS), for testing. Off by default. */
   userEmailsToAdmins: boolean;
@@ -156,7 +209,16 @@ export interface FreeConfig {
    * A free-plan account that sends chat requests but no session events is refused (app.ts).
    */
   dlOnly: boolean;
+  /**
+   * The owner's email about access requests (/request in dl), ACCESS_REQUEST_ALERTS: "each" (one
+   * per request, the default), "daily" (counted in the daily digest instead) or "off". Also a
+   * runtime setting.
+   */
+  accessRequestAlerts: AccessRequestAlerts;
 }
+
+export type AccessRequestAlerts = "each" | "daily" | "off";
+export const ACCESS_REQUEST_ALERT_MODES: readonly AccessRequestAlerts[] = ["each", "daily", "off"];
 
 export type Upstream = "openai" | "luminal" | "openrouter";
 export const UPSTREAMS: readonly Upstream[] = ["openai", "luminal", "openrouter"];
@@ -171,8 +233,14 @@ export interface Prices {
 export type AlertKind = "auto" | "discord" | "slack" | "telegram";
 
 export interface Offers {
-  pro: { priceUsdMonthly: number; tokensPerWeek: number };
-  topup: { priceUsd: number; tokens: number; validDays: number };
+  /** `valueLine`: one short sentence a client shows next to the price (PRO_VALUE_LINE). */
+  pro: { priceUsdMonthly: number; tokensPerWeek: number; valueLine: string };
+  /**
+   * Top-ups add usage dollars: `quantity` units of `unitPriceUsd` (from `minQuantity` to
+   * `maxQuantity`), each adding `usageMultiplier` times its price, valid `validDays`.
+   * `legacyTokens`: what a checkout started under the old token top-up still grants.
+   */
+  topup: { unitPriceUsd: number; minQuantity: number; maxQuantity: number; usageMultiplier: number; validDays: number; legacyTokens: number };
 }
 
 export interface StripeConfig {
@@ -191,16 +259,40 @@ export const DEFAULTS = {
   countCachedTokens: true,
   globalWeeklyUsdCap: 2000,
   globalTotalUsdCap: 7000,
-  perPersonWeeklyUsdCap: 20,
+  /**
+   * Two weekly dollar budgets per person. GPT-6 (every GPT-6 model) is the tighter one; DeepSeek
+   * is much cheaper per token for us and fast, so its budget is several times larger.
+   */
+  perPersonWeeklyUsdCap: 2,
+  deepseekWeeklyUsdCap: 8,
+  grantWeeklyUsdCap: 20,
   minGithubAccountAgeDays: 30,
   fullMinAccountAgeDays: 90,
   fullMinPublicRepos: 3,
   fullMinContributions: 50,
-  starterWeeklyTokens: 5_000_000,
+  humanSignalsNeeded: 3,
+  minActiveWeeks: 8,
+  minRepoAgeDays: 180,
+  minSocial: 10,
+  minFollowers: 3,
+  batchWindowDays: 1,
+  batchSize: 15,
+  // Publicly there is only Free and Pro: by default basic and Starter get exactly Full's weekly
+  // tokens and dollar budgets (the settings can still differ later).
+  starterWeeklyTokens: 50_000_000,
+  starterWeeklyUsdCap: 2,
+  starterDeepseekWeeklyUsdCap: 8,
+  basicMinAccountAgeDays: 365,
+  basicWeeklyTokens: 50_000_000,
+  basicWeeklyUsdCap: 2,
+  basicDeepseekWeeklyUsdCap: 8,
   networkSignupsPerDay: 3,
+  blockedEmails: [],
+  domainSignupsPerDay: 5,
   openAdmission: false,
   requireGithubActivity: true,
   dlOnly: true,
+  accessRequestAlerts: "each" as AccessRequestAlerts,
   /**
    * OpenRouter's cache-read price over its input price for deepseek/deepseek-v4.1-flash-1017,
    * from https://openrouter.ai/api/v1/models on 2026-11-03: input $0.30/M, cache read
@@ -222,11 +314,24 @@ export const DEFAULTS = {
   referralBonusTokens: 10_000_000,
   referralBonusCap: 50_000_000,
   referralLinkBase: "https://dl.new/r/",
-  proPriceUsdMonthly: 10,
-  proTokensPerWeek: 100_000_000,
-  topupPriceUsd: 3,
-  topupTokens: 50_000_000,
-  topupValidDays: 30,
+  /** Dollars and cents: $3.99 a month. */
+  proPriceUsdMonthly: 3.99,
+  /**
+   * Pro's weekly tokens sit well above what its weekly dollar ceiling buys on the default model,
+   * so the dollar ceiling is the limit that binds, on cheap and expensive models alike.
+   */
+  proTokensPerWeek: 300_000_000,
+  proWeeklyUsdCap: 6,
+  proDeepseekWeeklyUsdCap: 40,
+  proValueLine: "Lots of DeepSeek every week, plus more GPT-6.",
+  /** Top-ups: $1 units, 2 to 20 of them; each $1 adds $1.25 of usage, for 90 days. */
+  topupUnitPriceUsd: 1,
+  topupMinQuantity: 2,
+  topupMaxQuantity: 20,
+  topupUsageMultiplier: 1.25,
+  topupValidDays: 90,
+  /** The old token top-up ($3 for 50M tokens): checkouts started before dollar top-ups still get what they paid for. */
+  topupLegacyTokens: 50_000_000,
   alertEmailFrom: "alerts@dl.new",
   billingSuccessUrl: "https://dl.new/billing/success",
   billingCancelUrl: "https://dl.new/billing/cancel",
@@ -272,12 +377,29 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     globalWeeklyUsdCap: usd(env.GLOBAL_WEEKLY_USD_CAP, DEFAULTS.globalWeeklyUsdCap, "GLOBAL_WEEKLY_USD_CAP"),
     globalTotalUsdCap: usd(env.GLOBAL_TOTAL_USD_CAP, DEFAULTS.globalTotalUsdCap, "GLOBAL_TOTAL_USD_CAP"),
     perPersonWeeklyUsdCap: usd(env.PER_PERSON_WEEKLY_USD_CAP, DEFAULTS.perPersonWeeklyUsdCap, "PER_PERSON_WEEKLY_USD_CAP"),
+    deepseekWeeklyUsdCap: usd(env.DEEPSEEK_WEEKLY_USD_CAP, DEFAULTS.deepseekWeeklyUsdCap, "DEEPSEEK_WEEKLY_USD_CAP"),
+    grantWeeklyUsdCap: usd(env.GRANT_WEEKLY_USD_CAP, DEFAULTS.grantWeeklyUsdCap, "GRANT_WEEKLY_USD_CAP"),
     minGithubAccountAgeDays: whole(env.MIN_GITHUB_ACCOUNT_AGE_DAYS, DEFAULTS.minGithubAccountAgeDays, "MIN_GITHUB_ACCOUNT_AGE_DAYS"),
     fullMinAccountAgeDays: whole(env.FULL_MIN_ACCOUNT_AGE_DAYS, DEFAULTS.fullMinAccountAgeDays, "FULL_MIN_ACCOUNT_AGE_DAYS"),
     fullMinPublicRepos: whole(env.FULL_MIN_PUBLIC_REPOS, DEFAULTS.fullMinPublicRepos, "FULL_MIN_PUBLIC_REPOS"),
     fullMinContributions: whole(env.FULL_MIN_CONTRIBUTIONS, DEFAULTS.fullMinContributions, "FULL_MIN_CONTRIBUTIONS"),
+    humanSignalsNeeded: whole(env.HUMAN_SIGNALS_NEEDED, DEFAULTS.humanSignalsNeeded, "HUMAN_SIGNALS_NEEDED"),
+    minActiveWeeks: whole(env.MIN_ACTIVE_WEEKS, DEFAULTS.minActiveWeeks, "MIN_ACTIVE_WEEKS"),
+    minRepoAgeDays: whole(env.MIN_REPO_AGE_DAYS, DEFAULTS.minRepoAgeDays, "MIN_REPO_AGE_DAYS"),
+    minSocial: whole(env.MIN_SOCIAL, DEFAULTS.minSocial, "MIN_SOCIAL"),
+    minFollowers: whole(env.MIN_FOLLOWERS, DEFAULTS.minFollowers, "MIN_FOLLOWERS"),
+    batchWindowDays: whole(env.BATCH_WINDOW_DAYS, DEFAULTS.batchWindowDays, "BATCH_WINDOW_DAYS"),
+    batchSize: whole(env.BATCH_SIZE, DEFAULTS.batchSize, "BATCH_SIZE"),
     starterWeeklyTokens: whole(env.STARTER_WEEKLY_TOKENS, DEFAULTS.starterWeeklyTokens, "STARTER_WEEKLY_TOKENS"),
+    starterWeeklyUsdCap: usd(env.STARTER_WEEKLY_USD_CAP, DEFAULTS.starterWeeklyUsdCap, "STARTER_WEEKLY_USD_CAP"),
+    starterDeepseekWeeklyUsdCap: usd(env.STARTER_DEEPSEEK_WEEKLY_USD_CAP, DEFAULTS.starterDeepseekWeeklyUsdCap, "STARTER_DEEPSEEK_WEEKLY_USD_CAP"),
+    basicMinAccountAgeDays: whole(env.BASIC_MIN_ACCOUNT_AGE_DAYS, DEFAULTS.basicMinAccountAgeDays, "BASIC_MIN_ACCOUNT_AGE_DAYS"),
+    basicWeeklyTokens: whole(env.BASIC_WEEKLY_TOKENS, DEFAULTS.basicWeeklyTokens, "BASIC_WEEKLY_TOKENS"),
+    basicWeeklyUsdCap: usd(env.BASIC_WEEKLY_USD_CAP, DEFAULTS.basicWeeklyUsdCap, "BASIC_WEEKLY_USD_CAP"),
+    basicDeepseekWeeklyUsdCap: usd(env.BASIC_DEEPSEEK_WEEKLY_USD_CAP, DEFAULTS.basicDeepseekWeeklyUsdCap, "BASIC_DEEPSEEK_WEEKLY_USD_CAP"),
     networkSignupsPerDay: whole(env.NETWORK_SIGNUPS_PER_DAY, DEFAULTS.networkSignupsPerDay, "NETWORK_SIGNUPS_PER_DAY"),
+    blockedEmails: env.BLOCKED_EMAILS === undefined ? [...DEFAULTS.blockedEmails] : String(env.BLOCKED_EMAILS).split(",").map((v) => v.trim()).filter(Boolean),
+    domainSignupsPerDay: whole(env.DOMAIN_SIGNUPS_PER_DAY, DEFAULTS.domainSignupsPerDay, "DOMAIN_SIGNUPS_PER_DAY"),
     openAdmission: flag(env.OPEN_ADMISSION, DEFAULTS.openAdmission, "OPEN_ADMISSION"),
     requireGithubActivity: flag(env.REQUIRE_GITHUB_ACTIVITY, DEFAULTS.requireGithubActivity, "REQUIRE_GITHUB_ACTIVITY"),
     countCachedTokens: flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS"),
@@ -293,13 +415,16 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     referralLinkBase: text(env.REFERRAL_LINK_BASE) ?? DEFAULTS.referralLinkBase,
     offers: {
       pro: {
-        priceUsdMonthly: amount(env.PRO_PRICE_USD_MONTHLY, DEFAULTS.proPriceUsdMonthly, "PRO_PRICE_USD_MONTHLY"),
+        priceUsdMonthly: price(env.PRO_PRICE_USD_MONTHLY, DEFAULTS.proPriceUsdMonthly, "PRO_PRICE_USD_MONTHLY"),
         tokensPerWeek: whole(env.PRO_TOKENS_PER_WEEK, DEFAULTS.proTokensPerWeek, "PRO_TOKENS_PER_WEEK"),
+        valueLine: valueLine(env.PRO_VALUE_LINE),
       },
       topup: {
-        priceUsd: amount(env.TOPUP_PRICE_USD, DEFAULTS.topupPriceUsd, "TOPUP_PRICE_USD"),
-        tokens: whole(env.TOPUP_TOKENS, DEFAULTS.topupTokens, "TOPUP_TOKENS"),
+        unitPriceUsd: price(env.TOPUP_UNIT_PRICE_USD, DEFAULTS.topupUnitPriceUsd, "TOPUP_UNIT_PRICE_USD"),
+        ...quantities(env),
+        usageMultiplier: multiplier(env.TOPUP_USAGE_MULTIPLIER),
         validDays: whole(env.TOPUP_VALID_DAYS, DEFAULTS.topupValidDays, "TOPUP_VALID_DAYS"),
+        legacyTokens: whole(env.TOPUP_TOKENS, DEFAULTS.topupLegacyTokens, "TOPUP_TOKENS"),
       },
     },
     alertWebhookUrl: webhookUrl(env.ALERT_WEBHOOK_URL),
@@ -316,7 +441,8 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
       cancelUrl: httpsUrl(env.BILLING_CANCEL_URL, "BILLING_CANCEL_URL") ?? DEFAULTS.billingCancelUrl,
       portalReturnUrl: httpsUrl(env.BILLING_PORTAL_RETURN_URL, "BILLING_PORTAL_RETURN_URL") ?? DEFAULTS.billingPortalReturnUrl,
     },
-    proWeeklyUsdCap: text(env.PRO_WEEKLY_USD_CAP) === undefined ? undefined : usd(env.PRO_WEEKLY_USD_CAP, 0, "PRO_WEEKLY_USD_CAP"),
+    proWeeklyUsdCap: usd(env.PRO_WEEKLY_USD_CAP, DEFAULTS.proWeeklyUsdCap, "PRO_WEEKLY_USD_CAP"),
+    proDeepseekWeeklyUsdCap: usd(env.PRO_DEEPSEEK_WEEKLY_USD_CAP, DEFAULTS.proDeepseekWeeklyUsdCap, "PRO_DEEPSEEK_WEEKLY_USD_CAP"),
     primaryUpstream: upstream(env.PRIMARY_UPSTREAM),
     openaiApiKey: text(env.OPENAI_API_KEY),
     openaiFirstByteTimeoutSeconds: timeoutSeconds(env.OPENAI_FIRST_BYTE_TIMEOUT_SECONDS, DEFAULTS.openaiFirstByteTimeoutSeconds, "OPENAI_FIRST_BYTE_TIMEOUT_SECONDS"),
@@ -336,6 +462,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     userEmails: flag(env.USER_EMAILS, true, "USER_EMAILS"),
     userEmailsToAdmins: flag(env.USER_EMAILS_TO_ADMINS, false, "USER_EMAILS_TO_ADMINS"),
     dlOnly: flag(env.DL_ONLY, DEFAULTS.dlOnly, "DL_ONLY"),
+    accessRequestAlerts: accessRequestAlerts(env.ACCESS_REQUEST_ALERTS),
   };
 }
 
@@ -373,6 +500,41 @@ function amount(value: unknown, fallback: number, name: string): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) throw new ConfigError(`${name} must be a number of dollars (got "${raw}").`);
   return parsed;
+}
+
+/** A price in dollars and cents ("3.99", "10"): never more than two decimals, so it shows exactly. */
+function price(value: unknown, fallback: number, name: string): number {
+  const raw = text(value);
+  if (raw === undefined) return fallback;
+  if (!/^\d+(\.\d{1,2})?$/.test(raw)) throw new ConfigError(`${name} must be dollars and cents, e.g. "3.99" (got "${raw}").`);
+  return Number(raw);
+}
+
+/** TOPUP_MIN_QUANTITY and TOPUP_MAX_QUANTITY: 1 to 100 units, the minimum no more than the maximum. */
+function quantities(env: Record<string, unknown>): { minQuantity: number; maxQuantity: number } {
+  const minQuantity = whole(env.TOPUP_MIN_QUANTITY, DEFAULTS.topupMinQuantity, "TOPUP_MIN_QUANTITY");
+  const maxQuantity = whole(env.TOPUP_MAX_QUANTITY, DEFAULTS.topupMaxQuantity, "TOPUP_MAX_QUANTITY");
+  if (minQuantity < 1 || maxQuantity > 100 || minQuantity > maxQuantity) {
+    throw new ConfigError(`TOPUP_MIN_QUANTITY and TOPUP_MAX_QUANTITY must be 1 to 100 with the minimum no more than the maximum (got ${minQuantity} and ${maxQuantity}).`);
+  }
+  return { minQuantity, maxQuantity };
+}
+
+/** TOPUP_USAGE_MULTIPLIER: usage dollars per dollar paid, 0.5 to 5. */
+function multiplier(value: unknown): number {
+  const raw = text(value);
+  if (raw === undefined) return DEFAULTS.topupUsageMultiplier;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0.5 || parsed > 5) throw new ConfigError(`TOPUP_USAGE_MULTIPLIER must be a number from 0.5 to 5 (got "${raw}").`);
+  return parsed;
+}
+
+/** PRO_VALUE_LINE: one short sentence, at most 80 characters. */
+function valueLine(value: unknown): string {
+  const raw = text(value);
+  if (raw === undefined) return DEFAULTS.proValueLine;
+  if (raw.length > 80 || /[\r\n]/.test(raw)) throw new ConfigError(`PRO_VALUE_LINE must be one line of at most 80 characters (got "${raw}").`);
+  return raw;
 }
 
 function stripeId(value: unknown, prefix: string, name: string): string | undefined {
@@ -472,6 +634,13 @@ function hostCooldown(value: unknown): number {
   const minutes = whole(value, DEFAULTS.openRouterHostCooldownMinutes, "OPENROUTER_HOST_COOLDOWN_MINUTES");
   if (minutes > MAX_HOST_COOLDOWN_MINUTES) throw new ConfigError(`OPENROUTER_HOST_COOLDOWN_MINUTES must be 0 to ${MAX_HOST_COOLDOWN_MINUTES} (got "${minutes}").`);
   return minutes;
+}
+
+function accessRequestAlerts(value: unknown): AccessRequestAlerts {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return DEFAULTS.accessRequestAlerts;
+  if ((ACCESS_REQUEST_ALERT_MODES as readonly string[]).includes(raw)) return raw as AccessRequestAlerts;
+  throw new ConfigError(`ACCESS_REQUEST_ALERTS must be "each", "daily" or "off" (got "${raw}").`);
 }
 
 function upstream(value: unknown): Upstream {

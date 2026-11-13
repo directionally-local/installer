@@ -71,6 +71,10 @@ export const BLOCKED_MESSAGE = "This account is blocked from the free tier. Cont
 /** The dl-only refusal (code dl_only): free tokens were used from another tool. */
 export const DL_ONLY_MESSAGE = "Free tokens work inside dl only. Run dl to keep using them, or use your own API key in any tool.";
 
+/** The refusal (code server_keys_unavailable) for creating or using a server key without being granted them. */
+export const SERVER_KEYS_UNAVAILABLE_MESSAGE =
+  "Server keys on the free tier are by request. Type /request in dl and say what server you want to run it on, or use your own API key on the server.";
+
 export const DEVICE_TAKEN_MESSAGE = "This device already has a free allowance under another GitHub account; sign in with that account instead.";
 export const INVALID_INVITE_MESSAGE = "That invite code isn't valid or was already used.";
 
@@ -91,6 +95,16 @@ export function queuedMessage(position: number, wait: string): string {
 export function quotaMessage(reason: "tokens" | "spend", resetsAt: string, plan: "free" | "pro" = "free"): string {
   const what = reason === "spend" ? "spending allowance" : "token allowance";
   return `This week's ${plan === "pro" ? "Pro" : "free"} ${what} is used up. It resets at ${resetsAt}.`;
+}
+
+/**
+ * GPT-6's weekly budget is used up but DeepSeek's isn't (402 gpt_limit): not a dead end. Pro
+ * already has Pro, so its line leaves the offer out.
+ */
+export function gptLimitMessage(plan: "free" | "pro" = "free"): string {
+  return plan === "pro"
+    ? "You've used this week's Pro GPT-6 allowance. DeepSeek V4.1 Flash still has usage this week: switch with /model."
+    : "You've used this week's GPT-6 allowance. DeepSeek V4.1 Flash still has free usage this week: switch with /model, or get dl Pro.";
 }
 
 export const QUEUED_SIGNED_IN =

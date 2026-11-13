@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ADMIN_ID, completion, createService, errorCode, luminalUsage, MODEL, NOW, openaiUsage, usage, type Service } from "./harness.js";
+import { ADMIN_ID, completion, createService, errorCode, luminalUsage, MODEL, NOW, openaiResponse, responsesUsage, usage, type Service } from "./harness.js";
 
 /**
  * OpenAI as the default provider: GPT-6 Luna first, DeepSeek on Luminal as the automatic
@@ -32,7 +32,7 @@ const me = async (service: Service, token: string) =>
   };
 
 describe("OpenAI as the default provider", () => {
-  it("serves GPT-6 Luna on OpenAI, with max_completion_tokens and no OpenRouter fields", async () => {
+  it("serves GPT-6 Luna on OpenAI's Responses API, with max_output_tokens and no OpenRouter fields", async () => {
     const { service, token } = await member(OPENAI);
     const response = await chat(service, token);
     assert.equal(response.status, 200);
@@ -40,8 +40,12 @@ describe("OpenAI as the default provider", () => {
     assert.equal(service.calls.luminal.length, 0);
     const sent = service.calls.openai[0]!.body;
     assert.equal(sent.model, "gpt-6-luna");
-    assert.equal(sent.max_completion_tokens, 32_768);
+    assert.equal(sent.max_output_tokens, 32_768);
+    assert.equal(sent.max_completion_tokens, undefined);
     assert.equal(sent.max_tokens, undefined);
+    assert.equal(sent.messages, undefined);
+    assert.deepEqual(sent.input, [{ type: "message", role: "user", content: "hello" }]);
+    assert.equal(sent.store, false);
     assert.equal(sent.provider, undefined);
     assert.equal(sent.usage, undefined);
     assert.equal(service.calls.openai[0]!.headers.authorization, "Bearer sk-openai-test");
@@ -49,7 +53,7 @@ describe("OpenAI as the default provider", () => {
 
   it("prices the request at OpenAI's list prices and charges the OpenAI credit", async () => {
     const { service, token, adminToken } = await member(OPENAI);
-    service.setOpenAI(() => completion(openaiUsage(1_000_000, 1_000_000, 0)));
+    service.setOpenAI(() => openaiResponse(responsesUsage(1_000_000, 1_000_000, 0)));
     assert.equal((await chat(service, token)).status, 200);
     const spend = (await (await service.request("GET", "/admin/spend", { token: adminToken })).json()) as {
       openaiCredit: { usedUsd: number; balanceUsd: number; leftUsd: number };
@@ -118,13 +122,16 @@ describe("OpenAI as the default provider", () => {
 });
 
 describe("weekly pools", () => {
-  it("gives Luna and DeepSeek one 50M pool, Sol 10M and Astra 3M", async () => {
+  it("gives Luna 50M, Sol 10M, Astra 3M and DeepSeek no token cap (its dollar budget is the limit)", async () => {
     const { service, token } = await member(OPENAI);
     const body = await me(service, token);
     assert.equal(body.pools.luna!.tokensPerWeek, 50_000_000);
     assert.equal(body.pools.sol!.tokensPerWeek, 10_000_000);
     assert.equal(body.pools.astra!.tokensPerWeek, 3_000_000);
-    assert.deepEqual(body.pools.luna!.models, [LUNA, DEEPSEEK]);
+    assert.deepEqual(body.pools.luna!.models, [LUNA]);
+    assert.deepEqual(body.pools.deepseek!.models, [DEEPSEEK]);
+    assert.equal(body.pools.deepseek!.tokensPerWeek, null);
+    assert.equal(body.pools.deepseek!.remaining, null);
     assert.deepEqual(body.pools.sol!.models, [SOL]);
     assert.deepEqual(body.pools.astra!.models, [ASTRA]);
     // The default allowance reads as the Luna pool.
@@ -133,27 +140,28 @@ describe("weekly pools", () => {
 
   it("charges the pool of the model that served, not a second allowance", async () => {
     const { service, token } = await member(OPENAI);
-    service.setOpenAI(() => completion(openaiUsage(1000, 1000, 0)));
+    service.setOpenAI(() => openaiResponse(responsesUsage(1000, 1000, 0)));
     assert.equal((await chat(service, token, { model: SOL })).status, 200);
     let body = await me(service, token);
     assert.equal(body.pools.sol!.usedThisWeek, 2000);
     assert.equal(body.pools.luna!.usedThisWeek, 0);
 
-    // Luna and DeepSeek share the Luna pool.
+    // Luna has its own pool.
     assert.equal((await chat(service, token, { model: LUNA })).status, 200);
     body = await me(service, token);
     assert.equal(body.pools.luna!.usedThisWeek, 2000);
     assert.equal(body.pools.sol!.usedThisWeek, 2000);
   });
 
-  it("refuses Sol once its own 10M pool is used, while Luna still works", async () => {
+  it("refuses Luna once its own pool is used, while Sol still works, pointing at DeepSeek", async () => {
     const { service, token, adminToken } = await member(OPENAI);
     await service.request("POST", "/admin/people/100/grant", { token: adminToken, body: { usedThisWeek: 50_000_000 } });
     // The grant sets the Luna pool; Sol keeps its own.
     assert.equal((await chat(service, token, { model: SOL })).status, 200);
     const refused = await chat(service, token, { model: LUNA });
     assert.equal(refused.status, 402);
-    assert.equal(await errorCode(refused), "quota_exceeded");
+    // GPT-6's tokens out, DeepSeek's week isn't: not a dead end.
+    assert.equal(await errorCode(refused), "gpt_limit");
   });
 });
 

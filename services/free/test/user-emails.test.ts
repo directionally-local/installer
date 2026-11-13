@@ -62,7 +62,9 @@ describe("emails to users: the copy", () => {
   it("is lowercase, has no em or en dash, never names the person, and ends with the stop link", () => {
     for (const [kind, copy] of Object.entries(USER_EMAILS)) {
       for (const text of [copy.subject, copy.body, FOOTER].map((part) => part.replace("{unsubscribeUrl}", ""))) {
-        assert.equal(text, text.toLowerCase(), `${kind} isn't all lowercase`);
+        // Links keep their case (an invite code is case-sensitive); the words around them don't.
+        const words = text.replace(/https?:\/\/\S+/g, "");
+        assert.equal(words, words.toLowerCase(), `${kind} isn't all lowercase`);
         assert.doesNotMatch(text, /[—–]/, `${kind} has an em or en dash`);
         assert.doesNotMatch(text, /\{login\}/, `${kind} uses the login`);
       }
@@ -103,6 +105,21 @@ describe("emails to users: welcome", () => {
 
     // Signing in again is a returning person: nothing more.
     await s.signIn({ id: 200, login: "Alice", email: "alice@work.example" });
+    assert.equal(s.calls.resend.length, 1);
+  });
+
+  it("tells a sign-up below the bar, with no Starter tokens, that they need a key or can ask for credits", async () => {
+    const s = await service({ STARTER_WEEKLY_TOKENS: "0", FULL_MIN_ACCOUNT_AGE_DAYS: "365", FULL_MIN_CONTRIBUTIONS: "100", FULL_MIN_PUBLIC_REPOS: "100000" });
+    await startBrowserFlow(s.request, { id: 210, login: "newbie", email: "newbie@work.example", createdAt: "2026-10-01T00:00:00Z", publicRepos: 0, contributions: 3 });
+    assert.deepEqual(sentTo(s), ["newbie@work.example"]);
+    const text = String(s.calls.resend[0]!.body.text);
+    assert.match(text, /\/provider/);
+    assert.match(text, /contact@directionallylocal\.com/);
+    assert.doesNotMatch(text, /\$20 worth/, "no promise of free tokens");
+    assert.equal(s.calls.resend[0]!.headers["idempotency-key"], "dl-user-email-welcome_starter-210-once");
+
+    // And no "did something get in the way?" later: "pick free" wouldn't help them.
+    await scheduled(s, NOW + 2 * DAY);
     assert.equal(s.calls.resend.length, 1);
   });
 
@@ -184,9 +201,10 @@ describe("emails to users: most of the week used", () => {
     return (await s.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } })).status;
   }
 
-  it("goes on the request that crosses 80% of the week's tokens, once a week, and waits a day after another email", async () => {
-    const s = await service({ WEEKLY_TOKENS: "10000000" });
-    s.setOpenRouter(() => completion(usage(3_000_000, 10)));
+  it("goes on the request that crosses 80% of the week, once a week, and waits a day after another email", async () => {
+    // DeepSeek has no token cap: its week is its dollar budget.
+    const s = await service({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
+    s.setOpenRouter(() => completion(usage(3_000_000, 10, 0, 0.3)));
     const nora = { id: 500, login: "nora" };
     let token = (await s.signIn(nora)).access_token;
     assert.deepEqual(subjects(s), ["you're in"]);
@@ -196,7 +214,7 @@ describe("emails to users: most of the week used", () => {
     assert.equal(s.calls.resend.length, 1, "at most one email a day");
     s.clock.now = NOW + DAY;
     token = (await s.signIn(nora)).access_token;
-    s.setOpenRouter(() => completion(usage(10, 1)));
+    s.setOpenRouter(() => completion(usage(10, 1, 0, 0.0001)));
     assert.equal(await chat(s, token), 200);
     assert.deepEqual(subjects(s), ["you're in", "you've used most of this week's tokens"]);
     assert.match(String(s.calls.resend[1]!.body.text), /they reset on monday 9 nov\./);
@@ -207,7 +225,7 @@ describe("emails to users: most of the week used", () => {
   });
 
   it("goes when the dollar cap is 80% used first", async () => {
-    const s = await service({ PER_PERSON_WEEKLY_USD_CAP: "1" });
+    const s = await service({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
     await s.signIn({ id: 501, login: "olga" });
     s.clock.now = NOW + DAY;
     const { access_token: token } = await s.signIn({ id: 501, login: "olga" });
@@ -285,7 +303,7 @@ describe("emails to users: switches and failures", () => {
     const again = (await s.signIn({ id: ADMIN_ID, login: "owner" })).access_token; // the clock moved on
     assert.equal((await s.request("POST", "/admin/config", { token: again, body: { userEmails: null } })).status, 200);
     await startBrowserFlow(s.request, { id: 704, login: "vic" });
-    assert.deepEqual(sentTo(s), ["vic@example.com"]);
+    assert.deepEqual(sentTo(s), ["vic.704@example.com"]);
   });
 
   it("doesn't fail the sign-in when Resend fails, retries once on the next daily run, then gives up", async () => {

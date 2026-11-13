@@ -1,0 +1,34 @@
+-- GPU 0: NVIDIA RTX PRO 5000 Blackwell · 48935 MiB · driver 580.95.05 · CUDA 13.0
+-- Update strategy: side-by-side: the old model keeps serving while qwen-new starts (20 GB new + 20 GB old)
+.. Download and start qwen-new: vllm/vllm-openai:v0.20.0
+ok Download and start qwen-new: port 8001 · logs: docker logs -f dl-model-2
+.. Chat, tool call and JSON smoke tests: waiting for download and API readiness (up to 5 minutes)
+ok Chat, tool call and JSON smoke tests: 372.2 tokens/sec
+
+  ✗ Smoke test failed for Qwen/Qwen3-4B: JSON mode did not return {ok:true}
+    vLLM logs (dl-model-1):
+    (APIServer pid=1) INFO 11-10 13:53:02 [launcher.py:46] Route: /inference/v1/generate, Methods: POST
+    (APIServer pid=1) INFO 11-10 13:53:02 [launcher.py:46] Route: /scale_elastic_ep, Methods: POST
+    (APIServer pid=1) INFO 11-10 13:53:02 [launcher.py:46] Route: /is_scaling_elastic_ep, Methods: POST
+    (APIServer pid=1) INFO 11-10 13:53:02 [launcher.py:46] Route: /generative_scoring, Methods: POST
+    (APIServer pid=1) INFO 11-10 13:53:02 [launcher.py:46] Route: /v1/chat/completions/render, Methods: POST
+    (APIServer pid=1) INFO 11-10 13:53:02 [launcher.py:46] Route: /v1/completions/render, Methods: POST
+    (APIServer pid=1) INFO:     172.17.0.1:59882 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+    (APIServer pid=1) INFO:     172.17.0.1:48682 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+    (APIServer pid=1) INFO 11-10 13:54:02 [loggers.py:271] Engine 000: Avg prompt throughput: 1.1 tokens/s, Avg generation throughput: 4.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+    (APIServer pid=1) INFO:     172.17.0.1:33946 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+    (APIServer pid=1) INFO:     172.17.0.1:48682 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+    (APIServer pid=1) INFO 11-10 13:54:12 [loggers.py:271] Engine 000: Avg prompt throughput: 16.4 tokens/s, Avg generation throughput: 52.7 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+    (APIServer pid=1) INFO 11-10 13:54:22 [loggers.py:271] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+    (APIServer pid=1) INFO:     172.17.0.1:33476 - "GET /v1/models HTTP/1.1" 200 OK
+    (APIServer pid=1) INFO:     172.17.0.1:33476 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+    (APIServer pid=1) INFO:     172.17.0.1:33476 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+    (APIServer pid=1) INFO 11-10 14:11:52 [loggers.py:271] Engine 000: Avg prompt throughput: 829.3 tokens/s, Avg generation throughput: 72.5 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 49.3%
+    (APIServer pid=1) INFO 11-10 14:12:02 [loggers.py:271] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 49.3%
+    (APIServer pid=1) INFO:     172.17.0.1:33084 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+    (APIServer pid=1) INFO 11-10 14:16:12 [loggers.py:271] Engine 000: Avg prompt throughput: 1.1 tokens/s, Avg generation throughput: 5.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 49.3%
+    (APIServer pid=1) INFO:     172.17.0.1:33086 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+    (APIServer pid=1) INFO:     172.17.0.1:33084 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+    (APIServer pid=1) INFO:     Started server process [1]
+    (APIServer pid=1) INFO:     Waiting for application startup.
+    (APIServer pid=1) INFO:     Application startup complete.

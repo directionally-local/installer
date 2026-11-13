@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, completion, createService, MODEL, NOW, usage, type Service } from "./harness.js";
+import { ADMIN_ID, allowServerKeys, completion, createService, MODEL, NOW, usage, type Service } from "./harness.js";
 import { checkoutParams, formEncode, signatureHeader, verifyWebhook } from "../src/stripe.js";
 
 const DAY = 86_400_000;
@@ -21,6 +21,7 @@ async function service(vars: Record<string, string> = {}): Promise<Service> {
 /** A person signed in, with a server key for chat (it outlives the clock jumps below) and an access token for billing. */
 async function person(svc: Service, id = 100): Promise<{ access: string; key: string }> {
   const tokens = await svc.signIn({ id, login: `user${id}` }, { invite: await invite(svc) });
+  allowServerKeys(svc, id);
   const key = await svc.request("POST", "/v1/keys", { token: tokens.access_token, body: { name: `k${id}` } });
   return { access: tokens.access_token, key: ((await key.json()) as { key: string }).key };
 }
@@ -238,8 +239,9 @@ describe("Pro through its payment events", () => {
     assert.equal((await deliver(svc, "checkout.session.completed", proSession(100))).status, 200);
     let body = await me(svc, key);
     assert.equal(body.plan, "pro");
-    assert.equal(body.allowance.tokensPerWeek, 100_000_000);
-    assert.equal(body.allowance.usdPerWeek, null, "Pro has no dollar ceiling unless PRO_WEEKLY_USD_CAP is set");
+    assert.equal(body.allowance.tokensPerWeek, 300_000_000);
+    assert.equal(body.allowance.usdPerWeek, 6, "Pro's weekly GPT-6 budget (PRO_WEEKLY_USD_CAP, default $6)");
+    assert.equal(body.budgets.deepseek.usdPerWeek, 40, "Pro's weekly DeepSeek budget (PRO_DEEPSEEK_WEEKLY_USD_CAP, default $40)");
 
     const periodEnd = Math.floor((NOW + 30 * DAY) / 1000);
     await deliver(svc, "invoice.paid", invoice(100, "in_1", periodEnd));
@@ -290,6 +292,23 @@ describe("Pro through its payment events", () => {
     assert.equal((await me(svc, key)).plan, "free");
   });
 
+  it("lets a Pro subscriber create and use server keys, and only while Pro lasts", async () => {
+    const svc = await service();
+    const tokens = await svc.signIn({ id: 200, login: "user200" }, { invite: await invite(svc) });
+    const create = (name: string) => svc.request("POST", "/v1/keys", { token: tokens.access_token, body: { name } });
+    assert.equal(((await (await create("before")).json()) as { error: { code: string } }).error.code, "server_keys_unavailable");
+    await deliver(svc, "checkout.session.completed", proSession(200));
+    await deliver(svc, "invoice.paid", invoice(200, "in_1", Math.floor((NOW + 5 * DAY) / 1000)));
+    const created = await create("pro-box");
+    assert.equal(created.status, 201);
+    const { key } = (await created.json()) as { key: string };
+    assert.equal((await chat(svc, key)).status, 200);
+    svc.clock.now = NOW + 9 * DAY;
+    const refused = await chat(svc, key);
+    assert.equal(refused.status, 403);
+    assert.equal(((await refused.json()) as { error: { code: string } }).error.code, "server_keys_unavailable");
+  });
+
   it("handles each event id once", async () => {
     const svc = await service();
     await person(svc);
@@ -302,7 +321,7 @@ describe("Pro through its payment events", () => {
     assert.match(spend[1]!, /^1,0,0,10,10,/, "one subscriber, $10 revenue once (before tax)");
   });
 
-  it("uses Pro's 100M a week as paid usage, outside the free budget", async () => {
+  it("uses Pro's weekly allowance as paid usage, outside the free budget", async () => {
     const svc = await service({ GLOBAL_WEEKLY_USD_CAP: "1" });
     const free = await person(svc, 100);
     const pro = await person(svc, 101);
@@ -323,8 +342,9 @@ describe("Pro through its payment events", () => {
 });
 
 describe("top-ups", () => {
-  it("adds 50M tokens for 30 days, used after the weekly allowance, then expires", async () => {
-    const svc = await service({ WEEKLY_TOKENS: "40000" });
+  it("an old token top-up checkout adds 50M tokens for 30 days, used after the weekly allowance, then expires", async () => {
+    // DeepSeek has no token cap: its week ends at its dollar budget.
+    const svc = await service({ DEEPSEEK_WEEKLY_USD_CAP: "0.01" });
     const { key } = await person(svc);
     svc.setOpenRouter(() => completion(usage(20_000, 20_000, 0, 0.01)));
     assert.equal((await chat(svc, key)).status, 200, "the weekly allowance first");
@@ -337,7 +357,7 @@ describe("top-ups", () => {
     assert.equal((await chat(svc, key)).status, 200, "now from the top-up");
     const after = await me(svc, key);
     assert.equal(after.topupTokensLeft, 50_000_000 - 40_000);
-    assert.equal(after.allowance.usedThisWeek, 40_000, "the week's counter is unchanged");
+    assert.equal(after.pools.deepseek.usedThisWeek, 40_000, "the week's counter is unchanged");
     assert.equal((await svc.directory().spend(svc.clock.now)).paidRequests, 1, "top-up use is paid usage");
 
     // A second delivery of the same purchase (a new event id, same session) doesn't add twice.
@@ -370,6 +390,7 @@ describe("top-ups", () => {
 
     // An open sign-up now waits in line; a top-up or Pro lets them work anyway.
     const queuedTokens = await svc.signIn({ id: 300, login: "late" });
+    allowServerKeys(svc, 300);
     const keyResponse = await svc.request("POST", "/v1/keys", { token: queuedTokens.access_token, body: { name: "k" } });
     const queuedKey = ((await keyResponse.json()) as { key: string }).key;
     const refused = await chat(svc, queuedKey);
@@ -392,7 +413,7 @@ describe("the dashboard's paid section", () => {
     svc.setOpenRouter(() => completion(usage(10, 10, 0, 0.25)));
     await chat(svc, pro.key);
     const admin = (await svc.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
-    const html = await (await svc.request("GET", "/admin", { token: admin })).text();
+    const html = await (await svc.request("GET", "/admin?view=full", { token: admin })).text();
     assert.match(html, /Pro subscribers<b>1<\/b>/);
     assert.match(html, /Top-ups<b>1 <span class="muted">this week<\/span><\/b>/);
     assert.match(html, /Revenue, before tax<b>\$13\.00 <span class="muted">this week<\/span><\/b>/);

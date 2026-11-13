@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, completion, createInvite, createService, errorCode, MODEL, sse, usage, type Service } from "./harness.js";
+import { ADMIN_ID, completion, createInvite, createService, errorCode, MODEL, openaiResponse, responsesUsage, sse, usage, type Service } from "./harness.js";
 
 async function member(vars: Record<string, string> = {}): Promise<{ service: Service; token: string; adminToken: string }> {
   const service = await createService(vars);
@@ -12,8 +12,21 @@ async function member(vars: Record<string, string> = {}): Promise<{ service: Ser
 const chat = (service: Service, token: string, body: Record<string, unknown> = {}, headers: Record<string, string> = {}) =>
   service.request("POST", "/v1/chat/completions", { token, headers, body: { model: MODEL, messages: [{ role: "user", content: "hello" }], ...body } });
 
+/** DeepSeek's week, as /v1/me shows it: its pool's tokens (no token cap) and its own dollar budget. */
 async function me(service: Service, token: string) {
-  return ((await (await service.request("GET", "/v1/me", { token })).json()) as { allowance: { usedThisWeek: number; remaining: number; spentUsdThisWeek: number } }).allowance;
+  const body = (await (await service.request("GET", "/v1/me", { token })).json()) as {
+    pools: Record<string, { usedThisWeek: number; remaining: number | null }>;
+    budgets: Record<string, { usdPerWeek: number | null; spentUsd: number }>;
+  };
+  return { usedThisWeek: body.pools.deepseek!.usedThisWeek, remaining: body.pools.deepseek!.remaining, spentUsdThisWeek: body.budgets.deepseek!.spentUsd, usdPerWeek: body.budgets.deepseek!.usdPerWeek };
+}
+
+/** GPT-6 Luna on a fake OpenAI: a pool with a token cap. */
+const lunaChat = (service: Service, token: string, body: Record<string, unknown> = {}) =>
+  service.request("POST", "/v1/chat/completions", { token, body: { model: "gpt-6-luna", messages: [{ role: "user", content: "hello" }], ...body } });
+
+async function lunaMe(service: Service, token: string) {
+  return ((await (await service.request("GET", "/v1/me", { token })).json()) as { allowance: { usedThisWeek: number; remaining: number } }).allowance;
 }
 
 describe("chat completions", () => {
@@ -41,9 +54,9 @@ describe("chat completions", () => {
     // Cached tokens count at their price relative to input (0.02): 200 + 34 + ceil(1000 × 0.02).
     const allowance = await me(service, token);
     assert.equal(allowance.usedThisWeek, 254);
-    assert.equal(allowance.remaining, 50_000_000 - 254);
+    assert.equal(allowance.remaining, null, "DeepSeek has no token cap: its dollar budget is the limit");
     assert.equal(allowance.spentUsdThisWeek, 0.0021, "the USD cap uses the real reported cost");
-    assert.equal(response.headers.get("x-dl-tokens-remaining"), String(50_000_000 - 254));
+    assert.equal(response.headers.get("x-dl-tokens-remaining"), null, "no token count for a pool without a token cap");
     assert.equal(response.headers.get("x-dl-quota-resets-at"), "2026-11-09T00:00:00.000Z");
   });
 
@@ -136,7 +149,6 @@ describe("chat completions", () => {
     const response = await chat(service, token, { stream: true });
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
-    assert.ok(response.headers.get("x-dl-tokens-remaining"));
     const text = await response.text();
     assert.match(text, /héllo/);
     assert.match(text, /\[DONE\]/);
@@ -162,48 +174,52 @@ describe("chat completions", () => {
     await response.body!.cancel();
     const allowance = await me(service, token);
     assert.ok(allowance.usedThisWeek > 300, "charged the reservation");
-    assert.equal(allowance.remaining, 50_000_000 - allowance.usedThisWeek, "nothing left reserved");
+    const held = await service.account(100).allowance(service.clock.now, { weeklyTokens: 50_000_000, weeklyUsd: undefined }, "deepseek");
+    assert.equal(held.pools.deepseek.reserved, 0, "nothing left reserved");
   });
 
   it("clamps max_tokens so a request can't overshoot, then refuses with quota_exceeded", async () => {
-    const { service, token, adminToken } = await member();
+    // GPT-6 Luna: DeepSeek has no token cap to clamp to.
+    const { service, token, adminToken } = await member({ OPENAI_API_KEY: "sk-openai-test" });
     await service.request("POST", "/admin/people/100/grant", { token: adminToken, body: { tokensPerWeek: 5000 } });
-    service.setOpenRouter(() => completion(usage(40, 10)));
-    await chat(service, token, { max_tokens: 100_000 });
-    const firstMax = service.calls.openRouter[0]!.body.max_tokens as number;
+    service.setOpenAI(() => openaiResponse(responsesUsage(40, 10)));
+    await lunaChat(service, token, { max_tokens: 100_000 });
+    const firstMax = service.calls.openai[0]!.body.max_output_tokens as number;
     assert.ok(firstMax <= 5000 && firstMax > 0);
 
     await service.request("POST", "/admin/people/100/grant", { token: adminToken, body: { usedThisWeek: 4900 } });
-    const refused = await chat(service, token);
+    // DeepSeek's week used up too: the existing quota_exceeded applies (see gpt_limit for the other case).
+    await service.request("POST", "/admin/people/100/grant", { token: adminToken, body: { deepseekSpentUsdThisWeek: 1000 } });
+    const refused = await lunaChat(service, token);
     assert.equal(refused.status, 402);
     const body = (await refused.json()) as { error: { code: string; resetsAt: string; reason: string } };
     assert.equal(body.error.code, "quota_exceeded");
     assert.equal(body.error.reason, "tokens");
     assert.equal(body.error.resetsAt, "2026-11-09T00:00:00.000Z");
     assert.equal(refused.headers.get("x-dl-tokens-remaining"), "100");
-    assert.equal(service.calls.openRouter.length, 1, "nothing was forwarded");
+    assert.equal(service.calls.openai.length, 1, "nothing was forwarded");
   });
 
   it("holds concurrent reservations against the same allowance", async () => {
-    const { service, token, adminToken } = await member();
+    const { service, token, adminToken } = await member({ OPENAI_API_KEY: "sk-openai-test" });
     await service.request("POST", "/admin/people/100/grant", { token: adminToken, body: { tokensPerWeek: 2000 } });
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    service.setOpenRouter(async () => {
+    service.setOpenAI(async () => {
       await gate;
-      return completion(usage(10, 10));
+      return openaiResponse(responsesUsage(10, 10));
     });
-    const first = chat(service, token, { max_tokens: 1900 });
+    const first = lunaChat(service, token, { max_tokens: 1900 });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    const second = await chat(service, token, { max_tokens: 1900 });
+    const second = await lunaChat(service, token, { max_tokens: 1900 });
     assert.equal(second.status, 402, "the first request's reservation is still held");
     release();
     assert.equal((await first).status, 200);
-    assert.equal((await me(service, token)).usedThisWeek, 20);
+    assert.equal((await lunaMe(service, token)).usedThisWeek, 20);
   });
 
   it("ends a person's week at the spending cap too", async () => {
-    const { service, token } = await member({ PER_PERSON_WEEKLY_USD_CAP: "0.01" });
+    const { service, token } = await member({ DEEPSEEK_WEEKLY_USD_CAP: "0.01" });
     service.setOpenRouter(() => completion(usage(245_000, 100, 30_000, 0.012)));
     assert.equal((await chat(service, token)).status, 200);
     const refused = await chat(service, token);
@@ -211,12 +227,13 @@ describe("chat completions", () => {
     const body = (await refused.json()) as { error: { code: string; reason: string } };
     assert.equal(body.error.code, "quota_exceeded");
     assert.equal(body.error.reason, "spend");
-    assert.equal((await me(service, token)).remaining, 0);
+    const after = await me(service, token);
+    assert.ok(after.spentUsdThisWeek >= (after.usdPerWeek ?? Infinity));
   });
 
   it("resets the allowance on Monday 00:00 UTC", async () => {
     const { service, token, adminToken } = await member();
-    await service.request("POST", "/admin/people/100/grant", { token: adminToken, body: { usedThisWeek: 50_000_000 } });
+    await service.request("POST", "/admin/people/100/grant", { token: adminToken, body: { usedThisWeek: 50_000_000, spentUsdThisWeek: 1000, deepseekSpentUsdThisWeek: 1000 } });
     assert.equal(await errorCode(await chat(service, token)), "quota_exceeded");
     service.clock.now = Date.parse("2026-11-08T23:59:59.000Z");
     const refreshed = (await (await service.request("POST", "/v1/token/refresh", { body: { refresh_token: (await service.signIn({ id: 100, login: "alice" })).refresh_token } })).json()) as { access_token: string };
@@ -271,7 +288,7 @@ describe("chat completions", () => {
   it("charges reservations whose request never came back for their prompt, not the whole reservation", async () => {
     const { service, token } = await member();
     const person = service.account(100);
-    const reserved = await person.reserve({ promptEstimate: 100, requestedMaxTokens: 400, limits: { weeklyTokens: 50_000_000, weeklyUsd: 5 }, now: service.clock.now });
+    const reserved = await person.reserve({ pool: "deepseek", model: MODEL, promptEstimate: 100, requestedMaxTokens: 400, limits: { weeklyTokens: 50_000_000, weeklyUsd: 5 }, now: service.clock.now });
     assert.equal(reserved.ok, true);
     assert.equal(await person.sweep(service.clock.now + 31 * 60_000), 1);
     // The prompt estimate (100), not the reservation (100 + 400 of output never delivered).

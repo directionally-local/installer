@@ -31,7 +31,9 @@ describe("runtime settings (units)", () => {
     assert.equal(next.globalTotalUsdCap, 7000, "untouched settings keep the env value");
     assert.deepEqual(settingsView(config), {
       weeklyTokens: 50_000_000,
-      perPersonWeeklyUsdCap: 20,
+      perPersonWeeklyUsdCap: 2,
+      deepseekWeeklyUsdCap: 8,
+      grantWeeklyUsdCap: 20,
       globalWeeklyUsdCap: 2000,
       globalTotalUsdCap: 7000,
       maxActiveUsers: 50,
@@ -40,8 +42,25 @@ describe("runtime settings (units)", () => {
       fullMinAccountAgeDays: 90,
       fullMinPublicRepos: 3,
       fullMinContributions: 50,
-      starterWeeklyTokens: 5_000_000,
+      humanSignalsNeeded: 3,
+      minActiveWeeks: 8,
+      minRepoAgeDays: 180,
+      minSocial: 10,
+      minFollowers: 3,
+      batchWindowDays: 1,
+      batchSize: 15,
+      starterWeeklyTokens: 50_000_000,
+      starterWeeklyUsdCap: 2,
+      starterDeepseekWeeklyUsdCap: 8,
+      basicMinAccountAgeDays: 365,
+      basicWeeklyTokens: 50_000_000,
+      basicWeeklyUsdCap: 2,
+      basicDeepseekWeeklyUsdCap: 8,
+      proWeeklyUsdCap: 6,
+      proDeepseekWeeklyUsdCap: 40,
       networkSignupsPerDay: 3,
+      blockedEmails: [],
+      domainSignupsPerDay: 5,
       cachedTokenWeight: 0.02,
       openRouterProviderOrder: [],
       openRouterQuantizations: ["fp8", "mxfp8", "fp16", "bf16", "fp32"],
@@ -60,6 +79,7 @@ describe("runtime settings (units)", () => {
       luminalFirstByteTimeoutSeconds: 30,
       userEmails: true,
       dlOnly: true,
+      accessRequestAlerts: "each",
     });
   });
 
@@ -104,23 +124,25 @@ describe("admin config", () => {
     assert.deepEqual(view.log, []);
   });
 
-  it("changes the weekly token allowance and per-person USD cap without a release", async () => {
+  it("changes the weekly token allowance and both per-person dollar budgets without a release", async () => {
     const { service, admin, token } = await setup();
-    const set = await service.request("POST", "/admin/config", { token: admin, body: { weeklyTokens: 1000, perPersonWeeklyUsdCap: 2.5 } });
+    const set = await service.request("POST", "/admin/config", { token: admin, body: { weeklyTokens: 1000, perPersonWeeklyUsdCap: 2.5, deepseekWeeklyUsdCap: 0.0001 } });
     assert.equal(set.status, 200);
     const lowered = await allowance(service, token);
     assert.equal(lowered.tokensPerWeek, 1000);
     assert.equal(lowered.usdPerWeek, 2.5);
+    // A DeepSeek request: DeepSeek's budget ($0.0001) is what stops it.
     service.setOpenRouter(() => completion(usage(800, 100)));
     assert.equal((await chat(service, token)).status, 200);
     const refused = await chat(service, token);
     assert.equal(refused.status, 402, "the lower allowance applies to the next request");
     assert.equal(await errorCode(refused), "quota_exceeded");
 
-    await service.request("POST", "/admin/config", { token: admin, body: { weeklyTokens: null, perPersonWeeklyUsdCap: null } });
+    await service.request("POST", "/admin/config", { token: admin, body: { weeklyTokens: null, perPersonWeeklyUsdCap: null, deepseekWeeklyUsdCap: null } });
     const back = await allowance(service, token);
     assert.equal(back.tokensPerWeek, 50_000_000);
-    assert.equal(back.usdPerWeek, 20);
+    assert.equal(back.usdPerWeek, 2);
+    assert.equal((await chat(service, token)).status, 200, "DeepSeek's default budget is back");
   });
 
   it("a per-person grant still wins over the runtime default", async () => {
@@ -146,7 +168,7 @@ describe("admin config", () => {
     assert.equal((await chat(service, token)).status, 200);
 
     const spend = (await (await service.request("GET", "/admin/spend", { token: admin })).json()) as { caps: Record<string, number | null> };
-    assert.deepEqual(spend.caps, { globalWeeklyUsd: null, globalTotalUsd: 100, perPersonWeeklyUsd: 20, weeklyTokens: 50_000_000 });
+    assert.deepEqual(spend.caps, { globalWeeklyUsd: null, globalTotalUsd: 100, perPersonWeeklyUsd: 2, deepseekWeeklyUsd: 8, weeklyTokens: 50_000_000 });
   });
 
   it("validates input and changes nothing on a bad request", async () => {

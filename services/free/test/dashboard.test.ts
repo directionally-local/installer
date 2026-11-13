@@ -74,7 +74,7 @@ describe("admin dashboard sign-in", () => {
     for (const attribute of ["Path=/", "HttpOnly", "Secure", "SameSite=Strict", "Max-Age=3600"]) assert.ok(session.includes(attribute), attribute);
     assert.ok(setCookies.some((value) => value.startsWith("__Host-dl_admin_oauth=;") && value.includes("Max-Age=0")));
 
-    const page = await service.request("GET", "/admin", { headers: { cookie: cookie! } });
+    const page = await service.request("GET", "/admin?view=full", { headers: { cookie: cookie! } });
     assert.equal(page.status, 200);
     const html = await page.text();
     assert.match(html, /Signed in as <strong>owner<\/strong>/);
@@ -172,7 +172,7 @@ describe("admin dashboard sign-in", () => {
 describe("admin dashboard page", () => {
   it("is plain HTML that works under a strict content security policy", async () => {
     const service = await createService();
-    const response = await service.request("GET", "/admin", { headers: { cookie: await adminCookie(service) } });
+    const response = await service.request("GET", "/admin?view=full", { headers: { cookie: await adminCookie(service) } });
     const csp = response.headers.get("content-security-policy")!;
     assert.match(csp, /default-src 'none'/);
     assert.match(csp, /frame-ancestors 'none'/);
@@ -207,12 +207,13 @@ describe("admin dashboard numbers", () => {
     await admit(100, "alice", "2026-10-12");
     await admit(101, "bob", "2026-10-13");
     await admit(102, "carol", "2026-10-26");
+    // GPT-6 requests: the limits table holds them to the GPT-6 budget.
     const request = (githubId: number, when: string, costUsd: number, chargedTokens = 1000) =>
       directory.recordRequest({
         githubId,
         isAdmin: githubId === ADMIN_ID,
         at: at(when),
-        model: MODEL,
+        model: "gpt-6-luna",
         promptTokens: chargedTokens,
         completionTokens: 0,
         cachedTokens: 0,
@@ -303,7 +304,7 @@ describe("admin dashboard numbers", () => {
         ["2026-11-02", "carol", "2026-11-04", "tokens", "1000000", "5"],
       ],
     );
-    const html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    const html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
     assert.match(html, /Tue 2026-11-03/);
   });
 
@@ -318,7 +319,7 @@ describe("admin dashboard numbers", () => {
     assert.doesNotMatch(html, /<script|\sstyle="|<link|@import/i);
     assert.match(html, /prefers-color-scheme: dark/);
     // The toggle, Simple current; the free tier's state as a pill.
-    assert.match(html, /<nav class="views" aria-label="Dashboard view"><a href="\/admin\?view=simple" aria-current="page">Simple<\/a><a href="\/admin\?view=full">Full<\/a><\/nav>/);
+    assert.match(html, /<nav class="views" aria-label="Dashboard view"><a href="\/admin">Home<\/a><a href="\/admin\?view=simple" aria-current="page">Simple<\/a><a href="\/admin\?view=full">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><a href="\/admin\?view=health">Health<\/a><\/nav>/);
     assert.match(html, /class="pill open"[^>]*>Free tier open</);
     // The four cards, and nothing from the full view's tables.
     for (const id of ["signups", "growth", "tokens", "flags"]) assert.match(html, new RegExp(`<section class="card[^"]*" id="${id}"`));
@@ -330,7 +331,7 @@ describe("admin dashboard numbers", () => {
     // Tokens per person: carol and alice, coloured by level, never the admin.
     assert.match(html, /<title>carol: 995\.0k tokens this week \(Full\)<\/title>/);
     assert.match(html, /<title>alice: 2\.0k tokens this week \(Full\)<\/title>/);
-    assert.match(html, /<i class="c1"><\/i>Full<\/span><span><i class="c2"><\/i>Starter/);
+    assert.match(html, /<i class="c1"><\/i>Full<\/span><span><i class="c3"><\/i>Basic<\/span><span><i class="c2"><\/i>Starter/);
     assert.doesNotMatch(html, /owner: /);
     // Red flags: alice and carol reached their allowance this week; the line links to the full view's table.
     assert.match(html, /<li><a href="\/admin\?view=full#limits">Near weekly cap: alice, carol<\/a><\/li>/);
@@ -359,16 +360,17 @@ describe("admin dashboard numbers", () => {
     assert.match(html, /No tokens used this week\./);
   });
 
-  it("keeps the full view as the default, unchanged but for the toggle", async () => {
+  it("keeps the full view at ?view=full, unchanged but for the toggle; anything else is the home screen", async () => {
     const { service, cookie } = await scenario();
     const page = async (path: string) => (await (await service.request("GET", path, { headers: { cookie } })).text()).replace(/nonce="[0-9a-f]+"/, 'nonce=""');
-    const full = await page("/admin");
-    assert.equal(await page("/admin?view=full"), full);
-    assert.equal(await page("/admin?view=something-else"), full);
-    assert.match(full, /<span class="who"><nav class="views" aria-label="Dashboard view"><a href="\/admin\?view=simple">Simple<\/a><a href="\/admin\?view=full" aria-current="page">Full<\/a><\/nav>Signed in as/);
+    const full = await page("/admin?view=full");
+    const home = await page("/admin");
+    assert.match(home, /<h2 id="ok-h">Are we OK\?<\/h2>/);
+    assert.equal(await page("/admin?view=something-else"), home);
+    assert.match(full, /<span class="who"><nav class="views" aria-label="Dashboard view"><a href="\/admin">Home<\/a><a href="\/admin\?view=simple">Simple<\/a><a href="\/admin\?view=full" aria-current="page">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><a href="\/admin\?view=health">Health<\/a><\/nav>Signed in as/);
     // Every section of the full view is still there, in order.
     const headings = [...full.matchAll(/<h2>([^<]+)<\/h2>/g)].map((match) => match[1]);
-    assert.deepEqual(headings.slice(0, 3), ["Budget: Luminal credit", "Abuse", "Upstreams"]);
+    assert.deepEqual(headings.slice(0, 3), ["Spend", "Abuse", "Upstreams"]);
     for (const heading of ["Queue for free tokens", "Referrals", "Paid plans", "Funnel", "Weekly active developers", "Cohort retention", "Cost per user per week", "Who hit the limit", "Admin log"]) assert.ok(headings.includes(heading), heading);
     assert.match(full, /<form method="post" action="\/admin\/dashboard\/people\/100\/block">/);
     assert.doesNotMatch(full, /class="card/);
@@ -385,7 +387,7 @@ describe("admin dashboard numbers", () => {
     assert.equal(row!.admitted, "3");
     const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
     await service.request("POST", "/admin/pause", { token: adminToken });
-    const html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    const html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
     assert.match(html, /Paused for everyone/);
     assert.doesNotMatch(html, /<td>owner</);
   });
@@ -415,6 +417,115 @@ describe("admin dashboard numbers", () => {
   });
 });
 
+describe("admin dashboard daily retention", () => {
+  /**
+   * NOW is Wednesday 2026-11-04 12:00 UTC. Sign-up day 10-20: alice (D0, D1, D14), bob (D2 only),
+   * dave (never), carol (blocked, D1) and the admin (every day). Sign-up day 11-02: erin (D0, a
+   * session event but no request on D1, and D2, which is today and hasn't ended). gina signed up
+   * today and made a request: a row with no cells yet. frank signed up 10-25 and is blocked.
+   */
+  async function retentionScenario(): Promise<{ service: Service; cookie: string }> {
+    const service = await createService();
+    const directory = service.directory();
+    const admit = (githubId: number, login: string, when: string, isAdmin = false) =>
+      directory.admit({ githubId, login, isAdmin, inviteCode: undefined, clientDeviceId: null, accountTooNew: false, openAdmission: true, maxActive: 100, now: at(when) });
+    const request = (githubId: number, when: string) =>
+      directory.recordRequest({
+        githubId,
+        isAdmin: githubId === ADMIN_ID,
+        at: at(when),
+        model: MODEL,
+        promptTokens: 1000,
+        completionTokens: 0,
+        cachedTokens: 0,
+        chargedTokens: 1000,
+        costUsd: 0.01,
+        status: "ok",
+        latencyMs: 100,
+      });
+    await admit(ADMIN_ID, "owner", "2026-10-20T08:00:00Z", true);
+    await admit(100, "alice", "2026-10-20T09:00:00Z");
+    await admit(101, "bob", "2026-10-20T23:30:00Z");
+    await admit(102, "carol", "2026-10-20T10:00:00Z");
+    await admit(103, "dave", "2026-10-20T11:00:00Z");
+    await admit(104, "erin", "2026-11-02T07:00:00Z");
+    await admit(105, "frank", "2026-10-25T07:00:00Z");
+    await admit(106, "gina", "2026-11-04T08:00:00Z");
+    await request(106, "2026-11-04T09:00:00Z");
+    await request(100, "2026-10-20T09:30:00Z");
+    await request(100, "2026-10-21");
+    await request(100, "2026-11-03");
+    await request(101, "2026-10-22");
+    await request(102, "2026-10-21");
+    await request(105, "2026-10-25T08:00:00Z");
+    await request(104, "2026-11-02T08:00:00Z");
+    await directory.recordEvents(104, [{ id: "r1", type: "session.start", sessionId: "s", at: at("2026-11-03"), props: {} }], NOW);
+    await request(104, "2026-11-04T10:00:00Z");
+    for (let day = at("2026-10-20"); day <= NOW; day += DAY) await request(ADMIN_ID, new Date(day).toISOString());
+    const db = directoryEntry(service).state.db;
+    db.prepare("UPDATE people SET status = 'blocked' WHERE github_id IN (102, 105)").run();
+    return { service, cookie: await adminCookie(service) };
+  }
+
+  it("computes the share active on each day after sign-up, blank until the day has ended, without admins or blocked accounts", async () => {
+    const { service, cookie } = await retentionScenario();
+    const rows = await csv(service, cookie, "retention-daily");
+    assert.deepEqual(Object.keys(rows[0]!), ["cohort", "size", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d14"]);
+    const third = String(Math.round((1 / 3) * 1e6) / 1e6);
+    assert.deepEqual(
+      rows.map((row) => Object.values(row)),
+      [
+        ["2026-11-04", "1", "", "", "", "", "", "", "", "", ""],
+        ["2026-11-02", "1", "1", "0", "", "", "", "", "", "", ""],
+        ["2026-10-20", "3", third, third, third, "0", "0", "0", "0", "0", third],
+      ],
+    );
+
+    const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    const metrics = (await (await service.request("GET", "/admin/metrics", { token: adminToken })).json()) as { cohorts: Array<{ day: string; size: number; d: Record<string, number | null> }> };
+    assert.deepEqual(metrics.cohorts, [
+      { day: "2026-11-04", size: 1, d: { 0: null, 1: null, 2: null, 3: null, 4: null, 5: null, 6: null, 7: null, 14: null } },
+      { day: "2026-11-02", size: 1, d: { 0: 1, 1: 0, 2: null, 3: null, 4: null, 5: null, 6: null, 7: null, 14: null } },
+      { day: "2026-10-20", size: 3, d: { 0: 0.3333, 1: 0.3333, 2: 0.3333, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 14: 0.3333 } },
+    ]);
+
+    const full = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
+    assert.match(full, /<h2>Daily retention<\/h2><a href="\/admin\/dashboard\/retention-daily\.csv" download>CSV<\/a>/);
+    assert.match(full, /<tr><td>Wed 2026-11-04<\/td><td>1<\/td>(<td class="muted">–<\/td>){9}<\/tr>/);
+    assert.match(full, /<tr><td>Mon 2026-11-02<\/td><td>1<\/td><td title="1 of 1">100% <span class="muted">\(1\)<\/span><\/td><td title="0 of 1">0%/);
+  });
+
+  it("draws the retention card: a triangle of cells with tooltips, D14 only in the wide drawing, and the weighted D1 and D7", async () => {
+    const { service, cookie } = await retentionScenario();
+    const html = await (await service.request("GET", "/admin?view=simple", { headers: { cookie } })).text();
+    assert.doesNotMatch(html, /<script|\sstyle="/i);
+    assert.match(html, /<section class="card span3" id="retention" aria-label="Retention">\n<h2>Retention<\/h2>/);
+    const [wide, narrow] = [...html.matchAll(/<svg class="chart heat (wide|narrow)"[\s\S]*?<\/svg>/g)].map((match) => match[0]);
+    assert.ok(wide && narrow);
+    const cells = (svg: string) => [...svg.matchAll(/<title>([^<]* · D\d+ [^<]*)<\/title>/g)].map((match) => match[1]);
+    // Newest first; today's cohort (gina) has no cells, erin's has D0 and D1 (D2 is today), 10-20 has all nine.
+    assert.deepEqual(cells(wide), [
+      "Nov 2 · 1 person · D0 100% (1)",
+      "Nov 2 · 1 person · D1 0% (0)",
+      ...[0, 1, 2].map((d) => `Oct 20 · 3 people · D${d} 33% (1)`),
+      ...[3, 4, 5, 6, 7].map((d) => `Oct 20 · 3 people · D${d} 0% (0)`),
+      "Oct 20 · 3 people · D14 33% (1)",
+    ]);
+    assert.deepEqual(cells(narrow), cells(wide).slice(0, -1));
+    assert.match(wide, />D14<\/text>/);
+    assert.doesNotMatch(narrow, />D14</);
+    assert.match(html, /<p class="avg">Average D1 <b>25%<\/b> <span class="muted">\(2 cohorts, 4 people\)<\/span> · D7 <b>0%<\/b> <span class="muted">\(1 cohort, 3 people\)<\/span>, weighted by cohort size\.<\/p>/);
+    assert.match(wide, /<title>Nov 4 · 1 person<\/title>/);
+    assert.doesNotMatch(html, /Nov 4 · 1 person · D|owner|carol|frank|NaN/);
+  });
+
+  it("says so when nobody has signed up", async () => {
+    const service = await createService();
+    const html = await (await service.request("GET", "/admin?view=simple", { headers: { cookie: await adminCookie(service) } })).text();
+    assert.match(html, /id="retention"[^>]*>\n<h2>Retention<\/h2>\n<p class="caption">Counts only people who could use dl[^<]*<\/p>\n<p class="empty">No sign-ups with free tokens yet\.<\/p>/);
+  });
+});
+
 describe("admin dashboard install funnel", () => {
   it("shows scripts served → installs → sign-ups → first request → active, per day and per week, with a CSV", async () => {
     const service = await createService();
@@ -431,6 +542,7 @@ describe("admin dashboard install funnel", () => {
     await post("install", install, "2026-11-03", 4);
     await post("install", { ...install, os: "linux", arch: "x64", mode: "server", result: "failed", failedStep: "dl_up" }, "2026-11-03", 2);
     await post("install", { ...install, result: "failed", failedStep: "node" }, "2026-11-04");
+    await post("install", { ...install, os: "linux", result: "failed", failedStep: "preflight", failedReason: "arm32" }, "2026-11-04");
     service.clock.now = NOW;
     const admit = (githubId: number, login: string, when: string, isAdmin = false) =>
       directory.admit({ githubId, login, isAdmin, inviteCode: undefined, clientDeviceId: null, accountTooNew: false, openAdmission: true, maxActive: 100, now: at(when) });
@@ -459,10 +571,10 @@ describe("admin dashboard install funnel", () => {
     });
     assert.deepEqual(
       [row("day", "2026-11-04").scripts_served, row("day", "2026-11-04").installs_failed, row("day", "2026-11-04").active],
-      ["3", "1", "2"],
+      ["3", "2", "2"],
     );
     const thisWeek = row("week", "2026-11-02");
-    assert.deepEqual([thisWeek.scripts_served, thisWeek.installs_ok, thisWeek.installs_failed, thisWeek.signed_up, thisWeek.first_request, thisWeek.active], ["10", "4", "3", "2", "1", "0"]);
+    assert.deepEqual([thisWeek.scripts_served, thisWeek.installs_ok, thisWeek.installs_failed, thisWeek.signed_up, thisWeek.first_request, thisWeek.active], ["10", "4", "4", "2", "1", "0"]);
     const lastWeek = row("week", "2026-10-26");
     assert.deepEqual([lastWeek.scripts_served, lastWeek.signed_up, lastWeek.first_request, lastWeek.active], ["4", "1", "1", "1"], "carol: 3 request days");
 
@@ -472,16 +584,19 @@ describe("admin dashboard install funnel", () => {
       [
         ["system", "darwin", "arm64", "laptop", "", "4", "1"],
         ["system", "linux", "x64", "server", "", "0", "2"],
+        ["system", "linux", "arm64", "laptop", "", "0", "1"],
         ["failed_step", "", "", "", "dl_up", "", "2"],
         ["failed_step", "", "", "", "node", "", "1"],
+        ["failed_step", "", "", "", "preflight:arm32", "", "1"],
       ],
     );
 
-    const html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
+    const html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
     assert.match(html, /<h2>Funnel<\/h2>/);
     assert.match(html, /Anonymous counts: one per script served/);
     assert.match(html, /can't be joined to people/);
     assert.match(html, /Server setup \(dl up\)<\/td><td>2</);
+    assert.match(html, /Checks \(system, user, curl\): 32-bit ARM system<\/td><td>1</, "with why, when the script said");
     assert.match(html, /macOS arm64<\/td><td>laptop<\/td><td>4<\/td><td>1</);
     assert.match(html, /install-funnel\.csv/);
     assert.match(html, /<h3>By sign-up week<\/h3>/);
@@ -491,7 +606,7 @@ describe("admin dashboard install funnel", () => {
 describe("admin dashboard privacy", () => {
   // Columns that hold anything but counts, tokens, cost, time or who: never read by the dashboard.
   const FORBIDDEN = ["props", "session_id", "type", "model", "status", "received_at", "latency_ms", "note", "code_hash", "device_id", "old_value", "new_value", "changed_by_login"];
-  const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_timings", "download_daily", "install_daily"]);
+  const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_people", "upstream_timings", "download_daily", "install_daily", "refused_days"]);
 
   // The abuse section reads network hashes, device ids, status and the admin log on purpose:
   // its queries carry ABUSE_QUERY_TAG and are held to ABUSE_COLUMNS instead.
@@ -521,9 +636,9 @@ describe("admin dashboard privacy", () => {
       return SQLITE_OK;
     });
     try {
-      assert.equal((await service.request("GET", "/admin", { headers: { cookie } })).status, 200);
+      assert.equal((await service.request("GET", "/admin?view=full", { headers: { cookie } })).status, 200);
       assert.equal((await service.request("GET", "/admin?view=simple", { headers: { cookie } })).status, 200);
-      for (const table of ["spend", "weekly-active", "retention", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"]) await csv(service, cookie, table);
+      for (const table of ["spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"]) await csv(service, cookie, table);
     } finally {
       db.prepare = prepare;
       db.setAuthorizer?.(null);
@@ -533,7 +648,9 @@ describe("admin dashboard privacy", () => {
     assert.ok(statements.some((statement) => statement.startsWith(ABUSE_QUERY_TAG)));
     for (const statement of statements) {
       const abuse = statement.startsWith(ABUSE_QUERY_TAG);
-      const code = statement.replace(/'[^']*'/g, "''").replace(/\/\*.*?\*\//g, "");
+      // The one status the dashboard reads: blocked accounts are left out of the daily cohorts
+      // (people.status, held to DASHBOARD_COLUMNS by the authorizer below).
+      const code = statement.replaceAll("p.status != 'blocked'", "").replace(/'[^']*'/g, "''").replace(/\/\*.*?\*\//g, "");
       for (const word of abuse ? CONTENT : FORBIDDEN) assert.doesNotMatch(code, new RegExp(`\\b${word}\\b`, "i"), `${word} in: ${statement}`);
       const ctes = new Set([...code.matchAll(/\b(\w+)\s+AS\s*\(/gi)].map((match) => match[1]!.toLowerCase()));
       for (const match of code.matchAll(/\b(?:FROM|JOIN)\s+(\w+)/gi)) {
@@ -556,77 +673,142 @@ describe("admin dashboard privacy", () => {
   });
 });
 
-describe("admin dashboard speed", () => {
-  it("loads in under 2 seconds with 5,000 accounts and 1M request rows", { timeout: 300_000 }, async () => {
+describe("admin dashboard tokens and people per upstream", () => {
+  /**
+   * NOW is Wednesday 2026-11-04 (the week from Monday 11-02). Last week: alice on OpenRouter
+   * (10-28) and carol on Luminal (10-29). This week: alice on Luminal and OpenAI, bob on Luminal
+   * twice, and the admin on OpenAI (in the tokens, not in the people).
+   */
+  async function upstreamScenario(): Promise<{ service: Service; cookie: string }> {
     const service = await createService();
-    const cookie = await adminCookie(service);
+    const directory = service.directory();
+    const admit = (githubId: number, login: string, isAdmin = false) =>
+      directory.admit({ githubId, login, isAdmin, inviteCode: undefined, clientDeviceId: null, accountTooNew: false, openAdmission: true, maxActive: 100, now: at("2026-10-20") });
+    await admit(ADMIN_ID, "owner", true);
+    await admit(100, "alice");
+    await admit(101, "bob");
+    await admit(102, "carol");
+    const request = (githubId: number, when: string, upstream: "openai" | "luminal" | "openrouter", prompt: number, cached: number, out: number, usd: number) =>
+      directory.recordRequest({
+        githubId,
+        isAdmin: githubId === ADMIN_ID,
+        at: at(when),
+        model: upstream === "openai" ? "openai/gpt-6-mini" : MODEL,
+        promptTokens: prompt,
+        completionTokens: out,
+        cachedTokens: cached,
+        chargedTokens: prompt + out,
+        costUsd: usd,
+        status: "ok",
+        latencyMs: 100,
+        upstream,
+        creditUsd: upstream === "openrouter" ? 0 : usd,
+      });
+    await request(100, "2026-10-28", "openrouter", 1000, 200, 50, 0.01);
+    await request(102, "2026-10-29", "luminal", 500, 0, 10, 0.001);
+    await request(100, "2026-11-03", "luminal", 2000, 1500, 300, 0.02);
+    await request(100, "2026-11-04", "openai", 4000, 0, 600, 0.05);
+    await request(101, "2026-11-04T01:00:00Z", "luminal", 1000, 500, 40, 0.005);
+    await request(101, "2026-11-04T02:00:00Z", "luminal", 2000, 500, 60, 0.005);
+    await request(ADMIN_ID, "2026-11-04", "openai", 10_000, 0, 1000, 0.1);
+    return { service, cookie: await adminCookie(service) };
+  }
+
+  const pick = (rows: Array<Record<string, string>>, window: string, upstream: string) => {
+    const row = rows.find((r) => r.window === window && r.upstream === upstream)!;
+    return [row.users, row.requests, row.prompt_tokens, row.cached_tokens, row.completion_tokens];
+  };
+
+  it("sums tokens in, cached and out, and counts people (admins left out), per upstream and in total", async () => {
+    const { service, cookie } = await upstreamScenario();
+    const rows = await csv(service, cookie, "upstreams");
+    // This week.
+    assert.deepEqual(pick(rows, "week", "openai"), ["1", "2", "14000", "0", "1600"]);
+    assert.deepEqual(pick(rows, "week", "luminal"), ["2", "3", "5000", "2500", "400"]);
+    assert.deepEqual(pick(rows, "week", "openrouter"), ["0", "0", "0", "0", "0"]);
+    assert.deepEqual(pick(rows, "week", "total"), ["2", "5", "19000", "2500", "2000"], "alice counted once across two upstreams");
+    // All time, from the first request.
+    assert.deepEqual(pick(rows, "all_time", "openrouter"), ["1", "1", "1000", "200", "50"]);
+    assert.deepEqual(pick(rows, "all_time", "luminal"), ["3", "4", "5500", "2500", "410"]);
+    assert.deepEqual(pick(rows, "all_time", "openai"), ["1", "2", "14000", "0", "1600"]);
+    assert.deepEqual(pick(rows, "all_time", "total"), ["3", "7", "20500", "2700", "2060"]);
+    // Today.
+    assert.deepEqual(pick(rows, "today", "luminal"), ["1", "2", "3000", "1000", "100"]);
+    // All time has no timings (kept 15 days); the totals' cash and credit add up.
+    const allTotal = rows.find((r) => r.window === "all_time" && r.upstream === "total")!;
+    assert.equal(allTotal.ttft_median_ms, "");
+    assert.equal(Number(allTotal.cash_usd), 0.01);
+    assert.ok(Math.abs(Number(allTotal.credit_usd) - 0.181) < 1e-9);
+
+    const html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
+    const section = html.slice(html.indexOf('<section id="upstream">'), html.indexOf("</section>", html.indexOf('<section id="upstream">')));
+    assert.match(section, /<th>Users<\/th><th>Tokens in<\/th><th>Cached<\/th><th>Tokens out<\/th>/);
+    assert.match(section, /<th>All time, since 2026-10-28<\/th>/);
+    assert.match(section, /<tr class="group sel"><td>Total<\/td><td>7<\/td>.*?<td>3<\/td><td>20.5k<\/td><td>2.7k<\/td><td>2.06k<\/td>/);
+    assert.match(section, /<td>Luminal<\/td><td>3<\/td>.*?<td>2<\/td><td>5k<\/td><td>2.5k<\/td><td>400<\/td>/);
+  });
+
+  it("keeps completion tokens and people with each request", async () => {
+    const { service } = await upstreamScenario();
+    const db = directoryEntry(service).state.db;
+    const today = Math.floor(NOW / DAY);
+    assert.deepEqual({ ...db.prepare("SELECT completion_tokens FROM upstream_daily WHERE day = ? AND upstream = 'openai'").get(today) }, { completion_tokens: 1600 });
+    const day = (iso: string) => Math.floor(at(iso) / DAY);
+    assert.deepEqual(
+      db.prepare("SELECT upstream, github_id, first_day, last_day FROM upstream_people ORDER BY upstream, github_id").all().map((row) => ({ ...row })),
+      [
+        { upstream: "luminal", github_id: 100, first_day: day("2026-11-03"), last_day: day("2026-11-03") },
+        { upstream: "luminal", github_id: 101, first_day: day("2026-11-04"), last_day: day("2026-11-04") },
+        { upstream: "luminal", github_id: 102, first_day: day("2026-10-29"), last_day: day("2026-10-29") },
+        { upstream: "openai", github_id: 100, first_day: day("2026-11-04"), last_day: day("2026-11-04") },
+        { upstream: "openrouter", github_id: 100, first_day: day("2026-10-28"), last_day: day("2026-10-28") },
+      ],
+      "one row per person per upstream with the first and last day, and none for admins",
+    );
+    // A later request moves the last day on.
+    await service.directory().recordRequest({ githubId: 102, isAdmin: false, at: NOW, model: MODEL, promptTokens: 1, completionTokens: 1, cachedTokens: 0, chargedTokens: 2, costUsd: 0, status: "ok", latencyMs: 1, upstream: "luminal" });
+    assert.deepEqual({ ...db.prepare("SELECT first_day, last_day FROM upstream_people WHERE upstream = 'luminal' AND github_id = 102").get() }, { first_day: day("2026-10-29"), last_day: day("2026-11-04") });
+  });
+
+  it("builds completion tokens, missing days and people from the request log once, the same as it keeps them", async () => {
+    const { service, cookie } = await upstreamScenario();
     const entry = directoryEntry(service);
     const db = entry.state.db;
-
-    const PEOPLE = 5000;
-    const REQUESTS = 1_000_000;
-    const EVENTS = 200_000;
-    const span = 12 * 7 * DAY;
-    const start = NOW - span;
-    // mulberry32: small, seeded, and good enough to spread rows over people and days.
-    let seed = 42;
-    const random = () => {
-      seed = (seed + 0x6d2b79f5) | 0;
-      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+    const read = () => ({
+      daily: db.prepare("SELECT * FROM upstream_daily ORDER BY day, upstream").all().map((row) => ({ ...row })),
+      people: db.prepare("SELECT * FROM upstream_people ORDER BY upstream, github_id").all().map((row) => ({ ...row })),
+    });
+    const live = read();
+    assert.equal(live.daily.length, 5);
+    const restart = () => {
+      entry.object = new entry.object.constructor(entry.state, service.env);
     };
-    const generated = performance.now();
-    db.exec("BEGIN");
-    const person = db.prepare("INSERT INTO people (github_id, login, status, admitted_at, admitted_via) VALUES (?, ?, 'active', ?, 'invite:1')");
-    for (let index = 0; index < PEOPLE; index++) person.run(10_000 + index, `dev-${index}`, start + Math.floor(random() * span));
-    const insertRequest = db.prepare(
-      `INSERT INTO requests (github_id, is_admin, at, model, prompt_tokens, completion_tokens, cached_tokens, charged_tokens, cost_usd, status, latency_ms)
-       VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, 'ok', ?)`,
-    );
-    for (let index = 0; index < REQUESTS; index++) {
-      // A skewed mix: a few heavy users, a long tail.
-      const who = 10_000 + Math.floor(PEOPLE * random() ** 2);
-      const prompt = 2000 + Math.floor(random() * 60_000);
-      const cached = Math.floor(prompt * random());
-      const out = Math.floor(random() * 4000);
-      const charged = prompt - cached + out + Math.ceil(cached * 0.02);
-      insertRequest.run(who, start + Math.floor(random() * span), MODEL, prompt, out, cached, charged, charged * 3e-7, 800 + Math.floor(random() * 4000));
-    }
-    const insertEvent = db.prepare("INSERT INTO events (github_id, id, type, session_id, at, props, received_at) VALUES (?, ?, 'turn', 's', ?, '{}', ?)");
-    for (let index = 0; index < EVENTS; index++) insertEvent.run(10_000 + Math.floor(PEOPLE * random()), `e${index}`, start + Math.floor(random() * span), NOW);
-    db.exec("COMMIT");
-    const generateMs = performance.now() - generated;
-
-    // A deploy of this code on an existing log: the roll-up is built once, as the object starts.
-    db.exec("DELETE FROM daily_activity; DELETE FROM settings WHERE key = 'rollup:daily_activity'");
-    const backfill = performance.now();
-    entry.object = new entry.object.constructor(entry.state, service.env);
-    const backfillMs = performance.now() - backfill;
-
-    const timings: Record<string, number> = {};
-    const time = async (name: string, path: string) => {
-      const began = performance.now();
-      const response = await service.request("GET", path, { headers: { cookie } });
-      const body = await response.text();
-      timings[name] = Math.round(performance.now() - began);
-      assert.equal(response.status, 200, `${name}: ${body.slice(0, 200)}`);
-      return body;
+    // The log as it was before this change: no completion tokens, no people, and the days before
+    // upstream_daily existed missing from it.
+    const before = () => {
+      db.exec(`UPDATE upstream_daily SET completion_tokens = 0; DELETE FROM upstream_daily WHERE day < ${Math.floor(at("2026-11-03") / DAY)}; DELETE FROM upstream_people`);
+      db.exec("DELETE FROM settings WHERE key = 'rollup:upstream_tokens_people'");
     };
-    const html = await time("page", "/admin");
-    await time("page again", "/admin");
-    const simple = await time("simple", "/admin?view=simple");
-    for (const table of ["weekly-active", "retention", "weekly-cost", "top-cost", "limits"]) await time(`${table}.csv`, `/admin/dashboard/${table}.csv`);
+    before();
+    restart();
+    assert.deepEqual(read(), live);
+    // Once only: a later start leaves the tables alone.
+    db.exec("DELETE FROM upstream_people");
+    restart();
+    assert.equal(read().people.length, 0);
+    // And running it again on built tables changes nothing.
+    db.exec("DELETE FROM settings WHERE key = 'rollup:upstream_tokens_people'");
+    restart();
+    restart();
+    assert.deepEqual(read(), live);
+    assert.deepEqual(pick(await csv(service, cookie, "upstreams"), "all_time", "total"), ["3", "7", "20500", "2700", "2060"]);
+  });
 
-    const rows = (db.prepare("SELECT COUNT(*) AS n FROM daily_activity").get() as { n: number }).n;
-    console.log(
-      `dashboard speed: ${PEOPLE} people, ${REQUESTS} requests, ${EVENTS} events generated in ${Math.round(generateMs)} ms; ` +
-        `roll-up of ${rows} rows built in ${Math.round(backfillMs)} ms; ${JSON.stringify(timings)}`,
+  it("shows compact numbers", async () => {
+    const { compact } = await import("../src/dashboard-page.js");
+    assert.deepEqual(
+      [0, 412, 999, 1000, 2060, 12_345, 412_000_000, 2_300_000_000, 999_999, 41_249_999].map(compact),
+      ["0", "412", "999", "1k", "2.06k", "12.3k", "412M", "2.3B", "1M", "41.2M"],
     );
-    assert.match(html, /dev-\d+/);
-    assert.ok(timings.page! < 2000, `page took ${timings.page} ms`);
-    assert.ok(timings["page again"]! < 2000);
-    assert.ok(timings.simple! < 2000, `simple view took ${timings.simple} ms`);
-    assert.match(simple, /tokens this week/);
   });
 });

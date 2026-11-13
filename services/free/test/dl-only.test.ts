@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, createInvite, createService, MODEL, type Service } from "./harness.js";
+import { ADMIN_ID, allowServerKeys, createInvite, createService, MODEL, type Service } from "./harness.js";
 
 const DL_ONLY = "Free tokens work inside dl only. Run dl to keep using them, or use your own API key in any tool.";
 const HOUR = 3600_000;
@@ -52,7 +52,7 @@ async function adminCookie(service: Service): Promise<string> {
 const simpleView = async (service: Service, cookie: string) => (await service.request("GET", "/admin?view=simple", { headers: { cookie } })).text();
 
 describe("free tokens inside dl only", () => {
-  it("refuses an account with 20 requests and no session event in the last day, with dl_only", async () => {
+  it("refuses an account with no session events after 20 requests, with dl_only", async () => {
     const { service, token, refreshToken } = await member();
     assert.deepEqual(await chats(service, token, 20), Array(20).fill(200));
     const refused = await chat(service, token);
@@ -63,8 +63,38 @@ describe("free tokens inside dl only", () => {
     assert.equal((await chat(service, token)).status, 403);
     assert.equal(service.calls.openai.length + service.calls.luminal.length + service.calls.openRouter.length, calls, "nothing goes upstream");
 
-    // Once the requests are older than a day, the count starts again.
-    assert.equal((await chat(service, await nextDay(service, refreshToken, 24))).status, 200);
+    // The grace is used up, not renewed: a week later, still refused.
+    assert.equal((await errorOf(await chat(service, await nextDay(service, refreshToken, 24 * 7)))).code, "dl_only");
+  });
+
+  it("never lets an account with no session events use free tokens day after day under the threshold", async () => {
+    const { service, token: first, refreshToken } = await member();
+    assert.deepEqual(await chats(service, first, 15), Array(15).fill(200));
+    const token = await nextDay(service, refreshToken, 25);
+    // 15 yesterday and 5 today: the twentieth request without a session event is the last.
+    assert.deepEqual(await chats(service, token, 5), Array(5).fill(200));
+    const refused = await chat(service, token);
+    assert.equal(refused.status, 403);
+    assert.equal((await errorOf(refused)).code, "dl_only");
+  });
+
+  it("doesn't count an event with no session id as a dl session", async () => {
+    const { service, token } = await member();
+    const sent = await service.request("POST", "/v1/events", { token, body: { events: [{ id: "x1", type: "error", at: new Date(service.clock.now).toISOString() }] } });
+    assert.equal(sent.status, 202);
+    assert.deepEqual(await chats(service, token, 20), Array(20).fill(200));
+    assert.equal((await errorOf(await chat(service, token))).code, "dl_only");
+  });
+
+  it("serves an account with a recent session event, and gives a new session the same grace after a long break", async () => {
+    const { service, token: first, refreshToken } = await member();
+    assert.equal((await sendEvent(service, first, "s-1")).status, 202);
+    assert.deepEqual(await chats(service, first, 30), Array(30).fill(200));
+    // Back three days later: yesterday's requests are covered, the new session's first ones get the grace.
+    const token = await nextDay(service, refreshToken, 72);
+    assert.deepEqual(await chats(service, token, 3), Array(3).fill(200));
+    assert.equal((await sendEvent(service, token, "s-2")).status, 202);
+    assert.deepEqual(await chats(service, token, 30), Array(30).fill(200));
   });
 
   it("never refuses an account that sends session events, even when the first requests come before them", async () => {
@@ -87,6 +117,7 @@ describe("free tokens inside dl only", () => {
 
   it("leaves server keys (dl's server mode) out, and doesn't count their requests", async () => {
     const { service, token } = await member();
+    allowServerKeys(service, 100);
     const { key } = (await (await service.request("POST", "/v1/keys", { token, body: { name: "box" } })).json()) as { key: string };
     assert.deepEqual(await chats(service, key, 25), Array(25).fill(200));
     // The same person on a laptop: the server's requests don't push the sign-in token over.
@@ -138,6 +169,7 @@ describe("free tokens used outside dl, on the dashboard", () => {
   it("leaves admins and server keys out of the flag", async () => {
     const { service, token, adminToken } = await member();
     const cookie = await adminCookie(service);
+    allowServerKeys(service, 100);
     const { key } = (await (await service.request("POST", "/v1/keys", { token, body: { name: "box" } })).json()) as { key: string };
     await chats(service, adminToken, 12);
     await chats(service, key, 12);

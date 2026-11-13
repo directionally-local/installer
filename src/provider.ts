@@ -188,6 +188,9 @@ export function hotcellKeysAddArgs(provider: ProviderAnswer): string[] {
     args.push("--base-url", provider.baseUrl);
     if (provider.authHeader) args.push("--auth-header", provider.authHeader);
     if (provider.authFormat) args.push("--auth-format", provider.authFormat);
+    // A custom route with no key (vLLM on your own GPUs) is only live with --keyless.
+    // Hotcell's built-in keyless routes (ollama, lmstudio) already know they need none.
+    if (isKeyless(provider)) args.push("--keyless");
   }
   return args;
 }

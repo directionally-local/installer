@@ -6,8 +6,8 @@
  *     [--webhook https://free.directionallylocal.com/v1/billing/webhook]
  *
  * Creates, through Stripe's API:
- *   - Product "dl Pro" with a Price of $10.00 a month (recurring), tax behaviour exclusive
- *   - Product "dl top-up, 50M tokens" with a one-time Price of $3.00, tax behaviour exclusive
+ *   - Product "dl Pro" with a Price of $3.99 a month (recurring), tax behaviour exclusive
+ *   - Product "dl top-up" with a one-time Price of $1.00 (bought 2 to 20 at a time), tax behaviour exclusive
  *   - with --webhook: an endpoint for checkout.session.completed, invoice.paid,
  *     invoice.payment_failed, customer.subscription.updated and customer.subscription.deleted
  *
@@ -53,17 +53,17 @@ async function stripe(path, body) {
 // your tax adviser prefers a SaaS code.
 const pro = await stripe("/v1/products", {
   name: "dl Pro",
-  description: "100M tokens a week of DeepSeek V4.1 Flash on the Directionally Local managed tier.",
+  description: "More usage every week on the Directionally Local managed tier, every model.",
   tax_code: "txcd_10000000",
   metadata: { product: "pro" },
-  default_price_data: { currency: "usd", unit_amount: 1000, recurring: { interval: "month" }, tax_behavior: "exclusive" },
+  default_price_data: { currency: "usd", unit_amount: 399, recurring: { interval: "month" }, tax_behavior: "exclusive" },
 });
 const topup = await stripe("/v1/products", {
-  name: "dl top-up, 50M tokens",
-  description: "50M tokens of DeepSeek V4.1 Flash, used after the weekly allowance, valid 30 days.",
+  name: "dl top-up",
+  description: "Each $1 adds $1.25 of usage, spent after the weekly allowance, valid 90 days.",
   tax_code: "txcd_10000000",
   metadata: { product: "topup" },
-  default_price_data: { currency: "usd", unit_amount: 300, tax_behavior: "exclusive" },
+  default_price_data: { currency: "usd", unit_amount: 100, tax_behavior: "exclusive" },
 });
 
 console.log(`STRIPE_PRICE_PRO=${pro.default_price}`);

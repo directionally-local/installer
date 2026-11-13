@@ -19,6 +19,22 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: shellcheck install.sh
+  # Wall-clock speed checks on large generated data (services/**/*.perf.ts). They depend
+  # on the runner's speed, so they're reported here but never block a merge or a
+  # release; they aren't part of `npm test` or prepublish. See issue #222.
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          check-latest: true
+          cache: npm
+      - run: npm ci
+      - run: npm run test:perf
   # The site worker must stay deployable to Serverless Objects as well as
   # Cloudflare. Pinned because the CLI is pre-alpha; bump it deliberately.
   portability:

@@ -59,14 +59,28 @@ async function call(fetcher: Fetch, secretKey: string, path: string, body: Recor
 }
 
 /** The Checkout Session parameters for a product (exported for tests). */
-export function checkoutParams(input: { product: Product; config: StripeConfig; githubId: number; login: string; customerId: string | null }): Record<string, unknown> {
+export function checkoutParams(input: {
+  product: Product;
+  config: StripeConfig;
+  githubId: number;
+  login: string;
+  customerId: string | null;
+  /** A top-up: how many $1 units to start at, and the range the buyer may change it to on the page. */
+  topup?: TopupQuantity;
+}): Record<string, unknown> {
   const { product, config } = input;
   const price = product === "pro" ? config.pricePro : config.priceTopup;
-  const metadata = { github_id: String(input.githubId), github_login: input.login, product };
+  // `topup_kind: usd`: a dollar top-up (usage dollars); a top-up session without it is the old token kind.
+  const metadata = { github_id: String(input.githubId), github_login: input.login, product, ...(product === "topup" ? { topup_kind: "usd" } : {}) };
+  const topup = input.topup;
+  const line =
+    product === "topup" && topup
+      ? { price, quantity: topup.quantity, adjustable_quantity: { enabled: true, minimum: topup.minQuantity, maximum: topup.maxQuantity } }
+      : { price, quantity: 1 };
   return {
     mode: product === "pro" ? "subscription" : "payment",
-    line_items: [{ price, quantity: 1 }],
-    // dl.new's success page says "You're on Pro." or, for a top-up, "50M tokens added."
+    line_items: [line],
+    // dl.new's success page says "You're on Pro." or, for a top-up, that the usage was added.
     success_url: product === "topup" ? `${config.successUrl}${config.successUrl.includes("?") ? "&" : "?"}product=topup` : config.successUrl,
     cancel_url: config.cancelUrl,
     client_reference_id: String(input.githubId),
@@ -83,9 +97,16 @@ export function checkoutParams(input: { product: Product; config: StripeConfig; 
   };
 }
 
+/** A dollar top-up's quantity ($1 units) and the range Checkout lets the buyer adjust it in. */
+export interface TopupQuantity {
+  quantity: number;
+  minQuantity: number;
+  maxQuantity: number;
+}
+
 export async function createCheckout(
   fetcher: Fetch,
-  input: { product: Product; config: StripeConfig; githubId: number; login: string; customerId: string | null; idempotencyKey: string },
+  input: { product: Product; config: StripeConfig; githubId: number; login: string; customerId: string | null; idempotencyKey: string; topup?: TopupQuantity },
 ): Promise<{ id: string; url: string }> {
   const session = await call(fetcher, input.config.secretKey!, "/v1/checkout/sessions", checkoutParams(input), input.idempotencyKey);
   if (typeof session.url !== "string" || typeof session.id !== "string") throw new StripeError("Stripe didn't return a Checkout URL.", 502);
