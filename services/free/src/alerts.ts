@@ -251,7 +251,7 @@ export interface LuminalWindow {
 export interface ServingContext {
   serving: "openai" | "luminal" | "openrouter" | "none";
   openRouterConfigured: boolean;
-  /** The dashboard's upstream switch: <base>/admin?view=full#upstream. */
+  /** The Tools page's routing switch: <base>/admin?view=tools#upstream. */
   switchUrl: string;
 }
 
@@ -279,10 +279,10 @@ export function luminalSlowAlert(window: LuminalWindow, context: ServingContext)
   const rate = share(failures, window.requests);
   const action =
     context.serving === "openrouter"
-      ? `OpenRouter is serving already, so new requests don't go to Luminal; these failures came before the switch. To switch back later: open ${context.switchUrl} → Upstream → Luminal.`
+      ? `OpenRouter is serving already, so new requests don't go to Luminal; these failures came before the switch. To switch back later: open ${context.switchUrl} → Routing → Luminal.`
       : context.openRouterConfigured
-        ? `To switch to OpenRouter: open ${context.switchUrl} → Upstream → OpenRouter (it spends OpenRouter credit until you switch back)`
-        : `Switching to OpenRouter isn't possible: the service has no OPENROUTER_API_KEY. Set it (wrangler secret put OPENROUTER_API_KEY), then open ${context.switchUrl} → Upstream → OpenRouter.`;
+        ? `To switch to OpenRouter: open ${context.switchUrl} → Routing → OpenRouter (it spends OpenRouter credit until you switch back)`
+        : `Switching to OpenRouter isn't possible: the service has no OPENROUTER_API_KEY. Set it (wrangler secret put OPENROUTER_API_KEY), then open ${context.switchUrl} → Routing → OpenRouter.`;
   return {
     subject: `dl free tier: Luminal is slowing people down (${rate} of requests in 10 min)`,
     text: [
@@ -319,7 +319,7 @@ export function luminalRecoveredAlert(input: { window: LuminalWindow; quietReque
         : `No Luminal request failed or was rate limited in the last 30 minutes (${input.quietRequests} requests).`;
   const back =
     context.serving === "openrouter"
-      ? ` It spends OpenRouter credit until you switch back: open ${context.switchUrl} → Upstream → Luminal.`
+      ? ` It spends OpenRouter credit until you switch back: open ${context.switchUrl} → Routing → Luminal.`
       : "";
   return {
     subject: untried ? "dl free tier: Luminal alert cleared (no Luminal requests in 30 min)" : "dl free tier: Luminal back to normal",
@@ -471,7 +471,7 @@ export function dailyDigestAlert(digest: DailyDigest): Alert {
   lines.push("", `Queue: ${count(digest.queueWaiting)} waiting`, `Free tokens: ${digest.paused ? "PAUSED (kill switch)" : "on"}`);
   const asks = digest.accessRequests;
   if (asks) {
-    lines.push(`Access requests: ${count(asks.count)} new, ${count(asks.pending)} waiting for an answer${asks.pending > 0 ? " (answer them on the admin home screen)" : ""}`);
+    lines.push(`Access requests: ${count(asks.count)} new, ${count(asks.pending)} waiting for an answer${asks.pending > 0 ? " (answer them on the admin Tools page)" : ""}`);
     if (asks.logins.length > 0) lines.push(`  ${asks.logins.map((login) => `@${login}`).join(", ")}${asks.count > asks.logins.length ? ` and ${count(asks.count - asks.logins.length)} more` : ""}`);
   }
   return {

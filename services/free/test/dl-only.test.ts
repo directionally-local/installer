@@ -41,16 +41,6 @@ async function errorOf(response: Response): Promise<{ code: string; message: str
   return ((await response.json()) as { error: { code: string; message: string } }).error;
 }
 
-async function adminCookie(service: Service): Promise<string> {
-  const start = await service.request("GET", "/admin/signin");
-  const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
-  const oauth = start.headers.get("set-cookie")!.split(";")[0]!;
-  const done = await service.request("GET", `/device/callback?code=${encodeURIComponent(JSON.stringify({ id: ADMIN_ID, login: "owner" }))}&state=${encodeURIComponent(state)}`, { headers: { cookie: oauth } });
-  return done.headers.getSetCookie().find((value) => value.startsWith("__Host-dl_admin="))!.split(";")[0]!;
-}
-
-const simpleView = async (service: Service, cookie: string) => (await service.request("GET", "/admin?view=simple", { headers: { cookie } })).text();
-
 describe("free tokens inside dl only", () => {
   it("refuses an account with no session events after 20 requests, with dl_only", async () => {
     const { service, token, refreshToken } = await member();
@@ -154,29 +144,8 @@ describe("free tokens inside dl only", () => {
   });
 });
 
-describe("free tokens used outside dl, on the dashboard", () => {
-  it("flags an account with 10 requests and no session event in 7 days, until it sends one", async () => {
-    const { service, token } = await member({ DL_ONLY: "false" });
-    const cookie = await adminCookie(service);
-    await chats(service, token, 9);
-    assert.doesNotMatch(await simpleView(service, cookie), /Used outside dl/);
-    await chats(service, token, 1);
-    assert.match(await simpleView(service, cookie), /<a href="\/admin\?view=full#abuse">Used outside dl: alice \(10 requests, 0 dl sessions\)<\/a>/);
-    await sendEvent(service, token);
-    assert.doesNotMatch(await simpleView(service, cookie), /Used outside dl/);
-  });
-
-  it("leaves admins and server keys out of the flag", async () => {
-    const { service, token, adminToken } = await member();
-    const cookie = await adminCookie(service);
-    allowServerKeys(service, 100);
-    const { key } = (await (await service.request("POST", "/v1/keys", { token, body: { name: "box" } })).json()) as { key: string };
-    await chats(service, adminToken, 12);
-    await chats(service, key, 12);
-    assert.doesNotMatch(await simpleView(service, cookie), /Used outside dl/);
-  });
-
-  it("shows dl sessions this week per person in the people API and the full view", async () => {
+describe("dl sessions for admins", () => {
+  it("shows dl sessions this week per person in the people API", async () => {
     const { service, token, adminToken } = await member();
     await chats(service, token, 3);
     await sendEvent(service, token, "s-1");
@@ -186,8 +155,5 @@ describe("free tokens used outside dl, on the dashboard", () => {
     assert.equal(people.find((person) => person.login === "alice")?.dlSessionsThisWeek, 2);
     assert.equal(people.find((person) => person.login === "owner")?.dlSessionsThisWeek, 0);
 
-    const full = await (await service.request("GET", "/admin?view=full", { headers: { cookie: await adminCookie(service) } })).text();
-    assert.match(full, /<th>dl sessions this week<\/th>/);
-    assert.match(full, /alice[\s\S]*?<td>2<\/td><td>0<\/td><td class="l">/, "alice's row: 2 sessions, shares no network");
   });
 });

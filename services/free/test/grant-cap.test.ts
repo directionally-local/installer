@@ -185,22 +185,6 @@ describe("a grant's weekly dollar cap", () => {
     assert.equal((await person(s, admin, 101)).allowance.usdPerWeek, 10);
   });
 
-  it("the home screen's Grant button takes the amount and shows a person's own cap", async () => {
-    const { s, admin } = await setup({ GRANT_WEEKLY_USD_CAP: "8" });
-    const cookie = await adminCookie(s);
-    const id = await requested(s, admin, 100);
-    const home = await (await s.request("GET", "/admin", { headers: { cookie } })).text();
-    assert.match(home, /<input type="hidden" name="from" value="home"><input type="hidden" name="id" value="\d+"><label class="usd-in"><span class="sr">Weekly dollar cap for user100<\/span>\$<input type="number" name="usd" min="0" max="1000" step="any" inputmode="decimal" value="8"> a week<\/label><button class="btn primary"/);
-    const answered = await (async () => {
-      const page = await (await s.request("GET", "/admin", { headers: { cookie } })).text();
-      const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)![1]!;
-      const response = await s.request("POST", "/admin/dashboard/tools", { headers: { cookie, origin: "https://free.test" }, form: { csrf, tool: "request", from: "home", id: String(id), action: "grant", usd: "" } });
-      return response.text();
-    })();
-    assert.match(answered, /Granted: user100 is Full now with \$8 a week, and gets an email\./);
-    assert.equal((await person(s, admin, 100)).allowance.usdPerWeek, 8);
-  });
-
   it("shows the personal cap in the admin people list", async () => {
     const { s, admin } = await setup();
     await startBrowserFlow(s.request, { id: 100, login: "alice", createdAt: YOUNG });

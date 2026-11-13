@@ -74,7 +74,7 @@ describe("admin dashboard speed", () => {
     const generateMs = performance.now() - generated;
 
     // A deploy of this code on an existing log: the roll-ups are built once, as the object starts.
-    db.exec("DELETE FROM daily_activity; DELETE FROM settings WHERE key IN ('rollup:daily_activity', 'rollup:upstream_tokens_people')");
+    db.exec("DELETE FROM daily_activity; DELETE FROM person_totals; DELETE FROM settings WHERE key IN ('rollup:daily_activity', 'rollup:upstream_tokens_people', 'rollup:person_totals')");
     const backfill = performance.now();
     entry.object = new entry.object.constructor(entry.state, service.env);
     const backfillMs = performance.now() - backfill;
@@ -89,9 +89,7 @@ describe("admin dashboard speed", () => {
       return body;
     };
     const home = await time("home", "/admin");
-    const html = await time("page", "/admin?view=full");
-    await time("page again", "/admin?view=full");
-    const simple = await time("simple", "/admin?view=simple");
+    await time("home again", "/admin");
     for (const table of ["weekly-active", "retention", "weekly-cost", "top-cost", "limits"]) await time(`${table}.csv`, `/admin/dashboard/${table}.csv`);
 
     const rows = (db.prepare("SELECT COUNT(*) AS n FROM daily_activity").get() as { n: number }).n;
@@ -99,18 +97,14 @@ describe("admin dashboard speed", () => {
       `dashboard speed: ${PEOPLE} people, ${REQUESTS} requests, ${EVENTS} events generated in ${Math.round(generateMs)} ms; ` +
         `roll-up of ${rows} rows built in ${Math.round(backfillMs)} ms; ${JSON.stringify(timings)}`,
     );
-    assert.match(html, /dev-\d+/);
-    assert.match(home, /Are we OK\?/);
-    assert.match(home, /dev-\d+/);
-    assert.ok(timings.home! < 1000, `home took ${timings.home} ms`);
-    assert.ok(timings.page! < 2000, `page took ${timings.page} ms`);
-    assert.ok(timings["page again"]! < 2000);
-    assert.ok(timings.simple! < 2000, `simple view took ${timings.simple} ms`);
-    assert.match(simple, /tokens this week/);
+    assert.match(home, /Total Users/);
+    assert.equal([...home.matchAll(/<tr data-q="dev-\d+">/g)].length, PEOPLE);
+    assert.ok(timings.home! < 2000, `home took ${timings.home} ms`);
+    assert.ok(timings["home again"]! < 2000);
   });
 });
 
-describe("admin dashboard health view speed", () => {
+describe("admin health CSV speed", () => {
   it("stays fast on a month of events", { timeout: 300_000 }, async () => {
     const service = await createService();
     const cookie = await adminCookie(service);
@@ -156,7 +150,8 @@ describe("admin dashboard health view speed", () => {
     const timings: Record<string, number> = {};
     for (const days of [1, 7, 30]) {
       const began = performance.now();
-      const response = await service.request("GET", `/admin?view=health&days=${days}`, { headers: { cookie } });
+      // Each health CSV reads the whole window (health-data.ts), as the Health page did.
+      const response = await service.request("GET", `/admin/dashboard/health-sessions.csv?days=${days}`, { headers: { cookie } });
       await response.text();
       assert.equal(response.status, 200);
       timings[`${days}d`] = Math.round(performance.now() - began);

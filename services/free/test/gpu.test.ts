@@ -4,7 +4,6 @@ import type { DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, createInvite, createService, errorCode, NOW, type Service } from "./harness.js";
 import { adminCookie, tools } from "./admin-web.js";
 import { cleanEvent, cleanGpuProps, cleanGpuTelemetry, earlyAccessEmail, GPU_DETECT_OUTCOMES, GPU_ERROR_TYPES, GPU_EVENTS, GPU_OPTIONS, GPU_VENDORS, type GpuCount } from "../src/events.js";
-import { gpuSentence } from "../src/home-page.js";
 
 /**
  * Autopilot's GPU first run: the allowlist (events.ts), the anonymous POST /v1/telemetry/gpu, gpu.*
@@ -216,7 +215,7 @@ describe("gpu.* events on /v1/events", () => {
   });
 });
 
-describe("GPUs on the admin screens", () => {
+describe("GPUs in the admin CSVs", () => {
   /** NOW is 2026-11-04 12:00 UTC. Counts today and 3 days ago (in 7 days), and 10 days ago (only in 30). */
   async function scenario(): Promise<{ service: Service; cookie: string }> {
     const service = await createService();
@@ -247,50 +246,24 @@ describe("GPUs on the admin screens", () => {
     return { service, cookie: await adminCookie(service) };
   }
 
-  it("shows the Health view's GPU section and CSV over the window", async () => {
+  it("counts GPU first runs in the health-gpus CSV over the window", async () => {
     const { service, cookie } = await scenario();
-    const html = await (await service.request("GET", "/admin?view=health", { headers: { cookie } })).text();
-    assert.match(html, /<h2>GPUs<\/h2>/);
-    assert.match(html, /16 machines with GPUs \(1 whose GPU tool didn&#39;t answer\): 12 Nvidia, 3 AMD, 1 Ascend; 5 chose own GPUs\. 2 of 6 setups worked; most failures: unauthorized\./);
-    assert.match(html, /<td>No GPU<\/td><td>6<\/td>/);
-    assert.match(html, /<td>Yes<\/td><td>7<\/td>/);
-    assert.match(html, /<td>No<\/td><td>5<\/td>/);
-    assert.match(html, /<td>Own GPUs<\/td><td>5<\/td>/);
-    assert.match(html, /<td>Free tier<\/td><td>9<\/td>/);
-    assert.match(html, /<td>AMD<\/td><td>2<\/td><td>0<\/td>/);
-    assert.match(html, /<td>Ascend<\/td><td>0<\/td><td>1<\/td>/);
-    assert.match(html, /<tr class="bad"><td>This machine<\/td><td>2<\/td><td>1<\/td><td>no_toolkit \(1\)<\/td><\/tr>/);
-    assert.match(html, /<tr class="bad"><td>An endpoint<\/td><td>0<\/td><td>3<\/td><td>unauthorized \(2\), http \(1\)<\/td><\/tr>/);
-    assert.match(html, /href="\/admin\/dashboard\/health-gpus\.csv\?days=7" download/);
-    const gpusSection = /<section id="gpus">[^]*?<\/section>/.exec(html)![0];
-    assert.doesNotMatch(gpusSection, /—/);
-
     const csv = (await (await service.request("GET", "/admin/dashboard/health-gpus.csv", { headers: { cookie } })).text()).trim().split("\r\n");
     assert.equal(csv[0], "event,vendor,answer,option,path,outcome,error_type,count");
     assert.ok(csv.includes("detected,nvidia,,,,,,11"), csv.join("\n"));
     assert.ok(csv.includes("detected,nvidia,,,,probe_timeout,,1"), csv.join("\n"));
     assert.ok(csv.includes("result,,,,endpoint,failed,unauthorized,2"));
-    // 30 days: the older AMD machines too.
-    const month = await (await service.request("GET", "/admin?view=health&days=30", { headers: { cookie } })).text();
-    assert.match(month, /25 machines with GPUs \(1 whose GPU tool didn&#39;t answer\): 12 Nvidia, 12 AMD, 1 Ascend;/);
-    // 1 day: not the ones 3 days ago.
-    const today = await (await service.request("GET", "/admin?view=health&days=1", { headers: { cookie } })).text();
-    assert.match(today, /12 machines with GPUs: 8 Nvidia, 3 AMD, 1 Ascend;/);
+    // 30 days: the older AMD machines too; 1 day: not the ones 3 days ago.
+    const month = (await (await service.request("GET", "/admin/dashboard/health-gpus.csv?days=30", { headers: { cookie } })).text()).trim().split("\r\n");
+    assert.ok(month.includes("detected,amd,,,,,,12"), month.join("\n"));
+    const today = (await (await service.request("GET", "/admin/dashboard/health-gpus.csv?days=1", { headers: { cookie } })).text()).trim().split("\r\n");
+    assert.ok(today.includes("detected,nvidia,,,,,,8"), today.join("\n"));
   });
 
-  it("says so when there are none", async () => {
+  it("is just the header when there are none", async () => {
     const service = await createService();
     const cookie = await adminCookie(service);
-    assert.match(await (await service.request("GET", "/admin?view=health", { headers: { cookie } })).text(), /No GPU first runs counted\./);
-    assert.doesNotMatch(await (await service.request("GET", "/admin", { headers: { cookie } })).text(), /GPUs \(7 days\)/);
-  });
-
-  it("puts one line on the home screen", async () => {
-    const { service, cookie } = await scenario();
-    const html = await (await service.request("GET", "/admin", { headers: { cookie } })).text();
-    assert.match(html, /<a href="\/admin\?view=health#gpus">GPUs \(7 days\): 12 Nvidia, 3 AMD, 1 Ascend · 5 chose own GPUs · 2 early access<\/a>/);
-    assert.equal(gpuSentence({ gpus: { nvidia: 0, amd: 0, ascend: 0, ownGpus: 0, earlyAccess: 0 } }), null);
-    assert.equal(gpuSentence({ gpus: { nvidia: 1200, amd: 0, ascend: 0, ownGpus: 1, earlyAccess: 0 } }), "GPUs (7 days): 1,200 Nvidia, 0 AMD, 0 Ascend · 1 chose own GPUs · 0 early access");
+    assert.equal((await (await service.request("GET", "/admin/dashboard/health-gpus.csv", { headers: { cookie } })).text()).trim(), "event,vendor,answer,option,path,outcome,error_type,count");
   });
 });
 

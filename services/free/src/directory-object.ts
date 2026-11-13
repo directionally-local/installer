@@ -3,11 +3,11 @@ import { normalizeEmail } from "./email-guard.js";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
-import { abuseData, outsideDl, simpleData, type AbuseData, type SimpleData } from "./abuse.js";
+import { outsideDl } from "./abuse.js";
 import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, signupFunnel, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent, GpuCount } from "./events.js";
 import { healthData, type HealthData, type HealthWindow } from "./health-data.js";
-import { homeData, type HomeData } from "./home-data.js";
+import { adminHomeData, type AdminHomeData } from "./admin-home-data.js";
 import { milestoneCrossed, paymentAlert, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
 import { DEEPSEEK_MODEL, familyOf, type Family } from "./models.js";
@@ -668,6 +668,35 @@ const SCHEMA = [
      period_end INTEGER,
      state_at   INTEGER NOT NULL
    )`,
+  // Per person, all time, admins included: every request's prompt and completion tokens, its
+  // cost at the allowance's prices (cost_usd, free and paid), the count and the latest time.
+  // Kept with each request, so the admin home's users table reads one row per person.
+  `CREATE TABLE IF NOT EXISTS person_totals (
+     github_id         INTEGER PRIMARY KEY,
+     prompt_tokens     INTEGER NOT NULL,
+     completion_tokens INTEGER NOT NULL,
+     cost_usd          REAL NOT NULL,
+     requests          INTEGER NOT NULL,
+     last_at           INTEGER NOT NULL
+   )`,
+  // Each personal weekly cap an admin set (the grants table holds only the current one): when it
+  // was set, and when and how it ended (replaced by another cap, or removed). set_at is NULL for
+  // caps from before this was kept, when no admin log entry dates them.
+  `CREATE TABLE IF NOT EXISTS grant_history (
+     id            INTEGER PRIMARY KEY AUTOINCREMENT,
+     github_id     INTEGER NOT NULL,
+     weekly_usd    REAL,
+     weekly_tokens INTEGER,
+     set_at        INTEGER,
+     ended_at      INTEGER,
+     ended_how     TEXT
+   )`,
+  `CREATE INDEX IF NOT EXISTS grant_history_person ON grant_history (github_id, ended_at)`,
+  // Feedback sent (POST /v1/feedback) per UTC day: a count only; the message is emailed, never stored.
+  `CREATE TABLE IF NOT EXISTS feedback_daily (
+     day INTEGER PRIMARY KEY,
+     n   INTEGER NOT NULL
+   )`,
 ];
 
 /** Columns added after their table first shipped: added in place on start. */
@@ -727,6 +756,9 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["upstream_daily", "completion_tokens", "INTEGER NOT NULL DEFAULT 0"],
   // Two weekly dollar budgets: the part of `cost_usd` (free cost) that DeepSeek's budget paid.
   ["daily_activity", "deepseek_cost_usd", "REAL NOT NULL DEFAULT 0"],
+  // Prompt and completion tokens (free and paid) per person per day, for the admin home's usage chart.
+  ["daily_activity", "prompt_tokens", "INTEGER NOT NULL DEFAULT 0"],
+  ["daily_activity", "completion_tokens", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 /** Days of `daily_activity` whose DeepSeek cost is filled in from the request log when the column is added. */
@@ -739,6 +771,10 @@ const TIMINGS_MAX_AGE_MS = 15 * DAY_MS;
 const ROLLUP_READY = "rollup:daily_activity";
 /** Set in `settings` once `upstream_daily` (with completion tokens) and `upstream_people` have been built from the existing log. */
 const UPSTREAM_ROLLUP_READY = "rollup:upstream_tokens_people";
+/** Set in `settings` once `person_totals` has been built from the existing log. */
+const PERSON_TOTALS_READY = "rollup:person_totals";
+/** Set in `settings` once `grant_history` has been seeded from the grants table. */
+const GRANT_HISTORY_READY = "rollup:grant_history";
 
 /** What the sign-up GitHub activity check's contribution lookup found (app.ts). */
 export type GithubCheckOutcome = "contributions" | "none" | "error";
@@ -766,6 +802,9 @@ export class DirectoryObject extends DurableObject {
       if (rebuilt || added.has("daily_activity.sessions")) this.#backfillSessions();
       this.#backfillUpstreams();
       if (rebuilt || added.has("daily_activity.deepseek_cost_usd")) this.#backfillDeepseekCost();
+      if (rebuilt || added.has("daily_activity.prompt_tokens")) this.#backfillDailyTokens();
+      this.#backfillPersonTotals();
+      this.#seedGrantHistory();
     });
   }
 
@@ -853,19 +892,78 @@ export class DirectoryObject extends DurableObject {
     );
   }
 
+  /** Fills `daily_activity`'s prompt and completion tokens from the request log (admins left out, as there), once, when the columns are added. */
+  #backfillDailyTokens(): void {
+    this.ctx.storage.sql.exec(
+      `UPDATE daily_activity SET prompt_tokens = t.prompt, completion_tokens = t.completion
+       FROM (SELECT at / ${DAY_MS} AS day, github_id, SUM(prompt_tokens) AS prompt, SUM(completion_tokens) AS completion FROM requests WHERE is_admin = 0 GROUP BY 1, 2) AS t
+       WHERE daily_activity.day = t.day AND daily_activity.github_id = t.github_id`,
+    );
+  }
+
+  /** Builds `person_totals` from the request log once; `recordRequest` keeps it from then on. */
+  #backfillPersonTotals(): void {
+    const sql = this.ctx.storage.sql;
+    if (sql.exec("SELECT 1 FROM settings WHERE key = ?", PERSON_TOTALS_READY).toArray().length > 0) return;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec(
+        `INSERT INTO person_totals (github_id, prompt_tokens, completion_tokens, cost_usd, requests, last_at)
+         SELECT github_id, SUM(prompt_tokens), SUM(completion_tokens), SUM(cost_usd), COUNT(*), MAX(at) FROM requests WHERE true GROUP BY github_id
+         ON CONFLICT (github_id) DO UPDATE SET prompt_tokens = excluded.prompt_tokens, completion_tokens = excluded.completion_tokens,
+           cost_usd = excluded.cost_usd, requests = excluded.requests, last_at = excluded.last_at`,
+      );
+      sql.exec("INSERT INTO settings (key, value) VALUES (?, '1')", PERSON_TOTALS_READY);
+    });
+  }
+
+  /**
+   * Opens one `grant_history` row per cap already in `grants`, once. Its time is the latest admin
+   * log entry that gave the person Full (a grant by username, a pre-grant, or a granted access
+   * request), the only ways a cap was set before this was kept; NULL when there is none.
+   */
+  #seedGrantHistory(): void {
+    const sql = this.ctx.storage.sql;
+    if (sql.exec("SELECT 1 FROM settings WHERE key = ?", GRANT_HISTORY_READY).toArray().length > 0) return;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec(
+        `INSERT INTO grant_history (github_id, weekly_usd, weekly_tokens, set_at)
+         SELECT g.github_id, g.weekly_usd, g.weekly_tokens,
+                (SELECT MAX(l.changed_at) FROM config_log l
+                  WHERE (l.key LIKE 'person_level:' || g.github_id || ':%' AND l.new_value = '"full"')
+                     OR l.key LIKE 'pregrant:' || g.github_id || ':%'
+                     OR (l.key LIKE 'access_request:' || g.github_id || ':%' AND l.new_value = '"granted"'))
+         FROM grants g WHERE NOT EXISTS (SELECT 1 FROM grant_history h WHERE h.github_id = g.github_id AND h.ended_at IS NULL)`,
+      );
+      sql.exec("INSERT INTO settings (key, value) VALUES (?, '1')", GRANT_HISTORY_READY);
+    });
+  }
+
   /** Free tokens and cost go in `charged_tokens` and `cost_usd`; paid cost in `paid_cost_usd`. */
   #addActivity(
     githubId: number,
     at: number,
-    change: { requests: number; events: number; chargedTokens: number; costUsd: number; paidCostUsd?: number; creditUsd?: number; sessions?: number; deepseekCostUsd?: number },
+    change: {
+      requests: number;
+      events: number;
+      chargedTokens: number;
+      costUsd: number;
+      paidCostUsd?: number;
+      creditUsd?: number;
+      sessions?: number;
+      deepseekCostUsd?: number;
+      promptTokens?: number;
+      completionTokens?: number;
+    },
   ): void {
     this.ctx.storage.sql.exec(
-      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd, paid_cost_usd, credit_usd, sessions, deepseek_cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd, paid_cost_usd, credit_usd, sessions, deepseek_cost_usd, prompt_tokens, completion_tokens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (day, github_id) DO UPDATE SET
          requests = requests + excluded.requests, events = events + excluded.events, sessions = sessions + excluded.sessions,
          charged_tokens = charged_tokens + excluded.charged_tokens, cost_usd = cost_usd + excluded.cost_usd,
          paid_cost_usd = paid_cost_usd + excluded.paid_cost_usd, credit_usd = credit_usd + excluded.credit_usd,
-         deepseek_cost_usd = deepseek_cost_usd + excluded.deepseek_cost_usd`,
+         deepseek_cost_usd = deepseek_cost_usd + excluded.deepseek_cost_usd,
+         prompt_tokens = prompt_tokens + excluded.prompt_tokens, completion_tokens = completion_tokens + excluded.completion_tokens`,
       Math.floor(at / DAY_MS),
       githubId,
       change.requests,
@@ -876,6 +974,8 @@ export class DirectoryObject extends DurableObject {
       change.creditUsd ?? 0,
       change.sessions ?? 0,
       change.deepseekCostUsd ?? 0,
+      change.promptTokens ?? 0,
+      change.completionTokens ?? 0,
     );
   }
 
@@ -1919,24 +2019,9 @@ export class DirectoryObject extends DurableObject {
       .map((row) => ({ day: row.day, full: row.full, basic: row.basic, starter: row.starter }));
   }
 
-  /** The dashboard's abuse section (see abuse.ts). Admins are left out. */
-  async abuse(input: { now: number; adminIds: number[] }): Promise<AbuseData> {
-    return abuseData(this.ctx.storage.sql, input);
-  }
-
-  /** The Health view's numbers (see health-data.ts). Admins are left out. */
+  /** The health CSVs' numbers (see health-data.ts). Admins are left out. */
   async health(input: { now: number; adminIds: number[]; days: HealthWindow }): Promise<HealthData> {
     return healthData(this.ctx.storage.sql, input);
-  }
-
-  /** The home screen's numbers (see home-data.ts): small reads, so /admin opens fast. */
-  async home(input: { now: number; adminIds: number[] }): Promise<HomeData> {
-    return homeData(this.ctx.storage.sql, input);
-  }
-
-  /** The simple dashboard's per-person numbers (see abuse.ts). Admins are left out. */
-  async simple(input: { now: number; adminIds: number[] }): Promise<SimpleData> {
-    return simpleData(this.ctx.storage.sql, input);
   }
 
   // ─── Kill switch, runtime settings and spend ─────────────────────────────
@@ -2229,8 +2314,20 @@ export class DirectoryObject extends DurableObject {
           paidCostUsd: paid ? cash : 0,
           creditUsd: free ? credit : 0,
           deepseekCostUsd: free && (record.family ?? familyOf(record.model)) === "deepseek" ? record.costUsd : 0,
+          promptTokens: record.promptTokens,
+          completionTokens: record.completionTokens,
         });
       }
+      this.ctx.storage.sql.exec(
+        `INSERT INTO person_totals (github_id, prompt_tokens, completion_tokens, cost_usd, requests, last_at) VALUES (?, ?, ?, ?, 1, ?)
+         ON CONFLICT (github_id) DO UPDATE SET prompt_tokens = prompt_tokens + excluded.prompt_tokens, completion_tokens = completion_tokens + excluded.completion_tokens,
+           cost_usd = cost_usd + excluded.cost_usd, requests = requests + 1, last_at = MAX(last_at, excluded.last_at)`,
+        record.githubId,
+        record.promptTokens,
+        record.completionTokens,
+        record.costUsd,
+        record.at,
+      );
       this.ctx.storage.sql.exec(
         `INSERT INTO upstream_daily (day, upstream, requests, errors, prompt_tokens, cached_tokens, completion_tokens, cash_usd, credit_usd) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (day, upstream) DO UPDATE SET requests = requests + 1, errors = errors + excluded.errors,
@@ -2599,14 +2696,43 @@ export class DirectoryObject extends DurableObject {
   // ─── Metrics ─────────────────────────────────────────────────────────────
 
   /** Mirrors an admin's per-person caps (undefined: unchanged; null: back to the default). */
-  async recordGrant(input: { githubId: number; tokensPerWeek: number | null | undefined; usdPerWeek: number | null | undefined }): Promise<void> {
+  async recordGrant(input: { githubId: number; tokensPerWeek: number | null | undefined; usdPerWeek: number | null | undefined; at?: number }): Promise<void> {
     const sql = this.ctx.storage.sql;
+    const at = input.at ?? Date.now();
+    type Caps = { weekly_tokens: number | null; weekly_usd: number | null };
+    const read = () => sql.exec<Caps>("SELECT weekly_tokens, weekly_usd FROM grants WHERE github_id = ?", input.githubId).toArray()[0] ?? { weekly_tokens: null, weekly_usd: null };
     this.ctx.storage.transactionSync(() => {
+      const before = read();
       sql.exec("INSERT OR IGNORE INTO grants (github_id, weekly_tokens, weekly_usd) VALUES (?, NULL, NULL)", input.githubId);
       if (input.tokensPerWeek !== undefined) sql.exec("UPDATE grants SET weekly_tokens = ? WHERE github_id = ?", input.tokensPerWeek, input.githubId);
       if (input.usdPerWeek !== undefined) sql.exec("UPDATE grants SET weekly_usd = ? WHERE github_id = ?", input.usdPerWeek, input.githubId);
       sql.exec("DELETE FROM grants WHERE github_id = ? AND weekly_tokens IS NULL AND weekly_usd IS NULL", input.githubId);
+      // The history: a changed cap ends the open entry (replaced, or removed when back to the
+      // default) and opens one for the new cap.
+      const after = read();
+      if (before.weekly_tokens === after.weekly_tokens && before.weekly_usd === after.weekly_usd) return;
+      const removed = after.weekly_tokens === null && after.weekly_usd === null;
+      sql.exec("UPDATE grant_history SET ended_at = ?, ended_how = ? WHERE github_id = ? AND ended_at IS NULL", at, removed ? "removed" : "replaced", input.githubId);
+      if (!removed) sql.exec("INSERT INTO grant_history (github_id, weekly_usd, weekly_tokens, set_at) VALUES (?, ?, ?, ?)", input.githubId, after.weekly_usd, after.weekly_tokens, at);
     });
+  }
+
+  /** Counts one feedback message on its UTC day (nothing of it is stored). */
+  async countFeedback(at: number): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT INTO feedback_daily (day, n) VALUES (?, 1) ON CONFLICT (day) DO UPDATE SET n = n + 1", Math.floor(at / DAY_MS));
+  }
+
+  /** The admin home's numbers (see admin-home-data.ts). */
+  async adminHome(input: { now: number; adminIds: number[] }): Promise<AdminHomeData> {
+    return adminHomeData(this.ctx.storage.sql, input);
+  }
+
+  /** The person with this GitHub login (any case), for the Tools tab's block form. */
+  async personByLogin(login: string): Promise<{ githubId: number; login: string; status: string } | undefined> {
+    const row = this.ctx.storage.sql
+      .exec<{ github_id: number; login: string; status: string }>("SELECT github_id, login, status FROM people WHERE login = ? COLLATE NOCASE ORDER BY github_id LIMIT 1", login)
+      .toArray()[0];
+    return row ? { githubId: row.github_id, login: row.login, status: row.status } : undefined;
   }
 
   /** The admin dashboard's tables (see dashboard-data.ts). Admins are left out. */

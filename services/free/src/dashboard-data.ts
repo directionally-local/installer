@@ -711,25 +711,6 @@ export function signupFunnel(sql: Sql, now: number, admins: string): SignupFunne
 }
 
 /**
- * Day `offset`'s retention over the cohorts that have reached it, weighted by cohort size (all
- * their active people over all their people); null when none has.
- */
-export function averageRetention(cohorts: readonly DailyCohort[], offset: (typeof RETENTION_DAYS)[number]): { share: number; cohorts: number; people: number } | null {
-  const index = RETENTION_DAYS.indexOf(offset);
-  let people = 0;
-  let active = 0;
-  let counted = 0;
-  for (const cohort of cohorts) {
-    const cell = cohort.retained[index];
-    if (!cell) continue;
-    people += cohort.size;
-    active += cell.active;
-    counted++;
-  }
-  return counted === 0 || people === 0 ? null : { share: active / people, cohorts: counted, people };
-}
-
-/**
  * The install funnel (see `InstallFunnelRow`). `admins`: ADMIN_GITHUB_IDS as a JSON array.
  * `people`: each non-admin's first request day, and per week (its Monday's day number) how many
  * made requests on REGULAR_DAYS or more days, as `dashboardData` already has them.

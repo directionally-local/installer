@@ -1,7 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADMIN_ID, createService, MODEL } from "./harness.js";
-import { adminCookie } from "./admin-web.js";
 
 /**
  * Retention counts only people who could use dl (they had free tokens at sign-up), and the
@@ -41,11 +40,6 @@ describe("retention on people who could use dl", () => {
     assert.equal(metrics.cohorts.length, 1);
     assert.equal(metrics.cohorts[0]!.size, 2);
     assert.deepEqual(metrics.signupFunnel, [{ day: "2026-11-04", signedUp: 5, gotTokens: 2, refused: 3, refusedOpened: 1 }]);
-
-    const html = await (await s.request("GET", "/admin?view=simple", { headers: { cookie: await adminCookie(s) } })).text();
-    assert.match(html, /<p class="caption">Counts only people who could use dl/);
-    assert.match(html, /role="table" aria-label="Sign-ups by day/);
-    assert.match(html, /<div role="row"><span role="rowheader">Nov 4<\/span><span role="cell">5<\/span><span role="cell">2<\/span><span role="cell">3<\/span><span role="cell">1<\/span><\/div>/);
   });
 
   it("counts an admin's pre-grant as tokens at sign-up", async () => {

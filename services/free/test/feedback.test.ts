@@ -268,6 +268,22 @@ describe("POST /v1/feedback stores nothing", () => {
       assert.ok(!stored.includes(needle), `${needle} is stored`);
     }
   });
+
+  it("counts each one sent, a number per day and nothing else, for the admin home's Feedback card", async () => {
+    const s = await service();
+    await send(s, { message: "one" });
+    await send(s, { message: "two", email: "someone@example.com" });
+    const { state } = s.namespaces.DIRECTORY!.instances.get("directory") as unknown as { state: { db: import("node:sqlite").DatabaseSync } };
+    assert.deepEqual(
+      state.db.prepare("SELECT * FROM feedback_daily").all().map((row) => ({ ...row })),
+      [{ day: Math.floor(s.clock.now / 86_400_000), n: 2 }],
+    );
+    // A refused one (no email channel) isn't counted.
+    const off = await service({}, false);
+    assert.equal((await send(off, { message: "x" })).status, 503);
+    const offDirectory = off.namespaces.DIRECTORY?.instances.get("directory") as unknown as { state: { db: import("node:sqlite").DatabaseSync } } | undefined;
+    assert.equal(offDirectory ? (offDirectory.state.db.prepare("SELECT COUNT(*) AS n FROM feedback_daily").get() as { n: number }).n : 0, 0);
+  });
 });
 
 describe("GET /v1/feedback/reply-address", () => {

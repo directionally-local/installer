@@ -16,9 +16,8 @@ import { normalizeReferralCode, referralLink } from "./referrals.js";
 import { networkOf, rateLimitNetwork } from "./network.js";
 import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, type Sender } from "./feedback.js";
 import { apiError, json } from "./errors.js";
-import { homePage } from "./home-page.js";
-import type { HomePerson, LiveBudgets } from "./home-data.js";
-import { dashboardCsv, dashboardPage, deniedPage, earlyAccessCsv, healthCsv, healthPage, isCsvTable, isHealthCsvTable, signedInPage, signInPage, simpleDashboardPage, STARTER_ROWS, toolsPage, type SpendView, type StarterRow, type ToolsState } from "./dashboard-page.js";
+import { adminHomePage } from "./admin-home-page.js";
+import { dashboardCsv, deniedPage, earlyAccessCsv, healthCsv, isCsvTable, isHealthCsvTable, signedInPage, signInPage, toolsPage, type SpendView, type ToolsState } from "./dashboard-page.js";
 import { ACCESS_REQUEST_MAX_BYTES, ACCESS_REQUEST_USAGE, ACCESS_REQUESTS_PER_DAY, parseAccessRequest } from "./access-request.js";
 import { cleanBatch, cleanGpuTelemetry, earlyAccessEmail, type GpuCount } from "./events.js";
 import { cleanDownload, cleanInstall, MAX_TELEMETRY_BYTES } from "./telemetry.js";
@@ -713,7 +712,7 @@ function servingContext(c: Ctx, config: FreeConfig): ServingContext {
   return {
     serving: chooseUpstream(config.primaryUpstream, c.config) ?? "none",
     openRouterConfigured: c.config.openRouterApiKey !== undefined,
-    switchUrl: `${c.base}/admin?view=full#upstream`,
+    switchUrl: `${c.base}/admin?view=tools#upstream`,
   };
 }
 
@@ -1923,7 +1922,7 @@ async function accessRequest(c: Ctx, method: string): Promise<Response> {
     return rateLimited(result.retryAfterSeconds ?? 3600);
   }
   // The owner hears who asked and how many wait: never what they wrote. "daily" leaves it to the
-  // daily digest, "off" to the admin home screen.
+  // daily digest, "off" to the admin Tools page.
   if ((await runtime(c)).config.accessRequestAlerts === "each") await alert(c, [accessRequestAlert(identity.login, result.pendingCount)]);
   return json({ status: "pending" }, 201);
 }
@@ -1992,6 +1991,10 @@ async function feedback(c: Ctx): Promise<Response> {
     console.error("feedback email failed", error instanceof Error ? error.name : "error");
     return apiError(502, "feedback_failed", "The feedback couldn't be sent. Try again in a minute.");
   }
+  // A count for the admin home; the email went, so a failure here doesn't fail the request.
+  await directory(c)
+    .countFeedback(c.now())
+    .catch(() => console.error("feedback count failed"));
   return json({ ok: true, replyTo: replyTo ?? null });
 }
 
@@ -2917,7 +2920,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
         now,
       });
       if (!allowance) return apiError(404, "not_found", "No such person.");
-      await directory(c).recordGrant({ githubId, tokensPerWeek: tokensPerWeek as number | null | undefined, usdPerWeek: usdPerWeek as number | null | undefined });
+      await directory(c).recordGrant({ githubId, tokensPerWeek: tokensPerWeek as number | null | undefined, usdPerWeek: usdPerWeek as number | null | undefined, at: now });
       return json({ githubId, allowance: allowanceView(allowance) });
     }
   }
@@ -3095,7 +3098,7 @@ function grantUsd(config: FreeConfig, requested: number | undefined): number | u
 async function raiseGrantCap(c: Ctx, githubId: number, usd: number | undefined): Promise<number | undefined> {
   if (usd === undefined) return undefined;
   const cap = await account(c, githubId).raiseUsdCap(usd);
-  if (cap !== undefined) await directory(c).recordGrant({ githubId, tokensPerWeek: undefined, usdPerWeek: cap });
+  if (cap !== undefined) await directory(c).recordGrant({ githubId, tokensPerWeek: undefined, usdPerWeek: cap, at: c.now() });
   return cap;
 }
 
@@ -3112,7 +3115,7 @@ async function grantCapAfter(c: Ctx, githubId: number, outcome: "granted" | "alr
 const GRANT_USD_USAGE = `usdPerWeek is optional: a number of dollars, 0 to ${MAX_GRANT_USD} (0: no personal cap, only Full). Left out: the grantWeeklyUsdCap setting.`;
 const GRANT_USD_FORM_ERROR = `The weekly dollar cap must be 0 to ${MAX_GRANT_USD} (0: only Full, no personal cap).`;
 
-/** The line after answering a request on the Tools tab or the home screen. */
+/** The line after answering a request on the Tools tab. */
 function requestAnswerText(result: { login: string; status: "granted" | "declined"; usdPerWeek?: number }): string {
   if (result.status === "declined") return `Declined ${result.login}'s request.`;
   const cap = result.usdPerWeek !== undefined ? ` with ${grantUsdText(result.usdPerWeek)} a week` : "";
@@ -3308,7 +3311,7 @@ async function adminWebPersonAction(c: Ctx, githubId: number, action: "block" | 
   if (retry !== undefined) return rateLimited(retry);
   const status = await setBlocked(c, githubId, action === "block", { githubId: session.githubId, login: session.login, now: c.now() });
   if (!status) return deniedPage("No such person", `No free tier account has GitHub id ${githubId}.`, 404);
-  return new Response(null, { status: 303, headers: { location: "/admin?view=full#abuse", "cache-control": "no-store" } });
+  return new Response(null, { status: 303, headers: { location: "/admin?view=tools#block", "cache-control": "no-store" } });
 }
 
 /**
@@ -3334,7 +3337,7 @@ async function adminWebUpstream(c: Ctx): Promise<Response> {
     return deniedPage("Not changed", `The service has no ${secret}, so ${name} can't serve. Set the secret first.`, 409);
   }
   await directory(c).updateOverrides([{ key: "primaryUpstream", value: choice }], { githubId: session.githubId, login: session.login, now: c.now() });
-  return new Response(null, { status: 303, headers: { location: "/admin?view=full#upstream", "cache-control": "no-store" } });
+  return new Response(null, { status: 303, headers: { location: "/admin?view=tools#upstream", "cache-control": "no-store" } });
 }
 
 async function adminWeb(c: Ctx, path: string, method: string): Promise<Response> {
@@ -3373,22 +3376,18 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
 
   const now = c.now();
   const { config, paused } = await runtime(c);
-  if (csv === undefined && c.url.searchParams.get("view") === "tools") {
-    return toolsPage(await toolsState(c, config, identity, viaCookie, csrf, { grant: { text: "" }, compose: emptyEmailForm() }));
-  }
+  if (csv === undefined && c.url.searchParams.get("view") === "tools") return toolsPage(await toolsState(c, config, identity, viaCookie, csrf, { grant: { text: "" }, compose: emptyEmailForm() }));
+  // Any other view (the old Simple, Full and Health ones included) is the home page.
+  if (csv === undefined) return adminHomeResponse(c, config, paused, now, identity.login, viaCookie);
+  if (!isCsvTable(csv)) return apiError(404, "not_found", `GET ${c.url.pathname} isn't a route.`);
   if (csv === "early-access") return earlyAccessCsv(await directory(c).earlyAccessLeads(), now);
-  // The Health view and its CSVs read only health-data.ts's queries.
-  if ((csv === undefined && c.url.searchParams.get("view") === "health") || (csv !== undefined && isHealthCsvTable(csv))) {
-    const health = await directory(c).health({ now, adminIds: [...c.config.adminGithubIds], days: healthWindow(c.url.searchParams.get("days")) });
-    return csv !== undefined && isHealthCsvTable(csv) ? healthCsv(csv, health) : healthPage({ health, login: identity.login, signOut: viaCookie });
+  // The health CSVs read only health-data.ts's queries.
+  if (isHealthCsvTable(csv)) {
+    return healthCsv(csv, await directory(c).health({ now, adminIds: [...c.config.adminGithubIds], days: healthWindow(c.url.searchParams.get("days")) }));
   }
-  // The home screen is the default; Simple and Full are opt-in (?view=simple, ?view=full).
-  const viewName = c.url.searchParams.get("view");
-  if (csv === undefined && viewName !== "simple" && viewName !== "full") return homeResponse(c, config, paused, now, csrf, viaCookie);
-  const simple = csv === undefined && viewName === "simple";
   const weekParam = c.url.searchParams.get("week");
   const topWeek = weekParam && /^\d{4}-\d{2}-\d{2}$/.test(weekParam) ? Date.parse(`${weekParam}T00:00:00Z`) : Number.NaN;
-  const [data, spend, abuse, simpleData] = await Promise.all([
+  const [data, spend] = await Promise.all([
     directory(c).dashboard({
       now,
       adminIds: [...c.config.adminGithubIds],
@@ -3401,45 +3400,34 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
       ...(Number.isFinite(topWeek) ? { topWeek } : {}),
     }),
     directory(c).spend(now),
-    csv === undefined ? directory(c).abuse({ now, adminIds: [...c.config.adminGithubIds] }) : undefined,
-    simple ? directory(c).simple({ now, adminIds: [...c.config.adminGithubIds] }) : undefined,
   ]);
+  return dashboardCsv(csv, data, spendView(c, config, paused, spend));
+}
+
+/** GET /admin: the home page, from the Directory's admin-home reads and the spend counters. */
+async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, now: number, login: string, signOut: boolean): Promise<Response> {
+  const [data, spend] = await Promise.all([directory(c).adminHome({ now, adminIds: [...c.config.adminGithubIds] }), directory(c).spend(now)]);
   const view = spendView(c, config, paused, spend);
-  if (csv !== undefined && isCsvTable(csv) && !isHealthCsvTable(csv) && csv !== "early-access") return dashboardCsv(csv, data, view);
-  if (simpleData) return simpleDashboardPage({ data, spend: view, signOut: viaCookie, simple: simpleData, ...(abuse ? { abuse } : {}) });
-  const starters = await startersView(c, config, now);
-  return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie, starters, ...(abuse ? { abuse } : {}), ...(csrf ? { csrf } : {}) });
-}
-
-/**
- * Each spender's live weekly budgets, as GET /v1/admin/people/:id reads them (same limits, same
- * account call), at most ADMIN_PEOPLE_CONCURRENCY at once. An account that can't be read, or
- * doesn't exist, is left out of the map: the page then shows no budget use for it.
- */
-async function liveBudgets(c: Ctx, config: FreeConfig, now: number, people: readonly HomePerson[]): Promise<Map<number, LiveBudgets>> {
-  const read = await mapLimited(people, ADMIN_PEOPLE_CONCURRENCY, async (person): Promise<[number, LiveBudgets] | undefined> => {
-    try {
-      const level: Level = person.level === "basic" || person.level === "starter" ? person.level : "full";
-      const allowance = await account(c, person.githubId).allowance(now, limitsFor(config, 0, level, person.batchFlagged));
-      if (!allowance.exists) return undefined;
-      const { gpt6, deepseek } = budgetsView(allowance);
-      return [person.githubId, { status: allowance.status, gpt6: { spentUsd: gpt6.spentUsd, usdPerWeek: gpt6.usdPerWeek }, deepseek: { spentUsd: deepseek.spentUsd, usdPerWeek: deepseek.usdPerWeek } }];
-    } catch {
-      return undefined;
-    }
+  return adminHomePage({
+    data,
+    spend: view,
+    settings: {
+      weeklyTokens: config.weeklyTokens,
+      perPersonWeeklyUsd: config.perPersonWeeklyUsdCap ?? null,
+      deepseekWeeklyUsd: config.deepseekWeeklyUsdCap ?? null,
+      basicWeeklyTokens: config.basicWeeklyTokens,
+      basicWeeklyUsd: config.basicWeeklyUsdCap ?? null,
+      basicDeepseekWeeklyUsd: config.basicDeepseekWeeklyUsdCap ?? null,
+      starterWeeklyTokens: config.starterWeeklyTokens,
+      starterWeeklyUsd: config.starterWeeklyUsdCap ?? null,
+      starterDeepseekWeeklyUsd: config.starterDeepseekWeeklyUsdCap ?? null,
+      proWeeklyUsd: config.proWeeklyUsdCap ?? null,
+      proDeepseekWeeklyUsd: config.proDeepseekWeeklyUsdCap ?? null,
+      proPriceUsdMonthly: config.offers.pro.priceUsdMonthly,
+    },
+    login,
+    signOut,
   });
-  return new Map(read.filter((entry) => entry !== undefined));
-}
-
-/** GET /admin: the home screen, from the small home reads, the spend counters and the pending requests. */
-async function homeResponse(c: Ctx, config: FreeConfig, paused: boolean, now: number, csrf: string | undefined, signOut: boolean, notice?: { error: boolean; text: string }): Promise<Response> {
-  const [home, spend, requests] = await Promise.all([
-    directory(c).home({ now, adminIds: [...c.config.adminGithubIds] }),
-    directory(c).spend(now),
-    directory(c).pendingAccessRequests(now),
-  ]);
-  const live = await liveBudgets(c, config, now, home.spenders);
-  return homePage({ home, live, spend: spendView(c, config, paused, spend), requests, grantUsd: config.grantWeeklyUsdCap ?? 0, signOut, ...(csrf ? { csrf } : {}), ...(notice ? { notice } : {}) });
 }
 
 /** The dashboard's spend, caps and settings, from the effective config and the spend counters. */
@@ -3496,6 +3484,9 @@ function emptyEmailForm(): ToolsState["compose"] {
   return { subject: "", text: "", audience: "full", from: "", to: "", testTo: "" };
 }
 
+/** What a Tools form post adds to the page: the forms' contents and what the action did. */
+type ToolsPosted = Pick<ToolsState, "grant" | "compose"> & Partial<Pick<ToolsState, "requestNotice" | "recheck" | "leadNotice" | "block">>;
+
 /** Everything the Tools tab shows besides what was just posted. */
 async function toolsState(
   c: Ctx,
@@ -3503,7 +3494,7 @@ async function toolsState(
   identity: Identity,
   signOut: boolean,
   csrf: string | undefined,
-  posted: Pick<ToolsState, "grant" | "compose"> & Partial<Pick<ToolsState, "requestNotice" | "recheck" | "leadNotice">>,
+  posted: ToolsPosted,
 ): Promise<ToolsState> {
   const [cohorts, me, requests, leads] = await Promise.all([
     directory(c).broadcastCohorts({ days: COHORT_PICKER_DAYS, adminIds: [...c.config.adminGithubIds], includeAdmins: config.userEmailsToAdmins }),
@@ -3522,6 +3513,13 @@ async function toolsState(
     requests,
     leads,
     grantUsd: config.grantWeeklyUsdCap ?? 0,
+    routing: {
+      primaryUpstream: config.primaryUpstream,
+      openaiConfigured: c.config.openaiApiKey !== undefined,
+      luminalConfigured: c.config.luminalApiKey !== undefined,
+      openRouterConfigured: c.config.openRouterApiKey !== undefined,
+    },
+    block: { login: "" },
     ...posted,
   };
 }
@@ -3547,9 +3545,9 @@ async function adminWebTools(c: Ctx): Promise<Response> {
   if (!sameOrigin(c) || !timingSafeEqual(form.get("csrf") ?? "", csrf)) return deniedPage("Not changed", "Use the tools only from the dashboard itself.", 403);
   const retry = await limited(c, `admin:gh:${session.githubId}`, LIMITS.apiPerson);
   if (retry !== undefined) return rateLimited(retry);
-  const { config, paused } = await runtime(c);
+  const { config } = await runtime(c);
   const actor = { githubId: session.githubId, login: session.login, now: c.now() };
-  const state = (posted: Pick<ToolsState, "grant" | "compose"> & Partial<Pick<ToolsState, "requestNotice" | "recheck" | "leadNotice">>) => toolsState(c, config, session, true, csrf, posted).then(toolsPage);
+  const state = (posted: ToolsPosted) => toolsState(c, config, session, true, csrf, posted).then(toolsPage);
 
   if (form.get("tool") === "early-access-delete") {
     // A deletion request: every lead for that inbox goes (normalized, so name+tag@ and Gmail's dots match).
@@ -3560,6 +3558,19 @@ async function adminWebTools(c: Ctx): Promise<Response> {
     return state({ grant: { text: "" }, compose: emptyEmailForm(), leadNotice });
   }
 
+  if (form.get("tool") === "block") {
+    // Block or unblock by GitHub username (the people table's login, any case).
+    const login = (form.get("login") ?? "").trim().replace(/^@/, "").slice(0, 39);
+    const action = form.get("action");
+    const answer = (notice: { error: boolean; text: string }) => state({ grant: { text: "" }, compose: emptyEmailForm(), block: { login, notice } });
+    if (!login || (action !== "block" && action !== "unblock")) return answer({ error: true, text: "Type a GitHub username, then Block or Unblock." });
+    const person = await directory(c).personByLogin(login);
+    if (!person) return answer({ error: true, text: `No free tier account has the username ${login}.` });
+    if (action === "block" && c.config.adminGithubIds.has(person.githubId)) return answer({ error: true, text: `${person.login} is an admin; admins can't be blocked here.` });
+    const status = await setBlocked(c, person.githubId, action === "block", actor);
+    if (!status) return answer({ error: true, text: `No free tier account has the username ${login}.` });
+    return state({ grant: { text: "" }, compose: emptyEmailForm(), block: { login: "", notice: { error: false, text: `${person.login} is ${status === "blocked" ? "blocked" : "unblocked"}.` } } });
+  }
   if (form.get("tool") === "recheck") {
     return state({ grant: { text: "" }, compose: emptyEmailForm(), recheck: await recheckBelowBar(c, config, actor) });
   }
@@ -3567,10 +3578,7 @@ async function adminWebTools(c: Ctx): Promise<Response> {
     const id = Number(form.get("id"));
     const action = form.get("action");
     const note = (form.get("note") ?? "").trim().slice(0, 300) || null;
-    // The home screen's cards post here too (from=home), and get the home screen back.
-    const home = form.get("from") === "home";
-    const answer = (requestNotice: { error: boolean; text: string }) =>
-      home ? homeResponse(c, config, paused, c.now(), csrf, true, requestNotice) : state({ grant: { text: "" }, compose: emptyEmailForm(), requestNotice });
+    const answer = (requestNotice: { error: boolean; text: string }) => state({ grant: { text: "" }, compose: emptyEmailForm(), requestNotice });
     if (!Number.isSafeInteger(id) || (action !== "grant" && action !== "decline")) return answer({ error: true, text: "Pick Grant or Decline on a request." });
     const usd = action === "grant" ? parseGrantUsd(form.get("usd") ?? undefined) : undefined;
     if (usd === "invalid") return answer({ error: true, text: GRANT_USD_FORM_ERROR });
@@ -3622,31 +3630,6 @@ async function adminWebTools(c: Ctx): Promise<Response> {
   // Confirm, or a send whose copy or audience changed since it was counted: count (again) and ask.
   const changed = action === "send" ? { notice: { error: true, text: "The message or the audience changed since the count. Check the new count, then send." } } : {};
   return state({ grant: { text: "" }, compose: { ...draft, preview, ...(result.count > 0 ? { confirm: token, confirming: true } : {}), ...changed } });
-}
-
-/** The full dashboard's Starter accounts: stored signals and checks, newest first, admins left out. */
-async function startersView(c: Ctx, config: FreeConfig, now: number): Promise<{ rows: StarterRow[]; total: number }> {
-  const people = await directory(c).levelSignals();
-  const checks = peopleChecks(people, config, now);
-  const starters = people.filter((person) => person.level === "starter" && !c.config.adminGithubIds.has(person.github_id)).reverse();
-  const rows = starters.slice(0, STARTER_ROWS).map(
-    (person): StarterRow => ({
-      githubId: person.github_id,
-      login: person.login,
-      admittedAt: person.admitted_at,
-      levelReason: person.level_reason,
-      accountAgeDays: person.account_age_days,
-      publicRepos: person.public_repos,
-      contributions: person.contributions,
-      followers: person.followers,
-      activeWeeks: person.active_weeks ?? null,
-      outsideContributions: person.outside_contributions ?? null,
-      oldestRepoAt: person.oldest_repo_at ?? null,
-      social: person.social ?? null,
-      checks: checks.get(person.github_id)!,
-    }),
-  );
-  return { rows, total: starters.length };
 }
 
 async function adminSignIn(c: Ctx): Promise<Response> {

@@ -402,8 +402,8 @@ describe("top-ups", () => {
   });
 });
 
-describe("the dashboard's paid section", () => {
-  it("shows subscribers, top-ups, revenue and paid usage cost", async () => {
+describe("the dashboard's paid numbers", () => {
+  it("counts subscribers, top-ups, revenue and paid usage cost", async () => {
     const svc = await service();
     const pro = await person(svc, 100);
     await person(svc, 101);
@@ -413,11 +413,14 @@ describe("the dashboard's paid section", () => {
     svc.setOpenRouter(() => completion(usage(10, 10, 0, 0.25)));
     await chat(svc, pro.key);
     const admin = (await svc.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
-    const html = await (await svc.request("GET", "/admin?view=full", { token: admin })).text();
-    assert.match(html, /Pro subscribers<b>1<\/b>/);
-    assert.match(html, /Top-ups<b>1 <span class="muted">this week<\/span><\/b>/);
-    assert.match(html, /Revenue, before tax<b>\$13\.00 <span class="muted">this week<\/span><\/b>/);
-    assert.match(html, /Paid usage cost<b>\$0\.250 <span class="muted">this week<\/span><\/b>/);
+    const paid = (await (await svc.request("GET", "/admin/dashboard/paid.csv", { token: admin })).text()).trim().split("\r\n");
+    assert.equal(paid[0], "pro_subscribers,topups_this_week,topups_this_month,revenue_week_usd,revenue_month_usd,paid_cost_week_usd,paid_cost_month_usd,paid_requests_week");
+    assert.match(paid[1]!, /^1,1,1,13,13,0\.25,0\.25,1$/);
+    // The home page's paid row: one paying user on Pro, one top-up.
+    const html = await (await svc.request("GET", "/admin", { token: admin })).text();
+    assert.match(html, /<div><b>1<\/b><span>Paying Users<\/span><\/div>/);
+    assert.match(html, /<div><b>1<\/b><span>Top-ups<\/span><\/div>/);
+    assert.match(html, /<tr data-q="user100">\n<td data-v="user100">user100<\/td>\n<td class="l"><span class="badge pro">Pro<\/span><\/td>/);
   });
 });
 

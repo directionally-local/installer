@@ -109,7 +109,7 @@ async function scenario(): Promise<{ service: Service; cookie: string }> {
   return { service, cookie: await adminCookie(service) };
 }
 
-describe("admin dashboard health view", () => {
+describe("admin health CSVs", () => {
   it("computes errors, ends, versions, sessions, tools, models and installs, admins left out", async () => {
     const { service, cookie } = await scenario();
 
@@ -219,60 +219,22 @@ describe("admin dashboard health view", () => {
     assert.equal((await csv(service, cookie, "health-sessions", "?days=9999"))[0]!.sessions, "4");
   });
 
-  it("renders the page with takeaways, the window switch and the CSV links, and nothing of the admin's or the repo", async () => {
+  it("keeps the admin's numbers and the repo out of the CSVs", async () => {
     const { service, cookie } = await scenario();
-    const response = await service.request("GET", "/admin?view=health", { headers: { cookie } });
-    assert.equal(response.status, 200);
-    const html = await response.text();
-    assert.doesNotMatch(html, /<script|\sstyle="/i);
-    assert.match(html, /<a href="\/admin\?view=health" aria-current="page">Health<\/a>/);
-    assert.match(html, /<a href="\/admin\?view=simple">Simple<\/a>/);
-    assert.match(html, /<a href="\/admin\?view=health&amp;days=7" aria-current="page">7 days<\/a>/);
-    assert.match(html, /<a href="\/admin\?view=health&amp;days=30">30 days<\/a>/);
-    for (const title of ["Errors", "Crashes and abnormal ends", "Versions", "Sessions", "Tools", "Models", "Installs"]) assert.match(html, new RegExp(`<h2>${title}</h2>`));
-    assert.match(html, /Top error http_429: 2 times, 2 people, mostly from 3\.(4|5)\.0\./);
-    assert.match(html, /40% of 5 requests failed, most as /);
-    assert.match(html, /25% of sessions ended without a normal exit/);
-    assert.match(html, /50% of turns ended in an error, guardrail or abort\./);
-    assert.match(html, /50% of sessions on the newest version, 3\.5\.0/);
-    assert.match(html, /Median session: 0 turns, 5\.0 s\. 50% were opened and left with no turn\. 25\.0 PRs per 100 sessions\./);
-    assert.match(html, /bash is called most \(78% of calls\), in 100% of sessions\./);
-    assert.match(html, /Linux arm64 server installs fail 60%, mostly at the Node\.js step\./);
-    assert.match(html, /<tr class="bad"><td>\(no end event\) <span class="status blocked">abnormal<\/span>/);
-    assert.match(html, /href="\/admin\/dashboard\/health-tools\.csv\?days=7" download/);
-    for (const hidden of ["admin_only_error", "admin_tool", "admin/model", "3.6.0", REPO_HASH, "repoHash"]) assert.ok(!html.includes(hidden), hidden);
     for (const table of ["health-errors", "health-tools", "health-models", "health-versions"]) {
       const text = await (await service.request("GET", `/admin/dashboard/${table}.csv`, { headers: { cookie } })).text();
       for (const hidden of ["admin_only_error", "admin_tool", "admin/model", "3.6.0", REPO_HASH]) assert.ok(!text.includes(hidden), `${hidden} in ${table}`);
     }
-
-    // The other views carry the fourth switch too.
-    for (const view of ["simple", "full", "tools"]) {
-      assert.match(await (await service.request("GET", `/admin?view=${view}`, { headers: { cookie } })).text(), /<a href="\/admin\?view=health">Health<\/a>/, view);
-    }
-  });
-
-  it("renders with no data at all", async () => {
-    const service = await createService();
-    const html = await (await service.request("GET", "/admin?view=health&days=1", { headers: { cookie: await adminCookie(service) } })).text();
-    assert.match(html, /Autopilot reported no errors\./);
-    assert.match(html, /No tool calls reported\./);
-    assert.match(html, /No installs counted\./);
   });
 
   it("is for admins only", async () => {
     const service = await createService();
     const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
     const token = (await service.signIn({ id: 100, login: "alice" }, { invite: await createInvite(service, adminToken) })).access_token;
-    const member = await service.request("GET", "/admin?view=health", { token });
+    const member = await service.request("GET", "/admin/dashboard/health-errors.csv", { token });
     assert.equal(member.status, 403);
     assert.equal(await errorCode(member), "forbidden");
-    assert.equal((await service.request("GET", "/admin/dashboard/health-errors.csv", { token })).status, 403);
-    const signedOut = await service.request("GET", "/admin?view=health");
-    assert.equal(signedOut.status, 401);
-    assert.doesNotMatch(await signedOut.text(), /<h2>Errors<\/h2>/);
     assert.equal((await service.request("GET", "/admin/dashboard/health-errors.csv")).status, 401);
-    assert.equal((await service.request("GET", "/admin?view=health", { token: adminToken })).status, 200);
     assert.equal((await service.request("GET", "/admin/dashboard/health-sessions.csv?days=30", { token: adminToken })).status, 200);
   });
 
@@ -294,8 +256,7 @@ describe("admin dashboard health view", () => {
       return SQLITE_OK;
     });
     try {
-      assert.equal((await service.request("GET", "/admin?view=health&days=30", { headers: { cookie } })).status, 200);
-      for (const table of HEALTH_CSV_TABLES) await csv(service, cookie, table);
+      for (const table of HEALTH_CSV_TABLES) await csv(service, cookie, table, "?days=30");
     } finally {
       db.prepare = prepare;
       db.setAuthorizer?.(null);
