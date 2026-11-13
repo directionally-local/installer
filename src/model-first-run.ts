@@ -1,6 +1,6 @@
 import { MODEL_CATALOG, type ModelRecipe } from "./model-catalog.js";
 import { configureProvider, logPathOf, modelCommand, showHardware, type ModelCommandOptions } from "./model-command.js";
-import { SmokeError } from "./model-smoke.js";
+import { modelApiBase, SmokeError } from "./model-smoke.js";
 import { checkGpuDocker, containerRunning, detectHardware, type Hardware } from "./model-runtime.js";
 import { modelStatePath, readModelState } from "./state.js";
 import { autopilotConfigFile } from "./laptop/free-tier.js";
@@ -42,7 +42,7 @@ export type ModelUpErrorType =
  */
 export type ModelUpResult =
   | { ok: true; model: string }
-  | { ok: false; errorType: ModelUpErrorType; message: string; log?: string; model?: string };
+  | { ok: false; errorType: ModelUpErrorType; message: string; log?: string; model?: string; details?: string[] };
 
 /**
  * Catalog models verified end to end (launch, chat, tool call and JSON smoke tests, an Autopilot
@@ -206,7 +206,7 @@ export async function firstRunModelUp(options: FirstRunModelUpOptions): Promise<
         // Already serving here (an earlier dl model up): point Autopilot at it.
         await configureProvider(options, state.active, options.configPath ?? autopilotConfigFile());
         ui.line("done", "Model serving", state.active.repo);
-        ui.line("info", "API", `http://127.0.0.1:${state.active.port}/v1`);
+        ui.line("info", "API", modelApiBase(state.active));
         return { ok: true, model: state.active.repo };
       }
       return {
@@ -236,7 +236,11 @@ export async function firstRunModelUp(options: FirstRunModelUpOptions): Promise<
 function failure(error: unknown): Extract<ModelUpResult, { ok: false }> {
   const errorType = modelUpErrorType(error);
   if (errorType === "cancelled") return { ok: false, errorType, message: "Cancelled." };
-  const message = (error instanceof Error ? error.message : String(error)).split("\n")[0]!.trim();
+  const [first, ...rest] = (error instanceof Error ? error.message : String(error)).split("\n");
+  const message = first!.trim();
   const log = logPathOf(error);
-  return { ok: false, errorType, message, ...(log ? { log } : {}) };
+  // What to run next (the container kept for inspection, a curl that reproduces the failure);
+  // only those lines, so nothing else a message carries can reach the screen.
+  const details = rest.map((line) => line.trim()).filter((line) => /^(The vLLM container |Stop it with |Remove it with |Reproduce: curl )/.test(line));
+  return { ok: false, errorType, message, ...(log ? { log } : {}), ...(details.length ? { details } : {}) };
 }

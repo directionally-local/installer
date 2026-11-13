@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ModelRecipe } from "./model-catalog.js";
 import type { System } from "./system.js";
 
@@ -28,16 +29,35 @@ export async function checkGpuDocker(system: System): Promise<void> {
   if (!/"nvidia"\s*:/.test(docker.stdout)) throw new Error("Docker has no nvidia runtime. Run nvidia-ctk runtime configure --runtime=docker and restart Docker.");
 }
 
+/** The label holding a hash of the container's recipe, so a later run knows whether it can reuse it. */
+export const SPEC_LABEL = "dl.model.spec";
+
 export function dockerArgs(model: ModelRecipe, port: number, context: number, slot: number): string[] {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Port must be between 1 and 65535.");
   if (!Number.isInteger(context) || context < 512 || context > model.defaultContext) throw new Error(`Context length must be between 512 and ${model.defaultContext} for ${model.id}.`);
   const flags = [...model.flags];
   const index = flags.indexOf("--max-model-len");
   if (index !== -1) flags.splice(index, 2);
-  return ["run", "-d", "--name", `dl-model-${slot}`, "--gpus", "all", "--ipc=host",
-    "-p", `127.0.0.1:${port}:8000`, "-v", "dl-model-hf-cache:/root/.cache/huggingface",
-    model.image, "--model", model.repo, "--served-model-name", model.repo, ...flags, "--max-model-len", String(context),
+  const container = ["--name", `dl-model-${slot}`, "--gpus", "all", "--ipc=host",
+    "-p", `127.0.0.1:${port}:8000`, "-v", "dl-model-hf-cache:/root/.cache/huggingface"];
+  const serve = [model.image, "--model", model.repo, "--served-model-name", model.repo, ...flags, "--max-model-len", String(context),
     "--gpu-memory-utilization", String(model.gpuMemoryUtilization)];
+  const spec = createHash("sha256").update(JSON.stringify([...container, ...serve])).digest("hex").slice(0, 16);
+  return ["run", "-d", ...container, "--label", `${SPEC_LABEL}=${spec}`, ...serve];
+}
+
+/** The recipe hash `dockerArgs` labels the container with. */
+export function containerSpec(model: ModelRecipe, port: number, context: number, slot: number): string {
+  const args = dockerArgs(model, port, context, slot);
+  return args[args.indexOf("--label") + 1]!.slice(SPEC_LABEL.length + 1);
+}
+
+/** Whether a container exists, runs, and which recipe it was started with; undefined when there is none. */
+export async function inspectContainer(system: System, container: string): Promise<{ running: boolean; spec?: string } | undefined> {
+  const result = await system.probe("docker", ["inspect", "--format", `{{.State.Running}} {{index .Config.Labels "${SPEC_LABEL}"}}`, container]);
+  if (result.code !== 0) return undefined;
+  const [running, spec] = result.stdout.trim().split(/\s+/);
+  return { running: running === "true", ...(spec && /^[0-9a-f]{16}$/.test(spec) ? { spec } : {}) };
 }
 
 export async function containerRunning(system: System, container: string): Promise<boolean> {
