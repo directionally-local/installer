@@ -1,8 +1,10 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { autopilotConfigFile } from "./laptop/free-tier.js";
-import { fittingModels, recipe, type ModelRecipe } from "./model-catalog.js";
-import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Hardware } from "./model-runtime.js";
+import { fittingModels, gpuCounts, recipe, type ModelRecipe } from "./model-catalog.js";
+import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Gpu, type Hardware } from "./model-runtime.js";
+import { chooseParallelism, type ParallelPlan } from "./model-parallel.js";
+import { interconnect } from "./model-topology.js";
 import { bench as benchModel } from "./model-bench.js";
 import { FIRST_ANSWER_MS, localFetch, modelApiBase, SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
 import { modelStatePath, readModelState, writeModelState, type ModelDeployment } from "./state.js";
@@ -90,13 +92,24 @@ function portNumber(text: string): number {
   return value;
 }
 
-async function selectModel(options: ModelCommandOptions, id: string | undefined, availableMiB: number): Promise<ModelRecipe> {
-  const choices = fittingModels(availableMiB);
-  if (choices.length === 0) throw new Error(`No catalog models fit ${Math.floor(availableMiB / 1024)} GB of GPU VRAM.`);
+/** What a model needs, in words: "16 GB of GPU VRAM", "4 GPUs with 80 GB each, 320 GB in total". */
+export function needsText(model: ModelRecipe): string {
+  const counts = gpuCounts(model);
+  const fewest = counts[counts.length - 1]!;
+  if (fewest === 1 && !model.minTotalVramMiB) return `${Math.ceil(model.minVramMiB / 1024)} GB of GPU VRAM`;
+  const total = Math.ceil((model.minTotalVramMiB ?? model.minVramMiB) / 1024);
+  return `${fewest === 1 ? "1 GPU" : `${fewest} GPUs`} with ${Math.ceil(model.minVramMiB / 1024)} GB each, ${total} GB in total (runs on ${[...counts].reverse().join(", ")} GPUs)`;
+}
+
+/** Models that fit count every usable GPU (or the --gpus subset), not just the largest one. */
+async function selectModel(options: ModelCommandOptions, id: string | undefined, gpus: readonly Gpu[]): Promise<ModelRecipe> {
+  const choices = fittingModels(gpus);
+  const totalMiB = gpus.reduce((sum, gpu) => sum + gpu.totalMiB, 0);
+  if (choices.length === 0) throw new Error(`No catalog models fit ${gpus.length > 1 ? `${gpus.length} GPUs with ${Math.floor(totalMiB / 1024)} GB` : `${Math.floor(totalMiB / 1024)} GB`} of GPU VRAM.`);
   options.ui.line("info", "Models that fit", choices.map((item) => item.id).join(", "));
   if (id) {
     const selected = recipe(id);
-    if (!choices.includes(selected)) throw new Error(`${selected.id} needs ${Math.ceil(selected.minVramMiB / 1024)} GB of GPU VRAM.`);
+    if (!choices.includes(selected)) throw new Error(`${selected.id} needs ${needsText(selected)}.`);
     return selected;
   }
   if (!isInteractive(options)) throw new Error(`Name a model: ${choices.map((item) => item.id).join(", ")}`);
@@ -177,10 +190,10 @@ async function recordLogs(options: ModelCommandOptions, container: string): Prom
  * Whether a container left running by an earlier, failed attempt can be used as is: it runs the
  * same recipe (same image, model, flags, port and context) and its API answers.
  */
-async function reusable(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number): Promise<"reuse" | "replace" | "none"> {
+async function reusable(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, parallel?: ParallelPlan): Promise<"reuse" | "replace" | "none"> {
   const existing = await inspectContainer(options.system, `dl-model-${slot}`);
   if (!existing) return "none";
-  if (!existing.running || existing.spec !== containerSpec(model, port, context, slot)) return "replace";
+  if (!existing.running || existing.spec !== containerSpec(model, port, context, slot, parallel)) return "replace";
   try {
     const response = await (options.fetch ?? localFetch)(`${modelApiBase({ port })}/models`, { signal: AbortSignal.timeout(5000) });
     await response.arrayBuffer().catch(() => undefined);
@@ -190,11 +203,12 @@ async function reusable(options: ModelCommandOptions, model: ModelRecipe, port: 
   }
 }
 
-async function launch(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, reuse = false, progress: { started: boolean } = { started: false }): Promise<ModelDeployment> {
+async function launch(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, reuse = false, progress: { started: boolean } = { started: false }, parallel?: ParallelPlan): Promise<ModelDeployment> {
   const { system, ui } = options;
   const container = `dl-model-${slot}`;
   const deployment: ModelDeployment = { id: model.id, repo: model.repo, container, port, context,
     image: model.image, flags: model.flags, minVramMiB: model.minVramMiB, gpuMemoryUtilization: model.gpuMemoryUtilization,
+    ...(parallel ? { parallel: { gpus: parallel.gpus, tp: parallel.tp, pp: parallel.pp, ep: parallel.ep } } : {}),
     lastTest: { chat: false, tools: false, json: false, tokensPerSecond: 0, at: "" } };
   ui.plan([
     { id: "launch", label: "Start the vLLM container" },
@@ -211,7 +225,7 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
       options.record?.(`reusing ${container}: it runs the same recipe and its API answers`);
       ui.done("launch", `port ${port} · already running`);
     } else {
-      await system.run("docker", dockerArgs(model, port, context, slot));
+      await system.run("docker", dockerArgs(model, port, context, slot, parallel));
       ui.done("launch", `port ${port}`);
     }
     progress.started = true;
@@ -338,7 +352,13 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   const previous = state?.previous;
   const selected: ModelRecipe = action === "rollback"
     ? { id: previous!.id, repo: previous!.repo, minVramMiB: previous!.minVramMiB, gpuMemoryUtilization: previous!.gpuMemoryUtilization ?? 0.9, image: previous!.image, flags: previous!.flags, defaultContext: previous!.context }
-    : await selectModel(options, args[0], maxTotal);
+    : await selectModel(options, args[0], hardware.gpus);
+  // A multi-GPU model gets its layout for this machine's GPUs and links; one GPU adds no flags.
+  // Rollback restarts the previous deployment's layout as it was.
+  const layout = action === "rollback" ? previous!.parallel && { ...previous!.parallel, interconnect: interconnect(hardware.topology, previous!.parallel.gpus), why: "as before" }
+    : chooseParallelism(selected, hardware.gpus, hardware.topology);
+  const parallel = layout && layout.gpus.length > 1 ? layout : undefined;
+  if (parallel) ui.line("info", "Layout", parallel.why);
   const old = state?.active;
   if (old && !(await containerRunning(system, old.container))) throw new Error(`Current model container ${old.container} is stopped; restart it before changing models.`);
   const interactive = isInteractive(options);
@@ -351,12 +371,12 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   const candidateContainer = `dl-model-${slot}`;
   // A container a failed attempt left running for inspection is reused when it runs this exact
   // recipe and answers; otherwise it is replaced (and the GPU memory it held is counted again).
-  const existing = await reusable(options, selected, port, context, slot);
+  const existing = await reusable(options, selected, port, context, slot, parallel);
   const reuse = existing === "reuse";
   // Check the spare slot before stopping anything: a stale candidate must not cause downtime.
   if (old && !reuse && await containerRunning(system, candidateContainer)) {
     const spare = await inspectContainer(system, candidateContainer);
-    if (spare?.spec !== containerSpec(selected, port, context, slot)) throw new Error(`Spare container ${candidateContainer} is running; stop it manually before changing models.`);
+    if (spare?.spec !== containerSpec(selected, port, context, slot, parallel)) throw new Error(`Spare container ${candidateContainer} is running; stop it manually before changing models.`);
   }
   if (existing === "replace") {
     const wasRunning = await containerRunning(system, candidateContainer);
@@ -388,7 +408,7 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   const previousState = await system.readFile(statePath);
   const progress = { started: false };
   try {
-    const candidate = await launch(options, selected, port, context, slot, reuse, progress);
+    const candidate = await launch(options, selected, port, context, slot, reuse, progress, parallel);
     if (system.dryRun) {
       if (old && !stoppedOld) await system.run("docker", ["stop", old.container]);
       ui.line("info", "Dry run", "No model, provider or state changed.");

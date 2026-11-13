@@ -54,6 +54,8 @@ export interface ModelDeployment {
   minVramMiB: number;
   /** Fraction of GPU VRAM this deployment reserves; kept for rollback. */
   gpuMemoryUtilization?: number;
+  /** A multi-GPU deployment's layout: host GPU indices and tensor/pipeline/expert parallel sizes. */
+  parallel?: { gpus: number[]; tp: number; pp: number; ep: boolean };
   lastTest: { chat: boolean; tools: boolean; json: boolean; tokensPerSecond: number; at: string };
 }
 

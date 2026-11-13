@@ -1,0 +1,16 @@
+{
+  "dryRun": {
+    "output": "-- GPU: NVIDIA RTX PRO 5000 · 48 GB\n-- Driver: 580.95.05 · CUDA 13.0\n-- Models that fit: qwen-new, qwen-old\n.. Start the vLLM container: vllm/vllm-openai:v0.20.0\nok Start the vLLM container: port 8000\n-- Dry run: No model, provider or state changed.\n",
+    "docker": [
+      "docker run -d --name dl-model-1 --gpus all --ipc=host -p 127.0.0.1:8000:8000 -v dl-model-hf-cache:/root/.cache/huggingface --label dl.model.spec=3da7a837ad4ebec9 vllm/vllm-openai:v0.20.0 --model Qwen/Qwen3-4B-Instruct-2507 --served-model-name Qwen/Qwen3-4B-Instruct-2507 --tool-call-parser hermes --enable-auto-tool-choice --max-model-len 32768 --gpu-memory-utilization 0.4"
+    ]
+  },
+  "real": {
+    "output": "-- GPU: NVIDIA RTX PRO 5000 · 48 GB\n-- Driver: 580.95.05 · CUDA 13.0\n-- Models that fit: qwen-new, qwen-old\n.. Start the vLLM container: vllm/vllm-openai:v0.20.0\nok Start the vLLM container: port 8000\n.. Download qwen-new: waiting for vLLM\nok Model serving: Qwen/Qwen3-4B-Instruct-2507\n-- API: http://127.0.0.1:8000/v1\n",
+    "docker": [
+      "docker run -d --name dl-model-1 --gpus all --ipc=host -p 127.0.0.1:8000:8000 -v dl-model-hf-cache:/root/.cache/huggingface --label dl.model.spec=3da7a837ad4ebec9 vllm/vllm-openai:v0.20.0 --model Qwen/Qwen3-4B-Instruct-2507 --served-model-name Qwen/Qwen3-4B-Instruct-2507 --tool-call-parser hermes --enable-auto-tool-choice --max-model-len 32768 --gpu-memory-utilization 0.4"
+    ],
+    "state": "{\n  \"version\": 1,\n  \"active\": {\n    \"id\": \"qwen-new\",\n    \"repo\": \"Qwen/Qwen3-4B-Instruct-2507\",\n    \"container\": \"dl-model-1\",\n    \"port\": 8000,\n    \"context\": 32768,\n    \"image\": \"vllm/vllm-openai:v0.20.0\",\n    \"flags\": [\n      \"--tool-call-parser\",\n      \"hermes\",\n      \"--enable-auto-tool-choice\",\n      \"--max-model-len\",\n      \"32768\"\n    ],\n    \"minVramMiB\": 16384,\n    \"gpuMemoryUtilization\": 0.4,\n    \"lastTest\": {\n      \"chat\": true,\n      \"tools\": true,\n      \"json\": true,\n      \"tokensPerSecond\": 42,\n      \"at\": \"2026-11-13T00:00:00.000Z\"\n    }\n  }\n}\n",
+    "config": "{\n  \"provider\": \"vllm\",\n  \"model\": \"Qwen/Qwen3-4B-Instruct-2507\",\n  \"providers\": {\n    \"vllm\": {\n      \"model\": \"Qwen/Qwen3-4B-Instruct-2507\",\n      \"baseUrl\": \"http://127.0.0.1:8000/v1\"\n    }\n  }\n}\n"
+  }
+}

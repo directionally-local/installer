@@ -1,4 +1,4 @@
-import { MODEL_CATALOG, type ModelRecipe } from "./model-catalog.js";
+import { fitGpus, MODEL_CATALOG, type GpuSize, type ModelRecipe } from "./model-catalog.js";
 import { configureProvider, logPathOf, modelCommand, showHardware, type ModelCommandOptions } from "./model-command.js";
 import { modelApiBase, SmokeError } from "./model-smoke.js";
 import { checkGpuDocker, containerRunning, detectHardware, type Hardware } from "./model-runtime.js";
@@ -75,9 +75,13 @@ export interface FirstRunModelUpOptions extends Omit<ModelCommandOptions, "inter
 
 const gb = (mib: number) => Math.ceil(mib / 1024);
 
-/** The picker's rows: every catalog model, with whether it fits the largest GPU and whether it was tested. */
-export function modelChoices(largestMiB: number): Array<{ recipe: ModelRecipe; fits: boolean; tested: boolean }> {
-  return MODEL_CATALOG.map((recipe) => ({ recipe, fits: recipe.minVramMiB <= largestMiB, tested: TESTED_MODELS.has(recipe.id) }));
+/**
+ * The picker's rows: every catalog model, with whether it fits this machine's GPUs (all of
+ * them; a number is one GPU of that size) and whether it was tested.
+ */
+export function modelChoices(gpus: number | readonly GpuSize[]): Array<{ recipe: ModelRecipe; fits: boolean; tested: boolean }> {
+  const list = typeof gpus === "number" ? [{ index: 0, totalMiB: gpus }] : gpus;
+  return MODEL_CATALOG.map((recipe) => ({ recipe, fits: fitGpus(recipe, list) !== undefined, tested: TESTED_MODELS.has(recipe.id) }));
 }
 
 /** Map `dl model up`'s error to a short type. */
@@ -152,7 +156,7 @@ async function preflight(options: FirstRunModelUpOptions): Promise<ModelUpResult
 
 async function pickModel(options: FirstRunModelUpOptions, hardware: Hardware): Promise<ModelRecipe | ModelUpResult> {
   const largest = Math.max(...hardware.gpus.map((gpu) => gpu.totalMiB));
-  const choices = modelChoices(largest);
+  const choices = modelChoices(hardware.gpus);
   const fitting = choices.filter((choice) => choice.fits);
   if (fitting.length === 0) {
     return { ok: false, errorType: "no_fit", message: `No model in dl's catalog fits ${gb(largest)} GB of GPU memory yet.` };
