@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { autopilotConfigFile } from "./laptop/free-tier.js";
 import { fittingModels, gpuCounts, recipe, type ModelRecipe } from "./model-catalog.js";
 import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Gpu, type Hardware, type LaunchExtras, containerName, maxContext, recipeFor } from "./model-runtime.js";
-import { chooseParallelism } from "./model-parallel.js";
+import { chooseParallelism, type ParallelPlan } from "./model-parallel.js";
 import { interconnect } from "./model-topology.js";
 import { engine } from "./model-engines.js";
 import { gib, hostResources, memoryLimitBytes, preflight, preflightError } from "./model-preflight.js";
@@ -337,9 +337,28 @@ export function parseGpuList(text: string, gpus: readonly Gpu[]): Gpu[] {
   return gpus.filter((gpu) => chosen.includes(gpu.index));
 }
 
-/** The GPUs a deployment's container sees: its pinned devices, or every GPU. */
-function seenGpus(deployment: ModelDeployment, all: readonly Gpu[]): number[] {
-  return deployment.devices ?? all.map((gpu) => gpu.index);
+/**
+ * The host GPUs a container may see: all it was pinned to (they're reserved for it, and the
+ * engine takes the first ones it sees), unless the layout picked others among them; unpinned, the
+ * layout's GPUs when it uses some of the machine's; otherwise undefined (every GPU, as 0.30.1).
+ */
+export function devicesFor(pinned: readonly Gpu[] | undefined, layout: Pick<ParallelPlan, "gpus"> | undefined, machineGpus: number): number[] | undefined {
+  const pinnedIndices = pinned?.map((gpu) => gpu.index);
+  if (pinnedIndices) return layout && !layout.gpus.every((index, at) => pinnedIndices[at] === index) ? layout.gpus : pinnedIndices;
+  return layout && layout.gpus.length > 1 && layout.gpus.length < machineGpus ? layout.gpus : undefined;
+}
+
+/** Ports other deployments hold (their current and previous), so a new one or an update can't take one. */
+export function takenPorts(others: ReadonlyArray<[string, Omit<ModelState, "version">]>): Map<number, string> {
+  return new Map(others.flatMap(([other, entry]) => [entry.active, ...(entry.previous ? [entry.previous] : [])].map((deployment) => [deployment.port, other] as const)));
+}
+
+/** The first free port: after the current one for an update; a new named deployment also keeps the next one free for its updates. */
+export function defaultPortFor(old: ModelDeployment | undefined, named: boolean, taken: ReadonlyMap<number, string>): number {
+  let port = old ? old.port + 1 : 8000;
+  if (old) while (taken.has(port)) port++;
+  else if (named) while (taken.has(port) || taken.has(port + 1)) port += 2;
+  return port;
 }
 
 /** `dl model list`: every deployment on this machine. */
@@ -461,9 +480,7 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   if (parallel) ui.line("info", "Layout", parallel.why);
   // The container sees only its GPUs when pinned (all it was given: they're reserved for it, and
   // the engine takes the first ones it sees), or when its layout uses some of the machine's GPUs.
-  const pinnedIndices = pinned?.map((gpu) => gpu.index);
-  const devices = pinnedIndices ? (layout && !layout.gpus.every((index, at) => pinnedIndices[at] === index) ? layout.gpus : pinnedIndices)
-    : parallel && parallel.gpus.length < hardware.gpus.length ? parallel.gpus : undefined;
+  const devices = devicesFor(pinned, layout, hardware.gpus.length);
   // Two deployments never share a pinned GPU; one that sees every GPU is a warning, not an error.
   for (const [other, entry] of others) {
     const theirs = entry.active.devices;
@@ -484,11 +501,8 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   if (!Number.isInteger(context) || context < 512 || context > limit) throw new Error(`Context length must be between 512 and ${limit} for ${selected.id}.`);
   if (action !== "rollback") await checkFits(options, selected, context, hardware, usable, memoryBytes);
   // Ports other deployments hold (their current and previous), so an update can't take one.
-  const taken = new Map(others.flatMap(([other, entry]) => [entry.active, ...(entry.previous ? [entry.previous] : [])].map((deployment) => [deployment.port, other] as const)));
-  // The first free port: after the current one for an update; a new named deployment also keeps the next one free for its updates.
-  let defaultPort = old ? old.port + 1 : 8000;
-  if (old) while (taken.has(defaultPort)) defaultPort++;
-  else if (named) while (taken.has(defaultPort) || taken.has(defaultPort + 1)) defaultPort += 2;
+  const taken = takenPorts(others);
+  const defaultPort = defaultPortFor(old, named, taken);
   const portText = action === "rollback" ? String(previous!.port) : options.port ?? (interactive ? (await options.prompter.text(ui.prompt("Port", `default ${defaultPort}`))).trim() : "");
   const port = portNumber(portText || String(defaultPort));
   if (old && port === old.port) throw new Error("The new model needs a different port from the current model.");
