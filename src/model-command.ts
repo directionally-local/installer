@@ -2,8 +2,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { autopilotConfigFile } from "./laptop/free-tier.js";
 import { fittingModels, gpuCounts, recipe, type ModelRecipe } from "./model-catalog.js";
-import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Gpu, type Hardware } from "./model-runtime.js";
-import { chooseParallelism, type ParallelPlan } from "./model-parallel.js";
+import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Gpu, type Hardware, type LaunchExtras, recipeFor } from "./model-runtime.js";
+import { chooseParallelism } from "./model-parallel.js";
 import { interconnect } from "./model-topology.js";
 import { bench as benchModel } from "./model-bench.js";
 import { FIRST_ANSWER_MS, localFetch, modelApiBase, SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
@@ -103,12 +103,14 @@ export function needsText(model: ModelRecipe): string {
 
 /** Models that fit count every usable GPU (or the --gpus subset), not just the largest one. */
 async function selectModel(options: ModelCommandOptions, id: string | undefined, gpus: readonly Gpu[]): Promise<ModelRecipe> {
-  const choices = fittingModels(gpus);
+  // A blocked entry (no released engine runs it yet) is planned, never started.
+  const choices = fittingModels(gpus).filter((item) => !item.blocked);
   const totalMiB = gpus.reduce((sum, gpu) => sum + gpu.totalMiB, 0);
   if (choices.length === 0) throw new Error(`No catalog models fit ${gpus.length > 1 ? `${gpus.length} GPUs with ${Math.floor(totalMiB / 1024)} GB` : `${Math.floor(totalMiB / 1024)} GB`} of GPU VRAM.`);
   options.ui.line("info", "Models that fit", choices.map((item) => item.id).join(", "));
   if (id) {
     const selected = recipe(id);
+    if (selected.blocked) throw new Error(`${selected.id} can't be started yet: ${selected.blocked}. dl model up ${selected.id} --plan shows what it would run.`);
     if (!choices.includes(selected)) throw new Error(`${selected.id} needs ${needsText(selected)}.`);
     return selected;
   }
@@ -190,10 +192,10 @@ async function recordLogs(options: ModelCommandOptions, container: string): Prom
  * Whether a container left running by an earlier, failed attempt can be used as is: it runs the
  * same recipe (same image, model, flags, port and context) and its API answers.
  */
-async function reusable(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, parallel?: ParallelPlan): Promise<"reuse" | "replace" | "none"> {
+async function reusable(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, extras: LaunchExtras = {}): Promise<"reuse" | "replace" | "none"> {
   const existing = await inspectContainer(options.system, `dl-model-${slot}`);
   if (!existing) return "none";
-  if (!existing.running || existing.spec !== containerSpec(model, port, context, slot, parallel)) return "replace";
+  if (!existing.running || existing.spec !== containerSpec(model, port, context, slot, extras)) return "replace";
   try {
     const response = await (options.fetch ?? localFetch)(`${modelApiBase({ port })}/models`, { signal: AbortSignal.timeout(5000) });
     await response.arrayBuffer().catch(() => undefined);
@@ -203,12 +205,16 @@ async function reusable(options: ModelCommandOptions, model: ModelRecipe, port: 
   }
 }
 
-async function launch(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, reuse = false, progress: { started: boolean } = { started: false }, parallel?: ParallelPlan): Promise<ModelDeployment> {
+async function launch(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, reuse = false, progress: { started: boolean } = { started: false }, extras: LaunchExtras = {}): Promise<ModelDeployment> {
   const { system, ui } = options;
   const container = `dl-model-${slot}`;
+  const resolved = recipeFor(model, extras.computeCap);
   const deployment: ModelDeployment = { id: model.id, repo: model.repo, container, port, context,
-    image: model.image, flags: model.flags, minVramMiB: model.minVramMiB, gpuMemoryUtilization: model.gpuMemoryUtilization,
-    ...(parallel ? { parallel: { gpus: parallel.gpus, tp: parallel.tp, pp: parallel.pp, ep: parallel.ep } } : {}),
+    // The flags and environment as run (per-GPU-family ones included), so rollback restarts exactly this.
+    image: model.image, flags: resolved.flags, minVramMiB: model.minVramMiB, gpuMemoryUtilization: model.gpuMemoryUtilization,
+    ...(Object.keys(resolved.env).length ? { env: resolved.env } : {}),
+    ...(model.engine && model.engine !== "vllm" ? { engine: model.engine } : {}),
+    ...(extras.parallel ? { parallel: { gpus: extras.parallel.gpus, tp: extras.parallel.tp, pp: extras.parallel.pp, ep: extras.parallel.ep } } : {}),
     lastTest: { chat: false, tools: false, json: false, tokensPerSecond: 0, at: "" } };
   ui.plan([
     { id: "launch", label: "Start the vLLM container" },
@@ -225,7 +231,7 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
       options.record?.(`reusing ${container}: it runs the same recipe and its API answers`);
       ui.done("launch", `port ${port} · already running`);
     } else {
-      await system.run("docker", dockerArgs(model, port, context, slot, parallel));
+      await system.run("docker", dockerArgs(model, port, context, slot, extras));
       ui.done("launch", `port ${port}`);
     }
     progress.started = true;
@@ -351,7 +357,8 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   const maxTotal = Math.max(...hardware.gpus.map((gpu) => gpu.totalMiB));
   const previous = state?.previous;
   const selected: ModelRecipe = action === "rollback"
-    ? { id: previous!.id, repo: previous!.repo, minVramMiB: previous!.minVramMiB, gpuMemoryUtilization: previous!.gpuMemoryUtilization ?? 0.9, image: previous!.image, flags: previous!.flags, defaultContext: previous!.context }
+    ? { id: previous!.id, repo: previous!.repo, minVramMiB: previous!.minVramMiB, gpuMemoryUtilization: previous!.gpuMemoryUtilization ?? 0.9, image: previous!.image, flags: previous!.flags,
+      ...(previous!.env ? { env: previous!.env } : {}), ...(previous!.engine ? { engine: previous!.engine } : {}), defaultContext: previous!.context }
     : await selectModel(options, args[0], hardware.gpus);
   // A multi-GPU model gets its layout for this machine's GPUs and links; one GPU adds no flags.
   // Rollback restarts the previous deployment's layout as it was.
@@ -359,6 +366,9 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     : chooseParallelism(selected, hardware.gpus, hardware.topology);
   const parallel = layout && layout.gpus.length > 1 ? layout : undefined;
   if (parallel) ui.line("info", "Layout", parallel.why);
+  // Per-GPU-family flags (byGpu) follow the GPUs it runs on; a rollback's stored flags already have them.
+  const computeCap = action === "rollback" ? undefined : hardware.gpus.find((gpu) => gpu.index === (layout?.gpus[0] ?? hardware.gpus[0]!.index))?.computeCap;
+  const extras: LaunchExtras = { parallel, computeCap };
   const old = state?.active;
   if (old && !(await containerRunning(system, old.container))) throw new Error(`Current model container ${old.container} is stopped; restart it before changing models.`);
   const interactive = isInteractive(options);
@@ -371,12 +381,12 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   const candidateContainer = `dl-model-${slot}`;
   // A container a failed attempt left running for inspection is reused when it runs this exact
   // recipe and answers; otherwise it is replaced (and the GPU memory it held is counted again).
-  const existing = await reusable(options, selected, port, context, slot, parallel);
+  const existing = await reusable(options, selected, port, context, slot, extras);
   const reuse = existing === "reuse";
   // Check the spare slot before stopping anything: a stale candidate must not cause downtime.
   if (old && !reuse && await containerRunning(system, candidateContainer)) {
     const spare = await inspectContainer(system, candidateContainer);
-    if (spare?.spec !== containerSpec(selected, port, context, slot, parallel)) throw new Error(`Spare container ${candidateContainer} is running; stop it manually before changing models.`);
+    if (spare?.spec !== containerSpec(selected, port, context, slot, extras)) throw new Error(`Spare container ${candidateContainer} is running; stop it manually before changing models.`);
   }
   if (existing === "replace") {
     const wasRunning = await containerRunning(system, candidateContainer);
@@ -408,7 +418,7 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   const previousState = await system.readFile(statePath);
   const progress = { started: false };
   try {
-    const candidate = await launch(options, selected, port, context, slot, reuse, progress, parallel);
+    const candidate = await launch(options, selected, port, context, slot, reuse, progress, extras);
     if (system.dryRun) {
       if (old && !stoppedOld) await system.run("docker", ["stop", old.container]);
       ui.line("info", "Dry run", "No model, provider or state changed.");

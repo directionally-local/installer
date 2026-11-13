@@ -72,8 +72,9 @@ test("the picker shows every model with fits or doesn't fit, and tested or untes
   const result = await firstRunModelUp(f.options);
   assert.deepEqual(result, { ok: true, model: "Qwen/Qwen3-4B-Instruct-2507" });
   const rows = f.shown[0]!;
-  assert.deepEqual(rows.map((row) => row.value), ["qwen-new", "qwen-old", "glm-flash"]);
-  assert.deepEqual(rows.map((row) => row.detail), ["16 GB · fits · tested", "12 GB · fits · tested", "48 GB · doesn't fit · untested"]);
+  assert.deepEqual(rows.map((row) => row.value), ["qwen-new", "qwen-old", "glm-flash", "deepseek-v4.1-flash-fp8", "glm-5.3-flash"], "a blocked entry (deepseek-v4.1-flash-fp4) isn't offered");
+  assert.deepEqual(rows.map((row) => row.detail), ["16 GB · fits · tested", "12 GB · fits · tested", "48 GB · doesn't fit · untested",
+    "312 GB on 2+ GPUs · doesn't fit · untested", "340 GB on 4+ GPUs · doesn't fit · untested"]);
   assert.equal(f.initials[0], 0, "qwen-new, the first tested model that fits, is the default");
   assert.deepEqual(f.ups, [{ action: "up", args: ["qwen-new"], interactive: false }], "dl model up's own entry point, default context and port");
   assert.match(f.lines.join(""), /GPU: NVIDIA GeForce RTX 4090 · 24 GB/);
@@ -170,7 +171,7 @@ test("failures from dl model up become short error types; Esc is cancelled", asy
 
 test("tested models are the ones verified on a real GPU", () => {
   assert.deepEqual([...TESTED_MODELS].sort(), ["qwen-new", "qwen-old"]);
-  assert.deepEqual(modelChoices(49152).map((c) => [c.recipe.id, c.fits]), [["qwen-new", true], ["qwen-old", true], ["glm-flash", true]]);
+  assert.deepEqual(modelChoices(49152).map((c) => [c.recipe.id, c.fits]), [["qwen-new", true], ["qwen-old", true], ["glm-flash", true], ["deepseek-v4.1-flash-fp8", false], ["glm-5.3-flash", false]]);
 });
 
 const PRO_5000 = "0, NVIDIA RTX PRO 5000 Blackwell, 48935, 48000, 580.95.05\n";
@@ -179,7 +180,7 @@ test("an RTX PRO 5000 (48 GB): a short GPU line, and the picker, since two model
   const f = fixture({ gpu: PRO_5000 });
   assert.equal((await firstRunModelUp(f.options)).ok, true);
   assert.equal(f.shown.length, 1, "the picker was shown");
-  assert.deepEqual(f.shown[0]!.map((row) => row.detail?.split(" · ")[1]), ["fits", "fits", "doesn't fit"]);
+  assert.deepEqual(f.shown[0]!.map((row) => row.detail?.split(" · ")[1]), ["fits", "fits", "doesn't fit", "doesn't fit", "doesn't fit"]);
   const text = f.lines.join("");
   assert.match(text, /GPU: NVIDIA RTX PRO 5000 · 48 GB\n/);
   assert.match(text, /Driver: 580\.95\.05 · CUDA 12\.8\n/);

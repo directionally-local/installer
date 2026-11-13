@@ -17,7 +17,9 @@ test("catalog only offers models that fit a single GPU, and rejects unknown mode
   assert.deepEqual(fittingModels(16384).map((model) => model.id), ["qwen-new", "qwen-old"], "qwen-new (no thinking phase) comes first");
   assert.equal(fittingModels(49152).length, 3);
   assert.throws(() => recipe("unknown"), /Unknown model/);
-  assert.ok(MODEL_CATALOG.every((model) => model.image.startsWith("vllm/vllm-openai:") && model.flags.includes("--max-model-len")));
+  assert.ok(MODEL_CATALOG.every((model) => (model.engine ?? "vllm") === "vllm"
+    ? model.image.startsWith("vllm/vllm-openai:") && model.flags.includes("--max-model-len")
+    : model.image.startsWith("lmsysorg/sglang:") && model.flags.includes("--context-length")));
 });
 
 test("Nvidia, Docker and toolkit detection give actionable failures", async () => {

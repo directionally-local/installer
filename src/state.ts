@@ -56,6 +56,10 @@ export interface ModelDeployment {
   gpuMemoryUtilization?: number;
   /** A multi-GPU deployment's layout: host GPU indices and tensor/pipeline/expert parallel sizes. */
   parallel?: { gpus: number[]; tp: number; pp: number; ep: boolean };
+  /** Container environment (`-e`), when the recipe sets any; kept for rollback. */
+  env?: Record<string, string>;
+  /** The serving engine; vLLM when unset. */
+  engine?: "vllm" | "sglang";
   lastTest: { chat: boolean; tools: boolean; json: boolean; tokensPerSecond: number; at: string };
 }
 
