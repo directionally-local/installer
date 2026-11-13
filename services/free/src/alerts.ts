@@ -129,6 +129,29 @@ export function spendMilestoneAlert(input: {
   };
 }
 
+/**
+ * A payment just came in: who, what and how much (before tax), plus the running totals so the
+ * owner sees the trend without opening Stripe. Sent once per payment id.
+ */
+export function paymentAlert(input: { login: string | undefined; kind: "pro" | "topup"; renewal: boolean; amountCents: number; payments: number; payers: number; totalCents: number }): Alert {
+  const who = input.login ? `@${input.login}` : "someone";
+  const what = input.kind === "topup" ? "a top-up" : input.renewal ? "a Pro renewal" : "Pro";
+  const amount = dollars(input.amountCents / 100);
+  const lines = [
+    `dl free tier: ${who} paid ${amount} for ${what}.`,
+    "",
+    ...(input.login ? [`Login: @${input.login} (https://github.com/${input.login})`] : []),
+    `Product: ${input.kind === "topup" ? "top-up" : input.renewal ? "Pro (renewal)" : "Pro (new)"}`,
+    `Amount: ${amount} before tax`,
+    `All time: ${input.payments} ${input.payments === 1 ? "payment" : "payments"} from ${input.payers} ${input.payers === 1 ? "person" : "people"}, ${dollars(input.totalCents / 100)} before tax`,
+  ];
+  return {
+    subject: `dl: ${who} paid ${amount} (${input.kind === "topup" ? "top-up" : input.renewal ? "Pro renewal" : "Pro"})`,
+    text: lines.join("\n"),
+    footer: "Sent for every payment.",
+  };
+}
+
 /** A new access request (/request in dl): who, and how many wait. Never what they wrote. */
 export function accessRequestAlert(login: string, pending: number): Alert {
   return {

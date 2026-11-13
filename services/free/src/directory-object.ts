@@ -8,7 +8,7 @@ import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS
 import type { CleanEvent, GpuCount } from "./events.js";
 import { healthData, type HealthData, type HealthWindow } from "./health-data.js";
 import { homeData, type HomeData } from "./home-data.js";
-import { milestoneCrossed, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
+import { milestoneCrossed, paymentAlert, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
 import { DEEPSEEK_MODEL, familyOf, type Family } from "./models.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
@@ -2115,15 +2115,24 @@ export class DirectoryObject extends DurableObject {
   }
 
   /** A payment for the revenue numbers, once per id (a Checkout Session or an invoice). */
-  async recordPayment(input: { id: string; githubId: number; kind: "pro" | "topup"; amountCents: number; at: number }): Promise<void> {
-    this.ctx.storage.sql.exec(
-      "INSERT INTO payments (id, github_id, kind, amount_cents, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+  /**
+   * Records a payment once per id. Returns the "someone paid" alert for a new one, undefined
+   * for a payment already recorded (a retried or replayed webhook).
+   */
+  async recordPayment(input: { id: string; githubId: number; kind: "pro" | "topup"; amountCents: number; at: number; renewal?: boolean }): Promise<Alert | undefined> {
+    const sql = this.ctx.storage.sql;
+    const inserted = sql.exec(
+      "INSERT INTO payments (id, github_id, kind, amount_cents, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING RETURNING id",
       input.id,
       input.githubId,
       input.kind,
       input.amountCents,
       input.at,
-    );
+    ).toArray().length;
+    if (inserted === 0) return undefined;
+    const login = sql.exec<{ login: string }>("SELECT login FROM people WHERE github_id = ?", input.githubId).toArray()[0]?.login;
+    const totals = sql.exec<{ payments: number; payers: number; cents: number }>("SELECT COUNT(*) AS payments, COUNT(DISTINCT github_id) AS payers, COALESCE(SUM(amount_cents), 0) AS cents FROM payments").one();
+    return paymentAlert({ login, kind: input.kind, renewal: input.renewal === true, amountCents: input.amountCents, payments: totals.payments, payers: totals.payers, totalCents: totals.cents });
   }
 
   /** The dashboard's copy of a Pro subscription's state; older events don't overwrite newer ones. */
