@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.0](https://github.com/directionally-local/installer/compare/v0.33.0...v0.34.0) (2026-11-13)
+
+
+### Features
+
+* run the --workspace agent as the folder's owner, with its home outside the workspace ([#249](https://github.com/directionally-local/installer/issues/249)) ([fa1a1b6](https://github.com/directionally-local/installer/commit/fa1a1b6793de070965970c65c91d5fc95776eaca))
+
 ## [0.33.0](https://github.com/directionally-local/installer/compare/v0.32.0...v0.33.0) (2026-11-13)
 
 
