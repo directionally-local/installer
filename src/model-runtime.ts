@@ -1,24 +1,43 @@
 import { createHash } from "node:crypto";
 import type { ModelRecipe } from "./model-catalog.js";
+import { parallelFlags, type ParallelPlan } from "./model-parallel.js";
+import { parseTopology, type Topology } from "./model-topology.js";
 import type { System } from "./system.js";
 
-export interface Gpu { index: number; name: string; totalMiB: number; freeMiB: number; driver: string }
-export interface Hardware { gpus: Gpu[]; cuda: string }
+export interface Gpu {
+  index: number; name: string; totalMiB: number; freeMiB: number; driver: string; uuid?: string;
+  /** CUDA compute capability, "12.0" for RTX PRO Blackwell (sm120), "9.0" for H100 (sm90). */
+  computeCap?: string;
+}
+/** `topology` is read only when there is more than one GPU (and undefined when unreadable). */
+export interface Hardware { gpus: Gpu[]; cuda: string; topology?: Topology }
+
+/** The nvidia-smi query dl reads every GPU from (a fixture's nvidia-smi.csv is this command's output). */
+export const GPU_QUERY = ["--query-gpu=index,name,memory.total,memory.free,driver_version,uuid,compute_cap", "--format=csv,noheader,nounits"];
+
+/** nvidia-smi's CSV, one GPU per line: index, name, total and free MiB, driver, then (newer queries) UUID and compute capability. */
+export function parseGpus(csv: string): Gpu[] {
+  return csv.trim().split("\n").map((line) => {
+    const fields = line.split(",").map((part) => part.trim());
+    const [index, name, total, free, driver, uuid, cap] = fields;
+    if (!index || !name || !total || !free || !driver || !/^\d+$/.test(index) || !/^\d+$/.test(total) || !/^\d+$/.test(free)) throw new Error(`Could not parse Nvidia GPU details: ${line}`);
+    return { index: Number(index), name, totalMiB: Number(total), freeMiB: Number(free), driver, ...(uuid && /^GPU-/.test(uuid) ? { uuid } : {}), ...(cap && /^\d+\.\d+$/.test(cap) ? { computeCap: cap } : {}) };
+  });
+}
 
 /** Probes do not mutate the machine, even with --dry-run. */
 export async function detectHardware(system: System): Promise<Hardware> {
-  const result = await system.probe("nvidia-smi", ["--query-gpu=index,name,memory.total,memory.free,driver_version", "--format=csv,noheader,nounits"]);
+  const result = await system.probe("nvidia-smi", GPU_QUERY);
   if (result.code !== 0 || !result.stdout.trim()) throw new Error("No Nvidia GPU detected. Install the Nvidia driver and check nvidia-smi before running dl model up.");
-  const gpus = result.stdout.trim().split("\n").map((line) => {
-    const fields = line.split(",").map((part) => part.trim());
-    const [index, name, total, free, driver] = fields;
-    if (!index || !name || !total || !free || !driver || !/^\d+$/.test(index) || !/^\d+$/.test(total) || !/^\d+$/.test(free)) throw new Error(`Could not parse Nvidia GPU details: ${line}`);
-    return { index: Number(index), name, totalMiB: Number(total), freeMiB: Number(free), driver };
-  });
+  const gpus = parseGpus(result.stdout);
   const smi = await system.probe("nvidia-smi", []);
   const cuda = smi.stdout.match(/CUDA Version:\s*([\d.]+)/)?.[1];
   if (!cuda) throw new Error("nvidia-smi did not report a CUDA version; check your Nvidia driver.");
-  return { gpus, cuda };
+  if (gpus.length < 2) return { gpus, cuda };
+  // How the GPUs are linked decides the parallel layout (NVLink or PCIe); one GPU has no links.
+  const topo = await system.probe("nvidia-smi", ["topo", "-m"]);
+  const topology = topo.code === 0 ? parseTopology(topo.stdout) : undefined;
+  return { gpus, cuda, ...(topology ? { topology } : {}) };
 }
 
 export async function checkGpuDocker(system: System): Promise<void> {
@@ -32,7 +51,7 @@ export async function checkGpuDocker(system: System): Promise<void> {
 /** The label holding a hash of the container's recipe, so a later run knows whether it can reuse it. */
 export const SPEC_LABEL = "dl.model.spec";
 
-export function dockerArgs(model: ModelRecipe, port: number, context: number, slot: number): string[] {
+export function dockerArgs(model: ModelRecipe, port: number, context: number, slot: number, parallel?: ParallelPlan): string[] {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Port must be between 1 and 65535.");
   if (!Number.isInteger(context) || context < 512 || context > model.defaultContext) throw new Error(`Context length must be between 512 and ${model.defaultContext} for ${model.id}.`);
   const flags = [...model.flags];
@@ -41,14 +60,14 @@ export function dockerArgs(model: ModelRecipe, port: number, context: number, sl
   const container = ["--name", `dl-model-${slot}`, "--gpus", "all", "--ipc=host",
     "-p", `127.0.0.1:${port}:8000`, "-v", "dl-model-hf-cache:/root/.cache/huggingface"];
   const serve = [model.image, "--model", model.repo, "--served-model-name", model.repo, ...flags, "--max-model-len", String(context),
-    "--gpu-memory-utilization", String(model.gpuMemoryUtilization)];
+    "--gpu-memory-utilization", String(model.gpuMemoryUtilization), ...parallelFlags(parallel)];
   const spec = createHash("sha256").update(JSON.stringify([...container, ...serve])).digest("hex").slice(0, 16);
   return ["run", "-d", ...container, "--label", `${SPEC_LABEL}=${spec}`, ...serve];
 }
 
 /** The recipe hash `dockerArgs` labels the container with. */
-export function containerSpec(model: ModelRecipe, port: number, context: number, slot: number): string {
-  const args = dockerArgs(model, port, context, slot);
+export function containerSpec(model: ModelRecipe, port: number, context: number, slot: number, parallel?: ParallelPlan): string {
+  const args = dockerArgs(model, port, context, slot, parallel);
   return args[args.indexOf("--label") + 1]!.slice(SPEC_LABEL.length + 1);
 }
 
