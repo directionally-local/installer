@@ -141,6 +141,9 @@ It needs an Nvidia driver, Docker, and the Nvidia container toolkit; `dl model u
 | `dl model rollback` | Restart the previous deployment and switch the provider back. |
 | `dl model status` | The running model, its address, the GPU and its free memory, and the last test results. |
 | `dl model bench` | Time to first token (p50 and p95) and decode speed with 1, 8 and 32 requests at once, plus the prefix cache hit rate from vLLM's logs. |
+| `dl model list` | Every deployment on this machine: name, model, engine, GPUs, port, status. |
+
+Options: `--name NAME` makes or picks a separate deployment (update, rollback, status and bench then target it); `--gpus 0,1` pins it to those GPUs; `--port PORT` and `--context TOKENS` answer the questions up and update ask.
 
 `--dry-run` prints every Docker command without running it. The catalog lives in `src/model-catalog.ts`: each entry pins the Hugging Face repo, minimum GPU memory, the vLLM image tag, and flags (tool-call parser, reasoning parser, max model length, quantization). Today it has two Qwen 3 4B versions (an older and a newer one, handy for trying `update`), both tested end to end on a real GPU, and GLM-4.7-Flash for a 48 GB card, not yet tested.
 
@@ -155,6 +158,25 @@ dl model bench
 **When something fails.** The first line says which step failed and why. A container that started is kept running so you can look at it (`docker logs dl-model-1`), with the command to remove it, and running the same command again reuses it while it still answers. A failed test also prints a `curl` line that sends the same request, so you can reproduce it by hand. Autopilot's provider and the saved state are put back as they were. Every `dl model` run writes a log to `~/.directionallylocal/logs` (a failed one includes the end of vLLM's own log), and the error names the file.
 
 **From Autopilot's first run.** When `dl` starts Autopilot for the first time on a machine with an Nvidia card of 24 GB or more, Autopilot offers to run a private model on it. A yes runs this same setup: it checks Docker, offers to install the Nvidia container toolkit when it's missing (Ubuntu and Debian, with sudo), shows every catalog model with whether it fits this GPU and whether it was tested, and then runs `dl model up` with the default context and port. A failure opens a menu to retry, see what failed, pick another model, or carry on without a local model. Autopilot's **Use your own GPUs** answer also covers GPUs elsewhere: run `dl model up` on another server of yours and reach it through an SSH tunnel, or enter the address of a vLLM or other OpenAI-compatible server you already run.
+
+#### Several GPUs, and two models on one machine
+
+With more than one GPU, dl reads how they're linked (`nvidia-smi topo -m`: NVLink `NV#`, or PCIe `PIX`/`PXB`/`PHB`/`NODE`/`SYS`) and counts all of them (or the `--gpus` ones) for "models that fit". Over NVLink a model runs tensor parallel across its GPUs; over PCIe only, pipeline parallel as vLLM's docs advise for GPUs without NVLink, unless the model's own recipe documents tensor parallel (the DeepSeek V4.1 and GLM-5.3 entries do). A catalog entry picks its engine: vLLM, or SGLang (`lmsysorg/sglang`), behind the same checks.
+
+Two models can share a machine, each on its own GPUs:
+
+```sh
+dl model up deepseek-v4.1-flash-fp8 --name big --gpus 0,1,2,3 --port 8000
+dl model up qwen-new --name small --gpus 4 --port 8010
+dl model list
+dl model update glm-5.3-flash --name big
+```
+
+Each deployment has its own containers (`dl-model-NAME-1` and `-2` for updates), port and state entry; the unnamed one keeps `dl-model-1`/`-2`. Docker's `--gpus "device=…"` limits a container to its GPUs (renumbered from 0 inside; dl doesn't set `CUDA_VISIBLE_DEVICES`, whose host numbers would be wrong there), and dl refuses a GPU or port another deployment already has.
+
+Models that keep weights in host RAM (DeepSeek V4.1's Engram tables) get a memory limit, so one can't starve the other: `--memory` = the offloaded bytes (one copy per deployment: vLLM keeps "one host copy per replica", sharded over its tensor-parallel ranks) + 8 GiB per GPU worker (dl's allowance for each engine process, not an engine figure), with the same `--memory-swap` so it can't spill to swap. For DeepSeek V4.1 Flash on 4 GPUs that's 189.1 GiB + 32 GiB = 222 GiB, so on a 256 GB machine only one such deployment fits; `dl model up --plan` shows the math.
+
+All deployments share one Hugging Face cache volume (`dl-model-hf-cache`), read-write. That is safe: the cache is content-addressed, and Hugging Face's client takes a lock per file (`.locks/` at the cache root) so two containers never download the same blob at once; dl never deletes from it. A read-only mount would be safer still but breaks the first download, and the engines' images aren't verified to load from a read-only cache, so it isn't used. Two separate Docker setups (separate daemons) each have their own volume anyway.
 
 The model's state is kept separately from a server install, in `~/.local/state/directionallylocal/model.json` (or `$XDG_STATE_HOME`), so `dl model` works on a laptop or a server without touching `/etc/directionallylocal/state.json`.
 

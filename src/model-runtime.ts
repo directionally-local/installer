@@ -52,8 +52,41 @@ export async function checkGpuDocker(system: System): Promise<void> {
 /** The label holding a hash of the container's recipe, so a later run knows whether it can reuse it. */
 export const SPEC_LABEL = "dl.model.spec";
 
-/** What a launch adds beyond the recipe: the multi-GPU layout and the GPUs' compute capability (for `byGpu`). */
-export interface LaunchExtras { parallel?: ParallelPlan | undefined; computeCap?: string | undefined }
+/**
+ * What a launch adds beyond the recipe: the multi-GPU layout, the GPUs' compute capability (for
+ * `byGpu`), and for isolation the deployment's name, the host GPUs its container may see and its
+ * memory limit.
+ */
+export interface LaunchExtras {
+  parallel?: ParallelPlan | undefined;
+  computeCap?: string | undefined;
+  /** A named deployment's containers are dl-model-NAME-1/2; the default one's dl-model-1/2. */
+  name?: string | undefined;
+  devices?: readonly number[] | undefined;
+  memoryBytes?: number | undefined;
+}
+
+/** A deployment's container in a slot (1 or 2: an update starts the other one beside it). */
+export function containerName(name: string | undefined, slot: number): string {
+  return !name || name === "default" ? `dl-model-${slot}` : `dl-model-${name}-${slot}`;
+}
+
+/**
+ * Docker's --gpus value for some host GPUs. Docker parses it as CSV, so a list goes in double
+ * quotes inside the value: `--gpus '"device=0,2"'` in a shell ("The device value must be quoted
+ * because it contains a comma", https://docs.docker.com/engine/containers/gpu/). Inside, the
+ * container sees only these GPUs, numbered from 0; CUDA_VISIBLE_DEVICES isn't set (host indices
+ * would be wrong there).
+ */
+export function gpusValue(devices: readonly number[] | undefined): string {
+  if (!devices) return "all";
+  return devices.length === 1 ? `device=${devices[0]}` : `"device=${devices.join(",")}"`;
+}
+
+/** `--memory` in whole GiB, rounded up. */
+export function memoryValue(bytes: number): string {
+  return `${Math.ceil(bytes / 1024 ** 3)}g`;
+}
 
 /** The recipe's flags and environment for this GPU family (`byGpu` entries matching the compute capability's major version). */
 export function recipeFor(model: ModelRecipe, computeCap: string | undefined): { flags: string[]; env: Record<string, string>; gpuLabel?: string } {
@@ -74,7 +107,9 @@ export function dockerArgs(model: ModelRecipe, port: number, context: number, sl
   const server = engine(model.engine);
   const index = flags.indexOf(server.contextFlag);
   if (index !== -1) flags.splice(index, 2);
-  const container = ["--name", `dl-model-${slot}`, "--gpus", "all", "--ipc=host",
+  const container = ["--name", containerName(extras.name, slot), "--gpus", gpusValue(extras.devices), "--ipc=host",
+    // Same --memory-swap: "this prevents containers from using any swap" (Docker resource constraints docs).
+    ...(extras.memoryBytes ? ["--memory", memoryValue(extras.memoryBytes), "--memory-swap", memoryValue(extras.memoryBytes)] : []),
     "-p", `127.0.0.1:${port}:${server.containerPort}`, "-v", "dl-model-hf-cache:/root/.cache/huggingface",
     ...Object.entries(env).flatMap(([name, value]) => ["-e", `${name}=${value}`])];
   const serve = [model.image, ...server.serve(model, flags, context, extras.parallel)];

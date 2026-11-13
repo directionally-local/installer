@@ -77,11 +77,14 @@ On your laptop:
   dl provider set         pick another provider, key and model in Autopilot's list (--server NAME)
   dl provider github      replace the GitHub token
   dl model [ID]           the model for tasks and sessions on a place (no ID: Autopilot's list)
-  dl model up [MODEL]     serve a curated vLLM model on this machine's Nvidia GPU (--dry-run: plan only)
+  dl model up [MODEL]     serve a curated model (vLLM or SGLang) on this machine's Nvidia GPUs (--dry-run: plan only)
   dl model update [MODEL] smoke-test a replacement before switching (--dry-run: plan only)
   dl model rollback       restore the previous deployment and provider
   dl model status         running model, GPU memory, and last smoke tests
   dl model bench          TTFT p50/p95 and decode tok/s at concurrency 1/8/32, plus prefix cache
+  dl model list           every deployment here: name, model, engine, GPUs, port, status
+  model options: --name NAME (a separate deployment; update/rollback/status/bench target it),
+                 --gpus 0,1 (only these GPUs), --port PORT, --context TOKENS
   dl update               update dl (when npm has a newer one) and the Autopilot it pins, then
                           the default place (--check: only say whether there's a newer dl)
   dl update NAME          update a place's Autopilot, Hotcell and sandbox image to the versions dl pins
@@ -205,6 +208,9 @@ export async function main(
         continue: { type: "boolean", short: "c" },
         "from-claude-code": { type: "boolean" },
         yes: { type: "boolean", short: "y" },
+        gpus: { type: "string" },
+        port: { type: "string" },
+        context: { type: "string" },
       },
     });
   } catch (error) {
@@ -504,9 +510,11 @@ export async function main(
         return await use(parsed.positionals.slice(1), laptopIO);
       case "model": {
         const [action, ...args] = parsed.positionals.slice(1);
-        if (action === "up" || action === "update" || action === "rollback" || action === "status" || action === "bench") {
+        if (action === "up" || action === "update" || action === "rollback" || action === "status" || action === "bench" || action === "list") {
           if (values.server) { io.err("dl model deployment commands run on this machine; omit --server.\n"); return 2; }
-          return await gpuModelCommand(action, args, { system, ui: terminal && !values["dry-run"] ? new TerminalUi(io.out, undefined, colorOn) : new PlainUi(io.out), prompter: options.prompter ?? new TtyPrompter(), interactive: terminal });
+          return await gpuModelCommand(action, args, { system, ui: terminal && !values["dry-run"] ? new TerminalUi(io.out, undefined, colorOn) : new PlainUi(io.out), prompter: options.prompter ?? new TtyPrompter(), interactive: terminal,
+            ...(values.name !== undefined ? { name: values.name } : {}), ...(values.gpus !== undefined ? { gpus: values.gpus } : {}),
+            ...(values.port !== undefined ? { port: values.port } : {}), ...(values.context !== undefined ? { context: values.context } : {}) });
         }
         return await model(parsed.positionals.slice(1), { io: laptopIO, terminal, ...(values.server ? { server: values.server } : {}) });
       }
