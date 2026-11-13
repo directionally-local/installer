@@ -73,7 +73,7 @@ describe("dl model up against a fake vLLM", () => {
     assert.equal(first, "Chat test: the model returned no text, thinking mode used all tokens");
     assert.equal(kept, "The vLLM container is still running: docker logs dl-model-1");
     assert.equal(stop, "Stop it with docker rm -f dl-model-1; dl model up reuses it while it answers");
-    assert.match(reproduce!, /^Reproduce: curl -sS --max-time 30 -X POST 'http:\/\/127\.0\.0\.1:8000\/v1\/chat\/completions' -H 'content-type: application\/json' -d '\{"model":"Qwen\/Qwen3-4B","chat_template_kwargs":\{"enable_thinking":false\},"max_tokens":256,"messages":.*\}'$/);
+    assert.match(reproduce!, /^Reproduce: curl -sS --max-time 120 -X POST 'http:\/\/127\.0\.0\.1:8000\/v1\/chat\/completions' -H 'content-type: application\/json' -d '\{"model":"Qwen\/Qwen3-4B","chat_template_kwargs":\{"enable_thinking":false\},"max_tokens":256,"messages":.*\}'$/);
     assert.match(logLine!, /^Full log: \/tmp\/logs\/.*-up\.log$/);
     assert.deepEqual(more, [], "nothing more in the message: no server logs");
     assert.match(lines.join(""), /!! Chat test: only thinking, out of tokens|FAIL|failed/i);
@@ -87,7 +87,11 @@ describe("dl model up against a fake vLLM", () => {
     const vllm = { thinking: "none" as const, hangChat: true };
     server = await fakeVllm(vllm);
     const { system, options } = setup();
-    const opts = { ...options(server), smoke: ((deployment, sys, call, smokeOptions) => smokeTest(deployment, sys, call, { ...smokeOptions, answerMs: 300 })) as typeof smokeTest };
+    const budgets: Array<number | undefined> = [];
+    const opts = { ...options(server), smoke: ((deployment, sys, call, smokeOptions) => {
+      budgets.push(smokeOptions?.chatAnswerMs);
+      return smokeTest(deployment, sys, call, { ...smokeOptions, answerMs: 300, chatAnswerMs: 300 });
+    }) as typeof smokeTest };
     const error = await modelCommand("up", ["qwen-new"], opts).catch((caught: Error) => caught);
     assert.ok(error instanceof Error);
     assert.equal(error.message.split("\n")[0], "Chat test: no answer in 0.3 s");
@@ -105,6 +109,7 @@ describe("dl model up against a fake vLLM", () => {
     const runs = system.modelCommands.filter((command) => command.startsWith("run")).length;
     assert.equal(await modelCommand("up", ["qwen-new"], opts), 0);
     assert.equal(system.modelCommands.filter((command) => command.startsWith("run")).length, runs, "reused, not recreated");
+    assert.deepEqual(budgets, [120_000, undefined], "a fresh vLLM's first chat answer gets 120 s; a reused, warm one the usual 30 s");
     assert.ok(!system.modelCommands.some((command) => command.startsWith("rm")));
   });
 
@@ -126,6 +131,13 @@ describe("dl model up against a fake vLLM", () => {
     await assert.rejects(modelCommand("up", ["qwen-old"], opts), /: Chat test: the model returned no text/);
     assert.deepEqual(system.modelCommands.filter((command) => /^(run|rm)/.test(command)).map((command) => command.split(" ").slice(0, 2).join(" ")), ["run -d", "rm -f", "run -d", "rm -f", "run -d"]);
     assert.match(system.modelCommands.at(-1)!, /Qwen\/Qwen3-4B /);
+  });
+
+  it("the first chat test after a fresh start says it can take a minute", async () => {
+    server = await fakeVllm({ thinking: "none" });
+    const { lines, options } = setup();
+    assert.equal(await modelCommand("up", ["qwen-new"], options(server)), 0);
+    assert.match(lines.join(""), /\.\. Chat test: first answer can take a minute\nok Chat test\n/);
   });
 
   it("every line of dl model up, status, update, rollback and bench fits 80 columns", async () => {

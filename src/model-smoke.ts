@@ -75,6 +75,8 @@ export interface SmokeOptions {
   /** For tests: how long a check may wait for its answer once sent (30 s), and for a connection (10 s). */
   answerMs?: number;
   connectMs?: number;
+  /** The chat test's answer budget: FIRST_ANSWER_MS right after a fresh vLLM start (default: answerMs). */
+  chatAnswerMs?: number;
 }
 
 /** At most an hour of polls, however long the download keeps moving. */
@@ -82,6 +84,10 @@ const MAX_POLLS = 720;
 
 /** How long a check waits for its answer, counted from when the request was sent. */
 export const ANSWER_MS = 30_000;
+/** The first answer after a fresh vLLM start can take a minute or more (warm-up on the GPU). */
+export const FIRST_ANSWER_MS = 120_000;
+/** Shown while the first chat test waits with that longer budget. */
+export const FIRST_ANSWER_NOTE = "first answer can take a minute";
 /** How long a check waits to connect and send its request. */
 export const CONNECT_MS = 10_000;
 
@@ -183,6 +189,7 @@ export async function smokeTest(deployment: Pick<ModelDeployment, "repo" | "port
   const record = options.record ?? (() => {});
   const attempts = options.attempts ?? 60;
   const answerMs = options.answerMs ?? ANSWER_MS;
+  const chatAnswerMs = options.chatAnswerMs ?? answerMs;
   const connectMs = options.connectMs ?? CONNECT_MS;
   const seconds = (ms: number) => `${Math.round(ms / 100) / 10} s`;
 
@@ -264,8 +271,8 @@ export async function smokeTest(deployment: Pick<ModelDeployment, "repo" | "port
   };
 
   const chatBody = (body: Record<string, unknown>) => ({ model: deployment.repo, ...NO_THINKING, ...body });
-  const complete = async (check: SmokeCheck, body: Record<string, unknown>) => {
-    const sent = await send(check, "POST", url, chatBody({ max_tokens: 256, ...body }), answerMs);
+  const complete = async (check: SmokeCheck, body: Record<string, unknown>, budget = answerMs) => {
+    const sent = await send(check, "POST", url, chatBody({ max_tokens: 256, ...body }), budget);
     let text: string;
     try { text = await sent.response.text(); } catch (error) { throw sent.failure(error); }
     let parsed: Completion;
@@ -297,8 +304,10 @@ export async function smokeTest(deployment: Pick<ModelDeployment, "repo" | "port
   report("ready", "done");
 
   // 2. Chat: a short answer, judged on its text (thinking doesn't count).
-  report("chat", "start");
-  const chat = await complete("chat", { messages: [{ role: "user", content: "Reply with one short sentence." }] });
+  // The first request after a fresh start gets the longer budget, and says why it may take a while.
+  if (chatAnswerMs > answerMs) report("chat", "start", FIRST_ANSWER_NOTE);
+  else report("chat", "start");
+  const chat = await complete("chat", { messages: [{ role: "user", content: "Reply with one short sentence." }] }, chatAnswerMs);
   const chatChoice = chat.completion.choices?.[0];
   if (!answerText(chatChoice?.message?.content)) {
     const why = noTextReason(chatChoice?.message, chatChoice?.finish_reason);

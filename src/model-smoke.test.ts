@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo, LookupFunction } from "node:net";
 import { afterEach, describe, it } from "node:test";
 import { promisify } from "node:util";
-import { createLocalFetch, curlLine, modelApiBase, NO_THINKING, SmokeError, smokeTest, type FetchModel } from "./model-smoke.js";
+import { createLocalFetch, curlLine, FIRST_ANSWER_MS, modelApiBase, NO_THINKING, SmokeError, smokeTest, type FetchModel } from "./model-smoke.js";
 import { FakeModelSystem } from "./test-support/fake-model-system.js";
 import { fakeVllm, type FakeVllm } from "./test-support/fake-vllm.js";
 
@@ -76,6 +76,19 @@ describe("a failing check", () => {
     assert.ok(server.requests.some((request) => request.path === "/v1/chat/completions"), "the request reached the server");
     const line = log.find((entry) => entry.startsWith("smoke chat"))!;
     assert.match(line, new RegExp(`^smoke chat POST http://127\\.0\\.0\\.1:${server.port}/v1/chat/completions started \\S+Z: FAILED after \\d+ ms, sent after \\d+ ms: no answer in 0\\.3 s$`));
+  });
+
+  it("the first chat answer after a fresh start gets the longer budget; later checks keep theirs", async () => {
+    // Every non-streaming answer takes 400 ms: within the 1 s first-answer budget, over the 300 ms the others get.
+    server = await fakeVllm({ thinking: "none", answerDelayMs: 400 });
+    const steps: string[] = [];
+    const error = await smokeTest(at(server.port), new FakeModelSystem(), undefined, { attempts: 1, answerMs: 300, chatAnswerMs: 1000,
+      onCheck: (check, status, detail) => steps.push(`${status} ${check}${detail ? `: ${detail}` : ""}`) }).catch((caught: unknown) => caught);
+    assert.ok(error instanceof SmokeError);
+    assert.equal(error.message, "Tool call test: no answer in 0.3 s", "chat passed in 400 ms; the tool call test kept 300 ms");
+    assert.deepEqual(steps.slice(2, 4), ["start chat: first answer can take a minute", "done chat"]);
+    assert.match(error.curl!, /--max-time 1 /);
+    assert.equal(FIRST_ANSWER_MS, 120_000);
   });
 
   it("logs the HTTP status and a short body excerpt", async () => {

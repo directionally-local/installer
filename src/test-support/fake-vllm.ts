@@ -20,6 +20,8 @@ export interface FakeVllmOptions {
   chatText?: string;
   /** Chat completions are read but never answered (a request that hangs). */
   hangChat?: boolean;
+  /** Non-streaming chat completions answer after this many ms. */
+  answerDelayMs?: number;
   /** Chat completions answer this HTTP status with a short error body. */
   chatStatus?: number;
 }
@@ -55,6 +57,7 @@ export async function fakeVllm(options: FakeVllmOptions = {}): Promise<FakeVllm>
       }
       if (req.url !== "/v1/chat/completions" || !body) return json(404, {});
       if (options.hangChat) return;
+      if (options.answerDelayMs && !body.stream) await new Promise((resolve) => setTimeout(resolve, options.answerDelayMs));
       if (options.chatStatus) return json(options.chatStatus, { error: { message: "model is overloaded, try later" } });
       const kwargs = body.chat_template_kwargs as { enable_thinking?: boolean } | undefined;
       const thinks = thinking !== "none" && (options.alwaysThinks || kwargs?.enable_thinking !== false);

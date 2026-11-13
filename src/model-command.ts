@@ -4,7 +4,7 @@ import { autopilotConfigFile } from "./laptop/free-tier.js";
 import { fittingModels, recipe, type ModelRecipe } from "./model-catalog.js";
 import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Hardware } from "./model-runtime.js";
 import { bench as benchModel } from "./model-bench.js";
-import { localFetch, modelApiBase, SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
+import { FIRST_ANSWER_MS, localFetch, modelApiBase, SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
 import { modelStatePath, readModelState, writeModelState, type ModelDeployment } from "./state.js";
 import type { System } from "./system.js";
 import type { Ui } from "./ui.js";
@@ -233,6 +233,8 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
       ...(options.delay ? { delay: options.delay } : {}),
       running: () => containerRunning(system, container),
       ...(options.record ? { record: options.record } : {}),
+      // A fresh vLLM's first answer can take a minute; a reused one is warm.
+      ...(reuse ? {} : { chatAnswerMs: FIRST_ANSWER_MS }),
       onCheck: (check, status, detail) => {
         if (check === "ready") {
           if (status === "done") { watch.ready(); ui.done("ready"); }
