@@ -10,11 +10,11 @@ import { catalogDefaultText, chooseImage, namedByCaveat, parseImageRef, unoffici
 import { gib, hostResources, memoryLimitBytes, preflight, preflightError } from "./model-preflight.js";
 import { bench as benchModel } from "./model-bench.js";
 import { FIRST_ANSWER_MS, localFetch, modelApiBase, SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
-import { DEFAULT_DEPLOYMENT, modelStatePath, readDeployments, writeDeployment, type ModelDeployment, type ModelState } from "./state.js";
+import { DEFAULT_DEPLOYMENT, modelStatePath, readDeployments, writeDeployment, type ModelDeployment, type ModelSandbox, type ModelState } from "./state.js";
 import type { System } from "./system.js";
 import type { Ui } from "./ui.js";
 import type { Prompter } from "./prompt.js";
-import { attachArgs, attachSandbox, removeSandbox, repointSandbox, sandboxPreflight } from "./model-sandbox.js";
+import { attachArgs, attachSandbox, removeSandbox, repointSandbox, SandboxRemovedError, sandboxPreflight, userText } from "./model-sandbox.js";
 
 export interface ModelCommandOptions {
   system: System;
@@ -139,7 +139,13 @@ async function selectModel(options: ModelCommandOptions, id: string | undefined,
 }
 
 export async function configureProvider(options: Pick<ModelCommandOptions, "system">, deployment: ModelDeployment, path: string): Promise<void> {
-  const raw = await options.system.readFile(path);
+  const text = providerConfigText(await options.system.readFile(path), deployment, path);
+  await options.system.mkdir(dirname(path), { mode: 0o700 });
+  await options.system.writeFile(path, text, { mode: 0o600 });
+}
+
+/** Autopilot's config `raw` (or none) pointed at `deployment`, keeping everything else in it. */
+export function providerConfigText(raw: string | undefined, deployment: ModelDeployment, path: string): string {
   let config: Record<string, unknown> = {};
   if (raw) {
     try {
@@ -150,9 +156,8 @@ export async function configureProvider(options: Pick<ModelCommandOptions, "syst
   }
   const providers = config.providers && typeof config.providers === "object" && !Array.isArray(config.providers) ? config.providers as Record<string, unknown> : {};
   const saved = providers.vllm && typeof providers.vllm === "object" && !Array.isArray(providers.vllm) ? providers.vllm as Record<string, unknown> : {};
-  await options.system.mkdir(dirname(path), { mode: 0o700 });
-  await options.system.writeFile(path, `${JSON.stringify({ ...config, provider: "vllm", model: deployment.repo,
-    providers: { ...providers, vllm: { ...saved, model: deployment.repo, baseUrl: modelApiBase(deployment) } } }, null, 2)}\n`, { mode: 0o600 });
+  return `${JSON.stringify({ ...config, provider: "vllm", model: deployment.repo,
+    providers: { ...providers, vllm: { ...saved, model: deployment.repo, baseUrl: modelApiBase(deployment) } } }, null, 2)}\n`;
 }
 
 const GB = 1024 ** 3;
@@ -382,7 +387,7 @@ async function listDeployments(options: ModelCommandOptions, deployments: Record
     const sandbox = deployments[name]!.sandbox;
     const cell = sandbox ? await containerRunning(options.system, sandbox.container) : false;
     options.ui.line(running && (!sandbox || cell) ? "done" : "failed", name, `${active.id} · ${engine(active.engine).label} · ${imageText(active)} · GPUs ${gpus} · port ${active.port} · ${running ? "running" : "stopped"}`
-      + (sandbox ? ` · sandbox ${sandbox.workspace} (${sandbox.internet ? "internet" : "no internet"}, ${cell ? "running" : "stopped"})` : ""));
+      + (sandbox ? ` · sandbox ${sandbox.workspace} (${sandbox.internet ? "internet" : "no internet"}, as ${userText(sandbox.user)}, ${cell ? "running" : "stopped"})` : ""));
   }
   return 0;
 }
@@ -468,7 +473,7 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     if (state.previous) ui.line("info", "Previous", `${state.previous.id} · ${command("rollback")}`);
     if (state.sandbox) {
       const cell = await containerRunning(system, state.sandbox.container);
-      ui.line(cell ? "done" : "failed", "Sandbox", `${state.sandbox.workspace} · ${state.sandbox.internet ? "internet allowed" : "no internet"} · ${cell ? "running" : "stopped"} · ${command("attach")}`);
+      ui.line(cell ? "done" : "failed", "Sandbox", `${state.sandbox.workspace} · runs as ${userText(state.sandbox.user)} · ${state.sandbox.internet ? "internet allowed" : "no internet"} · ${cell ? "running" : "stopped"} · ${command("attach")}`);
     }
     if (!named && others.length) ui.line("info", "Others", `${others.map(([other]) => other).join(", ")} · dl model list`);
     return running ? 0 : 1;
@@ -504,7 +509,7 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   // checked before any model work, so a missing piece costs no download.
   const sandboxHost = options.workspace !== undefined ? await sandboxPreflight(system, options.workspace) : undefined;
   const attach = (deployment: ModelDeployment) => attachSandbox({ system, host: sandboxHost!, name, internet: options.allowInternet === true,
-    ...(options.delay ? { sleep: options.delay } : {}), step: (label, detail) => ui.line("done", label, detail) }, deployment);
+    ...(options.delay ? { sleep: options.delay } : {}), step: (label, detail) => ui.line("done", label, detail), note: (label, detail) => ui.line("info", label, detail) }, deployment);
   if (action === "up" && state && sandboxHost) {
     // A serving deployment without a sandbox gets one (also how a failed sandbox step is retried).
     if (state.sandbox) throw new Error(`${named ? `Deployment ${name}` : "This model"} already has a sandbox on ${state.sandbox.workspace}; ${command("down")} removes both.`);
@@ -675,11 +680,17 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     await writeDeployment(system, name, { active: candidate, ...(old ? { previous: old } : {}), ...(state?.sandbox ? { sandbox: state.sandbox } : {}) }, statePath);
     // The sandbox follows the switch before the old model stops: the alias moves, its config names the new model.
     if (state?.sandbox) {
+      const saveSandbox = (sandbox: ModelSandbox | undefined) => writeDeployment(system, name, { active: candidate, ...(old ? { previous: old } : {}), ...(sandbox ? { sandbox } : {}) }, statePath);
       try {
-        await repointSandbox(system, state.sandbox, candidate, old);
-        ui.line("info", "Sandbox", `now on ${candidate.id}`);
+        const sandbox = await repointSandbox(system, name, state.sandbox, candidate, old, (text) => ui.line("info", "Sandbox", text));
+        if (sandbox !== state.sandbox) await saveSandbox(sandbox);
+        ui.line("info", "Sandbox", `now on ${candidate.id} · runs as ${userText(sandbox.user)}`);
       } catch (error) {
-        ui.warn(fitWarning("Sandbox not moved to the new model: ", firstLine(error)));
+        if (error instanceof SandboxRemovedError) {
+          await saveSandbox(undefined);
+          ui.warn(fitWarning("Sandbox removed: ", firstLine(error)));
+          ui.line("info", "Sandbox", `dl model up --workspace ${state.sandbox.workspace}${named ? ` --name ${name}` : ""} makes it again`);
+        } else ui.warn(fitWarning("Sandbox not moved to the new model: ", firstLine(error)));
       }
     }
     if (old) await system.run("docker", ["stop", old.container]);
@@ -728,9 +739,10 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
 }
 
 /** How to use the sandbox, after it's up. */
-function sandboxReady(ui: Ui, command: (verb: string) => string, sandbox: { workspace: string; internet: boolean }): void {
+function sandboxReady(ui: Ui, command: (verb: string) => string, sandbox: { workspace: string; internet: boolean; home?: string | undefined; user?: string | undefined }): void {
   ui.line("info", "Open the agent", command("attach"));
-  ui.line("info", "Workspace", `${sandbox.workspace} (the only host directory it sees) · ${sandbox.internet ? "internet allowed" : "reaches only the model"}`);
+  ui.line("info", "Workspace", `${sandbox.workspace} · runs as ${userText(sandbox.user)} · ${sandbox.internet ? "internet allowed" : "reaches only the model"}`);
+  if (sandbox.home) ui.line("info", "Agent home", `${sandbox.home} (HOME, config, sessions; outside the workspace)`);
   ui.line("info", "Update", `${command("update")} [model] · the sandbox follows; ${command("rollback")} too`);
-  ui.line("info", "Stop", `${command("down")} · removes the model and the sandbox, keeps ${sandbox.workspace}`);
+  ui.line("info", "Stop", `${command("down")} · removes the model, the sandbox and its home, keeps ${sandbox.workspace}`);
 }

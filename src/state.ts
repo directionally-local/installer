@@ -81,11 +81,15 @@ export interface ModelSandbox {
   container: string;
   /** The host directory mounted at /workspace (its real path). */
   workspace: string;
+  /** The agent's home on the host, mounted at /home/agent; absent for dl 0.33.0's sandboxes (config in workspace/.dl). */
+  home?: string;
   /** The internal network shared with the model, then the egress network with --allow-internet. */
   networks: string[];
   internet: boolean;
   image: string;
   createdAt: string;
+  /** The numeric uid:gid the cell runs as (the workspace's owner); absent = root. */
+  user?: string;
 }
 
 export interface ModelState { version: 1; active: ModelDeployment; previous?: ModelDeployment; sandbox?: ModelSandbox }
@@ -158,7 +162,9 @@ export async function readModelState(system: System, path = modelStatePath()): P
 function validSandbox(value: unknown): value is ModelSandbox {
   const sandbox = value as Partial<ModelSandbox> | null;
   return !!sandbox && typeof sandbox === "object" && typeof sandbox.id === "string" && typeof sandbox.container === "string"
-    && typeof sandbox.workspace === "string" && Array.isArray(sandbox.networks) && sandbox.networks.length > 0 && typeof sandbox.internet === "boolean";
+    && typeof sandbox.workspace === "string" && Array.isArray(sandbox.networks) && sandbox.networks.length > 0 && typeof sandbox.internet === "boolean"
+    && (sandbox.home === undefined || typeof sandbox.home === "string")
+    && (sandbox.user === undefined || (typeof sandbox.user === "string" && /^\d+:\d+$/.test(sandbox.user)));
 }
 
 function validDeployment(value: unknown): value is ModelDeployment {

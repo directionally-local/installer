@@ -10,7 +10,10 @@ import { detectHardware, dockerArgs, gpuLine, maxContext, modelDownloadBytes, re
 import { interconnect } from "./model-topology.js";
 import type { FetchModel } from "./model-smoke.js";
 import { DEFAULT_DEPLOYMENT, readDeployments, readState } from "./state.js";
-import { CELL_AUTOPILOT, checkWorkspacePath, MIN_HOTCELL_FOR_SANDBOX, plannedImage, SANDBOX_LIMITS, sandboxCommands, sandboxConfigPath, sandboxEgressNetwork, sandboxNetwork, sandboxProvider, cellContainer } from "./model-sandbox.js";
+import {
+  CELL_AUTOPILOT, checkWorkspacePath, HOMES_ROOT, MIN_HOTCELL_FOR_SANDBOX, ownerUser, plannedImage, SANDBOX_HOME, SANDBOX_LIMITS, sandboxCommands, sandboxConfigPath, sandboxHomeDir,
+  sandboxEgressNetwork, sandboxNetwork, sandboxProvider, cellContainer, workspaceOwner, type WorkspaceOwner,
+} from "./model-sandbox.js";
 import { pinnedAutopilotVersion } from "./versions.js";
 import type { RunOptions, RunResult, System, WriteOptions } from "./system.js";
 
@@ -27,8 +30,10 @@ export function readOnly(inner: Pick<System, "probe" | "readFile" | "exists">): 
     dryRun: true,
     run: async (command: string, args: string[], _options?: RunOptions): Promise<RunResult> => refuse(`runs commands (asked to run ${[command, ...args].join(" ")})`),
     probe: (command, args, options) => {
-      // Read-only detection only: the GPUs, their links, and free disk. Never Docker.
-      if (command !== "nvidia-smi" && command !== "df") return Promise.resolve({ code: 1, stdout: "", stderr: `${command} is not probed by --plan` });
+      // Read-only detection only: the GPUs, their links, free disk, and who owns a --workspace
+      // folder (stat -c %u:%g, so the plan names the user the agent will run as). Never Docker.
+      const owner = command === "stat" && args.length === 3 && args[0] === "-c" && args[1] === "%u:%g";
+      if (command !== "nvidia-smi" && command !== "df" && !owner) return Promise.resolve({ code: 1, stdout: "", stderr: `${command} is not probed by --plan` });
       return inner.probe(command, args, options);
     },
     readFile: (path) => inner.readFile(path),
@@ -213,15 +218,24 @@ export async function planCommand(options: PlanOptions): Promise<number> {
     const install = elsewhere ? undefined : await readState(system).catch(() => undefined);
     const internet = options.allowInternet === true;
     const container = args[args.indexOf("--name") + 1]!;
-    const spec = { name, workspace, internet, image: install?.image ?? plannedImage(pinnedAutopilotVersion()) };
+    // The cell runs as the folder's owner. Here the folder is read when it exists; for another
+    // machine (--hardware) or a folder not made yet, the plan shows the usual case: a non-root owner.
+    const owner: WorkspaceOwner | undefined = elsewhere ? undefined : await workspaceOwner(system, workspace).catch(() => undefined);
+    const user = owner ? ownerUser(owner) : "UID:GID";
+    const spec = { name, workspace, internet, image: install?.image ?? plannedImage(pinnedAutopilotVersion()), user };
     const commands = sandboxCommands(spec, container);
     const provider = sandboxProvider({ repo: model.repo, engine: model.engine });
     const net = sandboxNetwork(name);
+    const home = sandboxHomeDir(name);
     const command = (verb: string) => `dl model ${verb}${named ? ` --name ${name}` : ""}`;
     out("\nSandbox (started after the model's tests pass)\n");
     print("Agent", `Autopilot in a Hotcell cell (container driver) · image ${spec.image}`);
-    print("Workspace", `${workspace} → /workspace, read-write: the only host directory it sees (symlinks resolved at up)`);
-    print("Mounts", "no home directory, no other host path, no Docker socket; Hotcell adds only its agent binary (read-only) and socket");
+    print("Workspace", `${workspace} → /workspace, read-write: the project (symlinks resolved at up); dl writes nothing in it`);
+    print("Home", `${home} → ${SANDBOX_HOME}, read-write: HOME and every XDG directory (config, sessions, caches); made by dl before the cell starts, owned by the user, 0700; dl model down deletes it`);
+    print("User", owner
+      ? `${owner.uid === 0 ? "root" : user} (owner of ${workspace}); root only when the owner is root`
+      : `the owner of ${workspace}, read at up (uid:gid, e.g. 1000:1000); root only when the owner is root`);
+    print("Mounts", "exactly those two host directories; no host home directory, no Docker socket; Hotcell adds only its agent binary (read-only) and socket");
     print("GPUs", "none (no --gpus, no /dev/nvidia*)");
     print("Network", `${net}: Docker --internal, no host address on it (no route off the box, no host services); shared with ${container} as "model"`);
     print("Egress", internet
@@ -231,9 +245,9 @@ export async function planCommand(options: PlanOptions): Promise<number> {
     const sandboxBytes = SANDBOX_LIMITS.memoryMb * MiB;
     print("Limits", `${SANDBOX_LIMITS.memoryMb / 1024} GiB memory, ${SANDBOX_LIMITS.cpus} CPUs, ${SANDBOX_LIMITS.pids} processes`
       + (result?.ramNeedBytes && host.ramAvailableBytes !== undefined ? ` · with the model's ${gib(result.ramNeedBytes)}: ${gib(result.ramNeedBytes + sandboxBytes)} of ${gib(host.ramAvailableBytes)} available` : ""));
-    print("Isolation", `the model container mounts only dl-model-hf-cache, never ${workspace}; checked after start (docker inspect, and from inside the cell)`);
-    print("Hotcell", `HOTCELL_WORKSPACE_ROOTS gains ${workspace} (restarts hotcell.service); needs dl's server install (sudo dl up), Hotcell ${MIN_HOTCELL_FOR_SANDBOX}+, root`);
-    print("Autopilot", `${sandboxConfigPath(workspace)} (the cell's XDG_CONFIG_HOME, git-ignored):`);
+    print("Isolation", `the model container mounts only dl-model-hf-cache, never ${workspace}; checked after start (docker inspect, from inside the cell, the owner of a file the agent writes, and ${workspace}'s listing and git status before and after)`);
+    print("Hotcell", `HOTCELL_WORKSPACE_ROOTS gains ${workspace}, HOTCELL_HOME_ROOTS ${HOMES_ROOT} (restarts hotcell.service); needs dl's server install (sudo dl up), Hotcell ${MIN_HOTCELL_FOR_SANDBOX}+, root`);
+    print("Autopilot", `${sandboxConfigPath(home)} (the cell's XDG_CONFIG_HOME, outside the workspace):`);
     out(`${JSON.stringify(provider.config, null, 2).split("\n").map((line) => `  ${line}`).join("\n")}\n`);
     out("\nSandbox commands\n");
     for (const network of commands.networks) out(`${shellCommand(network)}\n`);
@@ -241,9 +255,9 @@ export async function planCommand(options: PlanOptions): Promise<number> {
     out(`${shellCommand(commands.create).replace(/^docker /, "hotcell ")}\n`);
     out("\nThen\n");
     const then = (left: string, text: string) => out(`  ${left.padEnd(named ? 36 : 22)} ${text}\n`);
-    then(command("attach"), `Autopilot in the sandbox (docker exec -it -w /workspace ${cellContainer("ID")} ${CELL_AUTOPILOT})`);
+    then(command("attach"), `Autopilot in the sandbox (docker exec -it ${user ? `-u ${user} ` : ""}-w /workspace ${cellContainer("ID")} ${CELL_AUTOPILOT})`);
     then(`${command("update")} MODEL`, "tests the new model; when it passes, the sandbox follows (same URL, config rewritten)");
-    then(command("down"), `removes the model, the sandbox and its networks; keeps ${workspace}`);
+    then(command("down"), `removes the model, the sandbox, its networks and ${home}; keeps ${workspace}`);
   }
   return fits && !model.blocked ? 0 : 1;
 }

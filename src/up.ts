@@ -187,7 +187,7 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
       warn: (text) => ui.warn(text),
       retry: "dl up",
     });
-    await system.writeFile(PATHS.hotcellEnv, hotcellEnv({ apiKey, bridgeIp, workspaceRoots: hotcellValues.HOTCELL_WORKSPACE_ROOTS }), { mode: 0o640, owner: `root:${USERS.hotcell}`, secret: true });
+    await system.writeFile(PATHS.hotcellEnv, hotcellEnv({ apiKey, bridgeIp, workspaceRoots: hotcellValues.HOTCELL_WORKSPACE_ROOTS, homeRoots: hotcellValues.HOTCELL_HOME_ROOTS }), { mode: 0o640, owner: `root:${USERS.hotcell}`, secret: true });
     // The provider goes into aster.json next to the key; an install without one keeps the default (OpenRouter).
     const existingAster = await system.readFile(PATHS.asterConfig);
     if (answers.provider) {
