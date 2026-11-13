@@ -1,6 +1,6 @@
 import { escapeHtml } from "../../shared/src/html.js";
 import { barPath, creditProviders, grantUsdInput, ownCapText, shell, SIMPLE_STYLE, type SpendView } from "./dashboard-page.js";
-import { atCap, GPU_DAYS, modelName, realAllowance, type HomeData, type HomePerson, type Tier } from "./home-data.js";
+import { atCap, budgetReached, GPU_DAYS, modelName, realAllowance, type HomeData, type HomePerson, type LiveBudget, type LiveBudgets, type Tier } from "./home-data.js";
 import { BRAND_ORIGIN, PRODUCT_NAME } from "./pages.js";
 import type { PendingAccessRequest } from "./directory-object.js";
 import { DAY_MS, WEEK_MS } from "./week.js";
@@ -188,35 +188,39 @@ export interface PersonRow {
   githubId: number;
   login: string | null;
   tier: Tier;
-  /** This week's free cost, both budgets; `gptCostUsd` and `deepseekCostUsd` split it. */
-  costUsd: number;
-  gptCostUsd: number;
-  deepseekCostUsd: number;
-  /** The GPT-6 budget and the DeepSeek budget (null: no cap). */
-  capUsd: number | null;
-  deepseekCapUsd: number | null;
-  /** The cap is an admin's personal one (a grant), not the level's. */
+  /** Free cost since Monday 00:00 UTC, both budgets together, from the daily roll-up: history, kept across a weekly reset. */
+  sinceMondayUsd: number;
+  /** The account's live weekly budgets (what limits them now), or null when they couldn't be read. */
+  gpt6: LiveBudget | null;
+  deepseek: LiveBudget | null;
+  /** The GPT-6 cap is an admin's personal one (a grant), not the level's. */
   ownCap: boolean;
+  /** A live budget is at or over its cap. */
   atCap: boolean;
 }
 
-export function personRows(people: readonly HomePerson[], spend: SpendView): PersonRow[] {
-  return people.map((person) => {
-    const allowance = realAllowance(person, spend);
-    const deepseekCostUsd = person.deepseekCostUsd ?? 0;
-    return {
+/**
+ * The "Who's using it?" rows: ordered by spend since Monday (`people` comes sorted), each with its
+ * live budgets from `live`. Blocked and suspended accounts are left out (also when only the
+ * account says so).
+ */
+export function personRows(people: readonly HomePerson[], spend: SpendView, live: ReadonlyMap<number, LiveBudgets>): PersonRow[] {
+  const rows: PersonRow[] = [];
+  for (const person of people) {
+    const budgets = live.get(person.githubId) ?? null;
+    if (budgets && (budgets.status === "blocked" || budgets.status === "suspended")) continue;
+    rows.push({
       githubId: person.githubId,
       login: person.login,
-      tier: allowance.tier,
-      costUsd: person.costUsd,
-      gptCostUsd: Math.max(0, person.costUsd - deepseekCostUsd),
-      deepseekCostUsd,
-      capUsd: allowance.usd,
-      deepseekCapUsd: allowance.deepseekUsd,
+      tier: realAllowance(person, spend).tier,
+      sinceMondayUsd: person.costUsd,
+      gpt6: budgets?.gpt6 ?? null,
+      deepseek: budgets?.deepseek ?? null,
       ownCap: person.grantUsd !== null,
-      atCap: atCap(person, allowance),
-    };
-  });
+      atCap: budgets !== null && atCap(budgets),
+    });
+  }
+  return rows;
 }
 
 export function usersSentence(home: Pick<HomeData, "people">): string {
@@ -243,7 +247,7 @@ export interface Problem {
 }
 
 /** Every problem the data shows, worst first; the page shows MAX_PROBLEMS. */
-export function problems(home: HomeData, spend: SpendView, view: Outlook = outlook(spend, home), people: PersonRow[] = personRows(home.spenders, spend)): Problem[] {
+export function problems(home: HomeData, spend: SpendView, view: Outlook = outlook(spend, home), people: PersonRow[] = personRows(home.spenders, spend, new Map())): Problem[] {
   const found: Problem[] = [];
   const budget = "/admin?view=full#budget";
   if (view.stopped === "no_key") found.push({ severity: 100, text: "Free requests aren't being served: no provider key is set.", href: budget });
@@ -346,10 +350,15 @@ ${first ? `<text x="0" y="${height - 4}">${escapeHtml(monthDay(first.day))}</tex
 </svg>`;
 }
 
-/** A thin bar: spent against the cap. */
-function capBar(spent: number, cap: number | null, at: boolean): string {
+/** The used share of a live budget (0 with no cap), at most 1. */
+function usedShare(budget: LiveBudget | null): number {
+  return budget === null || budget.usdPerWeek === null || budget.usdPerWeek <= 0 ? 0 : Math.min(1, budget.spentUsd / budget.usdPerWeek);
+}
+
+/** A thin bar: the fuller live budget against its cap. */
+function capBar(share: number, at: boolean): string {
   const width = 100;
-  const filled = cap === null || cap <= 0 ? 0 : Math.min(1, spent / cap) * width;
+  const filled = share * width;
   return `<svg class="cap" viewBox="0 0 ${width} 6" preserveAspectRatio="none" aria-hidden="true"><rect class="track" x="0" y="0" width="${width}" height="6" rx="3"></rect>${
     filled > 0 ? `<rect class="${at ? "full" : "fill"}" x="0" y="0" width="${filled.toFixed(2)}" height="6" rx="3"></rect>` : ""
   }</svg>`;
@@ -375,6 +384,8 @@ main.home { max-width: 40rem; grid-template-columns: minmax(0, 1fr); gap: 16px; 
 .people .tier { color: var(--k-muted); font-size: 12.5px; flex: none; }
 .people .amt { font-variant-numeric: tabular-nums; color: var(--k-muted); font-size: 13px; text-align: right; }
 .people .amt b { color: var(--k-text); font-weight: 600; }
+.people .limit { grid-column: 1 / -1; color: var(--k-muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.people .limit b { color: var(--k-text); font-weight: 600; }
 .people svg.cap { grid-column: 1 / -1; width: 100%; height: 6px; display: block; }
 svg.cap .track { fill: var(--k-border); }
 svg.cap .fill { fill: var(--c-1); }
@@ -409,6 +420,8 @@ svg.cap .full { fill: var(--k-stop); }
 
 export interface HomeInput {
   home: HomeData;
+  /** Live weekly budgets for the people in `home.spenders`, by GitHub id (see app.ts liveBudgets). */
+  live: ReadonlyMap<number, LiveBudgets>;
   spend: SpendView;
   requests: PendingAccessRequest[];
   /** The grantWeeklyUsdCap setting: the Grant forms' default weekly dollar cap (0: Full only). */
@@ -439,7 +452,7 @@ ${form}
 export function homePage(input: HomeInput): Response {
   const { home, spend, requests, csrf } = input;
   const view = outlook(spend, home);
-  const people = personRows(home.spenders, spend);
+  const people = personRows(home.spenders, spend, input.live);
   const found = problems(home, spend, view, people).slice(0, MAX_PROBLEMS);
 
   const header = `<header class="bar"><div>
@@ -463,17 +476,20 @@ ${spendChart(home.spendDays, [...keys], 340, "narrow")}
   const rows = top.map((row) => {
     const name = row.login ?? `#${row.githubId}`;
     const link = row.login ? `<a href="https://github.com/${encodeURIComponent(row.login)}" rel="noopener noreferrer nofollow" target="_blank">${escapeHtml(name)}</a>` : `<a href="/admin?view=full#top">${escapeHtml(name)}</a>`;
-    // GPT-6 first (the tighter budget, and the one a personal cap sets), then DeepSeek when used.
-    const amount = row.capUsd === null ? `GPT-6 <b>${escapeHtml(money(row.gptCostUsd))}</b>, no cap` : `GPT-6 <b>${escapeHtml(money(row.gptCostUsd))}</b> of ${escapeHtml(money(row.capUsd))}${row.ownCap ? " (own cap)" : ""}`;
-    const deepseek =
-      row.deepseekCostUsd > 0 ? ` · DeepSeek <b>${escapeHtml(money(row.deepseekCostUsd))}</b>${row.deepseekCapUsd === null ? ", no cap" : ` of ${escapeHtml(money(row.deepseekCapUsd))}`}` : "";
-    return `<li><span class="who">${link} <span class="tier">${escapeHtml(TIER_WORDS[row.tier])}</span></span><span class="amt">${row.atCap ? `<span class="capword">at cap</span> ` : ""}${amount}${deepseek}</span>${capBar(row.gptCostUsd, row.capUsd, row.atCap)}</li>`;
+    // Two numbers: spend since Monday (history, what ranks the list) and the live budgets (what limits them now).
+    const budget = (name: string, value: LiveBudget, own = false) =>
+      `${budgetReached(value) ? `<span class="capword">at cap</span> ` : ""}${name} <b>${escapeHtml(money(value.spentUsd))}</b>${value.usdPerWeek === null ? ", no cap" : ` of ${escapeHtml(money(value.usdPerWeek))}${own ? " (own cap)" : ""}`}`;
+    const limit =
+      row.gpt6 && row.deepseek
+        ? `This week's limit: ${budget("GPT-6", row.gpt6, row.ownCap)} · ${budget("DeepSeek", row.deepseek)}`
+        : "This week's limit: couldn't be read";
+    return `<li><span class="who">${link} <span class="tier">${escapeHtml(TIER_WORDS[row.tier])}</span></span><span class="amt"><b>${escapeHtml(money(row.sinceMondayUsd))}</b> since Monday</span><span class="limit">${limit}</span>${capBar(Math.max(usedShare(row.gpt6), usedShare(row.deepseek)), row.atCap)}</li>`;
   });
   const gpuLine = gpuSentence(home);
   const using = `<section class="card" id="using" aria-labelledby="using-h">
 <h2 id="using-h">Who's using it?</h2>
 <p class="say">${escapeHtml(usersSentence(home))}</p>
-${rows.length > 0 ? `<h3 class="sub">Spent most this week</h3><ul class="people">${rows.join("\n")}</ul>` : `<p class="none">Nobody has used free tokens this week.</p>`}
+${rows.length > 0 ? `<h3 class="sub">Spent most since Monday</h3><ul class="people">${rows.join("\n")}</ul>` : `<p class="none">Nobody has used free tokens this week.</p>`}
 ${gpuLine ? `<p class="more"><a href="/admin?view=health#gpus">${escapeHtml(gpuLine)}</a></p>` : ""}
 </section>`;
 

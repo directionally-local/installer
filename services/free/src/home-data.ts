@@ -23,7 +23,14 @@ export interface HomeSpendDay {
   openrouter: number;
 }
 
-/** One person's week: what they used and what their level allows. */
+/** Spenders the home screen reads live budget counters for: the top this many by spend since Monday. */
+export const HOME_LIVE_PEOPLE = 16;
+
+/**
+ * One person's week from the daily roll-up: what they used since Monday 00:00 UTC (history, for
+ * "who's using it"), and what their level allows. Not their budget use: an admin's weekly reset
+ * or a set counter changes the account's counters, not this history (see `LiveBudgets`).
+ */
 export interface HomePerson {
   githubId: number;
   login: string | null;
@@ -32,10 +39,25 @@ export interface HomePerson {
   /** An admin's per-person caps (the grants table); null for the level's own. */
   grantTokens: number | null;
   grantUsd: number | null;
-  /** This week's free cost, both budgets, and DeepSeek's part of it (GPT-6's is the rest). */
+  /** Free cost since Monday, both budgets together. */
   costUsd: number;
-  deepseekCostUsd?: number;
   tokens: number;
+}
+
+/** One weekly dollar budget as the account counts it right now (usdPerWeek null: no cap). */
+export interface LiveBudget {
+  spentUsd: number;
+  usdPerWeek: number | null;
+}
+
+/**
+ * A person's live weekly budgets from their AccountObject: the same numbers GET
+ * /v1/admin/people/:id returns in `allowance.budgets`, so a weekly reset shows at once.
+ */
+export interface LiveBudgets {
+  status: string | null;
+  gpt6: LiveBudget;
+  deepseek: LiveBudget;
 }
 
 export interface HomeData {
@@ -45,7 +67,10 @@ export interface HomeData {
   spendDays: HomeSpendDay[];
   /** People with a request or a session event today and this week, and sign-ups today. */
   people: { today: number; week: number; signupsToday: number };
-  /** Everyone who used free tokens this week, most dollars first. */
+  /**
+   * The HOME_LIVE_PEOPLE people (not blocked or suspended, not admins) who spent the most free
+   * dollars since Monday, most first.
+   */
   spenders: HomePerson[];
   /** This week's requests per model (admins left out), and how many failed. */
   models: Array<{ model: string; requests: number; failed: number }>;
@@ -79,8 +104,8 @@ export const HOME_QUERY_TAG = "/* home */";
 /** Tables and columns the home screen may read. */
 export const HOME_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   upstream_daily: ["day", "upstream", "requests", "errors", "cash_usd", "credit_usd"],
-  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd", "deepseek_cost_usd"],
-  people: ["github_id", "login", "admitted_at", "admitted_via", "level", "batch_flag"],
+  daily_activity: ["day", "github_id", "requests", "events", "charged_tokens", "cost_usd"],
+  people: ["github_id", "login", "admitted_at", "admitted_via", "level", "batch_flag", "status"],
   grants: ["github_id", "weekly_tokens", "weekly_usd"],
   requests: ["github_id", "is_admin", "at", "model", "status"],
   install_daily: ["day", "os", "arch", "mode", "result", "installs"],
@@ -133,15 +158,17 @@ export function homeData(store: Sql, input: { now: number; adminIds: readonly nu
   const signupsToday =
     sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM people WHERE admitted_at >= ? AND ${notAdmin("github_id")}`, today * DAY_MS, admins).toArray()[0]?.n ?? 0;
 
+  // Blocked and suspended accounts can't use anything, so they aren't "using it".
   const spenders = sql
-    .exec<{ github_id: number; login: string | null; level: string | null; batch_flag: number | null; grant_tokens: number | null; grant_usd: number | null; cost: number; deepseek: number; tokens: number }>(
+    .exec<{ github_id: number; login: string | null; level: string | null; batch_flag: number | null; grant_tokens: number | null; grant_usd: number | null; cost: number; tokens: number }>(
       `SELECT d.github_id AS github_id, p.login AS login, p.level AS level, p.batch_flag AS batch_flag, g.weekly_tokens AS grant_tokens, g.weekly_usd AS grant_usd,
-              SUM(d.cost_usd) AS cost, SUM(d.deepseek_cost_usd) AS deepseek, SUM(d.charged_tokens) AS tokens
+              SUM(d.cost_usd) AS cost, SUM(d.charged_tokens) AS tokens
        FROM daily_activity d LEFT JOIN people p ON p.github_id = d.github_id LEFT JOIN grants g ON g.github_id = d.github_id
-       WHERE d.day >= ? AND d.requests > 0 AND ${notAdmin("d.github_id")}
-       GROUP BY d.github_id ORDER BY cost DESC, tokens DESC, d.github_id`,
+       WHERE d.day >= ? AND d.requests > 0 AND ${notAdmin("d.github_id")} AND (p.status IS NULL OR p.status NOT IN ('blocked', 'suspended'))
+       GROUP BY d.github_id ORDER BY cost DESC, tokens DESC, d.github_id LIMIT ?`,
       weekDay,
       admins,
+      HOME_LIVE_PEOPLE,
     )
     .toArray()
     .map(
@@ -153,7 +180,6 @@ export function homeData(store: Sql, input: { now: number; adminIds: readonly nu
         grantTokens: row.grant_tokens,
         grantUsd: row.grant_usd,
         costUsd: row.cost,
-        deepseekCostUsd: row.deepseek,
         tokens: row.tokens,
       }),
     );
@@ -276,20 +302,17 @@ export function realAllowance(
   return { tier: "full", tokens: person.grantTokens ?? settings.weeklyTokens, usd: grantUsd ?? settings.perPersonWeeklyUsd, deepseekUsd: deepseek(settings.perPersonWeeklyUsd, settings.deepseekWeeklyUsd) };
 }
 
-/** Within this share of the token allowance counts as reached (see dashboard-data.ts TOKEN_LIMIT_SHARE). */
-const AT_CAP_TOKEN_SHARE = 0.99;
+/** A budget is reached when the account's live spend is at or over its (non-zero) weekly cap. */
+export function budgetReached(budget: LiveBudget): boolean {
+  return budget.usdPerWeek !== null && budget.usdPerWeek > 0 && budget.spentUsd >= budget.usdPerWeek - 1e-9;
+}
 
 /**
- * Whether this week's use reached either dollar budget (GPT-6's or DeepSeek's), or (nearly) the
- * tokens. The tokens count only for someone with no DeepSeek spend: the roll-up doesn't split
- * tokens by model, and DeepSeek has no token cap. Nobody with no tokens counts.
+ * Whether either weekly dollar budget (GPT-6's or DeepSeek's) is reached by the account's live
+ * counters. Never from the daily roll-up: that keeps spend from before an admin's weekly reset.
  */
-export function atCap(person: Pick<HomePerson, "costUsd" | "tokens"> & { deepseekCostUsd?: number }, allowance: { tokens: number; usd: number | null; deepseekUsd?: number | null }): boolean {
-  if (allowance.tokens <= 0) return false;
-  const deepseekCost = person.deepseekCostUsd ?? 0;
-  const gptCost = person.costUsd - deepseekCost;
-  const reached = (cost: number, cap: number | null | undefined) => cap !== null && cap !== undefined && cap > 0 && cost >= cap - 1e-9;
-  return reached(gptCost, allowance.usd) || reached(deepseekCost, allowance.deepseekUsd) || (deepseekCost === 0 && person.tokens >= allowance.tokens * AT_CAP_TOKEN_SHARE);
+export function atCap(live: Pick<LiveBudgets, "gpt6" | "deepseek">): boolean {
+  return budgetReached(live.gpt6) || budgetReached(live.deepseek);
 }
 
 /** A model id in plain words: its name ("GPT-6 Astra") when the free tier knows it. */
