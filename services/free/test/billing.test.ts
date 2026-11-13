@@ -420,3 +420,35 @@ describe("the dashboard's paid section", () => {
     assert.match(html, /Paid usage cost<b>\$0\.250 <span class="muted">this week<\/span><\/b>/);
   });
 });
+
+describe("payment alert", () => {
+  const emailed = (svc: Service) =>
+    svc.calls.emails.map((email) => {
+      const [head, body] = email.raw.split("\r\n\r\n") as [string, string];
+      const subject = /\r\nSubject: ([^\r\n]*)\r\n/.exec(head)![1]!;
+      const text = new TextDecoder().decode(Uint8Array.from(atob(body.replace(/\r\n/g, "")), (char) => char.charCodeAt(0)));
+      return { subject, text };
+    }).filter((email) => email.subject.startsWith("dl: "));
+
+  it("emails the owner once per payment: who, what, how much, and the running totals", async () => {
+    const svc = await createService({ ...VARS, ALERT_EMAIL_TO: "owner@example.com" }, { email: true });
+    await person(svc, 100);
+    await person(svc, 101);
+    await deliver(svc, "checkout.session.completed", topupSession(100, "cs_t1", { metadata: { github_id: "100", product: "topup", topup_kind: "usd" } }));
+    let mails = emailed(svc);
+    assert.equal(mails.length, 1);
+    assert.equal(mails[0]!.subject, "dl: @user100 paid $3 (top-up)");
+    assert.match(mails[0]!.text, /@user100 paid \$3 for a top-up/);
+    assert.match(mails[0]!.text, /All time: 1 payment from 1 person, \$3 before tax/);
+
+    await deliver(svc, "checkout.session.completed", proSession(101));
+    assert.equal(emailed(svc).length, 1, "the Pro checkout itself isn't the payment; its invoice is");
+    const periodEnd = Math.floor((NOW + 30 * DAY) / 1000);
+    await deliver(svc, "invoice.paid", { ...invoice(101, "in_1", periodEnd), billing_reason: "subscription_create" });
+    await deliver(svc, "invoice.paid", { ...invoice(101, "in_1", periodEnd), billing_reason: "subscription_create" }, { id: "evt_replay" });
+    await deliver(svc, "invoice.paid", { ...invoice(101, "in_2", periodEnd), billing_reason: "subscription_cycle" });
+    mails = emailed(svc);
+    assert.deepEqual(mails.map((m) => m.subject), ["dl: @user100 paid $3 (top-up)", "dl: @user101 paid $10 (Pro)", "dl: @user101 paid $10 (Pro renewal)"], "a replayed invoice under a new event id isn't a second email");
+    assert.match(mails[2]!.text, /All time: 3 payments from 2 people, \$23 before tax/);
+  });
+});

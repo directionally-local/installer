@@ -1777,12 +1777,12 @@ async function applyBillingEvent(c: Ctx, event: StripeEvent): Promise<string> {
           const usd = topupUsage(paidCents, usageMultiplier);
           if (usd <= 0) return "ignored";
           await account(c, githubId).grantCredit({ id: String(object.id), usd, createdAt, expiresAt: createdAt + validDays * DAY_MS });
-          await directory(c).recordPayment({ id: String(object.id), githubId, kind: "topup", amountCents: paidCents, at: createdAt });
+          await alert(c, [await directory(c).recordPayment({ id: String(object.id), githubId, kind: "topup", amountCents: paidCents, at: createdAt })].filter(isAlert));
           return "topup_granted";
         }
         // A checkout started under the old token top-up: the tokens it was sold with, for 30 days.
         await account(c, githubId).grantTopup({ id: String(object.id), tokens: legacyTokens, createdAt, expiresAt: createdAt + LEGACY_TOPUP_DAYS * DAY_MS });
-        await directory(c).recordPayment({ id: String(object.id), githubId, kind: "topup", amountCents: paidCents, at: createdAt });
+        await alert(c, [await directory(c).recordPayment({ id: String(object.id), githubId, kind: "topup", amountCents: paidCents, at: createdAt })].filter(isAlert));
         return "topup_granted";
       }
       const subscriptionId = idOf(object.subscription);
@@ -1796,7 +1796,8 @@ async function applyBillingEvent(c: Ctx, event: StripeEvent): Promise<string> {
       const githubId = await owner(metadata.github_id);
       if (githubId === undefined) return "ignored";
       if (event.type === "invoice.payment_failed") return subscription(githubId, { subscriptionId, state: "past_due", periodEnd: undefined });
-      await directory(c).recordPayment({ id: String(object.id), githubId, kind: "pro", amountCents: cents(object.total_excluding_tax ?? object.subtotal ?? object.amount_paid), at: eventAt * 1000 });
+      const renewal = object.billing_reason === "subscription_cycle";
+      await alert(c, [await directory(c).recordPayment({ id: String(object.id), githubId, kind: "pro", amountCents: cents(object.total_excluding_tax ?? object.subtotal ?? object.amount_paid), at: eventAt * 1000, renewal })].filter(isAlert));
       return subscription(githubId, { subscriptionId, state: "active", periodEnd: invoicePeriodEnd(object) });
     }
     case "customer.subscription.updated":
@@ -1813,6 +1814,10 @@ async function applyBillingEvent(c: Ctx, event: StripeEvent): Promise<string> {
     default:
       return "ignored";
   }
+}
+
+function isAlert(value: Alert | undefined): value is Alert {
+  return value !== undefined;
 }
 
 function cents(value: unknown): number {
