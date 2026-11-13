@@ -1,6 +1,6 @@
 # Directionally Local installer
 
-Coding agents that run on your own computer or on your own server. Send a task; it runs in its own [Hotcell](https://github.com/directionally-local/hotcell) sandbox, driven by [Autopilot](https://github.com/directionally-local/autopilot), and comes back as a pull request, even with your laptop closed. Start one at [dl.new](https://dl.new). On GPUs you own, `dl model` sets up an open model, tests it, and connects dl to it; see [On your own GPUs](#on-your-own-gpus).
+Coding agents that run on your own computer or on your own server. Send a task; it runs in its own [Hotcell](https://github.com/directionally-local/hotcell) sandbox, driven by [Autopilot](https://github.com/directionally-local/autopilot), and comes back as a pull request, even with your laptop closed. Start one at [dl.new](https://dl.new). On an Nvidia GPU you own, `dl model` sets up an open model, tests it, and connects dl to it; see [On your own GPUs](#on-your-own-gpus).
 
 Where this is going: [the roadmap](docs/ROADMAP.md). Come talk to us on [Discord](https://discord.gg/zeBnJTgcRK).
 
@@ -30,8 +30,8 @@ Then it installs Hotcell and Autopilot on the place, builds the sandbox image, s
 
 ```
   ✓ Checking this computer   macOS 15.1 · Docker Desktop 29.5.2 · Node 24.22.1 · 120 GB free
-  ✓ Installing Hotcell (sandbox SDK) + Autopilot (harness)   Autopilot 3.15.0 · Hotcell 0.1.38
-  ✓ Building the sandbox image   Node 24 · Autopilot 3.15.0
+  ✓ Installing Hotcell (sandbox SDK) + Autopilot (harness)   Autopilot 3.22.0 · Hotcell 0.1.38
+  ✓ Building the sandbox image   Node 24 · Autopilot 3.22.0
   ✓ Starting services     start at login · logs in ~/.directionallylocal/logs
   ✓ Connecting            this computer · tasks pause while it sleeps
 
@@ -86,7 +86,7 @@ dl status                           # where agents run, their provider, model an
 
 `dl status` says when a place runs another Autopilot or Hotcell than this laptop's `dl` pins: `! box runs Hotcell 0.1.30, this dl pins 0.1.38   dl update box`.
 
-When Autopilot here uses the free tier, `dl status` also shows the account: `Free tier  @octo · 49.9M of 50M tokens left this week · resets Mon 09:00` (local time). dl reads Autopilot's sign-in and asks the free tier service once (`GET /v1/me`, 3 seconds at most, never refreshing the sign-in); if that fails it shows only `@octo`, or nothing.
+When Autopilot here uses the free tier, `dl status` also shows the account: who is signed in (`@octo`), the tokens left this week, and when the week resets (local time). When free usage runs out, Autopilot's `/upgrade` offers dl Pro or a one-time top-up. dl reads Autopilot's sign-in and asks the free tier service once (`GET /v1/me`, 3 seconds at most, never refreshing the sign-in); if that fails it shows only `@octo`, or nothing.
 
 The "fits ~N agents" figure is a conservative estimate: memory left after the host's own share (at least 1.5 GB or 15%), divided by 1 GB per sandbox, capped at two per CPU. Measured numbers will replace it.
 
@@ -119,7 +119,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl use [NAME]` | Where tasks and bare `dl` go without `--server`. With no name, shows it. |
 | `dl provider` | The provider and GitHub token on each place. `dl provider set` picks another provider, key and model in Autopilot's list; `dl provider github` replaces the GitHub token. `--server NAME` picks the place. `dl keys` is the same command. |
 | `dl model [ID]` | The model for tasks and sessions on a place. With no ID, Autopilot's own model picker. For a model served on this machine's GPU, see `dl model up` below. |
-| `dl model up` / `update` / `rollback` / `status` | Serve a curated open model on this machine's Nvidia GPU with vLLM, test it, and point Autopilot at it. See [On your own GPUs](#on-your-own-gpus). |
+| `dl model up` / `update` / `rollback` / `status` / `bench` | Serve a curated open model on one of this machine's Nvidia GPUs with vLLM, test it, and point Autopilot at it. See [On your own GPUs](#on-your-own-gpus). |
 | `dl update` | Update `dl` itself when npm has a newer one (the install script or npm, however it was installed; `--check` only reports), make sure the Autopilot it pins is installed, then update the default place as `dl update NAME` does. |
 | `dl update NAME` | Update a place's Autopilot, Hotcell and sandbox image to the versions `dl` pins. A server over SSH (its `dl` first), this computer in place. `--wait` waits for running tasks instead of asking; with no terminal it waits anyway. |
 | `dl local status` | Agents running on this computer: running?, where, how many fit. |
@@ -130,29 +130,35 @@ Run options: `--server NAME`, `-m/--model MODEL`, `--repo OWNER/NAME`, `--detach
 
 ### On your own GPUs
 
-`dl model` sets up open models on Nvidia GPUs you own and keeps them updated safely. `dl model up` detects the GPUs, picks a tested config, starts the model with vLLM in Docker, checks that it answers correctly (chat, a tool call, JSON), and points Autopilot at it. `dl model update` tests a new version next to the old one and only switches if it passes; `dl model rollback` undoes it. Data and weights stay on your hardware.
+`dl model` runs an open model on an Nvidia GPU you own and keeps it updated safely. `dl model up` checks the GPU, Docker and the Nvidia container toolkit, lets you pick a model that fits, starts it with vLLM in Docker, tests that it answers correctly, and points Autopilot at it. `dl model update` tests a new model next to the old one and switches only if it passes; `dl model rollback` undoes it. Your code, prompts and weights stay on your hardware.
 
-Today: Nvidia GPUs, one machine, vLLM, tested with small models. Coming soon: large models that need several GPUs (GLM 5.3 Flash, DeepSeek V4.1 Flash, Kimi K2.6). On the roadmap: AMD and Huawei Ascend. Running open models on your own GPUs? [Tell us what you run](https://directionallylocal.com/gpus/#partner).
-
-`dl model` can serve a curated open model on this machine's Nvidia GPU with vLLM in Docker, then point Autopilot at it. It needs an Nvidia driver, Docker, and nvidia-container-toolkit; `dl model up` checks all three and says what's missing.
+It needs an Nvidia driver, Docker, and the Nvidia container toolkit; `dl model up` checks all three and says what's missing. The model runs on one GPU, so what fits is decided per GPU, not by adding several cards together.
 
 | Command | What it does |
 | --- | --- |
-| `dl model up [MODEL] [--dry-run]` | Detect the GPU, list only catalog models that fit, ask for context length and port (8000), start `vllm/vllm-openai` as `dl-model-1` with the catalog's flags and a shared Hugging Face cache, then smoke-test chat, a tool call and JSON mode. Saves the deployment and sets Autopilot's `vllm` provider to `http://127.0.0.1:<port>/v1`. |
-| `dl model update [MODEL] [--dry-run]` | Start the replacement as `dl-model-2` on port+1 when there's free VRAM; otherwise warn about downtime and ask. Smoke-test both, print a side-by-side table, then switch the provider and stop the old container, keeping its config for rollback. A failure removes the new container and leaves the old one serving. |
+| `dl model up [MODEL] [--dry-run]` | Show the GPU and driver, list the catalog models that fit, ask for the context length and port (8000), and start `vllm/vllm-openai` as `dl-model-1` with the catalog's flags and a shared Hugging Face cache. Progress shows the download and vLLM starting, then four tests: chat, speed, a tool call and JSON. The first answer from a freshly started vLLM may take up to 120 seconds. When they pass, it saves the deployment and sets Autopilot's `vllm` provider to `http://127.0.0.1:<port>/v1`. |
+| `dl model update [MODEL] [--dry-run]` | Start the replacement as the other container on port+1 when the GPU has room for both; otherwise warn about downtime and ask. Test the new one, re-test the old one, compare their speed over 512 tokens, then switch the provider and stop the old container, keeping its config for rollback. If the new one fails, the old one keeps serving. |
 | `dl model rollback` | Restart the previous deployment and switch the provider back. |
-| `dl model status` | The running model, port, GPU memory, and the last smoke-test results. |
+| `dl model status` | The running model, its address, the GPU and its free memory, and the last test results. |
+| `dl model bench` | Time to first token (p50 and p95) and decode speed with 1, 8 and 32 requests at once, plus the prefix cache hit rate from vLLM's logs. |
 
-`--dry-run` prints every Docker command without running it. The catalog lives in `src/model-catalog.ts`: each entry pins the Hugging Face repo, minimum VRAM, vLLM image tag, and flags (tool-call parser, reasoning parser, max model length, quantization). It starts with two Qwen 3 4B versions (an older/newer pair for trying `update`) and GLM-4.7-Flash when 48 GB is available.
+`--dry-run` prints every Docker command without running it. The catalog lives in `src/model-catalog.ts`: each entry pins the Hugging Face repo, minimum GPU memory, the vLLM image tag, and flags (tool-call parser, reasoning parser, max model length, quantization). Today it has two Qwen 3 4B versions (an older and a newer one, handy for trying `update`), both tested end to end on a real GPU, and GLM-4.7-Flash for a 48 GB card, not yet tested.
 
 ```sh
 dl model up                 # pick from what fits; defaults to port 8000
-dl model update qwen-new    # test the newer Qwen, then switch
+dl model update qwen-old    # test another model, then switch
 dl model rollback           # back to the previous one
 dl model status
+dl model bench
 ```
 
+**When something fails.** The first line says which step failed and why. A container that started is kept running so you can look at it (`docker logs dl-model-1`), with the command to remove it, and running the same command again reuses it while it still answers. A failed test also prints a `curl` line that sends the same request, so you can reproduce it by hand. Autopilot's provider and the saved state are put back as they were. Every `dl model` run writes a log to `~/.directionallylocal/logs` (a failed one includes the end of vLLM's own log), and the error names the file.
+
+**From Autopilot's first run.** When `dl` starts Autopilot for the first time on a machine with an Nvidia card of 24 GB or more, Autopilot offers to run a private model on it. A yes runs this same setup: it checks Docker, offers to install the Nvidia container toolkit when it's missing (Ubuntu and Debian, with sudo), shows every catalog model with whether it fits this GPU and whether it was tested, and then runs `dl model up` with the default context and port. A failure opens a menu to retry, see what failed, pick another model, or carry on without a local model. Autopilot's **Use your own GPUs** answer also covers GPUs elsewhere: run `dl model up` on another server of yours and reach it through an SSH tunnel, or enter the address of a vLLM or other OpenAI-compatible server you already run.
+
 The model's state is kept separately from a server install, in `~/.local/state/directionallylocal/model.json` (or `$XDG_STATE_HOME`), so `dl model` works on a laptop or a server without touching `/etc/directionallylocal/state.json`.
+
+Today: one Nvidia GPU, one model per machine, vLLM, tested with small models. Coming soon: models that need several GPUs, SGLang, and several models on one machine. AMD and Huawei Ascend GPUs are on the roadmap.
 
 ### On the server
 
