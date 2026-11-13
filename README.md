@@ -141,7 +141,10 @@ It needs an Nvidia driver, Docker, and the Nvidia container toolkit; `dl model u
 | `dl model rollback` | Restart the previous deployment and switch the provider back. |
 | `dl model status` | The running model, its address, the GPU and its free memory, and the last test results. |
 | `dl model bench` | Time to first token (p50 and p95) and decode speed with 1, 8 and 32 requests at once, plus the prefix cache hit rate from vLLM's logs. |
-| `dl model list` | Every deployment on this machine: name, model, engine, GPUs, port, status. |
+| `dl model list` | Every deployment on this machine: name, model, engine, GPUs, port, status, and its sandbox if it has one. |
+| `dl model up MODEL --workspace DIR [--allow-internet]` | Also run Autopilot in a Hotcell sandbox that sees only `DIR` and reaches only the model. See [One box: the model and a sandboxed agent](#one-box-the-model-and-a-sandboxed-agent). |
+| `dl model attach [-- ARGS]` | Open Autopilot in that sandbox (`dl model attach -- -c` continues the last session). |
+| `dl model down` | Stop and remove the deployment's containers, and its sandbox and networks; `DIR` is kept. |
 | `dl model up MODEL --plan [--hardware DIR]` | Print the exact `docker run` command, the GPUs it would use, the parallel layout and the memory math (weights per GPU, KV cache, buffers, host RAM for offloaded weights, disk), and whether it fits, without running, downloading or writing anything. It reads `nvidia-smi`, `/proc/meminfo`, `df` and the weights' size from the Hugging Face API (never Docker). `--hardware DIR` plans for another machine from its command output (the format of `src/test-support/fixtures/gpu`), with no probes and the catalog's recorded weight size. Exits 1 when it doesn't fit. |
 
 Options: `--name NAME` makes or picks a separate deployment (update, rollback, status and bench then target it); `--gpus 0,1` pins it to those GPUs; `--port PORT` and `--context TOKENS` answer the questions up and update ask.
@@ -159,6 +162,26 @@ dl model bench
 **When something fails.** The first line says which step failed and why. A container that started is kept running so you can look at it (`docker logs dl-model-1`), with the command to remove it, and running the same command again reuses it while it still answers. A failed test also prints a `curl` line that sends the same request, so you can reproduce it by hand. Autopilot's provider and the saved state are put back as they were. Every `dl model` run writes a log to `~/.directionallylocal/logs` (a failed one includes the end of vLLM's own log), and the error names the file.
 
 **From Autopilot's first run.** When `dl` starts Autopilot for the first time on a machine with an Nvidia card of 24 GB or more, Autopilot offers to run a private model on it. A yes runs this same setup: it checks Docker, offers to install the Nvidia container toolkit when it's missing (Ubuntu and Debian, with sudo), shows every catalog model with whether it fits this GPU and whether it was tested, and then runs `dl model up` with the default context and port. A failure opens a menu to retry, see what failed, pick another model, or carry on without a local model. Autopilot's **Use your own GPUs** answer also covers GPUs elsewhere: run `dl model up` on another server of yours and reach it through an SSH tunnel, or enter the address of a vLLM or other OpenAI-compatible server you already run.
+
+#### One box: the model and a sandboxed agent
+
+On a GPU server set up with `sudo dl up`, one command runs the model and Autopilot next to it, isolated to one project directory:
+
+```sh
+sudo dl model up deepseek-v4.1-flash-fp8 --workspace /srv/project --plan   # both halves, nothing run
+sudo dl model up deepseek-v4.1-flash-fp8 --workspace /srv/project
+sudo dl model attach                                                      # Autopilot, in /srv/project
+```
+
+It first checks the sandbox's needs: dl's server install, Hotcell 0.1.39 or newer, root, and a workspace outside home and system directories. Then it starts the model exactly as `dl model up` does, with the same preflight, layout, `docker run` and tests. Once the tests pass, it adds the sandbox:
+
+- **One host directory.** A Hotcell cell (container driver, the image `dl up` builds for agent sessions) gets `DIR` bind-mounted read-write at `/workspace`, and nothing else from the host: no home directory, no Docker socket, no GPU. dl adds `DIR` to Hotcell's `HOTCELL_WORKSPACE_ROOTS` (Hotcell refuses any other directory) and restarts `hotcell.service`.
+- **Only the model.** The cell's only network is `dl-model-net`, a Docker `--internal` network with no host address on it: no route off the box and no host services. The model's container joins it as `model`, so Autopilot's provider is `http://model:8000/v1`, with no key. The model still publishes only on `127.0.0.1`. Hotcell's key gateway isn't wired, so the cell holds no tokens. `--allow-internet` adds a second network, `dl-model-net-egress`, with only the cell on it, for git and npm. Like any container on a bridge, it can then reach host ports bound to all addresses.
+- **Autopilot's settings live with the project.** They are in `DIR/.dl/` (its config, sessions and caches, git-ignored): `DIR/.dl/config/autopilot/config.json` names the model and `http://model:8000/v1`.
+- **Limits.** 8 GiB of memory, 4 CPUs and 1024 processes. The plan adds the model's `--memory` to show what is left.
+- **Checked after start.** `docker inspect` must show the one bind mount, only the planned networks, no GPU and no privileges. The model container must not mount `DIR`. From inside the cell, the model must answer, `/workspace` must be writable, there must be no Docker socket and no `/dev/nvidia*`, and without `--allow-internet` the internet must not answer and there must be no default route. If any check fails, dl removes the sandbox, says what leaked, and leaves the model serving. Running the same command again retries only the sandbox.
+
+`dl model update` and `dl model rollback` move the `model` name to the new container and rewrite the cell's config before the old one stops, so the agent's address never changes. `dl model down` removes the model, the cell, its networks and its entry in `HOTCELL_WORKSPACE_ROOTS`, and never touches `DIR`. Files the agent writes are owned by root (the cell runs as root).
 
 #### Several GPUs, and two models on one machine
 

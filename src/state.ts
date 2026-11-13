@@ -71,7 +71,24 @@ export interface ModelDeployment {
   lastTest: { chat: boolean; tools: boolean; json: boolean; tokensPerSecond: number; at: string };
 }
 
-export interface ModelState { version: 1; active: ModelDeployment; previous?: ModelDeployment }
+/**
+ * Autopilot in a Hotcell cell beside a deployment (`dl model up --workspace`): the cell sees one
+ * host directory and reaches the model on `networks[0]`; the deployment's update keeps it.
+ */
+export interface ModelSandbox {
+  /** Hotcell's sandbox id, and its Docker container (`sbx-<id>`). */
+  id: string;
+  container: string;
+  /** The host directory mounted at /workspace (its real path). */
+  workspace: string;
+  /** The internal network shared with the model, then the egress network with --allow-internet. */
+  networks: string[];
+  internet: boolean;
+  image: string;
+  createdAt: string;
+}
+
+export interface ModelState { version: 1; active: ModelDeployment; previous?: ModelDeployment; sandbox?: ModelSandbox }
 
 /** The name of the deployment `dl model` works on without --name (the only one before named deployments). */
 export const DEFAULT_DEPLOYMENT = "default";
@@ -91,11 +108,11 @@ export async function readDeployments(system: System, path = modelStatePath()): 
   try { value = JSON.parse(raw); } catch { throw new Error(`Invalid model state at ${path}; fix it before changing containers.`); }
   if ((value as { version?: unknown } | null)?.version === 1) {
     const state = await readModelState(system, path);
-    return state ? { [DEFAULT_DEPLOYMENT]: { active: state.active, ...(state.previous ? { previous: state.previous } : {}) } } : {};
+    return state ? { [DEFAULT_DEPLOYMENT]: { active: state.active, ...(state.previous ? { previous: state.previous } : {}), ...(state.sandbox ? { sandbox: state.sandbox } : {}) } } : {};
   }
   const deployments = (value as Partial<ModelStateV2> | null)?.deployments;
   if ((value as { version?: unknown }).version !== 2 || !deployments || typeof deployments !== "object" || Array.isArray(deployments)
-    || !Object.values(deployments).every((entry) => entry && validDeployment(entry.active) && (entry.previous === undefined || validDeployment(entry.previous)))) {
+    || !Object.values(deployments).every((entry) => entry && validDeployment(entry.active) && (entry.previous === undefined || validDeployment(entry.previous)) && (entry.sandbox === undefined || validSandbox(entry.sandbox)))) {
     throw new Error(`Invalid model state at ${path}; fix it before changing containers.`);
   }
   return deployments;
@@ -110,7 +127,7 @@ export async function writeDeployment(system: System, name: string, entry: Omit<
   if (names.length === 0) { await system.remove(path); return; }
   if (names.length === 1 && names[0] === DEFAULT_DEPLOYMENT) {
     const only = all[DEFAULT_DEPLOYMENT]!;
-    await writeModelState(system, { version: 1, active: only.active, ...(only.previous ? { previous: only.previous } : {}) }, path);
+    await writeModelState(system, { version: 1, active: only.active, ...(only.previous ? { previous: only.previous } : {}), ...(only.sandbox ? { sandbox: only.sandbox } : {}) }, path);
     return;
   }
   await system.mkdir(dirname(path), { mode: 0o700 });
@@ -133,9 +150,15 @@ export async function readModelState(system: System, path = modelStatePath()): P
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== "object") throw new Error("invalid model state");
     const state = value as Partial<ModelState>;
-    if (state.version !== 1 || !validDeployment(state.active) || (state.previous !== undefined && !validDeployment(state.previous))) throw new Error("invalid model state");
+    if (state.version !== 1 || !validDeployment(state.active) || (state.previous !== undefined && !validDeployment(state.previous)) || (state.sandbox !== undefined && !validSandbox(state.sandbox))) throw new Error("invalid model state");
     return state as ModelState;
   } catch { throw new Error(`Invalid model state at ${path}; fix it before changing containers.`); }
+}
+
+function validSandbox(value: unknown): value is ModelSandbox {
+  const sandbox = value as Partial<ModelSandbox> | null;
+  return !!sandbox && typeof sandbox === "object" && typeof sandbox.id === "string" && typeof sandbox.container === "string"
+    && typeof sandbox.workspace === "string" && Array.isArray(sandbox.networks) && sandbox.networks.length > 0 && typeof sandbox.internet === "boolean";
 }
 
 function validDeployment(value: unknown): value is ModelDeployment {
