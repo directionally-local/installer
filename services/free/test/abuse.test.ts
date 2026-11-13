@@ -31,8 +31,9 @@ async function adminCookie(service: Service): Promise<string> {
   return done.headers.getSetCookie().find((value) => value.startsWith("__Host-dl_admin="))!.split(";")[0]!;
 }
 
-async function dashboard(service: Service, cookie: string): Promise<string> {
-  const response = await service.request("GET", "/admin?view=full", { headers: { cookie } });
+/** The Tools page, where the forms (and their CSRF token) are. */
+async function dashboard(service: Service, cookie: string, path = "/admin?view=tools"): Promise<string> {
+  const response = await service.request("GET", path, { headers: { cookie } });
   assert.equal(response.status, 200);
   return response.text();
 }
@@ -124,12 +125,11 @@ describe("blocking a person", () => {
   it("blocks from the dashboard only with the session, the CSRF token and a same-origin post, and logs it", async () => {
     const { service, admin } = await setup();
     const bob = await tokensFor(service, { id: 101, login: "bob" }, { ip: "198.51.100.20" });
-    // A request puts bob in the top users table, with a Block button.
     assert.equal((await chat(service, bob.access_token)).status, 200);
     const cookie = await adminCookie(service);
     const html = await dashboard(service, cookie);
     const csrf = csrfOf(html);
-    assert.match(html, /action="\/admin\/dashboard\/people\/101\/block"/);
+    assert.match(html, /<input type="hidden" name="tool" value="block">/);
 
     // No CSRF token, a wrong one, another origin, or no session: nothing changes.
     assert.equal((await post(service, cookie, "/admin/dashboard/people/101/block", {})).status, 403);
@@ -147,49 +147,48 @@ describe("blocking a person", () => {
 
     const done = await post(service, cookie, "/admin/dashboard/people/101/block", { csrf });
     assert.equal(done.status, 303);
-    assert.equal(done.headers.get("location"), "/admin?view=full#abuse");
+    assert.equal(done.headers.get("location"), "/admin?view=tools#block");
     assert.equal(await errorCode(await chat(service, bob.access_token)), "blocked");
 
-    const after = await dashboard(service, cookie);
-    assert.match(after, /Blocked<b>1<\/b>/);
-    assert.match(after, /action="\/admin\/dashboard\/people\/101\/unblock"/);
-    assert.match(after, /status of bob <span class="muted">#101<\/span><\/td><td class="l">active<\/td><td class="l">blocked<\/td>/);
+    // Home shows the account as Blocked.
+    assert.match(await dashboard(service, cookie, "/admin"), /<tr data-q="bob">\n<td data-v="bob">bob<\/td>\n<td class="l"><span class="badge blocked">Blocked<\/span><\/td>/);
     const log = (await (await service.request("GET", "/admin/config", { token: admin })).json()) as { log: Array<{ key: string; oldValue: unknown; newValue: unknown; changedByLogin: string }> };
     assert.deepEqual(log.log[0], { ...log.log[0], key: "person_status:101:bob", oldValue: "active", newValue: "blocked", changedByLogin: "owner" });
 
     assert.equal((await post(service, cookie, "/admin/dashboard/people/101/unblock", { csrf })).status, 303);
     assert.equal((await chat(service, bob.access_token)).status, 200);
-    assert.match(await dashboard(service, cookie), /Blocked<b>0<\/b>/);
+    assert.match(await dashboard(service, cookie, "/admin"), /<td class="l"><span class="badge free">Free<\/span><\/td>/);
+  });
+
+  it("blocks and unblocks by username from the Tools page, never an admin", async () => {
+    const { service } = await setup();
+    const bob = await tokensFor(service, { id: 101, login: "bob" }, { ip: "198.51.100.20" });
+    const cookie = await adminCookie(service);
+    const csrf = csrfOf(await dashboard(service, cookie));
+    const tool = async (form: Record<string, string>, origin = "https://free.test") => {
+      const response = await post(service, cookie, "/admin/dashboard/tools", { csrf, tool: "block", ...form }, origin);
+      return { status: response.status, html: await response.text() };
+    };
+    assert.equal((await tool({ login: "bob", action: "block" }, "https://evil.test")).status, 403);
+    assert.equal((await service.directory().getPerson(101)).status, "active");
+
+    const blocked = await tool({ login: "@BOB", action: "block" });
+    assert.equal(blocked.status, 200);
+    assert.match(blocked.html, /<p class="msg" role="status">bob is blocked\.<\/p>/);
+    assert.equal((await service.directory().getPerson(101)).status, "blocked");
+    assert.equal(await errorCode(await chat(service, bob.access_token)), "blocked");
+
+    assert.match((await tool({ login: "bob", action: "unblock" })).html, /bob is unblocked\./);
+    assert.equal((await chat(service, bob.access_token)).status, 200);
+
+    assert.match((await tool({ login: "nobody", action: "block" })).html, /<p class="msg err" role="status">No free tier account has the username nobody\.<\/p>/);
+    assert.match((await tool({ login: "owner", action: "block" })).html, /owner is an admin; admins can&#39;t be blocked here\./);
+    assert.match((await tool({ login: "<b>x</b>", action: "block" })).html, /No free tier account has the username &lt;b&gt;x&lt;\/b&gt;\./);
   });
 });
 
-describe("abuse section", () => {
-  it("groups accounts that share a network, with their sign-up and this week's usage", async () => {
-    const { service } = await setup();
-    const a = await tokensFor(service, { id: 100, login: "alice" }, { ip: "198.51.100.10" });
-    await tokensFor(service, { id: 101, login: "alice-alt" }, { ip: "198.51.100.10" });
-    await tokensFor(service, { id: 102, login: "alice-alt2" }, { ip: "198.51.100.10" });
-    await tokensFor(service, { id: 200, login: "carol" }, { ip: "203.0.113.50" });
-    await chat(service, a.access_token);
-
-    const abuse = await service.directory().abuse({ now: service.clock.now, adminIds: [ADMIN_ID] });
-    assert.equal(abuse.clusterCount, 1);
-    assert.equal(abuse.clusteredAccounts, 3);
-    assert.deepEqual(abuse.clusters[0].members.map((member: { login: string }) => member.login), ["alice", "alice-alt", "alice-alt2"]);
-    assert.equal(abuse.clusters[0].members[0].weekRequests, 1);
-    assert.ok(abuse.clusters[0].members[0].weekTokens > 0);
-    assert.equal(abuse.topUsers[0].login, "alice");
-    assert.equal(abuse.topUsers[0].sharedWith, 2);
-
-    const html = await dashboard(service, await adminCookie(service));
-    assert.match(html, /Shared networks<b>1<\/b><span class="note">3 accounts/);
-    assert.match(html, /<span class="muted">3 accounts<\/span>/);
-    assert.doesNotMatch(html, /<td class="l">carol<\/td><td>200<\/td><td>2026/);
-    // The admin signs in from the harness's address and is never in a cluster.
-    assert.ok(abuse.clusters.every((cluster: { members: Array<{ githubId: number }> }) => cluster.members.every((member) => member.githubId !== ADMIN_ID)));
-  });
-
-  it("records and shows sign-ins refused because the device holds another account", async () => {
+describe("device refusals", () => {
+  it("records sign-ins refused because the device holds another account", async () => {
     const { service } = await setup();
     await tokensFor(service, { id: 100, login: "alice" }, { ip: "198.51.100.10", deviceId: "device-0001-abcdefgh" });
     const second = await signUp(service, { id: 101, login: "mallory" }, { ip: "198.51.100.30", deviceId: "device-0001-abcdefgh" });
@@ -203,44 +202,5 @@ describe("abuse section", () => {
       { github_id: 101, login: "mallory", device_id: "device-0001-abcdefgh", holder_id: 100 },
       { github_id: 102, login: "mallory2", device_id: "device-0001-abcdefgh", holder_id: 100 },
     ]);
-
-    const html = await dashboard(service, await adminCookie(service));
-    assert.match(html, /Second-account device sign-ins<b>2<\/b>/);
-    // Newest first; mallory2 never got in, so has no Block button (alice, who holds the grant, does).
-    assert.match(html, /<td class="l">mallory2<\/td><td class="l"><code>device-0001-…<\/code><\/td><td class="l">alice<\/td><td>2<\/td><td class="l"> <form method="post" action="\/admin\/dashboard\/people\/100\/block">/);
-  });
-
-  it("lists referral pairs on the same network", async () => {
-    const { service } = await setup();
-    await tokensFor(service, { id: 100, login: "ref" }, { ip: "198.51.100.40" });
-    const request: Service["request"] = (method, path, more = {}) => service.request(method, path, { ...more, ip: "198.51.100.40" });
-    const issued = (await (await request("POST", "/v1/device/code", { body: { referral_code: "ref" } })).json()) as { device_code: string; user_code: string };
-    const { state, cookie } = await authorize(request, issued.user_code);
-    const palPage = await (await request("GET", `/device/callback?code=${encodeURIComponent(JSON.stringify({ id: 101, login: "pal", createdAt: OLD }))}&state=${encodeURIComponent(state)}`, { headers: { cookie } })).text();
-    await submitDetails(request, palPage);
-
-    const abuse = await service.directory().abuse({ now: service.clock.now, adminIds: [ADMIN_ID] });
-    assert.equal(abuse.sameNetworkReferralCount, 1);
-    assert.deepEqual([abuse.sameNetworkReferrals[0].referrer.login, abuse.sameNetworkReferrals[0].referred.login], ["ref", "pal"]);
-    assert.match(await dashboard(service, await adminCookie(service)), /Same-network referrals<b>1<\/b>/);
-  });
-});
-
-describe("budget tiles and the serving upstream", () => {
-  it("shows the upstream chooseUpstream picks, and none sensibly", async () => {
-    const none = await createService({ OPENROUTER_API_KEY: "" });
-    const html = await dashboard(none, await adminCookie(none));
-    assert.match(html, /GPT-6 models go to<b class="state">nowhere<\/b>/);
-    assert.match(html, /DeepSeek goes to<b class="state">nowhere<\/b>/);
-    assert.match(html, /State<b class="state">Not serving: no upstream key \(503 no_upstream\)<\/b>/);
-
-    // DeepSeek stays on Luminal with the routing setting on OpenRouter when there is no OpenRouter key.
-    const luminal = await createService({ OPENROUTER_API_KEY: "", LUMINAL_API_KEY: "lum", PRIMARY_UPSTREAM: "openrouter" });
-    const page = await dashboard(luminal, await adminCookie(luminal));
-    assert.match(page, /DeepSeek goes to<b class="state">Luminal<\/b>/);
-    assert.match(page, /DeepSeek → <strong>Luminal<\/strong>/);
-    assert.match(page, /State<b class="state">Serving<\/b>/);
-    // The same numbers as the daily digest: credit used of the balance, what is left, free credit of the weekly budget.
-    assert.match(page, /<tr><td>Luminal<\/td><td class="l wrap">DeepSeek V4\.1 Flash 1017; the GPT-6 fallback<\/td><td class="used">\$0 <span class="muted">of \$2,000<\/span><svg[^]*?<\/svg><\/td><td>\$0 <span class="muted">free \$0 of \$250 budget<\/span><\/td><td>\$2,000<\/td><\/tr>/);
   });
 });

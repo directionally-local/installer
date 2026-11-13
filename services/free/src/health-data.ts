@@ -3,7 +3,7 @@ import { GPU_DETECT_OUTCOMES, GPU_EARLY_ACCESS_VENDORS, GPU_OPTIONS, GPU_PATHS, 
 import { DAY_MS } from "./week.js";
 
 /**
- * The admin dashboard's Health view (GET /admin?view=health): what Autopilot's session events and
+ * The admin health CSVs (/admin/dashboard/health-*.csv): what Autopilot's session events and
  * the free tier's own request log say about bugs, crashes and what gets used, over the last 1, 7
  * or 30 days.
  *
@@ -545,124 +545,5 @@ export function gpuSummary(rows: HealthGpus["rows"]): HealthGpus {
   };
 }
 
-// ─── Takeaways ───────────────────────────────────────────────────────────
-
-/** GPU vendors and first-run options in plain words. */
+/** GPU vendors in plain words (the Tools tab's early-access leads). */
 export const GPU_VENDOR_NAMES: Readonly<Record<string, string>> = { nvidia: "Nvidia", amd: "AMD", ascend: "Ascend", none: "No GPU" };
-export const GPU_OPTION_NAMES: Readonly<Record<string, string>> = {
-  free: "Free tier",
-  own_key: "Own API key",
-  gpus: "Own GPUs",
-  this_machine: "This machine",
-  remote_server: "A remote server",
-  endpoint: "An endpoint",
-};
-
-/** "N machines with GPUs: x Nvidia, y AMD, z Ascend; k chose own GPUs." and how their setups went. */
-export function gpuTakeaway(gpus: HealthGpus): string {
-  const runs = gpus.detected.reduce((sum, row) => sum + row.count, 0);
-  if (runs === 0 && gpus.rows.length === 0) return "No GPU first runs counted.";
-  const count = (vendor: string) => gpus.detected.find((row) => row.vendor === vendor)?.count ?? 0;
-  const chose = gpus.options.find((row) => row.option === "gpus")?.count ?? 0;
-  const unanswered = gpus.unanswered > 0 ? ` (${gpus.unanswered.toLocaleString("en-US")} whose GPU tool didn't answer)` : "";
-  let line = `${plural(gpus.withGpu, "machine")} with GPUs${unanswered}: ${count("nvidia").toLocaleString("en-US")} Nvidia, ${count("amd").toLocaleString("en-US")} AMD, ${count("ascend").toLocaleString("en-US")} Ascend; ${chose.toLocaleString("en-US")} chose own GPUs.`;
-  const ok = gpus.results.reduce((sum, row) => sum + row.ok, 0);
-  const failed = gpus.results.reduce((sum, row) => sum + row.failed, 0);
-  if (ok + failed > 0) {
-    const errors = new Map<string, number>();
-    for (const row of gpus.results) for (const error of row.errors) tally(errors, error.errorType, error.count);
-    const top = ranked(errors, failed)[0];
-    line += ` ${ok.toLocaleString("en-US")} of ${plural(ok + failed, "setup")} worked${top ? `; most failures: ${top.key}` : ""}.`;
-  }
-  return line;
-}
-
-/** install.sh's steps in plain words, for the takeaways and the page. */
-export const INSTALL_STEPS: Readonly<Record<string, string>> = {
-  "": "(not said)",
-  preflight: "the checks",
-  node: "the Node.js step",
-  install_dl: "installing dl",
-  path: "the PATH step",
-  dl_up: "server setup (dl up)",
-};
-
-const pct = (share: number) => `${Math.round(share * 100)}%`;
-const osName = (os: string) => (os === "darwin" ? "macOS" : os === "linux" ? "Linux" : os === "win32" ? "Windows" : os);
-const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
-const seconds = (ms: number) => (ms >= 60_000 ? `${(ms / 60_000).toFixed(ms >= 600_000 ? 0 : 1)} min` : `${(ms / 1000).toFixed(1)} s`);
-
-/** Rows below this many sessions or installs are too small to call out. */
-const MIN_GROUP = 5;
-
-/** One plain-English line per section, computed from the numbers. */
-export function healthTakeaways(data: HealthData): Record<"errors" | "ends" | "versions" | "sessions" | "tools" | "models" | "installs" | "gpus", string> {
-  const { errors, requests, ends, versions, sessions, tools, models, installs } = data;
-
-  let errorsLine: string;
-  if (errors.total === 0) errorsLine = "Autopilot reported no errors.";
-  else {
-    const top = errors.codes[0]!;
-    const version = top.versions[0];
-    errorsLine = `Top error ${top.code}: ${plural(top.count, "time")}, ${plural(top.people, "person", "people")}${version && version.version !== NOT_SENT ? `, mostly from ${version.version}` : ""}.`;
-  }
-  if (requests.total > 0) {
-    const fail = requests.failures[0];
-    errorsLine += ` ${pct(requests.failed / requests.total)} of ${plural(requests.total, "request")} failed${fail ? `, most as ${fail.status} on ${fail.model}` : ""}.`;
-  }
-
-  let endsLine: string;
-  if (ends.sessions === 0) endsLine = "No sessions started.";
-  else {
-    const abnormal = ends.overall.filter((row) => !row.normal).reduce((sum, row) => sum + row.count, 0);
-    const worst = ends.split.filter((row) => row.sessions >= MIN_GROUP && row.abnormal > 0).sort((a, b) => b.share - a.share)[0];
-    const badTurns = ends.turns.filter((row) => !row.normal).reduce((sum, row) => sum + row.count, 0);
-    endsLine =
-      abnormal === 0
-        ? "Every session ended normally or is still open."
-        : `${pct(abnormal / ends.sessions)} of sessions ended without a normal exit${worst ? `; worst ${worst.version} on ${osName(worst.os)} at ${pct(worst.share)}, mostly ${worst.top}` : ""}.`;
-    if (ends.turnTotal > 0) endsLine += ` ${pct(badTurns / ends.turnTotal)} of turns ended in an error, guardrail or abort.`;
-  }
-
-  let versionsLine: string;
-  if (versions.sessions === 0) versionsLine = "No sessions started.";
-  else {
-    const latest = versions.latest ? versions.versions.find((row) => row.version === versions.latest) : undefined;
-    const os = versions.os[0]!;
-    versionsLine = `${latest ? `${pct(latest.share)} of sessions on the newest version, ${latest.version}` : "No session sent its version"}; ${pct(os.share)} on ${osName(os.os)}.`;
-  }
-
-  const sessionsLine =
-    sessions.sessions === 0
-      ? "No sessions started."
-      : `Median session: ${plural(sessions.turnsMedian ?? 0, "turn")}${sessions.durationMedianMs !== null ? `, ${seconds(sessions.durationMedianMs)}` : ""}. ${pct(sessions.zeroTurns / sessions.sessions)} were opened and left with no turn. ${(sessions.prsPer100 ?? 0).toFixed(1)} PRs per 100 sessions.`;
-
-  let toolsLine: string;
-  if (tools.tools.length === 0) toolsLine = "No tool calls reported.";
-  else {
-    const top = tools.tools[0]!;
-    const widest = [...tools.tools].sort((a, b) => b.sessions - a.sessions)[0]!;
-    toolsLine = `${top.tool} is called most (${pct(tools.calls > 0 ? top.calls / tools.calls : 0)} of calls)${widest.tool === top.tool ? `, in ${pct(widest.share)} of sessions` : `; ${widest.tool} is in the most sessions (${pct(widest.share)})`}.`;
-  }
-
-  let modelsLine: string;
-  const topModel = models.sessions[0];
-  const slow = models.upstreams.filter((row) => row.p90TtftMs !== null).sort((a, b) => b.p90TtftMs! - a.p90TtftMs!)[0];
-  if (!topModel && !slow) modelsLine = "No sessions or upstream timings.";
-  else {
-    modelsLine = topModel ? `${pct(topModel.share)} of sessions on ${topModel.model}.` : "";
-    if (slow) modelsLine += `${modelsLine ? " " : ""}Slowest first token: ${slow.upstream}, p90 ${seconds(slow.p90TtftMs!)}.`;
-  }
-
-  let installsLine: string;
-  if (installs.ok + installs.failed === 0) installsLine = "No installs counted.";
-  else {
-    const worst = installs.platforms.filter((row) => row.ok + row.failed >= MIN_GROUP && row.failed > 0).sort((a, b) => b.failShare - a.failShare)[0];
-    installsLine = `${pct(installs.failed / (installs.ok + installs.failed))} of ${plural(installs.ok + installs.failed, "install")} failed.`;
-    if (worst) {
-      installsLine += ` ${osName(worst.os)} ${worst.arch} ${worst.mode} installs fail ${pct(worst.failShare)}${worst.topStep !== null ? `, mostly at ${INSTALL_STEPS[worst.topStep] ?? worst.topStep}` : ""}.`;
-    }
-  }
-
-  return { errors: errorsLine, ends: endsLine, versions: versionsLine, sessions: sessionsLine, tools: toolsLine, models: modelsLine, installs: installsLine, gpus: gpuTakeaway(data.gpus) };
-}

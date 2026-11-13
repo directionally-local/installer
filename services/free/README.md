@@ -276,7 +276,7 @@ What a person writes is user content: stored as plain text, shown only on the ad
 `GET /admin/access-requests` (pending, newest first) and
 `POST /admin/access-requests/:id/grant` (`{note?, usdPerWeek?}`) or `/decline` (`{note?}`).
 
-A grant (this one, `POST /admin/grant {logins, usdPerWeek?}`, and the Tools tab and home screen
+A grant (this one, `POST /admin/grant {logins, usdPerWeek?}`, and the Tools tab's
 forms) sets Full with reason "admin" and a personal weekly dollar cap: `usdPerWeek`, or the
 `grantWeeklyUsdCap` setting (default 20) when it's left out. It never lowers a higher personal
 cap already set; 0 sets no personal cap (only the level). Someone not signed up yet gets the cap
@@ -1083,8 +1083,8 @@ an `errorType` from a fixed list, `other` by default). Kept per UTC day in `gpu_
 words, the GPU's name (64 characters of letters, digits, space and `._()+/-`), its VRAM in whole
 GB and the GPU count; a malformed optional field is dropped. Same responses as above; 60 an hour
 per IP. Like installs it has no person attached, so admin machines can't be left out. Signed in,
-the same steps go to `/v1/events` as `gpu.*` events with only those fields kept. The Health
-view's GPUs section and one line on the home screen read the counts.
+the same steps go to `/v1/events` as `gpu.*` events with only those fields kept. The
+`health-gpus` CSV reads the counts.
 
 **GPU early-access emails.** After a yes to early access, Autopilot asks for an optional email
 ("Only used to tell you when <vendor> support is ready"), and sends it as `"email"` on that
@@ -1100,91 +1100,79 @@ request from the same card. The dl.new privacy policy says this.
 
 ## Admin dashboard
 
-**Home screen.** `GET /admin` opens on four questions, each answered in one plain sentence, made to
-be read on a phone in half a minute (`src/home-page.ts`, numbers from `src/home-data.ts`):
+**Home.** `GET /admin` (any `?view=` but `tools`) shows the data the old Kimiflare Cloud admin
+dashboard showed, in dl's model, on one page (`src/admin-home-page.ts`, numbers from
+`src/admin-home-data.ts`). Admins are left out of every total and shown, marked Admin, in the
+users table.
 
-1. **Are we OK?** "Fine", "Watch it" or "Act now", this week's free spend against the weekly budget
-   (the configured providers' weekly credit budgets added up), where it lands by Monday at this
-   pace, the credit left per provider and how many weeks it lasts. Act now: past 80% of the budget
-   by Monday, under 4 weeks of credit, a provider's credit used up, or no provider key. Watch it:
-   past 50%, under 8 weeks, or paused. A small chart of spend per day for 14 days, by provider.
-2. **Who's using it?** People with a request or session today and this week, sign-ups today, and
-   the five who spent most this week: tier in plain words (full, middle, small, no tokens), dollars
-   of their real cap (their level's, or an admin's grant; a creation-batch account has none), and
-   "at cap" when they reached it.
-3. **Is anything broken?** At most three problems, worst first, each linking to the Health or Full
-   view: a provider failing 10%+ of requests today and at least twice its week's share (20+
-   requests), a model failing more than 10% this week (20+ requests), installs on one platform
-   failing more than 15% (5+ installs), more than 25% of this week's sessions ending without a
-   normal exit (20+ sessions), spend or credit past the thresholds above, and people at their cap.
-4. **What needs me?** Pending `/request` asks with Grant and Decline (the Tools tab's form,
-   answered back on the home screen). This block comes first when anything is pending.
+- **Stat cards:** Total Users (every account, with how many are blocked), Active Grants (personal
+  weekly caps an admin set, on accounts that aren't blocked), Global Budget (free use this week,
+  OpenAI and Luminal credit plus OpenRouter cash, against the configured weekly credit budgets
+  added up, else `globalWeeklyUsdCap`), Est. Cost (all-time cost at the allowance's list prices,
+  free and paid), Feedback (messages sent; a count per day in `feedback_daily`, kept from this
+  version on, nothing of the message), 7-Day Prompts (input tokens over the last 7 UTC days).
+- **Platform Health:** Total Users, Active Grants, Total Cost, Total Tokens (input + output, all time).
+- **Paid:** paying users (active + past due), active, past due and canceled Pro subscriptions,
+  MRR (paying users × the Pro price), top-ups and top-up revenue (before tax).
+- **Usage Analytics:** input and output tokens and requests per day (30), week (12) or month (12),
+  a Day / Week / Month switch made of radio buttons (no script), an SVG bar chart with each
+  period's exact numbers in its tooltip.
+- **Users:** every account, sortable by every column and searchable by login (a small script with
+  the page's nonce; the CSP allows only that script). User, Plan (Pro, Past due, Canceled, Free,
+  or Blocked), Grant Limit (this week's GPT-6 dollar cap: the personal cap if an admin set one,
+  marked "own", else the level's; Pro's for Pro; the DeepSeek cap under it), Input Used, Remaining
+  (the caps less this week's free spend from the daily roll-up; an admin's weekly reset isn't seen
+  there; none for Pro, blocked or uncapped), Output, Cost, Requests, Last Active (all time, from
+  `person_totals`), Networks (how many distinct networks the person signed in from: dl keeps only
+  keyed hashes, never an address, so there is no IP column) and Joined.
+- **Active Grants / Expired / Revoked:** each personal cap with its weekly dollar and token caps
+  and when it was set (`grant_history`; caps from before it was kept are dated by the admin log
+  entry that gave Full, or blank), and the ended ones: replaced by another cap, removed, or still
+  set on a blocked account.
 
-Simple, Full (`?view=full`), Health and Tools are links in a "Details" row at the bottom.
+It reads `people`, `person_totals` (all-time tokens, cost, requests and last request per person,
+admins included, kept with each request and built once from the log), `daily_activity` (with
+prompt and completion tokens per person per day), `grants`, `grant_history`, `subscriptions`,
+`payments`, a count of `person_networks` and `feedback_daily`: one row per person or per day,
+never the request log, and no email or content. A test holds its queries to `ADMIN_HOME_COLUMNS`.
 
-**Full view.** `GET /admin?view=full` is the full page: weekly active developers (3+ days and any
-day, last 8 weeks), cohort retention (weeks 1, 2 and 4 after sign-up), cost per person per week
-(total, median, mean, and the top 10 of any week), who reached their token or dollar allowance
-this week and last (and on which day), and the budget with the pause and admission state. The
-page wears the dl.new brand: its fonts and logo load from `https://dl.new` (the page's CSP allows
-`font-src` and `img-src` from there and nothing else; still no scripts). Each table has a CSV at `/admin/dashboard/<table>.csv`
-(`spend`, `weekly-active`, `retention`, `retention-daily`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`, `limits`,
-`queue`, `referrals`, `funnel`, `install-funnel`, `installs`, `paid`, `upstreams`).
+**Tools.** `GET /admin?view=tools`: the actions. Access requests (Grant / Decline), give free
+tokens by GitHub username, block or unblock by username, the routing setting (`primaryUpstream`),
+re-check below-bar accounts, write an email, and the GPU early-access leads.
+
+**CSVs.** Every table the stats questions use is a CSV at `/admin/dashboard/<table>.csv`
+(`spend`, `weekly-active`, `retention`, `retention-daily`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`,
+`limits`, `queue`, `referrals`, `funnel`, `install-funnel`, `installs`, `paid`, `upstreams`,
+`early-access`, and `health-errors`, `health-request-failures`, `health-ends`, `health-turns`,
+`health-versions`, `health-sessions`, `health-tools`, `health-models`, `health-upstreams`,
+`health-installs`, `health-gpus`, which take `?days=1|7|30`). Weekly active developers are 3+
+request days and any day, last 8 weeks; cohort retention is weeks 1, 2 and 4 after sign-up; cost
+per person per week has the total, median, mean and the top 10 of any week; limits lists who
+reached their token or dollar allowance this week and last, and on which day.
 
 **Daily retention:** people grouped by the UTC day they were admitted (the last 21 days with
 sign-ups; admins and blocked accounts left out), and the share who made at least one request on
 day 0–7 and 14 after it. A day stays blank until it has ended (UTC), so today's partial
-numbers never show or count in the averages. The simple view (`/admin?view=simple`) draws it as a cohort triangle (the phone drawing
-drops D14) with the average D1 and D7 under it, weighted by cohort size; the full view has the
-table, `retention-daily.csv` has `cohort, size, d0…d7, d14` (shares), and `GET /admin/metrics`
+numbers never show. `retention-daily.csv` has `cohort, size, d0…d7, d14` (shares), and `GET /admin/metrics`
 returns it as `cohorts: [{day, size, d: {0: share, …, 14: share}}]` (null for days that haven't ended).
 It counts only people who could use dl: they had free tokens at sign-up (`people.signup_tokens`:
 Full, Basic, an admin's grant, or a Starter allowance without the batch flag; for sign-ups from
-before it was stored, the current level stands in). Next to it, per sign-up day, a small funnel
+before it was stored, the current level stands in). Per sign-up day, a small funnel
 of everyone: signed up, got tokens, refused, and refused but opened dl that day (a dl session or
 a refused chat request, from `refused_days`); `GET /admin/metrics` has it as
 `signupFunnel: [{day, signedUp, gotTokens, refused, refusedOpened}]`.
 
-At the top: the **budget, which is the Luminal credit**: credit used and left of
-`luminalCreditUsd` ($2,000), this week's free credit against `luminalWeeklyCreditUsd` ($250), and
-where the queue starts (`queueThreshold` of the weekly credit budget) with when this week's pace
-would reach it. A red banner shows at 80% of either. The OpenRouter cash caps
-(`globalWeeklyUsdCap`, `globalTotalUsdCap`) aren't shown as a budget; they still apply to
-OpenRouter spend, and the state line says so if one stops free tokens. Then the **abuse
-section** (below), the queue (waiting now, the longest wait, how many this
-Monday let in and the forecast behind it), referrals (links used, sign-ups via referral, how many
-became weekly active, bonus tokens a week granted this week), paid plans (active Pro
-subscribers, top-ups this week and month, revenue before tax this week and month, and what paid
-usage cost upstream), and the funnel: per day (last 14) and per week (last 8), install scripts
-served by route → installs finished, ok and failed → sign-ups → first request → active (that
-day; for a week, 3+ request days), then installs by OS, chip and mode and the top failed steps,
-then the funnel per sign-up week and in all (sign-ups → first request → weekly active). The
-first two steps are [anonymous counts](#install-counts) and can't be joined to people. Counts
-only, no content.
+**Upstreams** (`upstreams.csv`): per upstream for today, this week and all time: requests,
+errors, median and p90 time to first token, median time to first byte, cache-hit share, tokens,
+credit and cash. These count admin requests too, since they measure the upstream. The routing
+switch is on the Tools page (`#upstream`): a form posting to `/admin/dashboard/upstream` with the
+session's CSRF token and a same-origin check; it sets the `primaryUpstream` override, logged in
+the admin log; an upstream without its key can't be chosen.
 
-**Serving from** (under the heading): the upstream serving now, with a link to the switch.
-
-**Upstreams** (after the abuse section, `#upstream`): which upstream is serving, the **Serve
-from: Luminal / OpenRouter** buttons (a form posting to `/admin/dashboard/upstream` with the
-session's CSRF token and a same-origin check, like Block; it sets the `primaryUpstream` override,
-logged in the admin log; an upstream without its key can't be chosen), and per
-upstream for today and this week: requests, errors, median and p90 time to first token, median
-time to first byte, cache-hit share (cached over prompt tokens), credit and cash. These count
-admin requests too, since they measure the upstream. The red banner also shows at 80% of the
-credit. CSV: `upstreams`.
-
-**Abuse:** accounts sharing a network hash with other accounts (grouped, with login, sign-up
-time, when each was first seen on the network, and this week's requests, tokens and credit),
-sign-ins refused with `device_taken` in the last 7 days (who tried, the shortened device id, who
-holds its grant, how many times; recorded in the Directory's `device_refusals`), referral pairs
-stopped as `same_network`, the top 25 users this week (with how many accounts share a network
-with each), blocked accounts, and the GitHub activity check's daily outcomes. Each person has a
-**Block** button (Unblock once blocked). Then an **admin log**: the config log, newest first,
-which records settings, pause, block and unblock.
-
-- **Block:** `POST /admin/people/:id/block` and `/unblock` (admin bearer token), or the
-  dashboard's form, which posts to `/admin/dashboard/people/:id/block|unblock` and needs the
-  session cookie, a same-origin request and a CSRF token bound to the session. It sets the
+- **Block:** `POST /admin/people/:id/block` and `/unblock` (admin bearer token), or the Tools
+  page's "Block or unblock" form (by GitHub username; admins can't be blocked there), which posts
+  to `/admin/dashboard/tools`; `/admin/dashboard/people/:id/block|unblock` still takes a form post
+  too. Both need the session cookie, a same-origin request and a CSRF token bound to the session. It sets the
   person's status to `blocked` (unblock: `active`) and logs it (`person_status:<id>:<login>`).
   Blocked: chat requests, token refresh and server-key creation answer 403 `blocked` ("This
   account is blocked from the free tier. Contact contact@directionallylocal.com."), and sign-in
@@ -1204,13 +1192,11 @@ which records settings, pause, block and unblock.
   with a top-up is served from it). The check reads the caller's events and request log in the
   Directory read every chat request already makes; the only new write is a `via_key` flag on the
   request row it already inserts. Switch it off with `POST /admin/config {"dlOnly": false}`.
-  The simple view's red flags show **Used outside dl** for an account with at least 10 such
-  requests and no session event in the last 7 days (events counted by UTC day); the full view's
-  top users table and `GET /admin/people` (`dlSessionsThisWeek`) show dl sessions this week,
+  `GET /admin/people` (`dlSessionsThisWeek`) shows dl sessions this week,
   the distinct session ids in each person's events, counted in `daily_activity.sessions`.
 - **Admins are left out of every number:** anyone in `ADMIN_GITHUB_IDS` and anyone admitted as
   an admin.
-- **What it reads:** only `daily_activity`, a per-person per-day roll-up of request and event
+- **What the CSVs read:** only `daily_activity`, a per-person per-day roll-up of request and event
   counts, charged tokens and cost, plus GitHub logins, sign-up times, per-person grants and the
   spend totals, and for the launch sections the queue (ids and times), the Monday runs (counts
   and the forecast) and referrals (ids, time and outcome), and for the upstreams `upstream_daily`
@@ -1218,9 +1204,8 @@ which records settings, pause, block and unblock.
   `upstream_people` (ids and first and last days per upstream), and
   for the install funnel `download_daily` and `install_daily` (anonymous counts). No model, event type or properties,
   session ids, prompts or code. A test runs
-  the dashboard under an SQLite authorizer that allows only those columns. The abuse section
-  and the admin log also read network hashes, device ids, `people.status`, `device_refusals`,
-  `github_checks_daily` and `config_log`, held to their own list (`ABUSE_COLUMNS` in abuse.ts).
+  the CSVs under an SQLite authorizer that allows only those columns. The health CSVs read named
+  event fields, held to `HEALTH_COLUMNS`; the home page is held to `ADMIN_HOME_COLUMNS`.
 - **The roll-up** is kept up to date with each request and event, and built once from the
   existing log the first time this version starts.
 - **Reached the allowance** means charged tokens at 99% of the token allowance (the last

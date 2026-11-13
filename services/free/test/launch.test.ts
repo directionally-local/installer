@@ -612,17 +612,9 @@ describe("spend alerts", () => {
 });
 
 describe("dashboard additions", () => {
-  it("shows the credit budget, when the queue starts, the queue, referrals and the funnel", async () => {
+  it("counts the queue, referrals and the funnel in the CSVs", async () => {
     const { service } = await openService();
     const cookie = await adminCookie(service);
-    let html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
-    assert.doesNotMatch(html, /class="banner"/);
-    // Spend is per provider; the OpenRouter cash caps aren't shown as a budget.
-    assert.match(html, /<tr><td>Luminal <span class="muted">\(no key\)<\/span><\/td><td class="l wrap">[^<]*<\/td><td class="used">\$0 <span class="muted">of \$2,000<\/span><svg[^]*?<\/svg><\/td><td>\$0 <span class="muted">free \$0 of \$250 budget<\/span><\/td>/);
-    // No credit provider has a key, so only OpenRouter cash can start the line (as shouldQueue does).
-    assert.match(html, /Waiting line starts at<b>–<\/b><span class="note">No OpenAI or Luminal key: credit spend doesn&#39;t start the line\. Free OpenRouter cash past \$200 this week also starts it\./);
-    assert.doesNotMatch(html, /cash spend|weekly cap used|all-time cap/i);
-
     const referrer = await signUp(service, { id: 100, login: "ref", ip: "198.51.100.1" });
     await signUp(service, { id: 101, login: "pal", ip: "198.51.100.2", referral: "ref" });
     await activeOn(service, 100, [MONDAY, MONDAY + DAY, MONDAY + 2 * DAY]);
@@ -631,15 +623,9 @@ describe("dashboard additions", () => {
     await signUp(service, { id: 200, login: "waiting", ip: "198.51.100.3" });
     void referrer;
 
-    html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
-    assert.doesNotMatch(html, /class="banner"/);
-    assert.match(html, /Waiting line starts at<b>–<\/b><span class="note">On: 1 waiting\. New open sign-ups join the line\./);
-    assert.match(html, /Waiting now<b>1<\/b>/);
-    assert.match(html, /Links used<b>1<\/b>/);
-    assert.match(html, /Sign-ups via referral<b>1<\/b><span class="note">1 became weekly active/);
-    assert.match(html, /Bonus tokens granted this week<b>20\.0M<\/b><span class="note">A week, across 2 people/);
-    assert.match(html, /<h2>Funnel<\/h2>/);
-
+    const referrals = (await (await service.request("GET", "/admin/dashboard/referrals.csv", { headers: { cookie } })).text()).trim().split("\r\n");
+    assert.equal(referrals[0], "links_used,signups,blocked,became_active,bonus_tokens_this_week,people_with_bonus");
+    assert.equal(referrals[1], "1,1,0,1,20000000,2");
     const funnel = (await (await service.request("GET", "/admin/dashboard/funnel.csv", { headers: { cookie } })).text()).trim().split("\r\n");
     assert.equal(funnel[0], "signup_week,signed_up,first_request,weekly_active");
     assert.equal(funnel[1], "all,3,2,2");

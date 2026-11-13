@@ -300,16 +300,6 @@ describe("the weekly re-check with the additional signals", () => {
 });
 
 describe("the admin views of the additional signals", () => {
-  it("lists Starter accounts with their signals and checks on the full dashboard", async () => {
-    const { service, admin } = await open();
-    await service.signIn(above(100, { activeWeeks: 30 }));
-    await service.signIn(above(101, { activeWeeks: 10, social: 20, followers: 5 }));
-    const page = await (await service.request("GET", "/admin?view=full", { token: admin })).text();
-    assert.match(page, /<h2>Starter accounts<\/h2>/);
-    assert.match(page, /user100/);
-    assert.doesNotMatch(page.slice(page.indexOf("<h2>Starter accounts</h2>")), /user101/, "Full accounts aren't listed");
-  });
-
   it("backfills the creation day from the stored age on start", async () => {
     const { service, admin } = await open();
     await service.signIn(below(100));

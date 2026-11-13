@@ -74,11 +74,11 @@ describe("admin dashboard sign-in", () => {
     for (const attribute of ["Path=/", "HttpOnly", "Secure", "SameSite=Strict", "Max-Age=3600"]) assert.ok(session.includes(attribute), attribute);
     assert.ok(setCookies.some((value) => value.startsWith("__Host-dl_admin_oauth=;") && value.includes("Max-Age=0")));
 
-    const page = await service.request("GET", "/admin?view=full", { headers: { cookie: cookie! } });
+    const page = await service.request("GET", "/admin", { headers: { cookie: cookie! } });
     assert.equal(page.status, 200);
     const html = await page.text();
-    assert.match(html, /Signed in as <strong>owner<\/strong>/);
-    assert.match(html, /Weekly active developers/);
+    assert.match(html, /<form method="post" action="\/admin\/signout"><button type="submit" class="out">Sign out<\/button><\/form>/);
+    assert.match(html, /Total Users/);
   });
 
   it("refuses people who aren't admins, without a session", async () => {
@@ -172,18 +172,22 @@ describe("admin dashboard sign-in", () => {
 describe("admin dashboard page", () => {
   it("is plain HTML that works under a strict content security policy", async () => {
     const service = await createService();
-    const response = await service.request("GET", "/admin?view=full", { headers: { cookie: await adminCookie(service) } });
+    const response = await service.request("GET", "/admin", { headers: { cookie: await adminCookie(service) } });
     const csp = response.headers.get("content-security-policy")!;
     assert.match(csp, /default-src 'none'/);
     assert.match(csp, /frame-ancestors 'none'/);
-    assert.doesNotMatch(csp, /unsafe-inline|script-src/);
+    assert.doesNotMatch(csp, /unsafe-inline/);
     const nonce = /style-src 'nonce-([0-9a-f]+)'/.exec(csp)![1];
+    // The one script (sorting and search) runs by the same nonce.
+    assert.match(csp, new RegExp(`script-src 'nonce-${nonce}'`));
     const html = await response.text();
     assert.ok(html.includes(`<style nonce="${nonce}">`));
+    assert.equal([...html.matchAll(/<script/g)].length, 1);
+    assert.ok(html.includes(`<script nonce="${nonce}">`));
     // Fonts and the logo come from dl.new, and nothing else from anywhere.
     assert.match(csp, /font-src https:\/\/dl\.new;/);
     assert.match(csp, /img-src https:\/\/dl\.new;/);
-    assert.doesNotMatch(html, /<script|\sstyle="|<link|@import/i);
+    assert.doesNotMatch(html, /<script src|\sstyle="|<link|@import/i);
     for (const [, url] of html.matchAll(/url\("([^"]+)"\)/g)) assert.match(url!, /^https:\/\/dl\.new\/fonts\//);
     for (const [, url] of html.matchAll(/(?:src|href)="((?:https?:)?\/\/[^"]*)"/gi)) assert.match(url!, /^https:\/\/dl\.new\//);
     assert.match(html, /name="viewport"/);
@@ -304,76 +308,6 @@ describe("admin dashboard numbers", () => {
         ["2026-11-02", "carol", "2026-11-04", "tokens", "1000000", "5"],
       ],
     );
-    const html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
-    assert.match(html, /Tue 2026-11-03/);
-  });
-
-  it("has a simple view: sign-ups, growth, tokens per person and red flags as charts, with the toggle", async () => {
-    const { service, cookie } = await scenario();
-    const response = await service.request("GET", "/admin?view=simple", { headers: { cookie } });
-    assert.equal(response.status, 200);
-    const csp = response.headers.get("content-security-policy")!;
-    assert.match(csp, /default-src 'none'/);
-    assert.doesNotMatch(csp, /unsafe-inline|script-src/);
-    const html = await response.text();
-    assert.doesNotMatch(html, /<script|\sstyle="|<link|@import/i);
-    assert.match(html, /prefers-color-scheme: dark/);
-    // The toggle, Simple current; the free tier's state as a pill.
-    assert.match(html, /<nav class="views" aria-label="Dashboard view"><a href="\/admin">Home<\/a><a href="\/admin\?view=simple" aria-current="page">Simple<\/a><a href="\/admin\?view=full">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><a href="\/admin\?view=health">Health<\/a><\/nav>/);
-    assert.match(html, /class="pill open"[^>]*>Free tier open</);
-    // The four cards, and nothing from the full view's tables.
-    for (const id of ["signups", "growth", "tokens", "flags"]) assert.match(html, new RegExp(`<section class="card[^"]*" id="${id}"`));
-    assert.doesNotMatch(html, /<table|<form method="post" action="\/admin\/dashboard/);
-    // Sign-ups: 3 people so far (admins left out), one bar per day for 14 days, in two drawings.
-    assert.match(html, /<p class="big"><b>3<\/b>/);
-    assert.equal([...html.matchAll(/<title>[^<]*sign-ups?<\/title>/g)].length, 28);
-    assert.match(html, /<title>Today: 0 sign-ups<\/title>/);
-    // Tokens per person: carol and alice, coloured by level, never the admin.
-    assert.match(html, /<title>carol: 995\.0k tokens this week \(Full\)<\/title>/);
-    assert.match(html, /<title>alice: 2\.0k tokens this week \(Full\)<\/title>/);
-    assert.match(html, /<i class="c1"><\/i>Full<\/span><span><i class="c3"><\/i>Basic<\/span><span><i class="c2"><\/i>Starter/);
-    assert.doesNotMatch(html, /owner: /);
-    // Red flags: alice and carol reached their allowance this week; the line links to the full view's table.
-    assert.match(html, /<li><a href="\/admin\?view=full#limits">Near weekly cap: alice, carol<\/a><\/li>/);
-    // Growth: carol signed up 9 days ago and nobody since; weekly active people had no full week before.
-    assert.match(html, /<b class="down"><span class="arrow" aria-hidden="true">▼<\/span>−100%<\/b><span class="s">0 vs 1, last 7 days/);
-    assert.doesNotMatch(html, /Infinity|NaN/);
-
-    const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
-    await service.request("POST", "/admin/pause", { token: adminToken });
-    assert.match(await (await service.request("GET", "/admin?view=simple", { headers: { cookie } })).text(), /class="pill paused"[^>]*>Free tier paused</);
-  });
-
-  it("shows growth as — when the week before was zero, never Infinity%", async () => {
-    const { growth } = await import("../src/dashboard-page.js");
-    assert.deepEqual(growth(5, 0), { text: "—", trend: "flat" });
-    assert.deepEqual(growth(0, 0), { text: "—", trend: "flat" });
-    assert.deepEqual(growth(15, 12), { text: "+25%", trend: "up" });
-    assert.deepEqual(growth(9, 12), { text: "−25%", trend: "down" });
-    assert.deepEqual(growth(12, 12), { text: "0%", trend: "flat" });
-  });
-
-  it("says there are no red flags when there are none", async () => {
-    const service = await createService();
-    const html = await (await service.request("GET", "/admin?view=simple", { headers: { cookie: await adminCookie(service) } })).text();
-    assert.match(html, /<p class="none">No red flags\.<\/p>/);
-    assert.match(html, /No tokens used this week\./);
-  });
-
-  it("keeps the full view at ?view=full, unchanged but for the toggle; anything else is the home screen", async () => {
-    const { service, cookie } = await scenario();
-    const page = async (path: string) => (await (await service.request("GET", path, { headers: { cookie } })).text()).replace(/nonce="[0-9a-f]+"/, 'nonce=""');
-    const full = await page("/admin?view=full");
-    const home = await page("/admin");
-    assert.match(home, /<h2 id="ok-h">Are we OK\?<\/h2>/);
-    assert.equal(await page("/admin?view=something-else"), home);
-    assert.match(full, /<span class="who"><nav class="views" aria-label="Dashboard view"><a href="\/admin">Home<\/a><a href="\/admin\?view=simple">Simple<\/a><a href="\/admin\?view=full" aria-current="page">Full<\/a><a href="\/admin\?view=tools">Tools<\/a><a href="\/admin\?view=health">Health<\/a><\/nav>Signed in as/);
-    // Every section of the full view is still there, in order.
-    const headings = [...full.matchAll(/<h2>([^<]+)<\/h2>/g)].map((match) => match[1]);
-    assert.deepEqual(headings.slice(0, 3), ["Spend", "Abuse", "Upstreams"]);
-    for (const heading of ["Queue for free tokens", "Referrals", "Paid plans", "Funnel", "Weekly active developers", "Cohort retention", "Cost per user per week", "Who hit the limit", "Admin log"]) assert.ok(headings.includes(heading), heading);
-    assert.match(full, /<form method="post" action="\/admin\/dashboard\/people\/100\/block">/);
-    assert.doesNotMatch(full, /class="card/);
   });
 
   it("shows global spend against the caps, with admins kept apart", async () => {
@@ -387,9 +321,7 @@ describe("admin dashboard numbers", () => {
     assert.equal(row!.admitted, "3");
     const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
     await service.request("POST", "/admin/pause", { token: adminToken });
-    const html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
-    assert.match(html, /Paused for everyone/);
-    assert.doesNotMatch(html, /<td>owner</);
+    assert.equal((await csv(service, cookie, "spend"))[0]!.paused, "true");
   });
 
   it("builds the roll-up from an existing log the same as it keeps it", async () => {
@@ -488,41 +420,6 @@ describe("admin dashboard daily retention", () => {
       { day: "2026-11-02", size: 1, d: { 0: 1, 1: 0, 2: null, 3: null, 4: null, 5: null, 6: null, 7: null, 14: null } },
       { day: "2026-10-20", size: 3, d: { 0: 0.3333, 1: 0.3333, 2: 0.3333, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 14: 0.3333 } },
     ]);
-
-    const full = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
-    assert.match(full, /<h2>Daily retention<\/h2><a href="\/admin\/dashboard\/retention-daily\.csv" download>CSV<\/a>/);
-    assert.match(full, /<tr><td>Wed 2026-11-04<\/td><td>1<\/td>(<td class="muted">–<\/td>){9}<\/tr>/);
-    assert.match(full, /<tr><td>Mon 2026-11-02<\/td><td>1<\/td><td title="1 of 1">100% <span class="muted">\(1\)<\/span><\/td><td title="0 of 1">0%/);
-  });
-
-  it("draws the retention card: a triangle of cells with tooltips, D14 only in the wide drawing, and the weighted D1 and D7", async () => {
-    const { service, cookie } = await retentionScenario();
-    const html = await (await service.request("GET", "/admin?view=simple", { headers: { cookie } })).text();
-    assert.doesNotMatch(html, /<script|\sstyle="/i);
-    assert.match(html, /<section class="card span3" id="retention" aria-label="Retention">\n<h2>Retention<\/h2>/);
-    const [wide, narrow] = [...html.matchAll(/<svg class="chart heat (wide|narrow)"[\s\S]*?<\/svg>/g)].map((match) => match[0]);
-    assert.ok(wide && narrow);
-    const cells = (svg: string) => [...svg.matchAll(/<title>([^<]* · D\d+ [^<]*)<\/title>/g)].map((match) => match[1]);
-    // Newest first; today's cohort (gina) has no cells, erin's has D0 and D1 (D2 is today), 10-20 has all nine.
-    assert.deepEqual(cells(wide), [
-      "Nov 2 · 1 person · D0 100% (1)",
-      "Nov 2 · 1 person · D1 0% (0)",
-      ...[0, 1, 2].map((d) => `Oct 20 · 3 people · D${d} 33% (1)`),
-      ...[3, 4, 5, 6, 7].map((d) => `Oct 20 · 3 people · D${d} 0% (0)`),
-      "Oct 20 · 3 people · D14 33% (1)",
-    ]);
-    assert.deepEqual(cells(narrow), cells(wide).slice(0, -1));
-    assert.match(wide, />D14<\/text>/);
-    assert.doesNotMatch(narrow, />D14</);
-    assert.match(html, /<p class="avg">Average D1 <b>25%<\/b> <span class="muted">\(2 cohorts, 4 people\)<\/span> · D7 <b>0%<\/b> <span class="muted">\(1 cohort, 3 people\)<\/span>, weighted by cohort size\.<\/p>/);
-    assert.match(wide, /<title>Nov 4 · 1 person<\/title>/);
-    assert.doesNotMatch(html, /Nov 4 · 1 person · D|owner|carol|frank|NaN/);
-  });
-
-  it("says so when nobody has signed up", async () => {
-    const service = await createService();
-    const html = await (await service.request("GET", "/admin?view=simple", { headers: { cookie: await adminCookie(service) } })).text();
-    assert.match(html, /id="retention"[^>]*>\n<h2>Retention<\/h2>\n<p class="caption">Counts only people who could use dl[^<]*<\/p>\n<p class="empty">No sign-ups with free tokens yet\.<\/p>/);
   });
 });
 
@@ -590,16 +487,6 @@ describe("admin dashboard install funnel", () => {
         ["failed_step", "", "", "", "preflight:arm32", "", "1"],
       ],
     );
-
-    const html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
-    assert.match(html, /<h2>Funnel<\/h2>/);
-    assert.match(html, /Anonymous counts: one per script served/);
-    assert.match(html, /can't be joined to people/);
-    assert.match(html, /Server setup \(dl up\)<\/td><td>2</);
-    assert.match(html, /Checks \(system, user, curl\): 32-bit ARM system<\/td><td>1</, "with why, when the script said");
-    assert.match(html, /macOS arm64<\/td><td>laptop<\/td><td>4<\/td><td>1</);
-    assert.match(html, /install-funnel\.csv/);
-    assert.match(html, /<h3>By sign-up week<\/h3>/);
   });
 });
 
@@ -608,19 +495,15 @@ describe("admin dashboard privacy", () => {
   const FORBIDDEN = ["props", "session_id", "type", "model", "status", "received_at", "latency_ms", "note", "code_hash", "device_id", "old_value", "new_value", "changed_by_login"];
   const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_people", "upstream_timings", "download_daily", "install_daily", "refused_days"]);
 
-  // The abuse section reads network hashes, device ids, status and the admin log on purpose:
-  // its queries carry ABUSE_QUERY_TAG and are held to ABUSE_COLUMNS instead.
-  const CONTENT = ["props", "session_id", "type", "model", "received_at", "latency_ms", "note", "code_hash"];
-
   it("reads only allowed tables and columns", async () => {
     const { DASHBOARD_COLUMNS } = await import("../src/dashboard-data.js");
-    const { ABUSE_COLUMNS, ABUSE_QUERY_TAG } = await import("../src/abuse.js");
     const service = await createService();
     const cookie = await adminCookie(service);
     const { state } = directoryEntry(service);
     const db = state.db as DatabaseSync & { setAuthorizer?: (callback: ((...args: unknown[]) => number) | null) => void };
 
-    // Every statement the Directory runs while the page and the CSVs are served.
+    // Every statement the Directory runs while the CSVs are served (the home page's own queries
+    // are held to ADMIN_HOME_COLUMNS in home.test.ts).
     const statements: string[] = [];
     const prepare = db.prepare.bind(db);
     db.prepare = ((query: string) => {
@@ -630,14 +513,11 @@ describe("admin dashboard privacy", () => {
     // Where node:sqlite has it, SQLite itself reports each column read (while preparing, so a
     // read belongs to the statement being prepared).
     const reads: string[] = [];
-    const abuseReads: string[] = [];
     db.setAuthorizer?.((action, table, column) => {
-      if (action === SQLITE_READ) (statements.at(-1)?.startsWith(ABUSE_QUERY_TAG) ? abuseReads : reads).push(`${table}.${column}`);
+      if (action === SQLITE_READ) reads.push(`${table}.${column}`);
       return SQLITE_OK;
     });
     try {
-      assert.equal((await service.request("GET", "/admin?view=full", { headers: { cookie } })).status, 200);
-      assert.equal((await service.request("GET", "/admin?view=simple", { headers: { cookie } })).status, 200);
       for (const table of ["spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams"]) await csv(service, cookie, table);
     } finally {
       db.prepare = prepare;
@@ -645,29 +525,26 @@ describe("admin dashboard privacy", () => {
     }
 
     assert.ok(statements.length > 0);
-    assert.ok(statements.some((statement) => statement.startsWith(ABUSE_QUERY_TAG)));
     for (const statement of statements) {
-      const abuse = statement.startsWith(ABUSE_QUERY_TAG);
       // The one status the dashboard reads: blocked accounts are left out of the daily cohorts
       // (people.status, held to DASHBOARD_COLUMNS by the authorizer below).
       const code = statement.replaceAll("p.status != 'blocked'", "").replace(/'[^']*'/g, "''").replace(/\/\*.*?\*\//g, "");
-      for (const word of abuse ? CONTENT : FORBIDDEN) assert.doesNotMatch(code, new RegExp(`\\b${word}\\b`, "i"), `${word} in: ${statement}`);
+      for (const word of FORBIDDEN) assert.doesNotMatch(code, new RegExp(`\\b${word}\\b`, "i"), `${word} in: ${statement}`);
       const ctes = new Set([...code.matchAll(/\b(\w+)\s+AS\s*\(/gi)].map((match) => match[1]!.toLowerCase()));
       for (const match of code.matchAll(/\b(?:FROM|JOIN)\s+(\w+)/gi)) {
         const table = match[1]!.toLowerCase();
-        assert.ok((abuse ? table in ABUSE_COLUMNS || table === "json_each" : TABLES.has(table)) || ctes.has(table), `table ${table} in: ${statement}`);
+        assert.ok(TABLES.has(table) || ctes.has(table), `table ${table} in: ${statement}`);
       }
     }
     if (db.setAuthorizer) {
       assert.ok(reads.length > 0);
       const allowedIn = (columns: Readonly<Record<string, readonly string[]>>) =>
         new Set(Object.entries({ ...columns, json_each: ["value"] }).flatMap(([table, list]) => [...list, ""].map((column) => `${table}.${column}`)));
-      for (const [list, allowed] of [[reads, allowedIn(DASHBOARD_COLUMNS)], [abuseReads, allowedIn(ABUSE_COLUMNS)]] as const) {
-        for (const read of new Set(list)) {
-          const [table] = read.split(".");
-          if (table === "null" || table === "undefined") continue; // subquery and CTE columns
-          assert.ok(allowed.has(read), `reads ${read}`);
-        }
+      const allowed = allowedIn(DASHBOARD_COLUMNS);
+      for (const read of new Set(reads)) {
+        const [table] = read.split(".");
+        if (table === "null" || table === "undefined") continue; // subquery and CTE columns
+        assert.ok(allowed.has(read), `reads ${read}`);
       }
     }
   });
@@ -739,13 +616,6 @@ describe("admin dashboard tokens and people per upstream", () => {
     assert.equal(allTotal.ttft_median_ms, "");
     assert.equal(Number(allTotal.cash_usd), 0.01);
     assert.ok(Math.abs(Number(allTotal.credit_usd) - 0.181) < 1e-9);
-
-    const html = await (await service.request("GET", "/admin?view=full", { headers: { cookie } })).text();
-    const section = html.slice(html.indexOf('<section id="upstream">'), html.indexOf("</section>", html.indexOf('<section id="upstream">')));
-    assert.match(section, /<th>Users<\/th><th>Tokens in<\/th><th>Cached<\/th><th>Tokens out<\/th>/);
-    assert.match(section, /<th>All time, since 2026-10-28<\/th>/);
-    assert.match(section, /<tr class="group sel"><td>Total<\/td><td>7<\/td>.*?<td>3<\/td><td>20.5k<\/td><td>2.7k<\/td><td>2.06k<\/td>/);
-    assert.match(section, /<td>Luminal<\/td><td>3<\/td>.*?<td>2<\/td><td>5k<\/td><td>2.5k<\/td><td>400<\/td>/);
   });
 
   it("keeps completion tokens and people with each request", async () => {
