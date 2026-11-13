@@ -4,7 +4,7 @@ Coding agents on your own hardware, in six phases. Each phase ends at a gate you
 
 **Direction (since 10 November 2026):** dl's paid product is open models on GPUs you own. dl sets them up, tests every update and rolls back when one fails. It is for companies that self-host for privacy; the first target is US companies with their own GPUs. The free managed tier stays as the top of the funnel, and free tokens stay the default first-run option. The GPU work lives in [phase 1.5](#phase-15--your-own-gpus) and comes first in the week plan below.
 
-Last updated 10 November 2026. On npm today: dl 0.24.0, Autopilot 3.17.0, Hotcell 0.1.38.
+Last updated 13 November 2026. Latest releases: dl 0.32.0, Autopilot 3.22.0, Hotcell 0.1.38.
 
 Scope: the Directionally Local repositories (installer, autopilot, hotcell, serverless-objects, pr-deck), camouflage, and the Aster apps.
 
@@ -14,19 +14,34 @@ Issues carry a `phase-0` to `phase-5` label in `autopilot` and `installer`; `dec
 
 On 10 November this plan replaced the ten-week plan from 3 November. Work is now ordered by one test: does it help a company run open models on its own GPUs, with updates it can trust? The free tier keeps bringing people in alongside. Items from the old plan that don't pass the test are under "Waits until later" below, each with its reason. Phase 0 daily use runs alongside, not before.
 
+**Where the plan stands on 13 November**
+
+Done:
+- `dl model` v0.1 and every launch fix from week 2 (dl 0.22.0 to 0.28.0, Autopilot 3.18.0).
+- GPU-aware first run and "Use your own GPUs", two weeks early (Autopilot 3.19.0, dl 0.26.0), with fixes from a real GPU run (Autopilot 3.20.1 and 3.20.2, dl 0.28.0 and 0.30.1).
+- Several GPUs on one machine, SGLang as a second engine, preflight and `dl model up --plan` (dl 0.31.0), and `--image` (dl 0.32.0). Built and tested against recorded hardware output; not yet run on a real multi-GPU machine.
+- Free tier: dl Pro and top-ups when free usage runs out, and `/usage` with the real limits (Autopilot 3.21.0 and 3.22.0).
+
+In progress:
+- One command for a full GPU box: the model on all GPUs, plus dl's agent in a Hotcell sandbox that sees only one workspace folder (`--workspace`), and `dl model down`.
+- The first real run on a 4x RTX PRO 6000 machine (PCIe, Blackwell) with DeepSeek V4.1 Flash FP8, including checking vLLM v0.34.0rc2 there before it becomes the default image.
+
+Left: every `dl model` screen on camouflage-tui, the Kimi K2.6 catalog entry, a GLM 5.3 Flash test on an 8-GPU node, `dl model bench` on a real multi-GPU deployment, then everything in December and January below.
+
 | Week | Dates | What ships |
 | --- | --- | --- |
 | 1 | 3–9 Nov | **Shipped: free managed tier.** GitHub sign-in, then an email address; free GPT-6 and DeepSeek tokens every week, how many depends on the GitHub account, `/request` for more; resets every Monday 00:00 UTC; a global spend stop, a kill switch, a per-request usage log (counts only). [installer#78](https://github.com/directionally-local/installer/issues/78), [autopilot#1102](https://github.com/directionally-local/autopilot/issues/1102) · Admin dashboard ([installer#86](https://github.com/directionally-local/installer/issues/86)) · Retire the old Kimiflare Cloud service ([installer#84](https://github.com/directionally-local/installer/pull/84) checklist) · **Shipped early, planned for weeks 4–6:** bring your Claude Code setup, core part: the first run reads `CLAUDE.md`, `AGENTS.md` and other agents' instruction files in place, brings in Claude Code commands, lists MCP servers and keeps deny rules (autopilot#1140; rest of [autopilot#1126](https://github.com/directionally-local/autopilot/issues/1126) below) · **Continue in dl:** `dl --from-claude-code` and the opt-in `dl claude-code hook install` that offers it when Claude Code hits a limit ([autopilot#1127](https://github.com/directionally-local/autopilot/issues/1127)) · **Autopilot reports its state to herdr** (autopilot#1115, for [autopilot#1103](https://github.com/directionally-local/autopilot/issues/1103)) |
-| 2 | 10–16 Nov | **Launch dl model v0.1.** The first `dl model up`, `update`, `rollback` and `status` shipped in dl 0.22.0 (installer#179). **Verified on real hardware, not yet released:** side-by-side update, rollback (fixed), per-run log files, smoke tests with a KV-capacity check, and `dl model bench` (built early, originally weeks 3–4). Autopilot edited a file using a local model with `--dangerously-allow-all`. **Still open:** Autopilot sets `max_tokens` from the model's context length; Autopilot's exit codes and write permissions when it runs headless; detect a missing nvidia-container-toolkit and install it; show progress while the image downloads; usable-VRAM thresholds; the update comparison still shows the old inflated tok/s number |
-| 3–4 | 17–30 Nov | **GPU-aware first run:** dl detects Nvidia, AMD or Ascend GPUs and offers `dl model up`; "Use your own GPUs" joins the provider choice after free tokens and your own key · Every `dl model` screen on camouflage-tui · Several GPUs on one machine (tensor and expert parallel) · Catalog entries for GLM 5.3 Flash, DeepSeek V4.1 Flash 1017 and Kimi K2.6, each marked tested or untested · A first test of GLM 5.3 Flash on a rented 8-GPU node |
-| 5–8 | December | Assign GPUs and run several copies of a model behind one endpoint · Rolling updates for models that fill a whole machine · **`dl adopt`** brings an existing vLLM or SGLang setup under dl without replacing it · Every update runs the customer's own test prompts · The first design partners run dl in production |
-| 9 on | January | Several machines, with `dl model status` across the fleet · A Kubernetes path through `dl adopt` · AMD (ROCm), if a design partner needs it · **Paid update plan** (details not public until confirmed) |
+| 2 | 10–16 Nov | **Shipped: dl model v0.1.** The first `dl model up`, `update`, `rollback` and `status` shipped in dl 0.22.0 (installer#179). **Verified on real hardware on 10 Nov, released in dl 0.25.0:** side-by-side update, rollback (fixed), per-run log files, smoke tests with a KV-capacity check, and `dl model bench` (built early, originally weeks 3–4). Autopilot edited a file using a local model with `--dangerously-allow-all`. **The open items from 10 Nov, all shipped:** Autopilot caps `max_tokens` at a local server's context length (Autopilot 3.18.0); headless runs follow the interactive permissions, exit 45 when a run didn't finish, and can't read or write credentials without an exact rule (Autopilot 3.18.0); a missing Nvidia container toolkit is detected and offered for install (dl 0.25.0 and 0.26.0); download progress (dl 0.28.0); GPU memory checks before a side-by-side update (dl 0.25.0), later a full preflight (dl 0.31.0); the update comparison uses a fixed-length bench, so tok/s is no longer inflated (dl 0.25.0) |
+| 3–4 | 17–30 Nov | **Shipped early, in week 2: GPU-aware first run** (Autopilot 3.19.0, dl 0.26.0). Autopilot detects Nvidia, AMD or Ascend GPUs and offers a private model. "Use your own GPUs" joins the provider choice after free tokens and your own key, with three paths: this machine, another server through an SSH tunnel, or an existing OpenAI-compatible endpoint. Anonymous GPU counts and an optional early-access email (Autopilot 3.20.0, dl 0.27.0). Fixes from a real GPU run: smoke tests that work with thinking models, progress, the model picker, short GPU lines, a failure menu (Retry, See what failed, Pick another model, Continue) and vLLM reasoning (Autopilot 3.20.1, dl 0.28.0); a slow `nvidia-smi` gets 10 s and a retry before the no-GPU path (Autopilot 3.20.2); the chat test waits 120 s for a first answer, keeps the container on failure, reuses it on Retry, logs every request and prints a curl line to reproduce it (dl 0.30.1) · **Shipped: several GPUs on one machine** (dl 0.31.0). Detection reads how GPUs connect (PCIe or NVLink) and picks tensor or pipeline parallel; "models that fit" counts every GPU; SGLang as a second engine; `--gpus` and `--port` keep deployments apart, `dl model list` shows them; a preflight checks VRAM per GPU, RAM for offload, disk and KV before any download; `dl model up --plan` prints the command and memory math without running anything. `--image` runs a catalog entry in another container image and shows in `--plan` (dl 0.32.0) · **Partly shipped: catalog** (dl 0.31.0). DeepSeek V4.1 Flash 1017 FP8 and GLM 5.3 Flash are in, marked untested; the NVIDIA FP4 build of DeepSeek is listed but blocked until an engine release loads it; Kimi K2.6 is not in yet · **In progress:** one command for a full GPU box: the model on all GPUs plus dl's agent in a Hotcell sandbox limited to one workspace folder, pointed at the local model and shown in `--plan` (`--workspace`), and `dl model down` · **In progress:** the first real run on a 4x RTX PRO 6000 machine (PCIe, Blackwell) with DeepSeek V4.1 Flash FP8, checking vLLM v0.34.0rc2 there before it becomes the default · **Not started:** every `dl model` screen on camouflage-tui (the first-run failure menu already is); `dl model bench` on a real multi-GPU deployment; a first test of GLM 5.3 Flash on a rented 8-GPU node |
+| 5–8 | December | **Not started:** Run several copies of a model behind one endpoint (assigning GPUs shipped early, as `--gpus` in dl 0.31.0) · Rolling updates for models that fill a whole machine · **`dl adopt`** brings an existing vLLM or SGLang setup under dl without replacing it · Every update runs the customer's own test prompts · The first design partners run dl in production |
+| 9 on | January | **Not started:** Several machines, with `dl model status` across the fleet · A Kubernetes path through `dl adopt` · AMD (ROCm), if a design partner needs it · **Paid update plan** (details not public until confirmed) |
 
 **Kept throughout, because they protect the first run:** free tokens as the default first-run option, laptop mode (plain Autopilot), every `dl` a new session with `dl -c` to continue, eight sessions on an 8 GB laptop, the fresh-VM test, and guardrails for destructive actions so a first run never costs anyone their data ([autopilot#1125](https://github.com/directionally-local/autopilot/issues/1125)).
 
 **Waits until later, unless it breaks something for users:**
 - **Bring your Claude Code setup, the rest** (old weeks 4–5): translating skills and subagents, OpenCode commands and agents, plugin equivalents, a reset for "Always / Don't" answers, the checklist during `dl` install, and a measured first session under two minutes ([autopilot#1126](https://github.com/directionally-local/autopilot/issues/1126)). The core already works; the rest follows the GPU work.
-- **Paid plan for free-tier users** (old week 8, [installer#88](https://github.com/directionally-local/installer/issues/88)). Built: Stripe checkout and billing portal in the free tier service (installer#121) and `/upgrade` in Autopilot (autopilot#1149). Offering it follows the GPU work, because the paid product is now dl model.
+- **Two models per GPU box, beyond `--gpus` and `--port`** (moved here on 13 Nov). Separate GPUs and ports for each deployment shipped in dl 0.31.0; anything more waits, because the target setup is one model and one isolated agent per box.
+- **Paid plan for free-tier users** (old week 8, [installer#88](https://github.com/directionally-local/installer/issues/88)). Built: Stripe checkout and billing portal in the free tier service (installer#121) and `/upgrade` in Autopilot (autopilot#1149). Offering it was to follow the GPU work, because the paid product is now dl model. **Shipped on 12 Nov anyway, as the free tier's paywall:** dl Pro and top-ups when free usage runs out (Autopilot 3.21.0, dl 0.29.0). See the free tier lane below.
 - **Fixes from the paid plan's launch** (old week 9). They follow that launch.
 - **"Your tokens are back"** (old week 7, [installer#87](https://github.com/directionally-local/installer/issues/87)). Autopilot already shows the local reset time (autopilot#1128); the notice itself follows the GPU work.
 - **A pull request upstream so herdr lists dl** (old week 7). The state reporting it needs has shipped; the listing helps the multiplexer, which waits too.
@@ -48,6 +63,9 @@ People sign in with GitHub, then add an email address (one free account per emai
 - A global spend stop and a kill switch.
 - An admin view of people and usage.
 - "Free, sign in with GitHub" first on Autopilot's first-run question, with `/usage`, `/request` and `/invite`.
+- dl Pro and top-ups as the next step when free usage runs out; `/usage` shows the real limits (Autopilot 3.21.0, dl 0.29.0).
+- Separate weekly budgets for DeepSeek and GPT-6; when GPT-6's runs out, Autopilot offers DeepSeek (Autopilot 3.22.0, dl 0.30.0).
+- Admin: a plain-language home screen, a Health view, and tokens and users per provider (dl 0.24.0 to 0.30.0).
 
 **Not yet:** free tokens for background tasks and server sessions; other sign-ins.
 
@@ -217,18 +235,26 @@ Run open models on hardware you control. This started in weeks 2–3 alongside t
 
 **Verified on 10 Nov** on a rented RTX PRO 5000 (48 GB), from the `feat/model-command` branch: Nvidia, one GPU, vLLM in Docker. Smoke tests, a check that the KV cache fits before starting, a side-by-side update, and automatic recovery when an update fails all worked live. The evening test verified the rollback fix, per-run log files and `dl model bench` (built early, originally weeks 3–4); Autopilot edited a file using the local model with `--dangerously-allow-all`. On Qwen3-4B-Instruct-2507 with 1× RTX PRO 5000, the benchmark measured **126 tok/s single stream, 3,387 tok/s aggregate at 32 concurrent requests, TTFT 0.15 s (p50 at 32 concurrent), and prefix cache 50%**. These replace the earlier short-burst throughput reading; the update comparison still shows the old inflated tok/s number. [Test notes and raw outputs](https://github.com/directionally-local/installer/blob/feat/model-command/docs/gpu-test-2026-11-10.md).
 
-**Gate:** on one Nvidia machine, bring up a model, update it, and recover from a failed update automatically without losing the working deployment. Met on that branch on 10 Nov; it counts once the branch ships in a dl release.
+**Gate:** on one Nvidia machine, bring up a model, update it, and recover from a failed update automatically without losing the working deployment. Met on that branch on 10 Nov; **passed** when the branch shipped in dl 0.25.0 on 11 Nov.
+
+**Multi-GPU, 13 Nov:** dl 0.31.0 and 0.32.0 add several GPUs per machine, SGLang, preflight, `--plan` and `--image`. No multi-GPU machine was available while building them, so they are tested against recorded `nvidia-smi` output from three machines (1x RTX PRO 5000, 4x RTX PRO 6000 over PCIe, 8x H100 over NVLink), and the single-GPU output is pinned byte for byte. The first real run, on a 4x RTX PRO 6000 machine, is in progress.
 
 | Status | Item | Issues |
 | --- | --- | --- |
 | Done | Model setup: choose an open model, check the Nvidia GPU and Docker, start vLLM, and connect dl to it | installer#179 |
-| Verified, not released | Test updates before switching traffic; automatically roll back on failure, with manual `dl model rollback` as a fallback | `feat/model-command` |
-| Verified, not released | Rollback fix, per-run log files and `dl model bench` (built early, originally weeks 3–4) | `feat/model-command` |
-| Planned, week 2 | Launch fixes: `max_tokens` from context length, headless exit codes and write permissions, nvidia-container-toolkit detection and install, download progress, usable-VRAM thresholds, old inflated tok/s in the update comparison | new |
-| Planned, weeks 3–4 | GPU-aware first run and a "Use your own GPUs" provider option | new |
-| Planned, weeks 3–4 | Every `dl model` screen on camouflage-tui | new |
-| Planned, weeks 3–4 | A catalog with each model marked tested or untested | new |
-| Planned, weeks 3–4 | Multi-GPU deployments on one machine (was "Later") | new |
+| Done, dl 0.25.0 | Test updates before switching traffic; automatically roll back on failure, with manual `dl model rollback` as a fallback | `feat/model-command` |
+| Done, dl 0.25.0 | Rollback fix, per-run log files and `dl model bench` (built early, originally weeks 3–4) | `feat/model-command` |
+| Done, dl 0.25.0–0.28.0, Autopilot 3.18.0 | Launch fixes: `max_tokens` from context length, headless exit codes and write permissions, nvidia-container-toolkit detection and install, download progress, usable-VRAM thresholds, old inflated tok/s in the update comparison | autopilot#1233, #1238, #1239, #1240; installer#219, #229 |
+| Done, Autopilot 3.19.0 / dl 0.26.0 | GPU-aware first run and a "Use your own GPUs" provider option: this machine, another server through an SSH tunnel, or an existing OpenAI-compatible endpoint. Early-access counts and an optional email in Autopilot 3.20.0 / dl 0.27.0 | autopilot#1244, #1245; installer#219, #224 |
+| Done, Autopilot 3.20.1–3.20.2 / dl 0.28.0–0.30.1 | Fixes from a real GPU run: thinking-safe smoke tests, progress, picker, short GPU lines, a failure menu, vLLM reasoning, slow `nvidia-smi`, a 120 s first answer with the container kept for Retry | autopilot#1249, #1251; installer#229, #238 |
+| Not started | Every `dl model` screen on camouflage-tui (the first-run failure menu in Autopilot already is) | new |
+| Partly done, dl 0.31.0 | A catalog with each model marked tested or untested. Tested: the Qwen pair. Untested: DeepSeek V4.1 Flash 1017 FP8, GLM 5.3 Flash. Blocked until an engine release loads it: DeepSeek's NVIDIA FP4 build. Not in yet: Kimi K2.6 | installer#241 |
+| Done, dl 0.31.0 (not yet on real multi-GPU hardware) | Multi-GPU deployments on one machine (was "Later"): PCIe or NVLink detection, tensor and pipeline parallel sizing, SGLang, `--gpus`/`--port` and `dl model list`, preflight, `dl model up --plan` | installer#241 |
+| Done, dl 0.32.0 | `--image` runs a catalog entry in another container image, shown in `--plan` | installer#243 |
+| In progress | One command for a full GPU box: the model on all GPUs, plus dl's agent in a Hotcell sandbox limited to one workspace folder, pointed at the local model and shown in `--plan` (`--workspace`); `dl model down` | `feat/model-workspace-sandbox` |
+| In progress | First real run on a 4x RTX PRO 6000 machine (PCIe, Blackwell sm120) with DeepSeek V4.1 Flash FP8; vLLM v0.34.0rc2 validated there before it becomes the default image | new |
+| Not started | `dl model bench` on a real multi-GPU deployment; a GLM 5.3 Flash test on a rented 8-GPU node | new |
+| Waits until later | Two models per box beyond `--gpus` and `--port`: the target setup is one model and one isolated agent | new |
 | Planned, December | Several model copies behind one endpoint; rolling updates for models that fill a machine; the customer's own test prompts in every update | new |
 | Planned, December | `dl adopt` (was "Later", as `dl model adopt`) brings an existing vLLM or SGLang setup under dl's management without replacing it | new |
 | Planned, January | Several machines and fleet-wide `dl model status`; a Kubernetes path through `dl adopt`; the paid update plan | new |
@@ -325,11 +351,11 @@ These never block a phase.
 3. **How does a teammate reach a shared server?** SSH, the team's Tailscale, or a public address. Blocks phase 4.
 4. **Who pays, and who gets stopped?** One company key with per-person limits, or everyone's own key. Blocks phase 4.
 5. **What happens when a server is full?** Queue, per-person share, or a second server.
-6. ~~**Free tier: do cached tokens count fully toward the weekly allowance, how many people get in, and what's the privacy statement at sign-in?**~~ **Decided:** cached tokens count at their real cost; 50 million tokens or $5 a week; one account per GitHub user; accounts under 30 days need an invite. [installer#78](https://github.com/directionally-local/installer/issues/78)
+6. ~~**Free tier: do cached tokens count fully toward the weekly allowance, how many people get in, and what's the privacy statement at sign-in?**~~ **Decided:** cached tokens count at their real cost; a weekly allowance per person (amounts are operational settings, see the free tier lane); one account per GitHub user; accounts under 30 days need an invite. [installer#78](https://github.com/directionally-local/installer/issues/78)
 7. **Should the floors check block release PRs?** [installer#74](https://github.com/directionally-local/installer/issues/74)
-8. **What is the pricing unit for the paid update plan?** Per GPU, per machine, or per company.
-9. **Which models get "tested" status first?** The catalog marks each model tested or untested from weeks 3–4.
-10. **Does the free tier's spend cap need lowering, given recent sign-ups?**
+8. **What is the pricing unit for the paid self-hosted update plan?** Per GPU, per machine, or per company. Still open on 13 Nov.
+9. **Which models get "tested" status first?** Partly answered on 13 Nov: the Qwen pair is tested on one RTX PRO 5000. DeepSeek V4.1 Flash 1017 FP8 and GLM 5.3 Flash are in the catalog, untested. DeepSeek is next, from the first real 4x RTX PRO 6000 run.
+10. **Does the free tier's spend cap need lowering, given recent sign-ups?** Partly answered on 12 Nov: separate weekly budgets for DeepSeek and GPT-6, and dl Pro and top-ups when free usage runs out (Autopilot 3.21.0 and 3.22.0). Whether the global cap changes is still open.
 
 ## Every open issue, placed on the roadmap
 
