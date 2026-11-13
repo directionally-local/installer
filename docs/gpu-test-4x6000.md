@@ -12,18 +12,18 @@ It is written for a coding agent working from a laptop over SSH. Follow it liter
 
 | Part | Version needed | Why |
 | --- | --- | --- |
-| dl (`directionallylocal`) | **0.33.0 or later** | `--workspace`, `--allow-internet`, `dl model attach` and `dl model down` come from installer#245, which ships in dl 0.33.0. dl 0.32.0 (released 13 Nov) has `--plan`, `--image`, `update`, `status`, `list` and `bench`, but none of those four. |
+| dl (`directionallylocal`) | **0.34.0 or later** | `--workspace`, `--allow-internet`, `dl model attach` and `dl model down` came in dl 0.33.0 (installer#245). dl 0.34.0 (installer#249) runs the agent as the workspace folder's owner with its home outside the workspace, and needs Hotcell 0.1.40. |
 | Hotcell | **0.1.40 or later** | `--workspace-dir` and `--network` (hotcell#73), `--user` and `--home-dir` (hotcell#75). The dl release that pins it installs it with `dl up`. |
 | Autopilot (`autopilot-ai`) | the version dl pins | Runs inside the sandbox. |
 | vLLM image | `vllm/vllm-openai:v0.34.0rc2` | The catalog default, v0.33.0, lacks the sm120 fix for this model (vLLM #60762). Step I checks how it fails. |
 
-On 13 Nov the latest dl on npm is 0.32.0 and installer#245 is still open; Hotcell 0.1.39 is released. Before renting anything, on the laptop:
+Before renting anything, on the laptop:
 
 ```sh
-npm view directionallylocal version   # must print 0.33.0 or later
+npm view directionallylocal version   # must print 0.34.0 or later
 ```
 
-If it prints 0.32.0, don't rent the box. Tell the owner the gate can't run yet. Only if the owner asks for a partial run on 0.32.0: run the preconditions, the install, and steps A to D and I, leave out every `--workspace` flag, mark steps E to H and E2 as NOT RUN, and clean up between steps with `docker rm -f dl-model-1 dl-model-2` (0.32.0 has no `dl model down`).
+If it prints anything older, don't rent the box. Tell the owner the gate can't run yet.
 
 ## Cost and time
 

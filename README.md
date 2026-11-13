@@ -30,7 +30,7 @@ Then it installs Hotcell and Autopilot on the place, builds the sandbox image, s
 
 ```
   ✓ Checking this computer   macOS 15.1 · Docker Desktop 29.5.2 · Node 24.22.1 · 120 GB free
-  ✓ Installing Hotcell (sandbox SDK) + Autopilot (harness)   Autopilot 3.22.0 · Hotcell 0.1.39
+  ✓ Installing Hotcell (sandbox SDK) + Autopilot (harness)   Autopilot 3.22.0 · Hotcell 0.1.40
   ✓ Building the sandbox image   Node 24 · Autopilot 3.22.0
   ✓ Starting services     start at login · logs in ~/.directionallylocal/logs
   ✓ Connecting            this computer · tasks pause while it sleeps
@@ -84,7 +84,7 @@ dl pull <id>                        # check one out here
 dl status                           # where agents run, their provider, model and versions, what they're doing
 ```
 
-`dl status` says when a place runs another Autopilot or Hotcell than this laptop's `dl` pins: `! box runs Hotcell 0.1.30, this dl pins 0.1.39   dl update box`.
+`dl status` says when a place runs another Autopilot or Hotcell than this laptop's `dl` pins: `! box runs Hotcell 0.1.30, this dl pins 0.1.40   dl update box`.
 
 When Autopilot here uses the free tier, `dl status` also shows the account: who is signed in (`@octo`), the tokens left this week, and when the week resets (local time). When free usage runs out, Autopilot's `/upgrade` offers dl Pro or a one-time top-up. dl reads Autopilot's sign-in and asks the free tier service once (`GET /v1/me`, 3 seconds at most, never refreshing the sign-in); if that fails it shows only `@octo`, or nothing.
 
