@@ -1,6 +1,6 @@
 import { escapeHtml } from "../../shared/src/html.js";
 import { realAllowance, USAGE_PERIODS, type AdminGrantRow, type AdminHomeData, type AdminUserRow, type LevelSettings, type UsagePeriod, type UsagePeriodKind } from "./admin-home-data.js";
-import { adminNav, barPath, compact, creditProviders, shell, SIMPLE_STYLE, type SpendView } from "./dashboard-page.js";
+import { adminNav, barPath, compact, creditProviders, shell, SIMPLE_STYLE, spendTotals, type SpendView } from "./dashboard-page.js";
 import { BRAND_ORIGIN, PRODUCT_NAME } from "./pages.js";
 import { DAY_MS } from "./week.js";
 
@@ -61,13 +61,17 @@ export function userCaps(user: AdminUserRow, settings: AdminHomeInput["settings"
   };
 }
 
-/** Free use this week across providers (credit and OpenRouter cash, admins and paid left out) against the weekly budget. */
-export function weeklyBudget(spend: SpendView): { usedUsd: number; totalUsd: number | null } {
-  const providers = creditProviders(spend).filter((row) => row.configured || row.usedUsd > 0);
-  const usedUsd = providers.reduce((sum, row) => sum + row.freeWeekUsd, 0) + spend.weekUsd;
-  const budgets = providers.filter((row) => row.configured && row.weeklyBudgetUsd !== null);
-  const totalUsd = budgets.length > 0 ? budgets.reduce((sum, row) => sum + row.weeklyBudgetUsd!, 0) : spend.weeklyCapUsd;
-  return { usedUsd, totalUsd };
+/**
+ * The global budget, as the old Kimiflare dashboard showed it: all-time credit used across the
+ * providers against their total prepaid credit (OpenAI + Luminal). Without credit configured,
+ * all-time spend against the global all-time cap.
+ */
+export function globalBudget(spend: SpendView): { usedUsd: number; totalUsd: number | null } {
+  const providers = creditProviders(spend).filter((row) => row.configured);
+  if (providers.length > 0) {
+    return { usedUsd: providers.reduce((sum, row) => sum + row.usedUsd, 0), totalUsd: providers.reduce((sum, row) => sum + row.balanceUsd, 0) };
+  }
+  return { usedUsd: spendTotals(spend).allTimeUsd, totalUsd: spend.totalCapUsd };
 }
 
 const STYLE = `${SIMPLE_STYLE}
@@ -99,6 +103,9 @@ main.home > section { margin: 0 0 20px; }
 .totals b { display: block; font-size: 17px; color: var(--k-text); font-variant-numeric: tabular-nums; }
 .tools-link { font-size: 13px; color: var(--k-muted); margin: 0 0 16px; }
 .tools-link a { color: var(--k-text); font-weight: 600; }
+.pager { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin: 12px 0 0; font-size: 13px; color: var(--k-muted); font-variant-numeric: tabular-nums; }
+.pager button { min-height: 36px; padding: 6px 12px; border: 1px solid var(--k-border); border-radius: 8px; background: var(--k-bg); color: var(--k-text); font: inherit; cursor: pointer; }
+.pager button:disabled { opacity: .4; cursor: default; }
 .search { width: min(100%, 280px); min-height: 36px; padding: 6px 10px; border: 1px solid var(--k-border); border-radius: 8px; background: var(--k-bg); color: var(--k-text); font: 16px var(--body); }
 .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--k-border); border-radius: 8px; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
@@ -137,21 +144,44 @@ svg.chart.narrow { display: none; }
 }
 `;
 
-/** Sorts the users table by any column (data-v, else the text) and filters it by the search box. */
+/** Users per page in the table. */
+export const USERS_PER_PAGE = 50;
+
+/**
+ * Sorts the users table by any column (data-v, else the text), filters it by the search box and
+ * shows it a page at a time. The server already hides every row past the first page.
+ */
 const SCRIPT = `(() => {
   const table = document.getElementById("users");
   if (!table) return;
+  const PER = ${USERS_PER_PAGE};
   const body = table.tBodies[0];
-  const rows = Array.from(body.rows);
+  let rows = Array.from(body.rows);
   const search = document.getElementById("user-search");
   const shown = document.getElementById("user-count");
+  const pager = document.getElementById("user-pager");
+  const prev = document.getElementById("user-prev");
+  const next = document.getElementById("user-next");
+  const where = document.getElementById("user-page");
+  let page = 0;
+  let q = "";
+  const render = () => {
+    const hits = rows.filter((row) => !q || row.dataset.q.includes(q));
+    const pages = Math.max(1, Math.ceil(hits.length / PER));
+    if (page >= pages) page = pages - 1;
+    const from = page * PER;
+    const visible = new Set(hits.slice(from, from + PER));
+    for (const row of rows) row.hidden = !visible.has(row);
+    shown.textContent = q ? hits.length + " of " + rows.length : String(rows.length);
+    where.textContent = hits.length === 0 ? "No users" : (from + 1) + "–" + Math.min(from + PER, hits.length) + " of " + hits.length;
+    prev.disabled = page === 0;
+    next.disabled = page >= pages - 1;
+    pager.hidden = false;
+  };
   search.hidden = false;
-  search.addEventListener("input", () => {
-    const q = search.value.trim().toLowerCase();
-    let n = 0;
-    for (const row of rows) { const hit = !q || row.dataset.q.includes(q); row.hidden = !hit; if (hit) n++; }
-    shown.textContent = q ? n + " of " + rows.length : String(rows.length);
-  });
+  search.addEventListener("input", () => { q = search.value.trim().toLowerCase(); page = 0; render(); });
+  prev.addEventListener("click", () => { if (page > 0) { page--; render(); } });
+  next.addEventListener("click", () => { page++; render(); });
   const heads = Array.from(table.tHead.rows[0].cells);
   heads.forEach((th, index) => {
     const button = th.querySelector("button");
@@ -165,8 +195,11 @@ const SCRIPT = `(() => {
       const sign = dir === "ascending" ? 1 : -1;
       rows.sort((a, b) => { const x = value(a), y = value(b); return (x < y ? -1 : x > y ? 1 : 0) * sign; });
       for (const row of rows) body.appendChild(row);
+      page = 0;
+      render();
     });
   });
+  render();
 })();`;
 
 function stat(label: string, value: string, note = ""): string {
@@ -241,7 +274,7 @@ function userCell(user: AdminUserRow): string {
 function usersTable(users: AdminUserRow[], settings: AdminHomeInput["settings"]): string {
   const head = (label: string, type: "n" | "s", initial?: "descending") =>
     `<th${type === "s" ? ` class="l"` : ""} data-type="${type}"${initial ? ` aria-sort="${initial}"` : ""}><button type="button">${escapeHtml(label)}</button></th>`;
-  const rows = users.map((user) => {
+  const rows = users.map((user, index) => {
     const caps = userCaps(user, settings);
     const plan = planLabel(user);
     const planClass = user.status === "blocked" ? "blocked" : user.plan;
@@ -253,7 +286,7 @@ function usersTable(users: AdminUserRow[], settings: AdminHomeInput["settings"])
       caps.remaining === null
         ? `<td data-v="-1">—</td>`
         : `<td data-v="${caps.remaining.toFixed(4)}">${dollars(caps.remaining)}${meter(caps.remaining, caps.usd)}${caps.deepseekRemaining === null ? "" : `<span class="sub">DeepSeek ${dollars(caps.deepseekRemaining)}</span>`}</td>`;
-    return `<tr data-q="${escapeHtml(user.login.toLowerCase())}">
+    return `<tr data-q="${escapeHtml(user.login.toLowerCase())}"${index >= USERS_PER_PAGE ? " hidden" : ""}>
 <td data-v="${escapeHtml(user.login.toLowerCase())}">${userCell(user)}</td>
 <td class="l"><span class="badge ${planClass}">${plan}</span></td>
 ${limit}
@@ -272,7 +305,8 @@ ${remaining}
 <tbody>
 ${rows.join("\n")}
 </tbody>
-</table></div>`;
+</table></div>
+<nav class="pager" id="user-pager" aria-label="Users pages" hidden><button type="button" id="user-prev">← Previous</button><span id="user-page"></span><button type="button" id="user-next">Next →</button></nav>`;
 }
 
 function grantsTable(rows: AdminGrantRow[], ended: boolean): string {
@@ -291,7 +325,7 @@ function grantsTable(rows: AdminGrantRow[], ended: boolean): string {
 
 export function adminHomePage(input: AdminHomeInput): Response {
   const { data, spend, settings } = input;
-  const budget = weeklyBudget(spend);
+  const budget = globalBudget(spend);
   const paying = data.subscriptions.active + data.subscriptions.pastDue;
   const totalTokens = data.totals.promptTokens + data.totals.completionTokens;
   const feedbackNote = data.feedback.sinceDay === null ? "none counted yet" : `since ${date(data.feedback.sinceDay * DAY_MS)}`;
@@ -305,7 +339,7 @@ ${input.signOut ? `<form method="post" action="/admin/signout"><button type="sub
   const cards = `<div class="cards">
 ${stat("Total Users", data.totalUsers.toLocaleString("en-US"), `${data.blockedUsers.toLocaleString("en-US")} blocked`)}
 ${stat("Active Grants", data.activeGrants.length.toLocaleString("en-US"), "personal weekly caps")}
-${stat("Global Budget", `${dollars(budget.usedUsd)} / ${budget.totalUsd === null ? "no cap" : dollars(budget.totalUsd)}`, "free use this week")}
+${stat("Global Budget", `${dollars(budget.usedUsd)} / ${budget.totalUsd === null ? "no cap" : dollars(budget.totalUsd)}`, "credit used, all time")}
 ${stat("Est. Cost", dollars(data.totals.costUsd), "all time, at list prices")}
 ${stat("Feedback", data.feedback.total.toLocaleString("en-US"), feedbackNote)}
 ${stat("7-Day Prompts", compact(data.last7.promptTokens), "input tokens, last 7 days")}
