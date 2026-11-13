@@ -74,7 +74,7 @@ export function parseEnvFile(text: string | undefined): Record<string, string> {
   return values;
 }
 
-export function hotcellEnv(input: { apiKey: string; bridgeIp: string; workspaceRoots?: string | undefined }): string {
+export function hotcellEnv(input: { apiKey: string; bridgeIp: string; workspaceRoots?: string | undefined; homeRoots?: string | undefined }): string {
   return envFile("Hotcell daemon (sandboxes + credential gateway)", {
     HOTCELL_HOME: PATHS.hotcellHome,
     HOTCELL_KEYSTORE: "file",
@@ -90,6 +90,8 @@ export function hotcellEnv(input: { apiKey: string; bridgeIp: string; workspaceR
     HOTCELL_MODEL_PRICES: PATHS.modelPrices,
     // Host directories `dl model up --workspace` mounts into its agent's cell; kept across `dl up`.
     ...(input.workspaceRoots ? { HOTCELL_WORKSPACE_ROOTS: input.workspaceRoots } : {}),
+    // Where those agents' homes live (/var/lib/directionallylocal/workspaces); kept across `dl up`.
+    ...(input.homeRoots ? { HOTCELL_HOME_ROOTS: input.homeRoots } : {}),
   });
 }
 

@@ -12,18 +12,18 @@ It is written for a coding agent working from a laptop over SSH. Follow it liter
 
 | Part | Version needed | Why |
 | --- | --- | --- |
-| dl (`directionallylocal`) | **0.33.0 or later** | `--workspace`, `--allow-internet`, `dl model attach` and `dl model down` come from installer#245, which ships in dl 0.33.0. dl 0.32.0 (released 13 Nov) has `--plan`, `--image`, `update`, `status`, `list` and `bench`, but none of those four. |
-| Hotcell | **0.1.39 or later** | `--workspace-dir` and `--network` (hotcell#73). dl 0.33.0 pins it, and `dl up` installs it. |
+| dl (`directionallylocal`) | **0.34.0 or later** | `--workspace`, `--allow-internet`, `dl model attach` and `dl model down` came in dl 0.33.0 (installer#245). dl 0.34.0 (installer#249) runs the agent as the workspace folder's owner with its home outside the workspace, and needs Hotcell 0.1.40. |
+| Hotcell | **0.1.40 or later** | `--workspace-dir` and `--network` (hotcell#73), `--user` and `--home-dir` (hotcell#75). The dl release that pins it installs it with `dl up`. |
 | Autopilot (`autopilot-ai`) | the version dl pins | Runs inside the sandbox. |
 | vLLM image | `vllm/vllm-openai:v0.34.0rc2` | The catalog default, v0.33.0, lacks the sm120 fix for this model (vLLM #60762). Step I checks how it fails. |
 
-On 13 Nov the latest dl on npm is 0.32.0 and installer#245 is still open; Hotcell 0.1.39 is released. Before renting anything, on the laptop:
+Before renting anything, on the laptop:
 
 ```sh
-npm view directionallylocal version   # must print 0.33.0 or later
+npm view directionallylocal version   # must print 0.34.0 or later
 ```
 
-If it prints 0.32.0, don't rent the box. Tell the owner the gate can't run yet. Only if the owner asks for a partial run on 0.32.0: run the preconditions, the install, and steps A to D and I, leave out every `--workspace` flag, mark steps E to H and E2 as NOT RUN, and clean up between steps with `docker rm -f dl-model-1 dl-model-2` (0.32.0 has no `dl model down`).
+If it prints anything older, don't rent the box. Tell the owner the gate can't run yet.
 
 ## Cost and time
 
@@ -122,7 +122,7 @@ exec bash -l        # picks up dl on PATH
 dl --version | tee $R/facts/dl-version.txt
 ```
 
-**PASS:** prints 0.33.0 or later. If it prints 0.32.0, see "Versions": stop, or do the partial run only if the owner asked for it.
+**PASS:** prints 0.34.0 or later. If it prints anything older, see "Versions": stop.
 
 Then the server install, which sets up Hotcell, Autopilot's sandbox image and the services that `--workspace` needs. It doesn't need a provider key or a GitHub token for this test, so pass an empty answer set, and keep access to this machine (no Tailscale):
 
@@ -145,9 +145,9 @@ Record the versions:
 dl doctor 2>&1 | tee $R/facts/dl-doctor.txt
 ```
 
-**PASS:** `dl up` ends without an error; Hotcell is 0.1.39 or later; `systemctl is-active hotcell` prints `active`; an image `directionallylocal-cell:<autopilot version>` exists. `dl doctor` may flag the missing provider key and GitHub token; that is expected here. Record anything else it flags.
+**PASS:** `dl up` ends without an error; Hotcell is 0.1.40 or later; `systemctl is-active hotcell` prints `active`; an image `directionallylocal-cell:<autopilot version>` exists. `dl doctor` may flag the missing provider key and GitHub token; that is expected here. Record anything else it flags.
 
-**FAIL:** `dl up` stops with an error, or Hotcell is older than 0.1.39. Collect `$R/install-dl-up.txt` and `journalctl -u hotcell --no-pager -n 200 > $R/logs/hotcell-install.txt`, then stop: steps E to H can't run without it.
+**FAIL:** `dl up` stops with an error, or Hotcell is older than 0.1.40. Collect `$R/install-dl-up.txt` and `journalctl -u hotcell --no-pager -n 200 > $R/logs/hotcell-install.txt`, then stop: steps E to H can't run without it.
 
 ## A. The plan
 
@@ -335,13 +335,13 @@ ls -ln /srv/dltest > $R/f-files.txt
 
 **PASS:**
 - The run exits 0, and `f-task.typescript` shows tool calls (files written, `node --test` run).
-- `/srv/dltest` on the host now has `package.json`, `cli.js` and `test.js`. Record their owner from `f-files.txt`; the cell runs as root, so expect uid 0.
+- `/srv/dltest` on the host now has `package.json`, `cli.js` and `test.js`. Record their owner from `f-files.txt`; the cell runs as the owner of `/srv/dltest`, so expect that uid:gid (0:0 only if root owns it).
 - On the host, `node cli.js --version` prints `0.1.0` and `node --test` passes.
-- Autopilot's own files are under `/srv/dltest/.dl/` (config, state), and nothing was written elsewhere on the host.
+- Autopilot's own files are under `/var/lib/directionallylocal/workspaces/default/home/` (config, state), owned by the same uid:gid; there is no `.dl` in `/srv/dltest`, and nothing was written elsewhere on the host.
 
 Record the task's wall time, and whether any tool call failed or was malformed (look for parser or JSON errors in `docker logs dl-model-1 2>&1 | grep -i -E 'tool|pars' | tail -50 > $R/f-vllm-tool-lines.txt`).
 
-**FAIL:** a non-zero exit (exit 45 means the run didn't finish), no files, files elsewhere, or a failing test. Collect `$R/f-*`, `/srv/dltest/.dl/config/autopilot/config.json` (copy it to `$R/f-autopilot-config.json`) and the vLLM tool lines.
+**FAIL:** a non-zero exit (exit 45 means the run didn't finish), no files, files elsewhere, or a failing test. Collect `$R/f-*`, `/var/lib/directionallylocal/workspaces/default/home/.config/autopilot/config.json` (copy it to `$R/f-autopilot-config.json`) and the vLLM tool lines.
 
 ## G. Update to the same model and image
 
@@ -368,7 +368,7 @@ Then check:
 docker ps -a --format '{{.Names}} {{.Status}} {{.Ports}}' > $R/g-docker-ps.txt
 dl model status > $R/g-status.txt 2>&1
 docker inspect --format '{{json .NetworkSettings.Networks}}' dl-model-2 > $R/g-model2-networks.json
-cat /srv/dltest/.dl/config/autopilot/config.json > $R/g-autopilot-config.json
+cat /var/lib/directionallylocal/workspaces/default/home/.config/autopilot/config.json > $R/g-autopilot-config.json
 docker exec $SBX node -e "fetch('http://model:8000/v1/models',{signal:AbortSignal.timeout(5000)}).then(r=>r.text()).then(t=>{console.log('MODEL OK',t);process.exit(0)},e=>{console.log('MODEL FAIL',e.cause?.code||e.message);process.exit(1)})" > $R/g-model-reach.txt 2>&1; echo "exit=$?"
 script -q -e -c "dl model attach -- --dangerously-allow-all -p 'Run node --test in /workspace and tell me the result.'" $R/g-attach.typescript; echo "exit=$?"
 ```
@@ -412,7 +412,7 @@ ls -la /srv/dltest > $R/h-workspace-after.txt
 - `h-networks.txt` has no `dl-model-net` or `dl-model-net-egress`.
 - `HOTCELL_WORKSPACE_ROOTS` no longer contains `/srv/dltest`; `systemctl is-active hotcell` prints `active`.
 - `dl model list` shows no deployment.
-- `/srv/dltest` still has `HOST_MARKER.txt`, the CLI files and `.dl/`.
+- `/srv/dltest` still has `HOST_MARKER.txt` and the CLI files; `/var/lib/directionallylocal/workspaces/default/home` is gone.
 - Record whether the volume `dl-model-hf-cache` is still there (expected: kept, so the weights aren't downloaded again).
 
 **FAIL:** anything left behind, or anything in `/srv/dltest` removed. Collect `$R/h-*`.
@@ -497,7 +497,7 @@ nvidia-smi -q > $R/logs/nvidia-smi-q-end.txt
 docker ps -a > $R/logs/docker-ps-end.txt
 docker images > $R/logs/docker-images.txt
 docker system df > $R/logs/docker-system-df.txt
-cp -r /srv/dltest/.dl $R/logs/workspace-dl 2>/dev/null
+cp -r /var/lib/directionallylocal/workspaces/default/home $R/logs/agent-home 2>/dev/null
 ```
 
 The container logs (`docker logs dl-model-1`, `dl-model-2`) and `docker inspect` outputs for the model and sandbox containers are saved by the steps above, before `down` removes the containers. Check that `$R/b-docker-logs-dl-model-1.txt`, `$R/g-docker-logs-dl-model-2.txt`, `$R/e-inspect-sandbox.json` and `$R/i-docker-logs-dl-model-1.txt` exist.

@@ -47,16 +47,18 @@ docker run -d --name dl-model-1 --gpus all \
 
 Sandbox (started after the model's tests pass)
 Agent      Autopilot in a Hotcell cell (container driver) · image directionallylocal-cell:3.22.0
-Workspace  /srv/project → /workspace, read-write: the only host directory it sees (symlinks resolved at up)
-Mounts     no home directory, no other host path, no Docker socket; Hotcell adds only its agent binary (read-only) and socket
+Workspace  /srv/project → /workspace, read-write: the project (symlinks resolved at up); dl writes nothing in it
+Home       /var/lib/directionallylocal/workspaces/default/home → /home/agent, read-write: HOME and every XDG directory (config, sessions, caches); made by dl before the cell starts, owned by the user, 0700; dl model down deletes it
+User       the owner of /srv/project, read at up (uid:gid, e.g. 1000:1000); root only when the owner is root
+Mounts     exactly those two host directories; no host home directory, no Docker socket; Hotcell adds only its agent binary (read-only) and socket
 GPUs       none (no --gpus, no /dev/nvidia*)
 Network    dl-model-net: Docker --internal, no host address on it (no route off the box, no host services); shared with dl-model-1 as "model"
 Egress     only the model: no internet, no host services, no Hotcell key gateway; --allow-internet adds the internet
 Model API  http://model:8000/v1 · no key · never published beyond 127.0.0.1:8000 on the host
 Limits     8 GiB memory, 4 CPUs, 1024 processes · with the model's 221.1 GiB: 229.1 GiB of 243.2 GiB available
-Isolation  the model container mounts only dl-model-hf-cache, never /srv/project; checked after start (docker inspect, and from inside the cell)
-Hotcell    HOTCELL_WORKSPACE_ROOTS gains /srv/project (restarts hotcell.service); needs dl's server install (sudo dl up), Hotcell 0.1.39+, root
-Autopilot  /srv/project/.dl/config/autopilot/config.json (the cell's XDG_CONFIG_HOME, git-ignored):
+Isolation  the model container mounts only dl-model-hf-cache, never /srv/project; checked after start (docker inspect, from inside the cell, the owner of a file the agent writes, and /srv/project's listing and git status before and after)
+Hotcell    HOTCELL_WORKSPACE_ROOTS gains /srv/project, HOTCELL_HOME_ROOTS /var/lib/directionallylocal/workspaces (restarts hotcell.service); needs dl's server install (sudo dl up), Hotcell 0.1.40+, root
+Autopilot  /var/lib/directionallylocal/workspaces/default/home/.config/autopilot/config.json (the cell's XDG_CONFIG_HOME, outside the workspace):
   {
     "provider": "vllm",
     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
@@ -74,11 +76,12 @@ docker network create --internal -o com.docker.network.bridge.inhibit_ipv4=true 
 docker network connect --alias model dl-model-net dl-model-1
 hotcell create --name dl-model-agent --image directionallylocal-cell:3.22.0 \
     --driver container --workspace-dir /srv/project \
-    --network dl-model-net --memory 8192 --cpus 4 \
-    --pids 1024 --label dl.model.deployment=default \
-    --env XDG_CONFIG_HOME=/workspace/.dl/config,XDG_STATE_HOME=/workspace/.dl/state,XDG_DATA_HOME=/workspace/.dl/data,XDG_CACHE_HOME=/workspace/.dl/cache,AUTOPILOT_LAUNCHED_BY=dl
+    --home-dir /var/lib/directionallylocal/workspaces/default/home \
+    --user UID:GID --network dl-model-net --memory 8192 \
+    --cpus 4 --pids 1024 --label dl.model.deployment=default \
+    --env HOME=/home/agent,XDG_CONFIG_HOME=/home/agent/.config,XDG_STATE_HOME=/home/agent/.local/state,XDG_DATA_HOME=/home/agent/.local/share,XDG_CACHE_HOME=/home/agent/.cache,AUTOPILOT_LAUNCHED_BY=dl,USER=dl,LOGNAME=dl
 
 Then
-  dl model attach        Autopilot in the sandbox (docker exec -it -w /workspace sbx-ID /opt/autopilot/node_modules/.bin/autopilot)
+  dl model attach        Autopilot in the sandbox (docker exec -it -u UID:GID -w /workspace sbx-ID /opt/autopilot/node_modules/.bin/autopilot)
   dl model update MODEL  tests the new model; when it passes, the sandbox follows (same URL, config rewritten)
-  dl model down          removes the model, the sandbox and its networks; keeps /srv/project
+  dl model down          removes the model, the sandbox, its networks and /var/lib/directionallylocal/workspaces/default/home; keeps /srv/project
