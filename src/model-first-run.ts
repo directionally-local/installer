@@ -1,4 +1,4 @@
-import { fitGpus, MODEL_CATALOG, type GpuSize, type ModelRecipe } from "./model-catalog.js";
+import { fitGpus, gpuCounts, MODEL_CATALOG, type GpuSize, type ModelRecipe } from "./model-catalog.js";
 import { configureProvider, logPathOf, modelCommand, showHardware, type ModelCommandOptions } from "./model-command.js";
 import { modelApiBase, SmokeError } from "./model-smoke.js";
 import { checkGpuDocker, containerRunning, detectHardware, type Hardware } from "./model-runtime.js";
@@ -81,7 +81,13 @@ const gb = (mib: number) => Math.ceil(mib / 1024);
  */
 export function modelChoices(gpus: number | readonly GpuSize[]): Array<{ recipe: ModelRecipe; fits: boolean; tested: boolean }> {
   const list = typeof gpus === "number" ? [{ index: 0, totalMiB: gpus }] : gpus;
-  return MODEL_CATALOG.map((recipe) => ({ recipe, fits: fitGpus(recipe, list) !== undefined, tested: TESTED_MODELS.has(recipe.id) }));
+  return MODEL_CATALOG.filter((recipe) => !recipe.blocked).map((recipe) => ({ recipe, fits: fitGpus(recipe, list) !== undefined, tested: TESTED_MODELS.has(recipe.id) }));
+}
+
+/** "16 GB" for one GPU, "311 GB on 2+ GPUs" for a multi-GPU model. */
+function sizeText(recipe: ModelRecipe): string {
+  if (!recipe.parallel) return `${gb(recipe.minVramMiB)} GB`;
+  return `${gb(recipe.minTotalVramMiB ?? recipe.minVramMiB)} GB on ${Math.min(...gpuCounts(recipe))}+ GPUs`;
 }
 
 /** Map `dl model up`'s error to a short type. */
@@ -183,7 +189,7 @@ async function pickModel(options: FirstRunModelUpOptions, hardware: Hardware): P
       choices.map(({ recipe, fits, tested }) => ({
         value: recipe.id,
         label: `${recipe.id}  ${recipe.repo}`,
-        detail: `${gb(recipe.minVramMiB)} GB · ${fits ? "fits" : "doesn't fit"} · ${tested ? "tested" : "untested"}${recipe.id === options.avoid ? " · failed" : ""}`,
+        detail: `${sizeText(recipe)} · ${fits ? "fits" : "doesn't fit"} · ${tested ? "tested" : "untested"}${recipe.id === options.avoid ? " · failed" : ""}`,
       })),
       initial,
     );
