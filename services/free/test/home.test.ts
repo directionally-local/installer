@@ -4,8 +4,8 @@ import { constants as sqliteConstants, type DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, createService, MODEL, NOW, type Service } from "./harness.js";
 import { adminCookie, csrfOf } from "./admin-web.js";
 import type { SpendView } from "../src/dashboard-page.js";
-import { atCap, HOME_COLUMNS, HOME_QUERY_TAG, realAllowance, type HomeData, type LevelSettings } from "../src/home-data.js";
-import { MAX_PROBLEMS, money, outlook, problems, usersSentence } from "../src/home-page.js";
+import { atCap, HOME_COLUMNS, HOME_QUERY_TAG, realAllowance, type HomeData, type HomePerson, type LevelSettings, type LiveBudgets } from "../src/home-data.js";
+import { MAX_PROBLEMS, money, outlook, personRows, problems, usersSentence } from "../src/home-page.js";
 import { parseSettingsUpdate } from "../src/runtime-config.js";
 import { readFreeConfig } from "../src/config.js";
 
@@ -161,15 +161,14 @@ describe("home: real allowance per level", () => {
     assert.deepEqual(realAllowance(person("full", { grantUsd: 5 }), two), { tier: "full", tokens: 50_000_000, usd: 5, deepseekUsd: 8 });
   });
 
-  it("is at cap at the dollar cap or within 1% of the tokens, never with no tokens", () => {
-    assert.equal(atCap({ costUsd: 3, tokens: 0 }, { tokens: 10_000_000, usd: 3 }), true);
-    assert.equal(atCap({ costUsd: 2.9, tokens: 9_900_000 }, { tokens: 10_000_000, usd: 3 }), true);
-    assert.equal(atCap({ costUsd: 2.9, tokens: 9_800_000 }, { tokens: 10_000_000, usd: 3 }), false);
-    assert.equal(atCap({ costUsd: 0, tokens: 0 }, { tokens: 0, usd: 0 }), false);
-    // Per budget: GPT-6 is the cost less DeepSeek's part; DeepSeek's tokens never count.
-    assert.equal(atCap({ costUsd: 5, deepseekCostUsd: 4, tokens: 60_000_000 }, { tokens: 10_000_000, usd: 2, deepseekUsd: 8 }), false);
-    assert.equal(atCap({ costUsd: 6, deepseekCostUsd: 4, tokens: 0 }, { tokens: 10_000_000, usd: 2, deepseekUsd: 8 }), true);
-    assert.equal(atCap({ costUsd: 8, deepseekCostUsd: 8, tokens: 0 }, { tokens: 10_000_000, usd: 2, deepseekUsd: 8 }), true);
+  it("is at cap only when a live budget counter is at or over its cap, never with a cap of 0 or none", () => {
+    const live = (gpt6: number, gpt6Cap: number | null, deepseek: number, deepseekCap: number | null) => ({ gpt6: { spentUsd: gpt6, usdPerWeek: gpt6Cap }, deepseek: { spentUsd: deepseek, usdPerWeek: deepseekCap } });
+    assert.equal(atCap(live(3, 3, 0, 8)), true);
+    assert.equal(atCap(live(3.2, 3, 0, 8)), true);
+    assert.equal(atCap(live(2.9, 3, 0, 8)), false);
+    assert.equal(atCap(live(0, 2, 8, 8)), true);
+    assert.equal(atCap(live(0, 0, 0, 0)), false);
+    assert.equal(atCap(live(50, null, 50, null)), false);
   });
 });
 
@@ -211,12 +210,23 @@ describe("home: is anything broken?", () => {
     assert.deepEqual(texts(homeFixture({ providers: providers(14, 30) })), ["Luminal fails 14% of requests today, against 3% this week."]);
   });
 
-  it("flags people at their real cap", () => {
-    const people = [
+  it("flags people at their cap by their live budgets, not by spend since Monday", () => {
+    const people: HomePerson[] = [
       { githubId: 7, login: "kenji", level: "basic", batchFlagged: false, grantTokens: null, grantUsd: null, costUsd: 3, tokens: 1_000_000 },
-      { githubId: 8, login: "mara", level: "full", batchFlagged: false, grantTokens: null, grantUsd: null, costUsd: 3, tokens: 1_000_000 },
+      { githubId: 8, login: "mara", level: "full", batchFlagged: false, grantTokens: null, grantUsd: null, costUsd: 30, tokens: 1_000_000 },
     ];
-    assert.deepEqual(texts(homeFixture({ spenders: people })), ["kenji is at their weekly cap."]);
+    const live = new Map<number, LiveBudgets>([
+      [7, { status: "active", gpt6: { spentUsd: 3, usdPerWeek: 3 }, deepseek: { spentUsd: 0, usdPerWeek: 3 } }],
+      // $30 since Monday, but the week was reset: nothing on the live counters.
+      [8, { status: "active", gpt6: { spentUsd: 0, usdPerWeek: 20 }, deepseek: { spentUsd: 0, usdPerWeek: 8 } }],
+    ]);
+    const home = homeFixture({ spenders: people });
+    assert.deepEqual(
+      problems(home, spend, undefined, personRows(people, spend, live)).map((problem) => problem.text),
+      ["kenji is at their weekly cap."],
+    );
+    // Without live counters nobody is at cap.
+    assert.deepEqual(texts(home), []);
   });
 
   it("puts the worst first and the page shows three", () => {
@@ -287,7 +297,23 @@ async function scenario(vars: Record<string, string> = {}): Promise<{ service: S
   await request(101, 3);
   await request(102, 0.2);
   await request(103, 0.01);
+  // The accounts' own counters, as the requests would have charged them.
+  const counters: Array<[number, string, number, number]> = [[100, "fullfay", 12.4, 1.5], [101, "basicbo", 3, 0], [102, "smallsam", 0.2, 0], [103, "flaggedfy", 0.01, 0]];
+  for (const [githubId, login, gpt6, deepseek] of counters) {
+    const account = service.account(githubId);
+    await account.activate({ githubId, login, isAdmin: false, now: NOW - 10 * DAY });
+    await account.setGrant({ tokensPerWeek: undefined, usdPerWeek: undefined, usedThisWeek: undefined, spentUsdThisWeek: gpt6, deepseekSpentUsdThisWeek: deepseek, limits: { weeklyTokens: 50_000_000, weeklyUsd: undefined }, now: NOW });
+  }
   return { service, cookie: await adminCookie(service) };
+}
+
+/** The "Who's using it?" rows: login, then the row's text. */
+function usingRows(html: string): Array<[string, string]> {
+  const list = /<ul class="people">([^]*?)<\/ul>/.exec(html)?.[1] ?? "";
+  return [...list.matchAll(/<li>([^]*?)<\/li>/g)].map((match) => {
+    const text = match[1]!.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    return [text.split(" ")[0]!, text];
+  });
 }
 
 const page = async (service: Service, cookie: string, path = "/admin") => {
@@ -305,10 +331,11 @@ describe("home: the page", () => {
     assert.match(html, /<span class="verdict fine">Fine\.<\/span>/);
     assert.match(html, /4 people used dl today, 4 this week\. No new sign-ups today\./);
     assert.doesNotMatch(html, />owner</);
-    // Spend split by budget: GPT-6 against its cap, then DeepSeek when used.
-    assert.match(html, /fullfay<\/a> <span class="tier">full<\/span><\/span><span class="amt">GPT-6 <b>\$12<\/b> of \$20 · DeepSeek <b>\$1\.50<\/b> of \$8\.00<\/span>/);
-    assert.match(html, /basicbo<\/a> <span class="tier">middle<\/span><\/span><span class="amt"><span class="capword">at cap<\/span> GPT-6 <b>\$3\.00<\/b> of \$3\.00<\/span>/);
-    assert.match(html, /smallsam<\/a> <span class="tier">small<\/span><\/span><span class="amt">GPT-6 <b>\$0\.20<\/b> of \$0\.50<\/span>/);
+    // Two numbers per row: spend since Monday, and the live budgets, GPT-6 then DeepSeek.
+    assert.match(html, /<h3 class="sub">Spent most since Monday<\/h3>/);
+    assert.match(html, /fullfay<\/a> <span class="tier">full<\/span><\/span><span class="amt"><b>\$14<\/b> since Monday<\/span><span class="limit">This week's limit: GPT-6 <b>\$12<\/b> of \$20 · DeepSeek <b>\$1\.50<\/b> of \$8\.00<\/span>/);
+    assert.match(html, /basicbo<\/a> <span class="tier">middle<\/span><\/span><span class="amt"><b>\$3\.00<\/b> since Monday<\/span><span class="limit">This week's limit: <span class="capword">at cap<\/span> GPT-6 <b>\$3\.00<\/b> of \$3\.00 · DeepSeek/);
+    assert.match(html, /smallsam<\/a> <span class="tier">small<\/span><\/span><span class="amt"><b>\$0\.20<\/b> since Monday<\/span><span class="limit">This week's limit: GPT-6 <b>\$0\.20<\/b> of \$0\.50 ·/);
     assert.match(html, /flaggedfy<\/a> <span class="tier">no tokens<\/span>/);
     assert.match(html, /basicbo is at their weekly cap\. <a href="\/admin\?view=full#limits">see details<\/a>/);
     assert.match(html, /<p class="say">Nothing\. No one is waiting for an answer\.<\/p>/);
@@ -320,6 +347,50 @@ describe("home: the page", () => {
     const csp = (await service.request("GET", "/admin", { headers: { cookie } })).headers.get("content-security-policy")!;
     assert.match(csp, /default-src 'none'/);
     assert.doesNotMatch(csp, /unsafe-inline|script-src/);
+  });
+
+  it("after a weekly reset shows nobody at cap, while spend since Monday stays", async () => {
+    const { service, cookie } = await scenario();
+    assert.match(await page(service, cookie), /<span class="capword">at cap<\/span>/);
+    const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    assert.equal((await service.request("POST", "/admin/reset-week", { token: admin, body: {} })).status, 200);
+    const html = await page(service, cookie);
+    assert.doesNotMatch(html, /class="capword"|at cap|at their weekly cap/);
+    assert.doesNotMatch(html, /<rect class="full"/);
+    const rows = usingRows(html);
+    assert.deepEqual(rows.map(([login]) => login), ["fullfay", "basicbo", "smallsam", "flaggedfy"]);
+    assert.match(rows[0]![1], /\$14 since Monday This week's limit: GPT-6 \$0 of \$20 · DeepSeek \$0 of \$8\.00/);
+    assert.match(rows[1]![1], /\$3\.00 since Monday This week's limit: GPT-6 \$0 of \$3\.00/);
+  });
+
+  it("leaves blocked and suspended accounts out", async () => {
+    const { service, cookie } = await scenario();
+    const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    assert.equal((await service.request("POST", "/admin/people/100/block", { token: admin })).status, 200);
+    assert.equal((await service.request("POST", "/admin/people/101/suspend", { token: admin })).status, 200);
+    const html = await page(service, cookie);
+    assert.deepEqual(usingRows(html).map(([login]) => login), ["smallsam", "flaggedfy"]);
+    assert.doesNotMatch(html, /fullfay|basicbo/);
+  });
+
+  it("shows each family's numbers from the account's own budgets, as the admin people API does", async () => {
+    const { service, cookie } = await scenario();
+    const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    // An admin sets the counters: the roll-up still says GPT-6 $12.40 and DeepSeek $1.50 since Monday.
+    await service.request("POST", "/admin/people/100/grant", { token: admin, body: { spentUsdThisWeek: 0.004, deepseekSpentUsdThisWeek: 8 } });
+    const detail = (await (await service.request("GET", "/v1/admin/people/100", { token: admin })).json()) as { allowance: { budgets: Record<"gpt6" | "deepseek", { spentUsd: number; usdPerWeek: number | null }> } };
+    const { gpt6, deepseek } = detail.allowance.budgets;
+    const row = usingRows(await page(service, cookie)).find(([login]) => login === "fullfay")![1];
+    assert.equal(row, `fullfay full $14 since Monday This week's limit: GPT-6 ${money(gpt6.spentUsd)} of ${money(gpt6.usdPerWeek!)} · at cap DeepSeek ${money(deepseek.spentUsd)} of ${money(deepseek.usdPerWeek!)}`);
+    assert.equal(row, "fullfay full $14 since Monday This week's limit: GPT-6 under 1 cent of $20 · at cap DeepSeek $8.00 of $8.00");
+  });
+
+  it("orders people by spend since Monday, not by their live budgets", async () => {
+    const { service, cookie } = await scenario();
+    const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    await service.request("POST", "/admin/people/102/grant", { token: admin, body: { spentUsdThisWeek: 0.5 } });
+    await service.request("POST", "/admin/people/100/grant", { token: admin, body: { spentUsdThisWeek: 0, deepseekSpentUsdThisWeek: 0 } });
+    assert.deepEqual(usingRows(await page(service, cookie)).map(([login]) => login), ["fullfay", "basicbo", "smallsam", "flaggedfy"]);
   });
 
   it("puts what needs me first when anything waits, escaped and cut to two lines, and answers it in place", async () => {

@@ -17,6 +17,7 @@ import { networkOf, rateLimitNetwork } from "./network.js";
 import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, type Sender } from "./feedback.js";
 import { apiError, json } from "./errors.js";
 import { homePage } from "./home-page.js";
+import type { HomePerson, LiveBudgets } from "./home-data.js";
 import { dashboardCsv, dashboardPage, deniedPage, earlyAccessCsv, healthCsv, healthPage, isCsvTable, isHealthCsvTable, signedInPage, signInPage, simpleDashboardPage, STARTER_ROWS, toolsPage, type SpendView, type StarterRow, type ToolsState } from "./dashboard-page.js";
 import { ACCESS_REQUEST_MAX_BYTES, ACCESS_REQUEST_USAGE, ACCESS_REQUESTS_PER_DAY, parseAccessRequest } from "./access-request.js";
 import { cleanBatch, cleanGpuTelemetry, earlyAccessEmail, type GpuCount } from "./events.js";
@@ -3405,6 +3406,26 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
   return dashboardPage({ data, spend: view, login: identity.login, signOut: viaCookie, starters, ...(abuse ? { abuse } : {}), ...(csrf ? { csrf } : {}) });
 }
 
+/**
+ * Each spender's live weekly budgets, as GET /v1/admin/people/:id reads them (same limits, same
+ * account call), at most ADMIN_PEOPLE_CONCURRENCY at once. An account that can't be read, or
+ * doesn't exist, is left out of the map: the page then shows no budget use for it.
+ */
+async function liveBudgets(c: Ctx, config: FreeConfig, now: number, people: readonly HomePerson[]): Promise<Map<number, LiveBudgets>> {
+  const read = await mapLimited(people, ADMIN_PEOPLE_CONCURRENCY, async (person): Promise<[number, LiveBudgets] | undefined> => {
+    try {
+      const level: Level = person.level === "basic" || person.level === "starter" ? person.level : "full";
+      const allowance = await account(c, person.githubId).allowance(now, limitsFor(config, 0, level, person.batchFlagged));
+      if (!allowance.exists) return undefined;
+      const { gpt6, deepseek } = budgetsView(allowance);
+      return [person.githubId, { status: allowance.status, gpt6: { spentUsd: gpt6.spentUsd, usdPerWeek: gpt6.usdPerWeek }, deepseek: { spentUsd: deepseek.spentUsd, usdPerWeek: deepseek.usdPerWeek } }];
+    } catch {
+      return undefined;
+    }
+  });
+  return new Map(read.filter((entry) => entry !== undefined));
+}
+
 /** GET /admin: the home screen, from the small home reads, the spend counters and the pending requests. */
 async function homeResponse(c: Ctx, config: FreeConfig, paused: boolean, now: number, csrf: string | undefined, signOut: boolean, notice?: { error: boolean; text: string }): Promise<Response> {
   const [home, spend, requests] = await Promise.all([
@@ -3412,7 +3433,8 @@ async function homeResponse(c: Ctx, config: FreeConfig, paused: boolean, now: nu
     directory(c).spend(now),
     directory(c).pendingAccessRequests(now),
   ]);
-  return homePage({ home, spend: spendView(c, config, paused, spend), requests, grantUsd: config.grantWeeklyUsdCap ?? 0, signOut, ...(csrf ? { csrf } : {}), ...(notice ? { notice } : {}) });
+  const live = await liveBudgets(c, config, now, home.spenders);
+  return homePage({ home, live, spend: spendView(c, config, paused, spend), requests, grantUsd: config.grantWeeklyUsdCap ?? 0, signOut, ...(csrf ? { csrf } : {}), ...(notice ? { notice } : {}) });
 }
 
 /** The dashboard's spend, caps and settings, from the effective config and the spend counters. */
