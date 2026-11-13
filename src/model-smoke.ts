@@ -75,6 +75,8 @@ export interface SmokeOptions {
   /** For tests: how long a check may wait for its answer once sent (30 s), and for a connection (10 s). */
   answerMs?: number;
   connectMs?: number;
+  /** The engine's name in startup failures ("SGLang stopped while loading the model"); vLLM by default. */
+  engineLabel?: string;
   /** The chat test's answer budget: FIRST_ANSWER_MS right after a fresh vLLM start (default: answerMs). */
   chatAnswerMs?: number;
 }
@@ -188,6 +190,7 @@ export async function smokeTest(deployment: Pick<ModelDeployment, "repo" | "port
   const report = options.onCheck ?? (() => {});
   const record = options.record ?? (() => {});
   const attempts = options.attempts ?? 60;
+  const label = options.engineLabel ?? "vLLM";
   const answerMs = options.answerMs ?? ANSWER_MS;
   const chatAnswerMs = options.chatAnswerMs ?? answerMs;
   const connectMs = options.connectMs ?? CONNECT_MS;
@@ -294,10 +297,10 @@ export async function smokeTest(deployment: Pick<ModelDeployment, "repo" | "port
       probe.done();
       break;
     } catch (error) { lastError = error instanceof SmokeError ? error : undefined; /* not listening yet */ }
-    if (options.running && !(await options.running().catch(() => true))) throw new SmokeError("ready", "vLLM stopped while loading the model", "vLLM stopped", lastError?.curl);
+    if (options.running && !(await options.running().catch(() => true))) throw new SmokeError("ready", `${label} stopped while loading the model`, `${label} stopped`, lastError?.curl);
     if (idle >= attempts || polls >= MAX_POLLS) {
       const minutes = Math.max(1, Math.round(attempts * 5 / 60));
-      throw new SmokeError("ready", `vLLM wasn't ready after ${minutes} minute${minutes === 1 ? "" : "s"} without progress`, "not ready in time", lastError?.curl ?? curlLine("GET", `${base}/models`, undefined, 10));
+      throw new SmokeError("ready", `${label} wasn't ready after ${minutes} minute${minutes === 1 ? "" : "s"} without progress`, "not ready in time", lastError?.curl ?? curlLine("GET", `${base}/models`, undefined, 10));
     }
     await delay(5000);
   }

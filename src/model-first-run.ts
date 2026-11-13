@@ -96,7 +96,7 @@ export function modelUpErrorType(error: unknown): ModelUpErrorType {
   if (error instanceof SmokeError) return error.check === "ready" ? "launch_failed" : "smoke_failed";
   const message = error instanceof Error ? error.message : String(error);
   if (/Smoke test failed/i.test(message)) return "smoke_failed";
-  if (/Could not start vLLM/i.test(message)) return "launch_failed";
+  if (/Could not start (vLLM|SGLang)/i.test(message)) return "launch_failed";
   if (/VRAM|GPU memory|reserves/i.test(message)) return "no_fit";
   if (/Docker is missing|daemon/i.test(message)) return "no_docker";
   if (/nvidia-container-toolkit|nvidia runtime/i.test(message)) return "no_toolkit";
@@ -251,6 +251,6 @@ function failure(error: unknown): Extract<ModelUpResult, { ok: false }> {
   const log = logPathOf(error);
   // What to run next (the container kept for inspection, a curl that reproduces the failure);
   // only those lines, so nothing else a message carries can reach the screen.
-  const details = rest.map((line) => line.trim()).filter((line) => /^(The vLLM container |Stop it with |Remove it with |Reproduce: curl )/.test(line));
+  const details = rest.map((line) => line.trim()).filter((line) => /^(The (vLLM|SGLang) container |Stop it with |Remove it with |Reproduce: curl )/.test(line));
   return { ok: false, errorType, message, ...(log ? { log } : {}), ...(details.length ? { details } : {}) };
 }
