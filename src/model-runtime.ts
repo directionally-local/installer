@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ModelRecipe } from "./model-catalog.js";
-import { parallelFlags, type ParallelPlan } from "./model-parallel.js";
+import { engine } from "./model-engines.js";
+import type { ParallelPlan } from "./model-parallel.js";
 import { parseTopology, type Topology } from "./model-topology.js";
 import type { System } from "./system.js";
 
@@ -70,13 +71,13 @@ export function dockerArgs(model: ModelRecipe, port: number, context: number, sl
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Port must be between 1 and 65535.");
   if (!Number.isInteger(context) || context < 512 || context > maxContext(model)) throw new Error(`Context length must be between 512 and ${maxContext(model)} for ${model.id}.`);
   const { flags, env } = recipeFor(model, extras.computeCap);
-  const index = flags.indexOf("--max-model-len");
+  const server = engine(model.engine);
+  const index = flags.indexOf(server.contextFlag);
   if (index !== -1) flags.splice(index, 2);
   const container = ["--name", `dl-model-${slot}`, "--gpus", "all", "--ipc=host",
-    "-p", `127.0.0.1:${port}:8000`, "-v", "dl-model-hf-cache:/root/.cache/huggingface",
+    "-p", `127.0.0.1:${port}:${server.containerPort}`, "-v", "dl-model-hf-cache:/root/.cache/huggingface",
     ...Object.entries(env).flatMap(([name, value]) => ["-e", `${name}=${value}`])];
-  const serve = [model.image, "--model", model.repo, "--served-model-name", model.repo, ...flags, "--max-model-len", String(context),
-    "--gpu-memory-utilization", String(model.gpuMemoryUtilization), ...parallelFlags(extras.parallel)];
+  const serve = [model.image, ...server.serve(model, flags, context, extras.parallel)];
   const spec = createHash("sha256").update(JSON.stringify([...container, ...serve])).digest("hex").slice(0, 16);
   return ["run", "-d", ...container, "--label", `${SPEC_LABEL}=${spec}`, ...serve];
 }

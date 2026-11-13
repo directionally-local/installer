@@ -5,6 +5,7 @@ import { fittingModels, gpuCounts, recipe, type ModelRecipe } from "./model-cata
 import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Gpu, type Hardware, type LaunchExtras, recipeFor } from "./model-runtime.js";
 import { chooseParallelism } from "./model-parallel.js";
 import { interconnect } from "./model-topology.js";
+import { engine } from "./model-engines.js";
 import { bench as benchModel } from "./model-bench.js";
 import { FIRST_ANSWER_MS, localFetch, modelApiBase, SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
 import { modelStatePath, readModelState, writeModelState, type ModelDeployment } from "./state.js";
@@ -139,8 +140,6 @@ export async function configureProvider(options: Pick<ModelCommandOptions, "syst
 const GB = 1024 ** 3;
 const gbText = (bytes: number) => (bytes / GB).toFixed(1);
 
-/** vLLM's log once the weights are on disk and loading onto the GPU. */
-const LOADING = /Loading safetensors checkpoint shards|Loading weights took|Model loading took|Starting vLLM API server/;
 
 /**
  * The "Download" step's progress while vLLM isn't answering yet: bytes in the model's Hugging
@@ -150,6 +149,7 @@ const LOADING = /Loading safetensors checkpoint shards|Loading weights took|Mode
  */
 function downloadWatch(options: ModelCommandOptions, model: ModelRecipe, container: string) {
   const { system, ui } = options;
+  const server = engine(model.engine);
   let total: number | undefined | null = null;
   let last = 0;
   let phase: "download" | "ready" = "download";
@@ -170,21 +170,21 @@ function downloadWatch(options: ModelCommandOptions, model: ModelRecipe, contain
       const moved = bytes !== undefined && bytes > last;
       if (bytes !== undefined) last = Math.max(last, bytes);
       const logs = await system.probe("docker", ["logs", "--tail", "40", container]).catch(() => undefined);
-      if ((total && last >= total * 0.98) || LOADING.test(`${logs?.stdout ?? ""}${logs?.stderr ?? ""}`)) {
+      if ((total && last >= total * 0.98) || server.loading.test(`${logs?.stdout ?? ""}${logs?.stderr ?? ""}`)) {
         toReady();
         return moved;
       }
-      ui.start("download", last === 0 ? "waiting for vLLM" : total ? `${gbText(last)} of ${gbText(total)} GB · ${Math.min(99, Math.floor(last / total * 100))}%` : `${gbText(last)} GB so far`);
+      ui.start("download", last === 0 ? `waiting for ${server.label}` : total ? `${gbText(last)} of ${gbText(total)} GB · ${Math.min(99, Math.floor(last / total * 100))}%` : `${gbText(last)} GB so far`);
       return moved;
     },
   };
 }
 
 /** The container's recent logs go to the run log, never the screen. */
-async function recordLogs(options: ModelCommandOptions, container: string): Promise<void> {
+async function recordLogs(options: ModelCommandOptions, container: string, label = "vLLM", lines = 200): Promise<void> {
   if (!options.record) return;
-  const tail = await logTail(options.system, container, 200).catch(() => "");
-  options.record(`vLLM logs (${container}, last 200 lines):`);
+  const tail = await logTail(options.system, container, lines).catch(() => "");
+  options.record(`${label} logs (${container}, last ${lines} lines):`);
   for (const line of tail.split("\n")) options.record(`  ${line}`);
 }
 
@@ -208,6 +208,7 @@ async function reusable(options: ModelCommandOptions, model: ModelRecipe, port: 
 async function launch(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, reuse = false, progress: { started: boolean } = { started: false }, extras: LaunchExtras = {}): Promise<ModelDeployment> {
   const { system, ui } = options;
   const container = `dl-model-${slot}`;
+  const server = engine(model.engine);
   const resolved = recipeFor(model, extras.computeCap);
   const deployment: ModelDeployment = { id: model.id, repo: model.repo, container, port, context,
     // The flags and environment as run (per-GPU-family ones included), so rollback restarts exactly this.
@@ -217,9 +218,9 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
     ...(extras.parallel ? { parallel: { gpus: extras.parallel.gpus, tp: extras.parallel.tp, pp: extras.parallel.pp, ep: extras.parallel.ep } } : {}),
     lastTest: { chat: false, tools: false, json: false, tokensPerSecond: 0, at: "" } };
   ui.plan([
-    { id: "launch", label: "Start the vLLM container" },
+    { id: "launch", label: `Start the ${server.label} container` },
     { id: "download", label: `Download ${model.id}` },
-    { id: "ready", label: "Start vLLM" },
+    { id: "ready", label: `Start ${server.label}` },
     { id: "chat", label: "Chat test" },
     { id: "speed", label: "Speed test" },
     { id: "tools", label: "Tool call test" },
@@ -238,14 +239,14 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
   } catch (error) {
     ui.fail("launch", firstLine(error));
     ui.finish();
-    await recordLogs(options, container);
-    throw new Error(`Could not start vLLM: ${firstLine(error)}`);
+    await recordLogs(options, container, server.label);
+    throw new Error(`Could not start ${server.label}: ${firstLine(error)}`);
   }
   if (system.dryRun) { ui.finish(); return deployment; }
   options.record?.(`logs: docker logs -f ${container}`);
   const watch = downloadWatch(options, model, container);
   let current: SmokeCheck | "download" = "download";
-  ui.start("download", "waiting for vLLM");
+  ui.start("download", `waiting for ${server.label}`);
   if (reuse) watch.ready();
   try {
     deployment.lastTest = await (options.smoke ?? smokeTest)(deployment, system, options.fetch, {
@@ -253,6 +254,7 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
       ...(options.delay ? { delay: options.delay } : {}),
       running: () => containerRunning(system, container),
       ...(options.record ? { record: options.record } : {}),
+      ...(server.id !== "vllm" ? { engineLabel: server.label } : {}),
       // A fresh vLLM's first answer can take a minute; a reused one is warm.
       ...(reuse ? {} : { chatAnswerMs: FIRST_ANSWER_MS }),
       onCheck: (check, status, detail) => {
@@ -264,12 +266,14 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
       },
     });
     ui.finish();
+    // The engine's startup goes in the run log too, for comparing a later failure with a good start.
+    await recordLogs(options, container, server.label, 50);
     return deployment;
   } catch (error) {
     const step = error instanceof SmokeError && error.check !== "ready" ? error.check : current === "download" || current === "ready" ? watch.phase() : current;
     ui.fail(step, error instanceof SmokeError ? error.short : firstLine(error));
     ui.finish();
-    await recordLogs(options, container);
+    await recordLogs(options, container, server.label);
     throw error;
   }
 }
@@ -339,7 +343,7 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     if (!(await containerRunning(system, state.active.container))) throw new Error(`Model container ${state.active.container} is stopped; bench needs a running model.`);
     const result = await benchModel(state.active, system, options.fetch);
     for (const level of result.levels) ui.line("info", `${level.concurrency} at once, ${level.requests} reqs`, `TTFT p50 ${level.ttftP50}s p95 ${level.ttftP95}s · ${level.decodeTokPerSec} tok/s`);
-    if (result.prefixCacheHitRate !== undefined) ui.line("info", "Prefix cache", `${result.prefixCacheHitRate}% hits (vLLM logs)`);
+    if (result.prefixCacheHitRate !== undefined) ui.line("info", "Prefix cache", `${result.prefixCacheHitRate}% hits (${engine(state.active.engine).label} logs)`);
     return 0;
   }
   if (action !== "up" && action !== "update" && action !== "rollback") return 2;
@@ -459,7 +463,8 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
       const notes: string[] = [];
       if (keep) {
         const running = await containerRunning(system, candidateContainer);
-        notes.push(running ? `The vLLM container is still running: docker logs ${candidateContainer}` : `The vLLM container stopped: docker logs ${candidateContainer}`,
+        const label = engine(selected.engine).label;
+        notes.push(running ? `The ${label} container is still running: docker logs ${candidateContainer}` : `The ${label} container stopped: docker logs ${candidateContainer}`,
           `${running ? "Stop" : "Remove"} it with docker rm -f ${candidateContainer}${running ? `; dl model ${action} reuses it while it answers` : ""}`);
       } else await removeContainer(system, candidateContainer);
       if (error instanceof SmokeError && error.curl) notes.push(`Reproduce: ${error.curl}`);
