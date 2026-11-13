@@ -37,8 +37,8 @@ test("two named deployments, each pinned to its own GPUs: separate containers, p
   lines.length = 0;
   assert.equal(await run("list", []), 0);
   assert.equal(lines.join(""), [
-    "ok team-a: qwen-new · vLLM · GPUs 0,1 · port 8000 · running\n",
-    "ok team-b: qwen-old · vLLM · GPUs 2,3 · port 8002 · running\n",
+    "ok team-a: qwen-new · vLLM · vllm/vllm-openai:v0.20.0 · GPUs 0,1 · port 8000 · running\n",
+    "ok team-b: qwen-old · vLLM · vllm/vllm-openai:v0.20.0 · GPUs 2,3 · port 8002 · running\n",
   ].join(""));
 });
 

@@ -1,0 +1,46 @@
+Plan for deepseek-v4.1-flash-fp8 (deepseek-ai/DeepSeek-V4.1-Flash-1017) · untested · hardware from HARDWARE
+Nothing was run, downloaded or written.
+
+Engine     vLLM · vllm/vllm-openai:v0.33.0
+Machine    4x NVIDIA RTX PRO 6000 · 384 GB total · driver 580.95.05, CUDA 13.0 · RAM 251.5 GiB (243.2 GiB available)
+GPUs       0  NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition · 95.6 GiB (95.0 GiB free) · sm 12.0 · GPU-6b2d1f3e-0000-4000-8000-000000006000 · used
+           1  NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition · 95.6 GiB (95.0 GiB free) · sm 12.0 · GPU-6b2d1f3e-0000-4000-8000-000000006001 · used
+           2  NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition · 95.6 GiB (95.0 GiB free) · sm 12.0 · GPU-6b2d1f3e-0000-4000-8000-000000006002 · used
+           3  NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition · 95.6 GiB (95.0 GiB free) · sm 12.0 · GPU-6b2d1f3e-0000-4000-8000-000000006003 · used
+Links      PCIe only (NODE), no NVLink
+Layout     tensor parallel over 4 GPUs (PCIe only (NODE), no NVLink): vLLM's DeepSeek-V4.1-Flash recipe runs tensor parallel (TP 4 by default) and documents no other single-node layout; vLLM falls back from its custom all-reduce to NCCL on more than two PCIe-only GPUs · TP 4 × PP 1
+Settings   sm 12.0: Blackwell (the recipe's Blackwell settings)
+Container  dl-model-1 · sees every GPU · 127.0.0.1:8000 → 8000
+
+Memory per GPU
+  budget   87.9 GiB = 92% of 95.6 GiB (what vLLM reserves)
+  weights  71.5 GiB = (475.3 GiB − 189.1 GiB in host RAM) / 4 GPUs
+  KV       0.1 GiB = 890 B/token × 131072 tokens, one sequence at full context (DeepSeek's 890 bytes per token (FP4 KV; no fp8 figure is documented, so a floor), whole on every GPU (one KV head))
+  buffer   2.0 GiB = 2 B × 8192 batched tokens × 131072 (the indexer's [batched tokens × context] logits buffer, 2 B each (vLLM recipe))
+  left     14.3 GiB for more sequences' KV, activations and CUDA graphs
+
+Host
+  RAM      221.1 GiB container limit (--memory) = 189.1 GiB in host RAM + 4 × 8.0 GiB per GPU worker; 243.2 GiB available
+           Engram tables (layers 1 and 14), the two Engram-only shards; vLLM keeps one TP-sharded host copy per replica ("one host copy per replica", vLLM Engram docs)
+  disk     475.3 GiB of weights (Hugging Face API, *.safetensors of deepseek-ai/DeepSeek-V4.1-Flash-1017 (48 shards), 2026-11-13); 3539.0 GiB free on /var/lib/docker
+  driver   CUDA 13.0; the image needs 13.0
+
+Caveats
+  - No official recipe covers RTX PRO Blackwell (sm120) GPUs: the vLLM recipe lists H100, H200, B200, GB200, B300, GB300 and AMD. vLLM's SM120 fix for this model (#60762, 64-token kernel blocks, merged 2026-11-05) is in no final release yet (v0.34.0rc2 only), and issue #59203 reports indexer_kv_dtype mxfp4 rejected on SM120 on the release tag. Expect to need a newer image.
+  - The recipe's vram_minimum_gb is 614 with the Engram tables on the GPU; with them in host RAM the resident weights are ~286 GiB. Measure before relying on long contexts: the recipe says "measure before assuming a given context/batch fits".
+
+Result    fits: GPU memory, host RAM, disk and driver
+
+Command
+docker run -d --name dl-model-1 --gpus all \
+    --ipc=host --memory 222g --memory-swap 222g \
+    -p 127.0.0.1:8000:8000 -v dl-model-hf-cache:/root/.cache/huggingface \
+    -e VLLM_ENGINE_READY_TIMEOUT_S=3600 --label dl.model.spec=49e53945103df266 vllm/vllm-openai:v0.33.0 \
+    --model deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+    --served-model-name deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+    --tokenizer-mode deepseek_v41 --tool-call-parser deepseek_v41 \
+    --enable-auto-tool-choice --reasoning-parser deepseek_v41 \
+    --language-model-only --engram-config '{"cpu_offload":true}' \
+    --attention-config '{"backend":"FLASHINFER_MLA_SPARSE_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}' \
+    --kv-cache-dtype fp8 --max-num-seqs 128 --max-model-len 131072 \
+    --gpu-memory-utilization 0.92 --tensor-parallel-size 4

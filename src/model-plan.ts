@@ -1,8 +1,9 @@
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { recipe } from "./model-catalog.js";
-import { caveatsFor, defaultPortFor, deploymentName, devicesFor, needsText, parseGpuList, takenPorts } from "./model-command.js";
+import { caveatsFor, defaultPortFor, deploymentName, devicesFor, imageText, needsText, parseGpuList, takenPorts } from "./model-command.js";
 import { engine } from "./model-engines.js";
+import { chooseImage, unofficialWarning, withImage } from "./model-image.js";
 import { TESTED_MODELS } from "./model-first-run.js";
 import { gib, hostResources, memoryLimitBytes, preflight, RAM_PER_GPU_BYTES } from "./model-preflight.js";
 import { detectHardware, dockerArgs, gpuLine, maxContext, modelDownloadBytes, recipeFor } from "./model-runtime.js";
@@ -87,6 +88,8 @@ export interface PlanOptions {
   gpus?: string | undefined;
   port?: string | undefined;
   context?: string | undefined;
+  /** --image: the container image instead of the catalog's (never pulled or inspected by a plan). */
+  image?: string | undefined;
   /** Plan for another machine from its command output (no probes here, no network). */
   hardware?: string | undefined;
   statePath?: string | undefined;
@@ -107,7 +110,10 @@ export async function planCommand(options: PlanOptions): Promise<number> {
   const { out } = options;
   const print = (label: string, text: string) => out(`${pad(label)} ${text}\n`);
   if (!options.model) throw new Error("Name a model to plan: dl model up MODEL --plan");
-  const model = recipe(options.model);
+  const catalog = recipe(options.model);
+  const choice = chooseImage(catalog, options.image);
+  const model = withImage(catalog, choice);
+  const override = choice.catalogImage !== undefined;
   const elsewhere = options.hardware !== undefined;
   const system = elsewhere ? hardwareDir(options.hardware!) : readOnly(options.system);
   const hardware = await detectHardware(system);
@@ -142,7 +148,9 @@ export async function planCommand(options: PlanOptions): Promise<number> {
 
   out(`Plan for ${model.id} (${model.repo}) · ${TESTED_MODELS.has(model.id) ? "tested" : "untested"}${elsewhere ? ` · hardware from ${options.hardware}` : ""}\n`);
   out("Nothing was run, downloaded or written.\n\n");
-  print("Engine", `${server.label} · ${model.image}`);
+  print("Engine", `${server.label} · ${imageText(choice)}`);
+  const unofficial = override ? unofficialWarning(server.id, server.label, model.image) : undefined;
+  if (unofficial) print("Warning", unofficial);
   print("Machine", `${gpuLine(hardware.gpus)} · driver ${[...new Set(hardware.gpus.map((gpu) => gpu.driver))].join(", ")}, CUDA ${hardware.cuda}`
     + `${host.ramTotalBytes ? ` · RAM ${gib(host.ramTotalBytes)}${host.ramAvailableBytes ? ` (${gib(host.ramAvailableBytes)} available)` : ""}` : ""}`);
   for (const gpu of hardware.gpus) {
@@ -175,7 +183,8 @@ export async function planCommand(options: PlanOptions): Promise<number> {
       print("", model.memory!.offloadSource ?? "");
     } else print("  RAM", "nothing offloaded to host RAM");
     print("  disk", `${gib(result.weightsBytes)} of weights (${result.weightsSource}); ${host.diskAvailableBytes !== undefined ? `${gib(host.diskAvailableBytes)} free on ${host.diskPath}` : "free disk unknown"}`);
-    print("  driver", `CUDA ${hardware.cuda}${model.minCuda ? `; the image needs ${model.minCuda}` : ""}`);
+    print("  driver", `CUDA ${hardware.cuda}${model.minCuda ? `; the image needs ${model.minCuda}`
+      : override && catalog.minCuda ? `; --image's CUDA requirement is unknown, so not checked (the catalog image needs ${catalog.minCuda})` : ""}`);
   } else {
     out("\nMemory\n");
     print("  needs", `${needsText(model)} (catalog); ${server.label} reserves ${Math.round(model.gpuMemoryUtilization * 100)}% of the GPU = ${gib(model.gpuMemoryUtilization * Math.max(...gpusUsed.map((gpu) => gpu.totalMiB)) * MiB)}`);
@@ -183,11 +192,12 @@ export async function planCommand(options: PlanOptions): Promise<number> {
 
   const caveats = caveatsFor(model, gpusUsed);
   if (model.blocked || caveats.length || result?.warnings.length) out("\nCaveats\n");
-  if (model.blocked) out(`  - can't be started yet: ${model.blocked}\n`);
+  if (model.blocked) out(`  - can't be started yet: ${model.blocked}${override ? " (--image doesn't lift this: dl starts no blocked entry)" : ""}\n`);
   for (const warning of result?.warnings ?? []) out(`  - ${warning}\n`);
   for (const caveat of caveats) out(`  - ${caveat}\n`);
 
-  out(`\nResult    ${fits ? `${model.blocked ? "fits on paper, but blocked (see above)" : "fits"}${result ? ": GPU memory, host RAM, disk and driver" : ""}` : "doesn't fit"}\n`);
+  const checked = override && catalog.minCuda ? ": GPU memory, host RAM and disk (driver not checked for --image)" : ": GPU memory, host RAM, disk and driver";
+  out(`\nResult    ${fits ? `${model.blocked ? "fits on paper, but blocked (see above)" : "fits"}${result ? checked : ""}` : "doesn't fit"}\n`);
   for (const problem of result?.problems ?? []) out(`  - ${problem}\n`);
   if (result?.suggestions.length) out(`  nearest that fits: ${result.suggestions.join("; ")}\n`);
 
