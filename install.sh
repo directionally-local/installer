@@ -599,6 +599,7 @@ laptop_main() {
   # not with someone else's home: a sudo that kept HOME would leave root's files in it.
   if [ "$(id -u)" -eq 0 ]; then
     [ "$os" = linux ] || fail "on a laptop, run it as yourself, without sudo: it installs into your home directory"
+    # shellcheck disable=SC3067 # test -O works in dash, bash and busybox sh, the shells this runs under
     if [ -z "${DL_HOME_SET:-}" ] && [ -d "${HOME:-/}" ] && [ ! -O "${HOME:-/}" ]; then
       fail "$HOME isn't root's home; run it as yourself, without sudo (or as root: sudo -H sh)"
     fi

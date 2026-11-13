@@ -9,7 +9,9 @@ import { gib, hostResources, memoryLimitBytes, preflight, RAM_PER_GPU_BYTES } fr
 import { detectHardware, dockerArgs, gpuLine, maxContext, modelDownloadBytes, recipeFor } from "./model-runtime.js";
 import { interconnect } from "./model-topology.js";
 import type { FetchModel } from "./model-smoke.js";
-import { DEFAULT_DEPLOYMENT, readDeployments } from "./state.js";
+import { DEFAULT_DEPLOYMENT, readDeployments, readState } from "./state.js";
+import { CELL_AUTOPILOT, checkWorkspacePath, MIN_HOTCELL_FOR_SANDBOX, plannedImage, SANDBOX_LIMITS, sandboxCommands, sandboxConfigPath, sandboxEgressNetwork, sandboxNetwork, sandboxProvider, cellContainer } from "./model-sandbox.js";
+import { pinnedAutopilotVersion } from "./versions.js";
 import type { RunOptions, RunResult, System, WriteOptions } from "./system.js";
 
 const MiB = 1024 ** 2;
@@ -94,6 +96,9 @@ export interface PlanOptions {
   hardware?: string | undefined;
   statePath?: string | undefined;
   fetch?: FetchModel | undefined;
+  /** --workspace DIR (and --allow-internet): plan the agent's sandbox too. */
+  workspace?: string | undefined;
+  allowInternet?: boolean | undefined;
   out: (text: string) => void;
 }
 
@@ -110,6 +115,8 @@ export async function planCommand(options: PlanOptions): Promise<number> {
   const { out } = options;
   const print = (label: string, text: string) => out(`${pad(label)} ${text}\n`);
   if (!options.model) throw new Error("Name a model to plan: dl model up MODEL --plan");
+  if (options.allowInternet && options.workspace === undefined) throw new Error("--allow-internet is for the sandbox: add --workspace DIR");
+  const workspace = options.workspace !== undefined ? checkWorkspacePath(options.workspace) : undefined;
   const catalog = recipe(options.model);
   const choice = chooseImage(catalog, options.image);
   const model = withImage(catalog, choice);
@@ -202,5 +209,41 @@ export async function planCommand(options: PlanOptions): Promise<number> {
   if (result?.suggestions.length) out(`  nearest that fits: ${result.suggestions.join("; ")}\n`);
 
   out(`\nCommand${model.blocked ? " (once unblocked)" : ""}\n${shellCommand(args)}\n`);
+  if (workspace) {
+    const install = elsewhere ? undefined : await readState(system).catch(() => undefined);
+    const internet = options.allowInternet === true;
+    const container = args[args.indexOf("--name") + 1]!;
+    const spec = { name, workspace, internet, image: install?.image ?? plannedImage(pinnedAutopilotVersion()) };
+    const commands = sandboxCommands(spec, container);
+    const provider = sandboxProvider({ repo: model.repo, engine: model.engine });
+    const net = sandboxNetwork(name);
+    const command = (verb: string) => `dl model ${verb}${named ? ` --name ${name}` : ""}`;
+    out("\nSandbox (started after the model's tests pass)\n");
+    print("Agent", `Autopilot in a Hotcell cell (container driver) · image ${spec.image}`);
+    print("Workspace", `${workspace} → /workspace, read-write: the only host directory it sees (symlinks resolved at up)`);
+    print("Mounts", "no home directory, no other host path, no Docker socket; Hotcell adds only its agent binary (read-only) and socket");
+    print("GPUs", "none (no --gpus, no /dev/nvidia*)");
+    print("Network", `${net}: Docker --internal, no host address on it (no route off the box, no host services); shared with ${container} as "model"`);
+    print("Egress", internet
+      ? `the model, and the internet through ${sandboxEgressNetwork(name)} (--allow-internet: a bridge with only this cell; like any container there, it reaches host ports bound to all addresses)`
+      : "only the model: no internet, no host services, no Hotcell key gateway; --allow-internet adds the internet");
+    print("Model API", `${provider.baseUrl} · no key · never published beyond 127.0.0.1:${port} on the host`);
+    const sandboxBytes = SANDBOX_LIMITS.memoryMb * MiB;
+    print("Limits", `${SANDBOX_LIMITS.memoryMb / 1024} GiB memory, ${SANDBOX_LIMITS.cpus} CPUs, ${SANDBOX_LIMITS.pids} processes`
+      + (result?.ramNeedBytes && host.ramAvailableBytes !== undefined ? ` · with the model's ${gib(result.ramNeedBytes)}: ${gib(result.ramNeedBytes + sandboxBytes)} of ${gib(host.ramAvailableBytes)} available` : ""));
+    print("Isolation", `the model container mounts only dl-model-hf-cache, never ${workspace}; checked after start (docker inspect, and from inside the cell)`);
+    print("Hotcell", `HOTCELL_WORKSPACE_ROOTS gains ${workspace} (restarts hotcell.service); needs dl's server install (sudo dl up), Hotcell ${MIN_HOTCELL_FOR_SANDBOX}+, root`);
+    print("Autopilot", `${sandboxConfigPath(workspace)} (the cell's XDG_CONFIG_HOME, git-ignored):`);
+    out(`${JSON.stringify(provider.config, null, 2).split("\n").map((line) => `  ${line}`).join("\n")}\n`);
+    out("\nSandbox commands\n");
+    for (const network of commands.networks) out(`${shellCommand(network)}\n`);
+    out(`${shellCommand(commands.connect)}\n`);
+    out(`${shellCommand(commands.create).replace(/^docker /, "hotcell ")}\n`);
+    out("\nThen\n");
+    const then = (left: string, text: string) => out(`  ${left.padEnd(named ? 36 : 22)} ${text}\n`);
+    then(command("attach"), `Autopilot in the sandbox (docker exec -it -w /workspace ${cellContainer("ID")} ${CELL_AUTOPILOT})`);
+    then(`${command("update")} MODEL`, "tests the new model; when it passes, the sandbox follows (same URL, config rewritten)");
+    then(command("down"), `removes the model, the sandbox and its networks; keeps ${workspace}`);
+  }
   return fits && !model.blocked ? 0 : 1;
 }

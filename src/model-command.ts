@@ -14,6 +14,7 @@ import { DEFAULT_DEPLOYMENT, modelStatePath, readDeployments, writeDeployment, t
 import type { System } from "./system.js";
 import type { Ui } from "./ui.js";
 import type { Prompter } from "./prompt.js";
+import { attachArgs, attachSandbox, removeSandbox, repointSandbox, sandboxPreflight } from "./model-sandbox.js";
 
 export interface ModelCommandOptions {
   system: System;
@@ -44,6 +45,12 @@ export interface ModelCommandOptions {
   image?: string;
   /** Writes a line to the run log only, never to the screen (set by modelCommand). */
   record?: (line: string) => void;
+  /** --workspace DIR: also run Autopilot in a Hotcell sandbox that sees only DIR (up only). */
+  workspace?: string;
+  /** --allow-internet: the sandbox may reach the internet too (default: only the model). */
+  allowInternet?: boolean;
+  /** Extra arguments for Autopilot (dl model attach -- …). */
+  attachArgs?: string[];
 }
 
 /** The run log a failed `dl model` command wrote, when it wrote one. */
@@ -372,7 +379,10 @@ async function listDeployments(options: ModelCommandOptions, deployments: Record
     const active = deployments[name]!.active;
     const running = await containerRunning(options.system, active.container);
     const gpus = active.devices ? active.devices.join(",") : active.parallel ? active.parallel.gpus.join(",") : "all";
-    options.ui.line(running ? "done" : "failed", name, `${active.id} · ${engine(active.engine).label} · ${imageText(active)} · GPUs ${gpus} · port ${active.port} · ${running ? "running" : "stopped"}`);
+    const sandbox = deployments[name]!.sandbox;
+    const cell = sandbox ? await containerRunning(options.system, sandbox.container) : false;
+    options.ui.line(running && (!sandbox || cell) ? "done" : "failed", name, `${active.id} · ${engine(active.engine).label} · ${imageText(active)} · GPUs ${gpus} · port ${active.port} · ${running ? "running" : "stopped"}`
+      + (sandbox ? ` · sandbox ${sandbox.workspace} (${sandbox.internet ? "internet" : "no internet"}, ${cell ? "running" : "stopped"})` : ""));
   }
   return 0;
 }
@@ -416,7 +426,7 @@ export function imageText(deployment: Pick<ModelDeployment, "image" | "catalogIm
 /** The existing `dl model [ID]` picker lives in laptop/settings.ts; only subcommands come here. */
 async function modelCommandInner(action: string, args: string[], options: ModelCommandOptions): Promise<number> {
   const { system, ui } = options;
-  if ((action === "up" || action === "update") && args.length > 1 || (action === "status" || action === "rollback" || action === "bench" || action === "list") && args.length > 0) {
+  if ((action === "up" || action === "update") && args.length > 1 || (action === "status" || action === "rollback" || action === "bench" || action === "list" || action === "down") && args.length > 0) {
     ui.line("failed", "Usage", `dl model ${action}${action === "up" || action === "update" ? " [model] [--dry-run]" : ""}`);
     return 2;
   }
@@ -430,6 +440,8 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   const deployments = await readDeployments(system, statePath);
   if (action === "list") return listDeployments(options, deployments);
   const state = deployments[name];
+  if ((options.workspace !== undefined || options.allowInternet) && action !== "up") throw new Error(`--workspace${options.allowInternet ? " and --allow-internet go" : " goes"} with dl model up; the sandbox then follows the deployment through update and rollback.`);
+  if (options.allowInternet && options.workspace === undefined) throw new Error("--allow-internet is for the sandbox: dl model up MODEL --workspace DIR --allow-internet");
   /** "dl model rollback --name b": commands name a named deployment. */
   const command = (verb: string) => `dl model ${verb}${named ? ` --name ${name}` : ""}`;
   const others = Object.entries(deployments).filter(([other]) => other !== name);
@@ -454,10 +466,31 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     ui.line("info", "Last test", `chat ${mark(last.chat)} · tools ${mark(last.tools)} · JSON ${mark(last.json)} · ${last.tokensPerSecond} tok/s`);
     if (last.at) ui.line("info", "Tested", last.at.replace("T", " ").slice(0, 16));
     if (state.previous) ui.line("info", "Previous", `${state.previous.id} · ${command("rollback")}`);
+    if (state.sandbox) {
+      const cell = await containerRunning(system, state.sandbox.container);
+      ui.line(cell ? "done" : "failed", "Sandbox", `${state.sandbox.workspace} · ${state.sandbox.internet ? "internet allowed" : "no internet"} · ${cell ? "running" : "stopped"} · ${command("attach")}`);
+    }
     if (!named && others.length) ui.line("info", "Others", `${others.map(([other]) => other).join(", ")} · dl model list`);
     return running ? 0 : 1;
   }
   const noModel = () => new Error(named ? `No deployment named ${name}. Run dl model up [model] --name ${name} first, or see dl model list.` : "No model is installed. Run dl model up first.");
+  if (action === "attach") {
+    if (!state) throw noModel();
+    if (!state.sandbox) throw new Error(`${named ? `Deployment ${name}` : "This model"} has no sandbox; start one with dl model up ${state.active.id} --workspace DIR${named ? ` --name ${name}` : ""}.`);
+    if (!(await containerRunning(system, state.sandbox.container))) throw new Error(`The sandbox ${state.sandbox.container} is stopped; hotcell start ${state.sandbox.id} starts it again.`);
+    const result = await system.run("docker", attachArgs(state.sandbox, options.attachArgs), { inherit: true, allowFailure: true });
+    return result.code;
+  }
+  if (action === "down") {
+    if (!state) throw noModel();
+    const containers = [...new Set([state.active.container, ...(state.previous ? [state.previous.container] : []), containerName(name, 1), containerName(name, 2)])];
+    if (state.sandbox) await system.run("docker", ["rm", "-f", state.sandbox.container], { allowFailure: true });
+    for (const container of containers) await removeContainer(system, container);
+    if (state.sandbox) await removeSandbox(system, state.sandbox, options.delay);
+    if (!system.dryRun) await writeDeployment(system, name, undefined, statePath);
+    ui.line("done", "Stopped", `${state.active.id}${state.sandbox ? ` and its sandbox (${state.sandbox.workspace} is untouched)` : ""}`);
+    return 0;
+  }
   if (action === "bench") {
     if (!state) throw noModel();
     if (!(await containerRunning(system, state.active.container))) throw new Error(`Model container ${state.active.container} is stopped; bench needs a running model.`);
@@ -467,6 +500,21 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     return 0;
   }
   if (action !== "up" && action !== "update" && action !== "rollback") return 2;
+  // The sandbox's needs (dl's server install, a new enough Hotcell, root, the workspace) are
+  // checked before any model work, so a missing piece costs no download.
+  const sandboxHost = options.workspace !== undefined ? await sandboxPreflight(system, options.workspace) : undefined;
+  const attach = (deployment: ModelDeployment) => attachSandbox({ system, host: sandboxHost!, name, internet: options.allowInternet === true,
+    ...(options.delay ? { sleep: options.delay } : {}), step: (label, detail) => ui.line("done", label, detail) }, deployment);
+  if (action === "up" && state && sandboxHost) {
+    // A serving deployment without a sandbox gets one (also how a failed sandbox step is retried).
+    if (state.sandbox) throw new Error(`${named ? `Deployment ${name}` : "This model"} already has a sandbox on ${state.sandbox.workspace}; ${command("down")} removes both.`);
+    if (args[0] && recipe(args[0]).id !== state.active.id) throw new Error(`${named ? `Deployment ${name}` : "This machine"} serves ${state.active.id}; ${command("update")} ${args[0]} switches models, then dl model up --workspace adds the sandbox.`);
+    if (!(await containerRunning(system, state.active.container))) throw new Error(`The model container ${state.active.container} is stopped; restart it with docker start ${state.active.container}.`);
+    const sandbox = await attach(state.active);
+    if (!system.dryRun) await writeDeployment(system, name, { ...state, sandbox }, statePath);
+    sandboxReady(ui, command, sandbox);
+    return 0;
+  }
   if (action === "up" && state) {
     const running = await containerRunning(system, state.active.container);
     throw new Error(running
@@ -594,6 +642,7 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   const previousConfig = await system.readFile(configPath);
   const previousState = await system.readFile(statePath);
   const progress = { started: false };
+  let served: ModelDeployment | undefined;
   try {
     const candidate = await launch(options, selected, port, context, slot, reuse, progress, extras, choice.catalogImage);
     if (system.dryRun) {
@@ -623,11 +672,20 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
       }
     } else if (old) ui.line("info", "Speed", `new ${candidate.lastTest.tokensPerSecond} tok/s (old was stopped)`);
     await configureProvider(options, candidate, configPath);
-    await writeDeployment(system, name, { active: candidate, ...(old ? { previous: old } : {}) }, statePath);
+    await writeDeployment(system, name, { active: candidate, ...(old ? { previous: old } : {}), ...(state?.sandbox ? { sandbox: state.sandbox } : {}) }, statePath);
+    // The sandbox follows the switch before the old model stops: the alias moves, its config names the new model.
+    if (state?.sandbox) {
+      try {
+        await repointSandbox(system, state.sandbox, candidate, old);
+        ui.line("info", "Sandbox", `now on ${candidate.id}`);
+      } catch (error) {
+        ui.warn(fitWarning("Sandbox not moved to the new model: ", firstLine(error)));
+      }
+    }
     if (old) await system.run("docker", ["stop", old.container]);
     ui.line("done", "Model serving", candidate.repo);
     ui.line("info", "API", modelApiBase(candidate));
-    return 0;
+    served = candidate;
   } catch (error) {
     if (!system.dryRun) {
       // A container that started is kept so it can be inspected (and reused by a retry), unless
@@ -653,4 +711,26 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     }
     throw error;
   }
+  // The model is serving and saved; the sandbox comes after, so its failure never takes the model down.
+  if (!served || !sandboxHost) return 0;
+  let sandbox;
+  try {
+    sandbox = await attach(served);
+  } catch (error) {
+    throw new Error(`${firstLine(error)}\nThe model is serving (${modelApiBase(served)}); dl model up --workspace ${sandboxHost.workspace}${options.allowInternet ? " --allow-internet" : ""}${named ? ` --name ${name}` : ""} retries the sandbox.`);
+  }
+  if (!system.dryRun) {
+    const saved = (await readDeployments(system, statePath))[name];
+    if (saved) await writeDeployment(system, name, { ...saved, sandbox }, statePath);
+  }
+  sandboxReady(ui, command, sandbox);
+  return 0;
+}
+
+/** How to use the sandbox, after it's up. */
+function sandboxReady(ui: Ui, command: (verb: string) => string, sandbox: { workspace: string; internet: boolean }): void {
+  ui.line("info", "Open the agent", command("attach"));
+  ui.line("info", "Workspace", `${sandbox.workspace} (the only host directory it sees) · ${sandbox.internet ? "internet allowed" : "reaches only the model"}`);
+  ui.line("info", "Update", `${command("update")} [model] · the sandbox follows; ${command("rollback")} too`);
+  ui.line("info", "Stop", `${command("down")} · removes the model and the sandbox, keeps ${sandbox.workspace}`);
 }
