@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.0](https://github.com/directionally-local/installer/compare/v0.32.0...v0.33.0) (2026-11-13)
+
+
+### Features
+
+* dl model up --workspace runs Autopilot in a Hotcell sandbox beside the model ([#245](https://github.com/directionally-local/installer/issues/245)) ([92c0e2f](https://github.com/directionally-local/installer/commit/92c0e2f985bb2cffc2de3060fb92e0094cc7317c))
+
 ## [0.32.0](https://github.com/directionally-local/installer/compare/v0.31.0...v0.32.0) (2026-11-13)
 
 
