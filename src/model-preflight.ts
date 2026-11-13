@@ -188,7 +188,7 @@ export function preflight(input: PreflightInput, siblings = true): Preflight | u
   if (!overfull.length) for (const gpu of gpus.filter((item) => item.leftBytes < TIGHT_BYTES)) warnings.push(`GPU ${gpu.index} keeps only ${gib(gpu.leftBytes)} for more sequences, activations and CUDA graphs`);
 
   // Host RAM for the offloaded weights.
-  const ramNeedBytes = input.ramNeedBytes;
+  const ramNeedBytes = input.ramNeedBytes ?? memoryLimitBytes(model, count);
   if (ramNeedBytes && host.ramAvailableBytes !== undefined && ramNeedBytes > host.ramAvailableBytes) {
     problems.push(`system RAM: needs ${gib(ramNeedBytes)} (${gib(offloadBytes)} offloaded + ${gib(ramNeedBytes - offloadBytes)} for ${count} GPU workers), has ${gib(host.ramAvailableBytes)} available of ${gib(host.ramTotalBytes ?? host.ramAvailableBytes)}`);
   }

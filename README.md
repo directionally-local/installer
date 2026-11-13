@@ -119,7 +119,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl use [NAME]` | Where tasks and bare `dl` go without `--server`. With no name, shows it. |
 | `dl provider` | The provider and GitHub token on each place. `dl provider set` picks another provider, key and model in Autopilot's list; `dl provider github` replaces the GitHub token. `--server NAME` picks the place. `dl keys` is the same command. |
 | `dl model [ID]` | The model for tasks and sessions on a place. With no ID, Autopilot's own model picker. For a model served on this machine's GPU, see `dl model up` below. |
-| `dl model up` / `update` / `rollback` / `status` / `bench` | Serve a curated open model on one of this machine's Nvidia GPUs with vLLM, test it, and point Autopilot at it. See [On your own GPUs](#on-your-own-gpus). |
+| `dl model up` / `update` / `rollback` / `status` / `bench` / `list` | Serve a curated open model on this machine's Nvidia GPUs with vLLM or SGLang, test it, and point Autopilot at it. See [On your own GPUs](#on-your-own-gpus). |
 | `dl update` | Update `dl` itself when npm has a newer one (the install script or npm, however it was installed; `--check` only reports), make sure the Autopilot it pins is installed, then update the default place as `dl update NAME` does. |
 | `dl update NAME` | Update a place's Autopilot, Hotcell and sandbox image to the versions `dl` pins. A server over SSH (its `dl` first), this computer in place. `--wait` waits for running tasks instead of asking; with no terminal it waits anyway. |
 | `dl local status` | Agents running on this computer: running?, where, how many fit. |
@@ -132,7 +132,7 @@ Run options: `--server NAME`, `-m/--model MODEL`, `--repo OWNER/NAME`, `--detach
 
 `dl model` runs an open model on an Nvidia GPU you own and keeps it updated safely. `dl model up` checks the GPU, Docker and the Nvidia container toolkit, lets you pick a model that fits, starts it with vLLM in Docker, tests that it answers correctly, and points Autopilot at it. `dl model update` tests a new model next to the old one and switches only if it passes; `dl model rollback` undoes it. Your code, prompts and weights stay on your hardware.
 
-It needs an Nvidia driver, Docker, and the Nvidia container toolkit; `dl model up` checks all three and says what's missing. The model runs on one GPU, so what fits is decided per GPU, not by adding several cards together.
+It needs an Nvidia driver, Docker, and the Nvidia container toolkit; `dl model up` checks all three and says what's missing. Most catalog models run on one GPU, so what fits them is decided per GPU; the multi-GPU entries count every GPU (or the `--gpus` ones) and say how they'll be split.
 
 | Command | What it does |
 | --- | --- |
@@ -142,10 +142,11 @@ It needs an Nvidia driver, Docker, and the Nvidia container toolkit; `dl model u
 | `dl model status` | The running model, its address, the GPU and its free memory, and the last test results. |
 | `dl model bench` | Time to first token (p50 and p95) and decode speed with 1, 8 and 32 requests at once, plus the prefix cache hit rate from vLLM's logs. |
 | `dl model list` | Every deployment on this machine: name, model, engine, GPUs, port, status. |
+| `dl model up MODEL --plan [--hardware DIR]` | Print the exact `docker run` command, the GPUs it would use, the parallel layout and the memory math (weights per GPU, KV cache, buffers, host RAM for offloaded weights, disk), and whether it fits, without running, downloading or writing anything. It reads `nvidia-smi`, `/proc/meminfo`, `df` and the weights' size from the Hugging Face API (never Docker). `--hardware DIR` plans for another machine from its command output (the format of `src/test-support/fixtures/gpu`), with no probes and the catalog's recorded weight size. Exits 1 when it doesn't fit. |
 
 Options: `--name NAME` makes or picks a separate deployment (update, rollback, status and bench then target it); `--gpus 0,1` pins it to those GPUs; `--port PORT` and `--context TOKENS` answer the questions up and update ask.
 
-`--dry-run` prints every Docker command without running it. The catalog lives in `src/model-catalog.ts`: each entry pins the Hugging Face repo, minimum GPU memory, the vLLM image tag, and flags (tool-call parser, reasoning parser, max model length, quantization). Today it has two Qwen 3 4B versions (an older and a newer one, handy for trying `update`), both tested end to end on a real GPU, and GLM-4.7-Flash for a 48 GB card, not yet tested.
+Before anything downloads, `up` and `update` check that a model with known sizes fits (VRAM per GPU, host RAM, disk, driver) and say exactly what's short and the nearest option that fits. `--dry-run` prints every Docker command without running it. The catalog lives in `src/model-catalog.ts`: each entry pins the Hugging Face repo, minimum GPU memory, the engine's image tag, and flags (tool-call parser, reasoning parser, max model length, quantization). Today it has two Qwen 3 4B versions (an older and a newer one, handy for trying `update`), both tested end to end on a real GPU, and GLM-4.7-Flash for a 48 GB card, not yet tested. For several GPUs it has DeepSeek V4.1 Flash (1017) in FP8 (vLLM, Engram tables in host RAM) and FP4 (SGLang; planned only until an engine release loads it), and GLM-5.3-Flash; these are untested on real hardware, and each flag cites its source in the catalog.
 
 ```sh
 dl model up                 # pick from what fits; defaults to port 8000
@@ -180,7 +181,7 @@ All deployments share one Hugging Face cache volume (`dl-model-hf-cache`), read-
 
 The model's state is kept separately from a server install, in `~/.local/state/directionallylocal/model.json` (or `$XDG_STATE_HOME`), so `dl model` works on a laptop or a server without touching `/etc/directionallylocal/state.json`.
 
-Today: one Nvidia GPU, one model per machine, vLLM, tested with small models. Coming soon: models that need several GPUs, SGLang, and several models on one machine. AMD and Huawei Ascend GPUs are on the roadmap.
+Today: tested end to end with small models on one Nvidia GPU. Models that need several GPUs, SGLang, and several models on one machine are in, planned and checked with `--plan`, but not yet run on real multi-GPU hardware. AMD and Huawei Ascend GPUs are on the roadmap.
 
 ### On the server
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { recipe } from "./model-catalog.js";
 import { modelCommand } from "./model-command.js";
-import { hostResources, memoryLimitBytes, preflight, type HostResources } from "./model-preflight.js";
+import { hostResources, preflight, type HostResources } from "./model-preflight.js";
 import { detectHardware, type Hardware } from "./model-runtime.js";
 import type { Prompter } from "./prompt.js";
 import { fixtureSystem } from "./test-support/gpu-fixtures.js";
@@ -17,7 +17,7 @@ async function proBox(): Promise<{ hardware: Hardware; host: HostResources }> {
 
 function check(hardware: Hardware, host: HostResources, id: string, context: number, usable = hardware.gpus) {
   const model = recipe(id);
-  return preflight({ model, context, hardware, usable, host, ramNeedBytes: memoryLimitBytes(model, Math.min(usable.length, 4)) })!;
+  return preflight({ model, context, hardware, usable, host })!;
 }
 
 test("host RAM and disk come from /proc/meminfo and df under Docker's root", async () => {

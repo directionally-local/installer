@@ -18,6 +18,7 @@ import { PAIRED_NAME } from "./local/layout.js";
 import { provider as providerCommand } from "./laptop/provider.js";
 import { model } from "./laptop/settings.js";
 import { modelCommand as gpuModelCommand } from "./model-command.js";
+import { planCommand } from "./model-plan.js";
 import { openSession, startHere, type SessionInput } from "./laptop/session.js";
 import { detectGitHubRepository } from "./laptop/git.js";
 import { preview as laptopPreview } from "./laptop/preview.js";
@@ -78,6 +79,8 @@ On your laptop:
   dl provider github      replace the GitHub token
   dl model [ID]           the model for tasks and sessions on a place (no ID: Autopilot's list)
   dl model up [MODEL]     serve a curated model (vLLM or SGLang) on this machine's Nvidia GPUs (--dry-run: plan only)
+  dl model up MODEL --plan  the exact docker command, GPUs, layout and memory math; runs nothing
+                          (--hardware DIR: plan for another machine's nvidia-smi output)
   dl model update [MODEL] smoke-test a replacement before switching (--dry-run: plan only)
   dl model rollback       restore the previous deployment and provider
   dl model status         running model, GPU memory, and last smoke tests
@@ -209,6 +212,8 @@ export async function main(
         "from-claude-code": { type: "boolean" },
         yes: { type: "boolean", short: "y" },
         gpus: { type: "string" },
+        plan: { type: "boolean" },
+        hardware: { type: "string" },
         port: { type: "string" },
         context: { type: "string" },
       },
@@ -512,6 +517,12 @@ export async function main(
         const [action, ...args] = parsed.positionals.slice(1);
         if (action === "up" || action === "update" || action === "rollback" || action === "status" || action === "bench" || action === "list") {
           if (values.server) { io.err("dl model deployment commands run on this machine; omit --server.\n"); return 2; }
+          if (values.plan || values.hardware !== undefined) {
+            if (action !== "up" || !values.plan) { io.err("--plan goes with dl model up MODEL (and --hardware DIR with --plan).\n"); return 2; }
+            if (args.length !== 1) { io.err("Usage: dl model up MODEL --plan [--gpus 0,1] [--name NAME] [--port PORT] [--context TOKENS] [--hardware DIR]\n"); return 2; }
+            // Runs nothing, downloads nothing, writes nothing (not even a run log).
+            return await planCommand({ system, model: args[0], name: values.name, gpus: values.gpus, port: values.port, context: values.context, hardware: values.hardware, out: io.out });
+          }
           return await gpuModelCommand(action, args, { system, ui: terminal && !values["dry-run"] ? new TerminalUi(io.out, undefined, colorOn) : new PlainUi(io.out), prompter: options.prompter ?? new TtyPrompter(), interactive: terminal,
             ...(values.name !== undefined ? { name: values.name } : {}), ...(values.gpus !== undefined ? { gpus: values.gpus } : {}),
             ...(values.port !== undefined ? { port: values.port } : {}), ...(values.context !== undefined ? { context: values.context } : {}) });
