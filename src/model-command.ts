@@ -6,6 +6,7 @@ import { checkGpuDocker, containerRunning, containerSpec, detectHardware, docker
 import { chooseParallelism } from "./model-parallel.js";
 import { interconnect } from "./model-topology.js";
 import { engine } from "./model-engines.js";
+import { gib, hostResources, memoryLimitBytes, preflight, preflightError } from "./model-preflight.js";
 import { bench as benchModel } from "./model-bench.js";
 import { FIRST_ANSWER_MS, localFetch, modelApiBase, SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
 import { DEFAULT_DEPLOYMENT, modelStatePath, readDeployments, writeDeployment, type ModelDeployment, type ModelState } from "./state.js";
@@ -336,17 +337,6 @@ export function parseGpuList(text: string, gpus: readonly Gpu[]): Gpu[] {
   return gpus.filter((gpu) => chosen.includes(gpu.index));
 }
 
-/**
- * Host RAM a deployment that keeps weights in host memory may use: those weights (one copy per
- * deployment, e.g. the Engram tables) plus 8 GiB per GPU for each engine worker's own memory
- * (CUDA context, tokenizer, loader buffers). The 8 GiB is dl's allowance, not an engine figure.
- */
-export const RAM_PER_GPU_BYTES = 8 * 1024 ** 3;
-export function memoryLimitBytes(model: ModelRecipe, gpuCount: number): number | undefined {
-  const offload = model.memory?.offloadBytes;
-  return offload ? offload + gpuCount * RAM_PER_GPU_BYTES : undefined;
-}
-
 /** The GPUs a deployment's container sees: its pinned devices, or every GPU. */
 function seenGpus(deployment: ModelDeployment, all: readonly Gpu[]): number[] {
   return deployment.devices ?? all.map((gpu) => gpu.index);
@@ -363,6 +353,31 @@ async function listDeployments(options: ModelCommandOptions, deployments: Record
     options.ui.line(running ? "done" : "failed", name, `${active.id} · ${engine(active.engine).label} · GPUs ${gpus} · port ${active.port} · ${running ? "running" : "stopped"}`);
   }
   return 0;
+}
+
+/**
+ * The preflight before anything is downloaded, for models with known sizes: VRAM per GPU, host
+ * RAM for offloaded weights, disk for the weights (their size from the Hugging Face API, else the
+ * catalog's), and the driver. Throws what's short and the nearest option that fits.
+ */
+async function checkFits(options: ModelCommandOptions, model: ModelRecipe, context: number, hardware: Hardware, usable: readonly Gpu[], ramNeedBytes: number | undefined): Promise<void> {
+  if (!model.memory) return;
+  const { system, ui } = options;
+  const host = await hostResources(system);
+  const live = await modelDownloadBytes(model.repo, options.fetch ?? fetch);
+  const result = preflight({ model, context, hardware, usable, host, liveWeightsBytes: live, ramNeedBytes })!;
+  const first = result.gpus[0]!;
+  ui.line(result.problems.length ? "failed" : "info", "Memory", `${gib(first.weightsBytes)} weights + ${gib(first.kvBytes + first.bufferBytes)} KV/buffers per GPU of ${gib(first.budgetBytes)}`
+    + `${result.ramNeedBytes ? ` · RAM ${gib(result.ramNeedBytes)}` : ""} · disk ${gib(result.weightsBytes)}`);
+  for (const warning of result.warnings) ui.warn(warning);
+  for (const caveat of caveatsFor(model, usable)) ui.warn(caveat);
+  if (result.problems.length) throw preflightError(result);
+}
+
+/** A recipe's caveats that apply to these GPUs. */
+export function caveatsFor(model: ModelRecipe, gpus: readonly Pick<Gpu, "computeCap">[]): string[] {
+  const majors = new Set(gpus.map((gpu) => gpu.computeCap?.split(".")[0]));
+  return (model.caveats ?? []).filter((caveat) => !caveat.computeCaps || caveat.computeCaps.some((cap) => majors.has(cap))).map((caveat) => caveat.text);
 }
 
 /** The existing `dl model [ID]` picker lives in laptop/settings.ts; only subcommands come here. */
@@ -466,6 +481,8 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   const limit = maxContext(selected);
   const contextText = action === "rollback" ? String(previous!.context) : options.context ?? (interactive ? (await options.prompter.text(ui.prompt("Context length", `512–${limit} · default ${selected.defaultContext}`))).trim() : "");
   const context = contextText ? Number(contextText) : selected.defaultContext;
+  if (!Number.isInteger(context) || context < 512 || context > limit) throw new Error(`Context length must be between 512 and ${limit} for ${selected.id}.`);
+  if (action !== "rollback") await checkFits(options, selected, context, hardware, usable, memoryBytes);
   // Ports other deployments hold (their current and previous), so an update can't take one.
   const taken = new Map(others.flatMap(([other, entry]) => [entry.active, ...(entry.previous ? [entry.previous] : [])].map((deployment) => [deployment.port, other] as const)));
   // The first free port: after the current one for an update; a new named deployment also keeps the next one free for its updates.

@@ -12,6 +12,8 @@ function machine() {
   const prompter: Prompter = { choose: async () => "", select: async (_q, choices) => ({ value: choices[0]!.value }), secret: async () => "", text: async () => "" };
   const base: ModelCommandOptions = { system, ui: new PlainUi((line) => lines.push(line)), prompter, interactive: false,
     statePath: "/tmp/model.json", configPath: "/tmp/autopilot/config.json",
+    // No network: the Hugging Face size lookup fails, so the preflight uses the catalog's size.
+    fetch: async () => new Response("offline", { status: 503 }),
     smoke: async () => ({ chat: true, tools: true, json: true, tokensPerSecond: 20, at: "now" }),
     bench: async () => ({ levels: [{ concurrency: 1, requests: 1, ttftP50: 0.1, ttftP95: 0.1, decodeTokPerSec: 20 }] }) };
   const run = (action: string, args: string[], extra: Partial<ModelCommandOptions> = {}) => modelCommand(action, args, { ...base, ...extra });

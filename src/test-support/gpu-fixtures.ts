@@ -28,7 +28,12 @@ export function fixtureSystem(name: GpuFixture): FakeModelSystem & { probes: str
         try { return ok(readFixture(name, "topo.txt")); } catch { return { code: 1, stdout: "", stderr: "no topology" }; }
       }
       if (command === "nvidia-smi" && args.length === 0) return ok(readFixture(name, "nvidia-smi.txt"));
+      if (command === "df") return ok(readFixture(name, "df.txt"));
       return super.probe(command, args);
+    }
+    override async readFile(path: string): Promise<string | undefined> {
+      if (path === "/proc/meminfo") return readFixture(name, "meminfo");
+      return super.readFile(path);
     }
   }
   const system = new Fixture();
