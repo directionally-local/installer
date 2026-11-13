@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.30.0](https://github.com/directionally-local/installer/compare/v0.29.0...v0.30.0) (2026-11-13)
+
+
+### Features
+
+* **free:** tokens and users per upstream on the admin dashboard, with an all-time view ([#235](https://github.com/directionally-local/installer/issues/235)) ([31c6d10](https://github.com/directionally-local/installer/commit/31c6d101d66440e0117619760e3e7ecf33f67e83))
+* **free:** two weekly budgets, generous DeepSeek and tighter GPT-6 ([#237](https://github.com/directionally-local/installer/issues/237)) ([b8561ed](https://github.com/directionally-local/installer/commit/b8561ed5beea878c426ce27097bb1a9ae8db498e))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.22.0 ([#239](https://github.com/directionally-local/installer/issues/239)) ([ee565a6](https://github.com/directionally-local/installer/commit/ee565a6bbe3aec6a437e968f9bf6eac2c25bae9a))
+
 ## [0.29.0](https://github.com/directionally-local/installer/compare/v0.28.0...v0.29.0) (2026-11-12)
 
 
