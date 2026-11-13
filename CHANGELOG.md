@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.35.0](https://github.com/directionally-local/installer/compare/v0.34.0...v0.35.0) (2026-11-13)
+
+
+### Features
+
+* **free:** admin home shows the old Kimiflare admin dashboard's data ([#254](https://github.com/directionally-local/installer/issues/254)) ([9646491](https://github.com/directionally-local/installer/commit/9646491e931b31b0a713b79f79c39629b4bf85a1))
+* **free:** email the owner when someone pays ([#253](https://github.com/directionally-local/installer/issues/253)) ([903c2bc](https://github.com/directionally-local/installer/commit/903c2bc102bf3c9cc7e33d0ee75a5a75e87578f6))
+
+
+### Bug Fixes
+
+* **free:** home "Who's using it?" uses live budget counters, skips blocked accounts ([#251](https://github.com/directionally-local/installer/issues/251)) ([c8af739](https://github.com/directionally-local/installer/commit/c8af739101912c184a413bbf8219f6d1416ee5dd))
+
 ## [0.34.0](https://github.com/directionally-local/installer/compare/v0.33.0...v0.34.0) (2026-11-13)
 
 
