@@ -56,6 +56,12 @@ export interface ModelDeployment {
   gpuMemoryUtilization?: number;
   /** A multi-GPU deployment's layout: host GPU indices and tensor/pipeline/expert parallel sizes. */
   parallel?: { gpus: number[]; tp: number; pp: number; ep: boolean };
+  /** The deployment's name, when it isn't the default one. */
+  name?: string;
+  /** Host GPUs the container is limited to (`--gpus "device=…"`); unset: it sees every GPU. */
+  devices?: number[];
+  /** The container's memory limit in bytes (`--memory`), for models that keep weights in host RAM. */
+  memoryBytes?: number;
   /** Container environment (`-e`), when the recipe sets any; kept for rollback. */
   env?: Record<string, string>;
   /** The serving engine; vLLM when unset. */
@@ -65,13 +71,62 @@ export interface ModelDeployment {
 
 export interface ModelState { version: 1; active: ModelDeployment; previous?: ModelDeployment }
 
+/** The name of the deployment `dl model` works on without --name (the only one before named deployments). */
+export const DEFAULT_DEPLOYMENT = "default";
+
+/**
+ * Several deployments on one machine, by name, each with its own containers, port and GPUs.
+ * Written as version 2 only once there is more than the default one, so a machine with a single
+ * unnamed deployment keeps the version 1 file earlier dl versions read.
+ */
+export interface ModelStateV2 { version: 2; deployments: Record<string, Omit<ModelState, "version">> }
+
+/** Every deployment by name (the version 1 file's is "default"); empty when there is none. */
+export async function readDeployments(system: System, path = modelStatePath()): Promise<Record<string, Omit<ModelState, "version">>> {
+  const raw = await system.readFile(path);
+  if (!raw) return {};
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { throw new Error(`Invalid model state at ${path}; fix it before changing containers.`); }
+  if ((value as { version?: unknown } | null)?.version === 1) {
+    const state = await readModelState(system, path);
+    return state ? { [DEFAULT_DEPLOYMENT]: { active: state.active, ...(state.previous ? { previous: state.previous } : {}) } } : {};
+  }
+  const deployments = (value as Partial<ModelStateV2> | null)?.deployments;
+  if ((value as { version?: unknown }).version !== 2 || !deployments || typeof deployments !== "object" || Array.isArray(deployments)
+    || !Object.values(deployments).every((entry) => entry && validDeployment(entry.active) && (entry.previous === undefined || validDeployment(entry.previous)))) {
+    throw new Error(`Invalid model state at ${path}; fix it before changing containers.`);
+  }
+  return deployments;
+}
+
+/** Sets (or, with undefined, removes) one deployment and keeps the others. */
+export async function writeDeployment(system: System, name: string, entry: Omit<ModelState, "version"> | undefined, path = modelStatePath()): Promise<void> {
+  const all = { ...(await readDeployments(system, path)) };
+  if (entry) all[name] = entry;
+  else delete all[name];
+  const names = Object.keys(all);
+  if (names.length === 0) { await system.remove(path); return; }
+  if (names.length === 1 && names[0] === DEFAULT_DEPLOYMENT) {
+    const only = all[DEFAULT_DEPLOYMENT]!;
+    await writeModelState(system, { version: 1, active: only.active, ...(only.previous ? { previous: only.previous } : {}) }, path);
+    return;
+  }
+  await system.mkdir(dirname(path), { mode: 0o700 });
+  await system.writeFile(path, `${JSON.stringify({ version: 2, deployments: all } satisfies ModelStateV2, null, 2)}\n`, { mode: 0o600 });
+}
+
 export function modelStatePath(env: NodeJS.ProcessEnv = process.env): string {
   return join(env.XDG_STATE_HOME?.trim() || join(env.HOME || homedir(), ".local", "state"), "directionallylocal", "model.json");
 }
 
+/** The default deployment (all the first-run setup knows about), from either file version. */
 export async function readModelState(system: System, path = modelStatePath()): Promise<ModelState | undefined> {
   const raw = await system.readFile(path);
   if (!raw) return undefined;
+  if (/"version":\s*2\b/.test(raw)) {
+    const entry = (await readDeployments(system, path))[DEFAULT_DEPLOYMENT];
+    return entry ? { version: 1, ...entry } : undefined;
+  }
   try {
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== "object") throw new Error("invalid model state");

@@ -2,13 +2,13 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { autopilotConfigFile } from "./laptop/free-tier.js";
 import { fittingModels, gpuCounts, recipe, type ModelRecipe } from "./model-catalog.js";
-import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Gpu, type Hardware, type LaunchExtras, recipeFor } from "./model-runtime.js";
+import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Gpu, type Hardware, type LaunchExtras, containerName, maxContext, recipeFor } from "./model-runtime.js";
 import { chooseParallelism } from "./model-parallel.js";
 import { interconnect } from "./model-topology.js";
 import { engine } from "./model-engines.js";
 import { bench as benchModel } from "./model-bench.js";
 import { FIRST_ANSWER_MS, localFetch, modelApiBase, SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
-import { modelStatePath, readModelState, writeModelState, type ModelDeployment } from "./state.js";
+import { DEFAULT_DEPLOYMENT, modelStatePath, readDeployments, writeDeployment, type ModelDeployment, type ModelState } from "./state.js";
 import type { System } from "./system.js";
 import type { Ui } from "./ui.js";
 import type { Prompter } from "./prompt.js";
@@ -31,6 +31,13 @@ export interface ModelCommandOptions {
   delay?: (ms: number) => Promise<void>;
   /** The GPU lines were already shown (the first run shows them before its own checks). */
   hardwareShown?: boolean;
+  /** --name: which deployment (default: the unnamed one). */
+  name?: string;
+  /** --gpus: host GPU indices ("0,1") the deployment is pinned to. */
+  gpus?: string;
+  /** --port and --context: answers to the questions up and update ask on a terminal. */
+  port?: string;
+  context?: string;
   /** Writes a line to the run log only, never to the screen (set by modelCommand). */
   record?: (line: string) => void;
 }
@@ -193,7 +200,7 @@ async function recordLogs(options: ModelCommandOptions, container: string, label
  * same recipe (same image, model, flags, port and context) and its API answers.
  */
 async function reusable(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, extras: LaunchExtras = {}): Promise<"reuse" | "replace" | "none"> {
-  const existing = await inspectContainer(options.system, `dl-model-${slot}`);
+  const existing = await inspectContainer(options.system, containerName(extras.name, slot));
   if (!existing) return "none";
   if (!existing.running || existing.spec !== containerSpec(model, port, context, slot, extras)) return "replace";
   try {
@@ -207,7 +214,7 @@ async function reusable(options: ModelCommandOptions, model: ModelRecipe, port: 
 
 async function launch(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, reuse = false, progress: { started: boolean } = { started: false }, extras: LaunchExtras = {}): Promise<ModelDeployment> {
   const { system, ui } = options;
-  const container = `dl-model-${slot}`;
+  const container = containerName(extras.name, slot);
   const server = engine(model.engine);
   const resolved = recipeFor(model, extras.computeCap);
   const deployment: ModelDeployment = { id: model.id, repo: model.repo, container, port, context,
@@ -215,6 +222,8 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
     image: model.image, flags: resolved.flags, minVramMiB: model.minVramMiB, gpuMemoryUtilization: model.gpuMemoryUtilization,
     ...(Object.keys(resolved.env).length ? { env: resolved.env } : {}),
     ...(model.engine && model.engine !== "vllm" ? { engine: model.engine } : {}),
+    ...(extras.name ? { name: extras.name } : {}), ...(extras.devices ? { devices: [...extras.devices] } : {}),
+    ...(extras.memoryBytes ? { memoryBytes: extras.memoryBytes } : {}),
     ...(extras.parallel ? { parallel: { gpus: extras.parallel.gpus, tp: extras.parallel.tp, pp: extras.parallel.pp, ep: extras.parallel.ep } } : {}),
     lastTest: { chat: false, tools: false, json: false, tokensPerSecond: 0, at: "" } };
   ui.plan([
@@ -310,20 +319,76 @@ export async function modelCommand(action: string, args: string[], options: Mode
   }
 }
 
+/** A deployment name: lowercase letters, digits and dashes, so it fits a container name. */
+export function deploymentName(text: string | undefined): string {
+  const name = text?.trim() || DEFAULT_DEPLOYMENT;
+  if (!/^[a-z0-9][a-z0-9-]{0,30}$/.test(name)) throw new Error(`Deployment name "${name}" must be lowercase letters, digits and dashes (at most 31).`);
+  return name;
+}
+
+/** --gpus "0,1": host GPU indices that exist, without repeats. */
+export function parseGpuList(text: string, gpus: readonly Gpu[]): Gpu[] {
+  const indices = text.split(",").map((part) => part.trim());
+  if (indices.some((index) => !/^\d+$/.test(index))) throw new Error(`--gpus takes GPU indices like 0,1 (got "${text}").`);
+  const chosen = [...new Set(indices.map(Number))].sort((a, b) => a - b);
+  const missing = chosen.filter((index) => !gpus.some((gpu) => gpu.index === index));
+  if (missing.length) throw new Error(`No GPU ${missing.join(", ")} on this machine; it has ${gpus.map((gpu) => gpu.index).join(", ")}.`);
+  return gpus.filter((gpu) => chosen.includes(gpu.index));
+}
+
+/**
+ * Host RAM a deployment that keeps weights in host memory may use: those weights (one copy per
+ * deployment, e.g. the Engram tables) plus 8 GiB per GPU for each engine worker's own memory
+ * (CUDA context, tokenizer, loader buffers). The 8 GiB is dl's allowance, not an engine figure.
+ */
+export const RAM_PER_GPU_BYTES = 8 * 1024 ** 3;
+export function memoryLimitBytes(model: ModelRecipe, gpuCount: number): number | undefined {
+  const offload = model.memory?.offloadBytes;
+  return offload ? offload + gpuCount * RAM_PER_GPU_BYTES : undefined;
+}
+
+/** The GPUs a deployment's container sees: its pinned devices, or every GPU. */
+function seenGpus(deployment: ModelDeployment, all: readonly Gpu[]): number[] {
+  return deployment.devices ?? all.map((gpu) => gpu.index);
+}
+
+/** `dl model list`: every deployment on this machine. */
+async function listDeployments(options: ModelCommandOptions, deployments: Record<string, Omit<ModelState, "version">>): Promise<number> {
+  const names = Object.keys(deployments).sort((a, b) => (a === DEFAULT_DEPLOYMENT ? -1 : b === DEFAULT_DEPLOYMENT ? 1 : a.localeCompare(b)));
+  if (names.length === 0) { options.ui.line("info", "Models", "none · dl model up"); return 0; }
+  for (const name of names) {
+    const active = deployments[name]!.active;
+    const running = await containerRunning(options.system, active.container);
+    const gpus = active.devices ? active.devices.join(",") : active.parallel ? active.parallel.gpus.join(",") : "all";
+    options.ui.line(running ? "done" : "failed", name, `${active.id} · ${engine(active.engine).label} · GPUs ${gpus} · port ${active.port} · ${running ? "running" : "stopped"}`);
+  }
+  return 0;
+}
+
 /** The existing `dl model [ID]` picker lives in laptop/settings.ts; only subcommands come here. */
 async function modelCommandInner(action: string, args: string[], options: ModelCommandOptions): Promise<number> {
   const { system, ui } = options;
-  if ((action === "up" || action === "update") && args.length > 1 || (action === "status" || action === "rollback" || action === "bench") && args.length > 0) {
+  if ((action === "up" || action === "update") && args.length > 1 || (action === "status" || action === "rollback" || action === "bench" || action === "list") && args.length > 0) {
     ui.line("failed", "Usage", `dl model ${action}${action === "up" || action === "update" ? " [model] [--dry-run]" : ""}`);
     return 2;
   }
   const statePath = options.statePath ?? modelStatePath();
-  const state = await readModelState(system, statePath);
+  const name = deploymentName(options.name);
+  const named = name !== DEFAULT_DEPLOYMENT;
+  const deployments = await readDeployments(system, statePath);
+  if (action === "list") return listDeployments(options, deployments);
+  const state = deployments[name];
+  /** "dl model rollback --name b": commands name a named deployment. */
+  const command = (verb: string) => `dl model ${verb}${named ? ` --name ${name}` : ""}`;
+  const others = Object.entries(deployments).filter(([other]) => other !== name);
   if (action === "status") {
-    if (!state) { ui.line("info", "Model", "none · dl model up"); return 0; }
+    if (!state) { ui.line("info", "Model", named ? `no deployment named ${name} · dl model list` : "none · dl model up"); return 0; }
     const running = await containerRunning(system, state.active.container);
     ui.line(running ? "done" : "failed", "Model", state.active.repo);
     ui.line("info", "API", `${modelApiBase(state.active)} · ${running ? "running" : "stopped"}`);
+    // Only what 0.30.1 didn't have: the engine when it isn't vLLM, the GPUs when pinned or several.
+    if (state.active.engine && state.active.engine !== "vllm") ui.line("info", "Engine", engine(state.active.engine).label);
+    if (state.active.devices || state.active.parallel) ui.line("info", "GPUs", `${(state.active.devices ?? state.active.parallel!.gpus).join(", ")}${state.active.parallel ? ` · TP ${state.active.parallel.tp}${state.active.parallel.pp > 1 ? ` · PP ${state.active.parallel.pp}` : ""}` : ""}`);
     const hardware = await detectHardware(system).catch(() => undefined);
     if (hardware) {
       showHardware(ui, hardware);
@@ -335,11 +400,13 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     const mark = (ok: boolean) => (ok ? "✓" : "✗");
     ui.line("info", "Last test", `chat ${mark(last.chat)} · tools ${mark(last.tools)} · JSON ${mark(last.json)} · ${last.tokensPerSecond} tok/s`);
     if (last.at) ui.line("info", "Tested", last.at.replace("T", " ").slice(0, 16));
-    if (state.previous) ui.line("info", "Previous", `${state.previous.id} · dl model rollback`);
+    if (state.previous) ui.line("info", "Previous", `${state.previous.id} · ${command("rollback")}`);
+    if (!named && others.length) ui.line("info", "Others", `${others.map(([other]) => other).join(", ")} · dl model list`);
     return running ? 0 : 1;
   }
+  const noModel = () => new Error(named ? `No deployment named ${name}. Run dl model up [model] --name ${name} first, or see dl model list.` : "No model is installed. Run dl model up first.");
   if (action === "bench") {
-    if (!state) throw new Error("No model is installed. Run dl model up first.");
+    if (!state) throw noModel();
     if (!(await containerRunning(system, state.active.container))) throw new Error(`Model container ${state.active.container} is stopped; bench needs a running model.`);
     const result = await benchModel(state.active, system, options.fetch);
     for (const level of result.levels) ui.line("info", `${level.concurrency} at once, ${level.requests} reqs`, `TTFT p50 ${level.ttftP50}s p95 ${level.ttftP95}s · ${level.decodeTokPerSec} tok/s`);
@@ -350,39 +417,67 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   if (action === "up" && state) {
     const running = await containerRunning(system, state.active.container);
     throw new Error(running
-      ? "A model is already serving on this machine. Use dl model update [model] to replace it."
-      : `The configured model ${state.active.container} is stopped. Restart it with docker start ${state.active.container}, or replace it with dl model update [model].`);
+      ? named ? `A model is already serving as ${name}. Use ${command("update")} [model] to replace it, or pick another --name.` : "A model is already serving on this machine. Use dl model update [model] to replace it."
+      : `The configured model ${state.active.container} is stopped. Restart it with docker start ${state.active.container}, or replace it with ${command("update")} [model].`);
   }
-  if (action !== "up" && !state) throw new Error("No model is installed. Run dl model up first.");
+  if (action !== "up" && !state) throw noModel();
   if (action === "rollback" && !state?.previous) throw new Error("No previous model is available for rollback.");
   const hardware = await detectHardware(system);
   await checkGpuDocker(system);
   if (!options.hardwareShown) showHardware(ui, hardware);
-  const maxTotal = Math.max(...hardware.gpus.map((gpu) => gpu.totalMiB));
   const previous = state?.previous;
+  const old = state?.active;
+  // --gpus pins the deployment to those GPUs; an update keeps the current pinning unless given anew.
+  const pinned = options.gpus !== undefined ? parseGpuList(options.gpus, hardware.gpus)
+    : action === "rollback" ? previous!.devices && hardware.gpus.filter((gpu) => previous!.devices!.includes(gpu.index))
+      : old?.devices && hardware.gpus.filter((gpu) => old.devices!.includes(gpu.index));
+  const usable = pinned ?? hardware.gpus;
+  if (pinned) ui.line("info", "GPUs", `${pinned.map((gpu) => gpu.index).join(", ")} (of ${hardware.gpus.length})`);
+  const maxTotal = Math.max(...usable.map((gpu) => gpu.totalMiB));
   const selected: ModelRecipe = action === "rollback"
     ? { id: previous!.id, repo: previous!.repo, minVramMiB: previous!.minVramMiB, gpuMemoryUtilization: previous!.gpuMemoryUtilization ?? 0.9, image: previous!.image, flags: previous!.flags,
       ...(previous!.env ? { env: previous!.env } : {}), ...(previous!.engine ? { engine: previous!.engine } : {}), defaultContext: previous!.context }
-    : await selectModel(options, args[0], hardware.gpus);
-  // A multi-GPU model gets its layout for this machine's GPUs and links; one GPU adds no flags.
+    : await selectModel(options, args[0], usable);
+  // A multi-GPU model gets its layout for these GPUs and their links; one GPU adds no flags.
   // Rollback restarts the previous deployment's layout as it was.
   const layout = action === "rollback" ? previous!.parallel && { ...previous!.parallel, interconnect: interconnect(hardware.topology, previous!.parallel.gpus), why: "as before" }
-    : chooseParallelism(selected, hardware.gpus, hardware.topology);
+    : chooseParallelism(selected, usable, hardware.topology);
   const parallel = layout && layout.gpus.length > 1 ? layout : undefined;
   if (parallel) ui.line("info", "Layout", parallel.why);
+  // The container sees only its GPUs when pinned (all it was given: they're reserved for it, and
+  // the engine takes the first ones it sees), or when its layout uses some of the machine's GPUs.
+  const pinnedIndices = pinned?.map((gpu) => gpu.index);
+  const devices = pinnedIndices ? (layout && !layout.gpus.every((index, at) => pinnedIndices[at] === index) ? layout.gpus : pinnedIndices)
+    : parallel && parallel.gpus.length < hardware.gpus.length ? parallel.gpus : undefined;
+  // Two deployments never share a pinned GPU; one that sees every GPU is a warning, not an error.
+  for (const [other, entry] of others) {
+    const theirs = entry.active.devices;
+    if (devices && theirs) {
+      const shared = devices.filter((index) => theirs.includes(index));
+      if (shared.length) throw new Error(`GPU ${shared.join(", ")} is already used by deployment ${other}; pick others with --gpus (dl model list).`);
+    } else ui.warn(`Deployment ${other} ${theirs ? "uses GPUs " + theirs.join(",") : "sees every GPU"} and this one ${devices ? "uses GPUs " + devices.join(",") : "sees every GPU"}: pin both with --gpus to keep them apart.`);
+  }
   // Per-GPU-family flags (byGpu) follow the GPUs it runs on; a rollback's stored flags already have them.
   const computeCap = action === "rollback" ? undefined : hardware.gpus.find((gpu) => gpu.index === (layout?.gpus[0] ?? hardware.gpus[0]!.index))?.computeCap;
-  const extras: LaunchExtras = { parallel, computeCap };
-  const old = state?.active;
+  const memoryBytes = action === "rollback" ? previous!.memoryBytes : memoryLimitBytes(selected, layout?.gpus.length ?? 1);
+  const extras: LaunchExtras = { parallel, computeCap, ...(named ? { name } : {}), ...(devices ? { devices } : {}), ...(memoryBytes ? { memoryBytes } : {}) };
   if (old && !(await containerRunning(system, old.container))) throw new Error(`Current model container ${old.container} is stopped; restart it before changing models.`);
   const interactive = isInteractive(options);
-  const contextText = action === "rollback" ? String(previous!.context) : interactive ? (await options.prompter.text(ui.prompt("Context length", `512–${selected.defaultContext} · default ${selected.defaultContext}`))).trim() : "";
+  const limit = maxContext(selected);
+  const contextText = action === "rollback" ? String(previous!.context) : options.context ?? (interactive ? (await options.prompter.text(ui.prompt("Context length", `512–${limit} · default ${selected.defaultContext}`))).trim() : "");
   const context = contextText ? Number(contextText) : selected.defaultContext;
-  const portText = action === "rollback" ? String(previous!.port) : interactive ? (await options.prompter.text(ui.prompt("Port", `default ${old ? old.port + 1 : 8000}`))).trim() : "";
-  const port = portNumber(portText || String(old ? old.port + 1 : 8000));
+  // Ports other deployments hold (their current and previous), so an update can't take one.
+  const taken = new Map(others.flatMap(([other, entry]) => [entry.active, ...(entry.previous ? [entry.previous] : [])].map((deployment) => [deployment.port, other] as const)));
+  // The first free port: after the current one for an update; a new named deployment also keeps the next one free for its updates.
+  let defaultPort = old ? old.port + 1 : 8000;
+  if (old) while (taken.has(defaultPort)) defaultPort++;
+  else if (named) while (taken.has(defaultPort) || taken.has(defaultPort + 1)) defaultPort += 2;
+  const portText = action === "rollback" ? String(previous!.port) : options.port ?? (interactive ? (await options.prompter.text(ui.prompt("Port", `default ${defaultPort}`))).trim() : "");
+  const port = portNumber(portText || String(defaultPort));
   if (old && port === old.port) throw new Error("The new model needs a different port from the current model.");
-  const slot = old?.container === "dl-model-1" ? 2 : 1;
-  const candidateContainer = `dl-model-${slot}`;
+  if (taken.has(port)) throw new Error(`Port ${port} belongs to deployment ${taken.get(port)}; pick another with --port.`);
+  const slot = old?.container === containerName(name, 1) ? 2 : 1;
+  const candidateContainer = containerName(name, slot);
   // A container a failed attempt left running for inspection is reused when it runs this exact
   // recipe and answers; otherwise it is replaced (and the GPU memory it held is counted again).
   const existing = await reusable(options, selected, port, context, slot, extras);
@@ -397,15 +492,21 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     await removeContainer(system, candidateContainer);
     if (wasRunning && !system.dryRun) hardware.gpus = (await detectHardware(system)).gpus;
   }
-  // nvidia-smi free memory is per GPU. Do not sum several cards: vLLM is configured for one GPU.
-  // vLLM reserves gpuMemoryUtilization * total VRAM, not minVramMiB: that is what side-by-side must fit.
+  // nvidia-smi free memory is per GPU. The engine reserves gpuMemoryUtilization * total VRAM on each
+  // GPU it uses, not minVramMiB: that is what side-by-side must fit.
+  // One unpinned GPU (the 0.30.1 path): any GPU with room. Otherwise: every GPU it will use.
+  const used = devices ? (layout?.gpus ?? devices) : parallel?.gpus;
   const reserveMiB = Math.ceil(selected.gpuMemoryUtilization * maxTotal);
-  if (reserveMiB < selected.minVramMiB) throw new Error(`${selected.id} gpu-memory-utilization ${selected.gpuMemoryUtilization} reserves ${Math.floor(reserveMiB / 1024)} GB, less than the ${Math.ceil(selected.minVramMiB / 1024)} GB the model needs.`);
+  if (!used && reserveMiB < selected.minVramMiB) throw new Error(`${selected.id} gpu-memory-utilization ${selected.gpuMemoryUtilization} reserves ${Math.floor(reserveMiB / 1024)} GB, less than the ${Math.ceil(selected.minVramMiB / 1024)} GB the model needs.`);
+  const targets = used ? hardware.gpus.filter((gpu) => used.includes(gpu.index)) : hardware.gpus;
+  const short = used ? targets.filter((gpu) => gpu.freeMiB < Math.ceil(selected.gpuMemoryUtilization * gpu.totalMiB)) : [];
   // A reused candidate already holds its memory.
-  const enoughFree = reuse || hardware.gpus.some((gpu) => gpu.freeMiB >= reserveMiB);
+  const enoughFree = reuse || (used ? short.length === 0 : hardware.gpus.some((gpu) => gpu.freeMiB >= reserveMiB));
+  const perGpu = used ? " per GPU" : "";
   if (old) ui.line("info", "Update", enoughFree
-    ? `side-by-side, ${Math.ceil(reserveMiB / 1024)} GB new + ${Math.ceil((old.gpuMemoryUtilization ?? 0.9) * maxTotal / 1024)} GB old`
-    : `downtime: ${Math.ceil(Math.max(...hardware.gpus.map((gpu) => gpu.freeMiB)) / 1024)} GB free, needs ${Math.ceil(reserveMiB / 1024)} GB`);
+    ? `side-by-side, ${Math.ceil(reserveMiB / 1024)} GB new + ${Math.ceil((old.gpuMemoryUtilization ?? 0.9) * maxTotal / 1024)} GB old${perGpu}`
+    : used ? `downtime: GPU ${short.map((gpu) => `${gpu.index} has ${Math.floor(gpu.freeMiB / 1024)} GB free`).join(", GPU ")}, needs ${Math.ceil(reserveMiB / 1024)} GB per GPU`
+      : `downtime: ${Math.ceil(Math.max(...hardware.gpus.map((gpu) => gpu.freeMiB)) / 1024)} GB free, needs ${Math.ceil(reserveMiB / 1024)} GB`);
   let stoppedOld = false;
   if (old && !enoughFree) {
     ui.warn("Not enough GPU memory for both models: the current one stops first.");
@@ -415,7 +516,11 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     await system.run("docker", ["stop", old.container]);
     stoppedOld = true;
   }
-  if (!old && !enoughFree) throw new Error(`${selected.id} reserves ${Math.ceil(reserveMiB / 1024)} GB of GPU VRAM but the largest GPU has ${Math.ceil(Math.max(...hardware.gpus.map((gpu) => gpu.freeMiB)) / 1024)} GB free.`);
+  if (!old && !enoughFree) {
+    throw new Error(used
+      ? `${selected.id} reserves ${Math.round(selected.gpuMemoryUtilization * 100)}% of each GPU's VRAM, but GPU ${short.map((gpu) => `${gpu.index} has ${Math.floor(gpu.freeMiB / 1024)} GB free`).join(", GPU ")}.`
+      : `${selected.id} reserves ${Math.ceil(reserveMiB / 1024)} GB of GPU VRAM but the largest GPU has ${Math.ceil(Math.max(...hardware.gpus.map((gpu) => gpu.freeMiB)) / 1024)} GB free.`);
+  }
   if (old && existing === "none") await removeContainer(system, candidateContainer);
   const configPath = options.configPath ?? autopilotConfigFile();
   const previousConfig = await system.readFile(configPath);
@@ -450,7 +555,7 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
       }
     } else if (old) ui.line("info", "Speed", `new ${candidate.lastTest.tokensPerSecond} tok/s (old was stopped)`);
     await configureProvider(options, candidate, configPath);
-    await writeModelState(system, { version: 1, active: candidate, ...(old ? { previous: old } : {}) }, statePath);
+    await writeDeployment(system, name, { active: candidate, ...(old ? { previous: old } : {}) }, statePath);
     if (old) await system.run("docker", ["stop", old.container]);
     ui.line("done", "Model serving", candidate.repo);
     ui.line("info", "API", modelApiBase(candidate));
@@ -465,7 +570,7 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
         const running = await containerRunning(system, candidateContainer);
         const label = engine(selected.engine).label;
         notes.push(running ? `The ${label} container is still running: docker logs ${candidateContainer}` : `The ${label} container stopped: docker logs ${candidateContainer}`,
-          `${running ? "Stop" : "Remove"} it with docker rm -f ${candidateContainer}${running ? `; dl model ${action} reuses it while it answers` : ""}`);
+          `${running ? "Stop" : "Remove"} it with docker rm -f ${candidateContainer}${running ? `; ${command(action)} reuses it while it answers` : ""}`);
       } else await removeContainer(system, candidateContainer);
       if (error instanceof SmokeError && error.curl) notes.push(`Reproduce: ${error.curl}`);
       if (stoppedOld && old) await system.run("docker", ["start", old.container]);
