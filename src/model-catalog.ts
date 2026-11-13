@@ -48,8 +48,12 @@ export interface ModelRecipe {
   minCuda?: string;
   /** Not startable yet, and why (the plan still shows it). */
   blocked?: string;
-  /** Known caveats, shown in the plan and before a start; `computeCaps` limits one to those GPUs. */
-  caveats?: ReadonlyArray<{ computeCaps?: readonly string[]; text: string }>;
+  /**
+   * Known caveats, shown in the plan and before a start; `computeCaps` limits one to those GPUs.
+   * `advice` ends the caveat unless the image run is one of `fixedIn` (images the caveat names as
+   * containing the fix, repository:tag), which `--image` can pick.
+   */
+  caveats?: ReadonlyArray<{ computeCaps?: readonly string[]; text: string; advice?: string; fixedIn?: readonly string[] }>;
 }
 
 /** Sizes from the model's files and docs, for the preflight. Each value says where it comes from. */
@@ -101,7 +105,7 @@ const VLLM_MULTI = "vllm/vllm-openai:v0.33.0";
 const SM120 = ["12"];
 const SM120_V41 = "No official recipe covers RTX PRO Blackwell (sm120) GPUs: the vLLM recipe lists H100, H200, B200, GB200, B300, GB300 and AMD. "
   + "vLLM's SM120 fix for this model (#60762, 64-token kernel blocks, merged 2026-11-05) is in no final release yet (v0.34.0rc2 only), "
-  + "and issue #59203 reports indexer_kv_dtype mxfp4 rejected on SM120 on the release tag. Expect to need a newer image.";
+  + "and issue #59203 reports indexer_kv_dtype mxfp4 rejected on SM120 on the release tag.";
 
 /** DeepSeek-V4.1-Flash-1017's safetensors minus its two Engram shards (model-00047/48, Engram tensors only). */
 const V41_WEIGHTS = 510_296_708_312;
@@ -171,7 +175,7 @@ const MULTI_GPU: readonly ModelRecipe[] = [
       contextBuffer: { bytesPerCell: 2, batchedTokens: 8192, source: "the indexer's [batched tokens × context] logits buffer, 2 B each (vLLM recipe)" },
     },
     caveats: [
-      { computeCaps: SM120, text: SM120_V41 },
+      { computeCaps: SM120, text: SM120_V41, advice: "Expect to need a newer image.", fixedIn: ["vllm/vllm-openai:v0.34.0rc2"] },
       { text: "The recipe's vram_minimum_gb is 614 with the Engram tables on the GPU; with them in host RAM the resident weights are ~286 GiB. Measure before relying on long contexts: the recipe says \"measure before assuming a given context/batch fits\"." },
     ],
   },

@@ -6,6 +6,7 @@ import { checkGpuDocker, containerRunning, containerSpec, detectHardware, docker
 import { chooseParallelism, type ParallelPlan } from "./model-parallel.js";
 import { interconnect } from "./model-topology.js";
 import { engine } from "./model-engines.js";
+import { catalogDefaultText, chooseImage, namedByCaveat, parseImageRef, unofficialWarning, withImage, type ImageChoice } from "./model-image.js";
 import { gib, hostResources, memoryLimitBytes, preflight, preflightError } from "./model-preflight.js";
 import { bench as benchModel } from "./model-bench.js";
 import { FIRST_ANSWER_MS, localFetch, modelApiBase, SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
@@ -39,6 +40,8 @@ export interface ModelCommandOptions {
   /** --port and --context: answers to the questions up and update ask on a terminal. */
   port?: string;
   context?: string;
+  /** --image: run the catalog entry in this container image instead of its pinned one (up and update). */
+  image?: string;
   /** Writes a line to the run log only, never to the screen (set by modelCommand). */
   record?: (line: string) => void;
 }
@@ -213,14 +216,14 @@ async function reusable(options: ModelCommandOptions, model: ModelRecipe, port: 
   }
 }
 
-async function launch(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, reuse = false, progress: { started: boolean } = { started: false }, extras: LaunchExtras = {}): Promise<ModelDeployment> {
+async function launch(options: ModelCommandOptions, model: ModelRecipe, port: number, context: number, slot: number, reuse = false, progress: { started: boolean } = { started: false }, extras: LaunchExtras = {}, catalogImage?: string): Promise<ModelDeployment> {
   const { system, ui } = options;
   const container = containerName(extras.name, slot);
   const server = engine(model.engine);
   const resolved = recipeFor(model, extras.computeCap);
   const deployment: ModelDeployment = { id: model.id, repo: model.repo, container, port, context,
     // The flags and environment as run (per-GPU-family ones included), so rollback restarts exactly this.
-    image: model.image, flags: resolved.flags, minVramMiB: model.minVramMiB, gpuMemoryUtilization: model.gpuMemoryUtilization,
+    image: model.image, ...(catalogImage !== undefined ? { catalogImage } : {}), flags: resolved.flags, minVramMiB: model.minVramMiB, gpuMemoryUtilization: model.gpuMemoryUtilization,
     ...(Object.keys(resolved.env).length ? { env: resolved.env } : {}),
     ...(model.engine && model.engine !== "vllm" ? { engine: model.engine } : {}),
     ...(extras.name ? { name: extras.name } : {}), ...(extras.devices ? { devices: [...extras.devices] } : {}),
@@ -369,7 +372,7 @@ async function listDeployments(options: ModelCommandOptions, deployments: Record
     const active = deployments[name]!.active;
     const running = await containerRunning(options.system, active.container);
     const gpus = active.devices ? active.devices.join(",") : active.parallel ? active.parallel.gpus.join(",") : "all";
-    options.ui.line(running ? "done" : "failed", name, `${active.id} · ${engine(active.engine).label} · GPUs ${gpus} · port ${active.port} · ${running ? "running" : "stopped"}`);
+    options.ui.line(running ? "done" : "failed", name, `${active.id} · ${engine(active.engine).label} · ${imageText(active)} · GPUs ${gpus} · port ${active.port} · ${running ? "running" : "stopped"}`);
   }
   return 0;
 }
@@ -393,10 +396,21 @@ async function checkFits(options: ModelCommandOptions, model: ModelRecipe, conte
   if (result.problems.length) throw preflightError(result);
 }
 
-/** A recipe's caveats that apply to these GPUs. */
+/**
+ * A recipe's caveats that apply to these GPUs. A caveat naming the image run (--image) as the
+ * one with the fix says so instead of its advice; it never says the fix was verified.
+ */
 export function caveatsFor(model: ModelRecipe, gpus: readonly Pick<Gpu, "computeCap">[]): string[] {
   const majors = new Set(gpus.map((gpu) => gpu.computeCap?.split(".")[0]));
-  return (model.caveats ?? []).filter((caveat) => !caveat.computeCaps || caveat.computeCaps.some((cap) => majors.has(cap))).map((caveat) => caveat.text);
+  return (model.caveats ?? []).filter((caveat) => !caveat.computeCaps || caveat.computeCaps.some((cap) => majors.has(cap))).map((caveat) => {
+    if (namedByCaveat(model.image, caveat.fixedIn)) return `${caveat.text} This image (${model.image}) is the one the caveat names; dl hasn't verified it.`;
+    return caveat.advice ? `${caveat.text} ${caveat.advice}` : caveat.text;
+  });
+}
+
+/** "vllm/vllm-openai:v0.34.0rc2 (--image; catalog default v0.33.0)", or just the image. */
+export function imageText(deployment: Pick<ModelDeployment, "image" | "catalogImage">): string {
+  return deployment.catalogImage !== undefined ? `${deployment.image} (--image; catalog default ${catalogDefaultText(deployment.image, deployment.catalogImage)})` : deployment.image;
 }
 
 /** The existing `dl model [ID]` picker lives in laptop/settings.ts; only subcommands come here. */
@@ -405,6 +419,10 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   if ((action === "up" || action === "update") && args.length > 1 || (action === "status" || action === "rollback" || action === "bench" || action === "list") && args.length > 0) {
     ui.line("failed", "Usage", `dl model ${action}${action === "up" || action === "update" ? " [model] [--dry-run]" : ""}`);
     return 2;
+  }
+  if (options.image !== undefined) {
+    if (action !== "up" && action !== "update") throw new Error(`--image goes with dl model up and dl model update${action === "rollback" ? "; rollback restores the previous deployment's image" : ""}.`);
+    parseImageRef(options.image);
   }
   const statePath = options.statePath ?? modelStatePath();
   const name = deploymentName(options.name);
@@ -420,8 +438,9 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     const running = await containerRunning(system, state.active.container);
     ui.line(running ? "done" : "failed", "Model", state.active.repo);
     ui.line("info", "API", `${modelApiBase(state.active)} · ${running ? "running" : "stopped"}`);
-    // Only what 0.30.1 didn't have: the engine when it isn't vLLM, the GPUs when pinned or several.
+    // Beyond 0.30.1: the engine when it isn't vLLM, the image (and whether --image chose it), the GPUs when pinned or several.
     if (state.active.engine && state.active.engine !== "vllm") ui.line("info", "Engine", engine(state.active.engine).label);
+    ui.line("info", "Image", imageText(state.active));
     if (state.active.devices || state.active.parallel) ui.line("info", "GPUs", `${(state.active.devices ?? state.active.parallel!.gpus).join(", ")}${state.active.parallel ? ` · TP ${state.active.parallel.tp}${state.active.parallel.pp > 1 ? ` · PP ${state.active.parallel.pp}` : ""}` : ""}`);
     const hardware = await detectHardware(system).catch(() => undefined);
     if (hardware) {
@@ -468,10 +487,28 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   const usable = pinned ?? hardware.gpus;
   if (pinned) ui.line("info", "GPUs", `${pinned.map((gpu) => gpu.index).join(", ")} (of ${hardware.gpus.length})`);
   const maxTotal = Math.max(...usable.map((gpu) => gpu.totalMiB));
-  const selected: ModelRecipe = action === "rollback"
+  const chosen: ModelRecipe = action === "rollback"
     ? { id: previous!.id, repo: previous!.repo, minVramMiB: previous!.minVramMiB, gpuMemoryUtilization: previous!.gpuMemoryUtilization ?? 0.9, image: previous!.image, flags: previous!.flags,
       ...(previous!.env ? { env: previous!.env } : {}), ...(previous!.engine ? { engine: previous!.engine } : {}), defaultContext: previous!.context }
     : await selectModel(options, args[0], usable);
+  // The image: --image, else (an update of the same engine) the current deployment's --image,
+  // else the catalog's. Rollback restarts the previous deployment's image.
+  const sameEngine = old !== undefined && (old.engine ?? "vllm") === (chosen.engine ?? "vllm");
+  const choice: ImageChoice = action === "rollback" ? { image: previous!.image, ...(previous!.catalogImage !== undefined ? { catalogImage: previous!.catalogImage } : {}) }
+    : options.image !== undefined ? chooseImage(chosen, options.image)
+      : old?.catalogImage !== undefined && sameEngine ? chooseImage(chosen, old.image)
+        : { image: chosen.image };
+  const selected = withImage(chosen, choice);
+  const server = engine(selected.engine);
+  if (action !== "rollback" && options.image === undefined && old?.catalogImage !== undefined) {
+    ui.line("info", "Image", sameEngine ? `${old.image}, kept from the current deployment's --image (pass --image to change it)`
+      : `${chosen.image} (catalog); the current deployment's --image ${old.image} is for ${engine(old.engine).label}`);
+  } else if (choice.catalogImage !== undefined && action !== "rollback") ui.line("info", "Image", imageText(choice));
+  if (choice.catalogImage !== undefined) {
+    const warning = unofficialWarning(server.id, server.label, choice.image);
+    if (warning && action !== "rollback") ui.warn(warning);
+    if (action !== "rollback" && selected.minCuda === undefined && chosen.minCuda !== undefined) ui.line("info", "CUDA", `this image's requirement is unknown; the driver check is skipped (the catalog image needs ${chosen.minCuda})`);
+  }
   // A multi-GPU model gets its layout for these GPUs and their links; one GPU adds no flags.
   // Rollback restarts the previous deployment's layout as it was.
   const layout = action === "rollback" ? previous!.parallel && { ...previous!.parallel, interconnect: interconnect(hardware.topology, previous!.parallel.gpus), why: "as before" }
@@ -558,7 +595,7 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   const previousState = await system.readFile(statePath);
   const progress = { started: false };
   try {
-    const candidate = await launch(options, selected, port, context, slot, reuse, progress, extras);
+    const candidate = await launch(options, selected, port, context, slot, reuse, progress, extras, choice.catalogImage);
     if (system.dryRun) {
       if (old && !stoppedOld) await system.run("docker", ["stop", old.container]);
       ui.line("info", "Dry run", "No model, provider or state changed.");

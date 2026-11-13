@@ -50,6 +50,8 @@ export interface ModelDeployment {
   context: number;
   /** Kept so rollback can restart this exact recipe even if the catalog changes. */
   image: string;
+  /** Set when `image` came from --image: the catalog's image it replaced. */
+  catalogImage?: string;
   flags: readonly string[];
   minVramMiB: number;
   /** Fraction of GPU VRAM this deployment reserves; kept for rollback. */
@@ -141,7 +143,7 @@ function validDeployment(value: unknown): value is ModelDeployment {
   const deployment = value as Partial<ModelDeployment>;
   return typeof deployment.id === "string" && typeof deployment.repo === "string" && typeof deployment.container === "string"
     && Number.isInteger(deployment.port) && Number.isInteger(deployment.context)
-    && typeof deployment.image === "string" && Array.isArray(deployment.flags) && typeof deployment.minVramMiB === "number"
+    && typeof deployment.image === "string" && (deployment.catalogImage === undefined || typeof deployment.catalogImage === "string") && Array.isArray(deployment.flags) && typeof deployment.minVramMiB === "number"
     && !!deployment.lastTest && typeof deployment.lastTest.chat === "boolean" && typeof deployment.lastTest.tools === "boolean"
     && typeof deployment.lastTest.json === "boolean" && typeof deployment.lastTest.tokensPerSecond === "number" && typeof deployment.lastTest.at === "string";
 }

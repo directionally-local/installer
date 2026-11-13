@@ -85,9 +85,11 @@ On your laptop:
   dl model rollback       restore the previous deployment and provider
   dl model status         running model, GPU memory, and last smoke tests
   dl model bench          TTFT p50/p95 and decode tok/s at concurrency 1/8/32, plus prefix cache
-  dl model list           every deployment here: name, model, engine, GPUs, port, status
+  dl model list           every deployment here: name, model, engine, image, GPUs, port, status
   model options: --name NAME (a separate deployment; update/rollback/status/bench target it),
-                 --gpus 0,1 (only these GPUs), --port PORT, --context TOKENS
+                 --gpus 0,1 (only these GPUs), --port PORT, --context TOKENS,
+                 --image IMAGE (up/update/--plan: this container image instead of the catalog's,
+                 e.g. vllm/vllm-openai:v0.34.0rc2; same flags; update keeps it unless given again)
   dl update               update dl (when npm has a newer one) and the Autopilot it pins, then
                           the default place (--check: only say whether there's a newer dl)
   dl update NAME          update a place's Autopilot, Hotcell and sandbox image to the versions dl pins
@@ -216,6 +218,7 @@ export async function main(
         hardware: { type: "string" },
         port: { type: "string" },
         context: { type: "string" },
+        image: { type: "string" },
       },
     });
   } catch (error) {
@@ -519,13 +522,14 @@ export async function main(
           if (values.server) { io.err("dl model deployment commands run on this machine; omit --server.\n"); return 2; }
           if (values.plan || values.hardware !== undefined) {
             if (action !== "up" || !values.plan) { io.err("--plan goes with dl model up MODEL (and --hardware DIR with --plan).\n"); return 2; }
-            if (args.length !== 1) { io.err("Usage: dl model up MODEL --plan [--gpus 0,1] [--name NAME] [--port PORT] [--context TOKENS] [--hardware DIR]\n"); return 2; }
+            if (args.length !== 1) { io.err("Usage: dl model up MODEL --plan [--gpus 0,1] [--name NAME] [--port PORT] [--context TOKENS] [--image IMAGE] [--hardware DIR]\n"); return 2; }
             // Runs nothing, downloads nothing, writes nothing (not even a run log).
-            return await planCommand({ system, model: args[0], name: values.name, gpus: values.gpus, port: values.port, context: values.context, hardware: values.hardware, out: io.out });
+            return await planCommand({ system, model: args[0], name: values.name, gpus: values.gpus, port: values.port, context: values.context, image: values.image, hardware: values.hardware, out: io.out });
           }
           return await gpuModelCommand(action, args, { system, ui: terminal && !values["dry-run"] ? new TerminalUi(io.out, undefined, colorOn) : new PlainUi(io.out), prompter: options.prompter ?? new TtyPrompter(), interactive: terminal,
             ...(values.name !== undefined ? { name: values.name } : {}), ...(values.gpus !== undefined ? { gpus: values.gpus } : {}),
-            ...(values.port !== undefined ? { port: values.port } : {}), ...(values.context !== undefined ? { context: values.context } : {}) });
+            ...(values.port !== undefined ? { port: values.port } : {}), ...(values.context !== undefined ? { context: values.context } : {}),
+            ...(values.image !== undefined ? { image: values.image } : {}) });
         }
         return await model(parsed.positionals.slice(1), { io: laptopIO, terminal, ...(values.server ? { server: values.server } : {}) });
       }
