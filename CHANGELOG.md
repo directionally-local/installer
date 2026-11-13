@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.1](https://github.com/directionally-local/installer/compare/v0.30.0...v0.30.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* model smoke tests share one IPv4 base URL, log every request, and keep the container on failure ([#238](https://github.com/directionally-local/installer/issues/238)) ([5759b6b](https://github.com/directionally-local/installer/commit/5759b6b3981dbff92a5e25fc8c86f766ba7feac3))
+
 ## [0.30.0](https://github.com/directionally-local/installer/compare/v0.29.0...v0.30.0) (2026-11-13)
 
 
