@@ -279,6 +279,10 @@ describe("home: the page", () => {
     assert.match(html, /<th data-type="n" aria-sort="descending"><button type="button">Joined<\/button><\/th>/);
     assert.match(html, /<td data-v="34000">34k<\/td>/);
     assert.match(html, /<input type="search" id="user-search" class="search" placeholder="Search users" aria-label="Search users" autocomplete="off" hidden>/);
+    // A page at a time: the pager (shown by the script), and no row hidden with fewer than a page of users.
+    assert.match(html, /<nav class="pager" id="user-pager" aria-label="Users pages" hidden><button type="button" id="user-prev">← Previous<\/button><span id="user-page"><\/span><button type="button" id="user-next">Next →<\/button><\/nav>/);
+    assert.doesNotMatch(html, /<tr data-q="[^"]*" hidden>/);
+    assert.match(html, /const PER = 50;/);
     const csp = response.headers.get("content-security-policy")!;
     const nonce = /script-src 'nonce-([0-9a-f]{32})'/.exec(csp)?.[1];
     assert.ok(nonce, csp);
@@ -295,6 +299,19 @@ describe("home: the page", () => {
     const tools = await service.request("GET", "/admin?view=tools", { headers: { cookie } });
     assert.doesNotMatch(tools.headers.get("content-security-policy")!, /script-src/);
     assert.doesNotMatch(await tools.text(), /<script/);
+  });
+
+  it("hides every user past the first 50 until the script pages to them", async () => {
+    const { service, cookie } = await scenario();
+    const directory = service.directory();
+    for (let i = 0; i < 60; i++) {
+      await directory.admit({ githubId: 9000 + i, login: `many${i}`, isAdmin: false, inviteCode: undefined, clientDeviceId: null, accountTooNew: false, openAdmission: true, maxActive: 1000, now: NOW - 2 * DAY });
+    }
+    const html = await page(service, cookie);
+    const rows = [...html.matchAll(/<tr data-q="[^"]*"( hidden)?>/g)];
+    assert.equal(rows.length, 67);
+    assert.equal(rows.filter((row) => row[1]).length, 17);
+    assert.ok(rows.slice(0, 50).every((row) => !row[1]));
   });
 
   it("escapes logins", async () => {

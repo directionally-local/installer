@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADMIN_ID, createService } from "./harness.js";
 import { creditProviders, spendTotals, type SpendView } from "../src/dashboard-page.js";
-import { weeklyBudget } from "../src/admin-home-page.js";
+import { globalBudget } from "../src/admin-home-page.js";
 
 const MONDAY = Date.parse("2026-11-09T00:00:00Z");
 
@@ -66,12 +66,14 @@ describe("dashboard spend", () => {
     );
   });
 
-  it("puts this week's free use against the configured weekly credit budgets on the home page's Global Budget card", () => {
-    // Free credit this week (OpenAI $10 + Luminal $12) plus free OpenRouter cash, of $2,000 + $250.
-    assert.deepEqual(weeklyBudget(view({ weekUsd: 0.5 })), { usedUsd: 22.5, totalUsd: 2250 });
-    // Without credit budgets, the global weekly cap; without that either, none.
-    assert.deepEqual(weeklyBudget(view({ weeklyCreditUsd: null, openaiWeeklyCreditUsd: null, weeklyCapUsd: 300 })), { usedUsd: 22, totalUsd: 300 });
-    assert.deepEqual(weeklyBudget(view({ weeklyCreditUsd: null, openaiWeeklyCreditUsd: null })), { usedUsd: 22, totalUsd: null });
+  it("puts all-time credit used against the providers' total credit on the home page's Global Budget card", () => {
+    // OpenAI $17.04 of $5,000 plus Luminal $28.75 of $2,000.
+    const budget = globalBudget(view());
+    assert.equal(Math.round(budget.usedUsd * 100) / 100, 45.79);
+    assert.equal(budget.totalUsd, 7000);
+    // Without credit configured: all-time spend against the global all-time cap.
+    const bare = view({ openaiConfigured: false, luminalConfigured: false, totalCapUsd: 1000 });
+    assert.deepEqual(globalBudget(bare), { usedUsd: spendTotals(bare).allTimeUsd, totalUsd: 1000 });
   });
 
   it("writes the spend CSV from config and the counters", async () => {
