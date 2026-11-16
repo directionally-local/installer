@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { main } from "./cli.js";
 import { hotcellBin, hotcellEnv, PATHS } from "./layout.js";
 import { recipe } from "./model-catalog.js";
+import { pinnedAutopilotVersion } from "./versions.js";
 import { modelCommand, type ModelCommandOptions } from "./model-command.js";
 import { planCommand } from "./model-plan.js";
 import {
@@ -31,12 +32,14 @@ async function cli(...argv: string[]): Promise<{ code: number; out: string; err:
 const planArgs = (...extra: string[]) => ["model", "up", "deepseek-v4.1-flash-fp8", "--plan", "--hardware", fixtureDir("rtx-pro-6000-4x-pcie"), ...extra];
 /** The hardware directory is an absolute path on the machine running the tests. */
 const portable = (text: string) => text.replace(fixtureDir("rtx-pro-6000-4x-pcie"), "src/test-support/fixtures/gpu/rtx-pro-6000-4x-pcie");
+/** The cell image is tagged with the pinned Autopilot version; the snapshot says {AUTOPILOT}, so a version bump doesn't break it. */
+const CELL_IMAGE = `directionallylocal-cell:${pinnedAutopilotVersion()}`;
 
 test("--plan --workspace on 4x RTX PRO 6000: the model plan as before, then the sandbox, byte for byte", async () => {
   const { code, out, err } = await cli(...planArgs("--workspace", WORKSPACE));
   assert.equal(err, "");
   assert.equal(code, 0);
-  const snapshot = readFileSync(join(FIXTURES_DIR, "rtx-pro-6000-4x-pcie", "plan-deepseek-v4.1-flash-fp8-workspace.txt"), "utf8");
+  const snapshot = readFileSync(join(FIXTURES_DIR, "rtx-pro-6000-4x-pcie", "plan-deepseek-v4.1-flash-fp8-workspace.txt"), "utf8").replaceAll("{AUTOPILOT}", pinnedAutopilotVersion());
   assert.equal(portable(out), snapshot);
   // The model half is exactly the plan without --workspace.
   const plain = await cli(...planArgs());
@@ -87,7 +90,7 @@ test("--image and --workspace together: the image goes to the model only", async
   assert.equal(code, 0);
   const run = out.slice(out.indexOf("\nCommand"), out.indexOf("\nSandbox ("));
   assert.match(run, /vllm\/vllm-openai:v0\.34\.0rc2/);
-  assert.match(out, /--image directionallylocal-cell:3\.22\.0/, "the sandbox keeps dl's cell image");
+  assert.ok(out.includes(`--image ${CELL_IMAGE}`), "the sandbox keeps dl's cell image");
 });
 
 test("--allow-internet adds an egress network with only the cell on it; a named deployment gets its own names", async () => {

@@ -46,7 +46,7 @@ docker run -d --name dl-model-1 --gpus all \
     --gpu-memory-utilization 0.92 --tensor-parallel-size 4
 
 Sandbox (started after the model's tests pass)
-Agent      Autopilot in a Hotcell cell (container driver) · image directionallylocal-cell:3.22.0
+Agent      Autopilot in a Hotcell cell (container driver) · image directionallylocal-cell:{AUTOPILOT}
 Workspace  /srv/project → /workspace, read-write: the project (symlinks resolved at up); dl writes nothing in it
 Home       /var/lib/directionallylocal/workspaces/default/home → /home/agent, read-write: HOME and every XDG directory (config, sessions, caches); made by dl before the cell starts, owned by the user, 0700; dl model down deletes it
 User       the owner of /srv/project, read at up (uid:gid, e.g. 1000:1000); root only when the owner is root
@@ -74,7 +74,7 @@ Sandbox commands
 docker network create --internal -o com.docker.network.bridge.inhibit_ipv4=true \
     --label hotcell.attachable=true --label dl.model.deployment=default dl-model-net
 docker network connect --alias model dl-model-net dl-model-1
-hotcell create --name dl-model-agent --image directionallylocal-cell:3.22.0 \
+hotcell create --name dl-model-agent --image directionallylocal-cell:{AUTOPILOT} \
     --driver container --workspace-dir /srv/project \
     --home-dir /var/lib/directionallylocal/workspaces/default/home \
     --user UID:GID --network dl-model-net --memory 8192 \
