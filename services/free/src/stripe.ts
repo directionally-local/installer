@@ -5,8 +5,9 @@ import type { StripeConfig } from "./config.js";
  * Stripe, through its REST API with fetch (no SDK, so the Worker stays portable):
  *
  *   POST /v1/checkout/sessions          Checkout for Pro (a subscription) or a top-up (a payment),
- *                                       with Stripe Tax (`automatic_tax[enabled]=true`) and the
- *                                       billing address collected
+ *                                       with Stripe Tax (`automatic_tax[enabled]=true`) and only the
+ *                                       billing address it needs (country, and a postal code where
+ *                                       tax or the card needs one)
  *   POST /v1/billing_portal/sessions    the Customer Portal, for cancelling or changing the card
  *
  * Prices are Stripe Price ids from config (STRIPE_PRICE_PRO, STRIPE_PRICE_TOPUP); see
@@ -86,7 +87,9 @@ export function checkoutParams(input: {
     client_reference_id: String(input.githubId),
     metadata,
     automatic_tax: { enabled: true },
-    billing_address_collection: "required",
+    // "auto": Checkout asks only for what tax and the card need (often just the country).
+    // "required" asked for a full street address, and most people left at that step.
+    billing_address_collection: "auto",
     ...(input.customerId
       ? // Stripe Tax needs the address saved on an existing customer.
         { customer: input.customerId, customer_update: { address: "auto", name: "auto" } }
