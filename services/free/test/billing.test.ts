@@ -161,7 +161,7 @@ describe("Checkout and the portal", () => {
       "metadata[github_login]": "user100",
       "metadata[product]": "pro",
       "automatic_tax[enabled]": "true",
-      billing_address_collection: "required",
+      billing_address_collection: "auto",
       "subscription_data[metadata][github_id]": "100",
       "subscription_data[metadata][github_login]": "user100",
       "subscription_data[metadata][product]": "pro",
