@@ -111,6 +111,20 @@ describe("GPT-6 through OpenAI's Responses API", () => {
     }
   });
 
+  it("sets safety_identifier to the person's hashed id on every request, whatever the client sends", async () => {
+    const { service, token } = await member();
+    await chat(service, token, { model: "gpt-6-luna" });
+    await chat(service, token, { model: "gpt-6-luna", safety_identifier: "someone-else", user: "spoofed" });
+    const [first, second] = service.calls.openai.map((call) => call.body);
+    assert.match(String(first!.safety_identifier), /^dl-[0-9a-f]{32}$/);
+    assert.equal(first!.user, first!.safety_identifier);
+    assert.equal(second!.safety_identifier, first!.safety_identifier, "the client's safety_identifier is ignored");
+    assert.equal(second!.user, first!.user, "and so is its user");
+    const bob = (await service.signIn({ id: 101, login: "bob" })).access_token;
+    await chat(service, bob, { model: "gpt-6-luna" });
+    assert.notEqual(service.calls.openai[2]!.body.safety_identifier, first!.safety_identifier, "each person has their own");
+  });
+
   it("maps OpenRouter's reasoning.effort and a named tool_choice", async () => {
     const { service, token } = await member();
     await chat(service, token, { tools, reasoning: { effort: "low" }, tool_choice: { type: "function", function: { name: "read_file" } } });

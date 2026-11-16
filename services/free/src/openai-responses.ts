@@ -19,14 +19,20 @@ const str = (value: unknown): string | undefined => (typeof value === "string" ?
  * Sampling fields GPT-6 takes. All three GPT-6 models reason, and OpenAI's reasoning models
  * refuse `temperature` and `top_p` (checked against the API on 2026-11-09), so they're dropped.
  */
-const PASSTHROUGH_FIELDS = ["parallel_tool_calls", "prompt_cache_key", "safety_identifier"] as const;
+// `safety_identifier` is never passed through: the service sets it (below), so a client can't
+// put another person's id on its requests, or none at all.
+const PASSTHROUGH_FIELDS = ["parallel_tool_calls", "prompt_cache_key"] as const;
 
 export interface ResponsesRequestOptions {
   /** The provider's id for the model. */
   model: string;
   /** The reservation's output cap. */
   maxTokens: number;
-  /** The per-person identifier OpenAI sees (never the GitHub id itself). */
+  /**
+   * The per-person identifier OpenAI sees (never the GitHub id itself). Sent as
+   * `safety_identifier`, so OpenAI can act on one abusive person rather than the whole
+   * account, and as the older `user` field too.
+   */
   user: string;
   stream: boolean;
 }
@@ -39,6 +45,7 @@ export function toResponsesRequest(body: Json, options: ResponsesRequestOptions)
     max_output_tokens: options.maxTokens,
     store: false,
     user: options.user,
+    safety_identifier: options.user,
     stream: options.stream,
   };
   const tools = toTools(body.tools);
