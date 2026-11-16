@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.35.1](https://github.com/directionally-local/installer/compare/v0.35.0...v0.35.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.23.0 ([#257](https://github.com/directionally-local/installer/issues/257)) ([3dcdef4](https://github.com/directionally-local/installer/commit/3dcdef4bfcd9150ae86ae8b4e6e35b6b743e34cc))
+* **deps:** install Autopilot 3.24.0 ([566a243](https://github.com/directionally-local/installer/commit/566a243ec097f62bfb85d80013519d5e1e02d444))
+* **deps:** install Autopilot 3.24.0 ([6643d92](https://github.com/directionally-local/installer/commit/6643d92e8ce75aa3fb9530d330212ab50512caff))
+* **free:** Checkout asks only for the address it needs ([#258](https://github.com/directionally-local/installer/issues/258)) ([3d92df6](https://github.com/directionally-local/installer/commit/3d92df61911d4769f0ae33ec3ace28ee07bc6efc))
+
 ## [0.35.0](https://github.com/directionally-local/installer/compare/v0.34.0...v0.35.0) (2026-11-16)
 
 
