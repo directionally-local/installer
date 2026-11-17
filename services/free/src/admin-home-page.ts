@@ -3,6 +3,7 @@ import { realAllowance, USAGE_PERIODS, type AdminGrantRow, type AdminHomeData, t
 import { adminNav, barPath, compact, creditProviders, shell, SIMPLE_STYLE, type SpendView } from "./dashboard-page.js";
 import { BRAND_ORIGIN, PRODUCT_NAME } from "./pages.js";
 import { DAY_MS } from "./week.js";
+import { webFunnelCard, type WebFunnelRow } from "./web-signup.js";
 
 /**
  * The admin home (GET /admin): the data the old Kimiflare Cloud admin dashboard showed, in dl's
@@ -20,6 +21,10 @@ export interface AdminHomeInput {
   settings: LevelSettings & { proWeeklyUsd: number | null; proDeepseekWeeklyUsd: number | null; proPriceUsdMonthly: number };
   login: string;
   signOut: boolean;
+  /** dl.new's web sign-up funnel, per day (web-signup.ts); the card is left out without it. */
+  webFunnel?: WebFunnelRow[];
+  /** The time the page is for (the funnel card's last 7 days). */
+  now?: number;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -370,6 +375,7 @@ ${grantsTable(data.endedGrants, true)}
 ${cards}
 <div class="two">${health}${paid}</div>
 ${trial}
+${input.webFunnel ? webFunnelCard(input.webFunnel, input.now ?? Date.now()) : ""}
 ${usage}
 ${users}
 ${grants}

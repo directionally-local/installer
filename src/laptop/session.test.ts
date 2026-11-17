@@ -997,6 +997,26 @@ describe("dl the first time on a laptop", () => {
     await assert.rejects(readFile(join(config, "directionallylocal", "pending-referral"), "utf8"), "and no longer kept");
   });
 
+  it("passes dl.new's install code to Autopilot once: the first start only, from the variable or the kept file", async () => {
+    const dir = join(root, "fresh");
+    await mkdir(dir);
+    const config = process.env.XDG_CONFIG_HOME!;
+    const code = "AbCdEfGhIjKlMnOpQrStUvWxYz0";
+    const withEnv = (extra: Record<string, string>) =>
+      laptop(undefined, { session: { nodeVersion: PATCHED_NODE, autopilot: async () => AUTOPILOT, spawn: plain.spawn, signals: new EventEmitter(), installCode: { env: { XDG_CONFIG_HOME: config, ...extra } } } });
+    // The install script started dl with the command's code.
+    assert.equal(await inside(dir, () => main([], capture(), withEnv({ DL_INSTALL_CODE: code }))), 0);
+    assert.equal(plain.launches[0]!.env.DL_INSTALL_CODE, code);
+    assert.equal(await inside(dir, () => main([], capture(), withEnv({}))), 0);
+    assert.equal(plain.launches[1]!.env.DL_INSTALL_CODE, undefined, "used once");
+    // dl wasn't started by the install script: the kept code goes to the first dl, then is gone.
+    await mkdir(join(config, "directionallylocal"), { recursive: true });
+    await writeFile(join(config, "directionallylocal", "pending-install-code"), `${code}\n`);
+    assert.equal(await inside(dir, () => main([], capture(), withEnv({}))), 0);
+    assert.equal(plain.launches[2]!.env.DL_INSTALL_CODE, code);
+    await assert.rejects(readFile(join(config, "directionallylocal", "pending-install-code"), "utf8"));
+  });
+
   it("only needs a Node that Autopilot runs on", async () => {
     const dir = join(root, "fresh");
     await mkdir(dir);

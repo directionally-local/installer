@@ -3,6 +3,7 @@ import { normalizeEmail } from "./email-guard.js";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
+import type { WebFunnelRow, WebStep } from "./web-signup.js";
 import { outsideDl } from "./abuse.js";
 import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, signupFunnel, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent, GpuCount } from "./events.js";
@@ -556,6 +557,14 @@ const SCHEMA = [
   `DROP TABLE IF EXISTS upstream_minutes`,
   // The install funnel's anonymous counts (telemetry.ts): per UTC day and allowlisted values,
   // how many install scripts were served and how many installs finished. Nothing per person.
+  // dl.new's web sign-up funnel (web-signup.ts): per UTC day, how many times each step happened.
+  // Counts only: no person, address or code.
+  `CREATE TABLE IF NOT EXISTS web_funnel_daily (
+     day  INTEGER NOT NULL,
+     step TEXT NOT NULL,
+     n    INTEGER NOT NULL,
+     PRIMARY KEY (day, step)
+   ) WITHOUT ROWID`,
   `CREATE TABLE IF NOT EXISTS download_daily (
      day       INTEGER NOT NULL,
      route     TEXT NOT NULL,
@@ -2619,6 +2628,37 @@ export class DirectoryObject extends DurableObject {
         .toArray()[0]?.n ?? 0;
     if (outcome !== "error" || n < GITHUB_CHECK_ERROR_ALERT) return undefined;
     return this.#markAlert(`github-check-errors:${day}`, now) ? githubCheckErrorAlert(n) : undefined;
+  }
+
+  /** Adds one to the day's count of a web sign-up step (web-signup.ts). */
+  async countWebStep(step: WebStep, day: number): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO web_funnel_daily (day, step, n) VALUES (?, ?, 1) ON CONFLICT (day, step) DO UPDATE SET n = n + 1",
+      day,
+      step,
+    );
+  }
+
+  /** Every day's web sign-up step counts, oldest first. */
+  async webFunnel(): Promise<WebFunnelRow[]> {
+    return this.ctx.storage.sql.exec<WebFunnelRow>("SELECT day, step, n FROM web_funnel_daily ORDER BY day, step").toArray();
+  }
+
+  /**
+   * Binds a device id to an account, as a device-code sign-in that sent one does in `admit`:
+   * refused (and recorded as a device refusal) when the device already holds another account.
+   */
+  async bindDevice(input: { githubId: number; login: string; deviceId: string; now: number }): Promise<"ok" | "device_taken"> {
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      const holder = sql.exec<{ github_id: number }>("SELECT github_id FROM devices WHERE device_id = ?", input.deviceId).toArray()[0];
+      if (holder && holder.github_id !== input.githubId) {
+        sql.exec("INSERT INTO device_refusals (at, github_id, login, device_id, holder_id) VALUES (?, ?, ?, ?, ?)", input.now, input.githubId, input.login, input.deviceId, holder.github_id);
+        return "device_taken" as const;
+      }
+      sql.exec("INSERT OR IGNORE INTO devices (device_id, github_id) VALUES (?, ?)", input.deviceId, input.githubId);
+      return "ok" as const;
+    });
   }
 
   /** Adds one to the day's count of install scripts served (telemetry.ts). */

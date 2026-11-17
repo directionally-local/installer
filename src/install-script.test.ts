@@ -111,7 +111,7 @@ function laptopInstall(options: { os?: "Darwin" | "Linux"; machine?: string; and
   const getconf = { LONG_BIT: "64", GNU_LIBC_VERSION: "glibc 2.39", ...options.getconf };
   stub("getconf", `case "$1" in LONG_BIT) echo ${getconf.LONG_BIT} ;; GNU_LIBC_VERSION) echo "${getconf.GNU_LIBC_VERSION}" ;; *) exit 1 ;; esac`);
   // A Node: -e is the CVE check; anything else runs dl's entry, which answers --version.
-  const node = (patched: boolean) => `case "$1" in -e) exit ${patched ? 0 : 1} ;; -v) echo v24.22.1 ;; *) [ "$2" = --version ] && echo 0.10.0 || { echo "dl $* in $(pwd)" >> "${dir}/started.log"; echo "\${DL_REFERRAL-unset}" >> "${dir}/referral.log"; exit ${options.dlExit ?? 0}; } ;; esac`;
+  const node = (patched: boolean) => `case "$1" in -e) exit ${patched ? 0 : 1} ;; -v) echo v24.22.1 ;; *) [ "$2" = --version ] && echo 0.10.0 || { echo "dl $* in $(pwd)" >> "${dir}/started.log"; echo "\${DL_REFERRAL-unset}" >> "${dir}/referral.log"; echo "\${DL_INSTALL_CODE-unset}" >> "${dir}/install-code.log"; exit ${options.dlExit ?? 0}; } ;; esac`;
   stub("node", node(options.nodePatched ?? true));
   // npm: records its arguments and installs a dl entry point under --prefix.
   const npm = options.npmFails ? 'echo "npm http fetch GET 404 https://registry.npmjs.org/directionallylocal 80ms"; echo "npm ERR! 404"; exit 1' : `echo "$*" >> "${dir}/npm.log"
@@ -351,6 +351,25 @@ describe("install.sh on a laptop", () => {
     assert.equal(plain.read(join(plain.dir, "referral.log")), "unset\n");
     assert.doesNotMatch(plain.stdout, /DL_REFERRAL/);
     assert.ok(!existsSync(join(plain.home, ".config", "directionallylocal")));
+  });
+
+  it("from a personal install command (dl.new/i/CODE), starts dl with DL_INSTALL_CODE and keeps it for dl's next start", () => {
+    const code = "AbCdEfGhIjKlMnOpQrStUvWxYz0";
+    const result = run({ terminal: true, env: { DL_INSTALL_CODE: code } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.read(join(result.dir, "install-code.log")), `${code}\n`);
+    const kept = join(result.home, ".config", "directionallylocal", "pending-install-code");
+    assert.equal(result.read(kept), `${code}\n`);
+    assert.equal(statSync(kept).mode & 0o777, 0o600);
+    assert.doesNotMatch(result.stdout + result.stderr, new RegExp(code), "never printed");
+    // Not a code from dl.new: ignored, with one line, and nothing kept or passed on.
+    for (const bad of ["short", "$(id)aaaaaaaaaaaaaaaaaaaaaaa", "a".repeat(65)]) {
+      const ignored = run({ terminal: true, env: { DL_INSTALL_CODE: bad } });
+      assert.equal(ignored.status, 0, ignored.stderr);
+      assert.match(ignored.stdout, /Ignoring DL_INSTALL_CODE: it isn't a code from dl\.new\./);
+      assert.equal(ignored.read(join(ignored.dir, "install-code.log")), "unset\n", bad);
+      assert.ok(!existsSync(join(ignored.home, ".config", "directionallylocal", "pending-install-code")));
+    }
   });
 
   it("links dl into ~/.local/bin when this shell has it on PATH, so dl works in the same terminal", () => {
