@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.36.0](https://github.com/directionally-local/installer/compare/v0.35.1...v0.36.0) (2026-11-17)
+
+
+### Features
+
+* **free:** one-time trial for new accounts, with a paywall when it runs out ([6baab58](https://github.com/directionally-local/installer/commit/6baab5804902e1aecb779265593895c495bb18ab))
+* **free:** one-time trial for new accounts, with a paywall when it runs out ([f165e3b](https://github.com/directionally-local/installer/commit/f165e3b957c5101673ab50efc65b68db42631133))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.25.0 ([0c7f452](https://github.com/directionally-local/installer/commit/0c7f452cf88db4656a691dae78456ca40590529a))
+* **deps:** install Autopilot 3.25.0 ([8c5c4c4](https://github.com/directionally-local/installer/commit/8c5c4c45b4180f963410638b09a64af4660e5323))
+
 ## [0.35.1](https://github.com/directionally-local/installer/compare/v0.35.0...v0.35.1) (2026-11-16)
 
 
