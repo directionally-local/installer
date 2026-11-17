@@ -4,6 +4,7 @@
  * the owner's decisions in installer#78.
  */
 
+import { DEFAULT_WEB_SIGNUP_URL } from "./web-signup.js";
 import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type DataCollection, type Quantization } from "./routing.js";
 
 export class ConfigError extends Error {}
@@ -200,6 +201,12 @@ export interface FreeConfig {
   paused: boolean;
   /** The public origin for links, when the request's own origin isn't it (behind a proxy). */
   publicUrl: string | undefined;
+  /**
+   * dl.new's web sign-up page (WEB_SIGNUP_URL, an https URL; default https://dl.new/start): the
+   * only page a web sign-in returns to and Pro checkout comes back to, and its origin the only one
+   * the /web/* endpoints answer CORS for (web-signup.ts).
+   */
+  webSignupUrl: string;
   /**
    * Resend's API key (RESEND_API_KEY, a secret) for emails to users, used only when the USER_EMAIL
    * binding (Cloudflare Email Service) is absent. With neither, none are sent. Never logged.
@@ -468,6 +475,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     luminalWeeklyCreditUsd: usd(env.LUMINAL_WEEKLY_CREDIT_USD, DEFAULTS.luminalWeeklyCreditUsd, "LUMINAL_WEEKLY_CREDIT_USD"),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
+    webSignupUrl: webSignupUrl(env.WEB_SIGNUP_URL),
     resendApiKey: text(env.RESEND_API_KEY),
     emailFrom: sender(env.EMAIL_FROM) ?? DEFAULTS.emailFrom,
     emailReplyTo: emailAddress(env.EMAIL_REPLY_TO, "EMAIL_REPLY_TO") ?? DEFAULTS.emailReplyTo,
@@ -579,6 +587,20 @@ function stripeId(value: unknown, prefix: string, name: string): string | undefi
   const raw = text(value);
   if (raw === undefined) return undefined;
   if (!raw.startsWith(prefix) || !/^[A-Za-z0-9_]+$/.test(raw)) throw new ConfigError(`${name} must be a Stripe id starting with ${prefix} (got "${raw}").`);
+  return raw;
+}
+
+/** WEB_SIGNUP_URL: an https URL with a path and nothing after it (no query, no fragment). */
+function webSignupUrl(value: unknown): string {
+  const raw = httpsUrl(value, "WEB_SIGNUP_URL");
+  if (raw === undefined) return DEFAULT_WEB_SIGNUP_URL;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ConfigError("WEB_SIGNUP_URL must be an https URL.");
+  }
+  if (url.search || url.hash || url.username || url.password || url.href !== raw) throw new ConfigError("WEB_SIGNUP_URL must be a plain https URL like https://dl.new/start.");
   return raw;
 }
 

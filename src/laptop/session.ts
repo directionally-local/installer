@@ -13,6 +13,7 @@ import { findAutopilot, supportsAttachRemote, type AutopilotCommand } from "./au
 import { RemoteApiError, type RemoteClient, type RemoteConversation } from "./client.js";
 import { describeError, pickModel, type LaptopIO } from "./commands.js";
 import { referralForAutopilot, settleReferral, withReferral, type ReferralOptions } from "./referral.js";
+import { installCodeForAutopilot, withInstallCode } from "./install-code.js";
 import { placeModel, saveModel } from "./settings.js";
 import { recordLastUsed, resolveTarget, type RemoteServer, type TargetReason } from "./config.js";
 import { detectGitHubRepository, snapshotWorkingTree, type WorkingTreeSnapshot } from "./git.js";
@@ -83,6 +84,8 @@ export interface SessionInput {
   sessionsFile?: string;
   /** Where plain Autopilot's DL_REFERRAL comes from and is kept (referral.ts); the real environment and files unless replaced (tests). */
   referral?: ReferralOptions;
+  /** Where plain Autopilot's DL_INSTALL_CODE comes from (install-code.ts); the real environment and file unless replaced (tests). */
+  installCode?: { env?: Record<string, string | undefined>; path?: string };
   /** The Node.js version plain Autopilot will run on; this process's unless replaced (tests). */
   nodeVersion?: string;
   /** Runs `dl model up` when Autopilot asks for it (gpu-handoff.ts); the real one unless replaced (tests). */
@@ -182,6 +185,8 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
     ...(input.args ?? []),
   ];
   const referral = await referralForAutopilot({ env: process.env, ...input.referral });
+  // dl.new's personal install command: handed on once, to the first start only.
+  const installCode = await installCodeForAutopilot({ env: process.env, ...input.installCode });
   const signals = input.signals ?? process;
   let child: SessionChild | undefined;
   // Autopilot gets Ctrl-C from the terminal itself; dl must not die of it underneath.
@@ -207,7 +212,8 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
         // dl's own update command, never npm i -g autopilot-ai, which dl wouldn't use. Set here so a
         // DL_VERSION left over from the install script (its version pin) can't leak through.
         // DL_GPU_HANDOFF and, after a model setup, DL_GPU_RESULT/DL_GPU_ERROR/DL_GPU: gpu-handoff.ts.
-        const env = withReferral({
+        // DL_INSTALL_CODE: dl.new's install command's one-time code (install-code.ts), on the first start only.
+        const env = withInstallCode(withReferral({
           ...process.env,
           AUTOPILOT_LAUNCHED_BY: "dl",
           DL_VERSION: dlVersion(),
@@ -215,7 +221,7 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
           // Not on the last relaunch allowed: Autopilot mustn't offer a retry dl wouldn't run.
           ...(handoff && round < MAX_HANDOFFS ? { DL_GPU_HANDOFF: handoff.path } : {}),
           ...gpuEnv,
-        }, referral);
+        }, referral), round === 0 ? installCode : undefined);
         const started = (input.spawn ?? realSpawn)(autopilot.command, args, env, { cwd: input.cwd });
         child = started;
         started.on("exit", (code, signal) => resolve({ code, signal }));

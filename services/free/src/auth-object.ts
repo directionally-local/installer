@@ -23,6 +23,18 @@ export const REFRESH_TTL_MS = 30 * 86_400_000;
  */
 export const REFRESH_REUSE_GRACE_MS = 5 * 60_000;
 const OAUTH_STATE_TTL_MS = 600_000;
+/** How long the dl.new page has to exchange a finished web sign-in for its session. */
+export const WEB_HANDOFF_TTL_MS = 5 * 60_000;
+/** How long a personal install command works. */
+export const INSTALL_CODE_TTL_MS = 60 * 60_000;
+/** An install code's random bytes: 160 bits, 27 base64url characters. */
+const INSTALL_CODE_BYTES = 20;
+/** What the person chose on dl.new: where dl runs, and (this computer) the plan. */
+export type InstallOption = "computer" | "gpu";
+export type InstallPlan = "free" | "pro";
+export type InstallCodeRedeem =
+  | ({ ok: true; option: InstallOption; plan: InstallPlan | null } & Identity)
+  | { ok: false; reason: "unknown" | "used" | "expired" };
 const POLL_TOLERANCE_MS = 250;
 /** Earlier admin rows carried this in `device_hash`; the purpose column replaced it. */
 const LEGACY_ADMIN_MARKER = "admin-dashboard";
@@ -57,6 +69,10 @@ interface DeviceRow {
   referral_code: string | null;
   /** The sign-in step's carried state (GitHub signals, prefilled email) as JSON, for `needs_details`. */
   details_json: string | null;
+  /** A web sign-up's page to return to (dl.new); null for the CLI's device codes. */
+  web_return: string | null;
+  /** The SHA-256 of the web page's random state, for a web sign-up. */
+  web_state_hash: string | null;
 }
 
 interface RefreshRow {
@@ -99,6 +115,27 @@ const SCHEMA = [
      used_at    INTEGER
    )`,
   `CREATE INDEX IF NOT EXISTS refresh_family ON refresh_tokens (family)`,
+  // dl.new's web sign-up (web-signup.ts): the one-time code that hands a finished GitHub sign-in
+  // back to the dl.new page, bound to the page's own random state.
+  `CREATE TABLE IF NOT EXISTS web_handoffs (
+     code_hash  TEXT PRIMARY KEY,
+     state_hash TEXT NOT NULL,
+     github_id  INTEGER NOT NULL,
+     login      TEXT NOT NULL,
+     expires_at INTEGER NOT NULL
+   )`,
+  // ... and the personal install command's one-time code (dl.new/i/<code>), exchanged once by
+  // the installed dl for a sign-in session. `option` and `plan` are what the person chose.
+  `CREATE TABLE IF NOT EXISTS install_codes (
+     code_hash  TEXT PRIMARY KEY,
+     github_id  INTEGER NOT NULL,
+     login      TEXT NOT NULL,
+     option     TEXT NOT NULL,
+     plan       TEXT,
+     created_at INTEGER NOT NULL,
+     expires_at INTEGER NOT NULL,
+     used_at    INTEGER
+   )`,
   `CREATE INDEX IF NOT EXISTS refresh_person ON refresh_tokens (github_id)`,
 ];
 
@@ -110,10 +147,15 @@ export class AuthObject extends DurableObject {
       this.#migrateOAuthPurpose();
       this.#migrateReferralCode();
       this.#migrateDetails();
+      this.#migrateWeb();
     });
   }
 
-  async issueDeviceCode(input: { clientDeviceId: string | null; referralCode?: string | null; now: number }): Promise<{ deviceCode: string; userCode: string; expiresAt: number; interval: number }> {
+  /**
+   * `web`: a dl.new web sign-up (web-signup.ts) instead of the CLI's: the same code, GitHub round
+   * trip, details and invite steps and admission, then `finishWebSignIn` hands it back to `web.returnUrl`.
+   */
+  async issueDeviceCode(input: { clientDeviceId: string | null; referralCode?: string | null; now: number; web?: { returnUrl: string; state: string } }): Promise<{ deviceCode: string; userCode: string; expiresAt: number; interval: number }> {
     const deviceCode = randomToken();
     const deviceHash = await sha256Hex(deviceCode);
     const expiresAt = input.now + DEVICE_CODE_TTL_MS;
@@ -126,8 +168,8 @@ export class AuthObject extends DurableObject {
         continue;
       }
       this.ctx.storage.sql.exec(
-        `INSERT INTO device_codes (device_hash, user_code, status, created_at, expires_at, interval_s, client_device_id, referral_code)
-         VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)`,
+        `INSERT INTO device_codes (device_hash, user_code, status, created_at, expires_at, interval_s, client_device_id, referral_code, web_return, web_state_hash)
+         VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
         deviceHash,
         userCode,
         input.now,
@@ -135,6 +177,8 @@ export class AuthObject extends DurableObject {
         POLL_INTERVAL_S,
         input.clientDeviceId,
         input.referralCode ?? null,
+        input.web?.returnUrl ?? null,
+        input.web ? await sha256Hex(input.web.state) : null,
       );
       await this.#scheduleCleanup(input.now);
       return { deviceCode, userCode, expiresAt, interval: POLL_INTERVAL_S };
@@ -365,12 +409,118 @@ export class AuthObject extends DurableObject {
     return families;
   }
 
+  /**
+   * A web sign-up that admission just approved: the device code is used up (nobody polls it) and
+   * a one-time handoff code is issued for the page to exchange (`claimWebHandoff`). Undefined for
+   * a CLI sign-in, which the terminal's poll finishes as before.
+   */
+  async finishWebSignIn(deviceRef: string, identity: Identity, now: number): Promise<{ returnUrl: string; code: string } | undefined> {
+    const row = this.#byHash(deviceRef);
+    if (!row || row.web_return === null || row.web_state_hash === null || row.expires_at <= now) return undefined;
+    const code = randomToken();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("UPDATE device_codes SET status = 'consumed', ticket_hash = NULL WHERE device_hash = ?", deviceRef);
+      this.ctx.storage.sql.exec("DELETE FROM web_handoffs WHERE expires_at <= ?", now);
+    });
+    this.ctx.storage.sql.exec(
+      "INSERT INTO web_handoffs (code_hash, state_hash, github_id, login, expires_at) VALUES (?, ?, ?, ?, ?)",
+      await sha256Hex(code),
+      row.web_state_hash,
+      identity.githubId,
+      identity.login,
+      now + WEB_HANDOFF_TTL_MS,
+    );
+    await this.#scheduleCleanup(now);
+    return { returnUrl: row.web_return, code };
+  }
+
+  /** Whether this device code is a web sign-up's (its refusals then point back to the web page). */
+  async isWebSignIn(deviceRef: string): Promise<boolean> {
+    return (this.#byHash(deviceRef)?.web_return ?? null) !== null;
+  }
+
+  /** Consumes a web handoff code: once, unexpired, and only with the state the page started with. */
+  async claimWebHandoff(code: string, state: string, now: number): Promise<Identity | undefined> {
+    const codeHash = await sha256Hex(code);
+    const row = this.ctx.storage.sql
+      .exec<{ state_hash: string; github_id: number; login: string; expires_at: number }>("SELECT * FROM web_handoffs WHERE code_hash = ?", codeHash)
+      .toArray()[0];
+    if (!row) return undefined;
+    this.ctx.storage.sql.exec("DELETE FROM web_handoffs WHERE code_hash = ?", codeHash);
+    if (row.expires_at <= now) return undefined;
+    if (!timingSafeEqual(await sha256Hex(state), row.state_hash)) return undefined;
+    return { githubId: row.github_id, login: row.login };
+  }
+
+  /**
+   * A personal install command's code: random (160 bits), stored as its SHA-256 only, for one
+   * person, used once, for `INSTALL_CODE_TTL_MS`. Earlier unused codes of the same person stop
+   * working, so only the command on screen works.
+   */
+  async issueInstallCode(input: { identity: Identity; option: InstallOption; plan: InstallPlan | null; now: number }): Promise<{ code: string; expiresAt: number }> {
+    const code = randomToken(INSTALL_CODE_BYTES);
+    const expiresAt = input.now + INSTALL_CODE_TTL_MS;
+    const sql = this.ctx.storage.sql;
+    const codeHash = await sha256Hex(code);
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("DELETE FROM install_codes WHERE expires_at <= ? OR (github_id = ? AND used_at IS NULL)", input.now - INSTALL_CODE_TTL_MS, input.identity.githubId);
+      sql.exec(
+        "INSERT INTO install_codes (code_hash, github_id, login, option, plan, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        codeHash,
+        input.identity.githubId,
+        input.identity.login,
+        input.option,
+        input.plan,
+        input.now,
+        expiresAt,
+      );
+    });
+    await this.#scheduleCleanup(input.now);
+    return { code, expiresAt };
+  }
+
+  /** Uses an install code up: the person and their choice, or why it can't be used. */
+  async redeemInstallCode(code: string, now: number): Promise<InstallCodeRedeem> {
+    const codeHash = await sha256Hex(code);
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync((): InstallCodeRedeem => {
+      const row = sql
+        .exec<{ code_hash: string; github_id: number; login: string; option: string; plan: string | null; expires_at: number; used_at: number | null }>(
+          "SELECT * FROM install_codes WHERE code_hash = ?",
+          codeHash,
+        )
+        .toArray()[0];
+      // The lookup is by hash; the compare is constant-time all the same.
+      if (!row || !timingSafeEqual(row.code_hash, codeHash)) return { ok: false, reason: "unknown" };
+      if (row.used_at !== null) return { ok: false, reason: "used" };
+      if (row.expires_at <= now) return { ok: false, reason: "expired" };
+      sql.exec("UPDATE install_codes SET used_at = ? WHERE code_hash = ?", now, codeHash);
+      return {
+        ok: true,
+        githubId: row.github_id,
+        login: row.login,
+        option: row.option === "gpu" ? "gpu" : "computer",
+        plan: row.plan === "pro" || row.plan === "free" ? row.plan : null,
+      };
+    });
+  }
+
+  /** A new sign-in session (refresh-token family) for someone already admitted: an install code's exchange. */
+  async issueSession(identity: Identity, now: number): Promise<{ refreshToken: string; family: string }> {
+    const family = crypto.randomUUID();
+    return { refreshToken: await this.#issueRefresh(identity, family, now), family };
+  }
+
   async alarm(): Promise<void> {
     const now = Date.now();
+    this.ctx.storage.sql.exec("DELETE FROM web_handoffs WHERE expires_at <= ?", now);
+    this.ctx.storage.sql.exec("DELETE FROM install_codes WHERE expires_at <= ?", now - INSTALL_CODE_TTL_MS);
     this.ctx.storage.sql.exec("DELETE FROM device_codes WHERE expires_at <= ?", now - DEVICE_CODE_TTL_MS);
     this.ctx.storage.sql.exec("DELETE FROM oauth_states WHERE expires_at <= ?", now);
     this.ctx.storage.sql.exec("DELETE FROM refresh_tokens WHERE expires_at <= ? OR (used_at IS NOT NULL AND used_at <= ?)", now, now - REFRESH_TTL_MS);
-    const pending = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM device_codes").toArray()[0]?.n ?? 0;
+    const pending = this.ctx.storage.sql
+      .exec<{ n: number }>("SELECT (SELECT COUNT(*) FROM device_codes) + (SELECT COUNT(*) FROM web_handoffs) + (SELECT COUNT(*) FROM install_codes) AS n")
+      .toArray()[0]?.n ?? 0;
     if (pending > 0) await this.ctx.storage.setAlarm(now + 3_600_000);
   }
 
@@ -411,6 +561,13 @@ export class AuthObject extends DurableObject {
   #migrateDetails(): void {
     const columns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('device_codes')").toArray();
     if (!columns.some((column) => column.name === "details_json")) this.ctx.storage.sql.exec("ALTER TABLE device_codes ADD COLUMN details_json TEXT");
+  }
+
+  /** Adds `device_codes.web_return` and `web_state_hash` (dl.new's web sign-up) to databases created before them. */
+  #migrateWeb(): void {
+    const columns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('device_codes')").toArray();
+    if (!columns.some((column) => column.name === "web_return")) this.ctx.storage.sql.exec("ALTER TABLE device_codes ADD COLUMN web_return TEXT");
+    if (!columns.some((column) => column.name === "web_state_hash")) this.ctx.storage.sql.exec("ALTER TABLE device_codes ADD COLUMN web_state_hash TEXT");
   }
 
   /** Adds `device_codes.referral_code` to databases created before it existed. */

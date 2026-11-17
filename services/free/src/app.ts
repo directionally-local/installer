@@ -94,6 +94,7 @@ import {
 } from "./user-email-send.js";
 import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind } from "./user-emails.js";
 import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
+import { allowedReturn, isInstallOption, ONE_TIME_CODE, planFor, WEB_SESSION_TTL_S, WEB_STATE, webCors, webFunnelCsv, type WebStep } from "./web-signup.js";
 import { grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, parseGrantUsd, parseLogins, type GrantResult } from "./grant.js";
 
 /**
@@ -177,6 +178,12 @@ const LIMITS = {
   feedbackPersonHour: { capacity: 5, perHour: 5 },
   feedbackPersonDay: { capacity: 20, perHour: 20 / 24 },
   feedbackIp: { capacity: 10, perHour: 10 },
+  // dl.new's web sign-up (web-signup.ts). Handoff and install codes are 256 and 160 random bits,
+  // so these limits only keep the endpoints cheap; an office can still sign several people up.
+  webSessionIp: { capacity: 30, perHour: 30 },
+  installCodePerson: { capacity: 10, perHour: 10 },
+  installExchangeIp: { capacity: 20, perHour: 20 },
+  telemetryWebIp: perMinute(600),
 } satisfies Record<string, Limit>;
 
 export interface Env {
@@ -381,6 +388,9 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/v1/telemetry/download") return telemetry(c, "download");
   if (method === "POST" && path === "/v1/telemetry/install") return telemetry(c, "install");
   if (method === "POST" && path === "/v1/telemetry/gpu") return telemetry(c, "gpu");
+  if (method === "POST" && path === "/v1/telemetry/web") return webTelemetry(c);
+  if (method === "POST" && path === "/v1/install-code/exchange") return installCodeExchange(c);
+  if (path.startsWith("/web/")) return web(c, path, method);
   if (method === "GET" && path.startsWith("/v1/referrals/")) return referralLookup(c, path.slice("/v1/referrals/".length));
   if (method === "POST" && path === "/v1/billing/checkout") return billingCheckout(c);
   if (method === "POST" && path === "/v1/billing/portal") return billingPortal(c);
@@ -565,12 +575,16 @@ function signingKey(config: FreeConfig): Promise<CryptoKey> {
 
 /** `sid` is the refresh-token family: the sign-in session the access token belongs to. */
 async function tokenResponse(c: Ctx, identity: Identity, refreshToken: string, sid: string): Promise<Response> {
+  return json(await tokenBody(c, identity, refreshToken, sid));
+}
+
+async function tokenBody(c: Ctx, identity: Identity, refreshToken: string, sid: string) {
   const iat = Math.floor(c.now() / 1000);
   const accessToken = await signJwt(
     { iss: ISSUER, typ: "access", sub: String(identity.githubId), login: identity.login, sid, iat, exp: iat + ACCESS_TTL_S, jti: crypto.randomUUID() },
     await signingKey(c.config),
   );
-  return json({ access_token: accessToken, refresh_token: refreshToken, token_type: "Bearer", expires_in: ACCESS_TTL_S });
+  return { access_token: accessToken, refresh_token: refreshToken, token_type: "Bearer", expires_in: ACCESS_TTL_S };
 }
 
 /** Who is calling: from a sign-in session's access token, or from a server key. */
@@ -1132,6 +1146,11 @@ async function deviceAuthorize(c: Ctx): Promise<Response> {
   const ref = normalizeReferralCode(c.url.searchParams.get("ref") ?? undefined);
   const begun = userCode ? await auth(c).beginOAuth(userCode, c.now(), ref) : undefined;
   if (!begun) return enterCodePage("That code is unknown, used or expired. Start sign-in again in your terminal.");
+  return toGitHub(c, begun);
+}
+
+/** The redirect to GitHub for a device code's round trip, with the cookie that binds it to this browser. */
+function toGitHub(c: Ctx, begun: { state: string; browser: string }): Response {
   // `user:email` (read-only) prefills the contact email the next step asks for.
   const location = githubAuthorizeUrl({ clientId: c.config.githubClientId }, `${c.base}/device/callback`, begun.state, SIGN_IN_SCOPE);
   return new Response(null, {
@@ -1471,6 +1490,15 @@ async function admitAndFinish(
     await auth(c).decide(deviceRef, "approved", identity, c.now());
     if (result.queueStarted) await alert(c, [await directory(c).queueStartedAlert(c.now(), policyOf(c.config))]);
     if (result.firstSignup) await alert(c, [result.firstSignup]);
+    // A dl.new web sign-up: back to the page with a one-time code instead of "return to your terminal".
+    const web = await auth(c).finishWebSignIn(deviceRef, identity, c.now());
+    if (web) {
+      await countWebStep(c, "signed_in");
+      return new Response(null, {
+        status: 303,
+        headers: { location: `${web.returnUrl}#signin=${web.code}`, "cache-control": "no-store", "referrer-policy": "no-referrer" },
+      });
+    }
     const queued = result.queued ? ` ${QUEUED_SIGNED_IN}` : "";
     const invite =
       config.referralBonusTokens > 0
@@ -1714,6 +1742,12 @@ async function billingCheckout(c: Ctx): Promise<Response> {
   if (product === "topup" && (!Number.isInteger(quantity) || quantity < range.minQuantity || quantity > range.maxQuantity)) {
     return apiError(400, "invalid_request", `quantity must be a whole number from ${range.minQuantity} to ${range.maxQuantity}.`);
   }
+  return checkoutFor(c, identity, product, quantity, c.config.stripe);
+}
+
+/** A Stripe Checkout page for `product`, returning to the URLs in `stripe` (the CLI's, or dl.new's web sign-up). */
+async function checkoutFor(c: Ctx, identity: Identity, product: Product, quantity: number, stripe: FreeConfig["stripe"]): Promise<Response> {
+  const range = c.config.offers.topup;
   const unavailable = billingReady(c, product);
   if (unavailable) return unavailable;
   const person = account(c, identity.githubId);
@@ -1726,7 +1760,7 @@ async function billingCheckout(c: Ctx): Promise<Response> {
   try {
     const session = await createCheckout(c.fetch, {
       product,
-      config: c.config.stripe,
+      config: stripe,
       githubId: identity.githubId,
       login: identity.login,
       customerId: billing.customerId,
@@ -3441,6 +3475,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
   if (csv === undefined) return adminHomeResponse(c, config, paused, now, identity.login, viaCookie);
   if (!isCsvTable(csv)) return apiError(404, "not_found", `GET ${c.url.pathname} isn't a route.`);
   if (csv === "early-access") return earlyAccessCsv(await directory(c).earlyAccessLeads(), now);
+  if (csv === "web-signup") return webFunnelCsvResponse(c);
   // The health CSVs read only health-data.ts's queries.
   if (isHealthCsvTable(csv)) {
     return healthCsv(csv, await directory(c).health({ now, adminIds: [...c.config.adminGithubIds], days: healthWindow(c.url.searchParams.get("days")) }));
@@ -3466,7 +3501,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
 
 /** GET /admin: the home page, from the Directory's admin-home reads and the spend counters. */
 async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, now: number, login: string, signOut: boolean): Promise<Response> {
-  const [data, spend] = await Promise.all([directory(c).adminHome({ now, adminIds: [...c.config.adminGithubIds], trialCutoff: config.trialCutoff }), directory(c).spend(now)]);
+  const [data, spend, webFunnel] = await Promise.all([directory(c).adminHome({ now, adminIds: [...c.config.adminGithubIds], trialCutoff: config.trialCutoff }), directory(c).spend(now), directory(c).webFunnel()]);
   const view = spendView(c, config, paused, spend);
   return adminHomePage({
     data,
@@ -3487,6 +3522,8 @@ async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, no
     },
     login,
     signOut,
+    webFunnel,
+    now,
   });
 }
 
@@ -3747,4 +3784,246 @@ async function adminSignOut(c: Ctx): Promise<Response> {
     await account(c, session.githubId).revokeSessions({ sids: [session.sid], until: (session.exp + 60) * 1000, now: c.now() });
   }
   return new Response(null, { status: 303, headers: { location: "/admin", "set-cookie": adminCookie("", 0), "cache-control": "no-store" } });
+}
+
+// ─── dl.new's web sign-up (web-signup.ts) ───────────────────────────────────
+
+/** Counts one step of the web sign-up funnel (counts only). Never fails the request. */
+async function countWebStep(c: Ctx, step: WebStep): Promise<void> {
+  try {
+    await directory(c).countWebStep(step, Math.floor(c.now() / DAY_MS));
+  } catch (error) {
+    console.error("web funnel: count failed", error instanceof Error ? error.name : "error");
+  }
+}
+
+/** POST /v1/telemetry/web {step: "visited"}: the dl.new Worker counts each /start page it serves. */
+async function webTelemetry(c: Ctx): Promise<Response> {
+  const day = Math.floor(c.now() / DAY_MS);
+  const ipKey = await sha256Hex(`telemetry:${c.config.tokenSigningKey}:${day}:${c.ipNet}`);
+  const retry = await limited(c, `telemetry:web:${ipKey}`, LIMITS.telemetryWebIp);
+  if (retry !== undefined) return rateLimited(retry);
+  if (Number(c.request.headers.get("content-length") ?? 0) > MAX_TELEMETRY_BYTES) return apiError(413, "too_large", "A telemetry body is under 1 KB.");
+  const text = await c.request.text();
+  if (text.length > MAX_TELEMETRY_BYTES) return apiError(413, "too_large", "A telemetry body is under 1 KB.");
+  const body = parseJson(text) as { step?: unknown } | undefined;
+  // The other steps are counted where they happen, by the service itself.
+  if (body?.step !== "visited") return apiError(400, "invalid_request", 'Send {"step": "visited"}.');
+  await countWebStep(c, "visited");
+  return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+}
+
+/** The web page's origin (WEB_SIGNUP_URL's): the only one /web/* answers CORS for. */
+function webOrigin(c: Ctx): string {
+  return new URL(c.config.webSignupUrl).origin;
+}
+
+/** A plain page for a web sign-in that can't start, with the way back to the web page. */
+function webSignInProblem(c: Ctx, heading: string, message: string, status: number): Response {
+  return donePage(heading, `${message} Start again at ${c.config.webSignupUrl}.`, status);
+}
+
+/**
+ * GET /web/signin?return=<WEB_SIGNUP_URL>&state=<the page's random state>[&ref=<referral>]: starts
+ * the CLI's own browser sign-in (device code, GitHub, the details and invite steps, admission) for
+ * the web page. `return` may only be the configured page itself (no open redirect).
+ */
+async function webSignIn(c: Ctx): Promise<Response> {
+  const signupUrl = c.config.webSignupUrl;
+  if (!allowedReturn(c.url.searchParams.get("return"), signupUrl)) return webSignInProblem(c, "Sign-in link not valid", "This sign-in link isn't valid.", 400);
+  const state = c.url.searchParams.get("state") ?? "";
+  if (!WEB_STATE.test(state)) return webSignInProblem(c, "Sign-in link not valid", "This sign-in link isn't valid.", 400);
+  if (await isPaused(c)) return donePage("Paused", PAUSED_MESSAGE, 503);
+  const retry = await limited(c, `device:ip:${c.ipNet}`, LIMITS.deviceCodeIp);
+  if (retry !== undefined) return webSignInProblem(c, "Too many sign-ins", `Too many sign-ins from this network. Try again in ${Math.ceil(retry / 60)} minutes.`, 429);
+  const ref = normalizeReferralCode(c.url.searchParams.get("ref") ?? undefined) ?? null;
+  const issued = await auth(c).issueDeviceCode({ clientDeviceId: null, referralCode: ref, now: c.now(), web: { returnUrl: signupUrl, state } });
+  const begun = await auth(c).beginOAuth(issued.userCode, c.now());
+  if (!begun) return webSignInProblem(c, "Sign-in didn't start", "Something went wrong starting the sign-in.", 500);
+  return toGitHub(c, begun);
+}
+
+/** The person behind a web session (a JWT of type "web"), or a 401. */
+async function webCaller(c: Ctx): Promise<Identity | Response> {
+  const match = /^Bearer\s+(\S+)$/i.exec(c.request.headers.get("authorization") ?? "");
+  const invalid = () => apiError(401, "invalid_token", "Your dl.new sign-in expired. Sign in with GitHub again.");
+  if (!match) return invalid();
+  const claims = await verifyJwt(match[1]!, await signingKey(c.config), Math.floor(c.now() / 1000));
+  if (!claims || claims.typ !== "web" || claims.iss !== ISSUER || typeof claims.login !== "string") return invalid();
+  const githubId = Number(claims.sub);
+  if (!Number.isSafeInteger(githubId) || githubId <= 0) return invalid();
+  return { githubId, login: claims.login };
+}
+
+/** The admitted, unblocked person behind a web session, or the response that refuses them. */
+async function webPerson(c: Ctx): Promise<{ identity: Identity; person: PersonRow } | Response> {
+  const identity = await webCaller(c);
+  if (identity instanceof Response) return identity;
+  const guarded = await apiGuard(c, identity);
+  if (guarded) return guarded;
+  const person = await directory(c).getPerson(identity.githubId);
+  if (!person) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
+  if (person.status === "blocked") return blockedError();
+  return { identity, person };
+}
+
+const WEB_ROUTES: Record<string, { method: "GET" | "POST"; handle: (c: Ctx) => Promise<Response> }> = {
+  "/web/session": { method: "POST", handle: webSession },
+  "/web/me": { method: "GET", handle: webMe },
+  "/web/email": { method: "POST", handle: webEmail },
+  "/web/choice": { method: "POST", handle: webChoice },
+  "/web/checkout": { method: "POST", handle: webCheckout },
+  "/web/install-code": { method: "POST", handle: webInstallCode },
+};
+
+/** /web/*: the sign-in redirect, and the JSON endpoints the web page calls (CORS for its origin only). */
+async function web(c: Ctx, path: string, method: string): Promise<Response> {
+  if (path === "/web/signin") return method === "GET" ? webSignIn(c) : apiError(405, "method_not_allowed", "GET /web/signin.");
+  const route = WEB_ROUTES[path];
+  if (!route) return apiError(404, "not_found", `${method} ${c.url.pathname} isn't a route.`);
+  const origin = c.request.headers.get("origin");
+  const cors = webCors(origin, webOrigin(c));
+  if (method === "OPTIONS") return new Response(null, { status: 204, headers: { ...cors, "cache-control": "no-store" } });
+  if (method !== route.method) return apiError(405, "method_not_allowed", `${route.method} ${path}.`, {}, cors);
+  // A page on another site gets nothing, whatever it sends (its browser wouldn't show it the answer anyway).
+  if (origin !== null && origin !== webOrigin(c)) return apiError(403, "forbidden_origin", "Only dl.new can call this.", {}, cors);
+  const response = await route.handle(c);
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(cors)) headers.set(name, value);
+  headers.set("cache-control", "no-store");
+  return new Response(response.body, { status: response.status, headers });
+}
+
+/** POST /web/session {code, state}: the one-time code from the sign-in's redirect → a web session for the page. */
+async function webSession(c: Ctx): Promise<Response> {
+  const retry = await limited(c, `websession:ip:${c.ipNet}`, LIMITS.webSessionIp);
+  if (retry !== undefined) return rateLimited(retry);
+  const body = (await readJson(c)) ?? {};
+  const invalid = () => apiError(400, "invalid_grant", "This sign-in is invalid, used or expired. Sign in with GitHub again.");
+  if (typeof body.code !== "string" || !ONE_TIME_CODE.test(body.code) || typeof body.state !== "string" || !WEB_STATE.test(body.state)) return invalid();
+  const identity = await auth(c).claimWebHandoff(body.code, body.state, c.now());
+  if (!identity) return invalid();
+  if ((await directory(c).getPerson(identity.githubId))?.status === "blocked") return blockedError();
+  const iat = Math.floor(c.now() / 1000);
+  const token = await signJwt({ iss: ISSUER, typ: "web", sub: String(identity.githubId), login: identity.login, iat, exp: iat + WEB_SESSION_TTL_S, jti: crypto.randomUUID() }, await signingKey(c.config));
+  return json({ token, expires_in: WEB_SESSION_TTL_S, login: identity.login });
+}
+
+/** GET /web/me: what the web page shows: who, the contact email, the plan, the trial, the offers and the invite link. */
+async function webMe(c: Ctx): Promise<Response> {
+  const found = await webPerson(c);
+  if (found instanceof Response) return found;
+  const { identity, person: stored } = found;
+  c.callerId = identity.githubId;
+  const { config, person } = await runtime(c);
+  const allowance = await account(c, identity.githubId).allowance(
+    c.now(),
+    limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt)),
+  );
+  return json({
+    login: identity.login,
+    "email": stored.email,
+    emailUpdates: stored.email_updates === 1,
+    plan: allowance.plan,
+    trial: trialView(allowance),
+    /** The free weekly tokens, for an account not on the trial (grandfathered); 0 when there are none. */
+    weeklyTokens: allowance.trial ? 0 : allowance.tokensPerWeek,
+    offers: offers(config),
+    referral: person?.referral ? { link: linkFor(config, person), joined: person.referral.joined } : null,
+  });
+}
+
+/** POST /web/email {email, updates?}: the contact email, with the same checks as the sign-in's details step. */
+async function webEmail(c: Ctx): Promise<Response> {
+  const found = await webPerson(c);
+  if (found instanceof Response) return found;
+  const { identity, person } = found;
+  const body = (await readJson(c)) ?? {};
+  const email = typeof body.email === "string" ? body.email.trim() : "";
+  if (!plausibleEmail(email)) return apiError(400, "invalid_email", "Enter an email address we can reach you at.");
+  const inbox = normalizeEmail(email);
+  if (!c.config.adminGithubIds.has(identity.githubId)) {
+    const { config: guard } = await runtime(c);
+    if (emailBlocked(inbox, guard.blockedEmails)) return apiError(400, "email_blocked", EMAIL_BLOCKED_MESSAGE);
+    if (await directory(c).emailInUse(inbox, identity.githubId)) return apiError(409, "email_in_use", EMAIL_IN_USE_MESSAGE);
+  }
+  const updates = typeof body.updates === "boolean" ? body.updates : person.email_updates === 1;
+  await directory(c).setEmail(identity.githubId, email, updates, c.now());
+  return json({ email, emailUpdates: updates });
+}
+
+/** POST /web/choice {option}: "this computer" or "my Nvidia GPU" was chosen (counted only). */
+async function webChoice(c: Ctx): Promise<Response> {
+  const found = await webPerson(c);
+  if (found instanceof Response) return found;
+  const body = (await readJson(c)) ?? {};
+  if (!isInstallOption(body.option)) return apiError(400, "invalid_request", 'Send {option: "computer"} or {option: "gpu"}.');
+  await countWebStep(c, body.option === "gpu" ? "chose_gpu" : "chose_computer");
+  return json({ ok: true });
+}
+
+/** POST /web/checkout: Stripe Checkout for Pro, coming back to the web page (?checkout=done or ?checkout=cancel). */
+async function webCheckout(c: Ctx): Promise<Response> {
+  const found = await webPerson(c);
+  if (found instanceof Response) return found;
+  await countWebStep(c, "plan_pro");
+  const page = c.config.webSignupUrl;
+  return checkoutFor(c, found.identity, "pro", c.config.offers.topup.minQuantity, { ...c.config.stripe, successUrl: `${page}?checkout=done`, cancelUrl: `${page}?checkout=cancel` });
+}
+
+/**
+ * POST /web/install-code {option, plan}: the personal install command's one-time code (see
+ * AuthObject.issueInstallCode). The page shows `curl -fsSL https://dl.new/i/<code> | sh`.
+ */
+async function webInstallCode(c: Ctx): Promise<Response> {
+  const found = await webPerson(c);
+  if (found instanceof Response) return found;
+  const retry = await limited(c, `installcode:gh:${found.identity.githubId}`, LIMITS.installCodePerson);
+  if (retry !== undefined) return rateLimited(retry);
+  const body = (await readJson(c)) ?? {};
+  if (!isInstallOption(body.option)) return apiError(400, "invalid_request", 'Send {option: "computer" | "gpu", plan?: "free" | "pro"}.');
+  const plan = planFor(body.option, body.plan);
+  if (body.option === "computer" && !plan) return apiError(400, "invalid_request", 'On this computer, send plan "free" or "pro".');
+  const issued = await auth(c).issueInstallCode({ identity: found.identity, option: body.option, plan, now: c.now() });
+  if (plan === "free") await countWebStep(c, "plan_free");
+  await countWebStep(c, "command_shown");
+  return json({ code: issued.code, expires_in: Math.round((issued.expiresAt - c.now()) / 1000) });
+}
+
+/**
+ * POST /v1/install-code/exchange {code, device_id?}: the installed dl (Autopilot) trades the
+ * install command's code, once, for a sign-in session, as the device-code poll would give it,
+ * plus what the person chose (`option`, `plan`). A device id is bound as device-code sign-in
+ * binds one. Used, expired or unknown codes are 400 invalid_install_code (sign in with the device
+ * code instead). Codes are never logged.
+ */
+async function installCodeExchange(c: Ctx): Promise<Response> {
+  const retry = await limited(c, `installcode:ip:${c.ipNet}`, LIMITS.installExchangeIp);
+  if (retry !== undefined) return rateLimited(retry);
+  if (await isPaused(c)) return pausedError();
+  const body = (await readJson(c)) ?? {};
+  const invalid = (reason: string) =>
+    apiError(400, "invalid_install_code", reason === "used" ? "This install command was already used." : "This install command expired or isn't valid.", { reason });
+  if (typeof body.code !== "string" || !ONE_TIME_CODE.test(body.code)) return invalid("unknown");
+  const deviceId = typeof body.device_id === "string" && /^[A-Za-z0-9._:-]{8,128}$/.test(body.device_id) ? body.device_id : null;
+  const redeemed = await auth(c).redeemInstallCode(body.code, c.now());
+  if (!redeemed.ok) return invalid(redeemed.reason);
+  const identity: Identity = { githubId: redeemed.githubId, login: redeemed.login };
+  const person = await directory(c).getPerson(identity.githubId);
+  if (!person) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
+  if (person.status === "blocked") return blockedError();
+  if (deviceId && (await directory(c).bindDevice({ ...identity, deviceId, now: c.now() })) === "device_taken") {
+    return apiError(403, "device_taken", DEVICE_TAKEN_MESSAGE, { reason: "device_taken" });
+  }
+  const session = await auth(c).issueSession(identity, c.now());
+  await countWebStep(c, "code_exchanged");
+  return json({ ...(await tokenBody(c, identity, session.refreshToken, session.family)), login: identity.login, option: redeemed.option, plan: redeemed.plan });
+}
+
+/** GET /admin/dashboard/web-signup.csv: the web sign-up funnel per day. */
+async function webFunnelCsvResponse(c: Ctx): Promise<Response> {
+  return new Response(webFunnelCsv(await directory(c).webFunnel()), {
+    status: 200,
+    headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="free-web-signup-${isoDay(c.now())}.csv"`, "cache-control": "no-store", "x-content-type-options": "nosniff" },
+  });
 }

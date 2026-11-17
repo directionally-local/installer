@@ -1083,6 +1083,28 @@ Top-ups, plans and personal caps stay. `{dryRun: true}` only counts. It answers
 `{dryRun, people, reset, skippedBlocked}`. The kill
 switch is `POST /admin/pause` and `/admin/unpause`; `PAUSED=true` in env pauses as well.
 
+## Web sign-up (dl.new/start)
+
+dl.new's sign-up page signs people in with GitHub, lets them choose where dl runs (this computer, or their Nvidia GPU) and, on this computer, a plan (the one-time trial, or Pro through Stripe), then shows a personal one-time install command, `curl -fsSL https://dl.new/i/<code> | sh`, that installs dl already signed in. `src/web-signup.ts` has the contract; in short:
+
+| Endpoint | Who calls it | What it does |
+| --- | --- | --- |
+| `GET /web/signin?return=<WEB_SIGNUP_URL>&state=<page state>[&ref=<referral>]` | the page's Sign in button (a navigation) | Starts the CLI's own browser sign-in: a device code (no device id), GitHub, the details step (contact email) and the invite step when one is needed, and the same `admit` (open admission, account age, levels, batch flag, blocked emails, network sign-up limit, cohort). On success it 303s to `<WEB_SIGNUP_URL>#signin=<one-time code>` instead of "return to your terminal". `return` must be exactly `WEB_SIGNUP_URL`. |
+| `POST /web/session {code, state}` | the page (CORS) | The one-time code (5 minutes, once, bound to the page's state) → `{token, expires_in, login}`, a web session: a JWT of type `web`, one hour, accepted only by `/web/*`. |
+| `GET /web/me` | the page | `{login, email, emailUpdates, plan, trial, weeklyTokens, offers, referral: {link, joined}}`. |
+| `POST /web/email {email, updates?}` | the page | Changes the contact email with the details step's checks (plausible, blocked, one account per inbox). |
+| `POST /web/choice {option}` | the page | `computer` or `gpu`; counted only. |
+| `POST /web/checkout` | the page | Stripe Checkout for Pro, returning to `WEB_SIGNUP_URL?checkout=done` (or `cancel`). |
+| `POST /web/install-code {option, plan}` | the page | `{code, expires_in}`: 160 random bits, stored as SHA-256, one use, 60 minutes, for this account; a new one replaces an unused older one. `plan` (`free` or `pro`) only with `option: "computer"`. |
+| `POST /v1/install-code/exchange {code, device_id?}` | the installed dl (Autopilot) | Once: the device-code poll's token response plus `{login, option, plan}`. A device id is bound as in device sign-in (`device_taken` when it holds another account). Used, expired or unknown: 400 `invalid_install_code` with `reason` (`used`, `expired`, `unknown`); Autopilot then falls back to the device code. 20 tries an hour per network. |
+| `POST /v1/telemetry/web {step: "visited"}` | the dl.new Worker, when it serves `/start` | Counted only. |
+
+The `/web/*` JSON endpoints answer CORS only for `WEB_SIGNUP_URL`'s origin and refuse (403 `forbidden_origin`) a request whose `Origin` is another site. The web session travels as a bearer header, never a cookie, so there is no CSRF surface; the sign-in's own round trip uses the device flow's `__Host-` cookie on this host as before. Codes are never logged and appear in a URL only in the install command (and, for the handoff, in the page's fragment, which the page removes at once).
+
+The funnel (counts only, per UTC day): `visited`, `signed_in`, `chose_computer`, `chose_gpu`, `plan_free`, `plan_pro` (checkout started), `command_shown`, `code_exchanged`. The admin home has a "Web sign-up funnel" card (last 7 days, all time), and `/admin/dashboard/web-signup.csv` has one row per day.
+
+Settings: `WEB_SIGNUP_URL` (default `https://dl.new/start`). The GitHub OAuth app needs nothing new (the callback is still `/device/callback`).
+
 ## Install counts
 
 Two public endpoints count the top of the funnel, anonymously. No sign-in; each adds one to a

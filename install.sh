@@ -34,6 +34,10 @@
 # it's passed on to dl, which passes it to Autopilot for the free tier sign-in. On a laptop it's
 # also kept in ~/.config/directionallylocal/pending-referral until that sign-in, so signing in on
 # a later run still credits it.
+# Personal install commands from dl.new (curl -fsSL https://dl.new/i/CODE | sh) set
+# DL_INSTALL_CODE=CODE, a one-time code: it's passed on to dl, which passes it to Autopilot, which
+# trades it once with the free tier for a sign-in (no second GitHub sign-in). On a laptop it's
+# also kept in ~/.config/directionallylocal/pending-install-code until dl's next start.
 # At the end it sends one anonymous count to free.directionallylocal.com (OS, chip, laptop or server, dl version, ok or the step that failed and, when known, a word for why, which page); no IP or identity is kept, and DL_NO_TELEMETRY=1, DO_NOT_TRACK=1 or CI turns it off.
 set -eu
 
@@ -510,6 +514,22 @@ keep_referral() {
   (umask 077 && mkdir -p "$config/directionallylocal" && printf '%s\n' "$DL_REFERRAL" >"$file") 2>/dev/null || true
 }
 
+# DL_INSTALL_CODE as dl.new issues it: 22 to 64 base64url characters. Fails for anything else.
+valid_install_code() {
+  case $1 in
+    ""|*[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  [ "${#1}" -ge 22 ] && [ "${#1}" -le 64 ]
+}
+
+# The install code, kept for dl's next start (dl deletes it then): when dl isn't started here,
+# the first dl run still signs in with it. The newest one replaces an older one. Never fails the install.
+keep_install_code() {
+  config="${XDG_CONFIG_HOME:-$HOME/.config}"
+  file="$config/directionallylocal/pending-install-code"
+  (umask 077 && mkdir -p "$config/directionallylocal" && printf '%s\n' "$DL_INSTALL_CODE" >"$file") 2>/dev/null || true
+}
+
 # dl's prebuilt bundle for this computer (scripts/build-bundle.sh, built by the release
 # workflow from the same npm package): one download with a known size, instead of npm looking
 # up and fetching ~170 packages one at a time. Unpacks to the same $DL_HOME/dl that npm
@@ -693,13 +713,14 @@ laptop_main() {
   fi
 
   if [ -n "${DL_REFERRAL:-}" ]; then keep_referral; fi
+  if [ -n "${DL_INSTALL_CODE:-}" ]; then keep_install_code; fi
   # Installed: counted now, before dl starts (what dl does after is dl's, not the install's).
   count_install ok
 
   if [ -n "$start" ]; then
     say ""
     code=0
-    # DL_REFERRAL (exported in main) goes with it: dl passes it to Autopilot.
+    # DL_REFERRAL and DL_INSTALL_CODE (exported in main) go with it: dl passes them to Autopilot.
     "$DL_HOME/bin/dl" <"$tty" || code=$?
     # Back at the shell this script was piped from, where dl isn't on PATH yet: say so now,
     # when it's needed, as the lines above have scrolled away.
@@ -744,6 +765,15 @@ main() {
     else
       say "  Ignoring DL_REFERRAL: an invite code is a GitHub username."
       unset DL_REFERRAL
+    fi
+  fi
+  # A personal install command's one-time code (dl.new/i/CODE) goes the same way.
+  if [ -n "${DL_INSTALL_CODE:-}" ]; then
+    if valid_install_code "$DL_INSTALL_CODE"; then
+      export DL_INSTALL_CODE
+    else
+      say "  Ignoring DL_INSTALL_CODE: it isn't a code from dl.new."
+      unset DL_INSTALL_CODE
     fi
   fi
   COUNT_MODE=$(install_mode)
