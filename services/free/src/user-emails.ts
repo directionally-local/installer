@@ -10,7 +10,21 @@
  * When each one goes out is in user-email-send.ts.
  */
 
-export type UserEmailKind = "welcome" | "welcome_basic" | "welcome_starter" | "welcome_starter_small" | "access_granted" | "didnt_start" | "week_80" | "gone_quiet";
+export type UserEmailKind =
+  | "welcome"
+  | "welcome_basic"
+  | "welcome_starter"
+  | "welcome_starter_small"
+  | "welcome_trial"
+  | "access_granted"
+  | "access_granted_trial"
+  | "didnt_start"
+  | "week_80"
+  | "trial_80"
+  | "gone_quiet";
+
+/** The welcome kinds: held back while the person waits in line for free tokens. */
+export const WELCOME_KINDS: readonly UserEmailKind[] = ["welcome", "welcome_basic", "welcome_starter", "welcome_starter_small", "welcome_trial"];
 
 export interface UserEmailCopy {
   subject: string;
@@ -74,12 +88,47 @@ sina`,
     body: WELCOME_BODY,
   },
 
+  // 1f. The same moment, for a new sign-up on the trial (admitted at or after the trial cutoff):
+  // a one-time amount, not a weekly one. No amounts: they are runtime settings.
+  welcome_trial: {
+    subject: "you're in",
+    body: `hey,
+
+sina here, i build dl.
+
+you're on the free trial now: a one-time batch of free tokens to try dl, gpt-6 and deepseek included, on me. it doesn't reset, so when it's used up you can keep going with dl pro or a top up: type /upgrade in dl.
+
+three things worth trying first:
+- open dl in a repo and ask it how the project fits together
+- give it a small bug you've been putting off
+- ask it to write tests for one file
+
+if anything breaks or feels off, just reply to this. it comes straight to me and i read every one.
+
+there's also a discord where people share what they're building and help each other out: https://discord.gg/zeBnJTgcRK
+
+sina`,
+  },
+
   // 1e. An admin granted the person's access request (/request in dl).
   access_granted: {
     subject: "you're in",
     body: `hey,
 
 you're in. you now have free tokens: every model, gpt-6 included, and more free usage each week than the standard allowance. it resets every monday.
+
+thanks for telling me what you're building. if anything breaks or feels off, just reply to this.
+
+sina`,
+  },
+
+  // 1g. An admin granted the access request of someone on the trial: their free tokens are the
+  // trial's, not a weekly allowance.
+  access_granted_trial: {
+    subject: "you're in",
+    body: `hey,
+
+you're in. you now have your free trial tokens: every model, gpt-6 included. they're a one-time amount, so when they're used up you can keep going with dl pro or a top up: type /upgrade in dl.
 
 thanks for telling me what you're building. if anything breaks or feels off, just reply to this.
 
@@ -110,6 +159,20 @@ sina`,
 you've used about 80% of this week's free tokens. honestly that's great, it means dl is doing real work for you.
 
 they reset on {resets}. if you need more before then, you can plug in your own key with /provider and keep going.
+
+if you're building something cool with it, reply and tell me. i'm curious.
+
+sina`,
+  },
+
+  // 3b. Someone on the trial used 80% of their trial tokens (once: the trial doesn't reset).
+  trial_80: {
+    subject: "you've used most of your free trial",
+    body: `hey,
+
+you've used about 80% of your free trial tokens. honestly that's great, it means dl is doing real work for you.
+
+the trial doesn't reset. to keep going after it, type /upgrade in dl for dl pro or a top up, or plug in your own key with /provider.
 
 if you're building something cool with it, reply and tell me. i'm curious.
 

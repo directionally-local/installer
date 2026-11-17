@@ -28,7 +28,7 @@ export const ADMIN_HOME_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   grants: ["github_id", "weekly_tokens", "weekly_usd"],
   grant_history: ["github_id", "weekly_usd", "weekly_tokens", "set_at", "ended_at", "ended_how"],
   subscriptions: ["github_id", "state", "period_end"],
-  payments: ["kind", "amount_cents"],
+  payments: ["github_id", "kind", "amount_cents"],
   person_networks: ["github_id"],
   feedback_daily: ["day", "n"],
 };
@@ -65,6 +65,22 @@ export interface AdminUserRow {
   weekDeepseekUsd: number;
   /** Distinct networks (keyed hashes) the person signed in from. dl never stores an address. */
   networks: number;
+  /** On the new-user trial (admitted at or after the trial cutoff, not an admin); false: grandfathered. */
+  trial: boolean;
+}
+
+/**
+ * The new-user trial: who is on it and who of them went on to pay. `converted` counts trial
+ * accounts (admins left out) with a Pro subscription (any state: they subscribed) or a payment;
+ * `pro` and `topup` split it (someone with both counts in each).
+ */
+export interface TrialSummary {
+  /** The cutoff (Unix ms), or null while the trial is off. */
+  cutoff: number | null;
+  users: number;
+  converted: number;
+  pro: number;
+  topup: number;
 }
 
 export interface AdminGrantRow {
@@ -104,6 +120,7 @@ export interface AdminHomeData {
   activeGrants: AdminGrantRow[];
   endedGrants: AdminGrantRow[];
   usage: Record<UsagePeriodKind, UsagePeriod[]>;
+  trial: TrialSummary;
 }
 
 /** Monday 00:00 UTC of a day number, as a day number. */
@@ -121,7 +138,7 @@ export function planOf(state: string | null, periodEnd: number | null, now: numb
   return "free";
 }
 
-export function adminHomeData(store: Sql, input: { now: number; adminIds: readonly number[] }): AdminHomeData {
+export function adminHomeData(store: Sql, input: { now: number; adminIds: readonly number[]; trialCutoff?: number | undefined }): AdminHomeData {
   const sql: Sql = { exec: (query, ...bindings) => store.exec(`${ADMIN_HOME_QUERY_TAG} ${query}`, ...bindings) };
   const { now } = input;
   const adminIds = new Set(input.adminIds);
@@ -187,6 +204,7 @@ export function adminHomeData(store: Sql, input: { now: number; adminIds: readon
         weekGptUsd: Math.max(0, row.week_gpt ?? 0),
         weekDeepseekUsd: row.week_deepseek ?? 0,
         networks: row.networks,
+        trial: input.trialCutoff !== undefined && !(adminIds.has(row.github_id) || row.admitted_via === "admin") && row.admitted_at >= input.trialCutoff,
       }),
     );
 
@@ -209,6 +227,25 @@ export function adminHomeData(store: Sql, input: { now: number; adminIds: readon
     )
     .toArray()[0];
   const feedback = sql.exec<{ total: number | null; since: number | null }>("SELECT SUM(n) AS total, MIN(day) AS since FROM feedback_daily").toArray()[0];
+
+  // The trial's conversions: trial accounts that subscribed to Pro or paid for anything.
+  const trialUsers = users.filter((user) => user.trial);
+  const trial: TrialSummary = { cutoff: input.trialCutoff ?? null, users: trialUsers.length, converted: 0, pro: 0, topup: 0 };
+  if (trialUsers.length > 0) {
+    const paidKinds = new Map<number, Set<string>>();
+    for (const row of sql.exec<{ github_id: number; kind: string }>("SELECT DISTINCT github_id, kind FROM payments").toArray()) {
+      paidKinds.set(row.github_id, (paidKinds.get(row.github_id) ?? new Set()).add(row.kind));
+    }
+    const subscribed = new Set(sql.exec<{ github_id: number }>("SELECT github_id FROM subscriptions").toArray().map((row) => row.github_id));
+    for (const user of trialUsers) {
+      const kinds = paidKinds.get(user.githubId);
+      const pro = subscribed.has(user.githubId) || kinds?.has("pro") === true;
+      const topup = kinds?.has("topup") === true;
+      if (pro) trial.pro++;
+      if (topup) trial.topup++;
+      if (pro || topup) trial.converted++;
+    }
+  }
 
   // Personal caps: the current ones (grants), dated by their open history entry, and the ended ones.
   const logins = new Map(users.map((user) => [user.githubId, user]));
@@ -283,6 +320,7 @@ export function adminHomeData(store: Sql, input: { now: number; adminIds: readon
     activeGrants,
     endedGrants,
     usage: { day: series("day"), week: series("week"), month: series("month") },
+    trial,
   };
 }
 

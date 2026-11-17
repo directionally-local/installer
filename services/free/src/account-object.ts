@@ -4,7 +4,7 @@ import type { DirectoryObject } from "./directory-object.js";
 import { DEFAULT_MODEL, FAMILIES, POOLS, POOL_TOKENS, creditPrices, familyOfPool, modelById, type Family, type Pool } from "./models.js";
 import type { Upstream } from "./config.js";
 import type { Level } from "./admission.js";
-import { FALLBACK_USD_PER_MILLION_TOKENS, costAtPrices, costOf, estimateCostUsd, planReservation } from "./quota.js";
+import { FALLBACK_USD_PER_MILLION_TOKENS, MIN_OUTPUT_TOKENS, costAtPrices, costOf, estimateCostUsd, planReservation } from "./quota.js";
 import { weekEnd, weekStart } from "./week.js";
 
 /**
@@ -82,6 +82,23 @@ export interface FamilyBudget {
   tokensThisWeek: number;
 }
 
+/**
+ * A new account's one-time trial (see `Limits.trialTokens`): tokens counted the normal way
+ * (prompt with cached, plus completion), every free model together, for the account's lifetime.
+ * Only free weekly usage counts: Pro and top-ups don't use the trial.
+ */
+export interface TrialState {
+  tokens: number;
+  /** Settled free tokens since the trial started counting. */
+  used: number;
+  /** Held by free requests in flight. */
+  reserved: number;
+  /** What a new free request may still use: tokens less used and reserved, at least 0. */
+  remaining: number;
+  /** Used up: less than a minimal answer is left, in-flight requests aside. */
+  ended: boolean;
+}
+
 export interface Allowance {
   exists: boolean;
   plan: Plan;
@@ -113,11 +130,15 @@ export interface Allowance {
   pools: Record<Pool, PoolAllowance>;
   /** Both weekly dollar budgets. */
   budgets: Record<Family, FamilyBudget>;
+  /** The one-time trial, for an account on trial (whatever its plan); null for everyone else. */
+  trial: TrialState | null;
 }
 
 export type ReserveResult =
   | { ok: true; reservationId: string; amount: number; maxTokens: number; source: Source; paid: boolean; allowance: Allowance }
   | { ok: false; code: "not_invited" | "suspended" | "blocked"; allowance: Allowance }
+  /** A trial account on the free plan used its trial, with no top-up left: Pro or a top-up from here. */
+  | { ok: false; code: "trial_ended"; allowance: Allowance; trial: TrialState }
   | {
       ok: false;
       code: "quota_exceeded";
@@ -162,6 +183,12 @@ export interface Limits {
   level?: Level;
   /** A basic or Starter account's weekly tokens (BASIC_WEEKLY_TOKENS or STARTER_WEEKLY_TOKENS; 0 for a batch-flagged Starter). */
   levelTokens?: number;
+  /**
+   * The account is on the new-user trial (admitted at or after the trial cutoff, not an admin):
+   * its free usage is also held to these tokens for its lifetime, on top of the weekly rules.
+   * Undefined: grandfathered (or the trial is off), the weekly allowance alone.
+   */
+  trialTokens?: number;
 }
 
 export interface BillingState {
@@ -185,6 +212,8 @@ interface AccountRow {
   cost_used: number;
   /** ... of which DeepSeek's. GPT-6's is the rest. */
   cost_used_deepseek: number;
+  /** All-time free tokens (prompt with cached, plus completion) from the weekly allowance on the free plan: the trial's count. */
+  trial_used: number;
 }
 
 const SCHEMA = [
@@ -284,6 +313,9 @@ export class AccountObject extends DurableObject<AccountEnv> {
       // Spend from before this column counts as GPT-6's for the rest of that week.
       const accountColumns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('account')").toArray().map((column) => column.name);
       if (!accountColumns.includes("cost_used_deepseek")) this.ctx.storage.sql.exec("ALTER TABLE account ADD COLUMN cost_used_deepseek REAL NOT NULL DEFAULT 0");
+      // The trial's count: free tokens (unpaid weekly usage) for the account's lifetime. It starts
+      // at 0 for accounts from before it; only trial accounts (admitted at or after the cutoff) are held to it.
+      if (!accountColumns.includes("trial_used")) this.ctx.storage.sql.exec("ALTER TABLE account ADD COLUMN trial_used INTEGER NOT NULL DEFAULT 0");
     });
   }
 
@@ -335,7 +367,9 @@ export class AccountObject extends DurableObject<AccountEnv> {
     // The weekly allowance first (free or Pro), then top-ups.
     const family = familyOfPool(pool);
     const spendReached = before.usdPerWeek !== null && before.spentUsdThisWeek >= before.usdPerWeek;
-    const weeklyRoom = spendReached || (before.plan === "free" && input.limits.freeBlocked) ? 0 : (before.remaining ?? Number.MAX_SAFE_INTEGER);
+    // On the free plan, a trial account's weekly room is also held to what its trial has left.
+    const trial = before.plan === "free" ? before.trial : null;
+    const weeklyRoom = spendReached || (before.plan === "free" && input.limits.freeBlocked) ? 0 : Math.min(before.remaining ?? Number.MAX_SAFE_INTEGER, trial ? trial.remaining : Number.MAX_SAFE_INTEGER);
     const model = modelById(input.model ?? DEFAULT_MODEL);
     const estimate = (maxTokens: number) =>
       model ? estimateCostUsd(input.promptEstimate, maxTokens, model.prices) : ((Math.max(0, input.promptEstimate) + maxTokens) * FALLBACK_USD_PER_MILLION_TOKENS) / 1_000_000;
@@ -363,6 +397,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
       }
     }
     if (!plan) {
+      // The trial is what stops it: it is the same for every model, so no other model can help.
+      if (trial && !input.limits.freeBlocked && !planReservation(input.promptEstimate, input.requestedMaxTokens, trial.remaining)) {
+        return { ok: false, code: "trial_ended", allowance: before, trial };
+      }
       // Whether DeepSeek's week still has room, so a GPT-6 refusal can point there instead of a dead end.
       const deepseek = family === "gpt6" && !(before.plan === "free" && input.limits.freeBlocked) ? this.#allowance(row, input.now, input.limits, "deepseek") : undefined;
       const deepseekLeft = deepseek !== undefined && (deepseek.remaining === null || deepseek.remaining > 0);
@@ -414,6 +452,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
     this.ctx.storage.transactionSync(() => {
       this.#charge(row.github_id, input.reservationId, reservation.source, reservation.pool, charged, costUsd, input.now);
       this.#addTokens(reservation.pool, input.rawTokens ?? charged, input.now);
+      if (reservation.source === "weekly" && reservation.paid !== 1) this.#addTrial(row.github_id, input.rawTokens ?? charged);
     });
     return { charged, costUsd, paid: reservation.paid === 1, allowance: this.#allowance(this.#current(input.now), input.now, input.limits, reservation.pool) };
   }
@@ -467,6 +506,12 @@ export class AccountObject extends DurableObject<AccountEnv> {
       familyOfPool(pool),
       Math.round(tokens),
     );
+  }
+
+  /** Adds free tokens to the all-time count a trial is held to. */
+  #addTrial(githubId: number, tokens: number): void {
+    if (tokens <= 0) return;
+    this.ctx.storage.sql.exec("UPDATE account SET trial_used = trial_used + ? WHERE github_id = ?", Math.round(tokens), githubId);
   }
 
   /**
@@ -762,6 +807,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
         if (row) {
           this.#charge(row.github_id, reservation.id, reservation.source, reservation.pool, charged, costUsd, now);
           this.#addTokens(reservation.pool, charged, now);
+          if (reservation.source === "weekly" && reservation.paid !== 1) this.#addTrial(row.github_id, charged);
         }
         else this.ctx.storage.sql.exec("DELETE FROM reservations WHERE id = ?", reservation.id);
       });
@@ -851,6 +897,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const budgets = this.#budgets(row, now, limits, pro, bonus, pools.luna.tokensPerWeek);
     const { usdPerWeek, spentUsd: spent } = budgets[family];
     const spendLeft = usdPerWeek === null || spent < usdPerWeek;
+    const trial = this.#trial(row, limits);
+    // On the free plan the trial is a limit like the week's: `remaining` is the smaller of the two.
+    const own = row && spendLeft ? mine.remaining : 0;
+    const remaining = trial && plan === "free" && own !== 0 ? Math.min(own ?? Number.MAX_SAFE_INTEGER, trial.remaining) : own;
     return {
       exists: row !== undefined,
       plan,
@@ -864,14 +914,25 @@ export class AccountObject extends DurableObject<AccountEnv> {
       tokensPerWeek: mine.tokensPerWeek,
       usedThisWeek: mine.usedThisWeek,
       reserved: mine.reserved,
-      remaining: row && spendLeft ? mine.remaining : 0,
+      remaining,
       family,
       usdPerWeek,
       spentUsdThisWeek: spent,
       resetsAt: weekEnd(now),
       pools,
       budgets,
+      trial,
     };
+  }
+
+  /** The trial's state for an account on trial; null for everyone else (grandfathered, admins, the trial off). */
+  #trial(row: AccountRow | undefined, limits: Limits): TrialState | null {
+    if (!row || limits.trialTokens === undefined || row.is_admin === 1) return null;
+    const tokens = Math.max(0, limits.trialTokens);
+    const used = row.trial_used ?? 0;
+    const reserved =
+      this.ctx.storage.sql.exec<{ total: number | null }>("SELECT SUM(amount) AS total FROM reservations WHERE source = 'weekly' AND paid = 0").toArray()[0]?.total ?? 0;
+    return { tokens, used, reserved, remaining: Math.max(0, tokens - used - reserved), ended: tokens - used < MIN_OUTPUT_TOKENS };
   }
 
   /**

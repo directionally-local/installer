@@ -17,7 +17,7 @@ import { applyOverrides, readOverrides, type Overrides, type SettingChange } fro
 import { levelChecks, levelFor, type BasicRule, type GithubSignals, type Level, type LevelReason, type LevelThresholds, type SignalThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
-import type { UserEmailKind } from "./user-emails.js";
+import { WELCOME_KINDS, type UserEmailKind } from "./user-emails.js";
 import type { BroadcastAudience } from "./broadcast.js";
 
 /**
@@ -240,6 +240,8 @@ export interface PersonState {
    * session event covers (made more than 24 hours after the latest one, or with none ever).
    */
   outsideDl: boolean;
+  /** When the person was admitted (people.admitted_at, Unix ms): before the trial cutoff is grandfathered. Null when not in the Directory. */
+  admittedAt: number | null;
 }
 
 export interface Gate {
@@ -1369,9 +1371,10 @@ export class DirectoryObject extends DurableObject {
         restricted_contributions: number | null;
         signals_at: number | null;
         batch_flag: number;
-      }>("SELECT login, status, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at, batch_flag FROM people WHERE github_id = ?", githubId)
+        admitted_at: number;
+      }>("SELECT login, status, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at, batch_flag, admitted_at FROM people WHERE github_id = ?", githubId)
       .toArray()[0];
-    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false, level: "full", levelReason: null, batchFlagged: false, signals: null, outsideDl: false };
+    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false, level: "full", levelReason: null, batchFlagged: false, signals: null, outsideDl: false, admittedAt: null };
     const code = this.#ensureCode(githubId, person.login, now);
     const counting = countingPairs(sql, this.#pairs(githubId), now);
     const joined = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ? AND outcome = 'ok'", githubId).toArray()[0]?.n ?? 0;
@@ -1395,6 +1398,7 @@ export class DirectoryObject extends DurableObject {
               checkedAt: person.signals_at,
             },
       outsideDl: outsideDl(sql, githubId, now),
+      admittedAt: person.admitted_at,
     };
   }
 
@@ -1524,7 +1528,7 @@ export class DirectoryObject extends DurableObject {
       if (existing && (existing.status !== "failed" || !input.retry || existing.attempts >= 2)) return undefined;
       if (!existing && input.retry) return undefined;
       // Welcome and "didn't start" wait while the person waits in the queue for free tokens.
-      if ((input.kind === "welcome" || input.kind === "welcome_basic" || input.kind === "welcome_starter" || input.kind === "welcome_starter_small" || input.kind === "didnt_start") && sql.exec("SELECT 1 FROM queue WHERE github_id = ? AND admitted_at IS NULL", input.githubId).toArray().length > 0) return undefined;
+      if ((WELCOME_KINDS.includes(input.kind) || input.kind === "didnt_start") && sql.exec("SELECT 1 FROM queue WHERE github_id = ? AND admitted_at IS NULL", input.githubId).toArray().length > 0) return undefined;
       // At most one a day, except the answer to an access request the person asked for.
       const today = sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND day = ? AND status IN ('pending', 'sent') LIMIT 1", input.githubId, day).toArray();
       if (today.length > 0 && input.kind !== "access_granted") return undefined;
@@ -2723,7 +2727,7 @@ export class DirectoryObject extends DurableObject {
   }
 
   /** The admin home's numbers (see admin-home-data.ts). */
-  async adminHome(input: { now: number; adminIds: number[] }): Promise<AdminHomeData> {
+  async adminHome(input: { now: number; adminIds: number[]; trialCutoff?: number | undefined }): Promise<AdminHomeData> {
     return adminHomeData(this.ctx.storage.sql, input);
   }
 

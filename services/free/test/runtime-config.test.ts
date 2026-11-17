@@ -31,6 +31,8 @@ describe("runtime settings (units)", () => {
     assert.equal(next.globalTotalUsdCap, 7000, "untouched settings keep the env value");
     assert.deepEqual(settingsView(config), {
       weeklyTokens: 50_000_000,
+      trialCutoff: null,
+      trialTokens: 10_000_000,
       perPersonWeeklyUsdCap: 2,
       deepseekWeeklyUsdCap: 8,
       grantWeeklyUsdCap: 20,
