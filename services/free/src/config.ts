@@ -18,6 +18,15 @@ export interface FreeConfig {
   adminGithubIds: ReadonlySet<number>;
   weeklyTokens: number;
   /**
+   * The new-user trial's cutoff (TRIAL_CUTOFF, an ISO time or Unix ms; Unix ms here). Accounts
+   * admitted at or after it get a one-time trial of `trialTokens` instead of the weekly free
+   * allowance forever; accounts admitted before it keep the weekly free allowance (grandfathered).
+   * Admins are never on trial. Undefined (the default): no trial for anyone.
+   */
+  trialCutoff: number | undefined;
+  /** The one-time trial's tokens (TRIAL_TOKENS), counted as prompt (cached included) plus completion. */
+  trialTokens: number;
+  /**
    * Non-admin people at most while admission is invite-only. With open admission there is no
    * cap: the queue keeps spend inside the weekly budget instead (see queue.ts).
    */
@@ -255,6 +264,7 @@ export interface StripeConfig {
 
 export const DEFAULTS = {
   weeklyTokens: 50_000_000,
+  trialTokens: 10_000_000,
   maxActiveUsers: 50,
   countCachedTokens: true,
   globalWeeklyUsdCap: 2000,
@@ -373,6 +383,8 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     tokenSigningKey: signingKey,
     adminGithubIds: githubIds(text(env.ADMIN_GITHUB_IDS)),
     weeklyTokens: whole(env.WEEKLY_TOKENS, DEFAULTS.weeklyTokens, "WEEKLY_TOKENS"),
+    trialCutoff: instant(env.TRIAL_CUTOFF, "TRIAL_CUTOFF"),
+    trialTokens: whole(env.TRIAL_TOKENS, DEFAULTS.trialTokens, "TRIAL_TOKENS"),
     maxActiveUsers: whole(env.MAX_ACTIVE_USERS, DEFAULTS.maxActiveUsers, "MAX_ACTIVE_USERS"),
     globalWeeklyUsdCap: usd(env.GLOBAL_WEEKLY_USD_CAP, DEFAULTS.globalWeeklyUsdCap, "GLOBAL_WEEKLY_USD_CAP"),
     globalTotalUsdCap: usd(env.GLOBAL_TOTAL_USD_CAP, DEFAULTS.globalTotalUsdCap, "GLOBAL_TOTAL_USD_CAP"),
@@ -481,6 +493,32 @@ function whole(value: unknown, fallback: number, name: string): number {
   if (raw === undefined) return fallback;
   const parsed = Number(raw.replace(/_/g, ""));
   if (!Number.isSafeInteger(parsed) || parsed < 0) throw new ConfigError(`${name} must be a whole number (got "${raw}").`);
+  return parsed;
+}
+
+/**
+ * A moment as Unix ms, from an ISO time ("2026-11-20T00:00:00Z") or Unix ms. Undefined when unset
+ * or "none"/"off".
+ */
+export function parseInstant(value: unknown): number | undefined | "invalid" {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "number") return Number.isSafeInteger(value) && value > 0 ? value : "invalid";
+  if (typeof value !== "string") return "invalid";
+  const raw = value.trim();
+  if (raw === "" || ["none", "off"].includes(raw.toLowerCase())) return undefined;
+  if (/^\d+$/.test(raw)) {
+    const ms = Number(raw);
+    return Number.isSafeInteger(ms) && ms > 0 ? ms : "invalid";
+  }
+  // A date and a time with its zone, so nobody gets a cutoff in the server's local time.
+  if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/.test(raw)) return "invalid";
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) && ms > 0 ? ms : "invalid";
+}
+
+function instant(value: unknown, name: string): number | undefined {
+  const parsed = parseInstant(text(value));
+  if (parsed === "invalid") throw new ConfigError(`${name} must be an ISO time like 2026-11-20T00:00:00Z, Unix ms, or "none" (got "${String(value)}").`);
   return parsed;
 }
 

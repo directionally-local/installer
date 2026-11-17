@@ -38,6 +38,7 @@ import {
   gptLimitMessage,
   quotaMessage,
   signInRefusal,
+  trialEndedMessage,
   TOTAL_BUDGET_MESSAGE,
   weeklyBudgetMessage,
   type SignInRefusal,
@@ -85,6 +86,7 @@ import {
   userEmailsOn,
   userEmailTransport,
   verifyStopToken,
+  trialMostlyUsed,
   weekMostlyUsed,
   type UserEmailBinding,
   type UserEmailStore,
@@ -453,7 +455,23 @@ function basicRule(config: FreeConfig): BasicRule {
  * Full's weekly allowance. Basic and Starter get every model on their own tokens and dollar cap;
  * a batch-flagged Starter account gets 0 tokens.
  */
-function limitsFor(config: FreeConfig, bonusTokens = 0, level: Level = "full", batchFlagged = false): Limits {
+function limitsFor(config: FreeConfig, bonusTokens = 0, level: Level = "full", batchFlagged = false, trial = false): Limits {
+  const limits = levelLimits(config, bonusTokens, level, batchFlagged);
+  return trial ? { ...limits, trialTokens: config.trialTokens } : limits;
+}
+
+/**
+ * Whether an account is on the new-user trial: the trial is on (`trialCutoff` set), the account
+ * was admitted at or after the cutoff, and it isn't an admin. Everyone admitted before the cutoff
+ * is grandfathered: the weekly free allowance as before. Unknown admission (no Directory row): not on trial.
+ */
+export function onTrial(config: Pick<FreeConfig, "trialCutoff" | "adminGithubIds">, githubId: number, admittedAt: number | null | undefined): boolean {
+  if (config.trialCutoff === undefined || admittedAt === null || admittedAt === undefined) return false;
+  if (config.adminGithubIds.has(githubId)) return false;
+  return admittedAt >= config.trialCutoff;
+}
+
+function levelLimits(config: FreeConfig, bonusTokens: number, level: Level, batchFlagged: boolean): Limits {
   const served = servedLevel(level, config);
   // Two weekly dollar budgets: `weeklyUsd` is GPT-6's (every GPT-6 model), `deepseekWeeklyUsd`
   // DeepSeek's. A setting of "none" is no cap (null).
@@ -478,7 +496,7 @@ function limitsFor(config: FreeConfig, bonusTokens = 0, level: Level = "full", b
 async function personLimits(c: Ctx, config: FreeConfig, githubId: number, now: number): Promise<{ level: Level; limits: Limits }> {
   const person = (await directory(c).gate(now, policyOf(c.config), githubId)).person;
   const level = servedLevel(person?.level ?? "full", config);
-  return { level, limits: limitsFor(config, person?.bonusTokens, level, person?.batchFlagged === true) };
+  return { level, limits: limitsFor(config, person?.bonusTokens, level, person?.batchFlagged === true, onTrial(config, githubId, person?.admittedAt)) };
 }
 
 /** The level thresholds, from the effective config. */
@@ -1227,8 +1245,10 @@ async function levelDetails(c: Ctx, person: PersonRow | undefined, signIn: SignI
 }
 
 /** The welcome email for the level a new sign-up was admitted at. */
-function welcomeKind(level: Level, batchFlagged: boolean, config: FreeConfig): UserEmailKind {
+function welcomeKind(level: Level, batchFlagged: boolean, config: FreeConfig, trial = false): UserEmailKind {
   const served = servedLevel(level, config);
+  // On the trial, every level with free tokens gets the trial's welcome (no weekly promise).
+  if (trial && !noFreeTokens(served, config, batchFlagged)) return "welcome_trial";
   if (served === "full") return "welcome";
   if (served === "basic") return "welcome_basic";
   return noFreeTokens(served, config, batchFlagged) ? "welcome_starter" : "welcome_starter_small";
@@ -1282,7 +1302,7 @@ async function deviceDetails(c: Ctx): Promise<Response> {
     const config = (await runtime(c)).config;
     // The welcome for the level the person was admitted at (a network limit can lower it).
     const admittedAs = await directory(c).getPerson(found.githubId);
-    const kind = welcomeKind(admittedAs?.level ?? level.level, admittedAs ? admittedAs.batch_flag === 1 : level.batchFlagged === true, config);
+    const kind = welcomeKind(admittedAs?.level ?? level.level, admittedAs ? admittedAs.batch_flag === 1 : level.batchFlagged === true, config, onTrial(config, found.githubId, admittedAs?.admitted_at));
     await userEmail(c, config, kind, found.githubId, "");
   }
   return response;
@@ -1596,7 +1616,10 @@ async function me(c: Ctx): Promise<Response> {
   if (guarded) return guarded;
   c.callerId = identity.githubId;
   const { config, person } = await runtime(c);
-  const allowance = await account(c, identity.githubId).allowance(c.now(), limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true));
+  const allowance = await account(c, identity.githubId).allowance(
+    c.now(),
+    limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt)),
+  );
   if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
   // A Pro subscriber isn't waiting for anything; their place is kept if Pro ends.
   const queue = allowance.plan === "pro" ? null : (person?.queue ?? null);
@@ -1649,7 +1672,19 @@ async function me(c: Ctx): Promise<Response> {
         }
       : null,
     offers: offers(config),
+    /**
+     * The one-time trial, for an account admitted at or after the trial cutoff: `{tokens, used,
+     * remaining, ended}` (tokens counted as prompt with cached, plus completion, every free model
+     * together). Null for everyone else (grandfathered accounts keep the weekly free allowance).
+     */
+    trial: trialView(allowance),
   });
+}
+
+/** `{tokens, used, remaining, ended}` for a trial account, else null. */
+function trialView(allowance: Allowance): { tokens: number; used: number; remaining: number; ended: boolean } | null {
+  const trial = allowance.trial;
+  return trial ? { tokens: trial.tokens, used: Math.min(trial.used, trial.tokens), remaining: Math.max(0, trial.tokens - trial.used), ended: trial.ended } : null;
 }
 
 // ─── Billing ────────────────────────────────────────────────────────────────
@@ -2091,7 +2126,8 @@ async function chat(c: Ctx): Promise<Response> {
   }
   const level = servedLevel(gate.person?.level ?? "full", gate.config);
   const batchFlagged = gate.person?.batchFlagged === true;
-  const limits = limitsFor(gate.config, gate.person?.bonusTokens, level, batchFlagged);
+  const trial = onTrial(gate.config, identity.githubId, gate.person?.admittedAt);
+  const limits = limitsFor(gate.config, gate.person?.bonusTokens, level, batchFlagged, trial);
   const link = linkFor(gate.config, gate.person);
   const headers = async () => quotaHeaders(await person.allowance(c.now(), limits));
 
@@ -2211,6 +2247,9 @@ async function chat(c: Ctx): Promise<Response> {
       }
       return apiError(402, "quota_exceeded", quotaMessage(reservation.reason, resetsAt, reservation.allowance.plan), { resetsAt, reason: reservation.reason, offers: offers(gate.config), referralLink: link }, quota);
     }
+    if (reservation.code === "trial_ended") {
+      return apiError(402, "trial_ended", trialEndedMessage(reservation.trial.tokens, usdLabel(gate.config.offers.pro.priceUsdMonthly)), { trial: trialView(reservation.allowance), offers: offers(gate.config) }, quota);
+    }
     if (reservation.code === "blocked") return blockedError(quota);
     if (reservation.code === "suspended") return apiError(403, "suspended", "This account is suspended from the free tier.", {}, quota);
     return apiError(403, "not_invited", "This GitHub account isn't on the free tier.", {}, quota);
@@ -2271,8 +2310,13 @@ async function chat(c: Ctx): Promise<Response> {
     };
     await alert(c, await directory(c).recordRequest(record, policyOf(gate.config), servingContext(c, gate.config)));
     // Most of the week's free tokens used: one email a week, on the settlement that crossed 80%.
-    if (!settled.paid && !isAdmin && userEmailsOn(gate.config, userEmailVia(c)) && weekMostlyUsed(settled.allowance)) {
-      await userEmail(c, gate.config, "week_80", identity.githubId, String(weekStart(c.now())));
+    // On the trial, most of the trial instead (once): its weekly allowance isn't what it runs out of.
+    if (!settled.paid && !isAdmin && userEmailsOn(gate.config, userEmailVia(c))) {
+      if (trial) {
+        if (trialMostlyUsed(settled.allowance)) await userEmail(c, gate.config, "trial_80", identity.githubId, "");
+      } else if (weekMostlyUsed(settled.allowance)) {
+        await userEmail(c, gate.config, "week_80", identity.githubId, String(weekStart(c.now())));
+      }
     }
     return settled.allowance;
   };
@@ -2819,7 +2863,8 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     // One account call per person (allowance and key count together), at most ADMIN_PEOPLE_CONCURRENCY at once:
     // hundreds of Durable Object calls started together drop connections (Cloudflare error 1101).
     const rows = await mapLimited(slice, ADMIN_PEOPLE_CONCURRENCY, async (person) => {
-      const { allowance, serverKeys } = await account(c, person.github_id).adminSummary(now, limitsFor(config, 0, person.level, person.batch_flag === 1));
+      const trial = onTrial(config, person.github_id, person.admitted_at);
+      const { allowance, serverKeys } = await account(c, person.github_id).adminSummary(now, limitsFor(config, 0, person.level, person.batch_flag === 1, trial));
       return {
         githubId: person.github_id,
         login: person.login,
@@ -2827,6 +2872,10 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
         isAdmin: c.config.adminGithubIds.has(person.github_id),
         admittedAt: new Date(person.admitted_at).toISOString(),
         admittedVia: person.admitted_via,
+        // "trial": admitted at or after the trial cutoff, held to the one-time trial on the free plan;
+        // "grandfathered": the weekly free allowance as before (everyone, while the trial is off).
+        access: trial ? "trial" : "grandfathered",
+        trial: trialView(allowance),
         level: person.level,
         levelReason: person.level_reason,
         signals: {
@@ -2869,7 +2918,15 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       const own = await personLimits(c, config, githubId, now);
       const allowance = await account(c, githubId).allowance(now, own.limits);
       const personalCap = (await directory(c).personalCaps()).get(githubId) ?? null;
-      return json({ ...detail, level: own.level, allowance: allowanceView(allowance), personalCap, serverKeys: await account(c, githubId).keyCount() });
+      return json({
+        ...detail,
+        level: own.level,
+        access: own.limits.trialTokens !== undefined ? "trial" : "grandfathered",
+        trial: trialView(allowance),
+        allowance: allowanceView(allowance),
+        personalCap,
+        serverKeys: await account(c, githubId).keyCount(),
+      });
     }
     if (action === "revoke-tokens" && method === "POST") {
       // Ends every sign-in session and deletes every server key; the person can sign in again.
@@ -3186,7 +3243,10 @@ async function decideAccessRequest(
   if (!result) return { status: 404, code: "not_found", message: "No such pending request." };
   if (result.status === "blocked") return { status: 409, code: "blocked", message: `${result.login} is blocked; unblock the account first.` };
   const cap = result.outcome ? await grantCapAfter(c, result.githubId, result.outcome, usd) : undefined;
-  if (result.status === "granted") await userEmail(c, config, "access_granted", result.githubId, String(id));
+  if (result.status === "granted") {
+    const person = await directory(c).getPerson(result.githubId);
+    await userEmail(c, config, onTrial(config, result.githubId, person?.admitted_at) ? "access_granted_trial" : "access_granted", result.githubId, String(id));
+  }
   console.log(`admin access request ${result.status}`);
   return { id, githubId: result.githubId, login: result.login, status: result.status, ...(cap !== undefined ? { usdPerWeek: cap } : {}) };
 }
@@ -3406,7 +3466,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
 
 /** GET /admin: the home page, from the Directory's admin-home reads and the spend counters. */
 async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, now: number, login: string, signOut: boolean): Promise<Response> {
-  const [data, spend] = await Promise.all([directory(c).adminHome({ now, adminIds: [...c.config.adminGithubIds] }), directory(c).spend(now)]);
+  const [data, spend] = await Promise.all([directory(c).adminHome({ now, adminIds: [...c.config.adminGithubIds], trialCutoff: config.trialCutoff }), directory(c).spend(now)]);
   const view = spendView(c, config, paused, spend);
   return adminHomePage({
     data,

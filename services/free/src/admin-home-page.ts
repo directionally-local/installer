@@ -119,6 +119,7 @@ tbody tr:hover td { background: color-mix(in srgb, var(--k-text) 3%, transparent
 .badge.past_due { color: var(--k-flag); background: var(--k-flag-bg); }
 .badge.blocked { color: var(--k-stop); background: var(--k-stop-bg); }
 .badge.admin { color: var(--c-1); background: color-mix(in srgb, var(--c-1) 12%, transparent); margin-left: 6px; }
+.badge.trial { color: var(--k-flag); background: var(--k-flag-bg); margin-left: 6px; }
 svg.meter { display: block; width: 64px; height: 4px; border-radius: 2px; margin: 3px 0 0 auto; }
 svg.meter .track { fill: var(--k-border); }
 svg.meter .left { fill: var(--c-3); }
@@ -235,7 +236,7 @@ function meter(left: number, cap: number | null): string {
 }
 
 function userCell(user: AdminUserRow): string {
-  return `${escapeHtml(user.login)}${user.admin ? `<span class="badge admin">Admin</span>` : ""}`;
+  return `${escapeHtml(user.login)}${user.admin ? `<span class="badge admin">Admin</span>` : ""}${user.trial ? `<span class="badge trial">Trial</span>` : ""}`;
 }
 
 function usersTable(users: AdminUserRow[], settings: AdminHomeInput["settings"]): string {
@@ -328,6 +329,22 @@ ${quick("Top-ups", data.payments.topups.toLocaleString("en-US"))}
 ${quick("Top-up Revenue", dollars(data.payments.topupCents / 100))}
 </div></section>`;
 
+  // The new-user trial: who is on it (everyone else is grandfathered) and who of them paid.
+  const t = data.trial;
+  const rate = t.users > 0 ? `${Math.round((t.converted / t.users) * 100)}%` : "—";
+  const trial = `<section class="card" id="trial"><h2>New-User Trial</h2>${
+    t.cutoff === null
+      ? `<p class="empty">Off: everyone has the weekly free allowance. Set <code>trialCutoff</code> in config to start it.</p>`
+      : `<div class="quick">
+${quick("Cutoff", date(t.cutoff))}
+${quick("Trial Users", t.users.toLocaleString("en-US"))}
+${quick("Grandfathered", (data.users.filter((user) => !user.trial && !user.admin).length).toLocaleString("en-US"))}
+${quick("Converted", `${t.converted.toLocaleString("en-US")} (${rate})`)}
+${quick("To Pro", t.pro.toLocaleString("en-US"))}
+${quick("Top-up", t.topup.toLocaleString("en-US"))}
+</div>`
+  }</section>`;
+
   const kinds: UsagePeriodKind[] = ["day", "week", "month"];
   const usage = `<section class="card usage" id="usage">
 ${kinds.map((kind) => `<input type="radio" name="period" id="p-${kind}"${kind === "day" ? " checked" : ""}>`).join("")}
@@ -352,6 +369,7 @@ ${grantsTable(data.endedGrants, true)}
 <p class="tools-link">Grants, requests, blocking, routing and emails are on <a href="/admin?view=tools">Tools</a>. Admins are left out of every total and marked in the table.</p>
 ${cards}
 <div class="two">${health}${paid}</div>
+${trial}
 ${usage}
 ${users}
 ${grants}

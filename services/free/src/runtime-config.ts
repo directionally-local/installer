@@ -1,4 +1,4 @@
-import { ACCESS_REQUEST_ALERT_MODES, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, UPSTREAMS, type FreeConfig } from "./config.js";
+import { ACCESS_REQUEST_ALERT_MODES, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
@@ -16,6 +16,14 @@ import { isProviderSlugList, isQuantizationList } from "./routing.js";
 export const RUNTIME_SETTINGS = {
   /** Tokens per person per week. */
   weeklyTokens: { kind: "tokens", env: "WEEKLY_TOKENS" },
+  /**
+   * The new-user trial's cutoff: accounts admitted at or after it get a one-time trial
+   * (`trialTokens`) instead of the weekly free allowance. An ISO time or Unix ms; "none" turns the
+   * trial off. Unset: no trial for anyone.
+   */
+  trialCutoff: { kind: "instant", env: "TRIAL_CUTOFF" },
+  /** The one-time trial's tokens (prompt with cached, plus completion), every free model together. */
+  trialTokens: { kind: "tokens", env: "TRIAL_TOKENS" },
   /** A Full person's weekly GPT-6 budget, USD (real reported cost, every GPT-6 model). */
   perPersonWeeklyUsdCap: { kind: "usd", env: "PER_PERSON_WEEKLY_USD_CAP" },
   /** A Full person's weekly DeepSeek budget, USD (DeepSeek has no token cap). */
@@ -169,6 +177,11 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= MAX_FIRST_BYTE_TIMEOUT_SECONDS ? value : "invalid";
     case "alertMode":
       return typeof value === "string" && (ACCESS_REQUEST_ALERT_MODES as readonly string[]).includes(value) ? value : "invalid";
+    case "instant": {
+      // Stored as Unix ms; "none" (null) turns it off whatever the env says.
+      const parsed = parseInstant(value);
+      return parsed === "invalid" ? "invalid" : (parsed ?? null);
+    }
   }
 }
 
@@ -187,6 +200,7 @@ const RULES: Record<Kind, string> = {
   amount: `a number of dollars, 0 to ${MAX_USD}`,
   seconds: `a number of seconds, more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS}`,
   alertMode: '"each", "daily" or "off"',
+  instant: 'an ISO time with its zone, e.g. "2026-11-20T00:00:00Z", Unix ms, or "none" to turn it off',
 };
 
 /**
@@ -237,6 +251,7 @@ export function applyOverrides<T extends Partial<FreeConfig>>(config: T, overrid
     if (!(key in config)) continue;
     switch (RUNTIME_SETTINGS[key].kind) {
       case "usd":
+      case "instant":
         (next as unknown as Record<string, unknown>)[key] = value === null ? undefined : value;
         break;
       default:

@@ -56,6 +56,25 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
   to the chat names, so charging is unchanged. Luminal and OpenRouter stay on Chat Completions.
 - Any other model or provider needs the person’s own key (`model_not_allowed`).
 
+## The new-user trial
+
+Off until the owner sets `trialCutoff` (a runtime setting, below). Then:
+
+- **Grandfathered**: everyone admitted before the cutoff. Nothing changes: the weekly free
+  allowance by level, personal caps, batch-flagged accounts at 0.
+- **Trial**: accounts admitted at or after the cutoff (`people.admitted_at`), admins never. On
+  the free plan they get a one-time trial of `trialTokens` (10M) for the account's lifetime,
+  counted like `budgets.*.tokensThisWeek` (prompt tokens with cached ones, plus completion
+  tokens), every free model together. It holds on top of the weekly rules: a reservation gets at
+  most what both leave (in-flight free requests are held against the trial too), so a
+  batch-flagged account still gets nothing. Once it's used up, free requests get 402
+  `trial_ended` (see Refusals); the weekly reset doesn't bring it back.
+- Pro and top-ups work past the trial as they always do, and don't count against it. Pro for a
+  trial account is the same weekly allowance current free users get when `proWeeklyUsdCap` and
+  `proDeepseekWeeklyUsdCap` are set to the free levels (2 and 8).
+- The count (`account.trial_used`) is every free (unpaid weekly) token since this shipped, kept
+  for everyone but only applied to trial accounts.
+
 ## Account levels
 
 Every account is `full`, `basic` or `starter`. The point is to make account farming
@@ -187,9 +206,14 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
                 "bonusTokensPerWeek": 10000000, "bonusCapPerWeek": 50000000 },
   "offers": { "pro": { "priceUsdMonthly": 3.99, "price": "$3.99/month", "tokensPerWeek": 300000000, "usdPerWeek": 6,
                        "deepseekUsdPerWeek": 40, "valueLine": "Lots of DeepSeek every week, plus more GPT-6." },
-              "topup": { "unitPriceUsd": 1, "minQuantity": 2, "maxQuantity": 20, "usageMultiplier": 1.25, "validDays": 90, "fromPrice": "$2" } }
+              "topup": { "unitPriceUsd": 1, "minQuantity": 2, "maxQuantity": 20, "usageMultiplier": 1.25, "validDays": 90, "fromPrice": "$2" } },
+  "trial": null                         // or, for a trial account: { "tokens": 10000000, "used": 3800000, "remaining": 6200000, "ended": false }
 }
 ```
+
+- `trial` is null for grandfathered accounts (and everyone while the trial is off); for a trial
+  account it is there whatever the plan. `used` is capped at `tokens`; `ended` once less than a
+  minimal answer is left. On the free plan, `allowance.remaining` is also capped by the trial.
 
 - No level appears here: publicly there is only Free and Pro (`plan`).
 - `allowance.tokensPerWeek` includes this week's referral bonus; the GPT-6 dollar budget grows in
@@ -252,6 +276,15 @@ and the ways on. `request` is the access-request endpoint.
 ```
 
 No free tokens at all (HTTP 403 `below_bar`): `contact` (the email fallback) and `request`.
+
+A trial account's trial used up (free plan, no top-up left), whatever the model:
+
+```json
+{ "error": { "code": "trial_ended",
+             "message": "Your 10M free trial tokens are used up. Keep going with dl Pro for $3.99 a month, or add a top-up: /upgrade",
+             "trial": { "tokens": 10000000, "used": 10000000, "remaining": 0, "ended": true },
+             "offers": { "...": "as above" } } }
+```
 
 ### Access requests (`/request` in dl; `Authorization: Bearer <access token or server key>`)
 
@@ -686,6 +719,7 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `global_weekly_budget_reached` | chat (503) | `reason: "weekly_budget"`, `pausedForEveryone: true`, `resetsAt` (ISO time), `Retry-After` header |
 | `global_total_budget_reached` | chat (503) | `reason: "total_budget"`, `pausedForEveryone: true`, `resetsAt: null` |
 | `gpt_limit` | chat (402) | `family: "gpt6"`, `reason`, `resetsAt`, `alternative` (the DeepSeek model id), `offers`: GPT-6's week used up, DeepSeek's not |
+| `trial_ended` | chat (402) | `trial` (`{tokens, used, remaining, ended}`), `offers`: a trial account used its one-time trial |
 | `quota_exceeded` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `offers`, `referralLink` |
 | `basic_limit`, `starter_limit` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `request`, `offers`, `referralLink` |
 | `below_bar` | chat (403) | `contact`, `request` |
@@ -711,6 +745,8 @@ with who made it and when.
 | setting | env | default |
 |---|---|---|
 | `weeklyTokens` | `WEEKLY_TOKENS` | 50,000,000 |
+| `trialCutoff` | `TRIAL_CUTOFF` | unset (trial off): an ISO time with its zone or Unix ms; accounts admitted at or after it are on the trial; `"none"` turns it off |
+| `trialTokens` | `TRIAL_TOKENS` | 10,000,000: the one-time trial (prompt with cached, plus completion) |
 | `perPersonWeeklyUsdCap` | `PER_PERSON_WEEKLY_USD_CAP` | 2: a Full person's weekly GPT-6 budget (every GPT-6 model) |
 | `deepseekWeeklyUsdCap` | `DEEPSEEK_WEEKLY_USD_CAP` | 8: a Full person's weekly DeepSeek budget |
 | `proWeeklyUsdCap` | `PRO_WEEKLY_USD_CAP` | 6: Pro's weekly GPT-6 budget |
@@ -781,10 +817,11 @@ when each goes out is in `src/user-email-send.ts`. The provider:
 
 | email | when |
 |---|---|
-| welcome | right after a new sign-up gives their email on the details step; by level: `welcome` (Full), `welcome_basic`, `welcome_starter_small` (a Starter allowance), `welcome_starter` (no free tokens) |
-| access granted | an admin grants the person's access request (`access_granted`; not held back by the one-a-day rule) |
+| welcome | right after a new sign-up gives their email on the details step; by level: `welcome` (Full), `welcome_basic`, `welcome_starter_small` (a Starter allowance), `welcome_starter` (no free tokens); on the trial, `welcome_trial` (one-time tokens, /upgrade) unless no free tokens |
+| access granted | an admin grants the person's access request (`access_granted`, or `access_granted_trial` on the trial; not held back by the one-a-day rule) |
 | didn't start | daily run: admitted 24 to 72 hours ago, no request yet |
-| most of the week used | the request whose settlement takes the week past 80% of a pool's tokens or of the weekly dollar cap; once a week |
+| most of the week used | the request whose settlement takes the week past 80% of a pool's tokens or of the weekly dollar cap; once a week (not on the trial) |
+| most of the trial used | `trial_80`: a trial account's settlement past 80% of its trial tokens; once |
 | gone quiet | daily run: requests on 2 or more days, none in the last 7 |
 
 Only to people with an email who haven't pressed stop; never to admins (unless
@@ -1114,6 +1151,10 @@ users table.
 - **Platform Health:** Total Users, Active Grants, Total Cost, Total Tokens (input + output, all time).
 - **Paid:** paying users (active + past due), active, past due and canceled Pro subscriptions,
   MRR (paying users × the Pro price), top-ups and top-up revenue (before tax).
+- **New-User Trial:** off, or the cutoff, trial users, grandfathered users, and trial users who
+  converted (a Pro subscription in any state, or a payment), split into To Pro and Top-up.
+  Trial accounts carry a "Trial" badge in the Users table. `GET /admin/people` and
+  `GET /admin/people/:id` have `access` (`"trial"` or `"grandfathered"`) and `trial` (as in `/v1/me`).
 - **Usage Analytics:** input and output tokens and requests per day (30), week (12) or month (12),
   a Day / Week / Month switch made of radio buttons (no script), an SVG bar chart with each
   period's exact numbers in its tooltip.

@@ -21,10 +21,14 @@
  *   upstream_busy                 Luminal answered 429 (HTTP 429, Retry-After): transient, retry
  *   upstream_unavailable          Luminal answered 5xx or couldn't be reached (HTTP 503, Retry-After): transient, retry
  *   upstream_timeout              Luminal sent nothing before the first-byte timeout (HTTP 503, Retry-After): transient, retry
+ *   trial_ended                   a new account (admitted at or after the trial cutoff) used its one-time trial
+ *                                 (HTTP 402, with `trial` and `offers`): Pro or a top-up from here
  *
  * `not_invited` is still returned for a sign-in recorded before these codes existed, and by
  * the API for a token whose account isn't on the free tier.
  */
+
+import { formatTokens } from "./admission.js";
 
 export const SIGN_IN_REFUSALS = ["account_too_new", "no_github_activity", "invite_required", "cohort_full", "too_many_signups"] as const;
 export type SignInRefusal = (typeof SIGN_IN_REFUSALS)[number];
@@ -95,6 +99,14 @@ export function queuedMessage(position: number, wait: string): string {
 export function quotaMessage(reason: "tokens" | "spend", resetsAt: string, plan: "free" | "pro" = "free"): string {
   const what = reason === "spend" ? "spending allowance" : "token allowance";
   return `This week's ${plan === "pro" ? "Pro" : "free"} ${what} is used up. It resets at ${resetsAt}.`;
+}
+
+/**
+ * A new account's one-time trial is used up (402 trial_ended): free requests stop for good, and
+ * Pro or a top-up keeps it going. `/upgrade` in dl opens both. `proPrice` as the offers show it ("$3.99").
+ */
+export function trialEndedMessage(tokens: number, proPrice = "$3.99"): string {
+  return `Your ${formatTokens(tokens)} free trial tokens are used up. Keep going with dl Pro for ${proPrice} a month, or add a top-up: /upgrade`;
 }
 
 /**

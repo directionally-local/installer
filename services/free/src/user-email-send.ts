@@ -264,6 +264,12 @@ export function logUserEmails(where: string, outcomes: Array<"sent" | "failed" |
   else if (sent > 0) console.log(`user emails (${where}): ${sent} sent`);
 }
 
+/** Whether a trial account on the free plan has used 80% of its trial tokens. */
+export function trialMostlyUsed(allowance: { plan: string; trial: { tokens: number; used: number } | null }): boolean {
+  const trial = allowance.trial;
+  return allowance.plan === "free" && trial !== null && trial.tokens > 0 && trial.used >= trial.tokens * WEEK_EMAIL_SHARE;
+}
+
 /**
  * Whether an allowance is at or past 80% of any pool's weekly tokens or of the weekly dollar cap.
  * Free plan only: Pro and top-ups aren't "this week's free tokens".
