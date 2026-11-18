@@ -120,7 +120,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl provider` | The provider and GitHub token on each place. `dl provider set` picks another provider, key and model in Autopilot's list; `dl provider github` replaces the GitHub token. `--server NAME` picks the place. `dl keys` is the same command. |
 | `dl model [ID]` | The model for tasks and sessions on a place. With no ID, Autopilot's own model picker. For a model served on this machine's GPU, see `dl model up` below. |
 | `dl model up` / `update` / `rollback` / `status` / `bench` / `list` | Serve a curated open model on this machine's Nvidia GPUs with vLLM or SGLang, test it, and point Autopilot at it. See [On your own GPUs](#on-your-own-gpus). |
-| `dl evals set "COMMAND"` / `run` / `show` / `clear` | Your own eval command, run once per model with `OPENAI_BASE_URL` pointed at it; `dl model update` switches only if the new model holds up. See [Your own evals](#your-own-evals). |
+| `dl evals set "COMMAND"` / `--data PATH` / `run` / `show` / `clear` | Your own eval command, run once per model with `OPENAI_BASE_URL` pointed at it, or your eval data (JSONL, CSV, promptfoo, OpenAI Evals, Braintrust, LangSmith), run by dl; `dl model update` switches only if the new model holds up. See [Your own evals](#your-own-evals). |
 | `dl update` | Update `dl` itself when npm has a newer one (the install script or npm, however it was installed; `--check` only reports), make sure the Autopilot it pins is installed, then update the default place as `dl update NAME` does. |
 | `dl update NAME` | Update a place's Autopilot, Hotcell and sandbox image to the versions `dl` pins. A server over SSH (its `dl` first), this computer in place. `--wait` waits for running tasks instead of asking; with no terminal it waits anyway. |
 | `dl local status` | Agents running on this computer: running?, where, how many fit. |
@@ -222,7 +222,51 @@ A score, from 0 to 1, comes from the results files the run wrote (files it didn'
 
 `dl model update` runs the evals after the smoke tests and bench, on both models, and switches only if the new one passes where the old one passed and scores at least the old score minus the threshold (0.02 by default). Without scores, pass or fail decides. A command that fails on both models with no score blocks the update: the command is broken, not the model. When the old model had to stop to make room, only the new one runs and must pass. On a block, the old model keeps serving and dl says why in one line. The command is saved in `~/.local/state/directionallylocal/evals.json`, one per machine.
 
-Next: bring your data, where dl runs JSONL, CSV, promptfoo YAML and other eval sets itself.
+##### Bring your data
+
+No eval command? Point dl at the eval files you already have and it runs them itself. A file, a folder (every `.jsonl`, `.json`, `.csv`, `.tsv`, `.yaml` in it) or a glob; the format is recognized by content, so nothing needs converting.
+
+```sh
+dl evals set --data evals/qa.jsonl          # or a folder: --data evals/, or a glob: --data 'evals/*.csv'
+dl evals set "pytest evals/ -q --junitxml=junit.xml" --data evals/   # both: both must pass
+dl evals run
+dl evals set --data ""                     # take the data off again
+```
+
+What dl reads, one example per family:
+
+- **JSONL or JSON rows** with an input (`input`, `prompt`, `question`, `query`, `instruction`) and an expected answer (`expected`, `ideal`, `answer`, `output`, `target`): `{"question": "Capital of France?", "answer": "Paris"}`
+- **OpenAI Evals**: `{"input": [{"role": "user", "content": "Largest planet?"}], "ideal": ["Jupiter"]}`, and chat transcripts, where the last assistant turn is the answer: `{"messages": [{"role": "user", "content": "Opposite of hot?"}, {"role": "assistant", "content": "cold"}]}`
+- **Braintrust dataset exports** (JSON or JSONL): `{"id": "bt-1", "input": {"question": "Who painted the Mona Lisa?"}, "expected": "Leonardo da Vinci", "metadata": {}}`; an object input or expected uses its obvious field
+- **LangSmith dataset exports**: `{"inputs": {"question": "Legs on a spider?"}, "outputs": {"answer": "8"}}`, or a CSV with `inputs.question,outputs.answer` columns
+- **CSV or TSV** with a header using the same names, and promptfoo's `__expected` columns (`contains: Berlin`, `regex: ^\d+$`, a plain value for `equals`):
+
+  ```csv
+  question,answer
+  What is 3 x 3?,9
+  ```
+
+- **promptfoo configs** (`promptfooconfig.yaml`): every prompt × every test, `{{ vars }}` filled in, `defaultTest` merged, tests inline or from a CSV, YAML or JSONL file:
+
+  ```yaml
+  prompts: [file://prompts.txt, "Reply in one word: {{ question }}"]
+  tests:
+    - vars: { question: Capital of Spain? }
+      assert:
+        - { type: icontains, value: madrid }
+        - { type: llm-rubric, value: is polite }   # skipped: not supported
+    - file://tests.csv
+  ```
+
+Anything else is an error that says what dl expected; in a folder or a glob, such files are listed as skipped.
+
+Each case goes to each model's `/v1/chat/completions` with its served model id, temperature 0, at most 1024 tokens and thinking turned off (as in dl's smoke tests; a `<think>` block left in the answer is stripped), four at a time, 120 seconds per case, within `--timeout` for the whole run. A case passes when:
+
+- **it has assertions** (promptfoo `assert`, or `__expected` columns): all the ones dl supports pass: `equals`, `contains`, `icontains`, `contains-any`/`-all`, `icontains-any`/`-all`, `regex`, `starts-with`, `is-json`, `contains-json`, and their `not-` forms. Others (`llm-rubric`, `javascript`, `python`, `similar`...) are skipped and counted in the output, never passed. A case with only unsupported assertions falls back to its expected answer, or has no check.
+- **else it has an expected answer**: the answer equals it after lowercasing, collapsing whitespace and trimming quotes and end punctuation, or contains it as a whole word or phrase ("Paris" in "The capital is Paris.", never "4" in "42"). JSON compares as JSON. Several expected answers: any of them.
+- **else** it has no check and doesn't count.
+
+The score is passed over checked. The table shows it per model, then a summary ("41 of 44 passed · 3 with no check · llm-rubric ×6 skipped"), the first five failing cases in one line each, and a JSON file in `~/.directionallylocal/logs` with every case's input, answer and verdict. A data run fails only when no case got an answer (the endpoint is down) or the time ran out; otherwise the score decides at the gate, exactly as for a command. With both a command and data, both must pass and the score is the mean of the command's score (when it wrote one) and the data's.
 
 The model's state is kept separately from a server install, in `~/.local/state/directionallylocal/model.json` (or `$XDG_STATE_HOME`), so `dl model` works on a laptop or a server without touching `/etc/directionallylocal/state.json`.
 

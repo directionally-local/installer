@@ -126,7 +126,7 @@ Each repository's release bot picks the number from commit types: a feature bump
 | --- | --- | --- |
 | 0.10–0.36 (shipped) | 0, lane, 1.5 | Every `dl` a new session and `dl -c`; plain Autopilot on laptops; the free tier first in setup; Hotcell pinned exactly; `dl model` (0.22 on), tested on one GPU; several GPUs, SGLang, preflight, `--plan`, `--image` and `--workspace` (0.31–0.33, untested on hardware); the new-user trial and dl Pro (0.36) |
 | 0.37.0 (now) | lane | Sign up on dl.new with a one-time install command that starts dl signed in; Autopilot 3.26.0 |
-| next | 1.5 | `dl evals`, bring your command; `dl model update` gates on it, side by side |
+| 0.38.0 (release pending) | 1.5 | `dl evals`, bring your command; `dl model update` gates on it, side by side |
 | next | 1.5 | `dl evals`, bring your data: the built-in runner |
 | next | 1.5 | `dl ui`: Open WebUI next to the model, `dl ui share`, `dl ui invite` |
 | then | 1.5 | Opt-in traffic capture, replayed during `dl model update` |
@@ -265,9 +265,9 @@ Run open models on hardware you control. This started in weeks 2–3 alongside t
 | Built, untested on hardware, dl 0.31.0 | Multi-GPU deployments on one machine (was "Later"): PCIe or NVLink detection, tensor and pipeline parallel sizing, SGLang, `--gpus`/`--port` and `dl model list`, preflight, `dl model up --plan` | installer#241 |
 | Built, untested on hardware, dl 0.32.0 | `--image` runs a catalog entry in another container image, shown in `--plan` | installer#243 |
 | Built, untested on hardware, dl 0.33.0 | One command for a full GPU box: the model on all GPUs, plus dl's agent in a Hotcell sandbox limited to one workspace folder, pointed at the local model and shown in `--plan` (`--workspace`); `dl model attach`, `dl model down` | installer#245, hotcell#73 |
-| Built, untested on hardware (pull request open) | `dl evals`, bring your command: `dl evals set "COMMAND"` saves the team's eval command (pytest/DeepEval, promptfoo, Inspect, custom); `dl evals run` runs it once per model with `OPENAI_BASE_URL` pointed at each endpoint; pass or fail from the exit code, a score from JUnit XML, promptfoo JSON, Inspect logs, DeepEval's saved run or `{"score": n}` | new |
-| Built, untested on hardware (pull request open) | `dl model update` gates on `dl evals`: after the smoke tests and bench, the candidate must pass where the incumbent passed and score at least the incumbent's score minus a threshold (0.02 by default); side-by-side table; `--skip-evals` bypasses it | new |
-| Now, next pull request | `dl evals`, bring your data: detects JSONL, CSV, promptfoo YAML, OpenAI Evals JSONL, Braintrust and LangSmith exports; built-in runner | new |
+| Merged (dl 0.38.0 release pending) | `dl evals`, bring your command: `dl evals set "COMMAND"` saves the team's eval command (pytest/DeepEval, promptfoo, Inspect, custom); `dl evals run` runs it once per model with `OPENAI_BASE_URL` pointed at each endpoint; pass or fail from the exit code, a score from JUnit XML, promptfoo JSON, Inspect logs, DeepEval's saved run or `{"score": n}` | installer#272 |
+| Merged (dl 0.38.0 release pending) | `dl model update` gates on `dl evals`: after the smoke tests and bench, the candidate must pass where the incumbent passed and score at least the incumbent's score minus a threshold (0.02 by default); side-by-side table; `--skip-evals` bypasses it | installer#272 |
+| Built, untested on hardware (pull request open) | `dl evals`, bring your data: `dl evals set --data PATH` (a file, folder or glob) detects JSONL, CSV, promptfoo YAML, OpenAI Evals JSONL, Braintrust and LangSmith exports by content; the built-in runner sends each case to each model and checks it (promptfoo's deterministic assertions, else the expected answer); the same gate and table as a command | new |
 | Now | `dl ui`: Open WebUI team chat next to the model, localhost by default; `dl ui share` prints one internal link for the org (Tailscale with `tailscale serve` HTTPS on the tailnet hostname, never public; fallback: the LAN hostname or IP with `--listen`); admin-approved sign-ups or `dl ui invite <emails>` | new |
 | Later | `dl ui`: SSO (Google, Microsoft) through Open WebUI's OIDC support | new |
 | Next | Opt-in traffic capture, replayed against the candidate during `dl model update` (evals with no hand-written tests) | new |
