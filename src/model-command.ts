@@ -10,6 +10,7 @@ import { catalogDefaultText, chooseImage, namedByCaveat, parseImageRef, unoffici
 import { gib, hostResources, memoryLimitBytes, preflight, preflightError } from "./model-preflight.js";
 import { bench as benchModel } from "./model-bench.js";
 import { FIRST_ANSWER_MS, localFetch, modelApiBase, SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
+import { evalGate, evalsConfigPath, readEvalConfig, runEval, showRuns, type EvalRun, type ResultsFs, type SpawnEval } from "./model-evals.js";
 import { DEFAULT_DEPLOYMENT, modelStatePath, readDeployments, writeDeployment, type ModelDeployment, type ModelSandbox, type ModelState } from "./state.js";
 import type { System } from "./system.js";
 import type { Ui } from "./ui.js";
@@ -51,6 +52,11 @@ export interface ModelCommandOptions {
   allowInternet?: boolean;
   /** Extra arguments for Autopilot (dl model attach -- …). */
   attachArgs?: string[];
+  /** --skip-evals: update switches without running the eval command (dl evals set). */
+  skipEvals?: boolean;
+  /** For tests: the eval command's process and the results files it writes. */
+  evalSpawn?: SpawnEval;
+  evalFs?: ResultsFs;
 }
 
 /** The run log a failed `dl model` command wrote, when it wrote one. */
@@ -435,6 +441,7 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     ui.line("failed", "Usage", `dl model ${action}${action === "up" || action === "update" ? " [model] [--dry-run]" : ""}`);
     return 2;
   }
+  if (options.skipEvals && action !== "update") throw new Error("--skip-evals goes with dl model update.");
   if (options.image !== undefined) {
     if (action !== "up" && action !== "update") throw new Error(`--image goes with dl model up and dl model update${action === "rollback" ? "; rollback restores the previous deployment's image" : ""}.`);
     parseImageRef(options.image);
@@ -676,6 +683,8 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
         ui.line("info", "Speed (512 tokens)", "not compared, bench failed");
       }
     } else if (old) ui.line("info", "Speed", `new ${candidate.lastTest.tokensPerSecond} tok/s (old was stopped)`);
+    // The team's own evals gate the switch; a failure throws into the rollback below.
+    if (action === "update" && old) await gateOnEvals(options, name, statePath, stoppedOld ? undefined : old, candidate, old.id);
     await configureProvider(options, candidate, configPath);
     await writeDeployment(system, name, { active: candidate, ...(old ? { previous: old } : {}), ...(state?.sandbox ? { sandbox: state.sandbox } : {}) }, statePath);
     // The sandbox follows the switch before the old model stops: the alias moves, its config names the new model.
@@ -736,6 +745,39 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
   }
   sandboxReady(ui, command, sandbox);
   return 0;
+}
+
+/**
+ * `dl evals set`'s command against the incumbent and the candidate, side by side; throws (and so
+ * keeps the incumbent) unless the candidate passes the gate. No command set: a hint, no gate.
+ */
+async function gateOnEvals(options: ModelCommandOptions, name: string, statePath: string, incumbent: ModelDeployment | undefined, candidate: ModelDeployment, oldId: string): Promise<void> {
+  const { system, ui } = options;
+  const config = await readEvalConfig(system, evalsConfigPath(statePath));
+  if (!config) { ui.line("info", "Evals", 'none · dl evals set "COMMAND"'); return; }
+  if (options.skipEvals) { ui.line("info", "Evals", "skipped (--skip-evals)"); return; }
+  const settings = { system, config, logDir: options.logDir ?? runLogDir(), ...(options.evalSpawn ? { spawn: options.evalSpawn } : {}), ...(options.evalFs ? { fs: options.evalFs } : {}) };
+  const runs: EvalRun[] = [];
+  try {
+    for (const [deployment, role] of [[incumbent, "incumbent"], [candidate, "candidate"]] as const) {
+      if (!deployment) continue;
+      ui.line("info", "Evals", `running on ${deployment.id} (${role})`);
+      options.record?.(`evals ${role}: ${modelApiBase(deployment)}`);
+      const run = await runEval(settings, name, deployment, role);
+      options.record?.(`evals ${role} log: ${run.logPath}`);
+      runs.push(run);
+    }
+  } catch (error) {
+    throw new Error(`Evals could not run: ${firstLine(error)}; ${oldId} keeps serving (--skip-evals switches without them).`);
+  }
+  if (!incumbent) ui.warn("Evals ran on the new model only: the old one was stopped for it.");
+  showRuns(ui, runs);
+  const decision = evalGate(runs.find((run) => run.role === "incumbent"), runs.find((run) => run.role === "candidate")!, config.threshold);
+  if (!decision.ok) {
+    ui.line("failed", "Evals", decision.reason);
+    throw new Error(`Evals: ${decision.reason}; ${oldId} keeps serving.`);
+  }
+  ui.line("done", "Evals", decision.reason);
 }
 
 /** How to use the sandbox, after it's up. */
