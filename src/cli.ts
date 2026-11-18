@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +21,7 @@ import { model } from "./laptop/settings.js";
 import { modelCommand as gpuModelCommand, runLogDir } from "./model-command.js";
 import { planCommand } from "./model-plan.js";
 import { evalsCommand } from "./model-evals.js";
+import { chatUiCommand } from "./chat-ui.js";
 import { openSession, startHere, type SessionInput } from "./laptop/session.js";
 import { detectGitHubRepository } from "./laptop/git.js";
 import { preview as laptopPreview } from "./laptop/preview.js";
@@ -106,6 +108,16 @@ On your laptop:
   dl evals run [NAME...]  run it once per deployment here, with OPENAI_BASE_URL, OPENAI_API_KEY and
                           OPENAI_MODEL set for each
   dl evals show           the saved evals        dl evals clear   remove them
+  dl ui [up]              team chat: Open WebUI next to your dl model deployments, in Docker, on
+                          127.0.0.1:4800 (this machine only). The first run creates the admin
+                          (--admin-email EMAIL) and shows its password once. --port PORT;
+                          --listen [ADDRESS]: also reachable on the network (default 0.0.0.0)
+  dl ui share             print one link for your team: private HTTPS on your tailnet with Tailscale
+                          (tailscale serve, never Funnel); without it, the LAN address after
+                          dl ui up --listen. --off stops sharing
+  dl ui invite EMAIL...   make their accounts and print what to send each person (dl sends no email)
+  dl ui approve [EMAIL...|all]   who signed up and waits for approval; approve them
+  dl ui status · dl ui logs [-f] · dl ui down [--purge]   (--purge deletes accounts and chats)
   dl update               update dl (when npm has a newer one) and the Autopilot it pins, then
                           the default place (--check: only say whether there's a newer dl)
   dl update NAME          update a place's Autopilot, Hotcell and sandbox image to the versions dl pins
@@ -192,7 +204,7 @@ export async function main(
   // Everything after `--` belongs to Autopilot (bare dl on this computer): `dl -- --session ID`.
   const split = splitPassthrough(argv);
   const passthrough = split.passthrough;
-  argv = split.argv;
+  argv = bareListen(split.argv);
   let parsed;
   try {
     parsed = parseArgs({
@@ -242,6 +254,9 @@ export async function main(
         results: { type: "string" },
         timeout: { type: "string" },
         data: { type: "string" },
+        listen: { type: "string" },
+        "admin-email": { type: "string" },
+        off: { type: "boolean" },
       },
     });
   } catch (error) {
@@ -567,6 +582,14 @@ export async function main(
           ...(values.threshold !== undefined ? { threshold: values.threshold } : {}), ...(values.results !== undefined ? { results: values.results } : {}),
           ...(values.timeout !== undefined ? { timeout: values.timeout } : {}), ...(values.model !== undefined ? { model: values.model } : {}),
           ...(values.data !== undefined ? { data: values.data } : {}) });
+      case "ui": {
+        if (values.server) { io.err("dl ui runs on this machine, next to its dl model deployments; omit --server.\n"); return 2; }
+        const [action, ...args] = parsed.positionals.slice(1);
+        return await chatUiCommand(action, args, { system, ui: terminal ? new TerminalUi(io.out, undefined, colorOn) : new PlainUi(io.out), prompter: options.prompter ?? new TtyPrompter(), interactive: terminal,
+          ...(values.port !== undefined ? { port: values.port } : {}), ...(values.listen !== undefined ? { listen: values.listen } : {}),
+          ...(values["admin-email"] !== undefined ? { adminEmail: values["admin-email"] } : {}),
+          ...(values.off ? { off: true } : {}), ...(values.purge ? { purge: true } : {}), ...(values.follow ? { follow: true } : {}) });
+      }
       case "runs":
         // On a server, its runs; on a laptop, the tasks it sent.
         if (!(await readState(system))) {
@@ -784,6 +807,15 @@ function sessionInputFrom(
 }
 
 /** dl's own arguments, and everything after the first `--` (for Autopilot). */
+/** `--listen` with no address (last, or before another flag or a word that isn't one) means every address. */
+export function bareListen(argv: string[]): string[] {
+  return argv.map((arg, index) => {
+    if (arg !== "--listen") return arg;
+    const next = argv[index + 1];
+    return next === undefined || next.startsWith("-") || !isIP(next.replace(/^\[|\]$/g, "")) && next !== "localhost" ? "--listen=0.0.0.0" : arg;
+  });
+}
+
 export function splitPassthrough(argv: string[]): { argv: string[]; passthrough: string[] } {
   const dashes = argv.indexOf("--");
   return dashes === -1 ? { argv, passthrough: [] } : { argv: argv.slice(0, dashes), passthrough: argv.slice(dashes + 1) };

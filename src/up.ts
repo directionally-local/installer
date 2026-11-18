@@ -9,6 +9,7 @@ import {
 import type { Prompter } from "./prompt.js";
 import { ACCESS_MODES, readState, writeState, type AccessMode, type InstallState } from "./state.js";
 import type { System } from "./system.js";
+import { parseTailnetName, tailnetName, tailscaleIsUp } from "./tailscale.js";
 import { PlainUi, type SummaryItem, type Ui } from "./ui.js";
 import { ownerLink } from "./server-api.js";
 import { refreshModelPrices } from "./model-prices.js";
@@ -631,16 +632,6 @@ async function allowBridgePorts(system: System, bridgeIp: string): Promise<void>
   }
 }
 
-async function tailscaleIsUp(system: System): Promise<boolean> {
-  const status = await system.probe("tailscale", ["status", "--json"]);
-  if (status.code !== 0) return false;
-  try {
-    return (JSON.parse(status.stdout) as { BackendState?: string }).BackendState === "Running";
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Joins the tailnet right after the questions, before the long steps: the auth key is
  * used at once, so a later failure never has to ask for it again (it's never kept on disk).
@@ -662,7 +653,7 @@ async function joinTailnet(system: System, authKey: string | undefined): Promise
   }
   if (system.dryRun) return "on your tailnet";
   const status = await system.probe("tailscale", ["status", "--json"]);
-  const name = (JSON.parse(status.stdout || "{}") as { Self?: { DNSName?: string } }).Self?.DNSName?.replace(/\.$/, "");
+  const name = parseTailnetName(status.stdout);
   return name ? `${authKey ? "joined as" : "already on it as"} ${name.split(".")[0]}` : "joined";
 }
 
@@ -674,8 +665,7 @@ async function serveOverTailscale(system: System): Promise<string> {
       + "  Turn on MagicDNS and HTTPS certificates at https://login.tailscale.com/admin/dns, then run `dl up` again.");
   }
   if (system.dryRun) return DRY_RUN_URL;
-  const status = await system.probe("tailscale", ["status", "--json"]);
-  const dnsName = (JSON.parse(status.stdout || "{}") as { Self?: { DNSName?: string } }).Self?.DNSName?.replace(/\.$/, "");
+  const dnsName = await tailnetName(system);
   if (!dnsName) throw new Error("Tailscale is up but reported no DNS name for this machine; is MagicDNS on?");
   return `https://${dnsName}`;
 }
