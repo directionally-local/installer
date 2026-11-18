@@ -98,8 +98,8 @@ test("already signed in, not root: makes this login the operator, no sign-in", a
   setOnWait(() => { if (!webui.users.length) webui.add("me@acme.com", "Me", "pw", "admin"); });
   await firstRunChat(options({ root: false, user: "sina" }));
   assert.ok(!system.calls.some((call) => call.includes("tailscale up")));
-  assert.ok(!system.calls.includes("sudo -v"), "nothing needed sudo's password up front");
-  assert.ok(system.calls.includes("sudo tailscale set --operator=sina"));
+  assert.ok(system.calls.indexOf("sudo -v") < system.calls.indexOf("sudo tailscale set --operator=sina"), "the password is asked on the terminal first");
+  assert.equal(system.operator, "sina");
 });
 
 test("HTTPS certificates off: shows the admin console link and waits until they're on", async () => {

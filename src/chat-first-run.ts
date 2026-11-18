@@ -72,8 +72,9 @@ export async function firstRunChat(options: FirstRunChatOptions): Promise<ChatSe
   try {
     ui.title("Team chat in the browser");
     let tailscale = await tailscaleState(options.system);
-    if (tailscale.state !== "ready" && !options.root) {
-      // sudo asks for the password first, on the terminal, before anything else is printed.
+    if (!options.root) {
+      // Installing, signing in and making this login Tailscale's operator all need root: sudo
+      // asks for the password first, on the terminal, before anything else is printed.
       await options.system.run("sudo", ["-v"], { describe: "sudo -v", inherit: true });
     }
     if (tailscale.state === "missing") {
