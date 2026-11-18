@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.37.0](https://github.com/directionally-local/installer/compare/v0.36.0...v0.37.0) (2026-11-18)
+
+
+### Features
+
+* **free:** web sign-up from dl.new with a one-time install command ([#264](https://github.com/directionally-local/installer/issues/264)) ([9a9f555](https://github.com/directionally-local/installer/commit/9a9f5556ca402139142ff8c43a9dfb9b41149461))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.26.0 ([#266](https://github.com/directionally-local/installer/issues/266)) ([7068a6b](https://github.com/directionally-local/installer/commit/7068a6ba32ef2e3c37559ff1c442e2c0038498a4))
+
 ## [0.36.0](https://github.com/directionally-local/installer/compare/v0.35.1...v0.36.0) (2026-11-17)
 
 
