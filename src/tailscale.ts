@@ -1,9 +1,64 @@
+import { hostname } from "node:os";
 import type { RunResult, System } from "./system.js";
 
 /**
  * Tailscale, as dl uses it: `tailscale serve` publishes a local port as HTTPS on this machine's
  * tailnet name, reachable only from the tailnet. dl never runs `tailscale funnel` (public).
  */
+
+/** Where to turn on MagicDNS and HTTPS certificates (dl up, dl doctor and dl ui say the same). */
+export const HTTPS_CERTS_URL = "https://login.tailscale.com/admin/dns";
+
+/** Tailscale's own install script, as server mode (dl up) runs it. */
+export const TAILSCALE_INSTALL = "curl -fsSL https://tailscale.com/install.sh | sh";
+
+/** Installs Tailscale unless it's there; returns whether it installed it. `sudo` when not root. */
+export async function installTailscale(system: System, options: { sudo?: boolean } = {}): Promise<boolean> {
+  if ((await system.probe("tailscale", ["version"])).code === 0) return false;
+  const describe = "install Tailscale (tailscale.com/install.sh)";
+  if (options.sudo) await system.run("sudo", ["sh", "-c", TAILSCALE_INSTALL], { inherit: true, describe });
+  else await system.run("sh", ["-c", TAILSCALE_INSTALL], { inherit: true, describe });
+  return true;
+}
+
+/**
+ * What stands between this machine and a private HTTPS link:
+ * - missing: Tailscale isn't installed;
+ * - logged-out: installed, not logged in (or not connected);
+ * - no-https: logged in, but the tailnet has HTTPS certificates (or MagicDNS) off, so
+ *   `tailscale serve` can't give a real certificate;
+ * - ready: `name` is this machine's MagicDNS name.
+ */
+export type TailscaleState =
+  | { state: "missing" }
+  | { state: "logged-out" }
+  | { state: "no-https"; name?: string }
+  | { state: "ready"; name: string };
+
+/**
+ * Reads `tailscale status --json`: BackendState "Running" is logged in; CertDomains lists the
+ * names Tailscale can get a certificate for, and is empty while HTTPS certificates are off.
+ */
+export function parseTailscaleState(statusJson: string): TailscaleState {
+  let status: { BackendState?: string; Self?: { DNSName?: string }; CertDomains?: string[] | null };
+  try { status = JSON.parse(statusJson || "{}"); } catch { return { state: "logged-out" }; }
+  if (status.BackendState !== "Running") return { state: "logged-out" };
+  const name = status.Self?.DNSName?.replace(/\.$/, "") || undefined;
+  if (!name || !(status.CertDomains ?? []).some((domain) => domain.replace(/\.$/, "") === name)) return { state: "no-https", ...(name ? { name } : {}) };
+  return { state: "ready", name };
+}
+
+export async function tailscaleState(system: System): Promise<TailscaleState> {
+  if ((await system.probe("tailscale", ["version"])).code !== 0) return { state: "missing" };
+  const status = await system.probe("tailscale", ["status", "--json"]);
+  // Logged out, `tailscale status --json` still prints JSON (BackendState "NeedsLogin"), but may exit 1.
+  return parseTailscaleState(status.stdout);
+}
+
+/** This machine's name on the tailnet: its host name, as a DNS label. */
+export function machineName(host = hostname()): string {
+  return host.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 63) || "directionallylocal";
+}
 
 /** Logged in and connected. */
 export async function tailscaleIsUp(system: System): Promise<boolean> {

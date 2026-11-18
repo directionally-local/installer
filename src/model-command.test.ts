@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { modelCommand, type ModelCommandOptions } from "./model-command.js";
 import { FakeModelSystem } from "./test-support/fake-model-system.js";
+import { FakeOpenWebUi } from "./test-support/fake-open-webui.js";
 import { PlainUi } from "./ui.js";
 import type { Prompter } from "./prompt.js";
 import type { ModelDeployment } from "./state.js";
@@ -40,7 +41,41 @@ test("up configures vllm provider and state; status shows GPU and tests", async 
   assert.equal(config.providers.vllm.baseUrl, "http://127.0.0.1:8000/v1");
   assert.equal(await modelCommand("status", [], options), 0);
   assert.match(lines.join(""), /GPU: NVIDIA RTX 6000 · 48 GB.*Last test: chat ✓ · tools ✓ · JSON ✓ · 10 tok\/s/s);
-  assert.equal(system.modelCommands.length, 1);
+  assert.equal(system.modelCommands.length, 2);
+  // Passed its tests: Docker starts it again after a reboot.
+  assert.equal(system.modelCommands[1], "update --restart unless-stopped dl-model-1");
+});
+
+test("a model that fails its tests gets no restart policy (kept stopped for inspection after a reboot)", async () => {
+  const { system, options, failNew } = fixture();
+  failNew();
+  await assert.rejects(modelCommand("up", ["qwen-new"], options));
+  assert.ok(!system.modelCommands.some((command) => command.startsWith("update --restart")));
+});
+
+test("model up, update and down refresh a running team chat by itself: same link, new models", async () => {
+  const { system, options, lines } = fixture();
+  const webui = new FakeOpenWebUi();
+  const chat = { ...options, chatFetch: webui.fetch, delay: async () => {} };
+  // dl ui up ran earlier, and dl ui share.
+  await system.writeFile("/tmp/ui.json", JSON.stringify({ version: 2, port: 4800, share: { mode: "tailscale", url: "https://box.ts.net", httpsPort: 443 } }));
+  system.running.add("dl-ui");
+  system.vllmContainers.set("dl-ui", "0000000000000000");
+  const uiRuns = () => system.modelCommands.filter((command) => command.startsWith("run") && command.includes("--name dl-ui"));
+  await modelCommand("up", ["qwen-old"], chat);
+  assert.equal(uiRuns().length, 1);
+  assert.match(uiRuns()[0]!, /OPENAI_API_BASE_URLS=http:\/\/127\.0\.0\.1:8000\/v1/);
+  assert.match(uiRuns()[0]!, /WEBUI_URL=https:\/\/box\.ts\.net/, "the same link");
+  assert.match(lines.join(""), /Team chat: updated for the models here · same link: https:\/\/box\.ts\.net/);
+  await modelCommand("update", ["qwen-new"], chat);
+  assert.equal(uiRuns().length, 2);
+  assert.match(uiRuns()[1]!, /OPENAI_API_BASE_URLS=http:\/\/127\.0\.0\.1:8001\/v1/);
+  await modelCommand("down", [], chat);
+  assert.equal(uiRuns().length, 3);
+  assert.match(uiRuns()[2]!, /ENABLE_OPENAI_API=false/);
+  // status changes nothing.
+  await modelCommand("status", [], chat);
+  assert.equal(uiRuns().length, 3);
 });
 
 test("update compares both, switches provider, and rollback restores old deployment", async () => {

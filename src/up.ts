@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { hostname } from "node:os";
 import { agentCapacity, detectHost, preflightProblems, type HostFacts } from "./detect.js";
 import {
   AUTOPILOT_PORT, CELL_MEMORY_MB, GITHUB_PROXY_PORT, HOTCELL_EGRESS_PORT, HOTCELL_PORT, PATHS, SERVICES, USERS,
@@ -9,7 +8,7 @@ import {
 import type { Prompter } from "./prompt.js";
 import { ACCESS_MODES, readState, writeState, type AccessMode, type InstallState } from "./state.js";
 import type { System } from "./system.js";
-import { parseTailnetName, tailnetName, tailscaleIsUp } from "./tailscale.js";
+import { HTTPS_CERTS_URL, installTailscale, machineName, parseTailnetName, tailnetName, tailscaleIsUp } from "./tailscale.js";
 import { PlainUi, type SummaryItem, type Ui } from "./ui.js";
 import { ownerLink } from "./server-api.js";
 import { refreshModelPrices } from "./model-prices.js";
@@ -637,9 +636,7 @@ async function allowBridgePorts(system: System, bridgeIp: string): Promise<void>
  * used at once, so a later failure never has to ask for it again (it's never kept on disk).
  */
 async function joinTailnet(system: System, authKey: string | undefined): Promise<string> {
-  if ((await system.probe("tailscale", ["version"])).code !== 0) {
-    await system.run("sh", ["-c", "curl -fsSL https://tailscale.com/install.sh | sh"], { inherit: true, describe: "install Tailscale (tailscale.com/install.sh)" });
-  }
+  await installTailscale(system);
   if (authKey) {
     // The key goes through a 0600 file, never argv.
     const keyFile = `${PATHS.stateDir}/tailscale-auth-key`;
@@ -662,7 +659,7 @@ async function serveOverTailscale(system: System): Promise<string> {
   const served = await system.run("tailscale", ["serve", "--bg", "--https=443", `http://127.0.0.1:${AUTOPILOT_PORT}`], { allowFailure: true });
   if (served.code !== 0) {
     throw new Error(`Tailscale couldn't serve HTTPS: ${served.stderr.trim() || served.stdout.trim()}\n`
-      + "  Turn on MagicDNS and HTTPS certificates at https://login.tailscale.com/admin/dns, then run `dl up` again.");
+      + `  Turn on MagicDNS and HTTPS certificates at ${HTTPS_CERTS_URL}, then run \`dl up\` again.`);
   }
   if (system.dryRun) return DRY_RUN_URL;
   const dnsName = await tailnetName(system);
@@ -679,6 +676,3 @@ export async function waitUntil(system: System, sleep: (ms: number) => Promise<v
   throw new Error(`${what} didn't come up; check: journalctl -u ${unit} -n 50`);
 }
 
-function machineName(): string {
-  return hostname().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 63) || "directionallylocal";
-}

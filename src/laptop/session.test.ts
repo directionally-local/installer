@@ -963,6 +963,79 @@ describe("dl the first time on a laptop", () => {
     assert.equal(plain.launches.at(-1)!.env.DL_GPU_HANDOFF, undefined, "the last relaunch can't ask again, so Autopilot doesn't offer a retry");
   });
 
+  describe("How will your team use it? (the team chat after the model)", () => {
+    const MODEL_UP = JSON.stringify({ version: 1, action: "model-up" });
+    /** Autopilot writes `requests[n]` on its n-th launch (model-up, then the answer to the question). */
+    const answering = (requests: Array<string | undefined>): SessionSpawner => {
+      let launch = 0;
+      return (command, args, env, options) => {
+        const text = requests[launch++];
+        if (text && env.DL_GPU_HANDOFF) writeFileSync(env.DL_GPU_HANDOFF, text, { mode: 0o600 });
+        return plain.spawn(command, args, env, options);
+      };
+    };
+    const withChat = (spawn: SessionSpawner, chatUp: SessionInput["chatUp"], signals = new EventEmitter()) =>
+      laptop(undefined, { session: { nodeVersion: PATCHED_NODE, autopilot: async () => AUTOPILOT, spawn, signals, handoffTmp: root,
+        modelUp: async () => ({ ok: true, model: "Qwen/Qwen3-Coder-30B" }), ...(chatUp ? { chatUp } : {}) } });
+
+    it("after a model that passed, the relaunch offers the question (DL_CHAT_SETUP); a failure doesn't", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      assert.equal(await inside(dir, () => main([], capture(), withChat(answering([MODEL_UP]), undefined))), 0);
+      assert.equal(plain.launches[0]!.env.DL_CHAT_SETUP, undefined);
+      assert.equal(plain.launches[1]!.env.DL_CHAT_SETUP, "1");
+      assert.equal(plain.launches.length, 2, "Terminal agent: Autopilot just opens, as today");
+      const failing = laptop(undefined, { session: { nodeVersion: PATCHED_NODE, autopilot: async () => AUTOPILOT, spawn: answering([MODEL_UP]), signals: new EventEmitter(), handoffTmp: root,
+        modelUp: async () => ({ ok: false, errorType: "smoke_failed", message: "Smoke test failed" }) } });
+      assert.equal(await inside(dir, () => main([], capture(), failing)), 0);
+      assert.equal(plain.launches[3]!.env.DL_CHAT_SETUP, undefined);
+    });
+
+    it("Browser chat: dl sets up the chat with the model's name and exits, without the agent", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      const calls: unknown[] = [];
+      const chatUp: SessionInput["chatUp"] = async (request, _io, context) => { calls.push([request, context.model]); return { ok: true, url: "https://box.ts.net", hasAdmin: true }; };
+      assert.equal(await inside(dir, () => main([], capture(), withChat(answering([MODEL_UP, JSON.stringify({ version: 1, action: "chat-up", use: "browser" })]), chatUp))), 0);
+      assert.deepEqual(calls, [[{ version: 1, action: "chat-up", use: "browser" }, "Qwen/Qwen3-Coder-30B"]]);
+      assert.equal(plain.launches.length, 2, "no third Autopilot");
+    });
+
+    it("Browser chat that couldn't be set up exits 1", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      const chatUp: SessionInput["chatUp"] = async () => ({ ok: false, message: "Tailscale sign-in didn't finish." });
+      assert.equal(await inside(dir, () => main([], capture(), withChat(answering([MODEL_UP, JSON.stringify({ version: 1, action: "chat-up", use: "browser" })]), chatUp))), 1);
+    });
+
+    it("Both: the chat, then the agent once more, without the question", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      let called = 0;
+      const chatUp: SessionInput["chatUp"] = async () => { called++; return { ok: false, message: "HTTPS certificates are still off." }; };
+      assert.equal(await inside(dir, () => main([], capture(), withChat(answering([MODEL_UP, JSON.stringify({ version: 1, action: "chat-up", use: "both" })]), chatUp))), 0);
+      assert.equal(called, 1);
+      assert.equal(plain.launches.length, 3, "the agent opens even when the chat couldn't be set up");
+      assert.equal(plain.launches[2]!.env.DL_GPU_RESULT, undefined);
+      assert.equal(plain.launches[2]!.env.DL_CHAT_SETUP, undefined, "not asked again");
+    });
+
+    it("Ctrl-C during the chat setup stops its waits, not dl", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      const signals = new EventEmitter();
+      let aborted = false;
+      const chatUp: SessionInput["chatUp"] = async (_request, _io, context) => {
+        signals.emit("SIGINT");
+        aborted = context.signal.aborted;
+        return { ok: true, url: "https://box.ts.net", hasAdmin: false };
+      };
+      assert.equal(await inside(dir, () => main([], capture(), withChat(answering([MODEL_UP, JSON.stringify({ version: 1, action: "chat-up", use: "browser" })]), chatUp, signals))), 0);
+      assert.equal(aborted, true);
+      assert.equal(signals.listenerCount("SIGINT"), 0, "its handler is gone afterwards");
+    });
+  });
+
   it("dl --from-claude-code is autopilot --from-claude-code in this folder", async () => {
     const dir = join(root, "fresh");
     await mkdir(dir);

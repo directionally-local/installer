@@ -18,7 +18,8 @@ import { placeModel, saveModel } from "./settings.js";
 import { recordLastUsed, resolveTarget, type RemoteServer, type TargetReason } from "./config.js";
 import { detectGitHubRepository, snapshotWorkingTree, type WorkingTreeSnapshot } from "./git.js";
 import { describeSecretLocation, findLikelyProviderSecret, type SecretMatch } from "./secrets.js";
-import { handoffFile, MAX_HANDOFFS, resultEnv, takeHandoff, type ModelUpRequest } from "./gpu-handoff.js";
+import { handoffFile, MAX_HANDOFFS, resultEnv, takeHandoff, type ChatUpRequest, type ModelUpRequest } from "./gpu-handoff.js";
+import type { ChatSetupResult } from "../chat-first-run.js";
 import type { ModelUpResult } from "../model-first-run.js";
 import { forgetSession, latestSession, rememberSession, sessionsFor, sessionsPath, type SessionKey } from "./session-store.js";
 import { openRemoteForSession, withConnections, type RemoteOpener } from "./tunnel.js";
@@ -92,6 +93,8 @@ export interface SessionInput {
   modelUp?: (request: ModelUpRequest & { avoid?: string }, io: LaptopIO) => Promise<ModelUpResult>;
   /** Where the GPU handoff's private directory is made; the OS temp dir unless replaced (tests). */
   handoffTmp?: string;
+  /** Sets up the team chat when Autopilot asks for it (gpu-handoff.ts, chat-first-run.ts); the real one unless replaced (tests). */
+  chatUp?: (request: ChatUpRequest, io: LaptopIO, context: { model?: string; signal: AbortSignal }) => Promise<ChatSetupResult>;
 }
 
 const realSpawn: SessionSpawner = (command, args, env, options = {}) => spawn(command, args, { stdio: "inherit", env, ...(options.cwd ? { cwd: options.cwd } : {}) });
@@ -202,6 +205,8 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
   try {
     let gpuEnv: Record<string, string> = {};
     let lastFailed: string | undefined;
+    // The model the first run just started, for the team chat's final screen.
+    let started: string | undefined;
     for (let round = 0; ; round++) {
       const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | Error>((resolve) => {
         // AUTOPILOT_LAUNCHED_BY tells Autopilot dl started it, so its own hints (the exit line's
@@ -236,10 +241,27 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
         if (outcome.code !== null) return outcome.code;
         return outcome.signal === "SIGINT" ? 130 : outcome.signal === "SIGHUP" ? 129 : outcome.signal === "SIGTERM" ? 143 : 1;
       }
+      child = undefined;
+      if (request.action === "chat-up") {
+        // "How will your team use it?" Browser chat or Both: the team chat, then (Both) the agent.
+        // Ctrl-C stops dl's waits (for HTTPS certificates, for the admin account), not dl.
+        const stopWaiting = new AbortController();
+        const onInterrupt = () => stopWaiting.abort();
+        signals.on("SIGINT", onInterrupt);
+        let chat: ChatSetupResult;
+        try {
+          chat = await (input.chatUp ?? realChatUp)(request, io, { ...(started ? { model: started } : {}), signal: stopWaiting.signal });
+        } finally {
+          signals.off("SIGINT", onInterrupt);
+        }
+        if (request.use === "browser") return chat.ok ? 0 : 1;
+        // Both: the agent now, on the model; nothing more to report or ask.
+        gpuEnv = {};
+        continue;
+      }
       // Autopilot asked for a private model on this GPU: dl model up, then Autopilot again,
       // which opens on the new provider (or, when it failed, says so and asks again).
       // The request may name a model to retry, or ask for the picker with the last failure marked.
-      child = undefined;
       const result = await (input.modelUp ?? realModelUp)({ ...request, ...(lastFailed && !request.model ? { avoid: lastFailed } : {}) }, io);
       if (!result.ok && result.errorType !== "cancelled") {
         // One short line and where the details are; vLLM's own logs stay in the log file.
@@ -247,6 +269,7 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
         io.err(`\n  ${c.red("✗")} ${result.message}\n${(result.details ?? []).map((line) => `    ${line}\n`).join("")}${result.log ? `    ${c.dim(`Log: ${result.log}`)}\n` : ""}`);
       }
       lastFailed = result.ok ? undefined : result.model;
+      started = result.ok ? result.model : undefined;
       gpuEnv = resultEnv(result, request.gpu);
     }
   } finally {
@@ -254,6 +277,16 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
     await handoff?.cleanup().catch(() => {});
     for (const [name, handler] of handlers) signals.off(name, handler);
   }
+}
+
+/** The real team chat setup, on this terminal (chat-first-run.ts). */
+async function realChatUp(_request: ChatUpRequest, io: LaptopIO, context: { model?: string; signal: AbortSignal }): Promise<ChatSetupResult> {
+  const [{ firstRunChat }, { RealSystem }, { TerminalUi }] = await Promise.all([import("../chat-first-run.js"), import("../system.js"), import("../ui.js")]);
+  const root = typeof process.getuid === "function" && process.getuid() === 0;
+  return firstRunChat({
+    system: new RealSystem(), ui: new TerminalUi(io.out, undefined, io.color === true), prompter: new TtyPrompter({ settleMs: 300 }), root,
+    io: { out: io.out, color: io.color === true }, signal: context.signal, ...(context.model ? { model: context.model } : {}),
+  });
 }
 
 /** The real first-run model setup, on this terminal (model-first-run.ts). */

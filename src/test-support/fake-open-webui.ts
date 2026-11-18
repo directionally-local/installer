@@ -18,6 +18,14 @@ export class FakeUiSystem extends FakeSystem {
   oldTailscale = false;
   serveFails = false;
   dnsName = "box.tail1234.ts.net.";
+  /** The tailnet has HTTPS certificates on (CertDomains lists this machine). */
+  httpsCerts = true;
+  /** Certificates come on after this many more `tailscale status` reads (someone clicks Enable). */
+  certsAfterReads: number | undefined;
+  /** `tailscale up` (the interactive sign-in) ends without signing in. */
+  loginFails = false;
+  /** `tailscale set --operator=…` given. */
+  operator: string | undefined;
 
   constructor(options: { tailscale?: boolean; tailscaleUp?: boolean } = {}) {
     super({ docker: true, ...options });
@@ -29,6 +37,14 @@ export class FakeUiSystem extends FakeSystem {
   }
 
   override async run(command: string, args: string[], options: RunOptions = {}): Promise<RunResult> {
+    if (command === "sudo") {
+      this.calls.push(["sudo", ...args].join(" "));
+      if (args[0] === "tailscale" || args[0] === "docker") return this.run(args[0], args.slice(1), options);
+      if (args[0] === "sh") return super.run("sh", args.slice(1), options);
+      this.commands.push({ command, args });
+      return ok();
+    }
+    if (command === "sh") this.calls.push(["sh", ...args].join(" "));
     if (command !== "docker" && command !== "tailscale") return super.run(command, args, options);
     this.commands.push({ command, args });
     const result = this.answer(command, args);
@@ -46,7 +62,8 @@ export class FakeUiSystem extends FakeSystem {
         case "pull": this.pulled.add(args[1]!); return ok();
         case "inspect": {
           const container = this.uiContainers.get(name);
-          return container ? ok(`${container.running} ${container.spec}\n`) : fail("No such object");
+          if (!container) return fail("No such object");
+          return ok(args.join(" ").includes("Labels") ? `${container.running} ${container.spec}\n` : `${container.running}\n`);
         }
         case "run": {
           const label = args[args.indexOf("--label") + 1]!;
@@ -66,7 +83,22 @@ export class FakeUiSystem extends FakeSystem {
     if (args[0] === "version") return this.tailscaleInstalled ? ok("1.76.0\n") : fail("not installed");
     if (!this.tailscaleInstalled) return fail("tailscale: command not found");
     if (args[0] === "status") {
-      return ok(JSON.stringify(this.tailscaleUp ? { BackendState: "Running", Self: { DNSName: this.dnsName } } : { BackendState: "NeedsLogin" }));
+      if (this.certsAfterReads !== undefined && this.certsAfterReads-- <= 0) { this.httpsCerts = true; this.certsAfterReads = undefined; }
+      return ok(JSON.stringify(this.tailscaleUp
+        ? { BackendState: "Running", Self: { DNSName: this.dnsName }, CertDomains: this.httpsCerts ? [this.dnsName.replace(/\.$/, "")] : null }
+        : { BackendState: "NeedsLogin" }));
+    }
+    if (args[0] === "up") {
+      if (this.loginFails) return fail("context canceled");
+      this.tailscaleUp = true;
+      const operator = args.find((arg) => arg.startsWith("--operator="));
+      if (operator) this.operator = operator.slice("--operator=".length);
+      return ok();
+    }
+    if (args[0] === "set") {
+      const operator = args.find((arg) => arg.startsWith("--operator="));
+      if (operator) this.operator = operator.slice("--operator=".length);
+      return ok();
     }
     if (args[0] === "serve" && args[1] === "status") {
       const host = this.dnsName.replace(/\.$/, "");
@@ -94,9 +126,14 @@ export class FakeUiSystem extends FakeSystem {
 
 export interface FakeUser { id: string; email: string; name: string; role: string; password: string; created_at: number }
 
-/** Open WebUI's HTTP API, the parts dl ui uses, with its behaviour: the first sign-up becomes the admin. */
+/**
+ * Open WebUI's HTTP API, the parts dl ui uses, with its behaviour: the first sign-up becomes the
+ * admin; API keys (sk-…) work only on the user-management endpoints dl allows.
+ */
 export class FakeOpenWebUi {
   readonly users: FakeUser[] = [];
+  /** API key → user id, as Settings > Account > API Key makes them. */
+  readonly apiKeys = new Map<string, string>();
   readonly requests: Array<{ method: string; path: string; body?: Record<string, unknown>; token?: string }> = [];
   healthy = true;
   private next = 1;
@@ -109,7 +146,10 @@ export class FakeOpenWebUi {
     const token = auth?.replace(/^Bearer /, "");
     this.requests.push({ method, path: pathname, ...(body ? { body } : {}), ...(token ? { token } : {}) });
     const json = (status: number, value: unknown) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
-    const caller = token ? this.users.find((user) => `token-${user.id}` === token) : undefined;
+    if (token?.startsWith("sk-") && !["/api/v1/users", "/api/v1/auths/add"].some((allowed) => pathname === allowed || pathname.startsWith(`${allowed}/`))) {
+      return json(403, { detail: "Access prohibited" });
+    }
+    const caller = token?.startsWith("sk-") ? this.users.find((user) => this.apiKeys.get(token) === user.id) : token ? this.users.find((user) => `token-${user.id}` === token) : undefined;
     const admin = caller?.role === "admin";
     if (pathname === "/health") return this.healthy ? json(200, { status: true }) : json(503, {});
     if (pathname === "/api/config") return json(200, { name: "Open WebUI", ...(this.users.length ? {} : { onboarding: true }) });
@@ -138,6 +178,14 @@ export class FakeOpenWebUi {
     }
     return json(404, { detail: "Not Found" });
   };
+
+  /** The admin makes an API key in the browser. */
+  apiKey(email: string): string {
+    const user = this.users.find((entry) => entry.email === email)!;
+    const key = `sk-${user.id}0123456789abcdef`;
+    this.apiKeys.set(key, user.id);
+    return key;
+  }
 
   add(email: string, name: string, password: string, role: string): FakeUser {
     const user = { id: `u${this.next++}`, email, name, role, password, created_at: 1_763_000_000 };

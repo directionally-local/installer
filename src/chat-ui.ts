@@ -1,6 +1,4 @@
 import { createHash, randomBytes } from "node:crypto";
-import { isIP } from "node:net";
-import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { DUMMY_API_KEY } from "./model-evals.js";
 import { inspectContainer, removeContainer } from "./model-runtime.js";
@@ -8,22 +6,30 @@ import { localFetch, modelApiBase, type FetchModel } from "./model-smoke.js";
 import type { Prompter } from "./prompt.js";
 import { modelStatePath, readDeployments } from "./state.js";
 import type { System } from "./system.js";
-import { serveHttps, serveStatus, stopServing, tailnetName, tailnetUrl, tailscaleIsUp } from "./tailscale.js";
+import { HTTPS_CERTS_URL, serveHttps, serveStatus, stopServing, TAILSCALE_INSTALL, tailnetUrl, tailscaleState } from "./tailscale.js";
 import type { Ui } from "./ui.js";
 
 /**
  * `dl ui`: Open WebUI as the team's chat, next to the model, in one Docker container.
  *
- * - Localhost by default; `--listen` binds the LAN too (with a warning).
- * - `dl ui share`: one private link. Tailscale (`tailscale serve`, HTTPS on the tailnet name,
- *   never `tailscale funnel`), or without it the LAN address when listening there.
- * - Who gets in: sign-ups wait for an admin's approval (`dl ui approve`), or the admin invites
- *   emails (`dl ui invite`), which creates their accounts with a one-time password.
+ * - It listens on this machine's loopback only. The team reaches it over HTTPS: `dl ui share`
+ *   serves it on the tailnet name with `tailscale serve` (a real certificate, reachable only
+ *   from the tailnet; never `tailscale funnel`). There is no plain-HTTP network mode; without
+ *   Tailscale, an SSH tunnel reaches the loopback port (ssh -N -L 4800:127.0.0.1:4800 box).
+ * - The admin is whoever creates Open WebUI's first account, in the browser: dl prints the link
+ *   and says to open it at once. dl never keeps the admin's password. For `dl ui invite` and
+ *   `dl ui approve` it asks once for an admin's Open WebUI API key (Settings > Account), kept
+ *   0600 and usable only on the user-management endpoints (API_KEYS_ALLOWED_ENDPOINTS).
+ * - Two-factor sign-in is on for everyone (ENABLE_MFA): each person enrolls an authenticator
+ *   app on their first sign-in. Its secrets are encrypted with a key derived from
+ *   WEBUI_SECRET_KEY, which Open WebUI generates once into the data volume, so it persists.
+ * - Who gets in: sign-ups wait for an admin's approval, or the admin adds people.
  *
  * dl owns Open WebUI's settings: they come from the container's environment on every start
- * (ENABLE_PERSISTENT_CONFIG=false), so web search, image generation, the model endpoints and
- * pending approval are what dl set, whatever was saved before. Accounts and chats persist in the
- * dl-ui-data volume.
+ * (ENABLE_PERSISTENT_CONFIG=false), so web search, image generation, the model endpoints, 2FA
+ * and pending approval are what dl set, whatever was saved before. Accounts and chats persist in
+ * the dl-ui-data volume. The container restarts with Docker (--restart unless-stopped) and
+ * `tailscale serve --bg` is kept by tailscaled, so both survive logout and reboot.
  */
 
 /** Open WebUI v0.12.5 (29 Oct 2026), by tag and the digest of its multi-arch index (amd64, arm64). */
@@ -38,19 +44,24 @@ const DATA_DIR = "/app/backend/data";
 /** HTTPS ports tried on the tailnet name, in order; 443 is the server's agent API under `dl up`. */
 const TAILNET_PORTS = [443, 8443, 10000];
 const LOOPBACK = "127.0.0.1";
+/** The only endpoints an Open WebUI API key may call: listing, approving and adding people. */
+export const API_KEY_ENDPOINTS = ["/api/v1/users", "/api/v1/auths/add"];
+/** Where an admin makes the API key dl asks for. */
+export const API_KEY_WHERE = "your name (bottom left) > Settings > Account > API Key > Create";
 
-export type UiShare = { mode: "tailscale"; url: string; httpsPort: number } | { mode: "lan"; url: string };
+export interface UiShare { mode: "tailscale"; url: string; httpsPort: number }
 
-/** ~/.local/state/directionallylocal/ui.json, 0600: it holds the admin's password. */
+/** ~/.local/state/directionallylocal/ui.json, 0600: it may hold an admin's API key. */
 export interface UiState {
-  version: 1;
+  version: 2;
   port: number;
-  /** The address Open WebUI binds: 127.0.0.1, 0.0.0.0 or one of this machine's. */
-  listen: string;
-  adminEmail: string;
-  adminPassword: string;
-  /** The admin account exists in Open WebUI (made by dl on the first start). */
-  adminCreated: boolean;
+  /** An admin's Open WebUI API key (sk-…), asked for once by invite/approve. Never a password. */
+  adminApiKey?: string;
+  /**
+   * Open WebUI has its admin and has restarted since: making the first account turns sign-ups
+   * off in Open WebUI's memory, and a restart brings back dl's ENABLE_SIGNUP=true.
+   */
+  signupsOpen?: boolean;
   share?: UiShare;
 }
 
@@ -63,10 +74,12 @@ export interface ChatUiOptions {
   statePath?: string;
   fetch?: FetchModel;
   delay?: (ms: number) => Promise<void>;
-  interfaces?: () => NodeJS.Dict<NetworkInterfaceInfo[]>;
+  /** DL_UI_ADMIN_KEY: the admin API key without asking (scripts); process.env unless replaced. */
+  env?: NodeJS.ProcessEnv;
   port?: string;
-  /** --listen [ADDRESS]: "0.0.0.0" when given bare. */
+  /** --listen was given: refused, the chat is HTTPS-only. */
   listen?: string;
+  /** --admin-email: dl creates the admin itself and shows its password once (it never keeps it). */
   adminEmail?: string;
   /** share --off */
   off?: boolean;
@@ -77,6 +90,15 @@ export interface ChatUiOptions {
 
 export const UI_USAGE = "dl ui [up|status|share|invite EMAIL...|approve [EMAIL...|all]|logs|down]";
 
+/** How to reach the loopback-only chat from a laptop without Tailscale. */
+export function tunnelHint(port = UI_PORT): string {
+  return `ssh -N -L ${port}:127.0.0.1:${port} you@this-machine, then open http://127.0.0.1:${port} on your laptop`;
+}
+
+export const NO_LISTEN = "dl ui serves the chat over HTTPS only, so it no longer listens on the network (--listen).\n"
+  + "  For your team: dl ui share (a private HTTPS link with Tailscale).\n"
+  + `  Just you, without Tailscale: ${tunnelHint()}.`;
+
 export function uiStatePath(statePath = modelStatePath()): string {
   return join(dirname(statePath), "ui.json");
 }
@@ -85,10 +107,17 @@ export async function readUiState(system: System, path: string): Promise<UiState
   const raw = await system.readFile(path);
   if (!raw) return undefined;
   try {
-    const state = JSON.parse(raw) as Partial<UiState>;
-    if (state.version !== 1 || !Number.isInteger(state.port) || typeof state.listen !== "string" || typeof state.adminEmail !== "string"
-      || typeof state.adminPassword !== "string" || typeof state.adminCreated !== "boolean") throw new Error("invalid");
-    return state as UiState;
+    const state = JSON.parse(raw) as Record<string, unknown>;
+    if (!Number.isInteger(state.port)) throw new Error("invalid");
+    const share = state.share as Partial<UiShare> | undefined;
+    const tailnet = share?.mode === "tailscale" && typeof share.url === "string" && Number.isInteger(share.httpsPort) ? share as UiShare : undefined;
+    if (state.version === 1) {
+      // dl ui before HTTPS-only (never released): no LAN share, no password kept.
+      return { version: 2, port: state.port as number, ...(state.adminCreated === true ? { signupsOpen: true } : {}), ...(tailnet ? { share: tailnet } : {}) };
+    }
+    if (state.version !== 2 || (state.adminApiKey !== undefined && typeof state.adminApiKey !== "string")) throw new Error("invalid");
+    return { version: 2, port: state.port as number, ...(typeof state.adminApiKey === "string" ? { adminApiKey: state.adminApiKey } : {}),
+      ...(state.signupsOpen === true ? { signupsOpen: true } : {}), ...(tailnet ? { share: tailnet } : {}) };
   } catch {
     throw new Error(`Invalid dl ui state at ${path}; fix or remove it (dl ui down --purge starts over).`);
   }
@@ -112,33 +141,14 @@ export function generatePassword(): string {
   return `${randomBytes(18).toString("base64url")}-aA1`;
 }
 
-function hostFor(address: string): string {
-  return isIP(address) === 6 ? `[${address}]` : address;
-}
-
-/** Bound on every address or only on this machine's loopback. */
-const wildcard = (listen: string) => listen === "0.0.0.0" || listen === "::";
-const loopback = (listen: string) => listen === LOOPBACK || listen === "::1" || listen.startsWith("127.");
-
 /** Where dl itself reaches Open WebUI (and where `tailscale serve` points). */
-export function localUrl(state: Pick<UiState, "listen" | "port">): string {
-  return `http://${wildcard(state.listen) ? LOOPBACK : hostFor(state.listen)}:${state.port}`;
+export function localUrl(state: Pick<UiState, "port">): string {
+  return `http://${LOOPBACK}:${state.port}`;
 }
 
 /** The link Open WebUI calls itself (WEBUI_URL): the shared one, else the local one. */
-export function publicUrl(state: Pick<UiState, "listen" | "port" | "share">): string {
+export function publicUrl(state: Pick<UiState, "port" | "share">): string {
   return state.share?.url ?? localUrl(state);
-}
-
-/** This machine's LAN address: the one --listen named, else the first non-virtual IPv4. */
-export function lanAddress(listen: string, interfaces: NodeJS.Dict<NetworkInterfaceInfo[]> = networkInterfaces()): string | undefined {
-  if (!wildcard(listen) && !loopback(listen)) return listen;
-  for (const [name, addresses] of Object.entries(interfaces)) {
-    if (/^(lo|docker|br-|veth|tailscale|ts\d|virbr|cni|flannel|cali|zt|wg|utun)/.test(name)) continue;
-    const ipv4 = addresses?.find((address) => address.family === "IPv4" && !address.internal && !address.address.startsWith("169.254."));
-    if (ipv4) return ipv4.address;
-  }
-  return undefined;
 }
 
 /** The model endpoints Open WebUI talks to: each dl model deployment's API, by name. */
@@ -152,19 +162,25 @@ export async function modelEndpoints(system: System, statePath: string): Promise
  * has a switch for it; the only outbound connections left are the ones a user starts (a URL
  * pasted into a chat is fetched).
  */
-export function uiEnv(state: Pick<UiState, "listen" | "port" | "share">, endpoints: readonly string[]): Record<string, string> {
+export function uiEnv(state: Pick<UiState, "port" | "share">, endpoints: readonly string[]): Record<string, string> {
   return {
-    // --network host: Open WebUI binds this address and port itself, and reaches the models on 127.0.0.1.
-    HOST: state.listen,
+    // --network host: Open WebUI binds loopback itself, and reaches the models on 127.0.0.1.
+    HOST: LOOPBACK,
     PORT: String(state.port),
     WEBUI_URL: publicUrl(state),
     // The session-signing key is generated once into the volume, never passed in the environment.
+    // 2FA's secrets are encrypted with a key derived from it, so it must persist (it does, in the volume).
     WEBUI_SECRET_KEY_FILE: `${DATA_DIR}/.webui_secret_key`,
     // dl's settings win on every start (see the header).
     ENABLE_PERSISTENT_CONFIG: "false",
-    // Who gets in: anyone may ask, an admin approves each person.
+    // Who gets in: anyone may ask, an admin approves each person; everyone signs in with 2FA.
     ENABLE_SIGNUP: "true",
     DEFAULT_USER_ROLE: "pending",
+    ENABLE_MFA: "true",
+    // API keys, for dl ui invite/approve with an admin's key; only on the user-management endpoints.
+    ENABLE_API_KEYS: "true",
+    ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS: "true",
+    API_KEYS_ALLOWED_ENDPOINTS: API_KEY_ENDPOINTS.join(","),
     // The models: dl's deployments only. No Ollama, no OpenAI default, no endpoints users add in the browser.
     ENABLE_OLLAMA_API: "false",
     ENABLE_OPENAI_API: endpoints.length ? "true" : "false",
@@ -188,7 +204,7 @@ export function uiEnv(state: Pick<UiState, "listen" | "port" | "share">, endpoin
 }
 
 /** `docker run` for Open WebUI, labeled with a hash of everything else so a re-run knows whether it can keep the container. */
-export function uiDockerArgs(state: Pick<UiState, "listen" | "port" | "share">, endpoints: readonly string[]): string[] {
+export function uiDockerArgs(state: Pick<UiState, "port" | "share">, endpoints: readonly string[]): string[] {
   const env = uiEnv(state, endpoints);
   const container = ["--name", UI_CONTAINER, "--restart", "unless-stopped", "--network", "host", "-v", `${UI_VOLUME}:${DATA_DIR}`,
     ...Object.entries(env).flatMap(([name, value]) => ["-e", `${name}=${value}`])];
@@ -206,14 +222,7 @@ function parsePort(text: string): number {
   return port;
 }
 
-function parseListen(text: string): string {
-  const address = text.trim().replace(/^\[|\]$/g, "");
-  if (address === "localhost") return LOOPBACK;
-  if (!isIP(address)) throw new Error(`--listen takes an IP address of this machine (0.0.0.0 for every one; got "${text}").`);
-  return address;
-}
-
-/** Open WebUI's HTTP API, as its admin. */
+/** Open WebUI's HTTP API. */
 class OpenWebUi {
   constructor(private readonly base: string, private readonly call: FetchModel) {}
 
@@ -247,12 +256,10 @@ class OpenWebUi {
     }
   }
 
-  /** The admin's session token. */
-  async signIn(state: UiState): Promise<string> {
-    const result = await this.request<{ token?: string; role?: string }>("POST", "/api/v1/auths/signin", { email: state.adminEmail, password: state.adminPassword });
-    if (!result?.token) throw new Error(`Open WebUI didn't give ${state.adminEmail} a session (two-factor sign-in on? dl can't use it). Use the Admin Panel instead.`);
-    if (result.role !== "admin") throw new Error(`${state.adminEmail} isn't an admin in Open WebUI any more.`);
-    return result.token;
+  /** Whether the first account (the admin) exists: until then /api/config says onboarding. */
+  async hasAdmin(): Promise<boolean> {
+    const config = await this.request<{ onboarding?: boolean }>("GET", "/api/config");
+    return config?.onboarding !== true;
   }
 
   async users(token: string): Promise<OpenWebUiUser[]> {
@@ -270,15 +277,18 @@ export class OpenWebUiError extends Error {
   }
 }
 
+const refused = (error: unknown) => error instanceof OpenWebUiError && (error.status === 401 || error.status === 403);
+
 export async function chatUiCommand(action: string | undefined, args: string[], options: ChatUiOptions): Promise<number> {
   const { ui } = options;
   const path = uiStatePath(options.statePath);
   const verb = action ?? "up";
   if (verb !== "invite" && verb !== "approve" && args.length) { ui.line("failed", "Usage", UI_USAGE); return 2; }
+  if (options.listen !== undefined) throw new Error(NO_LISTEN);
   if (options.off && verb !== "share") throw new Error("--off goes with dl ui share.");
   if (options.purge && verb !== "down") throw new Error("--purge goes with dl ui down.");
   if (options.adminEmail !== undefined && verb !== "up") throw new Error("--admin-email goes with dl ui up.");
-  if ((options.listen !== undefined || options.port !== undefined) && verb !== "up") throw new Error("--listen and --port go with dl ui up.");
+  if (options.port !== undefined && verb !== "up") throw new Error("--port goes with dl ui up.");
   switch (verb) {
     case "up": return up(options, path);
     case "status": return status(options, path);
@@ -291,18 +301,24 @@ export async function chatUiCommand(action: string | undefined, args: string[], 
   }
 }
 
-async function requireState(options: ChatUiOptions, path: string): Promise<UiState> {
+async function requireState(options: Pick<ChatUiOptions, "system">, path: string): Promise<UiState> {
   const state = await readUiState(options.system, path);
   if (!state) throw new Error("Team chat isn't set up here yet: dl ui up");
   return state;
 }
 
-function api(options: ChatUiOptions, state: UiState): OpenWebUi {
+function api(options: Pick<ChatUiOptions, "fetch">, state: UiState): OpenWebUi {
   return new OpenWebUi(localUrl(state), options.fetch ?? localFetch);
 }
 
-async function waitHealthy(options: ChatUiOptions, state: UiState): Promise<void> {
-  const delay = options.delay ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+type Waiting = Pick<ChatUiOptions, "system" | "fetch" | "delay">;
+
+function sleeper(options: Pick<ChatUiOptions, "delay">): (ms: number) => Promise<void> {
+  return options.delay ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+}
+
+async function waitHealthy(options: Waiting, state: UiState): Promise<void> {
+  const delay = sleeper(options);
   const client = api(options, state);
   // The first start migrates its database; give it five minutes.
   for (let attempt = 0; attempt < 150; attempt++) {
@@ -313,11 +329,13 @@ async function waitHealthy(options: ChatUiOptions, state: UiState): Promise<void
   throw new Error(`Open WebUI didn't come up on ${localUrl(state)}; see docker logs ${UI_CONTAINER}`);
 }
 
+type Starting = Pick<ChatUiOptions, "system" | "ui" | "fetch" | "delay">;
+
 /**
  * Starts (or keeps) the container for `state`; returns whether it changed. The same settings
  * keep the running container; anything else replaces it (the volume keeps accounts and chats).
  */
-async function ensureContainer(options: ChatUiOptions, state: UiState, statePath: string): Promise<"kept" | "started" | "replaced"> {
+async function ensureContainer(options: Starting, state: UiState, statePath: string, path: string): Promise<"kept" | "started" | "replaced"> {
   const { system, ui } = options;
   const endpoints = await modelEndpoints(system, statePath);
   const runArgs = uiDockerArgs(state, endpoints);
@@ -328,92 +346,100 @@ async function ensureContainer(options: ChatUiOptions, state: UiState, statePath
     await system.run("docker", ["pull", OPEN_WEBUI_IMAGE]);
   }
   if (existing) await removeContainer(system, UI_CONTAINER);
-  ui.line("info", existing ? "Restarting" : "Starting", `Open WebUI on ${hostFor(state.listen)}:${state.port} (the first start takes a minute)`);
+  ui.line("info", existing ? "Restarting" : "Starting", `Open WebUI on ${LOOPBACK}:${state.port} (the first start takes a minute)`);
   await system.run("docker", runArgs);
-  if (!system.dryRun) await waitHealthy(options, state);
+  if (!system.dryRun) {
+    await waitHealthy(options, state);
+    // A fresh start has dl's sign-up setting, whatever Open WebUI did at its first account.
+    const open = await api(options, state).hasAdmin();
+    if (open !== Boolean(state.signupsOpen)) {
+      if (open) state.signupsOpen = true; else delete state.signupsOpen;
+      await writeUiState(system, path, state);
+    }
+  }
   ui.line("done", "Open WebUI", endpoints.length ? `up · ${endpoints.length === 1 ? "1 model endpoint" : `${endpoints.length} model endpoints`}` : "up · no model yet");
   return existing ? "replaced" : "started";
 }
 
-async function askAdminEmail(options: ChatUiOptions): Promise<string> {
-  let email = options.adminEmail?.trim().toLowerCase();
-  if (!email) {
-    if (!options.interactive) throw new Error("Name the admin's email: dl ui up --admin-email you@company.com");
-    email = (await options.prompter.text(options.ui.prompt("Admin email", "your sign-in to the team chat"))).trim().toLowerCase();
-  }
-  if (!validEmail(email)) throw new Error(`"${email}" isn't an email address.`);
-  return email;
+/**
+ * Open WebUI turns sign-ups off when its first account (the admin) is made. With dl's
+ * ENABLE_PERSISTENT_CONFIG=false that lasts only until a restart, which brings back dl's
+ * ENABLE_SIGNUP=true: once the admin exists, dl restarts the container once. True when it did.
+ */
+export async function reopenSignups(options: Waiting, path: string, state: UiState): Promise<boolean> {
+  if (state.signupsOpen || options.system.dryRun) return false;
+  if (!(await api(options, state).hasAdmin())) return false;
+  await options.system.run("docker", ["restart", UI_CONTAINER]);
+  await waitHealthy(options, state);
+  state.signupsOpen = true;
+  await writeUiState(options.system, path, state);
+  return true;
 }
 
-async function up(options: ChatUiOptions, path: string): Promise<number> {
-  const { system, ui } = options;
+export interface ChatStart {
+  state: UiState;
+  result: "kept" | "started" | "replaced";
+  /** Open WebUI has its admin account. */
+  hasAdmin: boolean;
+  /** --admin-email: the admin dl created, with the password shown once. */
+  created?: { email: string; password: string };
+}
+
+/** `dl ui up` without its summary: what the first run's chat setup calls too. */
+export async function startChat(options: ChatUiOptions, path = uiStatePath(options.statePath)): Promise<ChatStart> {
+  const { system } = options;
   const statePath = options.statePath ?? modelStatePath();
   const previous = await readUiState(system, path);
-  const listen = options.listen !== undefined ? parseListen(options.listen) : previous?.listen ?? LOOPBACK;
   const port = options.port !== undefined ? parsePort(options.port) : previous?.port ?? UI_PORT;
   const deployments = await readDeployments(system, statePath);
   const clash = Object.entries(deployments).find(([, entry]) => entry.active.port === port || entry.previous?.port === port || entry.active.port + 1 === port);
   if (clash) throw new Error(`Port ${port} belongs to model deployment ${clash[0]}; pick another with --port.`);
   if ((await system.probe("docker", ["info", "--format", "{{.ServerVersion}}"])).code !== 0) throw new Error("Docker is missing or its daemon is stopped; dl ui runs Open WebUI in Docker.");
-  if (previous?.adminCreated && options.adminEmail !== undefined && options.adminEmail.trim().toLowerCase() !== previous.adminEmail) {
-    throw new Error(`The admin is already ${previous.adminEmail}; add more admins in Open WebUI's Admin Panel.`);
-  }
-  const adminEmail = previous?.adminCreated ? previous.adminEmail : await askAdminEmail(options);
-  // A share link is for one address and port: a change drops it (dl ui share makes a new one).
-  const moved = previous && (previous.port !== port || previous.listen !== listen);
-  const state: UiState = {
-    version: 1, port, listen, adminEmail,
-    // Saved before Open WebUI starts, so a failed first start retries with the same password.
-    adminPassword: previous?.adminPassword ?? generatePassword(),
-    adminCreated: previous?.adminCreated ?? false,
-    ...(previous?.share && !(moved && previous.share.mode === "lan") ? { share: previous.share } : {}),
-  };
-  if (moved && previous?.share?.mode === "tailscale") {
+  const email = options.adminEmail?.trim().toLowerCase();
+  if (email !== undefined && !validEmail(email)) throw new Error(`"${email}" isn't an email address.`);
+  const state: UiState = { ...(previous ?? { version: 2, port }), port };
+  // A share link is for one port: a change drops it (dl ui share makes a new one).
+  if (previous?.share && previous.port !== port) {
     await stopServing(system, previous.share.httpsPort, localUrl(previous));
     delete state.share;
   }
   await writeUiState(system, path, state);
-  const result = await ensureContainer(options, state, statePath);
-  if (system.dryRun) { ui.line("info", "Dry run", "nothing started"); return 0; }
-  let created = false;
-  if (!state.adminCreated) {
-    await createAdmin(options, state);
-    state.adminCreated = true;
-    await writeUiState(system, path, state);
-    // Open WebUI turns sign-ups off after its first account; a restart brings back dl's settings.
-    await system.run("docker", ["restart", UI_CONTAINER]);
-    await waitHealthy(options, state);
-    ui.line("done", "Admin", adminEmail);
-    created = true;
+  const result = await ensureContainer(options, state, statePath, path);
+  if (system.dryRun) return { state, result, hasAdmin: false };
+  let created: ChatStart["created"];
+  const client = api(options, state);
+  let hasAdmin = await client.hasAdmin();
+  if (email !== undefined) {
+    if (hasAdmin) throw new Error("Open WebUI already has its admin; add more admins in its Admin Panel (Users).");
+    created = { email, password: generatePassword() };
+    const made = await client.request<{ role?: string }>("POST", "/api/v1/auths/signup", { name: "Admin", email, password: created.password });
+    if (made?.role !== "admin") throw new Error(`Open WebUI made ${email} a ${made?.role ?? "pending"} user, not the admin; dl ui down --purge and try again.`);
+    hasAdmin = true;
   }
-  if (!wildcard(listen) && loopback(listen)) {
-    ui.line("info", "Listening", `this machine only (${hostFor(listen)}:${port})`);
-  } else {
-    ui.warn(`Open WebUI is reachable on the network: ${hostFor(listen)}:${port}. Anyone who reaches it sees the sign-in page; sign-ups wait for your approval.`);
-  }
-  if (!(await modelEndpoints(system, statePath)).length) ui.warn("No dl model is running here, so the chat has no models yet: dl model up, then dl ui up again.");
-  const items = [{ label: "Open", value: publicUrl(state) }];
-  if (created) items.push({ label: "Admin", value: `${adminEmail} · password ${state.adminPassword}` });
-  ui.ready(result === "kept" && !created ? "Team chat is running" : "Team chat is ready", items, {
-    about: [
-      ...(created ? [`The password is shown once and kept in ${path} (readable by this user only). Change it after you sign in: Settings > Account; then dl ui invite and dl ui approve need the new one in that file.`] : []),
-      "New sign-ups wait for approval: dl ui approve. Or add people: dl ui invite a@x.com b@x.com",
-    ],
-    footer: state.share ? `Shared: ${state.share.url}` : "Only this machine can open it. dl ui share prints one private link for your team.",
-  });
-  return 0;
+  if (hasAdmin) await reopenSignups(options, path, state);
+  return { state, result, hasAdmin, ...(created ? { created } : {}) };
 }
 
-/** The first account becomes Open WebUI's admin; dl makes it at once, before anyone else can reach the sign-up page. */
-async function createAdmin(options: ChatUiOptions, state: UiState): Promise<void> {
-  const client = api(options, state);
-  const config = await client.request<{ onboarding?: boolean }>("GET", "/api/config");
-  if (config?.onboarding !== true) {
-    throw new Error(`Open WebUI's data (Docker volume ${UI_VOLUME}) already has accounts, and dl doesn't know its admin's password.\n`
-      + `Sign in with that admin, or start over: dl ui down --purge (deletes its accounts and chats), then dl ui up.`);
-  }
-  const created = await client.request<{ token?: string; role?: string }>("POST", "/api/v1/auths/signup", { name: "Admin", email: state.adminEmail, password: state.adminPassword });
-  if (created?.role !== "admin") throw new Error(`Open WebUI made ${state.adminEmail} a ${created?.role ?? "pending"} user, not the admin; dl ui down --purge and try again.`);
+async function up(options: ChatUiOptions, path: string): Promise<number> {
+  const { system, ui } = options;
+  const { state, result, hasAdmin, created } = await startChat(options, path);
+  if (system.dryRun) { ui.line("info", "Dry run", "nothing started"); return 0; }
+  ui.line("info", "Listening", `this machine only (${LOOPBACK}:${state.port})`);
+  if (!(await modelEndpoints(system, options.statePath ?? modelStatePath())).length) ui.warn("No dl model is running here, so the chat has no models yet: dl model up (the chat picks it up by itself).");
+  const items = [{ label: "Open", value: publicUrl(state) }];
+  if (created) items.push({ label: "Admin", value: `${created.email} · password ${created.password}` });
+  const about = [
+    ...(created ? ["The password is shown only now; dl doesn't keep it. Change it after you sign in: Settings > Account."] : []),
+    ...(!hasAdmin ? [state.share
+      ? `Set up the admin account at ${state.share.url} now: whoever opens it first becomes the admin.`
+      : `No admin yet: whoever opens it first becomes the admin. From your laptop: ${tunnelHint(state.port)}, and create it.`] : []),
+    "Everyone sets up an authenticator app (2FA) the first time they sign in. New sign-ups wait for approval.",
+  ];
+  ui.ready(result === "kept" && !created ? "Team chat is running" : "Team chat is ready", items, {
+    about,
+    footer: state.share ? `Shared: ${state.share.url}` : "Only this machine can open it (or an SSH tunnel). dl ui share gives your team a private HTTPS link with Tailscale.",
+  });
+  return 0;
 }
 
 async function status(options: ChatUiOptions, path: string): Promise<number> {
@@ -425,32 +451,39 @@ async function status(options: ChatUiOptions, path: string): Promise<number> {
   const endpoints = await modelEndpoints(system, statePath);
   const current = container?.spec === specOf(uiDockerArgs(state, endpoints));
   ui.line(container?.running ? "done" : "failed", "Team chat", container?.running ? `running · Open WebUI ${OPEN_WEBUI_VERSION}` : container ? "stopped · dl ui up" : "not running · dl ui up");
-  if (container && !current) ui.line("info", "Settings", "changed since it started (models, share or address) · dl ui up applies them");
-  ui.line("info", "Local", localUrl(state));
-  ui.line("info", "Shared", state.share ? `${state.share.url} (${state.share.mode === "tailscale" ? "tailnet only" : "LAN"})` : "no · dl ui share");
-  ui.line("info", "Listening", loopback(state.listen) ? "this machine only" : `${hostFor(state.listen)} (reachable on the network)`);
-  ui.line("info", "Admin", state.adminEmail);
+  if (container && !current) ui.line("info", "Settings", "changed since it started (models or share) · dl ui up applies them");
+  ui.line("info", "Local", `${localUrl(state)} (this machine only)`);
+  ui.line("info", "Shared", state.share ? `${state.share.url} (HTTPS, tailnet only)` : "no · dl ui share");
   ui.line("info", "Models", endpoints.length ? endpoints.join(", ") : "none · dl model up");
+  ui.line("info", "2FA", "required for everyone");
   if (container?.running) {
-    try {
-      const client = api(options, state);
-      const pending = (await client.users(await client.signIn(state))).filter((user) => user.role === "pending");
-      ui.line("info", "Waiting for approval", pending.length ? `${pending.map((user) => user.email).join(", ")} · dl ui approve` : "nobody");
-    } catch (error) {
-      ui.line("info", "Waiting for approval", `couldn't check (${error instanceof Error ? error.message.split("\n")[0] : String(error)})`);
-    }
+    const client = api(options, state);
+    const admin = await client.hasAdmin().catch(() => undefined);
+    if (admin === false) ui.line("info", "Admin", `not set up yet · open ${publicUrl(state)} and create it (the first account is the admin)`);
+    const pending = await pendingSignUps(options, state);
+    if (pending) ui.line("info", "Waiting for approval", pending.length ? `${pending.map((user) => user.email).join(", ")} · dl ui approve` : "nobody");
   }
   return 0;
 }
 
-async function requireRunning(options: ChatUiOptions, state: UiState): Promise<void> {
+/** Who waits for approval, when dl has an admin API key (never otherwise); undefined when unknown. */
+export async function pendingSignUps(options: Pick<ChatUiOptions, "fetch">, state: UiState): Promise<OpenWebUiUser[] | undefined> {
+  if (!state.adminApiKey) return undefined;
+  try {
+    return (await api(options, state).users(state.adminApiKey)).filter((user) => user.role === "pending");
+  } catch {
+    return undefined;
+  }
+}
+
+async function requireRunning(options: ChatUiOptions): Promise<void> {
   const container = await inspectContainer(options.system, UI_CONTAINER, UI_SPEC_LABEL);
   if (!container?.running) throw new Error("The team chat isn't running: dl ui up");
 }
 
 /** Picks the tailnet HTTPS port: the one already serving Open WebUI, else the first free one; never one Funnel makes public. */
-async function tailnetPort(options: ChatUiOptions, target: string, previous: number | undefined): Promise<number> {
-  const served = await serveStatus(options.system);
+async function tailnetPort(system: System, target: string, previous: number | undefined): Promise<number> {
+  const served = await serveStatus(system);
   const candidates = previous ? [previous, ...TAILNET_PORTS.filter((port) => port !== previous)] : TAILNET_PORTS;
   const port = candidates.find((candidate) => { const entry = served.get(candidate); return !entry || entry.proxy === target; });
   if (port === undefined) throw new Error(`Tailscale already serves other things on HTTPS ports ${TAILNET_PORTS.join(", ")}; free one (tailscale serve status) and run dl ui share again.`);
@@ -460,54 +493,112 @@ async function tailnetPort(options: ChatUiOptions, target: string, previous: num
   return port;
 }
 
+/**
+ * Serves the chat on `name` (this machine's tailnet name, HTTPS certificates on) with
+ * `tailscale serve --bg`, which tailscaled keeps across restarts, and points Open WebUI's own
+ * links at it.
+ */
+export async function shareOnTailnet(options: Starting & Pick<ChatUiOptions, "statePath">, path: string, state: UiState, name: string): Promise<UiShare> {
+  const { system } = options;
+  const target = localUrl(state);
+  const httpsPort = await tailnetPort(system, target, state.share?.httpsPort);
+  const served = await serveHttps(system, httpsPort, target);
+  if (served.code !== 0) {
+    throw new Error(`Tailscale couldn't serve HTTPS: ${served.stderr.trim() || served.stdout.trim()}\n`
+      + `  Turn on MagicDNS and HTTPS certificates at ${HTTPS_CERTS_URL}, then run dl ui share again.`);
+  }
+  const next: UiShare = { mode: "tailscale", url: tailnetUrl(name, httpsPort), httpsPort };
+  state.share = next;
+  await writeUiState(system, path, state);
+  // Open WebUI's own links (WEBUI_URL) follow the shared address.
+  await ensureContainer(options, state, options.statePath ?? modelStatePath(), path);
+  return next;
+}
+
+/** Why there's no private HTTPS link yet, and what to do: one line each. */
+export function tailscaleBlocker(state: "missing" | "logged-out" | "no-https"): { problem: string; next: string } {
+  if (state === "missing") return { problem: "Tailscale isn't installed here, and dl shares the chat only over HTTPS on your tailnet.", next: `install Tailscale (${TAILSCALE_INSTALL}), sign in (sudo tailscale up), then dl ui share` };
+  if (state === "logged-out") return { problem: "Tailscale isn't signed in here, and dl shares the chat only over HTTPS on your tailnet.", next: "sudo tailscale up (it prints a sign-in link), then dl ui share" };
+  return { problem: "HTTPS certificates are off for your tailnet, so there's no private HTTPS link yet.", next: `turn on MagicDNS and HTTPS certificates at ${HTTPS_CERTS_URL}, then dl ui share` };
+}
+
 async function share(options: ChatUiOptions, path: string): Promise<number> {
   const { system, ui } = options;
   const statePath = options.statePath ?? modelStatePath();
   const state = await requireState(options, path);
-  const target = localUrl(state);
   if (options.off) {
-    if (state.share?.mode === "tailscale") await stopServing(system, state.share.httpsPort, target);
+    if (state.share) await stopServing(system, state.share.httpsPort, localUrl(state));
     const was = state.share;
     delete state.share;
     await writeUiState(system, path, state);
-    if (await inspectContainer(system, UI_CONTAINER, UI_SPEC_LABEL)) await ensureContainer(options, state, statePath);
+    if (await inspectContainer(system, UI_CONTAINER, UI_SPEC_LABEL)) await ensureContainer(options, state, statePath, path);
     ui.line("done", "Shared", was ? `no longer (${was.url})` : "it wasn't");
-    if (!loopback(state.listen)) ui.line("info", "Listening", `still on ${hostFor(state.listen)}:${state.port}; dl ui up --listen 127.0.0.1 makes it this machine only`);
     return 0;
   }
-  await requireRunning(options, state);
-  let next: UiShare | undefined;
-  if (await tailscaleIsUp(system)) {
-    const httpsPort = await tailnetPort(options, target, state.share?.mode === "tailscale" ? state.share.httpsPort : undefined);
-    const served = await serveHttps(system, httpsPort, target);
-    if (served.code !== 0) {
-      throw new Error(`Tailscale couldn't serve HTTPS: ${served.stderr.trim() || served.stdout.trim()}\n`
-        + "  Turn on MagicDNS and HTTPS certificates at https://login.tailscale.com/admin/dns, then run dl ui share again.");
-    }
-    const name = await tailnetName(system);
-    if (!name) throw new Error("Tailscale is up but reported no DNS name for this machine; is MagicDNS on?");
-    next = { mode: "tailscale", url: tailnetUrl(name, httpsPort), httpsPort };
-  } else {
-    const installed = (await system.probe("tailscale", ["version"])).code === 0;
-    ui.line("info", "Tailscale", installed ? "not logged in here, so no private HTTPS link" : "not installed here, so no private HTTPS link");
-    const address = loopback(state.listen) ? undefined : lanAddress(state.listen, options.interfaces?.());
-    if (!address) {
-      ui.line("info", "Next", "dl ui up --listen (reachable on your network), then dl ui share; or install Tailscale and run tailscale up");
-      return 1;
-    }
-    next = { mode: "lan", url: `http://${hostFor(address)}:${state.port}` };
+  await requireRunning(options);
+  const tailscale = await tailscaleState(system);
+  if (tailscale.state !== "ready") {
+    // HTTPS only: no plain-HTTP fallback on the network.
+    const { problem, next } = tailscaleBlocker(tailscale.state);
+    ui.line("failed", "Tailscale", problem);
+    ui.line("info", "Next", next);
+    ui.line("info", "Or, just you", tunnelHint(state.port));
+    return 1;
   }
-  state.share = next;
-  await writeUiState(system, path, state);
-  // Open WebUI's own links (WEBUI_URL) follow the shared address.
-  await ensureContainer(options, state, statePath);
+  const next = await shareOnTailnet(options, path, state, tailscale.name);
+  const admin = await api(options, state).hasAdmin().catch(() => true);
   ui.ready("Share this link with your team", [{ label: "Team chat", value: next.url }], {
-    about: [next.mode === "tailscale"
-      ? "Private to your tailnet (tailscale serve, HTTPS); it isn't on the internet."
-      : "Plain HTTP on your network: anyone on it can reach the sign-in page."],
-    footer: "Sign-ups wait for your approval (dl ui approve), or add people: dl ui invite a@x.com",
+    about: [
+      "Private to your tailnet (tailscale serve, HTTPS); it isn't on the internet. Each person needs the Tailscale app.",
+      ...(!admin ? [`No admin yet: open ${next.url} now and create the admin account; whoever opens it first becomes the admin.`] : []),
+    ],
+    footer: "Sign-ups wait for your approval (Admin Panel > Users, or dl ui approve), or add people: dl ui invite a@x.com",
   });
   return 0;
+}
+
+/**
+ * An admin's API key, for invite and approve: the one kept in ui.json, else DL_UI_ADMIN_KEY,
+ * else asked once on a terminal. Checked (only an admin may list users) and kept 0600.
+ */
+async function adminKey(options: ChatUiOptions, path: string, state: UiState): Promise<string> {
+  if (state.adminApiKey) return state.adminApiKey;
+  const { ui } = options;
+  const where = `open ${publicUrl(state)}, then ${API_KEY_WHERE}`;
+  let key = (options.env ?? process.env).DL_UI_ADMIN_KEY?.trim();
+  if (!key) {
+    if (!options.interactive) throw new Error(`dl needs an Open WebUI API key of an admin, once (it never keeps the admin's password). Make one: ${where}. Then run this in a terminal, or with DL_UI_ADMIN_KEY=sk-…`);
+    ui.line("info", "Admin API key", "dl needs one, once, to add and approve people; it never keeps the admin's password");
+    ui.line("info", "Make one", where);
+    key = (await options.prompter.secret(ui.prompt("Admin API key", "sk-…"))).trim();
+  }
+  if (!/^sk-[A-Za-z0-9_-]{8,}$/.test(key)) throw new Error("That isn't an Open WebUI API key (they start with sk-).");
+  try {
+    await api(options, state).users(key);
+  } catch (error) {
+    if (refused(error)) throw new Error(`Open WebUI refused that key: it must be an admin's (${API_KEY_WHERE}).`);
+    throw error;
+  }
+  state.adminApiKey = key;
+  await writeUiState(options.system, path, state);
+  ui.line("done", "Admin API key", `kept in ${path} (readable by you only)`);
+  return key;
+}
+
+/** Runs `work` with the admin's key; a kept key Open WebUI refuses is dropped, so the next run asks again. */
+async function asAdmin<T>(options: ChatUiOptions, path: string, state: UiState, work: (client: OpenWebUi, key: string) => Promise<T>): Promise<T> {
+  const kept = Boolean(state.adminApiKey);
+  const key = await adminKey(options, path, state);
+  try {
+    return await work(api(options, state), key);
+  } catch (error) {
+    if (kept && refused(error)) {
+      delete state.adminApiKey;
+      await writeUiState(options.system, path, state);
+      throw new Error("Open WebUI refused the admin API key dl kept (deleted, or not an admin's any more); run the command again to give a new one.");
+    }
+    throw error;
+  }
 }
 
 async function invite(options: ChatUiOptions, path: string, emails: string[]): Promise<number> {
@@ -517,30 +608,32 @@ async function invite(options: ChatUiOptions, path: string, emails: string[]): P
   const bad = wanted.filter((email) => !validEmail(email));
   if (bad.length) throw new Error(`Not email addresses: ${bad.join(", ")}. Nobody was invited.`);
   const state = await requireState(options, path);
-  await requireRunning(options, state);
-  const client = api(options, state);
-  const token = await client.signIn(state);
-  const existing = new Map((await client.users(token)).map((user) => [user.email.toLowerCase(), user]));
+  await requireRunning(options);
   const link = publicUrl(state);
-  const items: Array<{ label: string; value: string }> = [];
-  for (const email of wanted) {
-    const user = existing.get(email);
-    if (user?.role === "pending") {
-      await client.request("POST", `/api/v1/users/${encodeURIComponent(user.id)}/update`, { role: "user" }, token);
-      ui.line("done", email, "approved (they had already signed up)");
-      items.push({ label: email, value: `${link} · sign in with the password they chose` });
-    } else if (user) {
-      ui.line("info", email, `already has an account (${user.role})`);
-    } else {
-      const password = generatePassword();
-      await client.request("POST", "/api/v1/auths/add", { name: email.split("@")[0], email, password, role: "user" }, token);
-      ui.line("done", email, "account created");
-      items.push({ label: email, value: `${link} · sign in as ${email} · password ${password} · then change it: Settings > Account` });
+  const items = await asAdmin(options, path, state, async (client, key) => {
+    const existing = new Map((await client.users(key)).map((user) => [user.email.toLowerCase(), user]));
+    const lines: Array<{ label: string; value: string }> = [];
+    for (const email of wanted) {
+      const user = existing.get(email);
+      if (user?.role === "pending") {
+        await client.request("POST", `/api/v1/users/${encodeURIComponent(user.id)}/update`, { role: "user" }, key);
+        ui.line("done", email, "approved (they had already signed up)");
+        lines.push({ label: email, value: `${link} · sign in with the password they chose` });
+      } else if (user) {
+        ui.line("info", email, `already has an account (${user.role})`);
+      } else {
+        const password = generatePassword();
+        await client.request("POST", "/api/v1/auths/add", { name: email.split("@")[0], email, password, role: "user" }, key);
+        ui.line("done", email, "account created");
+        lines.push({ label: email, value: `${link} · sign in as ${email} · password ${password} · then change it: Settings > Account` });
+      }
     }
-  }
+    return lines;
+  });
   if (!items.length) return 0;
   ui.ready("Send each person their line (dl sends no email)", items, {
-    about: ["The passwords are shown only now; dl doesn't keep them. A lost one: Admin Panel > Users > edit."],
+    about: ["The passwords are shown only now; dl doesn't keep them. A lost one: Admin Panel > Users > edit.",
+      "Each person sets up an authenticator app (2FA) the first time they sign in, and needs the Tailscale app."],
     ...(state.share ? {} : { footer: "This link works only on this machine until you run dl ui share." }),
   });
   return 0;
@@ -549,27 +642,27 @@ async function invite(options: ChatUiOptions, path: string, emails: string[]): P
 async function approve(options: ChatUiOptions, path: string, args: string[]): Promise<number> {
   const { ui } = options;
   const state = await requireState(options, path);
-  await requireRunning(options, state);
-  const client = api(options, state);
-  const token = await client.signIn(state);
-  const pending = (await client.users(token)).filter((user) => user.role === "pending");
-  if (!args.length) {
-    if (!pending.length) { ui.line("info", "Waiting for approval", "nobody"); return 0; }
-    for (const user of pending) ui.line("info", user.email, `${user.name}${user.created_at ? ` · signed up ${new Date(user.created_at * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""}`);
-    ui.line("info", "Approve", "dl ui approve EMAIL... (or all)");
+  await requireRunning(options);
+  return asAdmin(options, path, state, async (client, key) => {
+    const pending = (await client.users(key)).filter((user) => user.role === "pending");
+    if (!args.length) {
+      if (!pending.length) { ui.line("info", "Waiting for approval", "nobody"); return 0; }
+      for (const user of pending) ui.line("info", user.email, `${user.name}${user.created_at ? ` · signed up ${new Date(user.created_at * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""}`);
+      ui.line("info", "Approve", "dl ui approve EMAIL... (or all)");
+      return 0;
+    }
+    const all = args.length === 1 && args[0] === "all";
+    const wanted = all ? pending.map((user) => user.email.toLowerCase()) : [...new Set(args.map((email) => email.trim().toLowerCase()))];
+    const unknown = wanted.filter((email) => !pending.some((user) => user.email.toLowerCase() === email));
+    if (unknown.length) throw new Error(`Not waiting for approval: ${unknown.join(", ")}. dl ui approve lists who is.`);
+    for (const email of wanted) {
+      const user = pending.find((entry) => entry.email.toLowerCase() === email)!;
+      await client.request("POST", `/api/v1/users/${encodeURIComponent(user.id)}/update`, { role: "user" }, key);
+      ui.line("done", email, "approved");
+    }
+    if (!wanted.length) ui.line("info", "Waiting for approval", "nobody");
     return 0;
-  }
-  const all = args.length === 1 && args[0] === "all";
-  const wanted = all ? pending.map((user) => user.email.toLowerCase()) : [...new Set(args.map((email) => email.trim().toLowerCase()))];
-  const unknown = wanted.filter((email) => !pending.some((user) => user.email.toLowerCase() === email));
-  if (unknown.length) throw new Error(`Not waiting for approval: ${unknown.join(", ")}. dl ui approve lists who is.`);
-  for (const email of wanted) {
-    const user = pending.find((entry) => entry.email.toLowerCase() === email)!;
-    await client.request("POST", `/api/v1/users/${encodeURIComponent(user.id)}/update`, { role: "user" }, token);
-    ui.line("done", email, "approved");
-  }
-  if (!wanted.length) ui.line("info", "Waiting for approval", "nobody");
-  return 0;
+  });
 }
 
 async function logs(options: ChatUiOptions, path: string): Promise<number> {
@@ -581,7 +674,7 @@ async function logs(options: ChatUiOptions, path: string): Promise<number> {
 async function down(options: ChatUiOptions, path: string): Promise<number> {
   const { system, ui } = options;
   const state = await readUiState(system, path);
-  if (state?.share?.mode === "tailscale") await stopServing(system, state.share.httpsPort, localUrl(state));
+  if (state?.share) await stopServing(system, state.share.httpsPort, localUrl(state));
   await removeContainer(system, UI_CONTAINER);
   if (options.purge) {
     await system.run("docker", ["volume", "rm", "-f", UI_VOLUME], { allowFailure: true });
@@ -589,10 +682,31 @@ async function down(options: ChatUiOptions, path: string): Promise<number> {
     ui.line("done", "Team chat", "removed with its accounts and chats");
     return 0;
   }
-  if (state?.share) {
+  if (state) {
     delete state.share;
+    // The next start is a fresh process: sign-ups follow dl's setting again.
+    delete state.signupsOpen;
     await writeUiState(system, path, state);
   }
   ui.line("done", "Team chat", `stopped; accounts and chats kept (volume ${UI_VOLUME}) · dl ui up starts it again`);
   return 0;
+}
+
+/**
+ * After `dl model up`, `update`, `rollback` or `down`: a running team chat picks up the change by
+ * itself, with the same link and accounts (its container is replaced only when its model
+ * endpoints changed). A chat that isn't set up or was stopped is left alone; a failure only warns.
+ */
+export async function refreshChatUi(options: Starting & Pick<ChatUiOptions, "statePath">): Promise<void> {
+  const { system, ui } = options;
+  if (system.dryRun) return;
+  const path = uiStatePath(options.statePath);
+  try {
+    const state = await readUiState(system, path);
+    if (!state || !(await inspectContainer(system, UI_CONTAINER, UI_SPEC_LABEL))?.running) return;
+    const result = await ensureContainer(options, state, options.statePath ?? modelStatePath(), path);
+    if (result !== "kept") ui.line("done", "Team chat", `updated for the models here · same link: ${publicUrl(state)}`);
+  } catch (error) {
+    ui.warn(`The team chat didn't pick up the change: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}. dl ui up applies it.`);
+  }
 }
