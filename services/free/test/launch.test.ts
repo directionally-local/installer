@@ -436,6 +436,94 @@ describe("referrals", () => {
   });
 });
 
+describe("the trial referral bonus", () => {
+  /** Accounts admitted after this are on the one-time trial (10M); before it, grandfathered. */
+  const CUTOFF = Date.parse("2026-11-03T00:00:00Z");
+  const DAYS = [MONDAY, MONDAY + DAY, MONDAY + 2 * DAY];
+  const trialService = () => openService({ TRIAL_CUTOFF: new Date(CUTOFF).toISOString() });
+  /** A referred friend admitted straight into the Directory with the code, from their own network. */
+  const friend = (service: Service, id: number, code: string) =>
+    service.directory().admit({ githubId: id, login: `f${id}`, isAdmin: false, inviteCode: undefined, clientDeviceId: null, accountTooNew: false, openAdmission: true, inviteOnly: false, maxActive: 0, referralCode: code, networkHash: `net-${id}`, now: NOW });
+
+  it("adds +10M to a trial referrer's trial per friend who was ever weekly active, up to 50M", async () => {
+    const { service } = await trialService();
+    const referrer = await signUp(service, { id: 100, login: "ref", ip: "198.51.100.1" });
+    assert.equal((await me(service, referrer.tokens.access_token)).trial.tokens, 10_000_000);
+    for (let id = 200; id < 207; id++) await friend(service, id, "ref");
+    assert.equal((await me(service, referrer.tokens.access_token)).trial.tokens, 10_000_000, "joined but not active: nothing yet");
+    // Two days isn't weekly active; the referrer's own activity doesn't matter.
+    await activeOn(service, 200, [MONDAY, MONDAY + DAY]);
+    assert.equal((await me(service, referrer.tokens.access_token)).trial.tokens, 10_000_000);
+    await activeOn(service, 200, [MONDAY + 2 * DAY]);
+    let body = await me(service, referrer.tokens.access_token);
+    assert.equal(body.trial.tokens, 20_000_000);
+    assert.equal(body.trial.remaining, 20_000_000);
+    await activeOn(service, 201, DAYS);
+    assert.equal((await me(service, referrer.tokens.access_token)).trial.tokens, 30_000_000);
+    for (let id = 202; id < 207; id++) await activeOn(service, id, DAYS);
+    body = await me(service, referrer.tokens.access_token);
+    assert.equal(body.trial.tokens, 60_000_000, "7 active friends: capped at 50M on top of 10M");
+    // One-time, not weekly: weeks later with nobody active, it stays.
+    service.clock.now = NOW + 4 * WEEK;
+    assert.equal((await me(service, referrer.tokens.access_token)).trial.tokens, 60_000_000);
+  });
+
+  it("adds +10M to the referred person's trial once they have been weekly active", async () => {
+    const { service } = await trialService();
+    await signUp(service, { id: 100, login: "ref", ip: "198.51.100.1" });
+    const pal = await signUp(service, { id: 101, login: "pal", ip: "198.51.100.2", referral: "ref" });
+    assert.equal((await me(service, pal.tokens.access_token)).trial.tokens, 10_000_000);
+    await activeOn(service, 101, DAYS);
+    assert.equal((await me(service, pal.tokens.access_token)).trial.tokens, 20_000_000);
+    // The admin views show the same trial.
+    const admin = await adminToken(service);
+    const person = (await (await service.request("GET", "/admin/people/101", { token: admin })).json()) as Record<string, any>;
+    assert.equal(person.access, "trial");
+    assert.equal(person.trial.tokens, 20_000_000);
+    const list = (await (await service.request("GET", "/admin/people", { token: admin })).json()) as { people: Array<Record<string, any>> };
+    assert.equal(list.people.find((row) => row.githubId === 101)!.trial.tokens, 20_000_000);
+    assert.equal(list.people.find((row) => row.githubId === 100)!.trial.tokens, 20_000_000);
+  });
+
+  it("gives nothing for self-referral, an unknown code, or the same network", async () => {
+    const { service } = await trialService();
+    const referrer = await signUp(service, { id: 100, login: "ref", ip: "198.51.100.1" });
+    const self = await signUp(service, { id: 101, login: "me", ip: "198.51.100.2", referral: "me" });
+    const unknown = await signUp(service, { id: 102, login: "x", ip: "198.51.100.3", referral: "nobody" });
+    const sameNet = await signUp(service, { id: 103, login: "twin", ip: "198.51.100.1", referral: "ref" });
+    for (const id of [100, 101, 102, 103]) await activeOn(service, id, DAYS);
+    for (const who of [referrer, self, unknown, sameNet]) assert.equal((await me(service, who.tokens.access_token)).trial.tokens, 10_000_000);
+  });
+
+  it("stops counting a pair that later turns out to share a network", async () => {
+    const { service } = await trialService();
+    const referrer = await signUp(service, { id: 100, login: "ref", ip: "198.51.100.1" });
+    await signUp(service, { id: 101, login: "pal", ip: "198.51.100.2", referral: "ref" });
+    await activeOn(service, 101, DAYS);
+    assert.equal((await me(service, referrer.tokens.access_token)).trial.tokens, 20_000_000);
+    await signUp(service, { id: 101, login: "pal", ip: "198.51.100.1" });
+    assert.equal((await me(service, referrer.tokens.access_token)).trial.tokens, 10_000_000);
+  });
+
+  it("leaves grandfathered accounts on the weekly bonus, with no trial", async () => {
+    const { service, admin } = await openService();
+    const referrer = await signUp(service, { id: 100, login: "ref", ip: "198.51.100.1" });
+    // The trial starts after the referrer joined; the friend is on it.
+    const set = await service.request("POST", "/admin/config", { token: admin, body: { trialCutoff: new Date(NOW + 60_000).toISOString() } });
+    assert.equal(set.status, 200, await set.clone().text());
+    service.clock.now = NOW + 120_000;
+    const pal = await signUp(service, { id: 101, login: "pal", ip: "198.51.100.2", referral: "ref" });
+    await activeOn(service, 100, DAYS);
+    await activeOn(service, 101, DAYS);
+    const body = await me(service, referrer.tokens.access_token);
+    assert.equal(body.trial, null);
+    assert.equal(body.referral.bonusTokensPerWeek, 10_000_000);
+    assert.equal(body.allowance.tokensPerWeek, 60_000_000);
+    // The trial friend gets the trial bonus.
+    assert.equal((await me(service, pal.tokens.access_token)).trial.tokens, 20_000_000);
+  });
+});
+
 describe("GET /v1/referrals/<code>", () => {
   it("says whose code it is, and nothing else", async () => {
     const { service, admin } = await openService();

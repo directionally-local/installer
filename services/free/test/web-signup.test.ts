@@ -155,6 +155,30 @@ describe("the web session", () => {
     assert.equal(me.referral.joined, 0);
   });
 
+  it("describes the referral reward: once on the trial, weekly otherwise", async () => {
+    const service = await createService({ ...OPEN, TRIAL_CUTOFF: "2026-11-01T00:00:00Z" });
+    const token = await webToken(service, { id: 512, login: "trialist" });
+    const read = async (as: string) => ((await (await service.request("GET", "/web/me", { token: as, headers: fromPage() })).json()) as Record<string, any>);
+    let me = await read(token);
+    assert.deepEqual(me.referral, { link: "https://dl.new/r/trialist", joined: 0, kind: "trial", bonusTokens: 10_000_000, capTokens: 50_000_000, trialBonusTokens: 0 });
+    // A friend joins with the code and is weekly active: +10M on the trial.
+    await service.directory().admit({ githubId: 513, login: "pal", isAdmin: false, inviteCode: undefined, clientDeviceId: null, accountTooNew: false, openAdmission: true, inviteOnly: false, maxActive: 0, referralCode: "trialist", networkHash: "net-513", now: NOW });
+    for (const day of [0, 1, 2]) {
+      await service.directory().recordRequest({ githubId: 513, isAdmin: false, at: Date.parse("2026-11-02T12:00:00Z") + day * 86_400_000, model: "m", promptTokens: 1, completionTokens: 1, cachedTokens: 0, chargedTokens: 2, costUsd: 0, status: "ok", latencyMs: 1 });
+    }
+    me = await read(token);
+    assert.equal(me.referral.kind, "trial");
+    assert.equal(me.referral.joined, 1);
+    assert.equal(me.referral.trialBonusTokens, 10_000_000);
+    assert.equal(me.trial.tokens, 20_000_000);
+
+    const weekly = await createService(OPEN);
+    const oldtimer = await webToken(weekly, { id: 514, login: "oldtimer" });
+    me = (await (await weekly.request("GET", "/web/me", { token: oldtimer, headers: fromPage() })).json()) as Record<string, any>;
+    assert.equal(me.trial, null);
+    assert.deepEqual(me.referral, { link: "https://dl.new/r/oldtimer", joined: 0, kind: "weekly", bonusTokens: 10_000_000, capTokens: 50_000_000, trialBonusTokens: 0 });
+  });
+
   it("is not an access token, and an access token is not a web session", async () => {
     const service = await createService(OPEN);
     const token = await webToken(service, { id: 511, login: "scoped" });
