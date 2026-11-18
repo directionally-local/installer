@@ -120,7 +120,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl provider` | The provider and GitHub token on each place. `dl provider set` picks another provider, key and model in Autopilot's list; `dl provider github` replaces the GitHub token. `--server NAME` picks the place. `dl keys` is the same command. |
 | `dl model [ID]` | The model for tasks and sessions on a place. With no ID, Autopilot's own model picker. For a model served on this machine's GPU, see `dl model up` below. |
 | `dl model up` / `update` / `rollback` / `status` / `bench` / `list` | Serve a curated open model on this machine's Nvidia GPUs with vLLM or SGLang, test it, and point Autopilot at it. See [On your own GPUs](#on-your-own-gpus). |
-| `dl evals set "COMMAND"` / `--data PATH` / `run` / `show` / `clear` | Your own eval command, run once per model with `OPENAI_BASE_URL` pointed at it, or your eval data (JSONL, CSV, promptfoo, OpenAI Evals, Braintrust, LangSmith), run by dl; `dl model update` switches only if the new model holds up. See [Your own evals](#your-own-evals). |
+| `dl evals set "COMMAND"` / `--data PATH` / `run` / `show` / `clear` | Your own eval command, run once per model with `OPENAI_BASE_URL` pointed at it, or your eval data (promptfoo configs and tests, JSONL, CSV, OpenAI Evals, Braintrust, LangSmith), run with promptfoo; `dl model update` switches only if the new model holds up. See [Your own evals](#your-own-evals). |
 | `dl ui` / `share` / `invite` / `approve` / `status` / `logs` / `down` | Open WebUI as your team's chat, next to the models on this machine. See [Team chat: dl ui](#team-chat-dl-ui). |
 | `dl update` | Update `dl` itself when npm has a newer one (the install script or npm, however it was installed; `--check` only reports), make sure the Autopilot it pins is installed, then update the default place as `dl update NAME` does. |
 | `dl update NAME` | Update a place's Autopilot, Hotcell and sandbox image to the versions `dl` pins. A server over SSH (its `dl` first), this computer in place. `--wait` waits for running tasks instead of asking; with no terminal it waits anyway. |
@@ -225,7 +225,7 @@ A score, from 0 to 1, comes from the results files the run wrote (files it didn'
 
 ##### Bring your data
 
-No eval command? Point dl at the eval files you already have and it runs them itself. A file, a folder (every `.jsonl`, `.json`, `.csv`, `.tsv`, `.yaml` in it) or a glob; the format is recognized by content, so nothing needs converting.
+No eval command? Point dl at the eval files you already have. dl doesn't score them itself: it runs them with [promptfoo](https://github.com/promptfoo/promptfoo) (MIT), the open-source eval tool, so the checks behave exactly as promptfoo documents them. A file, a folder (every `.jsonl`, `.json`, `.csv`, `.tsv`, `.yaml` in it) or a glob; the format is recognized by content, so nothing needs converting.
 
 ```sh
 dl evals set --data evals/qa.jsonl          # or a folder: --data evals/, or a glob: --data 'evals/*.csv'
@@ -234,40 +234,40 @@ dl evals run
 dl evals set --data ""                     # take the data off again
 ```
 
-What dl reads, one example per family:
+What dl hands promptfoo as is:
+
+- **promptfoo configs** (`promptfooconfig.yaml`): prompts, tests, `defaultTest`, assertions and all, with dl's provider in place of the config's `providers`. A config that names its own provider for a test or an assertion is refused, since that could reach a hosted model.
+- **promptfoo test files**: CSV with `__expected` columns, or JSON, JSONL or YAML tests with `vars` and `assert`. The var named `input`, `prompt` or `question` (or the only var) is the prompt.
+
+What dl translates into promptfoo tests (the input as a var, the expected answer as an `__expected` value):
 
 - **JSONL or JSON rows** with an input (`input`, `prompt`, `question`, `query`, `instruction`) and an expected answer (`expected`, `ideal`, `answer`, `output`, `target`): `{"question": "Capital of France?", "answer": "Paris"}`
-- **OpenAI Evals**: `{"input": [{"role": "user", "content": "Largest planet?"}], "ideal": ["Jupiter"]}`, and chat transcripts, where the last assistant turn is the answer: `{"messages": [{"role": "user", "content": "Opposite of hot?"}, {"role": "assistant", "content": "cold"}]}`
+- **OpenAI Evals**: `{"input": [{"role": "user", "content": "Largest planet?"}], "ideal": ["Jupiter"]}`, and chat transcripts, where the last assistant turn is the answer: `{"messages": [{"role": "user", "content": "Opposite of hot?"}, {"role": "assistant", "content": "cold"}]}`. Chat goes to the model as chat.
 - **Braintrust dataset exports** (JSON or JSONL): `{"id": "bt-1", "input": {"question": "Who painted the Mona Lisa?"}, "expected": "Leonardo da Vinci", "metadata": {}}`; an object input or expected uses its obvious field
 - **LangSmith dataset exports**: `{"inputs": {"question": "Legs on a spider?"}, "outputs": {"answer": "8"}}`, or a CSV with `inputs.question,outputs.answer` columns
-- **CSV or TSV** with a header using the same names, and promptfoo's `__expected` columns (`contains: Berlin`, `regex: ^\d+$`, a plain value for `equals`):
+- **CSV or TSV** with a header using the same names (`question,answer`)
 
-  ```csv
-  question,answer
-  What is 3 x 3?,9
-  ```
+Rows without an expected answer are skipped and counted; anything else is an error that says what dl expected (in a folder or a glob, such files are listed as skipped).
 
-- **promptfoo configs** (`promptfooconfig.yaml`): every prompt × every test, `{{ vars }}` filled in, `defaultTest` merged, tests inline or from a CSV, YAML or JSONL file:
+An expected answer follows promptfoo's [`__expected` syntax](https://www.promptfoo.dev/docs/configuration/expected-outputs/): a plain value means `equals`, the exact answer; a prefix picks another check. Several right answers (OpenAI Evals' `ideal` list): any one passes.
 
-  ```yaml
-  prompts: [file://prompts.txt, "Reply in one word: {{ question }}"]
-  tests:
-    - vars: { question: Capital of Spain? }
-      assert:
-        - { type: icontains, value: madrid }
-        - { type: llm-rubric, value: is polite }   # skipped: not supported
-    - file://tests.csv
-  ```
+```csv
+question,__expected
+What is the capital of France?,Paris
+What is the capital of France?,contains:Paris
+What is the capital of France?,factuality:Paris is the capital of France
+Is this reply polite?,llm-rubric:is polite
+```
 
-Anything else is an error that says what dl expected; in a folder or a glob, such files are listed as skipped.
+The same values work in an `answer` or `expected` field of a JSONL row. `equals` is strict: "The capital of France is Paris." doesn't equal `Paris`. When most failures are like that, dl says so in one line and suggests `contains:` or `factuality:`; it never loosens the score itself.
 
-Each case goes to each model's `/v1/chat/completions` with its served model id, temperature 0, at most 1024 tokens and thinking turned off (as in dl's smoke tests; a `<think>` block left in the answer is stripped), four at a time, 120 seconds per case, within `--timeout` for the whole run. A case passes when:
+Model-graded checks (`llm-rubric`, `factuality`, `model-graded-closedqa` and the like) are judged by your own model, never a hosted one: during `dl model update` the old model judges both, so the two are graded by the same judge; `dl evals run` uses the first deployment (the default one) as judge for every model and says so. `similar` needs an embeddings endpoint, which dl's chat deployments don't serve, so it reports an error.
 
-- **it has assertions** (promptfoo `assert`, or `__expected` columns): all the ones dl supports pass: `equals`, `contains`, `icontains`, `contains-any`/`-all`, `icontains-any`/`-all`, `regex`, `starts-with`, `is-json`, `contains-json`, and their `not-` forms. Others (`llm-rubric`, `javascript`, `python`, `similar`...) are skipped and counted in the output, never passed. A case with only unsupported assertions falls back to its expected answer, or has no check.
-- **else it has an expected answer**: the answer equals it after lowercasing, collapsing whitespace and trimming quotes and end punctuation, or contains it as a whole word or phrase ("Paris" in "The capital is Paris.", never "4" in "42"). JSON compares as JSON. Several expected answers: any of them.
-- **else** it has no check and doesn't count.
+Each model gets promptfoo's OpenAI provider pointed at its `/v1` with its served model id, temperature 0, at most 1024 tokens, thinking turned off (as in dl's smoke tests: `chat_template_kwargs.enable_thinking: false`, reasoning not shown as part of the answer, a `<think>` block left in the answer stripped), four requests at a time, within `--timeout` for the whole run. promptfoo runs with no API keys or provider URLs from your shell, with telemetry, update checks and sharing off, and writes nothing outside dl's logs.
 
-The score is passed over checked. The table shows it per model, then a summary ("41 of 44 passed · 3 with no check · llm-rubric ×6 skipped"), the first five failing cases in one line each, and a JSON file in `~/.directionallylocal/logs` with every case's input, answer and verdict. A data run fails only when no case got an answer (the endpoint is down) or the time ran out; otherwise the score decides at the gate, exactly as for a command. With both a command and data, both must pass and the score is the mean of the command's score (when it wrote one) and the data's.
+promptfoo itself is pinned (0.125.1) and downloaded from npm the first time it's needed, into `~/.cache/directionallylocal/promptfoo-0.125.1` (`npm install --ignore-scripts`, a few hundred MB, once); it isn't part of dl's package. It needs Node 22.22 or newer and npm; offline, the first run says so.
+
+The score is promptfoo's: tests passed over tests run (an error, like no answer, counts as a fail). The table shows it per model, then a summary ("41 of 44 passed · 1 error"), the first five failing cases in one line each (input, expected, the check, and what the model said), and promptfoo's JSON output in `~/.directionallylocal/logs`, next to the config dl wrote, so you can rerun or inspect it with promptfoo yourself. A data run fails only when no case got an answer (the endpoint is down) or the time ran out; otherwise the score decides at the gate, exactly as for a command. With both a command and data, both must pass and the score is the mean of the command's score (when it wrote one) and the data's.
 
 The model's state is kept separately from a server install, in `~/.local/state/directionallylocal/model.json` (or `$XDG_STATE_HOME`), so `dl model` works on a laptop or a server without touching `/etc/directionallylocal/state.json`.
 
