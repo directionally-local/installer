@@ -121,6 +121,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl model [ID]` | The model for tasks and sessions on a place. With no ID, Autopilot's own model picker. For a model served on this machine's GPU, see `dl model up` below. |
 | `dl model up` / `update` / `rollback` / `status` / `bench` / `list` | Serve a curated open model on this machine's Nvidia GPUs with vLLM or SGLang, test it, and point Autopilot at it. See [On your own GPUs](#on-your-own-gpus). |
 | `dl evals set "COMMAND"` / `--data PATH` / `run` / `show` / `clear` | Your own eval command, run once per model with `OPENAI_BASE_URL` pointed at it, or your eval data (JSONL, CSV, promptfoo, OpenAI Evals, Braintrust, LangSmith), run by dl; `dl model update` switches only if the new model holds up. See [Your own evals](#your-own-evals). |
+| `dl ui` / `share` / `invite` / `approve` / `status` / `logs` / `down` | Open WebUI as your team's chat, next to the models on this machine. See [Team chat: dl ui](#team-chat-dl-ui). |
 | `dl update` | Update `dl` itself when npm has a newer one (the install script or npm, however it was installed; `--check` only reports), make sure the Autopilot it pins is installed, then update the default place as `dl update NAME` does. |
 | `dl update NAME` | Update a place's Autopilot, Hotcell and sandbox image to the versions `dl` pins. A server over SSH (its `dl` first), this computer in place. `--wait` waits for running tasks instead of asking; with no terminal it waits anyway. |
 | `dl local status` | Agents running on this computer: running?, where, how many fit. |
@@ -271,6 +272,24 @@ The score is passed over checked. The table shows it per model, then a summary (
 The model's state is kept separately from a server install, in `~/.local/state/directionallylocal/model.json` (or `$XDG_STATE_HOME`), so `dl model` works on a laptop or a server without touching `/etc/directionallylocal/state.json`.
 
 Today: tested end to end with small models on one Nvidia GPU. Models that need several GPUs, SGLang, and several models on one machine are in, planned and checked with `--plan`, but not yet run on real multi-GPU hardware. AMD and Huawei Ascend GPUs are on the roadmap.
+
+#### Team chat: dl ui
+
+`dl ui` runs [Open WebUI](https://github.com/open-webui/open-webui) (v0.12.5, pinned by digest) in Docker as your team's chat, talking to every `dl model` deployment on this machine. It listens on `127.0.0.1:4800` only, until you choose otherwise.
+
+```sh
+dl ui up --admin-email you@company.com   # first run: creates the admin and shows its password once
+dl ui share                   # one link for your team: https://box.tail1234.ts.net
+dl ui invite ana@company.com raj@company.com   # makes their accounts; prints what to send each person
+dl ui approve                 # who signed up and waits; dl ui approve EMAIL... (or all)
+dl ui status · dl ui logs -f · dl ui down [--purge]
+```
+
+- **Sharing:** with Tailscale logged in, `dl ui share` runs `tailscale serve` (HTTPS on this machine's tailnet name, reachable only from your tailnet; never Funnel). On a server where `dl up` already serves the agent on port 443, the chat gets `:8443`. Without Tailscale, run `dl ui up --listen` (every address, or `--listen 192.168.1.20`) and `dl ui share` prints the LAN address; dl warns that the sign-in page is then reachable by anyone on that network. `dl ui share --off` stops sharing.
+- **Who gets in:** anyone who opens the link can ask for an account; it waits until an admin approves it (`dl ui approve` or Open WebUI's Admin Panel). `dl ui invite` creates active accounts with a one-time password for you to pass on; dl sends no email and doesn't keep those passwords.
+- **The admin:** dl creates it through Open WebUI's API on the first start, before anyone else can reach the page, with a random password stored in `~/.local/state/directionallylocal/ui.json` (mode 0600). If you change the password in Open WebUI, put the new one in that file for `invite` and `approve`.
+- **Settings:** dl sets them on every start (`ENABLE_PERSISTENT_CONFIG=false`), so changes made in the Admin Panel's settings last until the next restart; accounts, chats and model access stay in the `dl-ui-data` volume. Off: Ollama, web search, image generation, community sharing, browser-added connections, Hugging Face downloads and the version check (`OFFLINE_MODE`), analytics (`SCARF_NO_ANALYTICS`, `DO_NOT_TRACK`, `ANONYMIZED_TELEMETRY=false`). After `dl model up` or `update`, run `dl ui up` again so the chat sees the new model.
+- **Next:** sign-in with Google or Microsoft through Open WebUI's OIDC support.
 
 ### On the server
 
