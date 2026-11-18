@@ -17,8 +17,9 @@ import { dlUpdate } from "./laptop/self-update.js";
 import { PAIRED_NAME } from "./local/layout.js";
 import { provider as providerCommand } from "./laptop/provider.js";
 import { model } from "./laptop/settings.js";
-import { modelCommand as gpuModelCommand } from "./model-command.js";
+import { modelCommand as gpuModelCommand, runLogDir } from "./model-command.js";
 import { planCommand } from "./model-plan.js";
+import { evalsCommand } from "./model-evals.js";
 import { openSession, startHere, type SessionInput } from "./laptop/session.js";
 import { detectGitHubRepository } from "./laptop/git.js";
 import { preview as laptopPreview } from "./laptop/preview.js";
@@ -93,7 +94,15 @@ On your laptop:
   model options: --name NAME (a separate deployment; update/rollback/status/bench target it),
                  --gpus 0,1 (only these GPUs), --port PORT, --context TOKENS,
                  --image IMAGE (up/update/--plan: this container image instead of the catalog's,
-                 e.g. vllm/vllm-openai:v0.34.0rc2; same flags; update keeps it unless given again)
+                 e.g. vllm/vllm-openai:v0.34.0rc2; same flags; update keeps it unless given again),
+                 --skip-evals (update: switch without running dl evals)
+  dl evals set "COMMAND"  your own eval command; dl model update runs it on the old and new model
+                          and switches only if the new one passes and scores at least the old
+                          score minus --threshold (0.02). --results GLOB: where it writes scores
+                          (JUnit XML, promptfoo, Inspect, DeepEval, {"score": n}); --timeout 30m
+  dl evals run [NAME...]  run it once per deployment here, with OPENAI_BASE_URL, OPENAI_API_KEY and
+                          OPENAI_MODEL set for each
+  dl evals show           the saved command      dl evals clear   remove it
   dl update               update dl (when npm has a newer one) and the Autopilot it pins, then
                           the default place (--check: only say whether there's a newer dl)
   dl update NAME          update a place's Autopilot, Hotcell and sandbox image to the versions dl pins
@@ -225,6 +234,10 @@ export async function main(
         image: { type: "string" },
         workspace: { type: "string" },
         "allow-internet": { type: "boolean" },
+        "skip-evals": { type: "boolean" },
+        threshold: { type: "string" },
+        results: { type: "string" },
+        timeout: { type: "string" },
       },
     });
   } catch (error) {
@@ -538,11 +551,17 @@ export async function main(
             ...(values.port !== undefined ? { port: values.port } : {}), ...(values.context !== undefined ? { context: values.context } : {}),
             ...(values.image !== undefined ? { image: values.image } : {}),
             ...(values.workspace !== undefined ? { workspace: values.workspace } : {}), ...(values["allow-internet"] ? { allowInternet: true } : {}),
+            ...(values["skip-evals"] ? { skipEvals: true } : {}),
             // dl model attach -- -c: the rest goes to Autopilot.
             ...(action === "attach" ? { attachArgs: args } : {}) });
         }
         return await model(parsed.positionals.slice(1), { io: laptopIO, terminal, ...(values.server ? { server: values.server } : {}) });
       }
+      case "evals":
+        if (values.server) { io.err("dl evals runs on this machine, against its dl model deployments; omit --server.\n"); return 2; }
+        return await evalsCommand(parsed.positionals.slice(1), { system, ui: terminal ? new TerminalUi(io.out, undefined, colorOn) : new PlainUi(io.out), cwd: process.cwd(), logDir: runLogDir(),
+          ...(values.threshold !== undefined ? { threshold: values.threshold } : {}), ...(values.results !== undefined ? { results: values.results } : {}),
+          ...(values.timeout !== undefined ? { timeout: values.timeout } : {}), ...(values.model !== undefined ? { model: values.model } : {}) });
       case "runs":
         // On a server, its runs; on a laptop, the tasks it sent.
         if (!(await readState(system))) {

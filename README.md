@@ -120,6 +120,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl provider` | The provider and GitHub token on each place. `dl provider set` picks another provider, key and model in Autopilot's list; `dl provider github` replaces the GitHub token. `--server NAME` picks the place. `dl keys` is the same command. |
 | `dl model [ID]` | The model for tasks and sessions on a place. With no ID, Autopilot's own model picker. For a model served on this machine's GPU, see `dl model up` below. |
 | `dl model up` / `update` / `rollback` / `status` / `bench` / `list` | Serve a curated open model on this machine's Nvidia GPUs with vLLM or SGLang, test it, and point Autopilot at it. See [On your own GPUs](#on-your-own-gpus). |
+| `dl evals set "COMMAND"` / `run` / `show` / `clear` | Your own eval command, run once per model with `OPENAI_BASE_URL` pointed at it; `dl model update` switches only if the new model holds up. See [Your own evals](#your-own-evals). |
 | `dl update` | Update `dl` itself when npm has a newer one (the install script or npm, however it was installed; `--check` only reports), make sure the Autopilot it pins is installed, then update the default place as `dl update NAME` does. |
 | `dl update NAME` | Update a place's Autopilot, Hotcell and sandbox image to the versions `dl` pins. A server over SSH (its `dl` first), this computer in place. `--wait` waits for running tasks instead of asking; with no terminal it waits anyway. |
 | `dl local status` | Agents running on this computer: running?, where, how many fit. |
@@ -137,7 +138,7 @@ It needs an Nvidia driver, Docker, and the Nvidia container toolkit; `dl model u
 | Command | What it does |
 | --- | --- |
 | `dl model up [MODEL] [--dry-run]` | Show the GPU and driver, list the catalog models that fit, ask for the context length and port (8000), and start `vllm/vllm-openai` as `dl-model-1` with the catalog's flags and a shared Hugging Face cache. Progress shows the download and vLLM starting, then four tests: chat, speed, a tool call and JSON. The first answer from a freshly started vLLM may take up to 120 seconds. When they pass, it saves the deployment and sets Autopilot's `vllm` provider to `http://127.0.0.1:<port>/v1`. |
-| `dl model update [MODEL] [--dry-run]` | Start the replacement as the other container on port+1 when the GPU has room for both; otherwise warn about downtime and ask. Test the new one, re-test the old one, compare their speed over 512 tokens, then switch the provider and stop the old container, keeping its config for rollback. If the new one fails, the old one keeps serving. |
+| `dl model update [MODEL] [--dry-run]` | Start the replacement as the other container on port+1 when the GPU has room for both; otherwise warn about downtime and ask. Test the new one, re-test the old one, compare their speed over 512 tokens, run [your evals](#your-own-evals) on both when they're set (`--skip-evals` skips them), then switch the provider and stop the old container, keeping its config for rollback. If the new one fails, the old one keeps serving. |
 | `dl model rollback` | Restart the previous deployment and switch the provider back. |
 | `dl model status` | The running model, its address, the GPU and its free memory, and the last test results. |
 | `dl model bench` | Time to first token (p50 and p95) and decode speed with 1, 8 and 32 requests at once, plus the prefix cache hit rate from vLLM's logs. |
@@ -202,6 +203,26 @@ Each deployment has its own containers (`dl-model-NAME-1` and `-2` for updates),
 Models that keep weights in host RAM (DeepSeek V4.1's Engram tables) get a memory limit, so one can't starve the other: `--memory` = the offloaded bytes (one copy per deployment: vLLM keeps "one host copy per replica", sharded over its tensor-parallel ranks) + 8 GiB per GPU worker (dl's allowance for each engine process, not an engine figure), with the same `--memory-swap` so it can't spill to swap. For DeepSeek V4.1 Flash on 4 GPUs that's 189.1 GiB + 32 GiB = 222 GiB, so on a 256 GB machine only one such deployment fits; `dl model up --plan` shows the math.
 
 All deployments share one Hugging Face cache volume (`dl-model-hf-cache`), read-write. That is safe: the cache is content-addressed, and Hugging Face's client takes a lock per file (`.locks/` at the cache root) so two containers never download the same blob at once; dl never deletes from it. A read-only mount would be safer still but breaks the first download, and the engines' images aren't verified to load from a read-only cache, so it isn't used. Two separate Docker setups (separate daemons) each have their own volume anyway.
+
+#### Your own evals
+
+`dl evals` runs the eval command your team already has (pytest or DeepEval, promptfoo, Inspect, a script) against each model, so an update has to pass your tests, not just dl's smoke tests. Nothing to convert.
+
+```sh
+cd ~/project
+dl evals set "pytest evals/ -q --junitxml=junit.xml"   # saved with this folder; --threshold 0.02 --results GLOB --timeout 30m
+dl evals run                  # once per deployment here: pass/fail, score, time
+dl model update qwen-new      # smoke tests, bench, then your evals on the old and new model side by side
+dl model update qwen-new --skip-evals
+```
+
+The command runs in your shell, in the folder `dl evals set` ran in, once per model, with `OPENAI_BASE_URL` (and `OPENAI_API_BASE`) set to that model's `/v1` address, `OPENAI_API_KEY` set to a placeholder (dl's vLLM and SGLang need no key), `OPENAI_MODEL` and `DL_EVAL_MODEL` set to the served model id, `DL_EVAL_ENDPOINT` to the server address without `/v1`, `DL_EVAL_DEPLOYMENT` to the deployment's name, and during an update `DL_EVAL_ROLE` to `incumbent` or `candidate`. Its output goes to a log in `~/.directionallylocal/logs`. Exit code 0 is a pass. A timeout (30 minutes by default) is a fail.
+
+A score, from 0 to 1, comes from the results files the run wrote (files it didn't write this time are ignored): JUnit XML (pytest `--junitxml`: passed over run), promptfoo's `-o FILE.json` (successes over all), Inspect logs in `logs/` (`.eval` or `.json`: the first scorer's accuracy, else mean), DeepEval's `.deepeval/.latest_test_run.json` (test cases passed), or any JSON `{"score": n}` (0–1, or up to 100 as a percentage). Without `--results`, dl looks only at `junit.xml`, `report.xml`, `test-results.xml`, `results.json`, `output.json`, `promptfoo-output.json`, `logs/*.eval`, `logs/*.json` and `.deepeval/.latest_test_run.json`. Several files: their mean. A file dl can't read is listed as "not read".
+
+`dl model update` runs the evals after the smoke tests and bench, on both models, and switches only if the new one passes where the old one passed and scores at least the old score minus the threshold (0.02 by default). Without scores, pass or fail decides. A command that fails on both models with no score blocks the update: the command is broken, not the model. When the old model had to stop to make room, only the new one runs and must pass. On a block, the old model keeps serving and dl says why in one line. The command is saved in `~/.local/state/directionallylocal/evals.json`, one per machine.
+
+Next: bring your data, where dl runs JSONL, CSV, promptfoo YAML and other eval sets itself.
 
 The model's state is kept separately from a server install, in `~/.local/state/directionallylocal/model.json` (or `$XDG_STATE_HOME`), so `dl model` works on a laptop or a server without touching `/etc/directionallylocal/state.json`.
 
