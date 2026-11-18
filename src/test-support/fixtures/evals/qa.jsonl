@@ -1,0 +1,5 @@
+{"question": "What is the capital of France?", "answer": "Paris"}
+{"prompt": "2 + 2 = ?", "expected": "4", "id": "math-1"}
+{"input": "Name a primary colour.", "target": ["red", "blue", "yellow"]}
+{"question": "Say anything."}
+{"note": "no input here"}

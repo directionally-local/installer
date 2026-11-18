@@ -100,9 +100,12 @@ On your laptop:
                           and switches only if the new one passes and scores at least the old
                           score minus --threshold (0.02). --results GLOB: where it writes scores
                           (JUnit XML, promptfoo, Inspect, DeepEval, {"score": n}); --timeout 30m
+  dl evals set --data PATH  your eval data (a file, folder or glob): JSONL, CSV, promptfoo YAML,
+                          OpenAI Evals, Braintrust or LangSmith exports, found by content; dl sends
+                          each case to each model and checks the answer (with a command: both run)
   dl evals run [NAME...]  run it once per deployment here, with OPENAI_BASE_URL, OPENAI_API_KEY and
                           OPENAI_MODEL set for each
-  dl evals show           the saved command      dl evals clear   remove it
+  dl evals show           the saved evals        dl evals clear   remove them
   dl update               update dl (when npm has a newer one) and the Autopilot it pins, then
                           the default place (--check: only say whether there's a newer dl)
   dl update NAME          update a place's Autopilot, Hotcell and sandbox image to the versions dl pins
@@ -238,6 +241,7 @@ export async function main(
         threshold: { type: "string" },
         results: { type: "string" },
         timeout: { type: "string" },
+        data: { type: "string" },
       },
     });
   } catch (error) {
@@ -561,7 +565,8 @@ export async function main(
         if (values.server) { io.err("dl evals runs on this machine, against its dl model deployments; omit --server.\n"); return 2; }
         return await evalsCommand(parsed.positionals.slice(1), { system, ui: terminal ? new TerminalUi(io.out, undefined, colorOn) : new PlainUi(io.out), cwd: process.cwd(), logDir: runLogDir(),
           ...(values.threshold !== undefined ? { threshold: values.threshold } : {}), ...(values.results !== undefined ? { results: values.results } : {}),
-          ...(values.timeout !== undefined ? { timeout: values.timeout } : {}), ...(values.model !== undefined ? { model: values.model } : {}) });
+          ...(values.timeout !== undefined ? { timeout: values.timeout } : {}), ...(values.model !== undefined ? { model: values.model } : {}),
+          ...(values.data !== undefined ? { data: values.data } : {}) });
       case "runs":
         // On a server, its runs; on a laptop, the tasks it sent.
         if (!(await readState(system))) {

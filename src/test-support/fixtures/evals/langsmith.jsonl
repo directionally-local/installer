@@ -1,0 +1,2 @@
+{"inputs": {"question": "Speed of light in km/s, roughly?"}, "outputs": {"answer": "300000"}, "metadata": {"dataset_split": ["base"]}}
+{"inputs": {"messages": [{"type": "human", "data": {"content": "What colour is the sky?"}}]}, "outputs": {"output": {"role": "assistant", "content": "blue"}}}

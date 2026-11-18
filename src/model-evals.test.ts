@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { crc32, deflateRawSync } from "node:zlib";
 import { modelCommand, type ModelCommandOptions } from "./model-command.js";
-import { evalGate, evalsCommand, evalTable, parseResultFile, parseTimeout, realSpawn, runEval, zipEntry, type EvalConfig, type EvalRun, type ResultsFs, type SpawnEval } from "./model-evals.js";
+import { evalGate, evalsCommand, evalTable, parseResultFile, parseTimeout, readEvalConfig, realSpawn, runEval, zipEntry, type EvalConfig, type EvalRun, type ResultsFs, type SpawnEval } from "./model-evals.js";
 import type { Prompter } from "./prompt.js";
 import { writeDeployment, type ModelDeployment } from "./state.js";
 import { FakeModelSystem } from "./test-support/fake-model-system.js";
@@ -74,7 +74,7 @@ test("set, show and clear store one eval command per machine, next to the model 
   assert.equal(await evalsCommand(["show"], options), 0);
   assert.match(lines.join(""), /Command: promptfoo eval -o out\.json\n-- Runs in: \/home\/me\/project\n-- Results: out\.json\n-- Threshold: 0\.1 .*\n-- Timeout: 45m 00s/);
   await assert.rejects(evalsCommand(["set", "x"], { ...options, threshold: "2" }), /--threshold takes a score difference from 0 to 1/);
-  await assert.rejects(evalsCommand(["show"], { ...options, threshold: "0.1" }), /--threshold and --results go with dl evals set/);
+  await assert.rejects(evalsCommand(["show"], { ...options, threshold: "0.1" }), /--threshold, --results and --data go with dl evals set/);
   assert.equal(await evalsCommand(["clear"], options), 0);
   assert.ok(!system.files.has("/state/evals.json"));
   assert.equal(await evalsCommand(["frobnicate"], options), 2);
@@ -120,7 +120,7 @@ test("run gives each deployment its own endpoint, model and key in the environme
 test("run without a command, or with no model, says what to do", async () => {
   const system = new FakeModelSystem();
   const options = { system, ui: new PlainUi(() => {}), statePath: "/state/model.json", cwd: PROJECT, logDir: "/logs", spawn: fakeSpawn().spawn, fs: new FakeProject() };
-  await assert.rejects(evalsCommand(["run"], options), /No eval command set\. Run dl evals set "COMMAND"/);
+  await assert.rejects(evalsCommand(["run"], options), /No evals set\. Run dl evals set "COMMAND" or dl evals set --data PATH/);
   await evalsCommand(["set", "make evals"], options);
   await assert.rejects(evalsCommand(["run"], options), /No model is running here/);
 });
@@ -194,6 +194,10 @@ test("the gate: pass, fail by threshold, pass/fail without scores, and a command
   assert.deepEqual(evalGate(inc(), cand({ passed: false, timedOut: true, code: 143 })), { ok: false, reason: "candidate's evals timed out; the incumbent's passed" });
   assert.deepEqual(evalGate(inc({ passed: false, code: 1 }), cand()), { ok: true, reason: "candidate passed; the incumbent failed" });
   assert.deepEqual(evalGate(inc({ passed: false, code: 127 }), cand({ passed: false, code: 127 })), { ok: false, reason: "the eval command failed (exit 127) on both models; fix it or pass --skip-evals" });
+  // Data evals with no answers from either model: the setup is broken, not the model.
+  const silent = { passed: false, code: 1, error: "no answers", dataOnly: true as const };
+  assert.deepEqual(evalGate(inc(silent), cand(silent)), { ok: false, reason: "the evals failed (no answers) on both models; fix them or pass --skip-evals" });
+  assert.deepEqual(evalGate(inc({ score: 1, dataOnly: true }), cand(silent)), { ok: false, reason: "candidate's evals failed (no answers); the incumbent's passed" });
   // One score only: pass/fail.
   assert.equal(evalGate(inc({ score: 0.9 }), cand()).ok, true);
   // The incumbent was stopped for the candidate (not enough VRAM for both): the candidate must pass.
@@ -286,6 +290,76 @@ test("--skip-evals switches without running them; with no command set, update on
   assert.match(lines.join(""), /Evals: skipped \(--skip-evals\)/);
   assert.equal(active(), "qwen-old");
   await assert.rejects(modelCommand("rollback", [], { ...options, skipEvals: true }), /--skip-evals goes with dl model update/);
+});
+
+/** A fake model API for the data runner: each port answers in its own way. */
+function portFetch(answers: Record<string, (prompt: string) => string>) {
+  const seen: string[] = [];
+  const fetch = async (url: string, init?: RequestInit) => {
+    const port = new URL(url).port;
+    seen.push(port);
+    const prompt = (JSON.parse(String(init!.body)) as { messages: Array<{ content: string }> }).messages.at(-1)!.content;
+    return new Response(JSON.stringify({ choices: [{ message: { content: answers[port]!(prompt) }, finish_reason: "stop" }] }), { status: 200 });
+  };
+  return { fetch, seen };
+}
+
+test("update gates on data evals the same way: side by side, the threshold, and the incumbent kept on a block", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "dl-evals-data-"));
+  try {
+    const data = join(dir, "qa.jsonl");
+    await writeFile(data, ["Paris", "Rome", "Madrid", "Berlin"].map((city) => JSON.stringify({ question: `Capital of ${city}?`, answer: city })).join("\n"));
+    const { system, lines, options, calls, active } = updateFixture();
+    await modelCommand("up", ["qwen-old"], options);
+    await system.writeFile("/tmp/evals.json", JSON.stringify({ version: 1, data, dir, setAt: "" }));
+    // The incumbent knows all four; the candidate gets Berlin wrong.
+    const model = portFetch({ 8000: (prompt) => prompt.replace(/^Capital of (.*)\?$/, "$1"), 8001: (prompt) => (prompt.includes("Berlin") ? "Bonn" : prompt.replace(/^Capital of (.*)\?$/, "It is $1.")) });
+    const error = await modelCommand("update", ["qwen-new"], { ...options, evalFetch: model.fetch }).catch((caught: Error) => caught);
+    assert.match(String(error), /^Error: Evals: candidate scored 0\.75, below incumbent 1\.00 − 0\.02; qwen-old keeps serving\./);
+    assert.equal(calls.length, 0, "no command ran");
+    assert.deepEqual([...new Set(model.seen)], ["8000", "8001"]);
+    const out = lines.join("");
+    assert.match(out, /-- qwen-old \(incumbent\) +pass +1\.00[\s\S]*-- qwen-new \(candidate\) +pass +0\.75/);
+    assert.match(out, /Results \(candidate\): data: 3 of 4 passed[\s\S]*Failed \(candidate\): qa\.jsonl#4: expected "Berlin", got "Bonn"/);
+    assert.equal(active(), "qwen-old");
+    // A looser threshold lets it through.
+    await system.writeFile("/tmp/evals.json", JSON.stringify({ version: 1, data, dir, threshold: 0.3, setAt: "" }));
+    assert.equal(await modelCommand("update", ["qwen-new"], { ...options, evalFetch: model.fetch }), 0);
+    assert.equal(active(), "qwen-new");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a command and data together: both run, both must pass, the score is their mean", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "dl-evals-both-"));
+  try {
+    const data = join(dir, "qa.jsonl");
+    await writeFile(data, '{"question": "Capital of France?", "answer": "Paris"}\n{"question": "Capital of Peru?", "answer": "Lima"}\n');
+    const { system, lines, options, calls, scores, exits, active } = updateFixture();
+    await modelCommand("up", ["qwen-old"], options);
+    await system.writeFile("/tmp/evals.json", JSON.stringify(config({ command: "python evals.py", data })));
+    scores.incumbent = 0.8; scores.candidate = 0.8;
+    const model = portFetch({ 8000: () => "Paris", 8001: () => "Paris or Lima" });
+    // Incumbent: (0.8 + 0.5) / 2 = 0.65; candidate (0.8 + 1) / 2 = 0.9.
+    assert.equal(await modelCommand("update", ["qwen-new"], { ...options, evalFetch: model.fetch }), 0);
+    assert.equal(calls.length, 2);
+    const out = lines.join("");
+    assert.match(out, /qwen-old \(incumbent\) +pass +0\.65[\s\S]*qwen-new \(candidate\) +pass +0\.90/);
+    assert.match(out, /Results \(incumbent\): results\.json: score 0\.8\n-- Results \(incumbent\): data: 1 of 2 passed/);
+    assert.equal(active(), "qwen-new");
+    // The command failing on the candidate blocks however well the data went.
+    exits.candidate = 1;
+    await assert.rejects(modelCommand("update", ["qwen-old"], { ...options, evalFetch: portFetch({ 8000: () => "Paris Lima", 8001: () => "Paris Lima" }).fetch }),
+      /Evals: candidate's evals failed \(exit 1\); the incumbent's passed/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("evals.json: a command, data, or both; neither is invalid", async () => {
+  const system = new FakeModelSystem();
+  const read = async (value: unknown) => { await system.writeFile("/s/evals.json", JSON.stringify(value)); return readEvalConfig(system, "/s/evals.json"); };
+  assert.equal((await read({ version: 1, command: "make", dir: "/p", setAt: "" }))!.command, "make", "configs from before --data still read");
+  assert.equal((await read({ version: 1, data: "/p/qa.jsonl", dir: "/p", setAt: "" }))!.data, "/p/qa.jsonl");
+  await assert.rejects(read({ version: 1, dir: "/p", setAt: "" }), /Invalid evals config/);
+  await assert.rejects(read({ version: 1, data: "", command: "make", dir: "/p", setAt: "" }), /Invalid evals config/);
 });
 
 test("the real child process: the user's shell in the project folder, its env, output in the log, and a timeout", async () => {

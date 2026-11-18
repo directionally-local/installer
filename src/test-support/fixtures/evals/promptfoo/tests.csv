@@ -1,0 +1,3 @@
+question,__expected,__expected2
+Capital of Germany?,contains: Berlin,not-contains: Munich
+Capital of Peru?,Lima,grade: is correct

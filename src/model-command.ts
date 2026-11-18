@@ -57,6 +57,8 @@ export interface ModelCommandOptions {
   /** For tests: the eval command's process and the results files it writes. */
   evalSpawn?: SpawnEval;
   evalFs?: ResultsFs;
+  /** For tests: the transport dl's data runner (dl evals set --data) sends cases over. */
+  evalFetch?: FetchModel;
 }
 
 /** The run log a failed `dl model` command wrote, when it wrote one. */
@@ -748,15 +750,16 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
 }
 
 /**
- * `dl evals set`'s command against the incumbent and the candidate, side by side; throws (and so
- * keeps the incumbent) unless the candidate passes the gate. No command set: a hint, no gate.
+ * `dl evals set`'s command and/or data against the incumbent and the candidate, side by side;
+ * throws (and so keeps the incumbent) unless the candidate passes the gate. None set: a hint, no gate.
  */
 async function gateOnEvals(options: ModelCommandOptions, name: string, statePath: string, incumbent: ModelDeployment | undefined, candidate: ModelDeployment, oldId: string): Promise<void> {
   const { system, ui } = options;
   const config = await readEvalConfig(system, evalsConfigPath(statePath));
-  if (!config) { ui.line("info", "Evals", 'none · dl evals set "COMMAND"'); return; }
+  if (!config) { ui.line("info", "Evals", 'none · dl evals set "COMMAND" or --data'); return; }
   if (options.skipEvals) { ui.line("info", "Evals", "skipped (--skip-evals)"); return; }
-  const settings = { system, config, logDir: options.logDir ?? runLogDir(), ...(options.evalSpawn ? { spawn: options.evalSpawn } : {}), ...(options.evalFs ? { fs: options.evalFs } : {}) };
+  const settings = { system, config, logDir: options.logDir ?? runLogDir(), ...(options.evalSpawn ? { spawn: options.evalSpawn } : {}), ...(options.evalFs ? { fs: options.evalFs } : {}),
+    ...(options.evalFetch ? { fetch: options.evalFetch } : {}) };
   const runs: EvalRun[] = [];
   try {
     for (const [deployment, role] of [[incumbent, "incumbent"], [candidate, "candidate"]] as const) {
