@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import { glob, readFile, stat } from "node:fs/promises";
-import { dirname, extname, isAbsolute, join } from "node:path";
+import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { inflateRawSync } from "node:zlib";
+import { caseSource, dataRunSummary, dataSummary, failureLines, loadEvalData, runDataCases, type DataRunOptions } from "./model-evals-data.js";
 import { containerRunning } from "./model-runtime.js";
-import { modelApiBase } from "./model-smoke.js";
+import { modelApiBase, type FetchModel } from "./model-smoke.js";
 import { DEFAULT_DEPLOYMENT, modelStatePath, readDeployments, type ModelDeployment } from "./state.js";
 import type { System } from "./system.js";
 import type { Ui } from "./ui.js";
@@ -13,11 +14,14 @@ import type { Ui } from "./ui.js";
  * `dl evals`, bring your command: the team's own eval command (pytest/DeepEval, promptfoo,
  * Inspect, anything) runs once per model with OPENAI_BASE_URL pointed at it. Pass or fail is its
  * exit code; a score comes from the results files it writes, when dl can read them.
+ * Bring your data (model-evals-data.ts): eval files dl runs itself. Either or both.
  */
 export interface EvalConfig {
   version: 1;
   /** Run with the user's shell (`$SHELL -c`), in `dir`. */
-  command: string;
+  command?: string;
+  /** An eval data file, folder or glob, absolute (dl evals set --data). */
+  data?: string;
   /** The directory `dl evals set` ran in. */
   dir: string;
   /** How far below the incumbent's score a candidate may land (0–1); DEFAULT_THRESHOLD when unset. */
@@ -46,7 +50,9 @@ export async function readEvalConfig(system: System, path: string): Promise<Eval
   if (!raw) return undefined;
   try {
     const value = JSON.parse(raw) as Partial<EvalConfig>;
-    if (value.version !== 1 || typeof value.command !== "string" || !value.command.trim() || typeof value.dir !== "string"
+    const command = typeof value.command === "string" && value.command.trim() !== "";
+    const data = typeof value.data === "string" && value.data.trim() !== "";
+    if (value.version !== 1 || !(command || data) || (value.command !== undefined && !command) || (value.data !== undefined && !data) || typeof value.dir !== "string"
       || (value.threshold !== undefined && !validThreshold(value.threshold)) || (value.results !== undefined && typeof value.results !== "string")
       || (value.timeoutSeconds !== undefined && !(Number.isInteger(value.timeoutSeconds) && value.timeoutSeconds > 0))) throw new Error("invalid");
     return value as EvalConfig;
@@ -268,7 +274,14 @@ export interface EvalRun {
   /** "junit.xml: JUnit XML: 41 of 44 passed", and files it couldn't read. */
   results: string[];
   durationMs: number;
+  /** The command's log; with data only, the data results file. */
   logPath: string;
+  /** No command ran: only data (dl evals set --data). */
+  dataOnly?: true;
+  /** Why it failed when not by an exit code: "no answers". */
+  error?: string;
+  /** The data part: "41 of 44 passed · ...", the first failing cases, and the full results file. */
+  data?: { summary: string; failures: string[]; resultsPath: string };
 }
 
 export interface EvalRunOptions {
@@ -280,6 +293,9 @@ export interface EvalRunOptions {
   spawn?: SpawnEval;
   fs?: ResultsFs;
   now?: () => number;
+  /** The data runner's transport (tests), and its limits. */
+  fetch?: FetchModel;
+  dataRun?: Omit<DataRunOptions, "fetch" | "deadline" | "now">;
 }
 
 async function snapshot(fs: ResultsFs, dir: string, patterns: readonly string[]): Promise<Map<string, number | undefined>> {
@@ -288,8 +304,58 @@ async function snapshot(fs: ResultsFs, dir: string, patterns: readonly string[])
   return seen;
 }
 
-/** Runs the eval command against one deployment and reads what it wrote. */
+/**
+ * The evals against one deployment: the command, the data, or both. With both, both must pass,
+ * and the score is the mean of the scores there are (the command's, when it wrote one, and the
+ * data's).
+ */
 export async function runEval(options: EvalRunOptions, name: string, deployment: ModelDeployment, role?: EvalRole): Promise<EvalRun> {
+  const command = options.config.command ? await runCommand(options, name, deployment, role) : undefined;
+  const data = options.config.data ? await runData(options, name, deployment, role) : undefined;
+  if (!command) return data!;
+  if (!data) return command;
+  const scores = [command.score, data.score].filter((score): score is number => score !== undefined);
+  const { score: _score, error: _error, ...rest } = command;
+  return { ...rest, passed: command.passed && data.passed, timedOut: command.timedOut || data.timedOut, durationMs: command.durationMs + data.durationMs,
+    ...(scores.length ? { score: scores.reduce((sum, value) => sum + value, 0) / scores.length } : {}),
+    ...(command.passed && data.error ? { error: data.error } : {}), data: data.data! };
+}
+
+/** The directory the data files share, so they show as paths under it. */
+function commonDir(paths: readonly string[]): string {
+  let dir = dirname(paths[0] ?? "/");
+  while (dir !== "/" && !paths.every((path) => path.startsWith(`${dir}/`))) dir = dirname(dir);
+  return dir;
+}
+
+/** dl's own runner over the data files, against one deployment; the full results go to a JSON file. */
+async function runData(options: EvalRunOptions, name: string, deployment: ModelDeployment, role?: EvalRole): Promise<EvalRun> {
+  const { config, system } = options;
+  const now = options.now ?? Date.now;
+  const loaded = await loadEvalData(config.data!);
+  const root = commonDir(loaded.sets.map((set) => set.path));
+  const cases = loaded.sets.flatMap((set) => set.cases.map((item) => ({ source: caseSource(set, item, root), item })));
+  await system.mkdir(options.logDir, { mode: 0o700 });
+  const started = now();
+  const timeoutSeconds = options.timeoutSeconds ?? config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
+  const result = await runDataCases(cases, deployment, { ...options.dataRun, ...(options.fetch ? { fetch: options.fetch } : {}), deadline: started + timeoutSeconds * 1000, now });
+  const durationMs = now() - started;
+  const stamp = new Date(started).toISOString().replace(/[:.]/g, "-");
+  const resultsPath = join(options.logDir, `${stamp}-evals-${name}${role ? `-${role}` : ""}-data.json`);
+  await system.writeFile(resultsPath, `${JSON.stringify({ deployment: name, model: deployment.id, served: deployment.repo, endpoint: modelApiBase(deployment), ...(role ? { role } : {}),
+    at: new Date(started).toISOString(), durationMs, data: config.data, files: loaded.sets.map((set) => ({ path: set.path, format: set.format, cases: set.cases.length, notes: set.notes })),
+    skippedFiles: loaded.skipped, score: result.score ?? null, checked: result.checked, passed: result.passed, noCheck: result.noCheck, errors: result.errors,
+    skippedAssertions: result.skipped, timedOut: result.timedOut, cases: result.cases }, null, 2)}\n`, { mode: 0o644 });
+  const noAnswers = result.cases.length > 0 && result.errors === result.cases.length;
+  const passed = !result.timedOut && !noAnswers;
+  const summary = noAnswers ? `no answers: ${result.cases[0]!.error}` : dataRunSummary(result);
+  return { deployment: name, model: deployment.id, ...(role ? { role } : {}), passed, code: passed ? 0 : 1, timedOut: result.timedOut,
+    ...(result.score !== undefined && !noAnswers ? { score: result.score } : {}), results: [], durationMs, logPath: resultsPath, dataOnly: true,
+    ...(noAnswers ? { error: "no answers" } : {}), data: { summary, failures: failureLines(result), resultsPath } };
+}
+
+/** Runs the eval command against one deployment and reads what it wrote. */
+async function runCommand(options: EvalRunOptions, name: string, deployment: ModelDeployment, role?: EvalRole): Promise<EvalRun> {
   const { config } = options;
   const fs = options.fs ?? realResultsFs;
   const now = options.now ?? Date.now;
@@ -304,7 +370,7 @@ export async function runEval(options: EvalRunOptions, name: string, deployment:
   const before = await snapshot(fs, config.dir, patterns);
   const started = now();
   const timeoutSeconds = options.timeoutSeconds ?? config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
-  const result = await (options.spawn ?? realSpawn)(config.command, { cwd: config.dir, env, timeoutMs: timeoutSeconds * 1000, logPath });
+  const result = await (options.spawn ?? realSpawn)(config.command!, { cwd: config.dir, env, timeoutMs: timeoutSeconds * 1000, logPath });
   const durationMs = now() - started;
   const after = await snapshot(fs, config.dir, patterns);
   const results: string[] = [];
@@ -327,7 +393,7 @@ export async function runEval(options: EvalRunOptions, name: string, deployment:
 // ---- Showing and gating --------------------------------------------------------------------
 
 const scoreText = (score: number | undefined) => (score === undefined ? "–" : score.toFixed(2));
-const resultText = (run: EvalRun) => (run.timedOut ? "timeout" : run.passed ? "pass" : `fail (${run.code})`);
+const resultText = (run: EvalRun) => (run.timedOut ? "timeout" : run.passed ? "pass" : `fail (${run.error ?? run.code})`);
 
 /** Model, result, score and time, one row per run, padded into columns. */
 export function evalTable(runs: readonly EvalRun[]): string[] {
@@ -340,8 +406,14 @@ export function evalTable(runs: readonly EvalRun[]): string[] {
 export function showRuns(ui: Ui, runs: readonly EvalRun[]): void {
   for (const row of evalTable(runs)) ui.line("info", row);
   for (const run of runs) {
-    for (const line of run.results) ui.line("info", `Results (${run.role ?? run.deployment})`, line);
-    if (!run.results.length) ui.line("info", `Results (${run.role ?? run.deployment})`, "no results file; pass or fail from the exit code");
+    const label = `Results (${run.role ?? run.deployment})`;
+    for (const line of run.results) ui.line("info", label, line);
+    if (!run.results.length && !run.dataOnly) ui.line("info", label, "no results file; pass or fail from the exit code");
+    if (run.data) {
+      ui.line("info", label, `data: ${run.data.summary}`);
+      for (const line of run.data.failures) ui.line("info", `Failed (${run.role ?? run.deployment})`, line);
+      ui.line("info", `Data results (${run.role ?? run.deployment})`, run.data.resultsPath);
+    }
   }
 }
 
@@ -353,7 +425,7 @@ export interface GateDecision { ok: boolean; reason: string }
  * passed. A command that fails on both, with no score, blocks: it is broken, not the model.
  */
 export function evalGate(incumbent: EvalRun | undefined, candidate: EvalRun, threshold = DEFAULT_THRESHOLD): GateDecision {
-  const failed = (run: EvalRun) => (run.timedOut ? "timed out" : `failed (exit ${run.code})`);
+  const failed = (run: EvalRun) => (run.timedOut ? "timed out" : run.error ? `failed (${run.error})` : `failed (exit ${run.code})`);
   if (!incumbent) return candidate.passed ? { ok: true, reason: "candidate passed (incumbent not run)" } : { ok: false, reason: `candidate's evals ${failed(candidate)}` };
   if (!candidate.passed && incumbent.passed) return { ok: false, reason: `candidate's evals ${failed(candidate)}; the incumbent's passed` };
   if (candidate.score !== undefined && incumbent.score !== undefined) {
@@ -365,7 +437,7 @@ export function evalGate(incumbent: EvalRun | undefined, candidate: EvalRun, thr
     return { ok: true, reason: `candidate ${scoreText(candidate.score)} ≥ incumbent ${scoreText(incumbent.score)} − ${threshold}` };
   }
   if (candidate.passed) return { ok: true, reason: incumbent.passed ? "both passed (no score to compare)" : "candidate passed; the incumbent failed" };
-  return { ok: false, reason: `the eval command ${failed(candidate)} on both models; fix it or pass --skip-evals` };
+  return { ok: false, reason: `the ${candidate.dataOnly ? "evals" : "eval command"} ${failed(candidate)} on both models; fix ${candidate.dataOnly ? "them" : "it"} or pass --skip-evals` };
 }
 
 // ---- dl evals -------------------------------------------------------------------------------
@@ -380,13 +452,16 @@ export interface EvalsCommandOptions {
   threshold?: string;
   results?: string;
   timeout?: string;
+  /** --data PATH: an eval data file, folder or glob ("" removes it). */
+  data?: string;
   /** -m/--model NAME: one more deployment to run on. */
   model?: string;
   spawn?: SpawnEval;
   fs?: ResultsFs;
+  fetch?: FetchModel;
 }
 
-const USAGE = 'dl evals set "COMMAND" [--threshold 0.02] [--results GLOB] [--timeout 30m] · dl evals run [NAME...] · dl evals show · dl evals clear';
+const USAGE = 'dl evals set ["COMMAND"] [--data PATH] [--threshold 0.02] [--results GLOB] [--timeout 30m] · dl evals run [NAME...] · dl evals show · dl evals clear';
 
 export async function evalsCommand(args: string[], options: EvalsCommandOptions): Promise<number> {
   const { system, ui } = options;
@@ -394,16 +469,20 @@ export async function evalsCommand(args: string[], options: EvalsCommandOptions)
   const statePath = options.statePath ?? modelStatePath();
   const path = evalsConfigPath(statePath);
   const usage = () => { ui.line("failed", "Usage", USAGE); return 2; };
-  const settingFlags = options.threshold !== undefined || options.results !== undefined;
-  if (action !== "set" && settingFlags) throw new Error("--threshold and --results go with dl evals set.");
+  const settingFlags = options.threshold !== undefined || options.results !== undefined || options.data !== undefined;
+  if (action !== "set" && settingFlags) throw new Error("--threshold, --results and --data go with dl evals set.");
   if (action !== "set" && action !== "run" && options.timeout !== undefined) throw new Error("--timeout goes with dl evals set or dl evals run.");
   if (action !== "run" && options.model !== undefined) throw new Error("--model goes with dl evals run.");
   const config = await readEvalConfig(system, path);
   if (action === "set") {
     if (rest.length > 1) return usage();
     const command = rest[0]?.trim() || config?.command;
-    if (!command) return usage();
-    const next: EvalConfig = { version: 1, command, dir: rest[0] ? options.cwd : config!.dir,
+    // A path as given, made absolute: a glob stays a glob.
+    const data = options.data !== undefined ? (options.data.trim() ? resolve(options.cwd, options.data.trim()) : undefined) : config?.data;
+    if (!command && !data) return usage();
+    // Read the data now: a file dl can't use is an error here, not at the next update.
+    const loaded = options.data?.trim() ? await loadEvalData(data!) : undefined;
+    const next: EvalConfig = { version: 1, ...(command ? { command } : {}), ...(data ? { data } : {}), dir: rest[0]?.trim() || !config ? options.cwd : config.dir,
       ...(options.threshold !== undefined ? { threshold: parseThreshold(options.threshold) } : config?.threshold !== undefined ? { threshold: config.threshold } : {}),
       ...(options.results !== undefined ? (options.results.trim() ? { results: options.results.trim() } : {}) : config?.results !== undefined ? { results: config.results } : {}),
       ...(options.timeout !== undefined ? { timeoutSeconds: parseTimeout(options.timeout) } : config?.timeoutSeconds !== undefined ? { timeoutSeconds: config.timeoutSeconds } : {}),
@@ -411,11 +490,12 @@ export async function evalsCommand(args: string[], options: EvalsCommandOptions)
     await writeEvalConfig(system, next, path);
     ui.line("done", "Evals", "saved; dl model update runs them on both models before switching");
     show(ui, next);
+    if (loaded) for (const line of dataSummary(loaded, commonDir(loaded.sets.map((set) => set.path)))) ui.line("info", "Data", line);
     return 0;
   }
   if (action === "show") {
     if (rest.length) return usage();
-    if (!config) { ui.line("info", "Evals", 'none · dl evals set "COMMAND"'); return 0; }
+    if (!config) { ui.line("info", "Evals", 'none · dl evals set "COMMAND" or dl evals set --data PATH'); return 0; }
     show(ui, config);
     return 0;
   }
@@ -426,7 +506,7 @@ export async function evalsCommand(args: string[], options: EvalsCommandOptions)
     return 0;
   }
   if (action !== "run") return usage();
-  if (!config) throw new Error('No eval command set. Run dl evals set "COMMAND" in your project first.');
+  if (!config) throw new Error('No evals set. Run dl evals set "COMMAND" or dl evals set --data PATH in your project first.');
   const deployments = await readDeployments(system, statePath);
   const names = [...rest, ...(options.model !== undefined ? [options.model] : [])];
   const chosen = names.length ? [...new Set(names)] : Object.keys(deployments).sort((a, b) => (a === DEFAULT_DEPLOYMENT ? -1 : b === DEFAULT_DEPLOYMENT ? 1 : a.localeCompare(b)));
@@ -441,17 +521,21 @@ export async function evalsCommand(args: string[], options: EvalsCommandOptions)
     const deployment = deployments[name]!.active;
     ui.line("info", "Evals", `running on ${deployment.id}${name !== DEFAULT_DEPLOYMENT ? ` (${name})` : ""} · ${modelApiBase(deployment)}`);
     runs.push(await runEval({ system, config, logDir: options.logDir, ...(options.timeout !== undefined ? { timeoutSeconds: parseTimeout(options.timeout) } : {}),
-      ...(options.spawn ? { spawn: options.spawn } : {}), ...(options.fs ? { fs: options.fs } : {}) }, name, deployment));
+      ...(options.spawn ? { spawn: options.spawn } : {}), ...(options.fs ? { fs: options.fs } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) }, name, deployment));
   }
   showRuns(ui, runs);
-  for (const run of runs) ui.line("info", `Log (${run.deployment})`, run.logPath);
+  for (const run of runs) if (!run.dataOnly) ui.line("info", `Log (${run.deployment})`, run.logPath);
   return runs.every((run) => run.passed) ? 0 : 1;
 }
 
 function show(ui: Ui, config: EvalConfig): void {
-  ui.line("info", "Command", config.command);
-  ui.line("info", "Runs in", config.dir);
-  ui.line("info", "Results", config.results ?? "found automatically: JUnit XML, promptfoo JSON, Inspect logs, DeepEval, {\"score\": n}");
+  if (config.command) {
+    ui.line("info", "Command", config.command);
+    ui.line("info", "Runs in", config.dir);
+    ui.line("info", "Results", config.results ?? "found automatically: JUnit XML, promptfoo JSON, Inspect logs, DeepEval, {\"score\": n}");
+  }
+  if (config.data) ui.line("info", "Data", `${config.data} (run by dl: JSONL, CSV, promptfoo, OpenAI Evals, Braintrust, LangSmith)`);
+  if (config.command && config.data) ui.line("info", "Both", "both must pass; the score is the mean of the two");
   ui.line("info", "Threshold", `${config.threshold ?? DEFAULT_THRESHOLD} (the new model may score this much lower)`);
   ui.line("info", "Timeout", durationText((config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS) * 1000));
 }

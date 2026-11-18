@@ -41,6 +41,7 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "autopilot-ai": "3.26.0"
+    "autopilot-ai": "3.26.0",
+    "yaml": "^2.9.1"
   }
 }

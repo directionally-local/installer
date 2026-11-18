@@ -1,0 +1,2 @@
+{"input": [{"role": "system", "content": "Answer with one word."}, {"role": "user", "content": "Capital of Japan?"}], "ideal": "Tokyo"}
+{"input": [{"role": "user", "content": "Largest planet?"}], "ideal": ["Jupiter", "jupiter"]}

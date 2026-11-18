@@ -1,0 +1,3 @@
+prompt	__expected
+Capital of Italy?	icontains: rome
+Give JSON	is-json

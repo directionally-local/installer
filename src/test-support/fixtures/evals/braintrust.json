@@ -1,0 +1,4 @@
+[
+  {"id": "bt-1", "input": {"question": "Who painted the Mona Lisa?"}, "expected": "Leonardo da Vinci", "metadata": {"split": "test"}, "_xact_id": "100"},
+  {"id": "bt-2", "input": "Boiling point of water in Celsius?", "expected": {"answer": "100"}, "metadata": {}}
+]

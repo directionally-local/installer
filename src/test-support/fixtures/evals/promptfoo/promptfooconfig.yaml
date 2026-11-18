@@ -1,0 +1,29 @@
+description: Capital cities
+prompts:
+  - file://prompts.txt
+  - "Reply in one word: {{ question }}"
+providers:
+  - openai:chat:qwen
+defaultTest:
+  assert:
+    - type: not-icontains
+      value: "as an ai"
+tests:
+  - description: france
+    vars:
+      question: What is the capital of France?
+      city: paris
+    assert:
+      - type: icontains
+        value: "{{ city }}"
+      - type: llm-rubric
+        value: mentions the Eiffel Tower
+      - type: javascript
+        value: output.length < 100
+  - vars:
+      question: Give the capital of Spain as JSON
+    assert:
+      - type: contains-json
+      - type: regex
+        value: "[Mm]adrid"
+  - file://tests.csv
