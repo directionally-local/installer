@@ -9,6 +9,7 @@ import { evalGate, evalsCommand, evalTable, parseResultFile, parseTimeout, readE
 import type { Prompter } from "./prompt.js";
 import { writeDeployment, type ModelDeployment } from "./state.js";
 import { FakeModelSystem } from "./test-support/fake-model-system.js";
+import { fakePromptfoo } from "./test-support/fake-promptfoo.js";
 import { PlainUi } from "./ui.js";
 
 const PROJECT = "/home/me/project";
@@ -292,19 +293,7 @@ test("--skip-evals switches without running them; with no command set, update on
   await assert.rejects(modelCommand("rollback", [], { ...options, skipEvals: true }), /--skip-evals goes with dl model update/);
 });
 
-/** A fake model API for the data runner: each port answers in its own way. */
-function portFetch(answers: Record<string, (prompt: string) => string>) {
-  const seen: string[] = [];
-  const fetch = async (url: string, init?: RequestInit) => {
-    const port = new URL(url).port;
-    seen.push(port);
-    const prompt = (JSON.parse(String(init!.body)) as { messages: Array<{ content: string }> }).messages.at(-1)!.content;
-    return new Response(JSON.stringify({ choices: [{ message: { content: answers[port]!(prompt) }, finish_reason: "stop" }] }), { status: 200 });
-  };
-  return { fetch, seen };
-}
-
-test("update gates on data evals the same way: side by side, the threshold, and the incumbent kept on a block", async () => {
+test("update gates on data evals the same way: promptfoo per model, the incumbent judges both, the threshold, and the incumbent kept on a block", async () => {
   const dir = await mkdtemp(join(tmpdir(), "dl-evals-data-"));
   try {
     const data = join(dir, "qa.jsonl");
@@ -313,18 +302,22 @@ test("update gates on data evals the same way: side by side, the threshold, and 
     await modelCommand("up", ["qwen-old"], options);
     await system.writeFile("/tmp/evals.json", JSON.stringify({ version: 1, data, dir, setAt: "" }));
     // The incumbent knows all four; the candidate gets Berlin wrong.
-    const model = portFetch({ 8000: (prompt) => prompt.replace(/^Capital of (.*)\?$/, "$1"), 8001: (prompt) => (prompt.includes("Berlin") ? "Bonn" : prompt.replace(/^Capital of (.*)\?$/, "It is $1.")) });
-    const error = await modelCommand("update", ["qwen-new"], { ...options, evalFetch: model.fetch }).catch((caught: Error) => caught);
+    const city = (input: string) => input.replace(/^Capital of (.*)\?$/, "$1");
+    const fake = fakePromptfoo(system, (port, input) => (port === "8001" && input.includes("Berlin") ? "Bonn" : city(input)));
+    const error = await modelCommand("update", ["qwen-new"], { ...options, evalPromptfoo: fake.promptfoo }).catch((caught: Error) => caught);
     assert.match(String(error), /^Error: Evals: candidate scored 0\.75, below incumbent 1\.00 − 0\.02; qwen-old keeps serving\./);
     assert.equal(calls.length, 0, "no command ran");
-    assert.deepEqual([...new Set(model.seen)], ["8000", "8001"]);
+    assert.deepEqual(fake.calls.map((call) => [call.provider.config.apiBaseUrl, call.grader.config.apiBaseUrl]),
+      [["http://127.0.0.1:8000/v1", "http://127.0.0.1:8000/v1"], ["http://127.0.0.1:8001/v1", "http://127.0.0.1:8000/v1"]], "the incumbent judges both");
     const out = lines.join("");
+    assert.match(out, /Judge: qwen-old grades model-graded checks/);
     assert.match(out, /-- qwen-old \(incumbent\) +pass +1\.00[\s\S]*-- qwen-new \(candidate\) +pass +0\.75/);
-    assert.match(out, /Results \(candidate\): data: 3 of 4 passed[\s\S]*Failed \(candidate\): qa\.jsonl#4: expected "Berlin", got "Bonn"/);
+    assert.match(out, /Results \(candidate\): data: 3 of 4 passed[\s\S]*Failed \(candidate\): qa\.jsonl#4: "Capital of Berlin\?" · equals "Berlin" · got "Bonn"/);
+    assert.match(out, /promptfoo results \(candidate\): \/tmp\/logs\/.*-evals-default-candidate\.json/);
     assert.equal(active(), "qwen-old");
     // A looser threshold lets it through.
     await system.writeFile("/tmp/evals.json", JSON.stringify({ version: 1, data, dir, threshold: 0.3, setAt: "" }));
-    assert.equal(await modelCommand("update", ["qwen-new"], { ...options, evalFetch: model.fetch }), 0);
+    assert.equal(await modelCommand("update", ["qwen-new"], { ...options, evalPromptfoo: fake.promptfoo }), 0);
     assert.equal(active(), "qwen-new");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -338,9 +331,9 @@ test("a command and data together: both run, both must pass, the score is their 
     await modelCommand("up", ["qwen-old"], options);
     await system.writeFile("/tmp/evals.json", JSON.stringify(config({ command: "python evals.py", data })));
     scores.incumbent = 0.8; scores.candidate = 0.8;
-    const model = portFetch({ 8000: () => "Paris", 8001: () => "Paris or Lima" });
+    const fake = fakePromptfoo(system, (port, input) => (port === "8000" ? "Paris" : input.includes("France") ? "Paris" : "Lima"));
     // Incumbent: (0.8 + 0.5) / 2 = 0.65; candidate (0.8 + 1) / 2 = 0.9.
-    assert.equal(await modelCommand("update", ["qwen-new"], { ...options, evalFetch: model.fetch }), 0);
+    assert.equal(await modelCommand("update", ["qwen-new"], { ...options, evalPromptfoo: fake.promptfoo }), 0);
     assert.equal(calls.length, 2);
     const out = lines.join("");
     assert.match(out, /qwen-old \(incumbent\) +pass +0\.65[\s\S]*qwen-new \(candidate\) +pass +0\.90/);
@@ -348,7 +341,7 @@ test("a command and data together: both run, both must pass, the score is their 
     assert.equal(active(), "qwen-new");
     // The command failing on the candidate blocks however well the data went.
     exits.candidate = 1;
-    await assert.rejects(modelCommand("update", ["qwen-old"], { ...options, evalFetch: portFetch({ 8000: () => "Paris Lima", 8001: () => "Paris Lima" }).fetch }),
+    await assert.rejects(modelCommand("update", ["qwen-old"], { ...options, evalPromptfoo: fakePromptfoo(system, (_port, input) => (input.includes("France") ? "Paris" : "Lima")).promptfoo }),
       /Evals: candidate's evals failed \(exit 1\); the incumbent's passed/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

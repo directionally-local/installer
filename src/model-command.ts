@@ -11,6 +11,7 @@ import { gib, hostResources, memoryLimitBytes, preflight, preflightError } from 
 import { bench as benchModel } from "./model-bench.js";
 import { FIRST_ANSWER_MS, localFetch, modelApiBase, SmokeError, smokeTest, type FetchModel, type SmokeCheck } from "./model-smoke.js";
 import { evalGate, evalsConfigPath, readEvalConfig, runEval, showRuns, type EvalRun, type ResultsFs, type SpawnEval } from "./model-evals.js";
+import type { Promptfoo } from "./model-evals-promptfoo.js";
 import { DEFAULT_DEPLOYMENT, modelStatePath, readDeployments, writeDeployment, type ModelDeployment, type ModelSandbox, type ModelState } from "./state.js";
 import type { System } from "./system.js";
 import type { Ui } from "./ui.js";
@@ -57,8 +58,8 @@ export interface ModelCommandOptions {
   /** For tests: the eval command's process and the results files it writes. */
   evalSpawn?: SpawnEval;
   evalFs?: ResultsFs;
-  /** For tests: the transport dl's data runner (dl evals set --data) sends cases over. */
-  evalFetch?: FetchModel;
+  /** For tests: promptfoo, which runs the eval data (dl evals set --data). */
+  evalPromptfoo?: Promptfoo;
 }
 
 /** The run log a failed `dl model` command wrote, when it wrote one. */
@@ -759,7 +760,10 @@ async function gateOnEvals(options: ModelCommandOptions, name: string, statePath
   if (!config) { ui.line("info", "Evals", 'none · dl evals set "COMMAND" or --data'); return; }
   if (options.skipEvals) { ui.line("info", "Evals", "skipped (--skip-evals)"); return; }
   const settings = { system, config, logDir: options.logDir ?? runLogDir(), ...(options.evalSpawn ? { spawn: options.evalSpawn } : {}), ...(options.evalFs ? { fs: options.evalFs } : {}),
-    ...(options.evalFetch ? { fetch: options.evalFetch } : {}) };
+    ...(options.evalPromptfoo ? { promptfoo: options.evalPromptfoo } : {}),
+    // The incumbent judges both models' model-graded checks: the same judge, on this machine.
+    judge: incumbent ?? candidate, say: (text: string) => ui.line("info", "promptfoo", text) };
+  if (config.data) ui.line("info", "Judge", `${(incumbent ?? candidate).id} grades model-graded checks (llm-rubric, factuality...) for ${incumbent ? "both models" : "the new model"}`);
   const runs: EvalRun[] = [];
   try {
     for (const [deployment, role] of [[incumbent, "incumbent"], [candidate, "candidate"]] as const) {

@@ -102,9 +102,10 @@ On your laptop:
                           and switches only if the new one passes and scores at least the old
                           score minus --threshold (0.02). --results GLOB: where it writes scores
                           (JUnit XML, promptfoo, Inspect, DeepEval, {"score": n}); --timeout 30m
-  dl evals set --data PATH  your eval data (a file, folder or glob): JSONL, CSV, promptfoo YAML,
-                          OpenAI Evals, Braintrust or LangSmith exports, found by content; dl sends
-                          each case to each model and checks the answer (with a command: both run)
+  dl evals set --data PATH  your eval data (a file, folder or glob), run with promptfoo: its
+                          configs and tests as is; JSONL, CSV, OpenAI Evals, Braintrust or LangSmith
+                          exports translated (expected = equals, or contains:/factuality:...); model-
+                          graded checks judged by your own model (with a command: both run)
   dl evals run [NAME...]  run it once per deployment here, with OPENAI_BASE_URL, OPENAI_API_KEY and
                           OPENAI_MODEL set for each
   dl evals show           the saved evals        dl evals clear   remove them

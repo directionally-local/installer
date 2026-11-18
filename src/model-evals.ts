@@ -1,11 +1,11 @@
-import { spawn } from "node:child_process";
-import { closeSync, openSync } from "node:fs";
 import { glob, readFile, stat } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { inflateRawSync } from "node:zlib";
-import { caseSource, dataRunSummary, dataSummary, failureLines, loadEvalData, runDataCases, type DataRunOptions } from "./model-evals-data.js";
+import { commonDir, dataSummary, loadEvalData } from "./model-evals-data.js";
+import { dataRunSummary, dataScore, failureLines, looseMatchHint, noAnswers, promptfooOutcome, PROMPTFOO_VERSION, realPromptfoo, runPromptfooData, spawnLogged,
+  type Promptfoo, type SpawnResult } from "./model-evals-promptfoo.js";
 import { containerRunning } from "./model-runtime.js";
-import { modelApiBase, type FetchModel } from "./model-smoke.js";
+import { modelApiBase } from "./model-smoke.js";
 import { DEFAULT_DEPLOYMENT, modelStatePath, readDeployments, type ModelDeployment } from "./state.js";
 import type { System } from "./system.js";
 import type { Ui } from "./ui.js";
@@ -14,7 +14,7 @@ import type { Ui } from "./ui.js";
  * `dl evals`, bring your command: the team's own eval command (pytest/DeepEval, promptfoo,
  * Inspect, anything) runs once per model with OPENAI_BASE_URL pointed at it. Pass or fail is its
  * exit code; a score comes from the results files it writes, when dl can read them.
- * Bring your data (model-evals-data.ts): eval files dl runs itself. Either or both.
+ * Bring your data (model-evals-data.ts, model-evals-promptfoo.ts): eval files promptfoo runs. Either or both.
  */
 export interface EvalConfig {
   version: 1;
@@ -105,7 +105,7 @@ export function evalEnv(deployment: Pick<ModelDeployment, "repo" | "port" | "hos
 
 // ---- Running the command -------------------------------------------------------------------
 
-export interface SpawnResult { code: number; timedOut: boolean }
+export type { SpawnResult };
 /** Runs the command with output going to `logPath`; production: `realSpawn`. */
 export type SpawnEval = (command: string, options: { cwd: string; env: Record<string, string>; timeoutMs: number; logPath: string }) => Promise<SpawnResult>;
 
@@ -113,26 +113,8 @@ export type SpawnEval = (command: string, options: { cwd: string; env: Record<st
  * `$SHELL -c COMMAND` in its own process group, so a timeout (or Ctrl-C) stops the whole tree
  * (pytest's workers, promptfoo's), not just the shell.
  */
-export const realSpawn: SpawnEval = (command, options) => new Promise((resolve, reject) => {
-  const out = openSync(options.logPath, "a", 0o644);
-  const child = spawn(process.env.SHELL || "/bin/sh", ["-c", command], {
-    cwd: options.cwd, env: { ...process.env, ...options.env }, stdio: ["ignore", out, out], detached: true,
-  });
-  closeSync(out);
-  let timedOut = false;
-  let killer: ReturnType<typeof setTimeout> | undefined;
-  const stop = () => {
-    try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
-    killer = setTimeout(() => { try { process.kill(-child.pid!, "SIGKILL"); } catch { /* gone */ } }, 10_000);
-    killer.unref();
-  };
-  const timer = setTimeout(() => { timedOut = true; stop(); }, options.timeoutMs);
-  const interrupt = () => { stop(); process.off("SIGINT", interrupt); process.kill(process.pid, "SIGINT"); };
-  process.on("SIGINT", interrupt);
-  const done = () => { clearTimeout(timer); process.off("SIGINT", interrupt); };
-  child.on("error", (error) => { done(); reject(error); });
-  child.on("close", (code, signal) => { done(); if (killer) clearTimeout(killer); resolve({ code: code ?? (signal ? 128 : 1), timedOut }); });
-});
+export const realSpawn: SpawnEval = (command, options) =>
+  spawnLogged(process.env.SHELL || "/bin/sh", ["-c", command], { ...options, env: { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)), ...options.env } });
 
 /** What dl reads results files through; production: the real filesystem. */
 export interface ResultsFs {
@@ -193,10 +175,8 @@ function parseJson(value: unknown): ParsedResult {
   const object = value as Record<string, unknown>;
   const results = object.results as Record<string, unknown> | undefined;
   // promptfoo eval -o FILE.json: results.stats has successes, failures and errors.
-  const stats = results && typeof results === "object" ? results.stats as Record<string, unknown> | undefined : undefined;
-  if (stats && typeof stats.successes === "number" && typeof stats.failures === "number") {
-    return ratio(stats.successes, stats.successes + stats.failures + (typeof stats.errors === "number" ? stats.errors : 0), "promptfoo");
-  }
+  const promptfoo = promptfooOutcome(object);
+  if (promptfoo) return ratio(promptfoo.successes, promptfoo.successes + promptfoo.failures + promptfoo.errors, "promptfoo");
   // Inspect's JSON log (--log-format json): results.scores[].metrics.
   if (object.eval && results && Array.isArray(results.scores)) return inspectScore(object);
   // DeepEval's saved test run: testCases[].success.
@@ -274,14 +254,14 @@ export interface EvalRun {
   /** "junit.xml: JUnit XML: 41 of 44 passed", and files it couldn't read. */
   results: string[];
   durationMs: number;
-  /** The command's log; with data only, the data results file. */
+  /** The command's log; with data only, promptfoo's log. */
   logPath: string;
   /** No command ran: only data (dl evals set --data). */
   dataOnly?: true;
   /** Why it failed when not by an exit code: "no answers". */
   error?: string;
-  /** The data part: "41 of 44 passed · ...", the first failing cases, and the full results file. */
-  data?: { summary: string; failures: string[]; resultsPath: string };
+  /** The data part: "41 of 44 passed · ...", the first failing cases, a hint, and promptfoo's JSON output. */
+  data?: { summary: string; failures: string[]; hint?: string; results: string[] };
 }
 
 export interface EvalRunOptions {
@@ -293,9 +273,12 @@ export interface EvalRunOptions {
   spawn?: SpawnEval;
   fs?: ResultsFs;
   now?: () => number;
-  /** The data runner's transport (tests), and its limits. */
-  fetch?: FetchModel;
-  dataRun?: Omit<DataRunOptions, "fetch" | "deadline" | "now">;
+  /** promptfoo, for the data (tests: a fake); realPromptfoo() when unset. */
+  promptfoo?: Promptfoo;
+  /** Grades model-graded assertions in the data; the deployment itself when unset. */
+  judge?: ModelDeployment;
+  /** One-line notes: promptfoo's first download. */
+  say?: (text: string) => void;
 }
 
 async function snapshot(fs: ResultsFs, dir: string, patterns: readonly string[]): Promise<Map<string, number | undefined>> {
@@ -321,37 +304,26 @@ export async function runEval(options: EvalRunOptions, name: string, deployment:
     ...(command.passed && data.error ? { error: data.error } : {}), data: data.data! };
 }
 
-/** The directory the data files share, so they show as paths under it. */
-function commonDir(paths: readonly string[]): string {
-  let dir = dirname(paths[0] ?? "/");
-  while (dir !== "/" && !paths.every((path) => path.startsWith(`${dir}/`))) dir = dirname(dir);
-  return dir;
-}
-
-/** dl's own runner over the data files, against one deployment; the full results go to a JSON file. */
+/** promptfoo over the data files, against one deployment, graded by the judge; promptfoo's JSON output stays in the logs. */
 async function runData(options: EvalRunOptions, name: string, deployment: ModelDeployment, role?: EvalRole): Promise<EvalRun> {
   const { config, system } = options;
   const now = options.now ?? Date.now;
   const loaded = await loadEvalData(config.data!);
-  const root = commonDir(loaded.sets.map((set) => set.path));
-  const cases = loaded.sets.flatMap((set) => set.cases.map((item) => ({ source: caseSource(set, item, root), item })));
   await system.mkdir(options.logDir, { mode: 0o700 });
   const started = now();
   const timeoutSeconds = options.timeoutSeconds ?? config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
-  const result = await runDataCases(cases, deployment, { ...options.dataRun, ...(options.fetch ? { fetch: options.fetch } : {}), deadline: started + timeoutSeconds * 1000, now });
-  const durationMs = now() - started;
   const stamp = new Date(started).toISOString().replace(/[:.]/g, "-");
-  const resultsPath = join(options.logDir, `${stamp}-evals-${name}${role ? `-${role}` : ""}-data.json`);
-  await system.writeFile(resultsPath, `${JSON.stringify({ deployment: name, model: deployment.id, served: deployment.repo, endpoint: modelApiBase(deployment), ...(role ? { role } : {}),
-    at: new Date(started).toISOString(), durationMs, data: config.data, files: loaded.sets.map((set) => ({ path: set.path, format: set.format, cases: set.cases.length, notes: set.notes })),
-    skippedFiles: loaded.skipped, score: result.score ?? null, checked: result.checked, passed: result.passed, noCheck: result.noCheck, errors: result.errors,
-    skippedAssertions: result.skipped, timedOut: result.timedOut, cases: result.cases }, null, 2)}\n`, { mode: 0o644 });
-  const noAnswers = result.cases.length > 0 && result.errors === result.cases.length;
-  const passed = !result.timedOut && !noAnswers;
-  const summary = noAnswers ? `no answers: ${result.cases[0]!.error}` : dataRunSummary(result);
-  return { deployment: name, model: deployment.id, ...(role ? { role } : {}), passed, code: passed ? 0 : 1, timedOut: result.timedOut,
-    ...(result.score !== undefined && !noAnswers ? { score: result.score } : {}), results: [], durationMs, logPath: resultsPath, dataOnly: true,
-    ...(noAnswers ? { error: "no answers" } : {}), data: { summary, failures: failureLines(result), resultsPath } };
+  const base = join(options.logDir, `${stamp}-evals-${name}${role ? `-${role}` : ""}`);
+  const run = await runPromptfooData({ system, promptfoo: options.promptfoo ?? realPromptfoo(), sets: loaded.sets, deployment, judge: options.judge ?? deployment,
+    workDir: `${base}-promptfoo`, outPrefix: base, deadline: started + timeoutSeconds * 1000, now, say: options.say ?? (() => {}) });
+  const durationMs = now() - started;
+  const silent = noAnswers(run);
+  const score = silent ? undefined : dataScore(run);
+  const passed = !run.timedOut && !silent;
+  const hint = looseMatchHint(run.outcomes);
+  return { deployment: name, model: deployment.id, ...(role ? { role } : {}), passed, code: passed ? 0 : 1, timedOut: run.timedOut,
+    ...(score !== undefined ? { score } : {}), results: [], durationMs, logPath: run.logPath, dataOnly: true, ...(silent ? { error: "no answers" } : {}),
+    data: { summary: silent ? `no answers: ${silent}` : dataRunSummary(run), failures: silent ? [] : failureLines(run.outcomes), ...(hint && !silent ? { hint } : {}), results: run.results } };
 }
 
 /** Runs the eval command against one deployment and reads what it wrote. */
@@ -412,7 +384,8 @@ export function showRuns(ui: Ui, runs: readonly EvalRun[]): void {
     if (run.data) {
       ui.line("info", label, `data: ${run.data.summary}`);
       for (const line of run.data.failures) ui.line("info", `Failed (${run.role ?? run.deployment})`, line);
-      ui.line("info", `Data results (${run.role ?? run.deployment})`, run.data.resultsPath);
+      if (run.data.hint) ui.line("info", "Hint", run.data.hint);
+      for (const path of run.data.results) ui.line("info", `promptfoo results (${run.role ?? run.deployment})`, path);
     }
   }
 }
@@ -458,7 +431,7 @@ export interface EvalsCommandOptions {
   model?: string;
   spawn?: SpawnEval;
   fs?: ResultsFs;
-  fetch?: FetchModel;
+  promptfoo?: Promptfoo;
 }
 
 const USAGE = 'dl evals set ["COMMAND"] [--data PATH] [--threshold 0.02] [--results GLOB] [--timeout 30m] · dl evals run [NAME...] · dl evals show · dl evals clear';
@@ -517,14 +490,18 @@ export async function evalsCommand(args: string[], options: EvalsCommandOptions)
   for (const name of chosen) if (!(await containerRunning(system, deployments[name]!.active.container))) stopped.push(deployments[name]!.active.container);
   if (stopped.length) throw new Error(`Model container ${stopped.join(", ")} is stopped; evals need a running model.`);
   const runs: EvalRun[] = [];
+  // One judge for every model, so their scores compare: the first deployment (the default one).
+  const judge = deployments[chosen[0]!]!.active;
+  if (config.data) ui.line("info", "Judge", `${judge.id} grades model-graded checks (llm-rubric, factuality...) for every model; nothing leaves this machine`);
   for (const name of chosen) {
     const deployment = deployments[name]!.active;
     ui.line("info", "Evals", `running on ${deployment.id}${name !== DEFAULT_DEPLOYMENT ? ` (${name})` : ""} · ${modelApiBase(deployment)}`);
     runs.push(await runEval({ system, config, logDir: options.logDir, ...(options.timeout !== undefined ? { timeoutSeconds: parseTimeout(options.timeout) } : {}),
-      ...(options.spawn ? { spawn: options.spawn } : {}), ...(options.fs ? { fs: options.fs } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) }, name, deployment));
+      ...(options.spawn ? { spawn: options.spawn } : {}), ...(options.fs ? { fs: options.fs } : {}), ...(options.promptfoo ? { promptfoo: options.promptfoo } : {}),
+      judge, say: (text) => ui.line("info", "promptfoo", text) }, name, deployment));
   }
   showRuns(ui, runs);
-  for (const run of runs) if (!run.dataOnly) ui.line("info", `Log (${run.deployment})`, run.logPath);
+  for (const run of runs) ui.line("info", `Log (${run.deployment})`, run.logPath);
   return runs.every((run) => run.passed) ? 0 : 1;
 }
 
@@ -534,7 +511,7 @@ function show(ui: Ui, config: EvalConfig): void {
     ui.line("info", "Runs in", config.dir);
     ui.line("info", "Results", config.results ?? "found automatically: JUnit XML, promptfoo JSON, Inspect logs, DeepEval, {\"score\": n}");
   }
-  if (config.data) ui.line("info", "Data", `${config.data} (run by dl: JSONL, CSV, promptfoo, OpenAI Evals, Braintrust, LangSmith)`);
+  if (config.data) ui.line("info", "Data", `${config.data} (run with promptfoo ${PROMPTFOO_VERSION}: promptfoo configs and tests as is; JSONL, CSV, OpenAI Evals, Braintrust, LangSmith translated)`);
   if (config.command && config.data) ui.line("info", "Both", "both must pass; the score is the mean of the two");
   ui.line("info", "Threshold", `${config.threshold ?? DEFAULT_THRESHOLD} (the new model may score this much lower)`);
   ui.line("info", "Timeout", durationText((config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS) * 1000));

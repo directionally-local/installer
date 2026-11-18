@@ -1,49 +1,64 @@
 import { glob, readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
-import { isDeepStrictEqual } from "node:util";
 import { parse as parseYaml } from "yaml";
-import { answerText, connectionError, hasReasoning, localFetch, modelApiBase, NO_THINKING, noTextReason, type FetchModel } from "./model-smoke.js";
-import type { ModelDeployment } from "./state.js";
 
 /**
- * `dl evals`, bring your data: the eval sets a team already has (JSONL, CSV, promptfoo configs,
- * OpenAI Evals, Braintrust and LangSmith exports), recognized by their content and run by dl
- * itself against each model's OpenAI-compatible endpoint. Nothing to convert.
+ * `dl evals`, bring your data: the eval sets a team already has, run by promptfoo
+ * (model-evals-promptfoo.ts). What promptfoo reads natively (its configs, and tests with `vars`
+ * and `__expected`/`assert`) goes to it as is; the rest (OpenAI Evals, Braintrust and LangSmith
+ * exports, plain rows, chat transcripts) becomes promptfoo tests: the input as a var, the
+ * expected answer as an `__expected` cell, which promptfoo reads as `equals` unless it says
+ * otherwise (`contains:Paris`, `factuality:...`). dl doesn't score anything itself.
  */
 
 export interface ChatMessage { role: string; content: string }
-/** A promptfoo-style check on the answer: "contains", "not-regex", "llm-rubric"... */
-export interface Assertion { type: string; value?: unknown }
 
-/** One eval case, whatever file it came from. */
-export interface EvalCase {
+/** One row dl translates into a promptfoo test. */
+export interface Row {
   input: string | ChatMessage[];
-  /** Right answers (any of them). */
+  /** Right answers: any of them (promptfoo `__expected` syntax each). */
   expected?: string[];
-  assertions?: Assertion[];
-  metadata: Record<string, unknown>;
+  /** `__expected` columns: all must pass. */
+  checks?: string[];
+  /** "qa.jsonl#2 (math-1)": the test's description, so failures say where they come from. */
+  source: string;
 }
+
+/** How promptfoo gets a data file. */
+export type DataRun =
+  /** A promptfoo config: run as is, with dl's provider and grader. */
+  | { kind: "config"; config: string }
+  /** promptfoo tests (a file, or a list from a JSON wrapper): filled into `{{ var }}`. */
+  | { kind: "tests"; prompt: string; tests: string | Array<Record<string, unknown>> }
+  /** Rows dl translated: a CSV with an `input` column and `__expected` cells. */
+  | { kind: "rows"; rows: Row[] };
 
 export interface DataSet {
   path: string;
-  /** "OpenAI Evals JSONL", "promptfoo YAML", "LangSmith CSV"... */
+  /** "OpenAI Evals JSONL", "promptfoo config (YAML)", "promptfoo tests CSV"... */
   format: string;
-  cases: EvalCase[];
-  /** "2 prompts × 10 tests", "3 rows without an input skipped". */
+  /** Handed to promptfoo as is (true), or translated by dl. */
+  native: boolean;
+  /** Tests or rows; undefined for a config (promptfoo counts them). */
+  cases?: number;
+  /** "3 rows without an input skipped". */
   notes: string[];
-  /** Files a promptfoo config read: a folder doesn't load them again as datasets of their own. */
+  /** Files a promptfoo config reads: a folder doesn't load them again as datasets of their own. */
   refs: string[];
+  run: DataRun;
 }
 
 const INPUT_KEYS = ["input", "prompt", "question", "query", "instruction", "problem", "text"];
 const EXPECTED_KEYS = ["expected", "ideal", "answer", "expected_output", "output", "target", "reference", "completion", "solution"];
 const DATA_EXTENSIONS = new Set([".jsonl", ".ndjson", ".json", ".csv", ".tsv", ".yaml", ".yml"]);
+/** The var a translated row's input goes in. */
+export const INPUT_VAR = "input";
 
 const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const present = (value: unknown) => value !== undefined && value !== null && value !== "";
 
 export const UNKNOWN_DATA = "not an eval dataset dl recognizes; expected JSONL or JSON rows with input/prompt/question (and expected/ideal/answer/output), "
-  + "chat messages, an OpenAI Evals, Braintrust or LangSmith export, a CSV with those columns, or a promptfoo config";
+  + "chat messages, an OpenAI Evals, Braintrust or LangSmith export, a CSV with those columns, promptfoo tests or a promptfoo config";
 
 // ---- Normalizing rows ----------------------------------------------------------------------
 
@@ -107,26 +122,17 @@ function expectedOf(value: unknown): string[] | undefined {
   return undefined;
 }
 
-/** promptfoo assertions: objects, or the `__expected` column's "contains: x" strings. */
-function assertionsOf(value: unknown): Assertion[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const assertions = value.map((item) => (typeof item === "string" ? expectedAssertion(item) : isObject(item) && typeof item.type === "string" ? { type: item.type, ...(item.value !== undefined ? { value: item.value } : {}) } : undefined))
-    .filter((item): item is Assertion => !!item);
-  return assertions.length ? assertions : undefined;
-}
-
 /** The kind of row, for the summary: what tool made this file. */
 function rowFormat(row: Record<string, unknown>): string {
   if (isObject(row.inputs)) return "LangSmith";
   if (Array.isArray(row.input) && "ideal" in row) return "OpenAI Evals";
   if ("expected" in row && "input" in row && ("metadata" in row || "_xact_id" in row || "span_id" in row || "dataset_id" in row)) return "Braintrust";
   if (Array.isArray(row.messages)) return "chat";
-  if (isObject(row.vars)) return "promptfoo tests";
   return "";
 }
 
-/** One row (JSON object or CSV record) as a case; undefined when it has no input. */
-export function rowCase(row: unknown, metadata: Record<string, unknown> = {}): EvalCase | undefined {
+/** One row (JSON object or CSV record) as a test to translate; undefined when it has no input. */
+export function rowOf(row: unknown): Omit<Row, "source"> & { id?: string } | undefined {
   if (!isObject(row)) return undefined;
   let input: string | ChatMessage[] | undefined;
   let expected: string[] | undefined;
@@ -146,33 +152,38 @@ export function rowCase(row: unknown, metadata: Record<string, unknown> = {}): E
     const messages = messagesOf(row.messages);
     if (messages && messages.length > 1 && messages.at(-1)!.role === "assistant") { input = messages.slice(0, -1); expected = [messages.at(-1)!.content]; }
     else input = messages;
-  } else if (isObject(row.vars)) {
-    // A promptfoo test with no prompt to fill: its one variable is the prompt.
-    input = inputOf(row.vars);
   }
   if (input === undefined || (typeof input === "string" && !input.trim())) return undefined;
   if (!expected) {
     const key = EXPECTED_KEYS.find((name) => name !== inputKey && present(row[name]));
     if (key) expected = expectedOf(row[key]);
   }
-  const assertions = assertionsOf(row.assert ?? row.assertions);
-  const meta = { ...(isObject(row.metadata) ? row.metadata : {}), ...metadata };
-  if (row.id !== undefined && meta.id === undefined) meta.id = row.id;
-  if (typeof row.description === "string" && meta.id === undefined) meta.id = row.description;
-  return { input, ...(expected?.length ? { expected } : {}), ...(assertions ? { assertions } : {}), metadata: meta };
+  const checks = (typeof row.__expected === "string" ? [row.__expected] : Array.isArray(row.__expected) ? row.__expected : undefined)?.filter((item): item is string => typeof item === "string" && !!item.trim());
+  const meta = isObject(row.metadata) ? row.metadata : {};
+  const id = row.id ?? meta.id ?? (typeof row.description === "string" ? row.description : undefined);
+  return { input, ...(expected?.length ? { expected } : {}), ...(checks?.length ? { checks } : {}), ...(id !== undefined && id !== "" ? { id: String(id) } : {}) };
 }
 
 function rowsSet(path: string, rows: unknown[], container: string): DataSet {
-  const cases: EvalCase[] = [];
-  let skipped = 0;
+  const translated: Row[] = [];
+  let noInput = 0;
+  let noExpected = 0;
   rows.forEach((row, index) => {
-    const item = rowCase(row, { row: index + 1 });
-    if (item) cases.push(item); else skipped++;
+    const source = `${basename(path)}#${index + 1}`;
+    const item = rowOf(row);
+    if (!item) { noInput++; return; }
+    if (!item.expected && !item.checks) { noExpected++; return; }
+    const { id, ...rest } = item;
+    translated.push({ ...rest, source: id && id !== source ? `${source} (${id})` : source });
   });
-  if (!cases.length) throw new Error(`${basename(path)}: ${UNKNOWN_DATA}.`);
+  if (!translated.length) throw new Error(`${basename(path)}: ${noInput === rows.length ? UNKNOWN_DATA : "no row has an expected answer to check"}.`);
   const first = rows.find(isObject);
   const kind = first ? rowFormat(first) : "";
-  return { path, format: kind ? `${kind} ${container}` : container, cases, notes: skipped ? [`${skipped} ${skipped === 1 ? "row" : "rows"} without an input skipped`] : [], refs: [] };
+  const notes = [
+    ...(noInput ? [`${noInput} ${noInput === 1 ? "row" : "rows"} without an input skipped`] : []),
+    ...(noExpected ? [`${noExpected} ${noExpected === 1 ? "row" : "rows"} without an expected answer skipped`] : []),
+  ];
+  return { path, format: kind ? `${kind} ${container}` : container, native: false, cases: translated.length, notes, refs: [], run: { kind: "rows", rows: translated } };
 }
 
 // ---- CSV -----------------------------------------------------------------------------------
@@ -201,12 +212,18 @@ export function parseCsv(text: string, delimiter = ","): string[][] {
   return rows;
 }
 
+/** Cells quoted, quotes doubled: what promptfoo's CSV reader (csv-parse) reads back exactly. */
+export function toCsv(rows: ReadonlyArray<readonly string[]>): string {
+  return rows.map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(",")).join("\n") + "\n";
+}
+
 const csvDelimiter = (text: string) => { const header = text.split(/\r?\n/, 1)[0] ?? ""; return header.includes("\t") && !header.includes(",") ? "\t" : ","; };
+const isExpectedColumn = (name: string) => /^__expected\d*$/.test(name.trim());
 
 /** Header columns that make a file an eval CSV. */
 function knownColumn(name: string): boolean {
   const key = name.trim().toLowerCase();
-  return INPUT_KEYS.includes(key) || ["inputs", "messages", "vars"].includes(key) || /^(inputs|outputs|vars)\./.test(key) || /^__expected\d*$/.test(key);
+  return INPUT_KEYS.includes(key) || ["inputs", "messages"].includes(key) || /^(inputs|outputs)\./.test(key) || isExpectedColumn(key);
 }
 
 function csvRecords(text: string): Array<Record<string, string>> {
@@ -215,152 +232,114 @@ function csvRecords(text: string): Array<Record<string, string>> {
   return rows.map((cells) => Object.fromEntries(names.map((name, index) => [name, cells[index] ?? ""])));
 }
 
-/** promptfoo's CSV tests: columns are vars, `__expected` (and `__expected2`...) assertions. */
-function csvTests(records: Array<Record<string, string>>): Array<Record<string, unknown>> {
-  return records.map((record) => {
-    const vars: Record<string, string> = {};
-    const assert: Assertion[] = [];
-    let description: string | undefined;
-    for (const [column, cell] of Object.entries(record)) {
-      if (/^__expected\d*$/.test(column)) { if (cell.trim()) assert.push(expectedAssertion(cell)); } else if (column === "__description") description = cell;
-      else if (!column.startsWith("__")) vars[column.replace(/^vars\./, "")] = cell;
-    }
-    return { vars, ...(assert.length ? { assert } : {}), ...(description ? { description } : {}) };
-  });
-}
-
-/** A CSV record as a row: `inputs.x`/`outputs.x` columns (and JSON `inputs` cells) nest like LangSmith's. */
+/** A CSV record as a row: `inputs.x`/`outputs.x` columns (and JSON `inputs` cells) nest like LangSmith's; `__expected` cells are kept as written. */
 function csvRow(record: Record<string, string>): Record<string, unknown> {
   const row: Record<string, unknown> = {};
-  const assert: Assertion[] = [];
+  const checks: string[] = [];
   for (const [column, cell] of Object.entries(record)) {
     const nested = /^(inputs|outputs)\.(.+)$/.exec(column);
     if (nested) { const group = (row[nested[1]!] ??= {}) as Record<string, unknown>; group[nested[2]!] = cell; continue; }
-    if (/^__expected\d*$/.test(column)) { if (cell.trim()) assert.push(expectedAssertion(cell)); continue; }
+    if (isExpectedColumn(column)) { if (cell.trim()) checks.push(cell); continue; }
     if (column === "__description") { row.description = cell; continue; }
     if (column.startsWith("__")) continue;
     let value: unknown = cell;
     if (/^(inputs|outputs|messages|metadata)$/.test(column) && /^[[{]/.test(cell.trim())) { try { value = JSON.parse(cell); } catch { /* text */ } }
     row[column] = value;
   }
-  if (assert.length) row.assert = assert;
+  if (checks.length) row.__expected = checks;
   return row;
+}
+
+/** Which var is the prompt: an input-like name, else `messages`, else the only one. */
+function promptVar(names: readonly string[]): string | undefined {
+  const lower = names.map((name) => name.toLowerCase());
+  const known = INPUT_KEYS.find((key) => lower.includes(key)) ?? (lower.includes("messages") ? "messages" : undefined);
+  if (known) return names[lower.indexOf(known)];
+  return names.length === 1 ? names[0] : undefined;
+}
+
+function csvSet(path: string, text: string): DataSet {
+  const records = csvRecords(text);
+  const columns = Object.keys(records[0] ?? {});
+  const tsv = /\.tsv$/i.test(path) || csvDelimiter(text) === "\t";
+  const vars = columns.filter((name) => !name.startsWith("__"));
+  // promptfoo's own test CSV: vars and `__expected` columns, read by promptfoo itself.
+  if (!tsv && columns.some(isExpectedColumn) && !vars.some((name) => /^(inputs|outputs)\./.test(name))) {
+    const prompt = promptVar(vars);
+    if (!prompt) throw new Error(`${basename(path)}: promptfoo tests with vars ${vars.join(", ")}; dl can't tell which one is the prompt. Name it input, prompt or question, or use a promptfoo config with prompts.`);
+    return { path, format: "promptfoo tests CSV", native: true, cases: records.length, notes: [], refs: [], run: { kind: "tests", prompt, tests: path } };
+  }
+  return rowsSet(path, records.map(csvRow), tsv ? "TSV" : "CSV");
 }
 
 // ---- promptfoo -----------------------------------------------------------------------------
 
-const SUPPORTED = new Set(["equals", "contains", "icontains", "contains-any", "contains-all", "icontains-any", "icontains-all", "regex", "starts-with", "is-json", "contains-json"]);
-/** promptfoo assertion types that `__expected` may name ("grade:" and "fn:" are its shorthands). */
-const EXPECTED_PREFIXES: Record<string, string> = { grade: "llm-rubric", fn: "javascript", eval: "javascript" };
-const KNOWN_TYPES = new Set([...SUPPORTED, "llm-rubric", "javascript", "python", "similar", "levenshtein", "rouge-n", "bleu", "factuality", "model-graded-closedqa",
-  "model-graded-factuality", "answer-relevance", "context-faithfulness", "context-recall", "context-relevance", "classifier", "moderation", "webhook", "perplexity",
-  "cost", "latency", "is-xml", "contains-xml", "is-sql", "contains-sql", "is-valid-openai-tools-call", "is-valid-openai-function-call", "g-eval", "select-best"]);
-
-/** promptfoo's `__expected` syntax: "contains: Paris", "not-icontains:x", "is-json", "grade: ..."; anything else is "equals". */
-export function expectedAssertion(text: string): Assertion {
-  const match = /^(not-)?([a-z][a-z0-9-]*)(\([^)]*\))?\s*(?::\s*([\s\S]*))?$/.exec(text.trim());
-  if (match) {
-    const name = EXPECTED_PREFIXES[match[2]!] ?? match[2]!;
-    if (KNOWN_TYPES.has(name) && (match[4] !== undefined || ["is-json", "contains-json", "is-xml", "is-sql", "is-valid-openai-tools-call"].includes(name))) {
-      return { type: `${match[1] ?? ""}${name}`, ...(match[4] !== undefined ? { value: match[4] } : {}) };
-    }
-  }
-  return { type: "equals", value: text };
-}
-
-/** promptfoo's Nunjucks, the part eval prompts use: {{ var }}, {{ a.b }}, `| dump`, `| trim`. */
-export function renderTemplate(template: string, vars: Record<string, unknown>): string {
-  return template.replace(/\{\{\s*([\w.]+)\s*(?:\|\s*(\w+)\s*)?\}\}/g, (_, path: string, filter?: string) => {
-    let value: unknown = vars;
-    for (const key of path.split(".")) value = isObject(value) ? value[key] : undefined;
-    if (filter === "dump") return JSON.stringify(value ?? null);
-    const text = value === undefined || value === null ? "" : typeof value === "string" ? value : JSON.stringify(value);
-    return filter === "trim" ? text.trim() : filter === "upper" ? text.toUpperCase() : filter === "lower" ? text.toLowerCase() : text;
-  });
-}
-
-type Prompt = { label: string; text?: string; messages?: ChatMessage[] };
-type Reader = (path: string) => Promise<string | undefined>;
-
-function promptOf(raw: string, label: string): Prompt {
-  if (raw.trim().startsWith("[")) {
-    try { const messages = messagesOf(JSON.parse(raw)); if (messages) return { label, messages }; } catch { /* a text prompt */ }
-  }
-  return { label, text: raw };
-}
-
 const fileRef = (value: unknown): string | undefined => (typeof value === "string" && value.startsWith("file://") ? value.slice("file://".length) : undefined);
+const isConfig = (value: unknown): value is Record<string, unknown> => isObject(value) && value.prompts !== undefined && (value.tests !== undefined || value.providers !== undefined || value.defaultTest !== undefined || value.scenarios !== undefined);
+const isTest = (value: unknown) => isObject(value) && isObject(value.vars);
 
-/** A promptfoo config: `prompts` × `tests` (inline, or a CSV/YAML/JSON file), `defaultTest` merged in. */
-async function promptfooSet(path: string, config: Record<string, unknown>, read: Reader, container: string): Promise<DataSet> {
-  const base = dirname(path);
-  const refs: string[] = [];
-  const notes: string[] = [];
-  const name = basename(path);
-  const load = async (spec: string): Promise<{ file: string; text: string }> => {
-    const file = resolve(base, spec);
-    const text = await read(file);
-    if (text === undefined) throw new Error(`${name}: can't read ${spec}.`);
-    refs.push(file);
-    return { file, text: text.replace(/^﻿/, "") };
-  };
-  const prompts: Prompt[] = [];
-  for (const item of config.prompts === undefined ? [] : Array.isArray(config.prompts) ? config.prompts : [config.prompts]) {
-    const raw = typeof item === "string" ? item : isObject(item) ? (typeof item.raw === "string" ? item.raw : typeof item.id === "string" ? item.id : undefined) : undefined;
-    const label = isObject(item) && typeof item.label === "string" ? item.label : undefined;
-    if (raw === undefined) { notes.push("a prompt dl can't read skipped"); continue; }
-    const spec = fileRef(raw);
-    if (spec === undefined) { prompts.push(promptOf(raw, label ?? raw.slice(0, 40))); continue; }
-    if (/[*?{]/.test(spec) || /\.(js|cjs|mjs|ts|py)(:\w+)?$/.test(spec)) { notes.push(`prompt ${spec} skipped (globs and code prompts are not supported)`); continue; }
-    const { text } = await load(spec);
-    if (extname(spec) === ".json") { const prompt = promptOf(text, label ?? spec); prompts.push(prompt); continue; }
-    // A text file holds several prompts separated by a line of ---.
-    text.split(/^-{3,}\s*$/m).map((part) => part.trim()).filter(Boolean).forEach((part, index, all) => prompts.push(promptOf(part, label ?? (all.length > 1 ? `${spec}#${index + 1}` : spec))));
+/**
+ * Where a promptfoo config (or its test files) names a provider of its own besides `providers`
+ * (which dl replaces) and `defaultTest.options.provider` (which dl's grader overrides): a test's
+ * target or an assertion's grader. Those could reach a hosted model, so dl refuses them.
+ */
+export function providerOverrides(value: unknown, at = ""): string[] {
+  if (Array.isArray(value)) return value.flatMap((item, index) => providerOverrides(item, `${at}[${index}]`));
+  if (!isObject(value)) return [];
+  const found: string[] = [];
+  for (const [key, child] of Object.entries(value)) {
+    const here = at ? `${at}.${key}` : key;
+    if (here === "providers" || here === "defaultTest.options.provider" || here === "targets") continue;
+    if ((key === "provider" || key === "providers") && present(child)) { found.push(here); continue; }
+    found.push(...providerOverrides(child, here));
   }
-  const defaults = isObject(config.defaultTest) ? config.defaultTest : {};
-  const tests: Array<Record<string, unknown>> = [];
-  const testSources = config.tests === undefined ? [] : Array.isArray(config.tests) ? config.tests : [config.tests];
-  for (const item of testSources) {
-    if (isObject(item)) { tests.push(item); continue; }
-    if (typeof item !== "string") continue;
-    const spec = fileRef(item) ?? item;
-    if (/[*?{]/.test(spec)) { notes.push(`tests ${spec} skipped (globs are not supported)`); continue; }
-    const { text } = await load(spec);
-    if (/\.(csv|tsv)$/i.test(spec)) tests.push(...csvTests(csvRecords(text)));
-    else {
-      const parsed = /\.jsonl$/i.test(spec) ? text.split(/\r?\n/).filter((line) => line.trim()).map((line) => JSON.parse(line) as unknown) : parseYaml(text) as unknown;
-      const list = Array.isArray(parsed) ? parsed : isObject(parsed) && Array.isArray(parsed.tests) ? parsed.tests : [];
-      tests.push(...list.filter(isObject));
-    }
-  }
-  if (config.scenarios !== undefined) notes.push("scenarios skipped (not supported)");
-  if (!tests.length) tests.push({});
-  const cases: EvalCase[] = [];
-  for (const [index, test] of tests.entries()) {
-    const vars: Record<string, unknown> = { ...(isObject(defaults.vars) ? defaults.vars : {}), ...(isObject(test.vars) ? test.vars : {}) };
-    for (const [key, value] of Object.entries(vars)) { const spec = fileRef(value); if (spec !== undefined && !/\.(js|py)$/.test(spec)) vars[key] = (await load(spec)).text; }
-    const assertions = [...(assertionsOf(defaults.assert) ?? []), ...(assertionsOf(test.assert) ?? [])]
-      .map((assertion) => (typeof assertion.value === "string" ? { ...assertion, value: renderTemplate(assertion.value, vars) } : assertion));
-    const meta = { test: index + 1, ...(typeof test.description === "string" ? { id: test.description } : {}) };
-    if (!prompts.length) {
-      // No prompts: a test's one variable is the prompt.
-      const input = inputOf(vars);
-      if (input !== undefined) cases.push({ input, ...(assertions.length ? { assertions } : {}), metadata: meta });
-      continue;
-    }
-    for (const prompt of prompts) {
-      const input = prompt.messages ? prompt.messages.map((message) => ({ ...message, content: renderTemplate(message.content, vars) })) : renderTemplate(prompt.text!, vars);
-      cases.push({ input, ...(assertions.length ? { assertions } : {}), metadata: { ...meta, ...(prompts.length > 1 ? { prompt: prompt.label } : {}) } });
-    }
-  }
-  if (!cases.length) throw new Error(`${name}: a promptfoo config with no prompts or tests dl can run.`);
-  notes.unshift(`${prompts.length || 1} ${prompts.length === 1 || !prompts.length ? "prompt" : "prompts"} × ${tests.length} ${tests.length === 1 ? "test" : "tests"}`);
-  return { path, format: `promptfoo ${container}`, cases, notes, refs };
+  return found;
 }
 
-const isPromptfoo = (value: unknown): value is Record<string, unknown> => isObject(value) && (Array.isArray(value.tests) || typeof value.tests === "string" || (value.prompts !== undefined && (value.providers !== undefined || value.defaultTest !== undefined)));
+/** A promptfoo config: run as is; the files it names are its own, and no test may pick a provider. */
+async function configSet(path: string, config: Record<string, unknown>, read: Reader, container: string): Promise<DataSet> {
+  const name = basename(path);
+  const refs: string[] = [];
+  const overrides = providerOverrides(config);
+  for (const item of [config.prompts, config.tests].flatMap((value) => (Array.isArray(value) ? value : [value]))) {
+    const spec = fileRef(item) ?? (typeof item === "string" && item === config.tests ? item : undefined);
+    if (spec === undefined || /[*?{]/.test(spec)) continue;
+    const file = resolve(dirname(path), spec.replace(/:\w+$/, ""));
+    refs.push(file);
+    if (/\.(ya?ml|json|jsonl)$/i.test(file)) {
+      const text = await read(file);
+      if (text === undefined) throw new Error(`${name}: can't read ${spec}.`);
+      let tests: unknown;
+      try { tests = /\.jsonl$/i.test(file) ? text.split(/\r?\n/).filter((line) => line.trim()).map((line) => JSON.parse(line) as unknown) : parseYaml(text); } catch { continue; }
+      overrides.push(...providerOverrides(tests).map((where) => `${spec}${where.startsWith("[") ? "" : "."}${where}`));
+    }
+  }
+  if (overrides.length) {
+    throw new Error(`${name}: sets its own provider at ${overrides.slice(0, 3).join(", ")}; dl runs and grades with your own models only, so remove it (dl sets the provider and the grader).`);
+  }
+  return { path, format: `promptfoo config (${container})`, native: true, notes: [], refs, run: { kind: "config", config: path } };
+}
+
+/** A list of promptfoo tests ({vars, assert}): read by promptfoo itself, the prompt var filled in. */
+function testsSet(path: string, tests: Array<Record<string, unknown>>, container: string, inline: boolean): DataSet {
+  const names = [...new Set(tests.flatMap((test) => Object.keys(test.vars as Record<string, unknown>)))];
+  const prompt = promptVar(names);
+  if (!prompt) throw new Error(`${basename(path)}: promptfoo tests with vars ${names.join(", ")}; dl can't tell which one is the prompt. Name it input, prompt or question, or use a promptfoo config with prompts.`);
+  if (tests.some((test) => typeof (test.vars as Record<string, unknown>)[prompt] === "object")) {
+    throw new Error(`${basename(path)}: the ${prompt} var holds a list or object; promptfoo would expand it into several tests. Use a promptfoo config with a chat prompt.`);
+  }
+  return { path, format: `promptfoo tests ${container}`, native: true, cases: tests.length, notes: [], refs: [], run: { kind: "tests", prompt, tests: inline ? tests : path } };
+}
+
+function listSet(path: string, rows: unknown[], container: string, inline: boolean): DataSet {
+  const objects = rows.filter(isObject);
+  if (objects.length && objects.every(isTest)) return testsSet(path, objects, container, inline);
+  return rowsSet(path, rows, container);
+}
 
 // ---- One file, by its content --------------------------------------------------------------
+
+type Reader = (path: string) => Promise<string | undefined>;
 
 /** One data file, recognized by its content; throws a one-line error for anything else. */
 export async function parseDataFile(path: string, text: string, read: Reader = readText): Promise<DataSet> {
@@ -373,11 +352,11 @@ export async function parseDataFile(path: string, text: string, read: Reader = r
     let isWhole = true;
     try { whole = JSON.parse(trimmed); } catch { isWhole = false; }
     if (isWhole) {
-      if (isPromptfoo(whole)) return promptfooSet(path, whole, read, "JSON");
-      if (Array.isArray(whole)) return rowsSet(path, whole, "JSON");
+      if (isConfig(whole)) return configSet(path, whole, read, "JSON");
+      if (Array.isArray(whole)) return listSet(path, whole, "JSON", !/\.json$/i.test(path));
       const object = whole as Record<string, unknown>;
       const list = ["examples", "rows", "data", "records", "items", "samples", "dataset", "tests"].map((key) => object[key]).find(Array.isArray);
-      return rowsSet(path, list ?? [object], "JSON");
+      return listSet(path, list ?? [object], "JSON", true);
     }
     // JSONL: one JSON value per line.
     const rows: unknown[] = [];
@@ -385,14 +364,15 @@ export async function parseDataFile(path: string, text: string, read: Reader = r
       if (!line.trim()) continue;
       try { rows.push(JSON.parse(line)); } catch { throw new Error(`${name}: line ${index + 1} is not JSON (JSONL needs one JSON object per line).`); }
     }
-    return rowsSet(path, rows, "JSONL");
+    // promptfoo reads .jsonl tests; under another name it wouldn't know them.
+    return listSet(path, rows, "JSONL", !/\.jsonl$/i.test(path));
   }
   const header = parseCsv(body.split(/\r?\n/, 1)[0] ?? "", csvDelimiter(body))[0] ?? [];
-  if (header.some(knownColumn)) return rowsSet(path, csvRecords(body).map(csvRow), /\.tsv$/i.test(path) ? "TSV" : "CSV");
+  if (header.some(knownColumn)) return csvSet(path, body);
   let yaml: unknown;
   try { yaml = parseYaml(body); } catch { throw new Error(`${name}: ${UNKNOWN_DATA}.`); }
-  if (isPromptfoo(yaml)) return promptfooSet(path, yaml, read, "YAML");
-  if (Array.isArray(yaml) && yaml.some(isObject)) return rowsSet(path, yaml, "YAML");
+  if (isConfig(yaml)) return configSet(path, yaml, read, "YAML");
+  if (Array.isArray(yaml) && yaml.some(isObject)) return listSet(path, yaml, "YAML", !/\.ya?ml$/i.test(path));
   throw new Error(`${name}: ${UNKNOWN_DATA}.`);
 }
 
@@ -440,236 +420,50 @@ export async function loadEvalData(pattern: string, read: Reader = readText): Pr
   return { sets: kept, skipped };
 }
 
-/** "120 cases: qa.jsonl (OpenAI Evals JSONL, 100), promptfooconfig.yaml (promptfoo YAML, 20: 2 prompts × 10 tests)". */
+/** "5 tests from 2 files", then per file: "qa.jsonl: JSONL, 4 tests (translated for promptfoo)". */
 export function dataSummary(data: LoadedData, root?: string): string[] {
   const shown = (path: string) => (root && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : basename(path));
-  const total = data.sets.reduce((sum, set) => sum + set.cases.length, 0);
-  return [`${total} ${total === 1 ? "case" : "cases"} from ${data.sets.length} ${data.sets.length === 1 ? "file" : "files"}`,
-    ...data.sets.map((set) => `${shown(set.path)}: ${set.format}, ${set.cases.length} ${set.cases.length === 1 ? "case" : "cases"}${set.notes.length ? ` (${set.notes.join("; ")})` : ""}`),
+  const counted = data.sets.filter((set) => set.cases !== undefined);
+  const total = counted.reduce((sum, set) => sum + set.cases!, 0);
+  const configs = data.sets.length - counted.length;
+  const head = [counted.length ? `${total} ${total === 1 ? "test" : "tests"}` : "", configs ? `${configs} promptfoo ${configs === 1 ? "config" : "configs"}` : ""].filter(Boolean).join(" and ");
+  return [`${head} from ${data.sets.length} ${data.sets.length === 1 ? "file" : "files"}, run with promptfoo`,
+    ...data.sets.map((set) => `${shown(set.path)}: ${set.format}${set.cases !== undefined ? `, ${set.cases} ${set.cases === 1 ? "test" : "tests"}` : ""}, ${set.native ? "as is" : "translated (equals unless a value says contains:, factuality:...)"}${set.notes.length ? ` (${set.notes.join("; ")})` : ""}`),
     ...data.skipped.map((reason) => `skipped ${reason}`)];
 }
 
-// ---- Checking an answer --------------------------------------------------------------------
-
-/** Lowercased, whitespace collapsed, quotes and trailing punctuation trimmed. */
-export function normalizeAnswer(text: string): string {
-  return text.toLowerCase().replace(/\s+/g, " ").trim().replace(/^["'`]+/, "").replace(/["'`.!?;:,]+$/, "").trim();
+/** The directory the data files share, so they show as paths under it. */
+export function commonDir(paths: readonly string[]): string {
+  let dir = dirname(paths[0] ?? "/");
+  while (dir !== "/" && !paths.every((path) => path.startsWith(`${dir}/`))) dir = dirname(dir);
+  return dir;
 }
 
-const stripFences = (text: string) => text.trim().replace(/^```[\w-]*\n([\s\S]*?)\n?```$/, "$1").trim();
-const tryJson = (text: string): { ok: boolean; value?: unknown } => { try { return { ok: true, value: JSON.parse(text) }; } catch { return { ok: false }; } };
+// ---- Translated rows as promptfoo tests ----------------------------------------------------
 
 /**
- * Whether the answer matches an expected one: equal after normalizing, or containing it as a
- * whole word or phrase ("Paris" in "The capital is Paris.", never "4" in "42"). JSON answers
- * compare as JSON.
+ * Text promptfoo's OpenAI provider would read as chat JSON goes as one user message, so it's
+ * sent as written.
  */
-export function matchesExpected(output: string, expected: string): boolean {
-  const want = normalizeAnswer(expected);
-  const got = normalizeAnswer(output);
-  if (got === want) return true;
-  if (/^[[{]/.test(expected.trim())) {
-    const left = tryJson(expected.trim());
-    const right = tryJson(stripFences(output));
-    if (left.ok && right.ok) return isDeepStrictEqual(left.value, right.value);
-  }
-  if (!want) return false;
-  const escaped = want.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}($|[^\\p{L}\\p{N}])`, "u").test(got);
-}
-
-/** A JSON object or array somewhere in the text (promptfoo's contains-json). */
-function containsJson(text: string): boolean {
-  for (let start = 0; start < text.length; start++) {
-    if (text[start] !== "{" && text[start] !== "[") continue;
-    for (let end = text.length; end > start; end--) {
-      if ((text[end - 1] === "}" || text[end - 1] === "]") && tryJson(text.slice(start, end)).ok) return true;
-    }
-  }
-  return false;
-}
-
-const listOf = (value: unknown): string[] => (Array.isArray(value) ? value.map(String) : String(value ?? "").split(",").map((item) => item.trim()).filter(Boolean));
-
-/** One promptfoo assertion on the answer; undefined when dl doesn't support its type. */
-export function checkAssertion(assertion: Assertion, output: string): { ok: boolean; reason: string } | undefined {
-  const negate = assertion.type.startsWith("not-");
-  const type = negate ? assertion.type.slice(4) : assertion.type;
-  if (!SUPPORTED.has(type)) return undefined;
-  const value = assertion.value;
-  const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
-  const lower = output.toLowerCase();
-  let ok: boolean;
-  switch (type) {
-    case "equals":
-      ok = typeof value === "string" || typeof value === "number" ? output.trim() === String(value).trim() : (() => { const parsed = tryJson(stripFences(output)); return parsed.ok && isDeepStrictEqual(parsed.value, value); })();
-      break;
-    case "contains": ok = output.includes(text); break;
-    case "icontains": ok = lower.includes(text.toLowerCase()); break;
-    case "contains-any": ok = listOf(value).some((item) => output.includes(item)); break;
-    case "contains-all": ok = listOf(value).every((item) => output.includes(item)); break;
-    case "icontains-any": ok = listOf(value).some((item) => lower.includes(item.toLowerCase())); break;
-    case "icontains-all": ok = listOf(value).every((item) => lower.includes(item.toLowerCase())); break;
-    case "starts-with": ok = output.trim().startsWith(text); break;
-    case "regex":
-      try { ok = new RegExp(text).test(output); } catch { return { ok: false, reason: `regex ${text} is not a valid regular expression` }; }
-      break;
-    case "is-json": ok = tryJson(output.trim()).ok; break;
-    default: ok = containsJson(output); break; // contains-json
-  }
-  if (negate) ok = !ok;
-  const shown = type === "is-json" || type === "contains-json" ? "" : type === "regex" ? ` /${text}/` : ` ${clip(text, 40, true)}`;
-  return { ok, reason: `${assertion.type}${shown}` };
-}
-
-export type CaseStatus = "pass" | "fail" | "no-check";
-
-/**
- * A case's result: its supported assertions when it has any (all must pass); else its expected
- * answers (any may match); else nothing to check. Unsupported assertion types are listed, never
- * counted as passes.
- */
-export function scoreCase(item: Pick<EvalCase, "expected" | "assertions">, output: string): { status: CaseStatus; reason?: string; skipped: string[] } {
-  const skipped: string[] = [];
-  const failed: string[] = [];
-  let checked = 0;
-  for (const assertion of item.assertions ?? []) {
-    const result = checkAssertion(assertion, output);
-    if (!result) { skipped.push(assertion.type); continue; }
-    checked++;
-    if (!result.ok) failed.push(result.reason);
-  }
-  if (checked) return failed.length ? { status: "fail", reason: `${failed.join(", ")} failed; got ${clip(output, 60, true)}`, skipped } : { status: "pass", skipped };
-  if (item.expected?.length) {
-    return item.expected.some((expected) => matchesExpected(output, expected))
-      ? { status: "pass", skipped }
-      : { status: "fail", reason: `expected ${clip(item.expected[0]!, 40, true)}${item.expected.length > 1 ? ` (or ${item.expected.length - 1} more)` : ""}, got ${clip(output, 60, true)}`, skipped };
-  }
-  return { status: "no-check", skipped };
-}
-
-/** One line, at most `max` characters, optionally quoted. */
-export function clip(text: string, max: number, quote = false): string {
-  const line = text.replace(/\s+/g, " ").trim();
-  const cut = line.length > max ? `${line.slice(0, max - 1)}…` : line;
-  return quote ? `"${cut}"` : cut;
-}
-
-// ---- Running cases against a model ---------------------------------------------------------
-
-export interface CaseResult {
-  /** File and row: "qa.jsonl#12". */
-  source: string;
-  id?: string;
-  input: string | ChatMessage[];
-  expected?: string[];
-  output?: string;
-  /** Why there was no answer: HTTP error, timeout, only thinking. */
-  error?: string;
-  status: CaseStatus;
-  reason?: string;
-}
-
-export interface DataRunResult {
-  cases: CaseResult[];
-  checked: number;
-  passed: number;
-  noCheck: number;
-  errors: number;
-  /** Unsupported assertion types and how often they were skipped. */
-  skipped: Record<string, number>;
-  timedOut: boolean;
-  /** passed / checked; undefined when nothing was checkable. */
-  score?: number;
-}
-
-export interface DataRunOptions {
-  fetch?: FetchModel;
-  /** Requests at once (4). */
-  concurrency?: number;
-  /** How long one case may take (120 s: a cold model's first answer can take a minute). */
-  caseTimeoutMs?: number;
-  maxTokens?: number;
-  /** No case starts after this time (ms since the epoch): the run's --timeout. */
-  deadline?: number;
-  now?: () => number;
-}
-
-export const DATA_CONCURRENCY = 4;
-export const CASE_TIMEOUT_MS = 120_000;
-export const DATA_MAX_TOKENS = 1024;
-
-/** A case's place in its file, for the output and the results file. */
-export function caseSource(set: DataSet, item: EvalCase, root?: string): string {
-  const file = root && set.path.startsWith(`${root}/`) ? set.path.slice(root.length + 1) : basename(set.path);
-  const at = item.metadata.row ?? item.metadata.test;
-  return `${file}${at !== undefined ? `#${String(at)}` : ""}${typeof item.metadata.prompt === "string" ? ` [${item.metadata.prompt}]` : ""}`;
+function inputCell(input: string | ChatMessage[]): string {
+  if (typeof input !== "string") return JSON.stringify(input);
+  if (/^\s*[[{]/.test(input)) { try { JSON.parse(input); return JSON.stringify([{ role: "user", content: input }]); } catch { /* plain text */ } }
+  return input;
 }
 
 /**
- * Every case against one model's /v1/chat/completions: temperature 0, the served model id,
- * thinking off like dl's smoke tests (and any <think> block stripped), a few at a time.
+ * Translated rows as a promptfoo test CSV: `input`, `__expected` cells (promptfoo reads each as
+ * `equals` unless it says otherwise), `__description`. Several right answers: one cell each and
+ * a `__threshold` of one in n, so any one passes.
  */
-export async function runDataCases(cases: ReadonlyArray<{ source: string; item: EvalCase }>, deployment: Pick<ModelDeployment, "repo" | "port" | "host">, options: DataRunOptions = {}): Promise<DataRunResult> {
-  const call = options.fetch ?? localFetch;
-  const now = options.now ?? Date.now;
-  const url = `${modelApiBase(deployment)}/chat/completions`;
-  const timeoutMs = options.caseTimeoutMs ?? CASE_TIMEOUT_MS;
-  const results: CaseResult[] = new Array(cases.length);
-  const skipped: Record<string, number> = {};
-  let timedOut = false;
-  let next = 0;
-  const one = async (index: number): Promise<CaseResult> => {
-    const { source, item } = cases[index]!;
-    const base = { source, ...(item.metadata.id !== undefined ? { id: String(item.metadata.id) } : {}), input: item.input, ...(item.expected ? { expected: item.expected } : {}) };
-    const checkable = !!item.expected?.length || (item.assertions ?? []).some((assertion) => checkAssertion(assertion, "") !== undefined);
-    const failure = (error: string): CaseResult => ({ ...base, error, status: checkable ? "fail" : "no-check", ...(checkable ? { reason: error } : {}) });
-    if (options.deadline !== undefined && now() >= options.deadline) { timedOut = true; return failure("not run: the time limit was reached"); }
-    const messages = typeof item.input === "string" ? [{ role: "user", content: item.input }] : item.input;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let output: string;
-    let note: string | undefined;
-    try {
-      const response = await call(url, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer dl-local" }, signal: controller.signal,
-        body: JSON.stringify({ model: deployment.repo, messages, temperature: 0, max_tokens: options.maxTokens ?? DATA_MAX_TOKENS, ...NO_THINKING }) });
-      const text = await response.text();
-      if (!response.ok) return failure(`HTTP ${response.status}: ${clip(text, 80)}`);
-      const choice = (JSON.parse(text) as { choices?: Array<{ message?: { content?: string | null; reasoning_content?: string | null; reasoning?: string | null }; finish_reason?: string | null }> }).choices?.[0];
-      output = answerText(choice?.message?.content);
-      if (!output && hasReasoning(choice?.message)) note = noTextReason(choice?.message, choice?.finish_reason).reason;
-    } catch (error) {
-      return failure(controller.signal.aborted ? `no answer in ${Math.round(timeoutMs / 1000)} s` : error instanceof SyntaxError ? "the reply is not JSON" : connectionError(error));
-    } finally {
-      clearTimeout(timer);
-    }
-    const scored = scoreCase(item, output);
-    for (const type of scored.skipped) skipped[type] = (skipped[type] ?? 0) + 1;
-    return { ...base, output, ...(note ? { error: note } : {}), status: scored.status, ...(scored.reason ? { reason: note && scored.status === "fail" ? `${note}; ${scored.reason}` : scored.reason } : {}) };
-  };
-  const worker = async () => { while (next < cases.length) { const index = next++; results[index] = await one(index); } };
-  await Promise.all(Array.from({ length: Math.min(options.concurrency ?? DATA_CONCURRENCY, cases.length) }, worker));
-  const checked = results.filter((result) => result.status !== "no-check").length;
-  const passed = results.filter((result) => result.status === "pass").length;
-  return { cases: results, checked, passed, noCheck: results.length - checked, errors: results.filter((result) => result.error && result.output === undefined).length, skipped, timedOut,
-    ...(checked ? { score: passed / checked } : {}) };
-}
-
-/** "41 of 44 passed · 3 with no check · 2 errors · llm-rubric ×6 skipped (not supported)". */
-export function dataRunSummary(run: DataRunResult): string {
-  const parts = [run.checked ? `${run.passed} of ${run.checked} passed` : "nothing to check (no expected answers or supported assertions)"];
-  if (run.checked && run.noCheck) parts.push(`${run.noCheck} with no check`);
-  if (run.errors) parts.push(`${run.errors} ${run.errors === 1 ? "error" : "errors"}`);
-  const skipped = Object.entries(run.skipped).map(([type, count]) => `${type} ×${count}`);
-  if (skipped.length) parts.push(`${skipped.join(", ")} skipped (not supported)`);
-  if (run.timedOut) parts.push("stopped at the time limit");
-  return parts.join(" · ");
-}
-
-/** The first few failing cases, one line each. */
-export function failureLines(run: DataRunResult, max = 5): string[] {
-  const failed = run.cases.filter((result) => result.status === "fail");
-  const lines = failed.slice(0, max).map((result) => clip(`${result.source}${result.id && !result.source.includes(result.id) ? ` (${result.id})` : ""}: ${result.reason ?? "failed"}`, 140));
-  if (failed.length > max) lines.push(`and ${failed.length - max} more in the results file`);
-  return lines;
+export function rowsCsv(rows: readonly Row[]): string {
+  const width = Math.max(1, ...rows.map((row) => (row.checks ?? row.expected ?? []).length));
+  const anyOf = rows.some((row) => !row.checks && (row.expected?.length ?? 0) > 1);
+  const header = [INPUT_VAR, ...Array.from({ length: width }, (_, index) => `__expected${index + 1}`), ...(anyOf ? ["__threshold"] : []), "__description"];
+  const body = rows.map((row) => {
+    const values = row.checks ?? row.expected ?? [];
+    const threshold = !row.checks && values.length > 1 ? String(Math.floor(1e6 / values.length) / 1e6) : "";
+    return [inputCell(row.input), ...Array.from({ length: width }, (_, index) => values[index] ?? ""), ...(anyOf ? [threshold] : []), row.source];
+  });
+  return toCsv([header, ...body]);
 }
