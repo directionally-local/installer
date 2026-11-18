@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.38.0](https://github.com/directionally-local/installer/compare/v0.37.0...v0.38.0) (2026-11-18)
+
+
+### Features
+
+* **free:** referral bonus adds to the one-time trial ([#269](https://github.com/directionally-local/installer/issues/269)) ([25f1429](https://github.com/directionally-local/installer/commit/25f14295f049948e7fdb67cf856665274ac6043e))
+* **model:** dl evals, bring your command, and the update gate ([#272](https://github.com/directionally-local/installer/issues/272)) ([5dd6bca](https://github.com/directionally-local/installer/commit/5dd6bcafcb0e404bfcb56bc81fedd792d23d3639))
+
 ## [0.37.0](https://github.com/directionally-local/installer/compare/v0.36.0...v0.37.0) (2026-11-18)
 
 
