@@ -123,9 +123,9 @@ export function containerSpec(model: ModelRecipe, port: number, context: number,
   return args[args.indexOf("--label") + 1]!.slice(SPEC_LABEL.length + 1);
 }
 
-/** Whether a container exists, runs, and which recipe it was started with; undefined when there is none. */
-export async function inspectContainer(system: System, container: string): Promise<{ running: boolean; spec?: string } | undefined> {
-  const result = await system.probe("docker", ["inspect", "--format", `{{.State.Running}} {{index .Config.Labels "${SPEC_LABEL}"}}`, container]);
+/** Whether a container exists, runs, and which recipe (the hash in `label`) it was started with; undefined when there is none. */
+export async function inspectContainer(system: System, container: string, label = SPEC_LABEL): Promise<{ running: boolean; spec?: string } | undefined> {
+  const result = await system.probe("docker", ["inspect", "--format", `{{.State.Running}} {{index .Config.Labels "${label}"}}`, container]);
   if (result.code !== 0) return undefined;
   const [running, spec] = result.stdout.trim().split(/\s+/);
   return { running: running === "true", ...(spec && /^[0-9a-f]{16}$/.test(spec) ? { spec } : {}) };
