@@ -118,40 +118,32 @@ Allowance amounts, eligibility rules and budgets are operational settings, not p
 
 ## Release plan
 
-Each repository's release bot picks the number from commit types: a feature bumps the minor version, a fix bumps the patch. This plan names **feature releases only**; patch releases ship in between and are not planned. Numbers are targets: if an unplanned feature lands first, the contents move up a number.
+Each repository's release bot picks the number from commit types: a feature bumps the minor version, a fix bumps the patch. This plan names **feature releases only**, with "next" and "later" instead of numbers for what hasn't shipped; patch releases ship in between and are not planned. Numbers are targets: if an unplanned feature lands first, the contents move up a number.
 
 ### dl (`directionallylocal`)
 
 | Version | Phase | Contents |
 | --- | --- | --- |
-| 0.9.4 (now) | 0 | Autopilot's provider picker, any provider, picker shown once, chats reopen, Autopilot 3.1 pinned |
-| 0.10 | 0 | Every `dl` a new session, `dl -c` to continue; on a laptop bare `dl` runs plain Autopilot · installer#71, #72 |
-| 0.11 | lane | Setup offers the free tier first: sign in with GitHub, no key needed; default model becomes the plain `deepseek-v4.1-flash` · installer#78 |
-| 0.12 | 0 | Hotcell pinned exactly · reboot-required warning · version-skew warning · installer#73, autopilot#1041 |
-| 0.13 | 1 | Fixes from the fresh-VM test · installer#47 |
-| 0.14 | 1 | `dl sessions` across places; sleeping sandboxes and disk in `dl status` · installer#49 |
-| **1.0** | 1 gate | Released when the fresh-VM test passes: a solo server is ready for strangers |
-| 1.1 | 2 | `dl deck`: the multiplexer across every place · installer#48, #54 |
-| 1.2 | 4 | Join a server with a link and approve a teammate in the browser · installer#75 |
-| 1.3 | 4 | `dl team` · installer#76 |
-| 1.4 | 5 | `dl agent` scripting, `dl schedule` · installer#51, autopilot#1100 |
+| 0.10–0.36 (shipped) | 0, lane, 1.5 | Every `dl` a new session and `dl -c`; plain Autopilot on laptops; the free tier first in setup; Hotcell pinned exactly; `dl model` (0.22 on), tested on one GPU; several GPUs, SGLang, preflight, `--plan`, `--image` and `--workspace` (0.31–0.33, untested on hardware); the new-user trial and dl Pro (0.36) |
+| 0.37.0 (now) | lane | Sign up on dl.new with a one-time install command that starts dl signed in; Autopilot 3.26.0 |
+| next | 1.5 | `dl evals`, bring your command; `dl model update` gates on it, side by side |
+| next | 1.5 | `dl evals`, bring your data: the built-in runner |
+| next | 1.5 | `dl ui`: Open WebUI next to the model, `dl ui share`, `dl ui invite` |
+| then | 1.5 | Opt-in traffic capture, replayed during `dl model update` |
+| after the multi-GPU test | 1.5 | Fixes from the 4x RTX PRO 6000 run; vLLM v0.34.0rc2 as the default image if it passes |
+| later | 1 | Fixes from the fresh-VM test (installer#47); `dl sessions` across places (installer#49); **1.0** when the fresh-VM test passes |
+| later | 2, 4, 5 | `dl deck` (installer#48, #54) · join a server with a link (installer#75) · `dl team` (installer#76) · `dl agent` and `dl schedule` (installer#51) |
 
 ### Autopilot (`autopilot-ai`)
 
 | Version | Phase | Contents |
 | --- | --- | --- |
-| 3.1.2 (now) | 0 | `autopilot/` folders, any-provider sandboxes, `autopilot connect`. 3.1.3 (fixes) is queued. |
-| 3.2 | 0 | Session titles, state and cost; `/resume` and `/clear` in remote sessions; your messages in history · #1046, #1092, #1093 |
-| 3.3 | 0 · 2 | Pull requests titled from commits; Autopilot reports its state to herdr · #1049, #1103 |
-| 3.4 | lane | The free managed tier: "Directionally Local, free" in the provider picker, GitHub sign-in, `/usage` · #1102 |
-| 3.5 | 1 | Typed outcomes; one retry on transient failures · #1096, #1043 |
-| 3.6 | 1 | Outbox for outside actions; sandbox cleanup · #1097, #1094 |
-| 3.7 | 1 | Faster session start: measured, then a git mirror per repository · #1095 |
-| 3.8 | 2 | The multiplexer's data feed: every conversation on a place in one stream · #1048 |
-| 3.9 | 4 | People on a server; per-person limits; a slot reserved for people; PR identity · #1098, #1099 |
-| 3.10 | 5 | Subagents that write · #1052–1054 |
-| 3.11 | 5 | Scheduled loops, record-only first; long commands to the background · #1100, #1101 |
-| 3.12 | 5 | Agent team: router, gate, stored mandates, reviewer, merge policy · #1020 |
+| 3.2–3.25 (shipped) | 0, lane, 1.5 | `/resume` and `/clear` in remote sessions, your messages in history, pull requests titled from commits, state reported to herdr, the free tier client with `/usage`, `/request` and `/invite`, dl Pro and top-ups, GPU-aware first run, long commands to the background · #1092, #1093, #1049, #1103, #1102, #1101 |
+| 3.26.0 (now) | lane | Starts signed in from a dl.new install command |
+| later | 1 | Typed outcomes; one retry on transient failures; an outbox for outside actions; faster session start · #1096, #1043, #1097, #1095 |
+| later | 2 | Session titles, state and cost in the list; the multiplexer's data feed · #1046, #1048 |
+| later | 4 | People on a server, per-person limits, a slot reserved for people, PR identity · #1098, #1099 |
+| later | 5 | Subagents that write; scheduled loops, record-only first; the agent team · #1052–1054, #1100, #1020 |
 | any | track | Harness quality ships between these: per-model profiles #999, memory #1073–1078, turn-engine refactor #951. No 4.0 is planned; CI blocks accidental major bumps. |
 
 ### Hotcell
@@ -171,19 +163,15 @@ Nothing further is planned; Hotcell's roadmap follows what Autopilot needs.
 
 | Version | Phase | Contents |
 | --- | --- | --- |
-| 2.11.0 (now) | 0 | Inline renderer; assumes 80×24 when a terminal reports no size |
-| 2.12 | 2 | Several sessions in one stream, with per-session status · camouflage#146 |
-| 2.13 | 2 | Notifications for sessions not on screen · camouflage#147 |
-| 2.14 | 2 | Deck layout · camouflage#149 |
-| 2.15 | 2 | Deck input and the goto picker · camouflage#150 |
-| 2.16 | track | SDK lifecycle handles · camouflage#131 |
-| 3.0 | track | Remove the old full-screen renderer, a deliberate breaking change · camouflage#134 |
+| 2.12.0 (now) | 0, 2 | The inline renderer; several sessions in one stream with per-session status (camouflage#146); SDK lifecycle handles (camouflage#131) |
+| next | 1.5 | Every `dl model` screen on camouflage-tui |
+| later | 2 | Notifications for sessions not on screen; the deck layout; deck input and the goto picker · camouflage#147, #149, #150 |
 
 ### Serverless Objects
 
 | Version | Phase | Contents |
 | --- | --- | --- |
-| 0.13.6 (now) | track | Pre-alpha, single host |
+| 0.13.7 (now) | track | Pre-alpha, single host |
 | 0.14 | track | Conformance on Linux; PartyServer, Containers, RPC through deploy · #115, #130, #132, #133 |
 | 0.15 | track | Beta after the 14-day soak · #114 |
 | later | parked | M4 (multi-node, SSO, audit logs, Helm, tenancy) waits until a team needs it. Its README still targets 30 Nov; one of the two should change. |
