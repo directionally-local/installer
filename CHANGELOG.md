@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.39.0](https://github.com/directionally-local/installer/compare/v0.38.0...v0.39.0) (2026-11-18)
+
+
+### Features
+
+* **evals:** bring your data runs on promptfoo ([#276](https://github.com/directionally-local/installer/issues/276)) ([e3a7896](https://github.com/directionally-local/installer/commit/e3a78961290ecc798739973061eda2a8297efe5d))
+* **model:** dl evals, bring your data ([#273](https://github.com/directionally-local/installer/issues/273)) ([a0a816e](https://github.com/directionally-local/installer/commit/a0a816e696585e6e78b2cecd821f201076bb9864))
+* **ui:** dl ui runs Open WebUI as team chat next to the model ([#275](https://github.com/directionally-local/installer/issues/275)) ([ce63ed5](https://github.com/directionally-local/installer/commit/ce63ed5b7fde314169e3958c32d51f0750b03c8b))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.27.0 ([#277](https://github.com/directionally-local/installer/issues/277)) ([450ebbc](https://github.com/directionally-local/installer/commit/450ebbc499e30595ff1b9ee715e72cf2709427fb))
+
 ## [0.38.0](https://github.com/directionally-local/installer/compare/v0.37.0...v0.38.0) (2026-11-18)
 
 
