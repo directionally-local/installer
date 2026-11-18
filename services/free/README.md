@@ -69,6 +69,9 @@ Off until the owner sets `trialCutoff` (a runtime setting, below). Then:
   most what both leave (in-flight free requests are held against the trial too), so a
   batch-flagged account still gets nothing. Once it's used up, free requests get 402
   `trial_ended` (see Refusals); the weekly reset doesn't bring it back.
+- Referrals add to the trial: each referred friend who becomes weekly active adds
+  `referralBonusTokens` (10M) once to **both** people's trial, up to `referralBonusCap` (50M) per
+  person (see [Referrals](#referrals)). `trial.tokens` includes it.
 - Pro and top-ups work past the trial as they always do, and don't count against it. Pro for a
   trial account is the same weekly allowance current free users get when `proWeeklyUsdCap` and
   `proDeepseekWeeklyUsdCap` are set to the free levels (2 and 8).
@@ -533,7 +536,15 @@ the last 12 Monday runs with their forecast inputs, and today's forecast.
   or so far this week: it starts the day both reach 3 days and lasts while both stay weekly
   active, recomputed each week. Each counting referral gives **both** sides
   `REFERRAL_BONUS_TOKENS` (10M) a week, up to `REFERRAL_BONUS_CAP` (50M) a week per person. Bonus
-  tokens are free tokens: their cost counts within the weekly budget.
+  tokens are free tokens: their cost counts within the weekly budget. This is the bonus for
+  grandfathered accounts.
+- **Trial bonus:** for an account on [the new-user trial](#the-new-user-trial), referrals add to
+  the one-time trial instead. Each `ok` referral whose referred friend has been weekly active in
+  any week adds `REFERRAL_BONUS_TOKENS` (10M) once to **both** people's trial: the referrer gets
+  it per such friend, the referred person once their own referral qualifies (once they have
+  been weekly active). Up to `REFERRAL_BONUS_CAP` (50M) per person in all, not per week. It stays
+  once earned (being weekly active once is for good), unless the referral stops counting (the
+  same network, below). Only a trial account's trial uses it; the weekly bonus is unchanged.
 - **Anti-abuse:** only new accounts can be referred, once. No payout for a person's own code
   (`self`), an unknown code, or two accounts seen on the same network (the same IPv4 address or
   IPv6 /64), at sign-up or at any later sign-in of either; a referral that turns out to share a
@@ -1091,7 +1102,7 @@ dl.new's sign-up page signs people in with GitHub, lets them choose where dl run
 | --- | --- | --- |
 | `GET /web/signin?return=<WEB_SIGNUP_URL>&state=<page state>[&ref=<referral>]` | the page's Sign in button (a navigation) | Starts the CLI's own browser sign-in: a device code (no device id), GitHub, the details step (contact email) and the invite step when one is needed, and the same `admit` (open admission, account age, levels, batch flag, blocked emails, network sign-up limit, cohort). On success it 303s to `<WEB_SIGNUP_URL>#signin=<one-time code>` instead of "return to your terminal". `return` must be exactly `WEB_SIGNUP_URL`. |
 | `POST /web/session {code, state}` | the page (CORS) | The one-time code (5 minutes, once, bound to the page's state) → `{token, expires_in, login}`, a web session: a JWT of type `web`, one hour, accepted only by `/web/*`. |
-| `GET /web/me` | the page | `{login, email, emailUpdates, plan, trial, weeklyTokens, offers, referral: {link, joined}}`. |
+| `GET /web/me` | the page | `{login, email, emailUpdates, plan, trial, weeklyTokens, offers, referral: {link, joined, kind, bonusTokens, capTokens, trialBonusTokens}}`. `referral.kind` is `"trial"` on the trial (each friend who becomes weekly active adds `bonusTokens` once to both people's trial, up to `capTokens` in all; `trialBonusTokens` is what this person has earned so far, already in `trial.tokens`) or `"weekly"` otherwise (`bonusTokens` a week to both while both stay weekly active, up to `capTokens` a week; `trialBonusTokens` 0). |
 | `POST /web/email {email, updates?}` | the page | Changes the contact email with the details step's checks (plausible, blocked, one account per inbox). |
 | `POST /web/choice {option}` | the page | `computer` or `gpu`; counted only. |
 | `POST /web/checkout` | the page | Stripe Checkout for Pro, returning to `WEB_SIGNUP_URL?checkout=done` (or `cancel`). |

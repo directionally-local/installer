@@ -26,6 +26,13 @@ import { DAY_MS, weekStart } from "./week.js";
  * `referralBonusTokens` (10M) a week, up to `referralBonusCap` (50M) a week per person. The
  * bonus is free tokens, so its cost counts against the free budget like any other free use.
  *
+ * A person on the new-user trial (see `onTrial` in app.ts) has a one-time trial instead of a
+ * weekly allowance, so the weekly bonus does little for them. Their referrals add to the trial
+ * instead (`trialBonuses`): each `ok` pair whose referred friend has been weekly active in any
+ * week adds `referralBonusTokens` (10M) to both people's trial, up to `referralBonusCap` (50M)
+ * per person in all. It is a one-time addition, not weekly, and stays once earned (being weekly
+ * active once is for good), unless the pair stops being `ok` (the same network, later).
+ *
  * In the queue, each referred friend who has been weekly active in any week moves the
  * referrer up `queueReferralPlaces` places.
  */
@@ -129,5 +136,30 @@ export function everActiveFriends(sql: Sql, referrers: readonly number[]): Map<n
     )
     .toArray();
   for (const row of rows) out.set(row.referrer_id, row.n);
+  return out;
+}
+
+/**
+ * The trial bonus per person (see the top of this file): for each `ok` pair whose referred friend
+ * has been weekly active in any week, `referralBonusTokens` to both sides, capped at
+ * `referralBonusCap`. For `ids` only, or everyone with such a pair when undefined. People with
+ * none are absent.
+ */
+export function trialBonuses(sql: Sql, rules: BonusRules, ids?: readonly number[]): Map<number, number> {
+  const out = new Map<number, number>();
+  if (rules.referralBonusTokens <= 0 || rules.referralBonusCap <= 0 || (ids !== undefined && ids.length === 0)) return out;
+  const only = ids === undefined ? "" : "AND (r.referrer_id IN (SELECT value FROM json_each(?)) OR r.referred_id IN (SELECT value FROM json_each(?)))";
+  const query = `SELECT r.referrer_id AS referrer_id, r.referred_id AS referred_id FROM referrals r
+       WHERE r.outcome = 'ok' ${only}
+         AND EXISTS (SELECT 1 FROM daily_activity d WHERE d.github_id = r.referred_id AND d.requests > 0
+                     GROUP BY ${WEEK_OF_DAY.replace(/day/g, "d.day")} HAVING COUNT(*) >= ${ACTIVE_DAYS})`;
+  const rows = (ids === undefined ? sql.exec<{ referrer_id: number; referred_id: number }>(query) : sql.exec<{ referrer_id: number; referred_id: number }>(query, JSON.stringify([...new Set(ids)]), JSON.stringify([...new Set(ids)]))).toArray();
+  const pairsPer = new Map<number, number>();
+  for (const row of rows) {
+    pairsPer.set(row.referrer_id, (pairsPer.get(row.referrer_id) ?? 0) + 1);
+    pairsPer.set(row.referred_id, (pairsPer.get(row.referred_id) ?? 0) + 1);
+  }
+  const wanted = ids === undefined ? undefined : new Set(ids);
+  for (const [id, count] of pairsPer) if (!wanted || wanted.has(id)) out.set(id, Math.min(rules.referralBonusCap, count * rules.referralBonusTokens));
   return out;
 }

@@ -13,7 +13,7 @@ import { milestoneCrossed, paymentAlert, spendMilestoneAlert, creditAlert, credi
 import type { Upstream } from "./config.js";
 import { DEEPSEEK_MODEL, familyOf, type Family } from "./models.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
-import { bonuses, codeFor, countingPairs, everActiveFriends, type Pair, type ReferralOutcome } from "./referrals.js";
+import { bonuses, codeFor, countingPairs, everActiveFriends, trialBonuses, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
 import { levelChecks, levelFor, type BasicRule, type GithubSignals, type Level, type LevelReason, type LevelThresholds, type SignalThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
@@ -217,6 +217,11 @@ export type RecheckRow = LevelSignalRow & Pick<PersonRow, "status" | "batch_flag
 export interface PersonState {
   queue: QueuePlace | null;
   bonusTokens: number;
+  /**
+   * The one-time trial's referral bonus (see `trialBonuses` in referrals.ts): added to the trial's
+   * tokens when the person is on the trial; unused for everyone else.
+   */
+  trialBonusTokens: number;
   referral: { code: string; joined: number; activeThisWeek: number } | null;
   /** An admin blocked this account (people.status "blocked"). */
   blocked: boolean;
@@ -1383,13 +1388,14 @@ export class DirectoryObject extends DurableObject {
         admitted_at: number;
       }>("SELECT login, status, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at, batch_flag, admitted_at FROM people WHERE github_id = ?", githubId)
       .toArray()[0];
-    if (!person) return { queue: null, bonusTokens: 0, referral: null, blocked: false, level: "full", levelReason: null, batchFlagged: false, signals: null, outsideDl: false, admittedAt: null };
+    if (!person) return { queue: null, bonusTokens: 0, trialBonusTokens: 0, referral: null, blocked: false, level: "full", levelReason: null, batchFlagged: false, signals: null, outsideDl: false, admittedAt: null };
     const code = this.#ensureCode(githubId, person.login, now);
     const counting = countingPairs(sql, this.#pairs(githubId), now);
     const joined = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ? AND outcome = 'ok'", githubId).toArray()[0]?.n ?? 0;
     return {
       queue: this.#place(githubId, now, policy),
       bonusTokens: bonuses(counting, policy).get(githubId) ?? 0,
+      trialBonusTokens: trialBonuses(sql, policy, [githubId]).get(githubId) ?? 0,
       referral: { code, joined, activeThisWeek: counting.filter((pair) => pair.referrer === githubId).length },
       blocked: person.status === "blocked",
       level: person.level ?? "full",
@@ -1797,6 +1803,11 @@ export class DirectoryObject extends DurableObject {
   async networkCounts(): Promise<Map<number, number>> {
     const rows = this.ctx.storage.sql.exec<{ github_id: number; n: number }>("SELECT github_id, COUNT(*) AS n FROM person_networks GROUP BY github_id").toArray();
     return new Map(rows.map((row) => [row.github_id, row.n]));
+  }
+
+  /** Everyone's one-time trial referral bonus in one query (the admin people list), by GitHub id; people with none are absent. */
+  async trialBonuses(policy: Pick<Policy, "referralBonusTokens" | "referralBonusCap">): Promise<Map<number, number>> {
+    return trialBonuses(this.ctx.storage.sql, policy);
   }
 
   /** How many distinct networks this person has signed in from (for the admin page). */

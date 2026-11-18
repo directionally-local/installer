@@ -463,11 +463,12 @@ function basicRule(config: FreeConfig): BasicRule {
 /**
  * The allowance's limits for a level. `bonusTokens`: this week's referral bonus, added on top of
  * Full's weekly allowance. Basic and Starter get every model on their own tokens and dollar cap;
- * a batch-flagged Starter account gets 0 tokens.
+ * a batch-flagged Starter account gets 0 tokens. `trial`: the account is on the one-time trial,
+ * of `trialTokens` plus `trialBonusTokens` (its referral bonus, see `trialBonuses` in referrals.ts).
  */
-function limitsFor(config: FreeConfig, bonusTokens = 0, level: Level = "full", batchFlagged = false, trial = false): Limits {
+function limitsFor(config: FreeConfig, bonusTokens = 0, level: Level = "full", batchFlagged = false, trial = false, trialBonusTokens = 0): Limits {
   const limits = levelLimits(config, bonusTokens, level, batchFlagged);
-  return trial ? { ...limits, trialTokens: config.trialTokens } : limits;
+  return trial ? { ...limits, trialTokens: config.trialTokens + Math.max(0, trialBonusTokens) } : limits;
 }
 
 /**
@@ -506,7 +507,7 @@ function levelLimits(config: FreeConfig, bonusTokens: number, level: Level, batc
 async function personLimits(c: Ctx, config: FreeConfig, githubId: number, now: number): Promise<{ level: Level; limits: Limits }> {
   const person = (await directory(c).gate(now, policyOf(c.config), githubId)).person;
   const level = servedLevel(person?.level ?? "full", config);
-  return { level, limits: limitsFor(config, person?.bonusTokens, level, person?.batchFlagged === true, onTrial(config, githubId, person?.admittedAt)) };
+  return { level, limits: limitsFor(config, person?.bonusTokens, level, person?.batchFlagged === true, onTrial(config, githubId, person?.admittedAt), person?.trialBonusTokens) };
 }
 
 /** The level thresholds, from the effective config. */
@@ -1646,7 +1647,7 @@ async function me(c: Ctx): Promise<Response> {
   const { config, person } = await runtime(c);
   const allowance = await account(c, identity.githubId).allowance(
     c.now(),
-    limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt)),
+    limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens),
   );
   if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
   // A Pro subscriber isn't waiting for anything; their place is kept if Pro ends.
@@ -2161,7 +2162,7 @@ async function chat(c: Ctx): Promise<Response> {
   const level = servedLevel(gate.person?.level ?? "full", gate.config);
   const batchFlagged = gate.person?.batchFlagged === true;
   const trial = onTrial(gate.config, identity.githubId, gate.person?.admittedAt);
-  const limits = limitsFor(gate.config, gate.person?.bonusTokens, level, batchFlagged, trial);
+  const limits = limitsFor(gate.config, gate.person?.bonusTokens, level, batchFlagged, trial, gate.person?.trialBonusTokens);
   const link = linkFor(gate.config, gate.person);
   const headers = async () => quotaHeaders(await person.allowance(c.now(), limits));
 
@@ -2884,7 +2885,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     if ("error" in page) return apiError(400, "invalid_request", page.error);
     // The Directory's per-person data in a few whole-table reads, not one call per person.
     const people = await directory(c).listPeople();
-    const [caps, networks, sessions] = await Promise.all([directory(c).personalCaps(), directory(c).networkCounts(), directory(c).weekSessions(now)]);
+    const [caps, networks, sessions, trialBonus] = await Promise.all([directory(c).personalCaps(), directory(c).networkCounts(), directory(c).weekSessions(now), directory(c).trialBonuses(policyOf(config))]);
     const checks = peopleChecks(people, config, now);
     // Filter and page before any account call, so a page costs one account call per person on it.
     const ordered = people
@@ -2898,7 +2899,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     // hundreds of Durable Object calls started together drop connections (Cloudflare error 1101).
     const rows = await mapLimited(slice, ADMIN_PEOPLE_CONCURRENCY, async (person) => {
       const trial = onTrial(config, person.github_id, person.admitted_at);
-      const { allowance, serverKeys } = await account(c, person.github_id).adminSummary(now, limitsFor(config, 0, person.level, person.batch_flag === 1, trial));
+      const { allowance, serverKeys } = await account(c, person.github_id).adminSummary(now, limitsFor(config, 0, person.level, person.batch_flag === 1, trial, trialBonus.get(person.github_id)));
       return {
         githubId: person.github_id,
         login: person.login,
@@ -3918,7 +3919,7 @@ async function webMe(c: Ctx): Promise<Response> {
   const { config, person } = await runtime(c);
   const allowance = await account(c, identity.githubId).allowance(
     c.now(),
-    limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt)),
+    limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens),
   );
   return json({
     login: identity.login,
@@ -3929,7 +3930,22 @@ async function webMe(c: Ctx): Promise<Response> {
     /** The free weekly tokens, for an account not on the trial (grandfathered); 0 when there are none. */
     weeklyTokens: allowance.trial ? 0 : allowance.tokensPerWeek,
     offers: offers(config),
-    referral: person?.referral ? { link: linkFor(config, person), joined: person.referral.joined } : null,
+    /**
+     * The invite link and what a referral earns, so the page can describe it. `kind`: "trial" for
+     * an account on the trial (each friend who becomes weekly active adds `bonusTokens` once to both
+     * people's trial, up to `capTokens` in all; `trialBonusTokens` earned so far), "weekly" otherwise
+     * (`bonusTokens` a week to both while both stay weekly active, up to `capTokens` a week).
+     */
+    referral: person?.referral
+      ? {
+          link: linkFor(config, person),
+          joined: person.referral.joined,
+          kind: allowance.trial ? "trial" : "weekly",
+          bonusTokens: config.referralBonusTokens,
+          capTokens: config.referralBonusCap,
+          trialBonusTokens: allowance.trial ? person.trialBonusTokens : 0,
+        }
+      : null,
   });
 }
 
