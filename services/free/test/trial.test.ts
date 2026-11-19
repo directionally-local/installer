@@ -140,15 +140,15 @@ describe("the new-user trial", () => {
   });
 
   it("holds the trial to what is left while requests are in flight, never past it", async () => {
-    const { service, bob } = await world({ perRequest: 1000, vars: { TRIAL_TOKENS: "40000" } });
+    const { service, bob } = await world({ perRequest: 1000, vars: { TRIAL_TOKENS: "100000" } });
     const account = service.account(200);
-    const limits: Limits = { weeklyTokens: 50_000_000, weeklyUsd: 2, deepseekWeeklyUsd: 8, trialTokens: 40_000 };
+    const limits: Limits = { weeklyTokens: 50_000_000, weeklyUsd: 2, deepseekWeeklyUsd: 8, trialTokens: 100_000 };
     const first = await account.reserve({ pool: "deepseek", promptEstimate: 100, requestedMaxTokens: undefined, limits, now: service.clock.now, model: MODEL });
     assert.equal(first.ok, true);
-    assert.equal(first.amount, 100 + 32_768);
+    assert.equal(first.amount, 100 + 65_536); // DeepSeek reserves up to its 65,536-token output cap
     const second = await account.reserve({ pool: "deepseek", promptEstimate: 100, requestedMaxTokens: undefined, limits, now: service.clock.now, model: MODEL });
     assert.equal(second.ok, true);
-    assert.ok(second.amount <= 40_000 - first.amount, "the second gets only what the first left");
+    assert.ok(second.amount <= 100_000 - first.amount, "the second gets only what the first left");
     assert.equal(second.allowance.trial.reserved, first.amount + second.amount);
     void bob;
   });

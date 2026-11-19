@@ -4,7 +4,7 @@ import { levelChecks, levelFor, levelReason, type GithubSignals } from "../src/a
 import { newInviteCode, newUserCode, normalizeInviteCode, normalizeUserCode } from "../src/codes.js";
 import { ConfigError, readFreeConfig } from "../src/config.js";
 import { cleanBatch, cleanProps } from "../src/events.js";
-import { chargedTokens, costOf, isAllowedModel, MAX_OUTPUT_TOKENS, parseUsage, planReservation } from "../src/quota.js";
+import { chargedTokens, costOf, DEEPSEEK_MAX_OUTPUT_TOKENS, isAllowedModel, MAX_OUTPUT_TOKENS, parseUsage, planReservation } from "../src/quota.js";
 import { meterStream, type StreamOutcome } from "../src/sse.js";
 import { weekEnd, weekStart } from "../src/week.js";
 
@@ -58,6 +58,9 @@ describe("reservation planning", () => {
     assert.deepEqual(planReservation(1000, 5000, 2000), { amount: 2000, maxTokens: 1000 });
     assert.equal(planReservation(1000, 5000, 1100), undefined);
     assert.deepEqual(planReservation(1000, 50, 1050), { amount: 1050, maxTokens: 50 });
+    // DeepSeek's higher cap: a thinking model's reasoning counts as output.
+    assert.deepEqual(planReservation(1000, 10 ** 9, 1_000_000, DEEPSEEK_MAX_OUTPUT_TOKENS), { amount: 1000 + 65_536, maxTokens: 65_536 });
+    assert.deepEqual(planReservation(1000, 65_536, 30_000, DEEPSEEK_MAX_OUTPUT_TOKENS), { amount: 30_000, maxTokens: 29_000 });
   });
 });
 
