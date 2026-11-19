@@ -34,7 +34,7 @@ Built, untested on hardware (tested only against recorded `nvidia-smi` output, f
 - `dl ui`: Open WebUI as team chat next to the model, `dl ui share` over Tailscale HTTPS, `dl ui invite` and `dl ui approve` (dl 0.39.0, installer#275).
 - An optional optimized engine during `dl model up`: picking it sends a request to talk to us; vLLM stays the default path (dl 0.40.0, installer#279).
 
-Pull request open: the GPU first run asks how the team will use the model (browser chat, terminal agent or both); dl sets up Tailscale, shares the chat over HTTPS only with 2FA on, and `dl status` sums up the box (installer#278, autopilot#1276).
+Merged, unreleased: the GPU first run asks how the team will use the model (browser chat, terminal agent or both); dl sets up Tailscale, shares the chat over HTTPS only with 2FA on, and `dl status` sums up the box (installer#278, autopilot#1276). Then "Which coding agent?": Autopilot, Claude Code, OpenCode or Pi on the local model, kept for the box; `dl agent set NAME` changes it (installer#289, autopilot#1277).
 
 Also shipped: free tier dl Pro and top-ups when free usage runs out, and `/usage` with the real limits (Autopilot 3.21.0 and 3.22.0); `dl claude`, Claude Code on the free tier's DeepSeek (dl 0.40.0, see the free tier lane); hook events for sessionpipe (Autopilot 3.27.0, autopilot#1272), with the Autopilot adapter merged upstream (spacesheep-dev/sessionpipe#281; spec issues #279 and #280 open).
 

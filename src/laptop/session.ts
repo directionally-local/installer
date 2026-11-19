@@ -18,7 +18,9 @@ import { placeModel, saveModel } from "./settings.js";
 import { recordLastUsed, resolveTarget, type RemoteServer, type TargetReason } from "./config.js";
 import { detectGitHubRepository, snapshotWorkingTree, type WorkingTreeSnapshot } from "./git.js";
 import { describeSecretLocation, findLikelyProviderSecret, type SecretMatch } from "./secrets.js";
-import { handoffFile, MAX_HANDOFFS, resultEnv, takeHandoff, type ChatUpRequest, type ModelUpRequest } from "./gpu-handoff.js";
+import { agentsEnv, handoffFile, MAX_HANDOFFS, resultEnv, takeHandoff, type ChatUpRequest, type ModelUpRequest, type OtherAgent } from "./gpu-handoff.js";
+import { readAgentChoice, saveAgentChoice } from "./agent-choice.js";
+import { AGENTS, installedAgents, installMessage, launchLocalAgent, readLocalModel, type AgentId, type LocalModel } from "./local-agents.js";
 import type { ChatSetupResult } from "../chat-first-run.js";
 import type { ModelUpResult } from "../model-first-run.js";
 import { forgetSession, latestSession, rememberSession, sessionsFor, sessionsPath, type SessionKey } from "./session-store.js";
@@ -95,6 +97,16 @@ export interface SessionInput {
   handoffTmp?: string;
   /** Sets up the team chat when Autopilot asks for it (gpu-handoff.ts, chat-first-run.ts); the real one unless replaced (tests). */
   chatUp?: (request: ChatUpRequest, io: LaptopIO, context: { model?: string; signal: AbortSignal }) => Promise<ChatSetupResult>;
+  /** Open Autopilot whatever agent the box has chosen (dl --from-claude-code). */
+  forceAutopilot?: boolean;
+  /** The agent plain dl opens on this box (agent-choice.ts); read from dl's state unless replaced (tests). */
+  agentChoice?: { read: () => Promise<AgentId | undefined>; save: (agent: AgentId) => Promise<void> };
+  /** The box's model for the other agents (local-agents.ts); dl model's state unless replaced (tests). */
+  localModel?: () => Promise<LocalModel | undefined>;
+  /** Which agents' CLIs are on PATH; looked up unless replaced (tests). */
+  installedAgents?: () => Promise<Record<AgentId, boolean>>;
+  /** Opens another agent on the box's model; the real launcher unless replaced (tests). */
+  launchAgent?: (agent: OtherAgent, model: LocalModel, options: { continue?: boolean; args?: readonly string[] }, io: LaptopIO) => Promise<number>;
 }
 
 const realSpawn: SessionSpawner = (command, args, env, options = {}) => spawn(command, args, { stdio: "inherit", env, ...(options.cwd ? { cwd: options.cwd } : {}) });
@@ -176,6 +188,34 @@ export async function startHere(input: SessionInput, io: LaptopIO): Promise<numb
  */
 async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<number> {
   const c = palette(io.color === true);
+  const choice = input.agentChoice ?? { read: () => readAgentChoice(), save: (agent: AgentId) => saveAgentChoice(agent) };
+  const localModel = input.localModel ?? realLocalModel;
+  const launch = input.launchAgent ?? ((agent, model, options, launchIO) => launchLocalAgent(agent, model, options, launchIO, { cwd: input.cwd }));
+  // The box's chosen agent (dl agent set, or the GPU first run's "Which coding agent?"), on its model.
+  const chosen = input.forceAutopilot ? undefined : await choice.read().catch(() => undefined);
+  if (chosen && chosen !== "autopilot") {
+    const model = await localModel().catch(() => undefined);
+    if (model) {
+      if (input.model) io.err(`  ${c.yellow("!")} -m is for Autopilot; ${AGENTS[chosen].label} runs on this box's model, ${model.model}.\n`);
+      return launch(chosen, model, { ...(input.continue ? { continue: true } : {}), ...(input.args?.length ? { args: input.args } : {}) }, io);
+    }
+    io.err(`  ${c.yellow("!")} dl opens ${AGENTS[chosen].label} on this box's model, and there is none now (dl model up). Opening Autopilot.\n`);
+  }
+  /** The first run's choice of another agent: saved for the box, then opened (or, not installed, how to install it). */
+  const openChosen = async (agent: OtherAgent): Promise<number> => {
+    await choice.save(agent).catch((error) => io.err(`  ${c.yellow("!")} Couldn't save the choice of ${AGENTS[agent].label}: ${describeError(error)}\n`));
+    const installed = await (input.installedAgents ?? (() => installedAgents()))();
+    if (!installed[agent]) {
+      io.err(`\n  Plain dl opens ${AGENTS[agent].label} on this box's model from now on.\n${installMessage(agent)}`);
+      return 0;
+    }
+    const model = await localModel().catch(() => undefined);
+    if (!model) {
+      io.err(`  ${c.red("✗")} No model on this box to open ${AGENTS[agent].label} on. See dl model status.\n`);
+      return 1;
+    }
+    return launch(agent, model, {}, io);
+  };
   const autopilot = await (input.autopilot ?? findAutopilot)();
   if (!autopilot) {
     io.err(`  ${c.red("✗")} The Autopilot that comes with dl isn't installed. Update: ${c.bold(DL_UPDATE)}\n`);
@@ -255,10 +295,13 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
           signals.off("SIGINT", onInterrupt);
         }
         if (request.use === "browser") return chat.ok ? 0 : 1;
+        // Both, with another agent chosen: that agent now, on the model.
+        if (request.agent) return await openChosen(request.agent);
         // Both: the agent now, on the model; nothing more to report or ask.
         gpuEnv = {};
         continue;
       }
+      if (request.action === "agent") return await openChosen(request.agent);
       // Autopilot asked for a private model on this GPU: dl model up, then Autopilot again,
       // which opens on the new provider (or, when it failed, says so and asks again).
       // The request may name a model to retry, or ask for the picker with the last failure marked.
@@ -271,12 +314,23 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
       lastFailed = result.ok ? undefined : result.model;
       started = result.ok ? result.model : undefined;
       gpuEnv = resultEnv(result, request.gpu);
+      // The model passed: which other agents can open on it, for "Which coding agent?".
+      if (result.ok) {
+        const [model, installed] = await Promise.all([localModel().catch(() => undefined), (input.installedAgents ?? (() => installedAgents()))().catch(() => undefined)]);
+        if (installed) Object.assign(gpuEnv, agentsEnv(model, installed));
+      }
     }
   } finally {
     if (referral) await settleReferral({ env: process.env, ...input.referral });
     await handoff?.cleanup().catch(() => {});
     for (const [name, handler] of handlers) signals.off(name, handler);
   }
+}
+
+/** The box's model (dl model's default deployment). */
+async function realLocalModel(): Promise<LocalModel | undefined> {
+  const { RealSystem } = await import("../system.js");
+  return readLocalModel(new RealSystem());
 }
 
 /** The real team chat setup, on this terminal (chat-first-run.ts). */

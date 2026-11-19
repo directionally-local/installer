@@ -24,6 +24,8 @@ import { modelCommand as gpuModelCommand, runLogDir } from "./model-command.js";
 import { planCommand } from "./model-plan.js";
 import { evalsCommand } from "./model-evals.js";
 import { boxSummary } from "./box-status.js";
+import { agentCommand } from "./laptop/agent-choice.js";
+import { readLocalModel } from "./laptop/local-agents.js";
 import { chatUiCommand } from "./chat-ui.js";
 import { openSession, startHere, type SessionInput } from "./laptop/session.js";
 import { detectGitHubRepository } from "./laptop/git.js";
@@ -60,6 +62,11 @@ On your laptop:
                           from the pushed commit, send no patch); anywhere else, a chat
   dl -c, --continue       this computer: autopilot -c; a server: reopen the latest session
                           started from this folder there
+  dl agent                the coding agent plain dl opens on a GPU box, on its own model, and a
+                          menu to change it: Autopilot (default), Claude Code, OpenCode or Pi.
+                          The others are your own CLIs (install them yourself), started for one
+                          run on the local model; their own config files aren't touched
+  dl agent set NAME       change it: autopilot, claude-code, opencode or pi
   dl --from-claude-code   continue this folder's latest Claude Code conversation here, in a new
                           Autopilot session (read on this computer; asks first)
   dl claude [ARGS]        your own Claude Code on free tokens (DeepSeek), through dl's free tier
@@ -76,7 +83,7 @@ On your laptop:
   dl setup                set up or repair where background tasks run (safe to re-run)
   dl new                  the same as bare dl (a new session)
   dl status               where your agents run, their provider, model and versions, and what they're doing
-                          (on a GPU box, first: models, team chat, agent server and Tailscale)
+                          (on a GPU box, first: models, coding agent, team chat, agent server and Tailscale)
   dl connect URL          connect to a server someone else set up (approve the code it shows)
   dl run "TASK"           run a task in a sandbox, in the background, from inside a GitHub
                           repository; it ends in a pull request
@@ -214,6 +221,8 @@ export interface MainOptions {
   boxSummary?: () => Promise<string | undefined>;
   /** `dl uninstall` on a server and on a laptop; the real ones unless replaced. */
   uninstall?: { server?: typeof uninstall; laptop?: typeof laptopUninstall };
+  /** `dl agent`; the real one unless replaced. */
+  agentCommand?: typeof agentCommand;
 }
 
 export async function main(
@@ -353,9 +362,17 @@ export async function main(
         io.err("  dl --from-claude-code needs a terminal.\n");
         return 2;
       }
-      return await startHere(sessionInput(values, ["--from-claude-code", ...passthrough], { continue: false }), laptopIO);
+      return await startHere({ ...sessionInput(values, ["--from-claude-code", ...passthrough], { continue: false }), forceAutopilot: true }, laptopIO);
     }
     switch (command) {
+      case "agent": {
+        return await (options.agentCommand ?? agentCommand)(parsed.positionals.slice(1), {
+          io: laptopIO,
+          interactive: terminal,
+          ...(terminal ? { prompter: options.prompter ?? new TtyPrompter() } : {}),
+          model: () => readLocalModel(new RealSystem()),
+        });
+      }
       case "claude-code": {
         const prompter = options.prompter ?? new TtyPrompter();
         return await claudeCodeCommand(parsed.positionals.slice(1), {

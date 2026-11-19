@@ -337,6 +337,30 @@ The model's state is kept separately from a server install, in `~/.local/state/d
 
 Today: tested end to end with small models on one Nvidia GPU. Models that need several GPUs, SGLang, and several models on one machine are in, planned and checked with `--plan`, but not yet run on real multi-GPU hardware. AMD and Huawei Ascend GPUs are on the roadmap.
 
+#### Your coding agent on the model: dl agent
+
+On a GPU box, the terminal agent can be Autopilot or a coding CLI you already use, on the box's own model. On the GPU first run, after **Terminal agent** or **Both**, Autopilot asks **"Which coding agent?"**:
+
+- **Autopilot (recommended)**, the default: comes with dl, made for local models.
+- **Claude Code**: Anthropic's CLI, on your model through its Messages API.
+- **OpenCode**: open-source agent, on your model as an OpenAI-compatible provider.
+- **Pi**: minimal open-source agent, on your model as an OpenAI-compatible provider.
+
+An agent whose CLI isn't on your PATH is marked **(install first)**; picking it saves the choice and prints the official install command, and dl stops there (run `dl` again once it's installed). dl never installs these CLIs. An agent that can't work on the model isn't offered (Claude Code needs a 32k context).
+
+The choice is kept for the box (`~/.local/state/directionallylocal/agent.json`, beside the model's state): plain `dl` opens that agent from then on, `dl -c` continues its latest session (each CLI's `-c`), and `dl -- ARGS` passes ARGS to it. `dl agent` shows it and offers the same menu; `dl agent set autopilot|claude-code|opencode|pi` changes it; `dl status` shows it. With no model on the box, dl opens Autopilot and says why.
+
+Each agent runs on the local model for that one run, and none of their own config files are read or written:
+
+| Agent | How dl points it at the model |
+|---|---|
+| Autopilot | its `vllm` provider, set by `dl model up` (as before) |
+| Claude Code | the engine's own Anthropic Messages API (vLLM 0.11.1+ and SGLang 0.5.9+ serve `/v1/messages`; every catalog image is newer): `ANTHROPIC_BASE_URL=http://127.0.0.1:PORT`, a dummy `ANTHROPIC_AUTH_TOKEN`, every model role (`ANTHROPIC_MODEL`, the opus/sonnet/haiku defaults, `CLAUDE_CODE_SUBAGENT_MODEL`) on the served model, `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. Your own `ANTHROPIC_*` variables are left out for that run (dl says which) |
+| OpenCode | `OPENCODE_CONFIG_CONTENT`: an `@ai-sdk/openai-compatible` provider at `http://127.0.0.1:PORT/v1` with the served model, its context and output limits, chosen as the model. It ranks above your own config files for that run. With OpenCode 2, dl adds `--standalone`, so a private server reads it instead of the shared background one |
+| Pi | a one-run extension (`pi -e FILE`, in a private temporary folder removed afterwards) that registers the endpoint as an OpenAI-compatible provider with the served model and its limits, then `--provider dl-local --model MODEL`. Your `~/.pi` settings, sign-ins and extensions stay as they are |
+
+The output limit each agent is told is a quarter of the context, at most 32,000 tokens. No free tier sign-in is needed and no free tier key is used: the model is the box's own, on 127.0.0.1. (`dl claude` is the other way round: Claude Code on the free tier.) Codex isn't offered yet.
+
 #### Team chat: dl ui
 
 `dl ui` runs [Open WebUI](https://github.com/open-webui/open-webui) (v0.12.5, pinned by digest) in Docker as your team's chat, talking to every `dl model` deployment on this machine. It listens on `127.0.0.1:4800` only. Your team reaches it over HTTPS only: a private link on your Tailscale network. There is no plain-HTTP network mode.
@@ -365,7 +389,7 @@ dl ui status · dl ui logs -f · dl ui down [--purge]
 - **It follows the models:** after `dl model up`, `update`, `rollback` or `down`, a running chat picks up the change by itself, with the same link and accounts.
 - **After logout and reboot:** everything keeps running. Open WebUI runs with `--restart unless-stopped`, a model gets the same policy once it passes its tests (one that failed is kept stopped for inspection), tailscaled keeps `tailscale serve --bg`'s config, and Docker and tailscaled start at boot.
 - **Settings:** dl sets them on every start (`ENABLE_PERSISTENT_CONFIG=false`), so changes made in the Admin Panel's settings last until the next restart; accounts, chats and model access stay in the `dl-ui-data` volume. Off: Ollama, web search, image generation, community sharing, browser-added connections, Hugging Face downloads and the version check (`OFFLINE_MODE`), analytics (`SCARF_NO_ANALYTICS`, `DO_NOT_TRACK`, `ANONYMIZED_TELEMETRY=false`).
-- **`dl status` on a GPU box** starts with what runs there: each model (port, healthy or not), the team chat (its link, and how many wait for approval when dl has an admin key), the agent server, and Tailscale (signed in, HTTPS on). Plain `dl` prints the same lines before it opens the agent.
+- **`dl status` on a GPU box** starts with what runs there: each model (port, healthy or not), the coding agent plain `dl` opens, the team chat (its link, and how many wait for approval when dl has an admin key), the agent server, and Tailscale (signed in, HTTPS on). Plain `dl` prints the same lines before it opens the agent.
 - **Next:** a guided invite step after the admin's first sign-in; a public link and your own domain; sign-in with Google or Microsoft through Open WebUI's OIDC support.
 
 ### On the server

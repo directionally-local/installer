@@ -1,3 +1,4 @@
+import { dirname, join } from "node:path";
 import { pendingSignUps, publicUrl, readUiState, uiStatePath, UI_CONTAINER, UI_SPEC_LABEL } from "./chat-ui.js";
 import { containerRunning, inspectContainer } from "./model-runtime.js";
 import { localFetch, modelApiBase, type FetchModel } from "./model-smoke.js";
@@ -5,6 +6,8 @@ import { describeAccess, modelStatePath, readDeployments, type InstallState } fr
 import type { System } from "./system.js";
 import { HTTPS_CERTS_URL, tailscaleState } from "./tailscale.js";
 import { palette } from "./ui.js";
+import { parseAgentChoice } from "./laptop/agent-choice.js";
+import { AGENTS, type AgentId } from "./laptop/local-agents.js";
 
 /**
  * What a GPU box runs, in a few lines: for `dl status`, and printed by plain `dl` before it does
@@ -20,6 +23,8 @@ export interface BoxSummaryOptions {
   color?: boolean;
   /** The server install (dl up), when there is one. */
   serverState?: InstallState;
+  /** The box's saved coding agent; agent.json beside the model's state unless replaced. */
+  agentChoice?: () => Promise<AgentId | undefined>;
 }
 
 export interface BoxRow { ok: boolean | undefined; label: string; detail: string }
@@ -41,6 +46,9 @@ export async function boxRows(options: BoxSummaryOptions): Promise<BoxRow[] | un
       detail: `${active.id} · port ${active.port} · ${healthy ? "healthy" : running ? "not answering · dl model status" : "stopped · dl model status"}` });
   }
   if (!names.length) rows.push({ ok: false, label: "Model", detail: "none · dl model up" });
+  // The coding agent plain dl opens here (agent-choice.ts).
+  const agent = (await (options.agentChoice ?? (async () => parseAgentChoice(await system.readFile(join(dirname(statePath), "agent.json")))))().catch(() => undefined)) ?? "autopilot";
+  rows.push({ ok: undefined, label: "Coding agent", detail: `${AGENTS[agent].label}${agent === "autopilot" ? " (default)" : names.length ? " on the model" : " · needs a model"} · dl agent to change` });
   if (chat) {
     const running = (await inspectContainer(system, UI_CONTAINER, UI_SPEC_LABEL))?.running === true;
     const pending = running ? await pendingSignUps({ fetch: call }, chat) : undefined;
