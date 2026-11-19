@@ -168,6 +168,11 @@ export interface RequestRecord {
   upstreamOutcome?: UpstreamOutcome;
   /** Sent with a server key (dlk_, dl's server mode) rather than a sign-in's access token. */
   viaKey?: boolean;
+  /**
+   * The coding agent other than Autopilot that sent it, through dl (`dl claude`: "claude-code");
+   * unset for Autopilot. Counts only: the admin view's breakdown and the allowance share.
+   */
+  harness?: string;
   /** The weekly dollar budget it was charged to (the requested model's); unset: the served model's. */
   family?: Family;
 }
@@ -777,6 +782,11 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   // Prompt and completion tokens (free and paid) per person per day, for the admin home's usage chart.
   ["daily_activity", "prompt_tokens", "INTEGER NOT NULL DEFAULT 0"],
   ["daily_activity", "completion_tokens", "INTEGER NOT NULL DEFAULT 0"],
+  // Requests from another coding agent through dl (`dl claude`): which one ("claude-code"); NULL is Autopilot.
+  ["requests", "harness", "TEXT"],
+  // ... and per person per day, how many requests and charged tokens came from such agents.
+  ["daily_activity", "harness_requests", "INTEGER NOT NULL DEFAULT 0"],
+  ["daily_activity", "harness_tokens", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 /** Days of `daily_activity` whose DeepSeek cost is filled in from the request log when the column is added. */
@@ -971,17 +981,20 @@ export class DirectoryObject extends DurableObject {
       deepseekCostUsd?: number;
       promptTokens?: number;
       completionTokens?: number;
+      harnessRequests?: number;
+      harnessTokens?: number;
     },
   ): void {
     this.ctx.storage.sql.exec(
-      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd, paid_cost_usd, credit_usd, sessions, deepseek_cost_usd, prompt_tokens, completion_tokens)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd, paid_cost_usd, credit_usd, sessions, deepseek_cost_usd, prompt_tokens, completion_tokens, harness_requests, harness_tokens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (day, github_id) DO UPDATE SET
          requests = requests + excluded.requests, events = events + excluded.events, sessions = sessions + excluded.sessions,
          charged_tokens = charged_tokens + excluded.charged_tokens, cost_usd = cost_usd + excluded.cost_usd,
          paid_cost_usd = paid_cost_usd + excluded.paid_cost_usd, credit_usd = credit_usd + excluded.credit_usd,
          deepseek_cost_usd = deepseek_cost_usd + excluded.deepseek_cost_usd,
-         prompt_tokens = prompt_tokens + excluded.prompt_tokens, completion_tokens = completion_tokens + excluded.completion_tokens`,
+         prompt_tokens = prompt_tokens + excluded.prompt_tokens, completion_tokens = completion_tokens + excluded.completion_tokens,
+         harness_requests = harness_requests + excluded.harness_requests, harness_tokens = harness_tokens + excluded.harness_tokens`,
       Math.floor(at / DAY_MS),
       githubId,
       change.requests,
@@ -994,6 +1007,8 @@ export class DirectoryObject extends DurableObject {
       change.deepseekCostUsd ?? 0,
       change.promptTokens ?? 0,
       change.completionTokens ?? 0,
+      change.harnessRequests ?? 0,
+      change.harnessTokens ?? 0,
     );
   }
 
@@ -1454,6 +1469,19 @@ export class DirectoryObject extends DurableObject {
         .exec<{ github_id: number; n: number }>("SELECT github_id, SUM(sessions) AS n FROM daily_activity WHERE day >= ? GROUP BY github_id", weekStart(now) / DAY_MS)
         .toArray()
         .map((row) => [row.github_id, row.n]),
+    );
+  }
+
+  /** Requests and charged tokens from other coding agents through dl (`dl claude`) this week, per person who sent any. */
+  async weekHarnessUsage(now: number): Promise<Map<number, { requests: number; tokens: number }>> {
+    return new Map(
+      this.ctx.storage.sql
+        .exec<{ github_id: number; requests: number; tokens: number }>(
+          "SELECT github_id, SUM(harness_requests) AS requests, SUM(harness_tokens) AS tokens FROM daily_activity WHERE day >= ? GROUP BY github_id HAVING SUM(harness_requests) > 0",
+          weekStart(now) / DAY_MS,
+        )
+        .toArray()
+        .map((row) => [row.github_id, { requests: row.requests, tokens: row.tokens }]),
     );
   }
 
@@ -2275,8 +2303,8 @@ export class DirectoryObject extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         `INSERT INTO requests (github_id, is_admin, at, model, prompt_tokens, completion_tokens, cached_tokens, charged_tokens, cost_usd, status, latency_ms, paid,
-                               upstream, credit_usd, ttfb_ms, ttft_ms, upstream_error, upstream_outcome, via_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                               upstream, credit_usd, ttfb_ms, ttft_ms, upstream_error, upstream_outcome, via_key, harness)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         record.githubId,
         record.isAdmin ? 1 : 0,
         record.at,
@@ -2296,6 +2324,7 @@ export class DirectoryObject extends DurableObject {
         record.upstreamError ? 1 : 0,
         outcome,
         record.viaKey ? 1 : 0,
+        record.harness ?? null,
       );
       const admin = record.isAdmin ? 1 : 0;
       // Three buckets: admins; paid usage (Pro, top-ups); and free usage, the only one the caps count.
@@ -2344,6 +2373,7 @@ export class DirectoryObject extends DurableObject {
           deepseekCostUsd: free && (record.family ?? familyOf(record.model)) === "deepseek" ? record.costUsd : 0,
           promptTokens: record.promptTokens,
           completionTokens: record.completionTokens,
+          ...(record.harness ? { harnessRequests: 1, harnessTokens: record.chargedTokens } : {}),
         });
       }
       this.ctx.storage.sql.exec(

@@ -120,6 +120,10 @@ export const RUNTIME_SETTINGS = {
   userEmails: { kind: "flag", env: "USER_EMAILS" },
   /** Free tokens inside dl only: chat requests without session events are refused (app.ts). */
   dlOnly: { kind: "flag", env: "DL_ONLY" },
+  /** Free tokens in other coding agents launched by dl (`dl claude`); false refuses them (harness_not_allowed). */
+  allowOtherHarnesses: { kind: "flag", env: "ALLOW_OTHER_HARNESSES" },
+  /** The share of the weekly free allowance (and the trial) other coding agents may use, 0 to 1. */
+  otherHarnessShare: { kind: "weight", env: "OTHER_HARNESS_SHARE" },
   /** The owner's email about access requests: "each" (one per request), "daily" (in the daily digest) or "off". */
   accessRequestAlerts: { kind: "alertMode", env: "ACCESS_REQUEST_ALERTS" },
 } as const;

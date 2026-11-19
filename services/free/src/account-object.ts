@@ -33,6 +33,31 @@ export function parseServerKey(key: string): { githubId: number; id: string; sec
   return Number.isSafeInteger(githubId) ? { githubId, id: match[2]!, secret: match[3]! } : undefined;
 }
 
+/**
+ * Harness keys: what `dl claude` hands Claude Code. `dlh_<githubId>_<id>_<secret>`, minted from a
+ * sign-in's access token for one dl session, bound to that sign-in session (signing out ends it),
+ * and short-lived: it expires HARNESS_KEY_TTL_MS after it was made or last refreshed. dl refreshes
+ * it while Claude Code runs and revokes it when it exits, so it never outlives dl by much.
+ */
+const HARNESS_KEY = /^dlh_([1-9][0-9]{0,15})_([a-z0-9]{12})_([A-Za-z0-9_-]{43})$/;
+export const HARNESS_KEY_TTL_MS = 15 * 60_000;
+/** Live harness keys per account: one per running `dl claude`. */
+export const MAX_HARNESS_KEYS = 10;
+/** The coding agents other than Autopilot dl can launch on free tokens. */
+export const HARNESSES = ["claude-code"] as const;
+export type Harness = (typeof HARNESSES)[number];
+
+export function parseHarnessKey(key: string): { githubId: number; id: string; secret: string } | undefined {
+  const match = HARNESS_KEY.exec(key);
+  if (!match) return undefined;
+  const githubId = Number(match[1]);
+  return Number.isSafeInteger(githubId) ? { githubId, id: match[2]!, secret: match[3]! } : undefined;
+}
+
+export type CreateHarnessKeyResult =
+  | { ok: true; id: string; key: string; expiresAt: number }
+  | { ok: false; code: "not_invited" | "suspended" | "blocked" | "harness_key_limit" };
+
 export interface ServerKeyView {
   id: string;
   name: string;
@@ -189,6 +214,14 @@ export interface Limits {
    * Undefined: grandfathered (or the trial is off), the weekly allowance alone.
    */
   trialTokens?: number;
+  /**
+   * Requests from another coding agent launched by dl (`dl claude`) see only this share (0 to 1)
+   * of the weekly allowance: every token pool, both dollar budgets and the trial are scaled by it,
+   * while what the week (and the trial) has used is counted in full. So such requests stop once the
+   * account as a whole has used the share; Autopilot's own requests keep the rest. Undefined: 1.
+   * Top-ups are not scaled.
+   */
+  harnessShare?: number;
 }
 
 export interface BillingState {
@@ -235,6 +268,14 @@ const SCHEMA = [
      key_hash     TEXT NOT NULL,
      created_at   INTEGER NOT NULL,
      last_used_at INTEGER
+   )`,
+  `CREATE TABLE IF NOT EXISTS harness_keys (
+     id         TEXT PRIMARY KEY,
+     harness    TEXT NOT NULL,
+     key_hash   TEXT NOT NULL,
+     sid        TEXT,
+     created_at INTEGER NOT NULL,
+     expires_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS revoked_sessions (
      sid        TEXT PRIMARY KEY,
@@ -706,7 +747,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
       sql.exec("DELETE FROM revoked_sessions WHERE expires_at <= ?", input.now);
       for (const sid of input.sids) {
         sql.exec("INSERT INTO revoked_sessions (sid, expires_at) VALUES (?, ?) ON CONFLICT(sid) DO UPDATE SET expires_at = MAX(expires_at, excluded.expires_at)", sid, input.until);
+        // Harness keys minted from that sign-in end with it (they can outlive the record above).
+        sql.exec("DELETE FROM harness_keys WHERE sid = ?", sid);
       }
+      if (input.notBefore !== undefined) sql.exec("DELETE FROM harness_keys WHERE sid IS NULL");
       if (input.notBefore !== undefined) {
         sql.exec("INSERT INTO meta (key, value) VALUES ('not_before', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(input.notBefore));
       }
@@ -759,11 +803,61 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return found;
   }
 
-  /** Deletes every key; returns how many there were. */
+  /** Deletes every server key (and every harness key); returns how many server keys there were. */
   async revokeAllKeys(): Promise<number> {
     const count = await this.keyCount();
     this.ctx.storage.sql.exec("DELETE FROM server_keys");
+    this.ctx.storage.sql.exec("DELETE FROM harness_keys");
     return count;
+  }
+
+  /** Mints a harness key for one dl session (see HARNESS_KEY). The secret is returned here once. */
+  async createHarnessKey(input: { harness: Harness; sid: string | undefined; now: number }): Promise<CreateHarnessKeyResult> {
+    const row = this.#row();
+    if (!row) return { ok: false, code: "not_invited" };
+    if (row.status === "blocked") return { ok: false, code: "blocked" };
+    if (row.status === "suspended") return { ok: false, code: "suspended" };
+    const sql = this.ctx.storage.sql;
+    sql.exec("DELETE FROM harness_keys WHERE expires_at <= ?", input.now);
+    const live = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM harness_keys").toArray()[0]?.n ?? 0;
+    if (live >= MAX_HARNESS_KEYS) return { ok: false, code: "harness_key_limit" };
+    const id = [...crypto.getRandomValues(new Uint8Array(6))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const secret = randomToken();
+    const expiresAt = input.now + HARNESS_KEY_TTL_MS;
+    sql.exec("INSERT INTO harness_keys (id, harness, key_hash, sid, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)", id, input.harness, await sha256Hex(secret), input.sid ?? null, input.now, expiresAt);
+    return { ok: true, id, key: `dlh_${row.github_id}_${id}_${secret}`, expiresAt };
+  }
+
+  /** Pushes a live harness key's expiry out again; undefined when it is unknown or expired. */
+  async refreshHarnessKey(id: string, now: number): Promise<number | undefined> {
+    const sql = this.ctx.storage.sql;
+    const found = sql.exec<{ expires_at: number }>("SELECT expires_at FROM harness_keys WHERE id = ?", id).toArray()[0];
+    if (!found || found.expires_at <= now) return undefined;
+    const expiresAt = now + HARNESS_KEY_TTL_MS;
+    sql.exec("UPDATE harness_keys SET expires_at = ? WHERE id = ?", expiresAt, id);
+    return expiresAt;
+  }
+
+  /** Deletes one harness key; false when there was none. */
+  async revokeHarnessKey(id: string): Promise<boolean> {
+    const found = this.ctx.storage.sql.exec("SELECT 1 FROM harness_keys WHERE id = ?", id).toArray().length > 0;
+    if (found) this.ctx.storage.sql.exec("DELETE FROM harness_keys WHERE id = ?", id);
+    return found;
+  }
+
+  /**
+   * The account behind a live harness key, its harness and the sign-in session it was minted
+   * from; undefined when the key is unknown, wrong, expired, or its sign-in session was revoked.
+   */
+  async verifyHarnessKey(id: string, secret: string, now: number): Promise<{ githubId: number; login: string; harness: Harness; sid?: string } | undefined> {
+    const row = this.#row();
+    const key = this.ctx.storage.sql
+      .exec<{ key_hash: string; harness: string; sid: string | null; expires_at: number }>("SELECT key_hash, harness, sid, expires_at FROM harness_keys WHERE id = ?", id)
+      .toArray()[0];
+    if (!row || !key || key.expires_at <= now || !timingSafeEqual(await sha256Hex(secret), key.key_hash)) return undefined;
+    if (!(HARNESSES as readonly string[]).includes(key.harness)) return undefined;
+    if (key.sid !== null && this.ctx.storage.sql.exec("SELECT 1 FROM revoked_sessions WHERE sid = ?", key.sid).toArray().length > 0) return undefined;
+    return { githubId: row.github_id, login: row.login, harness: key.harness as Harness, ...(key.sid !== null ? { sid: key.sid } : {}) };
   }
 
   /** The account behind a server key, or undefined when the key is unknown or revoked. */
@@ -891,13 +985,15 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const pro = plan === "pro";
     // Pro replaces the free allowance (no referral bonus: that is free tokens); grants apply to free.
     const bonus = pro ? 0 : Math.max(0, limits.bonusTokens ?? 0);
-    const pools = this.#pools(row, now, limits, plan, bonus);
+    const share = limits.harnessShare === undefined ? 1 : Math.min(1, Math.max(0, limits.harnessShare));
+    const unscaled = this.#pools(row, now, limits, plan, bonus);
+    const pools = scalePools(unscaled, share);
     const mine = pools[pool];
     const family = familyOfPool(pool);
-    const budgets = this.#budgets(row, now, limits, pro, bonus, pools.luna.tokensPerWeek);
+    const budgets = scaleBudgets(this.#budgets(row, now, limits, pro, bonus, unscaled.luna.tokensPerWeek), share);
     const { usdPerWeek, spentUsd: spent } = budgets[family];
     const spendLeft = usdPerWeek === null || spent < usdPerWeek;
-    const trial = this.#trial(row, limits);
+    const trial = scaleTrial(this.#trial(row, limits), share);
     // On the free plan the trial is a limit like the week's: `remaining` is the smaller of the two.
     const own = row && spendLeft ? mine.remaining : 0;
     const remaining = trial && plan === "free" && own !== 0 ? Math.min(own ?? Number.MAX_SAFE_INTEGER, trial.remaining) : own;
@@ -1011,4 +1107,34 @@ export class AccountObject extends DurableObject<AccountEnv> {
     }
     return out;
   }
+}
+
+/** `harnessShare` (see Limits): each token pool's weekly tokens scaled, what is used counted in full. */
+function scalePools(pools: Record<Pool, PoolAllowance>, share: number): Record<Pool, PoolAllowance> {
+  if (share === 1) return pools;
+  const out = {} as Record<Pool, PoolAllowance>;
+  for (const pool of POOLS) {
+    const p = pools[pool];
+    const tokensPerWeek = p.tokensPerWeek === null ? null : Math.floor(p.tokensPerWeek * share);
+    out[pool] = { ...p, tokensPerWeek, remaining: tokensPerWeek === null ? null : Math.max(0, tokensPerWeek - p.usedThisWeek - p.reserved) };
+  }
+  return out;
+}
+
+/** `harnessShare`: both weekly dollar budgets scaled; null (no cap) stays null. */
+function scaleBudgets(budgets: Record<Family, FamilyBudget>, share: number): Record<Family, FamilyBudget> {
+  if (share === 1) return budgets;
+  const out = {} as Record<Family, FamilyBudget>;
+  for (const family of FAMILIES) {
+    const b = budgets[family];
+    out[family] = { ...b, usdPerWeek: b.usdPerWeek === null ? null : Math.round(b.usdPerWeek * share * 1e6) / 1e6 };
+  }
+  return out;
+}
+
+/** `harnessShare`: the trial's tokens scaled, what it has used counted in full. */
+function scaleTrial(trial: TrialState | null, share: number): TrialState | null {
+  if (!trial || share === 1) return trial;
+  const tokens = Math.floor(trial.tokens * share);
+  return { ...trial, tokens, remaining: Math.max(0, tokens - trial.used - trial.reserved), ended: tokens - trial.used < MIN_OUTPUT_TOKENS };
 }

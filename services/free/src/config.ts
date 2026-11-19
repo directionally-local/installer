@@ -226,6 +226,17 @@ export interface FreeConfig {
    */
   dlOnly: boolean;
   /**
+   * Free tokens in other coding agents launched by dl (`dl claude`: Claude Code), ALLOW_OTHER_HARNESSES,
+   * default on; also a runtime setting. Off: their requests get 403 `harness_not_allowed`.
+   */
+  allowOtherHarnesses: boolean;
+  /**
+   * The share (0 to 1) of a person's weekly free allowance, trial included, that other coding
+   * agents (`dl claude`) may use: their requests are held to the allowance scaled by it, counted
+   * against everything the week has used. OTHER_HARNESS_SHARE, default 0.5; also a runtime setting.
+   */
+  otherHarnessShare: number;
+  /**
    * The owner's email about access requests (/request in dl), ACCESS_REQUEST_ALERTS: "each" (one
    * per request, the default), "daily" (counted in the daily digest instead) or "off". Also a
    * runtime setting.
@@ -309,6 +320,8 @@ export const DEFAULTS = {
   openAdmission: false,
   requireGithubActivity: true,
   dlOnly: true,
+  allowOtherHarnesses: true,
+  otherHarnessShare: 0.5,
   accessRequestAlerts: "each" as AccessRequestAlerts,
   /**
    * OpenRouter's cache-read price over its input price for deepseek/deepseek-v4.1-flash-1017,
@@ -482,6 +495,8 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     userEmails: flag(env.USER_EMAILS, true, "USER_EMAILS"),
     userEmailsToAdmins: flag(env.USER_EMAILS_TO_ADMINS, false, "USER_EMAILS_TO_ADMINS"),
     dlOnly: flag(env.DL_ONLY, DEFAULTS.dlOnly, "DL_ONLY"),
+    allowOtherHarnesses: flag(env.ALLOW_OTHER_HARNESSES, DEFAULTS.allowOtherHarnesses, "ALLOW_OTHER_HARNESSES"),
+    otherHarnessShare: share(env.OTHER_HARNESS_SHARE, DEFAULTS.otherHarnessShare, "OTHER_HARNESS_SHARE"),
     accessRequestAlerts: accessRequestAlerts(env.ACCESS_REQUEST_ALERTS),
   };
 }

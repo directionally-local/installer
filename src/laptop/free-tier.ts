@@ -71,7 +71,7 @@ function base64Url(text: string): Uint8Array {
 }
 
 /** The service origin Autopilot uses: AUTOPILOT_DL_FREE_URL, else the provider's saved base URL, else the default. */
-function serviceOrigin(env: Env, savedBaseUrl: unknown): string | undefined {
+export function serviceOrigin(env: Env, savedBaseUrl: unknown): string | undefined {
   const raw = env.AUTOPILOT_DL_FREE_URL?.trim() || (typeof savedBaseUrl === "string" ? savedBaseUrl.trim() : "") || FREE_TIER_DEFAULT_URL;
   const origin = raw.replace(/\/+$/, "").replace(/\/v1$/, "");
   return /^https?:\/\/[^\s/]+$/i.test(origin) ? origin : undefined;

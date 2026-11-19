@@ -81,6 +81,8 @@ describe("runtime settings (units)", () => {
       luminalFirstByteTimeoutSeconds: 30,
       userEmails: true,
       dlOnly: true,
+      allowOtherHarnesses: true,
+      otherHarnessShare: 0.5,
       accessRequestAlerts: "each",
     });
   });

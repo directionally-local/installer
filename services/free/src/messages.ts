@@ -126,3 +126,37 @@ export const CREDIT_EXHAUSTED_MESSAGE = "Free tokens are paused while we top up.
 export const UPSTREAM_BUSY_MESSAGE = "The free tier is busy right now; retrying…";
 export const UPSTREAM_UNAVAILABLE_MESSAGE = "The free tier's model provider is having trouble right now; retrying…";
 export const UPSTREAM_TIMEOUT_MESSAGE = "The free tier's model provider didn't answer in time; retrying…";
+
+// ─── Other coding agents through dl (`dl claude`) ───────────────────────────
+
+/** A harness key that expired, was revoked, or whose sign-in ended (401 invalid_harness_key). */
+export const HARNESS_KEY_EXPIRED_MESSAGE = "This dl claude session's free tier key has expired. Quit Claude Code and run dl claude again.";
+
+/** The kill switch (`allowOtherHarnesses` off): 403 harness_not_allowed. */
+export const HARNESS_NOT_ALLOWED_MESSAGE =
+  "Free tokens in Claude Code are switched off for now. Free tokens still work in dl (Autopilot), and Claude Code works with your own Anthropic account.";
+
+/**
+ * Claude Code's share of the week (or of the trial) is used up while the account still has free
+ * usage left for Autopilot (402 harness_limit). `share` is 0 to 1.
+ */
+export function harnessLimitMessage(share: number, resetsAt: string | undefined, plan: "free" | "pro" = "free"): string {
+  const part = share >= 1 ? "all" : share <= 0 ? "none" : `${Math.round(share * 100)}%`;
+  const when = resetsAt ? ` It resets at ${resetsAt}.` : "";
+  return plan === "pro"
+    ? `Claude Code through dl gets ${part} of your Pro allowance, and that part is used up.${when} The rest works in dl (Autopilot): run dl.`
+    : `Claude Code through dl gets ${part} of your free allowance, and that part is used up.${when} Your remaining free usage works in dl (Autopilot): run dl. Or get dl Pro: run dl and type /upgrade.`;
+}
+
+/**
+ * A refusal written for Autopilot, reworded for another coding agent: dl's slash commands are
+ * typed in dl, not in that agent.
+ */
+export function forHarness(message: string): string {
+  if (message === DL_ONLY_MESSAGE) return "Free tokens in Claude Code work only while it runs from dl claude. Quit Claude Code and run dl claude again, or use your own Anthropic account.";
+  return message
+    .replace(/: \/upgrade$/, ": run dl and type /upgrade")
+    .replace(/Type \/request in dl/g, "Run dl and type /request")
+    .replace(/switch with \/model, or get dl Pro\./, "get dl Pro: run dl and type /upgrade.")
+    .replace(/use your own key: \/provider\./, "use Claude Code with your own Anthropic account.");
+}
