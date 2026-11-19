@@ -97,7 +97,9 @@ On your laptop:
                  --gpus 0,1 (only these GPUs), --port PORT, --context TOKENS,
                  --image IMAGE (up/update/--plan: this container image instead of the catalog's,
                  e.g. vllm/vllm-openai:v0.34.0rc2; same flags; update keeps it unless given again),
-                 --skip-evals (update: switch without running dl evals)
+                 --skip-evals (update: switch without running dl evals),
+                 --engine vllm|optimized (up: answer the engine question for models the
+                 optimized engine serves; runs without a terminal use the open-source engine)
   dl evals set "COMMAND"  your own eval command; dl model update runs it on the old and new model
                           and switches only if the new one passes and scores at least the old
                           score minus --threshold (0.02). --results GLOB: where it writes scores
@@ -251,6 +253,7 @@ export async function main(
         workspace: { type: "string" },
         "allow-internet": { type: "boolean" },
         "skip-evals": { type: "boolean" },
+        engine: { type: "string" },
         threshold: { type: "string" },
         results: { type: "string" },
         timeout: { type: "string" },
@@ -572,6 +575,7 @@ export async function main(
             ...(values.image !== undefined ? { image: values.image } : {}),
             ...(values.workspace !== undefined ? { workspace: values.workspace } : {}), ...(values["allow-internet"] ? { allowInternet: true } : {}),
             ...(values["skip-evals"] ? { skipEvals: true } : {}),
+            ...(values.engine !== undefined ? { engine: values.engine } : {}),
             // dl model attach -- -c: the rest goes to Autopilot.
             ...(action === "attach" ? { attachArgs: args } : {}) });
         }

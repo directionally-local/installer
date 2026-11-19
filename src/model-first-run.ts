@@ -1,5 +1,5 @@
 import { fitGpus, gpuCounts, MODEL_CATALOG, type GpuSize, type ModelRecipe } from "./model-catalog.js";
-import { configureProvider, logPathOf, modelCommand, showHardware, type ModelCommandOptions } from "./model-command.js";
+import { configureProvider, engineStep, logPathOf, modelCommand, showHardware, type ModelCommandOptions } from "./model-command.js";
 import { modelApiBase, SmokeError } from "./model-smoke.js";
 import { checkGpuDocker, containerRunning, detectHardware, type Hardware } from "./model-runtime.js";
 import { modelStatePath, readModelState } from "./state.js";
@@ -17,7 +17,9 @@ import { PromptCancelled } from "./prompt.js";
  *    whether it was tested on real hardware. Only one that fits can be started; when only one
  *    fits, it is picked and the line says why. A retry (Autopilot's "Retry") names the model
  *    and skips the picker.
- * 3. `modelCommand("up", [id])` non-interactively (default context and port): live progress,
+ * 3. The engine choice for a model the optimized engine serves (model-engine-choice.ts), the
+ *    same step plain `dl model up` asks; a "stop here" there ends the setup as cancelled.
+ * 4. `modelCommand("up", [id])` non-interactively (default context and port): live progress,
  *    smoke tests, and the vllm provider written to Autopilot's config.
  *
  * A model this machine already serves is reused: the provider is pointed at it.
@@ -230,6 +232,10 @@ export async function firstRunModelUp(options: FirstRunModelUpOptions): Promise<
     const picked = await pickModel(options, hardware);
     if (!("id" in picked)) return picked;
     try {
+      // The engine choice, once (model-engine-choice.ts): not again on a retry of the same model.
+      if (options.model !== picked.id && await engineStep(options, picked, hardware.gpus) === "stop") {
+        return { ok: false, errorType: "cancelled", message: "Cancelled.", model: picked.id };
+      }
       const code = await (options.modelUp ?? modelCommand)("up", [picked.id], { ...options, statePath, interactive: false, hardwareShown: true });
       if (code === 130) return { ok: false, errorType: "cancelled", message: "Cancelled.", model: picked.id };
       if (code !== 0) return { ok: false, errorType: "other", message: `dl model up exited with ${code}.`, model: picked.id };

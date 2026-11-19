@@ -54,6 +54,11 @@ export interface ModelRecipe {
    * containing the fix, repository:tag), which `--image` can pick.
    */
   caveats?: ReadonlyArray<{ computeCaps?: readonly string[]; text: string; advice?: string; fixedIn?: readonly string[] }>;
+  /**
+   * The optimized engine (set up by our team) serves this model: `dl model up` then asks which
+   * engine to use (model-engine-choice.ts). Set from OPTIMIZED_ENGINE_FAMILIES, not by hand.
+   */
+  optimizedEngine?: boolean;
 }
 
 /** Sizes from the model's files and docs, for the preflight. Each value says where it comes from. */
@@ -248,8 +253,14 @@ const MULTI_GPU: readonly ModelRecipe[] = [
     ],
   },
 ];
+/**
+ * Model families the optimized engine serves, as catalog id prefixes: the one list to change.
+ * Every catalog entry whose id starts with one of these gets `optimizedEngine: true`.
+ */
+export const OPTIMIZED_ENGINE_FAMILIES: readonly string[] = ["deepseek", "glm", "gpt-oss"];
+
 /** First is the default pick: qwen-new answers without a thinking phase, so it is the safer start. */
-export const MODEL_CATALOG: readonly ModelRecipe[] = [
+const CATALOG: readonly ModelRecipe[] = [
   { id: "qwen-new", repo: "Qwen/Qwen3-4B-Instruct-2507", minVramMiB: 16384, gpuMemoryUtilization: 0.4, image: IMAGE,
     flags: ["--tool-call-parser", "hermes", "--enable-auto-tool-choice", "--max-model-len", "32768"], defaultContext: 32768 },
   { id: "qwen-old", repo: "Qwen/Qwen3-4B", minVramMiB: 12288, gpuMemoryUtilization: 0.4, image: IMAGE,
@@ -258,6 +269,9 @@ export const MODEL_CATALOG: readonly ModelRecipe[] = [
     flags: ["--tool-call-parser", "glm47", "--enable-auto-tool-choice", "--reasoning-parser", "glm47", "--max-model-len", "8192", "--quantization", "fp8"], defaultContext: 8192 },
   ...MULTI_GPU,
 ];
+
+export const MODEL_CATALOG: readonly ModelRecipe[] = CATALOG.map((entry) =>
+  OPTIMIZED_ENGINE_FAMILIES.some((family) => entry.id.startsWith(family)) ? { ...entry, optimizedEngine: true } : entry);
 
 /** The part of a GPU the catalog's fit check needs. */
 export interface GpuSize { index: number; totalMiB: number }

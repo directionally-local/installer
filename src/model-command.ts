@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { autopilotConfigFile } from "./laptop/free-tier.js";
+import { autopilotConfigFile, freeTierAccount } from "./laptop/free-tier.js";
+import { chooseEngine, offersOptimizedEngine, type EngineChoiceOutcome, type PilotFetch } from "./model-engine-choice.js";
 import { fittingModels, gpuCounts, recipe, type ModelRecipe } from "./model-catalog.js";
 import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Gpu, type Hardware, type LaunchExtras, containerName, maxContext, recipeFor } from "./model-runtime.js";
 import { chooseParallelism, type ParallelPlan } from "./model-parallel.js";
@@ -60,6 +61,13 @@ export interface ModelCommandOptions {
   evalFs?: ResultsFs;
   /** For tests: promptfoo, which runs the eval data (dl evals set --data). */
   evalPromptfoo?: Promptfoo;
+  /** --engine: "optimized", or the open-source engine ("vllm", "sglang", "open-source"); up only. */
+  engine?: string;
+  /** For tests: the sign-in email the engine questions prefill, and the pilot request's fetch. */
+  signInEmail?: () => Promise<string | undefined>;
+  pilotFetch?: PilotFetch;
+  /** For tests; defaults to process.env (CI never asks the engine question). */
+  env?: NodeJS.ProcessEnv;
 }
 
 /** The run log a failed `dl model` command wrote, when it wrote one. */
@@ -127,6 +135,37 @@ export function needsText(model: ModelRecipe): string {
   if (fewest === 1 && !model.minTotalVramMiB) return `${Math.ceil(model.minVramMiB / 1024)} GB of GPU VRAM`;
   const total = Math.ceil((model.minTotalVramMiB ?? model.minVramMiB) / 1024);
   return `${fewest === 1 ? "1 GPU" : `${fewest} GPUs`} with ${Math.ceil(model.minVramMiB / 1024)} GB each, ${total} GB in total (runs on ${[...counts].reverse().join(", ")} GPUs)`;
+}
+
+/** --engine's value: the optimized engine, the open-source one, or undefined (ask). */
+export function engineFlag(text: string | undefined): "optimized" | "open-source" | undefined {
+  if (text === undefined) return undefined;
+  const value = text.trim().toLowerCase();
+  if (value === "optimized") return "optimized";
+  if (value === "vllm" || value === "sglang" || value === "open-source") return "open-source";
+  throw new Error(`--engine is vllm (the catalog's open-source engine) or optimized, not "${text}".`);
+}
+
+/**
+ * The engine step after the model is picked (model-engine-choice.ts): asked only on a terminal,
+ * outside CI and --dry-run, for a model the optimized engine serves; --engine answers it.
+ * "stop" when the person asked for the optimized engine and chose not to continue now.
+ */
+export async function engineStep(options: Omit<ModelCommandOptions, "interactive"> & { interactive?: boolean }, model: ModelRecipe, gpus: readonly Gpu[]): Promise<EngineChoiceOutcome> {
+  const wanted = engineFlag(options.engine);
+  if (wanted === "optimized" && !offersOptimizedEngine(model)) throw new Error(`${model.id} isn't offered on the optimized engine yet; run it without --engine (${engine(model.engine).label}).`);
+  if (wanted === "open-source" || !offersOptimizedEngine(model)) return "continue";
+  const env = options.env ?? process.env;
+  if (!(options.interactive ?? options.ui.interactive) || options.system.dryRun || env.CI) {
+    if (wanted === "optimized") throw new Error("--engine optimized asks three questions: run dl model up on a terminal.");
+    return "continue";
+  }
+  return chooseEngine({
+    ui: options.ui, prompter: options.prompter, model, gpus,
+    signInEmail: options.signInEmail ?? (async () => (await freeTierAccount({ env }))?.email),
+    ...(wanted === "optimized" ? { start: "questions" as const } : {}),
+    ...(options.pilotFetch ? { fetch: options.pilotFetch } : {}),
+  });
 }
 
 /** Models that fit count every usable GPU (or the --gpus subset), not just the largest one. */
@@ -445,6 +484,10 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     return 2;
   }
   if (options.skipEvals && action !== "update") throw new Error("--skip-evals goes with dl model update.");
+  if (options.engine !== undefined) {
+    if (action !== "up") throw new Error("--engine goes with dl model up.");
+    engineFlag(options.engine);
+  }
   if (options.image !== undefined) {
     if (action !== "up" && action !== "update") throw new Error(`--image goes with dl model up and dl model update${action === "rollback" ? "; rollback restores the previous deployment's image" : ""}.`);
     parseImageRef(options.image);
@@ -554,6 +597,8 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     ? { id: previous!.id, repo: previous!.repo, minVramMiB: previous!.minVramMiB, gpuMemoryUtilization: previous!.gpuMemoryUtilization ?? 0.9, image: previous!.image, flags: previous!.flags,
       ...(previous!.env ? { env: previous!.env } : {}), ...(previous!.engine ? { engine: previous!.engine } : {}), defaultContext: previous!.context }
     : await selectModel(options, args[0], usable);
+  // Which engine serves it, before anything downloads or starts.
+  if (action === "up" && await engineStep(options, chosen, hardware.gpus) === "stop") { ui.finish(); return 0; }
   // The image: --image, else (an update of the same engine) the current deployment's --image,
   // else the catalog's. Rollback restarts the previous deployment's image.
   const sameEngine = old !== undefined && (old.engine ?? "vllm") === (chosen.engine ?? "vllm");

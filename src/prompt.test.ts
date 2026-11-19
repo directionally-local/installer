@@ -234,3 +234,90 @@ describe("ScriptedPrompter.select", () => {
     assert.deepEqual(await new ScriptedPrompter({ Server: "root@x" }).select("Server", SERVERS), { value: "another", text: "root@x" });
   });
 });
+
+describe("TtyPrompter.edit", () => {
+  const ASK = "  Work email  from your GitHub sign-in, Enter to keep\n  › ";
+
+  it("starts with the prefill; Enter keeps it and leaves the answered prompt", async () => {
+    const t = fakeTerminal();
+    const answer = t.prompter.edit(ASK, "maya@acme.ai");
+    await waitFor(() => t.out().includes("maya@acme.ai"));
+    assert.deepEqual(screen(t.out()), ["  Work email  from your GitHub sign-in, Enter to keep", "  › maya@acme.ai▏"]);
+    t.type("\r");
+    assert.equal(await answer, "maya@acme.ai");
+    assert.deepEqual(screen(t.out()), ["  Work email  from your GitHub sign-in, Enter to keep", "  › maya@acme.ai"]);
+    assert.deepEqual(t.rawModes, [true, false]);
+  });
+
+  it("edits the prefill: Backspace, Ctrl-U and typing", async () => {
+    const t = fakeTerminal();
+    const answer = t.prompter.edit(ASK, "8× B300");
+    await waitFor(() => t.out().includes("B300"));
+    t.type("\x7f\x7f\x7f\x7fH100");
+    await tick();
+    t.type("\x15sam@x.io\r");
+    assert.equal(await answer, "sam@x.io");
+  });
+
+  it("Esc returns null and erases the question", async () => {
+    const t = fakeTerminal();
+    const answer = t.prompter.edit(ASK, "maya@acme.ai");
+    await waitFor(() => t.out().includes("maya@acme.ai"));
+    t.type("\x1b");
+    assert.equal(await answer, null);
+    assert.deepEqual(screen(t.out()), []);
+  });
+
+  it("Ctrl-C cancels", async () => {
+    const t = fakeTerminal();
+    const answer = t.prompter.edit(ASK, "");
+    await waitFor(() => t.out().includes("›"));
+    t.type("\x03");
+    await assert.rejects(answer, PromptCancelled);
+  });
+
+  it("without a raw terminal: a plain line, Enter on nothing keeps the prefill", async () => {
+    const t = fakeTerminal(false);
+    const answer = t.prompter.edit(ASK, "maya@acme.ai");
+    t.type("\n");
+    assert.equal(await answer, "maya@acme.ai");
+  });
+
+  it("ScriptedPrompter: \"<esc>\" goes back, \"\" keeps the prefill", async () => {
+    const scripted = new ScriptedPrompter({ Email: "", Company: "<esc>" });
+    assert.equal(await scripted.edit("Email", "a@b.co"), "a@b.co");
+    assert.equal(await scripted.edit("Company", ""), null);
+  });
+});
+
+describe("select: an accent and notes below the label", () => {
+  const ENGINES: SelectOption[] = [
+    { value: "optimized", label: "Optimized engine", accent: "(55% cheaper per token)", detail: "same speed as the model's official API · set up by our team · recommended", detailBelow: true },
+    { value: "open-source", label: "Open-source engine (vLLM)", detail: "free · starts now · what most providers run", detailBelow: true },
+  ];
+
+  it("draws each option on two lines with a blank line between, and moves the cursor", async () => {
+    const t = fakeTerminal();
+    const picked = t.prompter.select("  How should this GPU serve glm-flash?\n  › ", ENGINES, 1);
+    await waitFor(() => t.out().includes("what most providers run"));
+    assert.deepEqual(screen(t.out()), [
+      "  How should this GPU serve glm-flash?  ↑/↓ to move · Enter to pick",
+      "    Optimized engine (55% cheaper per token)",
+      "    same speed as the model's official API · set up by our team · recommended",
+      "",
+      "  › Open-source engine (vLLM)",
+      "    free · starts now · what most providers run",
+    ]);
+    t.type("\x1b[A\r");
+    assert.deepEqual(await picked, { value: "optimized" });
+    assert.deepEqual(screen(t.out()), ["  How should this GPU serve glm-flash?  ↑/↓ to move · Enter to pick", "  › Optimized engine"]);
+  });
+
+  it("the numbered fallback shows the accent and the note under the label", async () => {
+    const t = fakeTerminal(false);
+    const picked = t.prompter.select("  How should this GPU serve glm-flash?\n  › ", ENGINES);
+    t.type("\n");
+    assert.deepEqual(await picked, { value: "optimized" });
+    assert.match(t.out(), /1  Optimized engine \(55% cheaper per token\)\n     same speed as the model's official API/);
+  });
+});

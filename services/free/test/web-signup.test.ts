@@ -247,7 +247,10 @@ describe("the install code", () => {
     assert.equal(body.plan, "free");
     assert.equal(body.login, "installer");
     // The tokens are a normal sign-in: /v1/me works, and the refresh token rotates.
-    assert.equal((await service.request("GET", "/v1/me", { token: body.access_token })).status, 200);
+    const me = await service.request("GET", "/v1/me", { token: body.access_token });
+    assert.equal(me.status, 200);
+    // The contact email from the details step, which dl prefills in its forms.
+    assert.equal(((await me.json()) as { email: string | null }).email, "installer.520@example.com");
     assert.equal((await service.request("POST", "/v1/token/refresh", { body: { refresh_token: body.refresh_token } })).status, 200);
     const again = await service.request("POST", "/v1/install-code/exchange", { body: { code } });
     assert.equal(again.status, 400);
