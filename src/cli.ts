@@ -13,6 +13,7 @@ import { cancel, connect, describeError, laptopHome, laptopReady, pull, run, run
 import { autopilotAuth, autopilotOnPath, bundledAutopilotVersion, findAutopilot, type AutopilotAuth } from "./laptop/autopilot.js";
 import { FREE_TIER_PROVIDER, freeTierAccount, freeTierLine, type FreeTierAccount } from "./laptop/free-tier.js";
 import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
+import { claudeCommand } from "./laptop/claude.js";
 import { loadRemotes, resolveTarget } from "./laptop/config.js";
 import { dlUpdate } from "./laptop/self-update.js";
 import { PAIRED_NAME } from "./local/layout.js";
@@ -59,6 +60,10 @@ On your laptop:
                           started from this folder there
   dl --from-claude-code   continue this folder's latest Claude Code conversation here, in a new
                           Autopilot session (read on this computer; asks first)
+  dl claude [ARGS]        your own Claude Code on free tokens (DeepSeek), through dl's free tier
+                          sign-in; ARGS go to claude as they are. Needs claude installed; free
+                          tokens work in it only while dl claude runs, on a smaller share of the
+                          weekly allowance than Autopilot. Your ~/.claude settings aren't touched
   dl claude-code hook install   when Claude Code hits its usage or rate limit, show how to continue
                           in dl (adds a hook to ~/.claude/settings.json after asking; backs it up)
   dl claude-code hook remove    take that hook out again
@@ -192,6 +197,8 @@ export interface MainOptions {
   autopilotAuth?: () => Promise<AutopilotAuth | undefined>;
   /** The free tier account (`dl status`, when Autopilot uses the free tier); reads Autopilot's sign-in and GET /v1/me unless replaced. */
   freeTierAccount?: () => Promise<FreeTierAccount | undefined>;
+  /** `dl claude`; the real one unless replaced. */
+  claude?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** `dl uninstall` on a server and on a laptop; the real ones unless replaced. */
   uninstall?: { server?: typeof uninstall; laptop?: typeof laptopUninstall };
 }
@@ -204,6 +211,8 @@ export async function main(
   },
   options: MainOptions = {},
 ): Promise<number> {
+  // `dl claude ARGS`: every argument after `claude` is Claude Code's, flags included.
+  if (argv[0] === "claude") return await (options.claude ?? claudeCommand)(argv.slice(1), io);
   // Everything after `--` belongs to Autopilot (bare dl on this computer): `dl -- --session ID`.
   const split = splitPassthrough(argv);
   const passthrough = split.passthrough;

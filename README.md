@@ -105,6 +105,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl` | Talk to an agent: a new session each time. With nothing set up, plain `autopilot` in this folder (its first run picks the provider); nothing is installed. On this computer: plain `autopilot` in this folder, any folder, with your own Autopilot config (`dl -- ARGS` passes ARGS to it). On a server: inside a GitHub repository, that repository's agent session; anywhere else, a chat; it keeps running when you leave. |
 | `dl -c`, `dl --continue` | On this computer, `autopilot -c`. On a server, reopen the latest conversation started from this folder there. |
 | `dl --from-claude-code` | Continue this folder's latest Claude Code conversation in a new Autopilot session on this computer (`autopilot --from-claude-code`): it asks first, then sends your last request, the files changed, commands run and Claude's last message as the first message. The transcript is read here and goes only to your model. |
+| `dl claude [ARGS]` | Your own Claude Code on dl's free tokens, served by DeepSeek. See [Claude Code with free tokens: dl claude](#claude-code-with-free-tokens-dl-claude). |
 | `dl claude-code hook install` / `remove` | Opt in to a Claude Code hook that, when Claude Code stops on a usage or rate limit, shows `Claude Code hit its limit. Continue in dl: dl --from-claude-code` as a terminal notification and window title. Shows the entry and asks before adding it to `~/.claude/settings.json`, backs the file up first, and merges into it; `remove` takes out only dl's entry. |
 | `dl setup` | Set up or repair where background tasks run. Safe to re-run. `--identity FILE` names the SSH key to use. |
 | `dl new` | The same as bare `dl`: a new session here. Kept as an alias for a release. |
@@ -129,6 +130,38 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl uninstall [--purge] [--yes]` | Remove dl from this computer. Lists what it will remove and asks first (`--yes` doesn't ask; with no terminal it needs `--yes`). Signs out of the free tier, stops agents set up with `dl setup` on this computer, takes dl's hook out of Claude Code's settings, removes the two lines the install script added to your shell startup file (keeping a `.dl-uninstall.bak` copy), the `dl` links in `~/.local/bin` and `~/bin` that point into `~/.directionallylocal`, `~/.config/directionallylocal`, and `~/.directionallylocal` itself (or `DL_HOME`). `--purge` also removes Autopilot's settings, sign-ins and history (`~/.config/autopilot`, `~/.local/share/autopilot`, `~/.local/state/autopilot`); projects' `.autopilot` folders stay. |
 
 Run options: `--server NAME`, `-m/--model MODEL`, `--repo OWNER/NAME`, `--detach`.
+
+### Claude Code with free tokens: dl claude
+
+`dl claude` starts the Claude Code you already have, on the free tier instead of your Anthropic
+account. Every argument after `claude` goes to it unchanged (`dl claude -p "fix the test"`,
+`dl claude --resume`), and its exit code is dl's.
+
+- **Sign-in:** the same free tier sign-in as `dl` and Autopilot. If you aren't signed in, it runs
+  that sign-in first (which also makes the free tier Autopilot's provider; `/provider` changes it).
+- **Claude Code itself:** dl never installs it. Without `claude` on your PATH it prints the
+  official install command (`curl -fsSL https://claude.ai/install.sh | bash`) and stops.
+- **The model:** DeepSeek V4.1 Flash for every request, whatever model Claude Code names. GPT-6
+  stays in Autopilot.
+- **Only while dl claude runs:** dl gets a key that lasts 15 minutes, refreshes it while Claude
+  Code runs and ends it when Claude Code exits. It's in Claude Code's environment only, never on a
+  command line. Free tokens don't work in Claude Code started any other way.
+- **A smaller share:** Claude Code may use part of your weekly free allowance (half, by default),
+  and of the new-user trial; Autopilot keeps the rest. dl Pro and top-ups work as in Autopilot.
+- **Your settings stay yours:** nothing under `~/.claude` is read or changed. For this run only,
+  Claude Code gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`,
+  `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`,
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`.
+  Your own `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` and similar variables are left out of
+  Claude Code's environment for that run, and dl says which. If your `~/.claude/settings.json`
+  sets these in its `env` block or sets `apiKeyHelper`, those win in Claude Code; remove them to
+  use `dl claude`.
+- **What dl sends:** a session start and end (counts only, as Autopilot does), and a refresh every
+  few minutes. Prompts and code go to the model, never into dl's logs.
+- **Not supported:** images and PDFs (DeepSeek can't read them; Claude Code is told they were left
+  out), Anthropic's server tools such as web search, and prompt caching controls (the provider
+  caches on its own).
 
 ### On your own GPUs
 

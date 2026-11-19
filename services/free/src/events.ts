@@ -26,6 +26,8 @@ const SHORT_TEXT: Record<string, number> = {
   errorCode: 64,
   autopilotVersion: 32,
   os: 32,
+  // The coding agent dl launched other than Autopilot (`dl claude`: "claude-code").
+  harness: 32,
 };
 const COUNTS = ["turns", "durationMs"] as const;
 const MAX_TOOLS = 100;

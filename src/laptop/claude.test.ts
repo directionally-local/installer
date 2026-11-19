@@ -1,0 +1,296 @@
+import { EventEmitter } from "node:events";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it } from "node:test";
+import assert from "node:assert/strict";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { CLAUDE_INSTALL, CLAUDE_MODEL, claudeCommand, claudeEnv, type ClaudeDeps } from "./claude.js";
+import { freeTierAccessToken } from "./free-tier-token.js";
+import { main } from "../cli.js";
+
+const ORIGIN = "https://free.test";
+const KEY = `dlh_100_abcdefabcdef_${"s".repeat(43)}`;
+
+function capture() {
+  let out = "";
+  let err = "";
+  return { io: { out: (t: string) => void (out += t), err: (t: string) => void (err += t) }, out: () => out, err: () => err };
+}
+
+interface Call {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: any;
+}
+
+/** A fake service: mints the key, takes events, refreshes and revokes; records every call. */
+function fakeService(mintStatus = 201, mintBody: unknown = { id: "abcdefabcdef", key: KEY, harness: "claude-code", expiresAt: "x", ttlSeconds: 900 }) {
+  const calls: Call[] = [];
+  const fetch = async (url: string, init: RequestInit): Promise<Response> => {
+    calls.push({ url, method: init.method ?? "GET", headers: Object.fromEntries(new Headers(init.headers).entries()), body: init.body ? JSON.parse(String(init.body)) : undefined });
+    if (url.endsWith("/v1/harness-keys")) return Response.json(mintBody, { status: mintStatus });
+    if (url.endsWith("/v1/events")) return Response.json({ accepted: 1 }, { status: 202 });
+    return Response.json({ ok: true });
+  };
+  return { calls, fetch };
+}
+
+/** A fake `claude`: records how it was started and exits as told. */
+function fakeSpawn(exit: { code?: number | null; signal?: NodeJS.Signals | null } = { code: 0 }) {
+  const started: Array<{ command: string; args: string[]; options: SpawnOptions }> = [];
+  const killed: string[] = [];
+  const spawn = (command: string, args: string[], options: SpawnOptions): ChildProcess => {
+    started.push({ command, args, options });
+    const child = new EventEmitter() as ChildProcess;
+    (child as unknown as { kill: (signal: string) => boolean }).kill = (signal: string) => {
+      killed.push(signal);
+      return true;
+    };
+    setImmediate(() => child.emit("exit", exit.code ?? null, exit.signal ?? null));
+    return child;
+  };
+  return { started, killed, spawn };
+}
+
+function deps(overrides: Partial<ClaudeDeps> = {}): ClaudeDeps {
+  return {
+    env: { PATH: "/usr/bin", HOME: "/home/alice" },
+    findClaude: async () => "/usr/local/bin/claude",
+    token: async () => ({ ok: true, origin: ORIGIN, accessToken: "access-1" }),
+    signIn: async () => {
+      throw new Error("no sign-in expected");
+    },
+    setInterval: () => ({}),
+    clearInterval: () => undefined,
+    onSignal: () => () => undefined,
+    ...overrides,
+  };
+}
+
+describe("dl claude", () => {
+  it("mints a harness key, sends session.start before Claude Code starts, runs claude with every argument and the free tier env, then ends the session", async () => {
+    const service = fakeService();
+    const child = fakeSpawn({ code: 0 });
+    let eventsAtSpawn = -1;
+    const spawn = (command: string, args: string[], options: SpawnOptions) => {
+      eventsAtSpawn = service.calls.filter((call) => call.url.endsWith("/v1/events")).length;
+      return child.spawn(command, args, options);
+    };
+    const { io, err } = capture();
+    const code = await claudeCommand(["-p", "fix the bug", "--model", "opus", "--", "x"], io, deps({ fetch: service.fetch, spawn }));
+    assert.equal(code, 0);
+    assert.equal(err(), "");
+
+    const [mint, start, end, revoke] = service.calls;
+    assert.deepEqual([mint!.method, mint!.url, mint!.headers.authorization, mint!.body], ["POST", `${ORIGIN}/v1/harness-keys`, "Bearer access-1", { harness: "claude-code" }]);
+    assert.equal(start!.url, `${ORIGIN}/v1/events`);
+    assert.equal(start!.headers.authorization, `Bearer ${KEY}`, "events go as the harness key");
+    assert.equal(start!.body.events[0].type, "session.start");
+    assert.match(start!.body.events[0].sessionId, /^dl-claude-/);
+    assert.equal(start!.body.events[0].props.harness, "claude-code");
+    assert.equal(eventsAtSpawn, 1, "session.start went out before Claude Code started");
+    const ends = [end!, revoke!].sort((a, b) => a.method.localeCompare(b.method));
+    assert.deepEqual([ends[0]!.method, ends[0]!.url], ["DELETE", `${ORIGIN}/v1/harness-keys/abcdefabcdef`]);
+    assert.equal(ends[1]!.body.events[0].type, "session.end");
+    assert.equal(ends[1]!.body.events[0].sessionId, start!.body.events[0].sessionId);
+    assert.equal(ends[1]!.body.events[0].props.exitReason, "exit");
+
+    const [run] = child.started;
+    assert.equal(run!.command, "/usr/local/bin/claude");
+    assert.deepEqual(run!.args, ["-p", "fix the bug", "--model", "opus", "--", "x"]);
+    assert.equal(run!.options.stdio, "inherit");
+    const env = run!.options.env as Record<string, string>;
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(env).filter(([name]) => name.startsWith("ANTHROPIC_") || name.startsWith("CLAUDE_CODE_"))),
+      {
+        ANTHROPIC_BASE_URL: `${ORIGIN}/anthropic`,
+        ANTHROPIC_AUTH_TOKEN: KEY,
+        ANTHROPIC_MODEL: CLAUDE_MODEL,
+        ANTHROPIC_DEFAULT_OPUS_MODEL: CLAUDE_MODEL,
+        ANTHROPIC_DEFAULT_SONNET_MODEL: CLAUDE_MODEL,
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: CLAUDE_MODEL,
+        ANTHROPIC_SMALL_FAST_MODEL: CLAUDE_MODEL,
+        CLAUDE_CODE_SUBAGENT_MODEL: CLAUDE_MODEL,
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+        CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",
+      },
+    );
+    assert.equal(env.HOME, "/home/alice", "the rest of the environment passes through");
+    assert.ok(!run!.args.some((arg) => arg.includes(KEY)), "the key is never on the command line");
+  });
+
+  it("passes Claude Code's exit code through, and 128+n for a signal", async () => {
+    for (const [exit, expected] of [[{ code: 3 }, 3], [{ code: null, signal: "SIGTERM" as const }, 143]] as const) {
+      const code = await claudeCommand([], capture().io, deps({ fetch: fakeService().fetch, spawn: fakeSpawn(exit).spawn }));
+      assert.equal(code, expected);
+    }
+  });
+
+  it("refreshes the key while Claude Code runs, and forwards SIGTERM to it", async () => {
+    const service = fakeService();
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    const handlers = new Map<string, () => void>();
+    let child: ReturnType<typeof fakeSpawn> | undefined;
+    const spawn = (command: string, args: string[], options: SpawnOptions) => {
+      // While Claude Code runs: the timers fire, then SIGTERM arrives.
+      for (const timer of timers) timer.fn();
+      queueMicrotask(() => handlers.get("SIGTERM")!());
+      return child!.spawn(command, args, options);
+    };
+    child = fakeSpawn({ code: null, signal: "SIGTERM" });
+    await claudeCommand([], capture().io, deps({
+      fetch: service.fetch,
+      spawn,
+      setInterval: (fn, ms) => {
+        timers.push({ fn, ms });
+        return {};
+      },
+      onSignal: (signal, handler) => {
+        handlers.set(signal, handler);
+        return () => handlers.delete(signal);
+      },
+    }));
+    assert.deepEqual(timers.map((timer) => timer.ms).sort((a, b) => a - b), [4 * 60_000, 6 * 3600_000]);
+    assert.ok(service.calls.some((call) => call.method === "POST" && call.url === `${ORIGIN}/v1/harness-keys/abcdefabcdef/refresh` && call.headers.authorization === `Bearer ${KEY}`));
+    assert.deepEqual(child.killed, ["SIGTERM"]);
+    assert.ok(handlers.has("SIGINT") === false, "handlers are removed after Claude Code exits");
+  });
+
+  it("leaves the person's ANTHROPIC_* variables out of Claude Code's environment only, and says so once", async () => {
+    const child = fakeSpawn();
+    const parent = { PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-ant-mine", ANTHROPIC_BASE_URL: "https://proxy.example", CLAUDE_CODE_USE_BEDROCK: "1", ANTHROPIC_BETAS: "x" };
+    const { io, err } = capture();
+    await claudeCommand([], io, deps({ env: parent, fetch: fakeService().fetch, spawn: child.spawn }));
+    const env = child.started[0]!.options.env as Record<string, string | undefined>;
+    assert.equal(env.ANTHROPIC_API_KEY, undefined);
+    assert.equal(env.CLAUDE_CODE_USE_BEDROCK, undefined);
+    assert.equal(env.ANTHROPIC_BASE_URL, `${ORIGIN}/anthropic`);
+    assert.equal(env.ANTHROPIC_BETAS, "x");
+    assert.equal(parent.ANTHROPIC_API_KEY, "sk-ant-mine", "dl's own environment is unchanged");
+    assert.equal(err(), "  dl claude: not passing ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, CLAUDE_CODE_USE_BEDROCK to Claude Code for this session (it runs on dl's free tier).\n");
+    assert.ok(!err().includes("sk-ant-mine"));
+  });
+
+  it("prints the official install command and stops when claude isn't on PATH", async () => {
+    const service = fakeService();
+    const child = fakeSpawn();
+    const { io, err } = capture();
+    const code = await claudeCommand([], io, deps({ findClaude: async () => undefined, fetch: service.fetch, spawn: child.spawn }));
+    assert.equal(code, 1);
+    assert.ok(err().includes(CLAUDE_INSTALL));
+    assert.equal(service.calls.length, 0);
+    assert.equal(child.started.length, 0);
+  });
+
+  it("runs the free tier sign-in first when not signed in, then carries on", async () => {
+    let signedIn = false;
+    const child = fakeSpawn();
+    const { io, out } = capture();
+    const code = await claudeCommand([], io, deps({
+      token: async () => (signedIn ? { ok: true, origin: ORIGIN, accessToken: "access-2" } : { ok: false, reason: "signed_out" }),
+      signIn: async () => (signedIn = true),
+      fetch: fakeService().fetch,
+      spawn: child.spawn,
+    }));
+    assert.equal(code, 0);
+    assert.match(out(), /Signing in first/);
+    assert.equal(child.started.length, 1);
+  });
+
+  it("stops without starting Claude Code when sign-in fails or the service refuses the key", async () => {
+    const child = fakeSpawn();
+    const { io, err } = capture();
+    assert.equal(await claudeCommand([], io, deps({ token: async () => ({ ok: false, reason: "signed_out" }), signIn: async () => false, spawn: child.spawn })), 1);
+    const refused = fakeService(403, { error: { code: "harness_not_allowed", message: "Free tokens in Claude Code are switched off for now." } });
+    assert.equal(await claudeCommand([], io, deps({ fetch: refused.fetch, spawn: child.spawn })), 1);
+    assert.match(err(), /switched off for now/);
+    assert.equal(child.started.length, 0);
+  });
+
+  it("never touches ~/.claude", async () => {
+    const home = await mkdtemp(join(tmpdir(), "dl-claude-home-"));
+    try {
+      await claudeCommand([], capture().io, deps({ env: { PATH: "/usr/bin", HOME: home }, fetch: fakeService().fetch, spawn: fakeSpawn().spawn }));
+      assert.deepEqual(await readdir(home), []);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("is reached from main with every argument after `claude`, flags included", async () => {
+    let got: string[] | undefined;
+    const code = await main(["claude", "--resume", "-p", "hi", "--help"], capture().io, { claude: async (args) => ((got = args), 7) });
+    assert.equal(code, 7);
+    assert.deepEqual(got, ["--resume", "-p", "hi", "--help"]);
+  });
+});
+
+describe("claudeEnv", () => {
+  it("lists only variables that were set", () => {
+    assert.deepEqual(claudeEnv({ ANTHROPIC_MODEL: "", PATH: "/bin" }, { origin: ORIGIN, key: KEY }).removed, []);
+  });
+});
+
+describe("the free tier access token for dl claude", () => {
+  let dir: string;
+  let file: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "dl-token-"));
+    file = join(dir, "config.json");
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const save = (saved: Record<string, unknown>) => writeFile(file, JSON.stringify({ provider: "directionally-local", model: "m", providers: { "directionally-local": saved, openrouter: { apiKey: "sk-or" } } }));
+
+  it("uses a fresh saved token as it is, without the network", async () => {
+    await save({ apiKey: "access-1", refreshToken: "refresh-1", expiresAt: 10_000_000 });
+    const token = await freeTierAccessToken({ env: {}, file, now: () => 1_000, fetch: async () => assert.fail("no refresh") });
+    assert.deepEqual(token, { ok: true, origin: "https://free.directionallylocal.com", accessToken: "access-1" });
+  });
+
+  it("refreshes an expired one and saves the new pair in place, keeping everything else", async () => {
+    await save({ apiKey: "old", refreshToken: "refresh-1", expiresAt: 1_000, baseUrl: "https://free.test/v1" });
+    const sent: unknown[] = [];
+    const token = await freeTierAccessToken({
+      env: {},
+      file,
+      now: () => 5_000,
+      fetch: async (url, init) => {
+        sent.push([url, JSON.parse(String(init.body))]);
+        return Response.json({ access_token: "access-2", refresh_token: "refresh-2", expires_in: 3600 });
+      },
+    });
+    assert.deepEqual(token, { ok: true, origin: "https://free.test", accessToken: "access-2" });
+    assert.deepEqual(sent, [["https://free.test/v1/token/refresh", { refresh_token: "refresh-1" }]]);
+    const config = JSON.parse(await readFile(file, "utf8"));
+    assert.deepEqual(config.providers["directionally-local"], { apiKey: "access-2", refreshToken: "refresh-2", expiresAt: 3_605_000, baseUrl: "https://free.test/v1" });
+    assert.deepEqual(config.providers.openrouter, { apiKey: "sk-or" });
+    assert.equal(config.model, "m");
+  });
+
+  it("takes the pair another process rotated to when the refresh lost the race", async () => {
+    await save({ apiKey: "old", refreshToken: "refresh-1", expiresAt: 1_000 });
+    const token = await freeTierAccessToken({
+      env: {},
+      file,
+      now: () => 5_000,
+      sleep: async () => undefined,
+      fetch: async () => {
+        await save({ apiKey: "theirs", refreshToken: "refresh-2", expiresAt: 9_000_000 });
+        return Response.json({ error: { code: "invalid_grant", message: "x" } }, { status: 400 });
+      },
+    });
+    assert.deepEqual(token, { ok: true, origin: "https://free.directionallylocal.com", accessToken: "theirs" });
+  });
+
+  it("is signed out with no saved sign-in, or a refused refresh token", async () => {
+    assert.deepEqual(await freeTierAccessToken({ env: {}, file }), { ok: false, reason: "signed_out" });
+    await save({ apiKey: "old", refreshToken: "refresh-1", expiresAt: 1_000 });
+    const refused = await freeTierAccessToken({ env: {}, file, now: () => 5_000, sleep: async () => undefined, fetch: async () => Response.json({ error: { code: "invalid_grant" } }, { status: 400 }) });
+    assert.deepEqual(refused, { ok: false, reason: "signed_out" });
+  });
+});

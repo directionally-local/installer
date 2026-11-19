@@ -740,6 +740,10 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `upstream_unavailable` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `upstream_timeout` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `dl_only` | chat (403) | none |
+| `harness_not_allowed` | `POST /v1/harness-keys`, `/anthropic/v1/messages` (403) | none: `allowOtherHarnesses` is off |
+| `harness_limit` | `/anthropic/v1/messages` (402) | `harness`, `share`, `resetsAt` (not for the trial), `offers`: Claude Code's share of the week or trial is used, the account's isn't |
+| `invalid_harness_key` | `/anthropic/v1/messages`, `/v1/events`, harness key refresh (401) | none: expired, revoked, or its sign-in ended |
+| `harness_key_limit` | `POST /v1/harness-keys` (409) | `max` |
 | `server_keys_unavailable` | `POST /v1/keys`, and any request with a server key (403) | none |
 | `not_invited` | API, and older sign-ins | none |
 
@@ -782,6 +786,8 @@ with who made it and when.
 | `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
 | `userEmails` | `USER_EMAILS` | true (sends only with the `USER_EMAIL` binding or `RESEND_API_KEY`) |
 | `dlOnly` | `DL_ONLY` | true (free tokens inside dl only; see below) |
+| `allowOtherHarnesses` | `ALLOW_OTHER_HARNESSES` | true: Claude Code through `dl claude` may use free tokens; false refuses it (`harness_not_allowed`) |
+| `otherHarnessShare` | `OTHER_HARNESS_SHARE` | 0.5: the share (0 to 1) of the weekly allowance and of the trial Claude Code may use (see below) |
 | `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request); `daily` (one line in the daily digest); `off` |
 | `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 50,000,000, as Full (0: no free tokens below Basic) |
 | `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
@@ -811,6 +817,65 @@ curl -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json'
   -d '{"weeklyTokens": 60000000, "globalWeeklyUsdCap": 300, "openAdmission": null}' \
   https://free.example.com/admin/config
 ```
+
+## Claude Code through dl claude
+
+`dl claude` runs the person's own Claude Code against this service. Two pieces:
+
+**Harness keys** (`src/account-object.ts`, `src/app.ts` `harnessKeys`). Short-lived keys for one
+`dl claude` run, `dlh_<githubId>_<id>_<secret>` (only the secret's SHA-256 is stored):
+
+| request | response |
+|---|---|
+| `POST /v1/harness-keys {"harness": "claude-code"}` (a signed-in access token only) | 201 `{id, key, harness, expiresAt, ttlSeconds: 900}` |
+| `POST /v1/harness-keys/:id/refresh` (the access token, or that key) | `{id, expiresAt}`: another 15 minutes |
+| `DELETE /v1/harness-keys/:id` (the access token, or that key) | `{id, revoked: true}` |
+
+A key expires 15 minutes after it was made or last refreshed; dl refreshes it every 4 minutes
+while Claude Code runs and deletes it when Claude Code exits. Signing out of the sign-in it was
+minted from ends it, as does an admin's revoke-tokens. At most 10 live per account
+(`harness_key_limit`). It works only on `/anthropic/v1/messages`, `count_tokens` and
+`/v1/events`; never on `/v1/chat/completions`, `/v1/me` or `/v1/keys`.
+
+**The Anthropic Messages endpoint** (`src/anthropic.ts`). dl sets
+`ANTHROPIC_BASE_URL=<service>/anthropic`, so Claude Code posts to `/anthropic/v1/messages?beta=true`
+with the key as `Authorization: Bearer` (`x-api-key` works too). The request is translated into
+a chat completions body for `deepseek/deepseek-v4.1-flash-1017` (whatever model it names: GPT-6
+is never served to Claude Code) and goes through `chat` like any other request: the same
+reservation and settlement, dollar budgets, trial, Pro and top-ups, queue, global caps, dl-only
+check and refusals. The answer comes back as an Anthropic `message`, or streamed as
+`message_start`, `ping`, `content_block_start` / `content_block_delta` (`text_delta`,
+`input_json_delta`, `thinking_delta`) / `content_block_stop`, `message_delta` (stop reason and
+usage, cache reads as `cache_read_input_tokens`) and `message_stop`. Stop reasons: `end_turn`,
+`tool_use`, `max_tokens`, `stop_sequence` (when the upstream says which stop string matched),
+`refusal`.
+
+- **Supported:** `system` (string or text blocks), text, `tool_use`, `tool_result` (string or
+  nested blocks, `is_error`), `tools` with `input_schema`, `tool_choice` (`auto`, `any`, `tool`,
+  `none`, `disable_parallel_tool_use`), `max_tokens`, `temperature`, `top_p`, `stop_sequences`,
+  `stream`. The model's reasoning comes back as thinking blocks when the request asked for
+  thinking, and thinking blocks sent back become `reasoning_content`.
+- **Dropped:** images and documents (replaced by a note saying they were left out: DeepSeek reads
+  neither), server tools such as web search, `metadata`, `top_k`, `cache_control`, `thinking`
+  budgets, `container`, `mcp_servers`.
+- **`count_tokens`** (`POST /anthropic/v1/messages/count_tokens`): an estimate, about 4 characters
+  a token over the system prompt, messages and tools as JSON. Never charged, never sent upstream.
+  Claude Code uses it only for its context meter and works without it.
+- **Errors** are Anthropic's shape, `{"type": "error", "error": {"type", "message", "code"}}`, with
+  our message (dl's slash commands reworded as "run dl and type /upgrade"). Transient upstream
+  errors keep 429/503 and `Retry-After`, which Claude Code retries; refusals a retry can't change
+  (a pause for everyone, a global budget) go out as 403 so it doesn't retry them.
+- **The share** (`otherHarnessShare`, 0.5): Claude Code's requests see the allowance scaled by it:
+  every token pool, both dollar budgets and the trial, while what the week (and the trial) used
+  is counted in full. So Claude Code stops once the account has used half its week, from any
+  client, and Autopilot keeps the other half (`harness_limit` says so). Past the whole allowance,
+  the usual codes. Top-ups aren't scaled.
+- **Session events:** dl sends `session.start` (before Claude Code starts, and every 6 hours) and
+  `session.end` with the harness key; the service stamps `props.harness = "claude-code"`. They
+  cover the dl-only check exactly as Autopilot's events do.
+- **Usage:** `requests.harness` is `claude-code` for these requests (counts only), and
+  `daily_activity` keeps `harness_requests` and `harness_tokens`. `GET /admin/people` shows
+  `otherHarnessThisWeek: {requests, tokens}` per person.
 
 ## Emails to users
 

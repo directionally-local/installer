@@ -88,6 +88,8 @@ People sign in with GitHub, then add an email address (one free account per emai
 - Separate weekly budgets for DeepSeek and GPT-6; when GPT-6's runs out, Autopilot offers DeepSeek (Autopilot 3.22.0, dl 0.30.0).
 - Admin: a plain-language home screen, a Health view, and tokens and users per provider (dl 0.24.0 to 0.30.0).
 
+- **In review:** Claude Code on free tokens with `dl claude`: DeepSeek only, while dl claude runs, on a smaller share of the weekly allowance and the trial, with a kill switch.
+
 **Not yet:** free tokens for background tasks and server sessions; other sign-ins.
 
 **Built as** a portable Workers app on Durable Objects with SQLite, per the installer's portable-services rules, so it also runs on Serverless Objects.
@@ -127,6 +129,7 @@ Each repository's release bot picks the number from commit types: a feature bump
 | 0.10–0.36 (shipped) | 0, lane, 1.5 | Every `dl` a new session and `dl -c`; plain Autopilot on laptops; the free tier first in setup; Hotcell pinned exactly; `dl model` (0.22 on), tested on one GPU; several GPUs, SGLang, preflight, `--plan`, `--image` and `--workspace` (0.31–0.33, untested on hardware); the new-user trial and dl Pro (0.36) |
 | 0.37.0 (shipped) | lane | Sign up on dl.new with a one-time install command that starts dl signed in; Autopilot 3.26.0 |
 | 0.38.0 (now) | 1.5 | `dl evals`, bring your command; `dl model update` gates on it, side by side |
+| next | lane | `dl claude`: Claude Code on free tokens (DeepSeek), after the free tier service with `/anthropic/v1/messages` is deployed |
 | next | 1.5 | `dl evals`, bring your data, run with promptfoo |
 | next | 1.5 | `dl ui`: Open WebUI next to the model, `dl ui share`, `dl ui invite` |
 | then | 1.5 | Opt-in traffic capture, replayed during `dl model update` |
