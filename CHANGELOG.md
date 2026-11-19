@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.40.0](https://github.com/directionally-local/installer/compare/v0.39.0...v0.40.0) (2026-11-19)
+
+
+### Features
+
+* dl claude runs Claude Code on the free tier (DeepSeek) ([#281](https://github.com/directionally-local/installer/issues/281)) ([ac9d257](https://github.com/directionally-local/installer/commit/ac9d2576dc38927df59262805cffca1c1a3b9e42))
+* **model:** engine choice step for models the optimized engine serves ([#279](https://github.com/directionally-local/installer/issues/279)) ([4f43d24](https://github.com/directionally-local/installer/commit/4f43d249f63b0f02d8d2f70b3bbae16405432361))
+
+
+### Bug Fixes
+
+* **free:** exempt Pro from otherHarnessShare ([#282](https://github.com/directionally-local/installer/issues/282)) ([8c9b621](https://github.com/directionally-local/installer/commit/8c9b621d5f1bac1d99bde8599c93485aec7819ff))
+
 ## [0.39.0](https://github.com/directionally-local/installer/compare/v0.38.0...v0.39.0) (2026-11-18)
 
 
