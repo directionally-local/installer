@@ -158,7 +158,7 @@ describe("Anthropic requests → chat completions", () => {
 
   it("refuses a body without messages, or with an unknown role", () => {
     assert.equal(toChatRequest({}, OPTIONS).ok, false);
-    assert.equal(toChatRequest({ messages: [{ role: "system", content: "x" }] }, OPTIONS).ok, false);
+    assert.equal(toChatRequest({ messages: [{ role: "tool", content: "x" }] }, OPTIONS).ok, false);
   });
 });
 
@@ -321,5 +321,24 @@ describe("errors and token counts", () => {
     const body = { system: "x".repeat(400), messages: [{ role: "user", content: "y".repeat(400) }] };
     const estimate = estimateInputTokens(body);
     assert.ok(estimate > 200 && estimate < 260, String(estimate));
+  });
+});
+
+describe("system messages inside messages", () => {
+  it("keeps a system-role message (as Claude Code sends) as a system message instead of refusing", () => {
+    const out = toChatRequest(
+      { messages: [{ role: "system", content: [{ type: "text", text: "be brief" }] }, { role: "user", content: "hi" }], max_tokens: 10 },
+      { model: "deepseek/deepseek-v4.1-flash-1017", vision: false },
+    );
+    assert.equal(out.ok, true);
+    if (!out.ok) return;
+    const messages = out.body.messages as Array<{ role: string; content: unknown }>;
+    assert.deepEqual(messages[0], { role: "system", content: "be brief" });
+    assert.equal(messages[1]!.role, "user");
+  });
+
+  it("still refuses an unknown role", () => {
+    const out = toChatRequest({ messages: [{ role: "tool", content: "x" }] }, { model: "m", vision: false });
+    assert.equal(out.ok, false);
   });
 });

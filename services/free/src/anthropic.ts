@@ -55,7 +55,11 @@ export function toChatRequest(input: Json, options: AnthropicRequestOptions): Tr
     else if (role === "assistant") {
       const assistant = assistantMessage(message.content);
       if (assistant) messages.push(assistant);
-    } else return { ok: false, message: `messages: role must be "user" or "assistant" (got ${JSON.stringify(role ?? null)}).` };
+    } else if (role === "system") {
+      // Claude Code can put system text inside messages too (not only in `system`): keep it as a system message.
+      const text = systemText(message.content);
+      if (text) messages.push({ role: "system", content: text });
+    } else return { ok: false, message: `messages: role must be "user", "assistant" or "system" (got ${JSON.stringify(role ?? null)}).` };
   }
   const stream = input.stream === true;
   const body: Json = { model: options.model, messages, stream };
