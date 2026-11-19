@@ -4,7 +4,7 @@ import type { DirectoryObject } from "./directory-object.js";
 import { DEFAULT_MODEL, FAMILIES, POOLS, POOL_TOKENS, creditPrices, familyOfPool, modelById, type Family, type Pool } from "./models.js";
 import type { Upstream } from "./config.js";
 import type { Level } from "./admission.js";
-import { FALLBACK_USD_PER_MILLION_TOKENS, MIN_OUTPUT_TOKENS, costAtPrices, costOf, estimateCostUsd, planReservation } from "./quota.js";
+import { DEEPSEEK_MAX_OUTPUT_TOKENS, FALLBACK_USD_PER_MILLION_TOKENS, MAX_OUTPUT_TOKENS, MIN_OUTPUT_TOKENS, costAtPrices, costOf, estimateCostUsd, planReservation } from "./quota.js";
 import { weekEnd, weekStart } from "./week.js";
 
 /**
@@ -415,7 +415,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const estimate = (maxTokens: number) =>
       model ? estimateCostUsd(input.promptEstimate, maxTokens, model.prices) : ((Math.max(0, input.promptEstimate) + maxTokens) * FALLBACK_USD_PER_MILLION_TOKENS) / 1_000_000;
     let source: Source = "weekly";
-    let plan = planReservation(input.promptEstimate, input.requestedMaxTokens, weeklyRoom);
+    const outputCap = model?.family === "deepseek" ? Math.min(model.maxOutputTokens, DEEPSEEK_MAX_OUTPUT_TOKENS) : MAX_OUTPUT_TOKENS;
+    let plan = planReservation(input.promptEstimate, input.requestedMaxTokens, weeklyRoom, outputCap);
     let spendFull = false;
     if (plan && before.usdPerWeek !== null) {
       const inFlight = this.#inFlight("weekly", family);
@@ -424,14 +425,14 @@ export class AccountObject extends DurableObject<AccountEnv> {
     }
     if (!plan) {
       source = "topup";
-      plan = planReservation(input.promptEstimate, input.requestedMaxTokens, before.topupTokensLeft);
+      plan = planReservation(input.promptEstimate, input.requestedMaxTokens, before.topupTokensLeft, outputCap);
     }
     if (!plan) {
       // Dollar top-ups last, held like the dollar caps: what is spent plus the estimates in flight.
       // With nothing else in flight a request goes through while any of the balance is left.
       const credit = this.#creditLeft(input.now);
       const inFlight = this.#inFlight("credit");
-      const wanted = planReservation(input.promptEstimate, input.requestedMaxTokens, Number.MAX_SAFE_INTEGER);
+      const wanted = planReservation(input.promptEstimate, input.requestedMaxTokens, Number.MAX_SAFE_INTEGER, outputCap);
       if (wanted && credit > 0 && (inFlight.count === 0 || inFlight.usd + estimate(wanted.maxTokens) <= credit)) {
         source = "credit";
         plan = wanted;
@@ -439,7 +440,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
     }
     if (!plan) {
       // The trial is what stops it: it is the same for every model, so no other model can help.
-      if (trial && !input.limits.freeBlocked && !planReservation(input.promptEstimate, input.requestedMaxTokens, trial.remaining)) {
+      if (trial && !input.limits.freeBlocked && !planReservation(input.promptEstimate, input.requestedMaxTokens, trial.remaining, outputCap)) {
         return { ok: false, code: "trial_ended", allowance: before, trial };
       }
       // Whether DeepSeek's week still has room, so a GPT-6 refusal can point there instead of a dead end.

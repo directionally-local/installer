@@ -11,6 +11,8 @@ export { ALLOWED_MODELS } from "./models.js";
 
 /** The most output tokens one request may ask for. */
 export const MAX_OUTPUT_TOKENS = 32_768;
+/** DeepSeek is a thinking model whose reasoning counts as output: its cap matches its declared 65,536-token limit. */
+export const DEEPSEEK_MAX_OUTPUT_TOKENS = 65_536;
 /** A request that can't fit this many output tokens is refused rather than truncated to nothing. */
 export const MIN_OUTPUT_TOKENS = 256;
 /**
@@ -46,8 +48,8 @@ export interface ReservationPlan {
  * How much to reserve, given what's left. Undefined when even a minimal answer wouldn't fit:
  * the caller answers `quota_exceeded`.
  */
-export function planReservation(promptEstimate: number, requestedMaxTokens: number | undefined, remaining: number): ReservationPlan | undefined {
-  const wanted = Math.min(MAX_OUTPUT_TOKENS, requestedMaxTokens && requestedMaxTokens > 0 ? Math.floor(requestedMaxTokens) : MAX_OUTPUT_TOKENS);
+export function planReservation(promptEstimate: number, requestedMaxTokens: number | undefined, remaining: number, cap: number = MAX_OUTPUT_TOKENS): ReservationPlan | undefined {
+  const wanted = Math.min(cap, requestedMaxTokens && requestedMaxTokens > 0 ? Math.floor(requestedMaxTokens) : cap);
   const room = remaining - promptEstimate;
   const minimum = Math.min(MIN_OUTPUT_TOKENS, wanted);
   if (room < minimum) return undefined;
