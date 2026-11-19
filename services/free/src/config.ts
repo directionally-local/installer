@@ -233,7 +233,7 @@ export interface FreeConfig {
   /**
    * The share (0 to 1) of a person's weekly free allowance, trial included, that other coding
    * agents (`dl claude`) may use: their requests are held to the allowance scaled by it, counted
-   * against everything the week has used. OTHER_HARNESS_SHARE, default 0.5; also a runtime setting.
+   * against everything the week has used. Pro is exempt. OTHER_HARNESS_SHARE, default 0.5; also a runtime setting.
    */
   otherHarnessShare: number;
   /**

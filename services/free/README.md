@@ -787,7 +787,7 @@ with who made it and when.
 | `userEmails` | `USER_EMAILS` | true (sends only with the `USER_EMAIL` binding or `RESEND_API_KEY`) |
 | `dlOnly` | `DL_ONLY` | true (free tokens inside dl only; see below) |
 | `allowOtherHarnesses` | `ALLOW_OTHER_HARNESSES` | true: Claude Code through `dl claude` may use free tokens; false refuses it (`harness_not_allowed`) |
-| `otherHarnessShare` | `OTHER_HARNESS_SHARE` | 0.5: the share (0 to 1) of the weekly allowance and of the trial Claude Code may use (see below) |
+| `otherHarnessShare` | `OTHER_HARNESS_SHARE` | 0.5: the share (0 to 1) of the free weekly allowance and of the trial Claude Code may use; Pro is exempt (see below) |
 | `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request); `daily` (one line in the daily digest); `off` |
 | `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 50,000,000, as Full (0: no free tokens below Basic) |
 | `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
@@ -869,7 +869,8 @@ usage, cache reads as `cache_read_input_tokens`) and `message_stop`. Stop reason
   every token pool, both dollar budgets and the trial, while what the week (and the trial) used
   is counted in full. So Claude Code stops once the account has used half its week, from any
   client, and Autopilot keeps the other half (`harness_limit` says so). Past the whole allowance,
-  the usual codes. Top-ups aren't scaled.
+  the usual codes. Top-ups and Pro aren't scaled: a Pro subscriber gets the whole Pro allowance in
+  Claude Code.
 - **Session events:** dl sends `session.start` (before Claude Code starts, and every 6 hours) and
   `session.end` with the harness key; the service stamps `props.harness = "claude-code"`. They
   cover the dl-only check exactly as Autopilot's events do.

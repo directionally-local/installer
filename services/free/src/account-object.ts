@@ -219,7 +219,7 @@ export interface Limits {
    * of the weekly allowance: every token pool, both dollar budgets and the trial are scaled by it,
    * while what the week (and the trial) has used is counted in full. So such requests stop once the
    * account as a whole has used the share; Autopilot's own requests keep the rest. Undefined: 1.
-   * Top-ups are not scaled.
+   * Top-ups and Pro are not scaled: a Pro subscriber gets the whole Pro allowance.
    */
   harnessShare?: number;
 }
@@ -985,7 +985,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const pro = plan === "pro";
     // Pro replaces the free allowance (no referral bonus: that is free tokens); grants apply to free.
     const bonus = pro ? 0 : Math.max(0, limits.bonusTokens ?? 0);
-    const share = limits.harnessShare === undefined ? 1 : Math.min(1, Math.max(0, limits.harnessShare));
+    // Pro is exempt: a subscriber gets the whole Pro allowance in other coding agents too.
+    const share = pro || limits.harnessShare === undefined ? 1 : Math.min(1, Math.max(0, limits.harnessShare));
     const unscaled = this.#pools(row, now, limits, plan, bonus);
     const pools = scalePools(unscaled, share);
     const mine = pools[pool];
