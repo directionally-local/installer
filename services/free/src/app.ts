@@ -1657,7 +1657,7 @@ async function me(c: Ctx): Promise<Response> {
     login: identity.login,
     githubId: identity.githubId,
     /** The contact email given at sign-in (the caller's own), or null; dl prefills it in its forms. */
-    email: person?.email ?? null,
+    "email": person?.email ?? null,
     status: allowance.status,
     // No level here: publicly there is only Free and Pro (`plan`). The internal level shows only
     // in the budgets it sets.
