@@ -29,6 +29,8 @@ export interface FreeTierAccount {
   tokensPerWeek?: number;
   /** When the week's allowance comes back (ISO time). */
   resetsAt?: string;
+  /** The contact email given at sign-in (from /v1/me, when the service sends it). */
+  email?: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -109,7 +111,7 @@ async function readMe(url: string, token: string, options: FreeTierOptions): Pro
     signal: AbortSignal.timeout(options.timeoutMs ?? ME_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const body = (await response.json()) as { login?: unknown; allowance?: { remaining?: unknown; tokensPerWeek?: unknown; resetsAt?: unknown } };
+  const body = (await response.json()) as { login?: unknown; email?: unknown; allowance?: { remaining?: unknown; tokensPerWeek?: unknown; resetsAt?: unknown } };
   const allowance = body.allowance ?? {};
   const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined);
   const remaining = count(allowance.remaining);
@@ -119,6 +121,7 @@ async function readMe(url: string, token: string, options: FreeTierOptions): Pro
     ...(typeof body.login === "string" && GITHUB_LOGIN.test(body.login) ? { login: body.login } : {}),
     ...(remaining !== undefined && tokensPerWeek !== undefined ? { remaining, tokensPerWeek } : {}),
     ...(resetsAt ? { resetsAt } : {}),
+    ...(typeof body.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email) && body.email.length <= 254 ? { email: body.email } : {}),
   };
 }
 

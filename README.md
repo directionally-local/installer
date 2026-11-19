@@ -144,6 +144,7 @@ It needs an Nvidia driver, Docker, and the Nvidia container toolkit; `dl model u
 | `dl model status` | The running model, its address, the GPU and its free memory, and the last test results. |
 | `dl model bench` | Time to first token (p50 and p95) and decode speed with 1, 8 and 32 requests at once, plus the prefix cache hit rate from vLLM's logs. |
 | `dl model list` | Every deployment on this machine: name, model, engine, GPUs, port, status, and its sandbox if it has one. |
+| `dl model up [MODEL] [--engine vllm\|optimized]` | For a model the optimized engine serves (DeepSeek, GLM and gpt-oss entries), first ask how this GPU should serve it: the optimized engine (set up by our team: three questions, work email, company and GPUs, sent to our pilot inbox, then an offer to continue with vLLM for now) or the open-source engine (vLLM, or SGLang for SGLang entries), which is today's setup. `--engine` answers it; runs without a terminal, in CI or with `--dry-run` never ask and use the open-source engine. |
 | `dl model up MODEL --workspace DIR [--allow-internet]` | Also run Autopilot in a Hotcell sandbox that sees only `DIR` and reaches only the model. See [One box: the model and a sandboxed agent](#one-box-the-model-and-a-sandboxed-agent). |
 | `dl model attach [-- ARGS]` | Open Autopilot in that sandbox (`dl model attach -- -c` continues the last session). |
 | `dl model down` | Stop and remove the deployment's containers, and its sandbox and networks; `DIR` is kept. |

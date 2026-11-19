@@ -59,6 +59,8 @@ export function palette(enabled: boolean) {
     red: wrap("31", "39"),
     yellow: wrap("33", "39"),
     cyan: wrap("36", "39"),
+    /** Orange (256-colour 208), for the one phrase a screen wants noticed. */
+    accent: wrap("38;5;208", "39"),
   };
 }
 

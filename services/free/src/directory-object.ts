@@ -215,6 +215,8 @@ export type LevelSignalRow = Pick<PersonRow, (typeof LEVEL_SIGNAL_COLUMNS)[numbe
 export type RecheckRow = LevelSignalRow & Pick<PersonRow, "status" | "batch_flag" | "signals_at">;
 
 export interface PersonState {
+  /** The contact email given at sign-in; null when none. */
+  email: string | null;
   queue: QueuePlace | null;
   bonusTokens: number;
   /**
@@ -1386,13 +1388,15 @@ export class DirectoryObject extends DurableObject {
         signals_at: number | null;
         batch_flag: number;
         admitted_at: number;
-      }>("SELECT login, status, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at, batch_flag, admitted_at FROM people WHERE github_id = ?", githubId)
+        email: string | null;
+      }>("SELECT login, status, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at, batch_flag, admitted_at, email FROM people WHERE github_id = ?", githubId)
       .toArray()[0];
-    if (!person) return { queue: null, bonusTokens: 0, trialBonusTokens: 0, referral: null, blocked: false, level: "full", levelReason: null, batchFlagged: false, signals: null, outsideDl: false, admittedAt: null };
+    if (!person) return { email: null, queue: null, bonusTokens: 0, trialBonusTokens: 0, referral: null, blocked: false, level: "full", levelReason: null, batchFlagged: false, signals: null, outsideDl: false, admittedAt: null };
     const code = this.#ensureCode(githubId, person.login, now);
     const counting = countingPairs(sql, this.#pairs(githubId), now);
     const joined = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ? AND outcome = 'ok'", githubId).toArray()[0]?.n ?? 0;
     return {
+      email: person.email ?? null,
       queue: this.#place(githubId, now, policy),
       bonusTokens: bonuses(counting, policy).get(githubId) ?? 0,
       trialBonusTokens: trialBonuses(sql, policy, [githubId]).get(githubId) ?? 0,

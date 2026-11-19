@@ -181,7 +181,7 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
 
 ```jsonc
 {
-  "login": "alice", "githubId": 123, "status": "active",
+  "login": "alice", "githubId": 123, "email": "alice@example.com", "status": "active",  // email: given at sign-in, or null
   // The Luna pool and the GPT-6 budget, as older clients read them; `budgets` has both.
   "allowance": { "tokensPerWeek": 50000000, "usedThisWeek": 0, "remaining": 50000000,
                  "resetsAt": "2026-11-09T00:00:00.000Z", "usdPerWeek": 2, "spentUsdThisWeek": 0,

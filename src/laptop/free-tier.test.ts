@@ -73,6 +73,13 @@ describe("the free tier account in dl status", () => {
     }
   });
 
+  it("carries the sign-in email when /v1/me sends one (the engine questions prefill it), never a malformed one", async () => {
+    for (const [email, expected] of [["octo@example.com", "octo@example.com"], ["not an email", undefined], [42, undefined], [null, undefined]] as const) {
+      const { options } = stubs({ apiKey: ACCESS }, () => Response.json({ login: "octo", email }));
+      assert.equal((await freeTierAccount(options))?.email, expected);
+    }
+  });
+
   it("shows nothing when there is no sign-in to read", async () => {
     assert.equal(await freeTierAccount(stubs(undefined).options), undefined);
     assert.equal(await freeTierAccount(stubs({ refreshToken: "r" }).options), undefined);

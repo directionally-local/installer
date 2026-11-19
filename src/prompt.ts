@@ -8,6 +8,10 @@ export interface SelectOption {
   label: string;
   /** A dim note after the label. */
   detail?: string;
+  /** Words after the label in the accent colour, e.g. "(55% cheaper per token)". */
+  accent?: string;
+  /** Show `detail` on its own line under the label (a list of a few options with longer notes). */
+  detailBelow?: boolean;
   /**
    * Picking this option asks for text instead (e.g. "Another server" → user@host).
    * `prompt` is the styled prompt for the numbered fallback (ui.prompt(…)); `placeholder`
@@ -42,6 +46,11 @@ export interface Prompter {
   /** Hidden input for keys and tokens. */
   secret(question: string): Promise<string>;
   text(question: string): Promise<string>;
+  /**
+   * A line of text that starts as `initial` (editable; Enter keeps it). Null when Esc is
+   * pressed, so the caller can go back. Optional: without it callers use text(), with no Esc.
+   */
+  edit?(question: string, initial?: string): Promise<string | null>;
 }
 
 /** The terminal a prompt talks to: /dev/tty in real use, a fake in tests. */
@@ -124,11 +133,27 @@ export class TtyPrompter implements Prompter {
     return this.ask(question, false);
   }
 
+  async edit(question: string, initial = ""): Promise<string | null> {
+    const terminal = this.open();
+    const raw = typeof terminal.input.setRawMode === "function" && terminal.input.isTTY === true && this.env.TERM !== "dumb";
+    if (!raw) {
+      // A plain line: Esc can't be told apart here, so Enter on nothing keeps `initial`.
+      terminal.close();
+      const answer = await this.ask(question, false);
+      return answer === "" ? initial : answer;
+    }
+    return new LineEdit(terminal, question, initial, this.color, this.settleMs).run();
+  }
+
   /** The plain fallback: a numbered list, then a typed choice (Enter for the preselected one). */
   private async numbered(question: string, options: SelectOption[], start: number): Promise<SelectResult> {
     const c = palette(this.color);
-    const width = Math.max(...options.map((option) => option.label.length)) + 2;
-    const list = options.map((option, index) => `  ${c.cyan(String(index + 1))}  ${option.detail ? `${option.label.padEnd(width)} ${c.dim(option.detail)}` : option.label}`).join("\n");
+    const full = (option: SelectOption) => `${option.label}${option.accent ? ` ${option.accent}` : ""}`;
+    const width = Math.max(...options.map((option) => full(option).length)) + 2;
+    const shown = (option: SelectOption) => `${option.label}${option.accent ? ` ${c.accent(option.accent)}` : ""}`;
+    const list = options.map((option, index) => `  ${c.cyan(String(index + 1))}  ${option.detail
+      ? option.detailBelow ? `${shown(option)}\n     ${c.dim(option.detail)}` : `${shown(option)}${" ".repeat(width - full(option).length)} ${c.dim(option.detail)}`
+      : shown(option)}`).join("\n");
     const typed = options.find((option) => option.input);
     const range = options.length === 2 ? "1 or 2" : `1-${options.length}`;
     const hint = `${range}${typed ? `, or ${typed.input!.placeholder.split(",")[0]}` : ""} · Enter for ${start + 1}`;
@@ -372,12 +397,17 @@ class ArrowSelect {
       // The real cursor stays hidden (it sits below the list); draw one where typing goes.
       return [this.c.dim(`  ${option.label} · Esc to go back`), `${this.marker}${this.text}${this.caret}${placeholder}`];
     }
-    const width = Math.max(...this.options.map((option) => option.label.length)) + 2;
-    return this.options.map((option, index) => {
+    const full = (option: SelectOption) => `${option.label}${option.accent ? ` ${option.accent}` : ""}`;
+    const width = Math.max(...this.options.map((option) => full(option).length)) + 2;
+    return this.options.flatMap((option, index) => {
       const selected = index === this.cursor;
-      const label = option.detail ? option.label.padEnd(width) : option.label;
-      const line = `  ${selected ? this.c.cyan("›") : " "} ${selected ? this.c.bold(label) : label}`;
-      return this.fit(line, option.detail ? this.c.dim(option.detail) : "");
+      const label = selected ? this.c.bold(option.label) : option.label;
+      const accent = option.accent ? ` ${this.c.accent(option.accent)}` : "";
+      const pad = option.detail && !option.detailBelow ? " ".repeat(width - full(option).length) : "";
+      const line = `  ${selected ? this.c.cyan("›") : " "} ${label}${accent}${pad}`;
+      // Two-line options: the note on its own line, a blank line between options.
+      if (option.detailBelow) return [line, ...(option.detail ? [this.fit("", this.c.dim(`    ${option.detail}`))] : []), ...(index < this.options.length - 1 ? [""] : [])];
+      return [this.fit(line, option.detail ? this.c.dim(option.detail) : "")];
     });
   }
 
@@ -407,6 +437,95 @@ class ArrowSelect {
     if (plainTail.length <= room) return `${styled}${tail}`;
     if (room <= 1) return styled;
     return `${styled}${this.c.dim(`${plainTail.slice(0, room - 1)}…`)}`;
+  }
+}
+
+/**
+ * One line of input in raw mode, starting as `initial`: typing edits it, Backspace deletes,
+ * Ctrl-U clears, Enter answers, Esc returns null (go back), Ctrl-C cancels. On Enter it leaves
+ * what an answered text prompt leaves (the question and `› answer`), so ui.answered() and
+ * ui.rejected() replace it; on Esc it erases the question.
+ */
+class LineEdit {
+  private text: string;
+  private readonly head: string;
+  private readonly marker: string;
+  private readonly caret: string;
+
+  constructor(
+    private readonly terminal: PromptTerminal,
+    question: string,
+    initial: string,
+    color: boolean,
+    private readonly settleMs = 0,
+  ) {
+    this.text = initial;
+    this.caret = color ? "\x1b[7m \x1b[27m" : "▏";
+    const split = question.lastIndexOf("\n");
+    this.head = split >= 0 ? question.slice(0, split) : "";
+    this.marker = split >= 0 ? question.slice(split + 1) : question;
+  }
+
+  run(): Promise<string | null> {
+    const { input, output } = this.terminal;
+    return new Promise((resolve, reject) => {
+      let finished = false;
+      const restore = () => {
+        input.setRawMode?.(false);
+        output.write(SHOW_CURSOR);
+      };
+      const onExit = () => restore();
+      const onSignal = () => { restore(); process.exit(130); };
+      const end = (outcome: () => void) => {
+        if (finished) return;
+        finished = true;
+        input.off("data", onData);
+        process.off("exit", onExit);
+        process.off("SIGINT", onSignal);
+        process.off("SIGTERM", onSignal);
+        restore();
+        this.terminal.close();
+        outcome();
+      };
+      const readyAt = Date.now() + this.settleMs;
+      const onData = (chunk: Buffer | string) => {
+        if (Date.now() < readyAt) return;
+        for (const key of parseKeys(typeof chunk === "string" ? chunk : chunk.toString("utf8"))) {
+          if (key === "cancel") {
+            output.write(`\r\x1b[2K${this.head ? "\x1b[1F\x1b[J" : ""}`);
+            end(() => reject(new PromptCancelled()));
+            return;
+          }
+          if (key === "escape") {
+            output.write(`\r\x1b[2K${this.head ? "\x1b[1F\x1b[J" : ""}`);
+            end(() => resolve(null));
+            return;
+          }
+          if (key === "enter") {
+            output.write(`\r\x1b[2K${this.marker}${this.text}\n`);
+            const answer = this.text.trim();
+            end(() => resolve(answer));
+            return;
+          }
+          if (key === "backspace") this.text = [...this.text].slice(0, -1).join("");
+          else if (key === "clear") this.text = "";
+          else if (typeof key === "object") this.text += key.text;
+        }
+        this.draw();
+      };
+      process.once("exit", onExit);
+      process.on("SIGINT", onSignal);
+      process.on("SIGTERM", onSignal);
+      input.setRawMode!(true);
+      input.on("data", onData);
+      input.resume();
+      output.write(`${HIDE_CURSOR}${this.head ? `${this.head}\n` : ""}`);
+      this.draw();
+    });
+  }
+
+  private draw(): void {
+    this.terminal.output.write(`\r\x1b[2K${this.marker}${this.text}${this.caret}`);
   }
 }
 
@@ -441,6 +560,13 @@ export class ScriptedPrompter implements Prompter {
 
   async text(question: string): Promise<string> {
     return this.answer(question);
+  }
+
+  /** "<esc>" presses Esc (null); "" keeps `initial`; anything else replaces it. */
+  async edit(question: string, initial = ""): Promise<string | null> {
+    const answer = this.answer(question);
+    if (answer === "<esc>") return null;
+    return answer === "" ? initial : answer.trim();
   }
 
   private answer(question: string): string {
