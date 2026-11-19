@@ -226,13 +226,13 @@ export interface FreeConfig {
    */
   dlOnly: boolean;
   /**
-   * Free tokens in other coding agents launched by dl (`dl claude`: Claude Code), ALLOW_OTHER_HARNESSES,
+   * Free tokens in other coding agents launched by dl (`dl claude`, `dl opencode`), ALLOW_OTHER_HARNESSES,
    * default on; also a runtime setting. Off: their requests get 403 `harness_not_allowed`.
    */
   allowOtherHarnesses: boolean;
   /**
    * The share (0 to 1) of a person's weekly free allowance, trial included, that other coding
-   * agents (`dl claude`) may use: their requests are held to the allowance scaled by it, counted
+   * agents (`dl claude`, `dl opencode`) may use: their requests are held to the allowance scaled by it, counted
    * against everything the week has used. Pro is exempt. OTHER_HARNESS_SHARE, default 0.5; also a runtime setting.
    */
   otherHarnessShare: number;

@@ -25,9 +25,10 @@ import {
   BLOCKED_MESSAGE,
   DEVICE_TAKEN_MESSAGE,
   DL_ONLY_MESSAGE,
-  HARNESS_KEY_EXPIRED_MESSAGE,
-  HARNESS_NOT_ALLOWED_MESSAGE,
+  harnessKeyExpiredMessage,
+  harnessNotAllowedMessage,
   harnessLimitMessage,
+  HARNESS_WORDS,
   forHarness,
   SERVER_KEYS_UNAVAILABLE_MESSAGE,
   INVALID_INVITE_MESSAGE,
@@ -49,7 +50,7 @@ import {
 } from "./messages.js";
 import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
-import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FREE_MODELS, POOLS, creditPrices, fallbackOf, familyOfPool, modelById, type FreeModel, type Pool } from "./models.js";
+import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FAMILIES, FREE_MODELS, POOLS, creditPrices, fallbackOf, familyOfPool, modelById, type Family, type FreeModel, type Pool } from "./models.js";
 import { emailBlocked, emailDomain, normalizeEmail, plausibleEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
 import {
   ACCESS_REQUEST_PATH,
@@ -387,7 +388,7 @@ async function route(c: Ctx): Promise<Response> {
   if (path === "/v1/status" && (method === "GET" || method === "OPTIONS")) return status(c);
   if (method === "GET" && path === "/v1/me") return me(c);
   if (method === "GET" && path === "/v1/models") return models(c);
-  if (method === "POST" && path === "/v1/chat/completions") return chat(c);
+  if (method === "POST" && path === "/v1/chat/completions") return chatCompletions(c);
   if (method === "POST" && path === "/v1/events") return events(c);
   if (path === "/v1/harness-keys" || path.startsWith("/v1/harness-keys/")) return harnessKeys(c, path.slice("/v1/harness-keys".length).replace(/^\//, ""), method);
   if (path.startsWith("/anthropic/")) return anthropic(c, path.slice("/anthropic".length), method);
@@ -599,7 +600,7 @@ async function tokenBody(c: Ctx, identity: Identity, refreshToken: string, sid: 
 
 /** Who is calling: from a sign-in session's access token, or from a server key. */
 interface Caller extends Identity {
-  /** "harness": a harness key from `dl claude` (see HARNESS_KEY in account-object.ts). */
+  /** "harness": a harness key from `dl claude` or `dl opencode` (see HARNESS_KEY in account-object.ts). */
   via: "access" | "key" | "harness";
   /** With a harness key: which coding agent, and the key's id. */
   harness?: Harness;
@@ -611,10 +612,14 @@ interface Caller extends Identity {
 /**
  * The person behind a valid access token, or a 401. With `keys`, a server key is accepted
  * too, from an account allowed keys (`serverKeysAllowed`); with `ungrantedKeys` as well, from
- * any account (only /request, so a server with an old key can ask for a grant). An access token
+ * any account (only /request, so a server with an old key can ask for a grant). With `harness`,
+ * a harness key: any (true), or only one minted for one of the listed agents. An access token
  * from a revoked session is refused like an expired one.
  */
-async function authenticate(c: Ctx, options: { keys?: boolean; ungrantedKeys?: boolean; harness?: boolean; apiKeyHeader?: boolean } = {}): Promise<Caller | Response> {
+async function authenticate(
+  c: Ctx,
+  options: { keys?: boolean; ungrantedKeys?: boolean; harness?: boolean | readonly Harness[]; apiKeyHeader?: boolean } = {},
+): Promise<Caller | Response> {
   // Anthropic clients may send the key as `x-api-key` instead (apiKeyHeader: the Anthropic endpoint).
   const apiKey = options.apiKeyHeader ? c.request.headers.get("x-api-key")?.trim() : undefined;
   const header = c.request.headers.get("authorization") ?? (apiKey ? `Bearer ${apiKey}` : "");
@@ -623,11 +628,14 @@ async function authenticate(c: Ctx, options: { keys?: boolean; ungrantedKeys?: b
   if (!match) return invalid();
   const bearer = match[1]!;
   if (bearer.startsWith("dlh_")) {
-    // A harness key works only where `harness` allows it: never on chat completions or keys.
+    // A harness key works only where `harness` allows it, and only for the agents it lists:
+    // Claude Code's on the Anthropic endpoint, OpenCode's on chat completions; never on keys.
     const parsed = parseHarnessKey(bearer);
     if (!options.harness || !parsed) return invalid();
+    const only = Array.isArray(options.harness) ? (options.harness as readonly Harness[]) : undefined;
     const owner = await account(c, parsed.githubId).verifyHarnessKey(parsed.id, parsed.secret, c.now());
-    if (!owner) return apiError(401, "invalid_harness_key", HARNESS_KEY_EXPIRED_MESSAGE, {}, { "www-authenticate": 'Bearer error="invalid_token"' });
+    if (!owner) return apiError(401, "invalid_harness_key", harnessKeyExpiredMessage(only?.length === 1 ? only[0] : undefined), {}, { "www-authenticate": 'Bearer error="invalid_token"' });
+    if (only && !only.includes(owner.harness)) return invalid();
     return { githubId: owner.githubId, login: owner.login, via: "harness", harness: owner.harness, harnessKeyId: parsed.id, ...(owner.sid ? { sid: owner.sid } : {}) };
   }
   if (bearer.startsWith("dlk_")) {
@@ -1940,7 +1948,8 @@ async function referralLookup(c: Ctx, raw: string): Promise<Response> {
 }
 
 async function models(c: Ctx): Promise<Response> {
-  const identity = await authenticate(c, { keys: true });
+  // OpenCode's harness key may list them too (dl opencode reads the list to configure it).
+  const identity = await authenticate(c, { keys: true, harness: ["opencode"] });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
@@ -1953,6 +1962,7 @@ async function models(c: Ctx): Promise<Response> {
       name: model.name,
       context_window: model.contextWindow,
       max_output_tokens: model.maxOutputTokens,
+      vision: model.vision,
     })),
   });
 }
@@ -1973,19 +1983,20 @@ async function events(c: Ctx): Promise<Response> {
   return json({ accepted }, 202);
 }
 
-// ─── Other coding agents through dl (`dl claude`) ───────────────────────────
+// ─── Other coding agents through dl (`dl claude`, `dl opencode`) ────────────
 
 /**
- * Harness keys: what `dl claude` hands Claude Code (see HARNESS_KEY in account-object.ts).
+ * Harness keys: what `dl claude` hands Claude Code and `dl opencode` hands OpenCode (see
+ * HARNESS_KEY in account-object.ts).
  *
- *   POST   /v1/harness-keys {harness: "claude-code"}  → 201 {id, key, harness, expiresAt, ttlSeconds}
+ *   POST   /v1/harness-keys {harness: "claude-code" | "opencode"}  → 201 {id, key, harness, expiresAt, ttlSeconds}
  *          (a signed-in access token only: not a server key, not another harness key)
  *   POST   /v1/harness-keys/:id/refresh                → {id, expiresAt}: another HARNESS_KEY_TTL_MS
  *   DELETE /v1/harness-keys/:id                         → {id, revoked: true}
  *
  * Refresh and revoke take the access token or that same harness key, so dl needs the sign-in only
- * to start. The key works on /anthropic/v1/messages (and count_tokens) and /v1/events, nowhere
- * else. 403 harness_not_allowed while `allowOtherHarnesses` is off; 409 harness_key_limit past
+ * to start. A Claude Code key works on /anthropic/v1/messages (and count_tokens), an OpenCode
+ * key on /v1/chat/completions and /v1/models; both on /v1/events, and nowhere else. 403 harness_not_allowed while `allowOtherHarnesses` is off; 409 harness_key_limit past
  * MAX_HARNESS_KEYS running at once.
  */
 async function harnessKeys(c: Ctx, rest: string, method: string): Promise<Response> {
@@ -2001,14 +2012,14 @@ async function harnessKeys(c: Ctx, rest: string, method: string): Promise<Respon
     if (typeof harness !== "string" || !(HARNESSES as readonly string[]).includes(harness)) {
       return apiError(400, "invalid_request", `Send {harness}: one of ${HARNESSES.join(", ")}.`);
     }
-    if (!(await runtime(c)).config.allowOtherHarnesses) return apiError(403, "harness_not_allowed", HARNESS_NOT_ALLOWED_MESSAGE);
+    if (!(await runtime(c)).config.allowOtherHarnesses) return apiError(403, "harness_not_allowed", harnessNotAllowedMessage(harness as Harness));
     const created = await person.createHarnessKey({ harness: harness as Harness, sid: identity.sid, now: c.now() });
     if (created.ok) {
       return json({ id: created.id, key: created.key, harness, expiresAt: new Date(created.expiresAt).toISOString(), ttlSeconds: HARNESS_KEY_TTL_MS / 1000 }, 201);
     }
     switch (created.code) {
       case "harness_key_limit":
-        return apiError(409, "harness_key_limit", `At most ${MAX_HARNESS_KEYS} dl claude sessions can run at once. Quit one first.`, { max: MAX_HARNESS_KEYS });
+        return apiError(409, "harness_key_limit", `At most ${MAX_HARNESS_KEYS} ${HARNESS_WORDS[harness as Harness].command} sessions can run at once. Quit one first.`, { max: MAX_HARNESS_KEYS });
       case "blocked":
         return blockedError();
       case "suspended":
@@ -2024,7 +2035,7 @@ async function harnessKeys(c: Ctx, rest: string, method: string): Promise<Respon
     if (identity.via === "key" || (identity.via === "harness" && identity.harnessKeyId !== id)) return apiError(403, "forbidden", "This key can't manage that harness key.");
     if (match[2] && method === "POST") {
       const expiresAt = await person.refreshHarnessKey(id, c.now());
-      if (expiresAt === undefined) return apiError(404, "harness_key_not_found", HARNESS_KEY_EXPIRED_MESSAGE);
+      if (expiresAt === undefined) return apiError(404, "harness_key_not_found", harnessKeyExpiredMessage(identity.harness));
       return json({ id, expiresAt: new Date(expiresAt).toISOString() });
     }
     if (!match[2] && method === "DELETE") {
@@ -2071,7 +2082,7 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
   if (method !== "POST" || (path !== "/v1/messages" && path !== "/v1/messages/count_tokens")) {
     return anthropicErrorResponse(404, `${method} /anthropic${path} isn't a route: the free tier serves POST /anthropic/v1/messages.`, "not_found");
   }
-  const identity = await authenticate(c, { harness: true, apiKeyHeader: true });
+  const identity = await authenticate(c, { harness: ["claude-code"], apiKeyHeader: true });
   if (identity instanceof Response) return toAnthropicErrorResponse(identity);
   if (identity.via !== "harness") return anthropicErrorResponse(401, "Use the key dl claude sets: run dl claude.", "invalid_token");
   const raw = await c.request.text();
@@ -2336,22 +2347,51 @@ interface TranslatedChat {
   bodyBytes: number;
 }
 
-async function chat(c: Ctx, translated?: TranslatedChat): Promise<Response> {
-  const identity = translated ? translated.identity : await authenticate(c, { keys: true });
+/**
+ * `POST /v1/chat/completions`: Autopilot's (a sign-in or a server key), and OpenCode's through
+ * `dl opencode` (its harness key). OpenCode's refusals are reworded for it (`forHarness`): dl's
+ * slash commands are typed in dl.
+ */
+async function chatCompletions(c: Ctx): Promise<Response> {
+  const identity = await authenticate(c, { keys: true, harness: ["opencode"] });
   if (identity instanceof Response) {
     identity.headers.set("x-dl-quota-resets-at", new Date(weekEnd(c.now())).toISOString());
     return identity;
   }
+  const answer = await chat(c, { identity });
+  return identity.harness ? rewordedForHarness(answer, identity.harness) : answer;
+}
+
+/** Our `{error: {code, message, ...}}` refusal with its message reworded for `harness`; anything else as it is. */
+async function rewordedForHarness(response: Response, harness: Harness): Promise<Response> {
+  if (response.status < 400 || !(response.headers.get("content-type") ?? "").includes("application/json")) return response;
+  const text = await response.text();
+  const body = parseJson(text) as { error?: Record<string, unknown> } | undefined;
+  const headers = new Headers(response.headers);
+  headers.delete("content-length");
+  if (!body?.error || typeof body.error.message !== "string") return new Response(text, { status: response.status, headers });
+  return new Response(JSON.stringify({ ...body, error: { ...body.error, message: forHarness(body.error.message, harness) } }), { status: response.status, headers });
+}
+
+/** Which weekly budgets each other agent may spend: Claude Code through dl is DeepSeek only. */
+const HARNESS_FAMILIES: Readonly<Record<Harness, readonly Family[]>> = {
+  "claude-code": ["deepseek"],
+  opencode: FAMILIES,
+};
+
+async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unknown>; bodyBytes?: number }): Promise<Response> {
+  const { identity } = input;
+  const translated = input.body ? (input as TranslatedChat) : undefined;
   const person = account(c, identity.githubId);
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
   if (c.config.paused) return pausedError(quotaHeaders(await person.allowance(c.now(), limitsFor(c.config))));
   c.callerId = identity.githubId;
   const gate = await runtime(c);
   if (gate.person?.blocked) return blockedError();
-  // Another coding agent launched by dl (`dl claude`): the kill switch, then a smaller share of
+  // Another coding agent launched by dl (`dl claude`, `dl opencode`): the kill switch, then a smaller share of
   // the allowance (`otherHarnessShare`, applied to the limits below). Admins too: it's a switch.
   const harness = identity.via === "harness" ? identity.harness : undefined;
-  if (harness && !gate.config.allowOtherHarnesses) return apiError(403, "harness_not_allowed", HARNESS_NOT_ALLOWED_MESSAGE);
+  if (harness && !gate.config.allowOtherHarnesses) return apiError(403, "harness_not_allowed", harnessNotAllowedMessage(harness));
   // A Starter or basic account is re-checked once a week from its public profile, and promoted
   // if it now qualifies. The one move down: a basic account the creation-batch check now flags
   // goes to Starter with no free tokens (directory-object.ts recheckLevel).
@@ -2398,8 +2438,8 @@ async function chat(c: Ctx, translated?: TranslatedChat): Promise<Response> {
     return apiError(400, "model_not_allowed", `The free tier serves ${ALLOWED_MODELS.join(", ")} only.`, { allowed: [...ALLOWED_MODELS] }, await headers());
   }
   const requested = modelById(body.model)!;
-  // Other coding agents get DeepSeek only: GPT-6 stays Autopilot's.
-  if (harness && requested.family !== "deepseek") {
+  // Claude Code gets DeepSeek only; OpenCode, every model.
+  if (harness && !HARNESS_FAMILIES[harness].includes(requested.family)) {
     return apiError(400, "model_not_allowed", `Claude Code through dl is served by ${DEEPSEEK_MODEL} only.`, { allowed: [DEEPSEEK_MODEL] }, await headers());
   }
   // Every level gets every model; basic and Starter on their smaller allowance.
@@ -2476,7 +2516,7 @@ async function chat(c: Ctx, translated?: TranslatedChat): Promise<Response> {
       const wholeLeft = whole.remaining === null || whole.remaining > 0;
       if (wholeLeft && !(whole.plan === "free" && whole.trial?.ended)) {
         const resetsAt = reservation.code === "trial_ended" ? undefined : new Date(reservation.allowance.resetsAt).toISOString();
-        return apiError(402, "harness_limit", harnessLimitMessage(gate.config.otherHarnessShare, resetsAt, reservation.allowance.plan), { harness, share: gate.config.otherHarnessShare, ...(resetsAt ? { resetsAt } : {}), offers: offers(gate.config) }, quota);
+        return apiError(402, "harness_limit", harnessLimitMessage(gate.config.otherHarnessShare, resetsAt, reservation.allowance.plan, harness), { harness, share: gate.config.otherHarnessShare, ...(resetsAt ? { resetsAt } : {}), offers: offers(gate.config) }, quota);
       }
     }
     if (reservation.code === "quota_exceeded") {
@@ -3166,7 +3206,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
         serverKeys,
         // Distinct dl sessions (from Autopilot's session events) since Monday 00:00 UTC.
         dlSessionsThisWeek: sessions.get(person.github_id) ?? 0,
-        // Requests and charged tokens from Claude Code through `dl claude` since Monday 00:00 UTC.
+        // Requests and charged tokens from other tools through dl (`dl claude`, `dl opencode`) since Monday 00:00 UTC.
         otherHarnessThisWeek: harnessUsage.get(person.github_id) ?? { requests: 0, tokens: 0 },
       };
     });

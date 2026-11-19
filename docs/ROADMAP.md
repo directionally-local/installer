@@ -40,7 +40,7 @@ Also shipped: free tier dl Pro and top-ups when free usage runs out, and `/usage
 
 Next
 1. **A native Mac app (Swift)** that opens the team's Open WebUI, with Tailscale built in and a guided invite step. Planned, not started.
-2. **Other coding tools beyond Claude Code** (OpenCode, Pi, Codex) on dl-launched sessions. Planned.
+2. **Other coding tools beyond Claude Code** on dl-launched sessions: `dl opencode` (OpenCode, every free tier model) has a pull request open; Pi and Codex planned.
 3. **Opt-in traffic capture, replayed against the candidate during `dl model update`:** evals for teams with no hand-written tests.
 4. **The multi-GPU hardware test** on a rented 4x RTX PRO 6000 machine (PCIe, Blackwell): `dl model up deepseek-v4.1-flash-fp8 --image vllm/vllm-openai:v0.34.0rc2 --workspace <dir>` passes every step in [the 4x RTX PRO 6000 test procedure](gpu-test-4x6000.md), which also decides whether v0.34.0rc2 becomes the default image. **Paused until there's budget for the rental;** until then everything multi-GPU stays "built, untested". After it: every `dl model` screen on camouflage-tui, and `dl model bench` on a real multi-GPU deployment.
 
@@ -90,7 +90,9 @@ People sign in with GitHub, then add an email address (one free account per emai
 - DeepSeek requests may ask for up to 65,536 output tokens (installer#283).
 - Since 19 Nov, new users get the weekly allowance by GitHub account level again; the one-time new-user trial is off. dl Pro and top-ups stay as optional upgrades, and a global weekly spend ceiling protects credits.
 
-**Next:** other coding tools beyond Claude Code (OpenCode, Pi, Codex), through sessions dl launches.
+- Pull request open: `dl opencode`, the person's own OpenCode on the free tier through the chat completions endpoint Autopilot uses, with every free tier model (GPT-6 Luna by default, Sol, Astra, DeepSeek), on the same short-lived keys, share, kill switch and dl-only check as `dl claude`. Configured per run through `OPENCODE_CONFIG_CONTENT`; OpenCode 2 gets a private server (`--standalone`).
+
+**Next:** more coding tools (Pi, Codex), through sessions dl launches.
 
 **Not yet:** free tokens for background tasks and server sessions; other sign-ins.
 
@@ -134,7 +136,8 @@ Each repository's release bot picks the number from commit types: a feature bump
 | 0.39.0 (shipped) | 1.5 | `dl evals`, bring your data, run with promptfoo; `dl ui`: Open WebUI next to the model, `dl ui share`, `dl ui invite`/`approve`; Autopilot 3.27.0 |
 | 0.40.0 (now) | lane, 1.5 | `dl claude`: Claude Code on the free tier's DeepSeek; an optional optimized engine during `dl model up` |
 | next | 1.5 | Team chat from the GPU first run: Tailscale set up by dl, HTTPS only, 2FA on, `dl status` summary (installer#278, pull request open) |
-| next | lane | Other coding tools beyond Claude Code (OpenCode, Pi, Codex) through sessions dl launches |
+| next | lane | `dl opencode`: OpenCode on every free tier model (pull request open) |
+| later | lane | More coding tools (Pi, Codex) through sessions dl launches |
 | then | 1.5 | Opt-in traffic capture, replayed during `dl model update` |
 | after the multi-GPU test | 1.5 | Fixes from the 4x RTX PRO 6000 run; vLLM v0.34.0rc2 as the default image if it passes |
 | later | 1 | Fixes from the fresh-VM test (installer#47); `dl sessions` across places (installer#49); **1.0** when the fresh-VM test passes |
