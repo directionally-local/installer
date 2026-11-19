@@ -147,7 +147,8 @@ account. Every argument after `claude` goes to it unchanged (`dl claude -p "fix 
   Code runs and ends it when Claude Code exits. It's in Claude Code's environment only, never on a
   command line. Free tokens don't work in Claude Code started any other way.
 - **A smaller share:** Claude Code may use part of your weekly free allowance (half, by default),
-  and of the new-user trial; Autopilot keeps the rest. dl Pro and top-ups work as in Autopilot.
+  and of the new-user trial; Autopilot keeps the rest. With dl Pro, Claude Code gets your whole Pro
+  allowance; top-ups work as in Autopilot.
 - **Your settings stay yours:** nothing under `~/.claude` is read or changed. For this run only,
   Claude Code gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`,
   `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
