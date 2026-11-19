@@ -14,6 +14,7 @@ import { autopilotAuth, autopilotOnPath, bundledAutopilotVersion, findAutopilot,
 import { FREE_TIER_PROVIDER, freeTierAccount, freeTierLine, type FreeTierAccount } from "./laptop/free-tier.js";
 import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
 import { claudeCommand } from "./laptop/claude.js";
+import { opencodeCommand } from "./laptop/opencode.js";
 import { loadRemotes, resolveTarget } from "./laptop/config.js";
 import { dlUpdate } from "./laptop/self-update.js";
 import { PAIRED_NAME } from "./local/layout.js";
@@ -64,6 +65,10 @@ On your laptop:
                           sign-in; ARGS go to claude as they are. Needs claude installed; free
                           tokens work in it only while dl claude runs, on a smaller share of the
                           weekly allowance than Autopilot. Your ~/.claude settings aren't touched
+  dl opencode [ARGS]      your own OpenCode on free tokens (GPT-6 Luna by default; Sol, Astra and
+                          DeepSeek in /models), through dl's free tier sign-in; ARGS go to opencode
+                          as they are. Needs opencode installed; free tokens work in it only while
+                          dl opencode runs. Your OpenCode config files aren't touched
   dl claude-code hook install   when Claude Code hits its usage or rate limit, show how to continue
                           in dl (adds a hook to ~/.claude/settings.json after asking; backs it up)
   dl claude-code hook remove    take that hook out again
@@ -199,6 +204,8 @@ export interface MainOptions {
   freeTierAccount?: () => Promise<FreeTierAccount | undefined>;
   /** `dl claude`; the real one unless replaced. */
   claude?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
+  /** `dl opencode`; the real one unless replaced. */
+  opencode?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** `dl uninstall` on a server and on a laptop; the real ones unless replaced. */
   uninstall?: { server?: typeof uninstall; laptop?: typeof laptopUninstall };
 }
@@ -213,6 +220,8 @@ export async function main(
 ): Promise<number> {
   // `dl claude ARGS`: every argument after `claude` is Claude Code's, flags included.
   if (argv[0] === "claude") return await (options.claude ?? claudeCommand)(argv.slice(1), io);
+  // `dl opencode ARGS`: the same for OpenCode.
+  if (argv[0] === "opencode") return await (options.opencode ?? opencodeCommand)(argv.slice(1), io);
   // Everything after `--` belongs to Autopilot (bare dl on this computer): `dl -- --session ID`.
   const split = splitPassthrough(argv);
   const passthrough = split.passthrough;

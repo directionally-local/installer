@@ -29,6 +29,7 @@
  */
 
 import { formatTokens } from "./admission.js";
+import type { Harness } from "./account-object.js";
 
 export const SIGN_IN_REFUSALS = ["account_too_new", "no_github_activity", "invite_required", "cohort_full", "too_many_signups"] as const;
 export type SignInRefusal = (typeof SIGN_IN_REFUSALS)[number];
@@ -127,36 +128,61 @@ export const UPSTREAM_BUSY_MESSAGE = "The free tier is busy right now; retrying�
 export const UPSTREAM_UNAVAILABLE_MESSAGE = "The free tier's model provider is having trouble right now; retrying…";
 export const UPSTREAM_TIMEOUT_MESSAGE = "The free tier's model provider didn't answer in time; retrying…";
 
-// ─── Other coding agents through dl (`dl claude`) ───────────────────────────
+// ─── Other coding agents through dl (`dl claude`, `dl opencode`) ────────────
+
+/** How each coding agent dl launches is named in its refusals. */
+export const HARNESS_WORDS: Readonly<Record<Harness, { product: string; command: string; own: string }>> = {
+  "claude-code": { product: "Claude Code", command: "dl claude", own: "your own Anthropic account" },
+  opencode: { product: "OpenCode", command: "dl opencode", own: "your own provider key" },
+};
 
 /** A harness key that expired, was revoked, or whose sign-in ended (401 invalid_harness_key). */
-export const HARNESS_KEY_EXPIRED_MESSAGE = "This dl claude session's free tier key has expired. Quit Claude Code and run dl claude again.";
+export function harnessKeyExpiredMessage(harness?: Harness): string {
+  if (!harness) return "This dl session's free tier key has expired. Quit the tool and run it from dl again (dl claude, dl opencode).";
+  const { product, command } = HARNESS_WORDS[harness];
+  return `This ${command} session's free tier key has expired. Quit ${product} and run ${command} again.`;
+}
+
+/** Claude Code's: what `dl claude` users have always seen. */
+export const HARNESS_KEY_EXPIRED_MESSAGE = harnessKeyExpiredMessage("claude-code");
 
 /** The kill switch (`allowOtherHarnesses` off): 403 harness_not_allowed. */
-export const HARNESS_NOT_ALLOWED_MESSAGE =
-  "Free tokens in Claude Code are switched off for now. Free tokens still work in dl (Autopilot), and Claude Code works with your own Anthropic account.";
+export function harnessNotAllowedMessage(harness: Harness = "claude-code"): string {
+  const { product, own } = HARNESS_WORDS[harness];
+  return `Free tokens in ${product} are switched off for now. Free tokens still work in dl (Autopilot), and ${product} works with ${own}.`;
+}
+
+export const HARNESS_NOT_ALLOWED_MESSAGE = harnessNotAllowedMessage("claude-code");
 
 /**
- * Claude Code's share of the week (or of the trial) is used up while the account still has free
- * usage left for Autopilot (402 harness_limit). `share` is 0 to 1.
+ * Another agent's share of the week (or of the trial) is used up while the account still has
+ * free usage left for Autopilot (402 harness_limit). `share` is 0 to 1.
  */
-export function harnessLimitMessage(share: number, resetsAt: string | undefined, plan: "free" | "pro" = "free"): string {
+export function harnessLimitMessage(share: number, resetsAt: string | undefined, plan: "free" | "pro" = "free", harness: Harness = "claude-code"): string {
   const part = share >= 1 ? "all" : share <= 0 ? "none" : `${Math.round(share * 100)}%`;
   const when = resetsAt ? ` It resets at ${resetsAt}.` : "";
+  const { product } = HARNESS_WORDS[harness];
   return plan === "pro"
-    ? `Claude Code through dl gets ${part} of your Pro allowance, and that part is used up.${when} The rest works in dl (Autopilot): run dl.`
-    : `Claude Code through dl gets ${part} of your free allowance, and that part is used up.${when} Your remaining free usage works in dl (Autopilot): run dl. Or get dl Pro: run dl and type /upgrade.`;
+    ? `${product} through dl gets ${part} of your Pro allowance, and that part is used up.${when} The rest works in dl (Autopilot): run dl.`
+    : `${product} through dl gets ${part} of your free allowance, and that part is used up.${when} Your remaining free usage works in dl (Autopilot): run dl. Or get dl Pro: run dl and type /upgrade.`;
 }
 
 /**
  * A refusal written for Autopilot, reworded for another coding agent: dl's slash commands are
- * typed in dl, not in that agent.
+ * typed in dl, not in that agent. OpenCode switches models in its own /models, so the GPT-6
+ * limit's pointer to DeepSeek stays for it; Claude Code through dl has only DeepSeek.
  */
-export function forHarness(message: string): string {
-  if (message === DL_ONLY_MESSAGE) return "Free tokens in Claude Code work only while it runs from dl claude. Quit Claude Code and run dl claude again, or use your own Anthropic account.";
-  return message
+export function forHarness(message: string, harness: Harness = "claude-code"): string {
+  const { product, command, own } = HARNESS_WORDS[harness];
+  if (message === DL_ONLY_MESSAGE) return `Free tokens in ${product} work only while it runs from ${command}. Quit ${product} and run ${command} again, or use ${own}.`;
+  const reworded = message
     .replace(/: \/upgrade$/, ": run dl and type /upgrade")
-    .replace(/Type \/request in dl/g, "Run dl and type /request")
-    .replace(/switch with \/model, or get dl Pro\./, "get dl Pro: run dl and type /upgrade.")
-    .replace(/use your own key: \/provider\./, "use Claude Code with your own Anthropic account.");
+    .replace(/Type \/request in dl/g, "Run dl and type /request");
+  const models =
+    harness === "opencode"
+      ? reworded
+          .replace(/switch with \/model, or get dl Pro\./, "pick it in /models, or get dl Pro: run dl and type /upgrade.")
+          .replace(/switch with \/model\./, "pick it in /models.")
+      : reworded.replace(/switch with \/model, or get dl Pro\./, "get dl Pro: run dl and type /upgrade.");
+  return models.replace(/use your own key: \/provider\./, `use ${product} with ${own}.`);
 }

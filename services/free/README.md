@@ -740,9 +740,9 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `upstream_unavailable` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `upstream_timeout` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `dl_only` | chat (403) | none |
-| `harness_not_allowed` | `POST /v1/harness-keys`, `/anthropic/v1/messages` (403) | none: `allowOtherHarnesses` is off |
-| `harness_limit` | `/anthropic/v1/messages` (402) | `harness`, `share`, `resetsAt` (not for the trial), `offers`: Claude Code's share of the week or trial is used, the account's isn't |
-| `invalid_harness_key` | `/anthropic/v1/messages`, `/v1/events`, harness key refresh (401) | none: expired, revoked, or its sign-in ended |
+| `harness_not_allowed` | `POST /v1/harness-keys`, `/anthropic/v1/messages`, `/v1/chat/completions` with an OpenCode key (403) | none: `allowOtherHarnesses` is off |
+| `harness_limit` | `/anthropic/v1/messages`, `/v1/chat/completions` with an OpenCode key (402) | `harness`, `share`, `resetsAt` (not for the trial), `offers`: that tool's share of the week or trial is used, the account's isn't |
+| `invalid_harness_key` | `/anthropic/v1/messages`, `/v1/chat/completions`, `/v1/models`, `/v1/events`, harness key refresh (401) | none: expired, revoked, or its sign-in ended |
 | `harness_key_limit` | `POST /v1/harness-keys` (409) | `max` |
 | `server_keys_unavailable` | `POST /v1/keys`, and any request with a server key (403) | none |
 | `not_invited` | API, and older sign-ins | none |
@@ -786,8 +786,8 @@ with who made it and when.
 | `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
 | `userEmails` | `USER_EMAILS` | true (sends only with the `USER_EMAIL` binding or `RESEND_API_KEY`) |
 | `dlOnly` | `DL_ONLY` | true (free tokens inside dl only; see below) |
-| `allowOtherHarnesses` | `ALLOW_OTHER_HARNESSES` | true: Claude Code through `dl claude` may use free tokens; false refuses it (`harness_not_allowed`) |
-| `otherHarnessShare` | `OTHER_HARNESS_SHARE` | 0.5: the share (0 to 1) of the free weekly allowance and of the trial Claude Code may use; Pro is exempt (see below) |
+| `allowOtherHarnesses` | `ALLOW_OTHER_HARNESSES` | true: Claude Code through `dl claude` and OpenCode through `dl opencode` may use free tokens; false refuses both (`harness_not_allowed`) |
+| `otherHarnessShare` | `OTHER_HARNESS_SHARE` | 0.5: the share (0 to 1) of the free weekly allowance and of the trial Claude Code and OpenCode may use; Pro is exempt (see below) |
 | `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request); `daily` (one line in the daily digest); `off` |
 | `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 50,000,000, as Full (0: no free tokens below Basic) |
 | `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
@@ -818,24 +818,34 @@ curl -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json'
   https://free.example.com/admin/config
 ```
 
-## Claude Code through dl claude
+## Claude Code and OpenCode through dl claude and dl opencode
 
-`dl claude` runs the person's own Claude Code against this service. Two pieces:
+`dl claude` runs the person's own Claude Code against this service, and `dl opencode` their own
+OpenCode. Three pieces:
 
 **Harness keys** (`src/account-object.ts`, `src/app.ts` `harnessKeys`). Short-lived keys for one
-`dl claude` run, `dlh_<githubId>_<id>_<secret>` (only the secret's SHA-256 is stored):
+`dl claude` or `dl opencode` run, `dlh_<githubId>_<id>_<secret>` (only the secret's SHA-256 is
+stored), each for one harness (`claude-code` or `opencode`):
 
 | request | response |
 |---|---|
-| `POST /v1/harness-keys {"harness": "claude-code"}` (a signed-in access token only) | 201 `{id, key, harness, expiresAt, ttlSeconds: 900}` |
+| `POST /v1/harness-keys {"harness": "claude-code" \| "opencode"}` (a signed-in access token only) | 201 `{id, key, harness, expiresAt, ttlSeconds: 900}` |
 | `POST /v1/harness-keys/:id/refresh` (the access token, or that key) | `{id, expiresAt}`: another 15 minutes |
 | `DELETE /v1/harness-keys/:id` (the access token, or that key) | `{id, revoked: true}` |
 
 A key expires 15 minutes after it was made or last refreshed; dl refreshes it every 4 minutes
-while Claude Code runs and deletes it when Claude Code exits. Signing out of the sign-in it was
+while the tool runs and deletes it when the tool exits. Signing out of the sign-in it was
 minted from ends it, as does an admin's revoke-tokens. At most 10 live per account
-(`harness_key_limit`). It works only on `/anthropic/v1/messages`, `count_tokens` and
-`/v1/events`; never on `/v1/chat/completions`, `/v1/me` or `/v1/keys`.
+(`harness_key_limit`). A Claude Code key works only on `/anthropic/v1/messages`, `count_tokens`
+and `/v1/events`; an OpenCode key only on `/v1/chat/completions`, `/v1/models` and `/v1/events`.
+Neither works on `/v1/me` or `/v1/keys`.
+
+**OpenCode** speaks chat completions, so its requests take Autopilot's path unchanged: every free
+tier model (GPT-6 Luna, Sol, Astra and DeepSeek), streaming, the GPT-6 to DeepSeek fallback, and
+every refusal, with the share, the kill switch and the dl-only check below applied as for Claude
+Code. Refusal messages are reworded for OpenCode (`forHarness`: "run dl and type /upgrade",
+"pick it in /models"). `/v1/models` also says whether each model reads images (`vision`); dl
+configures OpenCode from it.
 
 **The Anthropic Messages endpoint** (`src/anthropic.ts`). dl sets
 `ANTHROPIC_BASE_URL=<service>/anthropic`, so Claude Code posts to `/anthropic/v1/messages?beta=true`
@@ -865,16 +875,16 @@ usage, cache reads as `cache_read_input_tokens`) and `message_stop`. Stop reason
   our message (dl's slash commands reworded as "run dl and type /upgrade"). Transient upstream
   errors keep 429/503 and `Retry-After`, which Claude Code retries; refusals a retry can't change
   (a pause for everyone, a global budget) go out as 403 so it doesn't retry them.
-- **The share** (`otherHarnessShare`, 0.5): Claude Code's requests see the allowance scaled by it:
+- **The share** (`otherHarnessShare`, 0.5): Claude Code's and OpenCode's requests see the allowance scaled by it:
   every token pool, both dollar budgets and the trial, while what the week (and the trial) used
   is counted in full. So Claude Code stops once the account has used half its week, from any
   client, and Autopilot keeps the other half (`harness_limit` says so). Past the whole allowance,
   the usual codes. Top-ups and Pro aren't scaled: a Pro subscriber gets the whole Pro allowance in
   Claude Code.
-- **Session events:** dl sends `session.start` (before Claude Code starts, and every 6 hours) and
-  `session.end` with the harness key; the service stamps `props.harness = "claude-code"`. They
-  cover the dl-only check exactly as Autopilot's events do.
-- **Usage:** `requests.harness` is `claude-code` for these requests (counts only), and
+- **Session events:** dl sends `session.start` (before the tool starts, and every 6 hours) and
+  `session.end` with the harness key; the service stamps `props.harness` with the key's harness
+  (`claude-code` or `opencode`). They cover the dl-only check exactly as Autopilot's events do.
+- **Usage:** `requests.harness` is `claude-code` or `opencode` for these requests (counts only), and
   `daily_activity` keeps `harness_requests` and `harness_tokens`. `GET /admin/people` shows
   `otherHarnessThisWeek: {requests, tokens}` per person.
 
