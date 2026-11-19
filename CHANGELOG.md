@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.41.0](https://github.com/directionally-local/installer/compare/v0.40.0...v0.41.0) (2026-11-19)
+
+
+### Features
+
+* dl opencode runs OpenCode on the free tier (every model) ([#288](https://github.com/directionally-local/installer/issues/288)) ([f4bb45e](https://github.com/directionally-local/installer/commit/f4bb45edb13ae28ba5914faad1f66628dd6533a3))
+
+
+### Bug Fixes
+
+* **free:** accept system-role messages on the Anthropic endpoint ([#285](https://github.com/directionally-local/installer/issues/285)) ([ebb600b](https://github.com/directionally-local/installer/commit/ebb600b31651c6def354c1aea3c4f7e5c5253e0c))
+* **free:** DeepSeek requests may ask for up to 65,536 output tokens ([#283](https://github.com/directionally-local/installer/issues/283)) ([ba626a1](https://github.com/directionally-local/installer/commit/ba626a1ad573854cc98cb66d334d7ca5975d8d32))
+
 ## [0.40.0](https://github.com/directionally-local/installer/compare/v0.39.0...v0.40.0) (2026-11-19)
 
 
