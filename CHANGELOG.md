@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.42.0](https://github.com/directionally-local/installer/compare/v0.41.0...v0.42.0) (2026-11-20)
+
+
+### Features
+
+* **agent:** pick the coding agent for the GPU box's own model ([#289](https://github.com/directionally-local/installer/issues/289)) ([46ab55a](https://github.com/directionally-local/installer/commit/46ab55ad927866c478905d1e6d3fa19804d34bd7))
+* **ui:** team chat from the GPU first run, HTTPS only, admin in the browser, 2FA on ([#278](https://github.com/directionally-local/installer/issues/278)) ([0efd182](https://github.com/directionally-local/installer/commit/0efd1824a358cdf6e766688087ca5430847bbc54))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.28.0 ([#292](https://github.com/directionally-local/installer/issues/292)) ([57fa89f](https://github.com/directionally-local/installer/commit/57fa89f68101b21a8479ed4a61d67f0be3422b2f))
+
 ## [0.41.0](https://github.com/directionally-local/installer/compare/v0.40.0...v0.41.0) (2026-11-19)
 
 
