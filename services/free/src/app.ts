@@ -1981,9 +1981,22 @@ async function models(c: Ctx): Promise<Response> {
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
+  // GPT-6 is listed only for people with a GPT-6 budget (admins, personal grants): while it's
+  // paused on the free tier, tools reading this list (dl opencode) offer DeepSeek only.
+  const { config, person } = await runtime(c);
+  const isAdmin = c.config.adminGithubIds.has(identity.githubId);
+  let listed = FREE_MODELS;
+  if (!isAdmin) {
+    const allowance = await account(c, identity.githubId).allowance(
+      c.now(),
+      limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens),
+    );
+    const gpt6 = allowance.budgets.gpt6.usdPerWeek;
+    if (gpt6 !== null && gpt6 <= 0) listed = FREE_MODELS.filter((model) => model.family !== "gpt6");
+  }
   return json({
     object: "list",
-    data: FREE_MODELS.map((model) => ({
+    data: listed.map((model) => ({
       id: model.id,
       object: "model",
       owned_by: model.provider,
