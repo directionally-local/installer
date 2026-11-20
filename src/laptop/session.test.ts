@@ -17,6 +17,7 @@ import { loadRemotes, saveRemote, type RemoteServer } from "./config.js";
 import type { SetupOptions } from "./setup.js";
 import { autopilotOnPath, bundledAutopilot, openSession, planSession, startHere, supportsAttachRemote, type AutopilotCommand, type SessionChild, type SessionInput, type SessionSpawner } from "./session.js";
 import { MAX_HANDOFFS } from "./gpu-handoff.js";
+import type { LocalModel } from "./local-agents.js";
 import { loadSessions, rememberSession } from "./session-store.js";
 import { loadSettings, placeModel } from "./settings.js";
 import { createOpener, type RemoteOpener } from "./tunnel.js";
@@ -159,13 +160,15 @@ const roots: string[] = [];
 let root: string;
 let api: FakeApi;
 let autopilot: FakeAutopilot;
-const previous = { remotes: process.env.AUTOPILOT_REMOTES_FILE, xdg: process.env.XDG_CONFIG_HOME };
+const previous = { remotes: process.env.AUTOPILOT_REMOTES_FILE, xdg: process.env.XDG_CONFIG_HOME, state: process.env.XDG_STATE_HOME };
 
 beforeEach(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), "dl-session-test-")));
   roots.push(root);
   process.env.AUTOPILOT_REMOTES_FILE = join(root, "remotes.json");
   process.env.XDG_CONFIG_HOME = join(root, "config");
+  // dl model's state and the box's agent choice (agent.json) live here, never in the real home.
+  process.env.XDG_STATE_HOME = join(root, "state");
   api = new FakeApi();
   await api.start();
   autopilot = new FakeAutopilot(api);
@@ -173,7 +176,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await api.stop();
-  for (const [key, value] of [["AUTOPILOT_REMOTES_FILE", previous.remotes], ["XDG_CONFIG_HOME", previous.xdg]] as const) {
+  for (const [key, value] of [["AUTOPILOT_REMOTES_FILE", previous.remotes], ["XDG_CONFIG_HOME", previous.xdg], ["XDG_STATE_HOME", previous.state]] as const) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
@@ -1033,6 +1036,101 @@ describe("dl the first time on a laptop", () => {
       assert.equal(await inside(dir, () => main([], capture(), withChat(answering([MODEL_UP, JSON.stringify({ version: 1, action: "chat-up", use: "browser" })]), chatUp, signals))), 0);
       assert.equal(aborted, true);
       assert.equal(signals.listenerCount("SIGINT"), 0, "its handler is gone afterwards");
+    });
+  });
+
+  describe("Which coding agent? (after Terminal agent or Both)", () => {
+    const MODEL_UP = JSON.stringify({ version: 1, action: "model-up" });
+    const MODEL: LocalModel = { name: "default", model: "Qwen/Qwen3-Coder-30B", baseUrl: "http://127.0.0.1:8000/v1", context: 65536, output: 16384, engine: "vllm", image: "vllm/vllm-openai:v0.20.0" };
+    const answering = (requests: Array<string | undefined>): SessionSpawner => {
+      let launch = 0;
+      return (command, args, env, options) => {
+        const text = requests[launch++];
+        if (text && env.DL_GPU_HANDOFF) writeFileSync(env.DL_GPU_HANDOFF, text, { mode: 0o600 });
+        return plain.spawn(command, args, env, options);
+      };
+    };
+    type Launch = { agent: string; model: string; options: unknown };
+    const agentLaptop = (spawn: SessionSpawner, extra: Partial<SessionInput> = {}) => {
+      const launches: Launch[] = [];
+      let saved: string | undefined;
+      const options = laptop(undefined, { session: { nodeVersion: PATCHED_NODE, autopilot: async () => AUTOPILOT, spawn, signals: new EventEmitter(), handoffTmp: root,
+        modelUp: async () => ({ ok: true, model: "Qwen/Qwen3-Coder-30B" }),
+        chatUp: async () => ({ ok: true, url: "https://box.ts.net", hasAdmin: true }),
+        localModel: async () => MODEL,
+        installedAgents: async () => ({ autopilot: true, "claude-code": true, opencode: false, pi: true }),
+        agentChoice: { read: async () => saved as never, save: async (agent) => { saved = agent; } },
+        launchAgent: async (agent, model, launchOptions) => { launches.push({ agent, model: model.model, options: launchOptions }); return 5; },
+        ...extra } });
+      return { options, launches, saved: () => saved, save: (agent: string) => { saved = agent; } };
+    };
+
+    it("the relaunch after a model that passed lists the other agents and whether each is installed", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      const box = agentLaptop(answering([MODEL_UP]));
+      assert.equal(await inside(dir, () => main([], capture(), box.options)), 0);
+      assert.equal(plain.launches[0]!.env.DL_AGENTS, undefined);
+      assert.deepEqual(JSON.parse(plain.launches[1]!.env.DL_AGENTS!), [{ id: "claude-code", installed: true }, { id: "opencode", installed: false }, { id: "pi", installed: true }]);
+      assert.equal(box.saved(), undefined, "Autopilot (no request): nothing saved, Autopilot opens");
+    });
+
+    it("Terminal agent + Claude Code: saved for the box and opened on the model; its exit code is dl's", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      const box = agentLaptop(answering([MODEL_UP, JSON.stringify({ version: 1, action: "agent", agent: "claude-code" })]));
+      assert.equal(await inside(dir, () => main([], capture(), box.options)), 5);
+      assert.equal(box.saved(), "claude-code");
+      assert.deepEqual(box.launches, [{ agent: "claude-code", model: "Qwen/Qwen3-Coder-30B", options: {} }]);
+      assert.equal(plain.launches.length, 2, "no third Autopilot");
+    });
+
+    it("Both + Pi: the team chat, then Pi", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      const box = agentLaptop(answering([MODEL_UP, JSON.stringify({ version: 1, action: "chat-up", use: "both", agent: "pi" })]));
+      assert.equal(await inside(dir, () => main([], capture(), box.options)), 5);
+      assert.equal(box.saved(), "pi");
+      assert.deepEqual(box.launches.map((l) => l.agent), ["pi"]);
+      assert.equal(plain.launches.length, 2);
+    });
+
+    it("a CLI that isn't installed: saved, the install command, and dl stops cleanly", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      const io = capture();
+      const box = agentLaptop(answering([MODEL_UP, JSON.stringify({ version: 1, action: "agent", agent: "opencode" })]));
+      assert.equal(await inside(dir, () => main([], io, box.options)), 0);
+      assert.equal(box.saved(), "opencode");
+      assert.equal(box.launches.length, 0);
+      assert.match(plainText(io.text()), /Plain dl opens OpenCode on this box's model from now on\./);
+      assert.match(plainText(io.text()), /curl -fsSL https:\/\/opencode\.ai\/v2\/install \| bash/);
+    });
+
+    it("plain dl opens the saved agent on the model, with -c and the arguments after --", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      const box = agentLaptop(plain.spawn);
+      box.save("pi");
+      assert.equal(await inside(dir, () => main(["-c", "--", "--verbose"], capture(), box.options)), 5);
+      assert.deepEqual(box.launches, [{ agent: "pi", model: "Qwen/Qwen3-Coder-30B", options: { continue: true, args: ["--verbose"] } }]);
+      assert.equal(plain.launches.length, 0, "no Autopilot");
+    });
+
+    it("plain dl with a saved agent but no model on the box opens Autopilot and says why; --from-claude-code is always Autopilot", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      const io = capture();
+      const box = agentLaptop(plain.spawn, { localModel: async () => undefined });
+      box.save("claude-code");
+      assert.equal(await inside(dir, () => main([], io, box.options)), 0);
+      assert.equal(plain.launches.length, 1);
+      assert.match(plainText(io.text()), /dl opens Claude Code on this box's model, and there is none now \(dl model up\)\. Opening Autopilot\./);
+      const withModel = agentLaptop(plain.spawn);
+      withModel.save("claude-code");
+      assert.equal(await inside(dir, () => main(["--from-claude-code"], capture(), withModel.options)), 0);
+      assert.equal(withModel.launches.length, 0);
+      assert.equal(plain.launches.length, 2);
     });
   });
 

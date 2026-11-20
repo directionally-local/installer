@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelUpErrorType, ModelUpResult } from "../model-first-run.js";
+import { AGENT_IDS, agentSupport, type AgentId, type LocalModel } from "./local-agents.js";
 
 /**
  * The GPU first run's contract between dl and Autopilot (Autopilot's src/gpu/handoff.ts is the
@@ -43,6 +44,18 @@ import type { ModelUpErrorType, ModelUpResult } from "../model-first-run.js";
  * DL_GPU_RESULT or DL_CHAT_SETUP), which opens the agent. An Autopilot from before this never
  * asks; a dl from before this never sets DL_CHAT_SETUP, so the question isn't asked.
  *
+ * Coding agent (with the team chat): on that same relaunch dl also sets DL_AGENTS, the agents besides
+ * Autopilot it can open on the new model, as JSON:
+ *   [{"id":"claude-code","installed":true},{"id":"opencode","installed":false},{"id":"pi","installed":true}]
+ * (an agent that can't work on this model is left out). After "Terminal agent" or "Both",
+ * Autopilot asks "Which coding agent?" (Autopilot, recommended and the default; then those).
+ * Autopilot (or Esc) opens the session as before. Another agent after "Terminal agent" writes
+ *   {"version":1,"action":"agent","agent":"claude-code"|"opencode"|"pi"}
+ * and exits; after "Both" the chat-up request carries it: {"version":1,"action":"chat-up","use":"both","agent":"pi"}.
+ * dl saves the choice for the box (plain dl opens that agent from then on) and opens it on the
+ * model, or, when its CLI isn't installed, prints the install command and stops. Without
+ * DL_AGENTS (an older dl) the question isn't asked; an older Autopilot never asks.
+ *
  * Anything else (no file, another version or action) is ignored, so an older Autopilot that
  * never writes the file just runs as before, and an older dl that never sets DL_GPU_HANDOFF
  * gets Autopilot's screens without the "this machine" model setup (Autopilot then says to run
@@ -70,13 +83,35 @@ export interface ModelUpRequest {
   pick?: boolean;
 }
 
+/** An agent other than Autopilot, picked in "Which coding agent?". */
+export type OtherAgent = Exclude<AgentId, "autopilot">;
+
 export interface ChatUpRequest {
   version: 1;
   action: "chat-up";
   use: "browser" | "both";
+  /** After "both": the agent to open instead of Autopilot. */
+  agent?: OtherAgent;
 }
 
-export type HandoffRequest = ModelUpRequest | ChatUpRequest;
+export interface AgentRequest {
+  version: 1;
+  action: "agent";
+  agent: OtherAgent;
+}
+
+export type HandoffRequest = ModelUpRequest | ChatUpRequest | AgentRequest;
+
+function otherAgent(value: unknown): OtherAgent | undefined {
+  return value === "claude-code" || value === "opencode" || value === "pi" ? value : undefined;
+}
+
+/** DL_AGENTS for the relaunch after a model that passed (see above). */
+export function agentsEnv(model: LocalModel | undefined, installed: Record<AgentId, boolean>): Record<string, string> {
+  if (!model) return {};
+  const agents = AGENT_IDS.filter((id): id is OtherAgent => id !== "autopilot" && agentSupport(id, model).ok).map((id) => ({ id, installed: installed[id] }));
+  return { DL_AGENTS: JSON.stringify(agents) };
+}
 
 /** Relaunches after a model-up request, at most: a loop of failures ends in plain Autopilot. */
 export const MAX_HANDOFFS = 5;
@@ -108,7 +143,15 @@ export function parseHandoff(text: string): HandoffRequest | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const object = raw as Record<string, unknown>;
   if (object.version !== HANDOFF_VERSION) return undefined;
-  if (object.action === "chat-up") return object.use === "browser" || object.use === "both" ? { version: 1, action: "chat-up", use: object.use } : undefined;
+  if (object.action === "chat-up") {
+    if (object.use !== "browser" && object.use !== "both") return undefined;
+    const agent = object.use === "both" ? otherAgent(object.agent) : undefined;
+    return { version: 1, action: "chat-up", use: object.use, ...(agent ? { agent } : {}) };
+  }
+  if (object.action === "agent") {
+    const agent = otherAgent(object.agent);
+    return agent ? { version: 1, action: "agent", agent } : undefined;
+  }
   if (object.action !== "model-up") return undefined;
   const gpu = gpuFrom(object.gpu);
   const model = typeof object.model === "string" && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(object.model) ? object.model : undefined;

@@ -53,6 +53,7 @@ test("a GPU box with the model, the shared chat, sign-ups waiting and Tailscale 
   assert.equal(await summary(), `
   This GPU box
   ✓ Model         qwen-new · port 8000 · healthy
+  · Coding agent  Autopilot (default) · dl agent to change
   ✓ Team chat     running · https://box.tail1234.ts.net · 2 waiting for approval
   · Agent server  none · dl opens the agent in this terminal
   ✓ Tailscale     signed in as box · HTTPS on
@@ -78,6 +79,7 @@ test("several models, one not answering and one stopped; chat stopped; server in
   const { system, run, answering, summary } = box({ installed: true, up: true, certs: false });
   await writeDeployment(system, "default", { active: deployment("qwen-new", 8000) }, STATE);
   await writeDeployment(system, "big", { active: deployment("glm", 8002) }, STATE);
+  await system.writeFile("/state/agent.json", JSON.stringify({ version: 1, agent: "pi", at: "" }));
   run("dl-model-8000");
   answering.add(8002);
   await system.writeFile(UI_STATE, JSON.stringify({ version: 2, port: 4800 }));
@@ -86,6 +88,7 @@ test("several models, one not answering and one stopped; chat stopped; server in
   This GPU box
   ✗ Model big      glm · port 8002 · stopped · dl model status
   ✗ Model default  qwen-new · port 8000 · not answering · dl model status
+  · Coding agent   Pi on the model · dl agent to change
   ✗ Team chat      stopped · dl ui up
   ✓ Agent server   installed (dl up) · https://box.tail1234.ts.net
   ✗ Tailscale      signed in · HTTPS certificates off (https://login.tailscale.com/admin/dns)
