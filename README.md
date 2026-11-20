@@ -339,21 +339,34 @@ Today: tested end to end with small models on one Nvidia GPU. Models that need s
 
 #### Team chat: dl ui
 
-`dl ui` runs [Open WebUI](https://github.com/open-webui/open-webui) (v0.12.5, pinned by digest) in Docker as your team's chat, talking to every `dl model` deployment on this machine. It listens on `127.0.0.1:4800` only, until you choose otherwise.
+`dl ui` runs [Open WebUI](https://github.com/open-webui/open-webui) (v0.12.5, pinned by digest) in Docker as your team's chat, talking to every `dl model` deployment on this machine. It listens on `127.0.0.1:4800` only. Your team reaches it over HTTPS only: a private link on your Tailscale network. There is no plain-HTTP network mode.
+
+**On the GPU first run** (`curl dl.new/i/… | sh` with "My Nvidia GPU", or `dl` on a GPU box): once the model passes its tests, Autopilot asks "How will your team use it?": **Browser chat (you and your team)**, **Terminal agent** or **Both**. Terminal opens the agent on the model, as before. Browser chat and Both set up the chat for you:
+
+1. **Tailscale.** Installed if it's missing (the same install as `dl up`). If this machine isn't signed in, dl runs `tailscale up --qr`, which prints a sign-in link and a QR code: open it on your laptop or phone and sign in with Google, Microsoft or GitHub (or your org's existing Tailscale account). If your tailnet has HTTPS certificates off, dl shows the admin-console link ([login.tailscale.com/admin/dns](https://login.tailscale.com/admin/dns), HTTPS Certificates, Enable) and waits until they're on. Not running as root, these use `sudo` once, and your login becomes Tailscale's operator so later `dl ui` commands don't need sudo.
+2. **`dl ui up` and `dl ui share`.**
+3. **The admin link, in red.** Open WebUI makes its first account the admin, so whoever opens the link first becomes the admin: open it at once, yourself. dl waits until the account exists (Ctrl-C stops waiting; everything keeps running), then restarts Open WebUI once so your team can sign up. Both then opens the agent.
+
+If Tailscale can't be used, dl says why and what to do next, and stops; it never falls back to plain HTTP.
 
 ```sh
-dl ui up --admin-email you@company.com   # first run: creates the admin and shows its password once
+dl ui up                      # Open WebUI on 127.0.0.1:4800
 dl ui share                   # one link for your team: https://box.tail1234.ts.net
 dl ui invite ana@company.com raj@company.com   # makes their accounts; prints what to send each person
 dl ui approve                 # who signed up and waits; dl ui approve EMAIL... (or all)
 dl ui status · dl ui logs -f · dl ui down [--purge]
 ```
 
-- **Sharing:** with Tailscale logged in, `dl ui share` runs `tailscale serve` (HTTPS on this machine's tailnet name, reachable only from your tailnet; never Funnel). On a server where `dl up` already serves the agent on port 443, the chat gets `:8443`. Without Tailscale, run `dl ui up --listen` (every address, or `--listen 192.168.1.20`) and `dl ui share` prints the LAN address; dl warns that the sign-in page is then reachable by anyone on that network. `dl ui share --off` stops sharing.
-- **Who gets in:** anyone who opens the link can ask for an account; it waits until an admin approves it (`dl ui approve` or Open WebUI's Admin Panel). `dl ui invite` creates active accounts with a one-time password for you to pass on; dl sends no email and doesn't keep those passwords.
-- **The admin:** dl creates it through Open WebUI's API on the first start, before anyone else can reach the page, with a random password stored in `~/.local/state/directionallylocal/ui.json` (mode 0600). If you change the password in Open WebUI, put the new one in that file for `invite` and `approve`.
-- **Settings:** dl sets them on every start (`ENABLE_PERSISTENT_CONFIG=false`), so changes made in the Admin Panel's settings last until the next restart; accounts, chats and model access stay in the `dl-ui-data` volume. Off: Ollama, web search, image generation, community sharing, browser-added connections, Hugging Face downloads and the version check (`OFFLINE_MODE`), analytics (`SCARF_NO_ANALYTICS`, `DO_NOT_TRACK`, `ANONYMIZED_TELEMETRY=false`). After `dl model up` or `update`, run `dl ui up` again so the chat sees the new model.
-- **Next:** sign-in with Google or Microsoft through Open WebUI's OIDC support.
+- **Sharing:** with Tailscale signed in and HTTPS certificates on, `dl ui share` runs `tailscale serve --bg` (HTTPS with a real certificate on this machine's tailnet name, reachable only from your tailnet; never Funnel). On a server where `dl up` already serves the agent on port 443, the chat gets `:8443`. Each person needs the Tailscale app. `dl ui share --off` stops sharing. Without Tailscale, the chat is for you alone, through an SSH tunnel from your laptop: `ssh -N -L 4800:127.0.0.1:4800 you@box`, then open `http://127.0.0.1:4800`.
+- **The admin:** the first account made in the browser. dl never creates it by default and never keeps an admin password. `dl ui up --admin-email you@company.com` makes it from the terminal instead and shows its password once (dl doesn't keep it).
+- **Two-factor sign-in, for everyone** (`ENABLE_MFA=true`): each person sets up an authenticator app the first time they sign in. Open WebUI encrypts the 2FA secrets with a key derived from its `WEBUI_SECRET_KEY`, which it generates once into the `dl-ui-data` volume, so it survives restarts and updates.
+- **Who gets in:** anyone who opens the link can ask for an account; it waits until an admin approves it (Admin Panel > Users, or `dl ui approve`). `dl ui invite` creates active accounts with a one-time password for you to pass on; dl sends no email and doesn't keep those passwords.
+- **`invite` and `approve` use an admin's API key**, never a password: the first time, dl asks for one (make it in the chat: your name > Settings > Account > API Key > Create; or pass `DL_UI_ADMIN_KEY`), checks that it's an admin's and keeps it in `~/.local/state/directionallylocal/ui.json` (mode 0600). Open WebUI accepts API keys only on its user-management endpoints (`API_KEYS_ALLOWED_ENDPOINTS=/api/v1/users,/api/v1/auths/add`), so a leaked key can't read chats. A key Open WebUI no longer accepts is dropped and dl asks again. Without a key, `dl status` just doesn't show how many people are waiting.
+- **It follows the models:** after `dl model up`, `update`, `rollback` or `down`, a running chat picks up the change by itself, with the same link and accounts.
+- **After logout and reboot:** everything keeps running. Open WebUI runs with `--restart unless-stopped`, a model gets the same policy once it passes its tests (one that failed is kept stopped for inspection), tailscaled keeps `tailscale serve --bg`'s config, and Docker and tailscaled start at boot.
+- **Settings:** dl sets them on every start (`ENABLE_PERSISTENT_CONFIG=false`), so changes made in the Admin Panel's settings last until the next restart; accounts, chats and model access stay in the `dl-ui-data` volume. Off: Ollama, web search, image generation, community sharing, browser-added connections, Hugging Face downloads and the version check (`OFFLINE_MODE`), analytics (`SCARF_NO_ANALYTICS`, `DO_NOT_TRACK`, `ANONYMIZED_TELEMETRY=false`).
+- **`dl status` on a GPU box** starts with what runs there: each model (port, healthy or not), the team chat (its link, and how many wait for approval when dl has an admin key), the agent server, and Tailscale (signed in, HTTPS on). Plain `dl` prints the same lines before it opens the agent.
+- **Next:** a guided invite step after the admin's first sign-in; a public link and your own domain; sign-in with Google or Microsoft through Open WebUI's OIDC support.
 
 ### On the server
 

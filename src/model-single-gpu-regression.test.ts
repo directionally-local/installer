@@ -43,7 +43,9 @@ test("1x RTX PRO 5000 + qwen-new: the dry run prints and plans exactly what 0.30
 test("1x RTX PRO 5000 + qwen-new: up runs the same docker command and writes the same state and provider", async () => {
   const run = await upQwenNew(false);
   assert.equal(run.output, GOLDEN.real.output);
-  assert.deepEqual(run.docker, GOLDEN.real.docker);
+  // The same docker run as 0.30.1; since then a model that passed its tests also restarts after a reboot.
+  assert.deepEqual(run.docker.filter((command) => !command.startsWith("docker update")), GOLDEN.real.docker);
+  assert.deepEqual(run.docker.filter((command) => command.startsWith("docker update")), ["docker update --restart unless-stopped dl-model-1"]);
   assert.equal(run.system.files.get("/tmp/x/model.json")?.content, GOLDEN.real.state);
   assert.equal(run.system.files.get("/tmp/x/c.json")?.content, GOLDEN.real.config);
 });

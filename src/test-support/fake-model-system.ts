@@ -40,7 +40,7 @@ export class FakeModelSystem extends FakeSystem {
       this.modelCommands.push(args.join(" "));
       const name = args[0] === "run" ? args[args.indexOf("--name") + 1]! : args.at(-1)!;
       if (args[0] === "run" || args[0] === "start") this.running.add(name);
-      if (args[0] === "run") this.vllmContainers.set(name, args.find((arg) => arg.startsWith("dl.model.spec="))?.slice("dl.model.spec=".length) ?? "");
+      if (args[0] === "run") this.vllmContainers.set(name, args.find((arg) => /^dl\.(model|ui)\.spec=/.test(arg))?.replace(/^dl\.(model|ui)\.spec=/, "") ?? "");
       if (args[0] === "stop" || args[0] === "rm") this.running.delete(name);
       if (args[0] === "rm") this.vllmContainers.delete(name);
       return ok();

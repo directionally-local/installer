@@ -32,6 +32,17 @@ import type { ModelUpErrorType, ModelUpResult } from "../model-first-run.js";
  * `gpu` is optional and only passed back. Two more optional fields (dl 0.28):
  *   "model":"qwen-old"  run this catalog model again, without the picker (Retry);
  *   "pick":true         show the picker, the model that just failed marked (Pick another model).
+ *
+ * Team chat (dl 0.39): on the relaunch after a model-up that succeeded, dl also sets
+ * DL_CHAT_SETUP=1: it can set up the team chat. Autopilot then asks "How will your team use
+ * it?" (Browser chat / Terminal agent / Both). Terminal opens the agent as before. Browser and
+ * Both write
+ *   {"version":1,"action":"chat-up","use":"browser"|"both"}
+ * and exit: dl sets up Tailscale, `dl ui up` and `dl ui share`, and prints the admin link.
+ * After "browser" dl exits there; after "both" it starts Autopilot once more (without
+ * DL_GPU_RESULT or DL_CHAT_SETUP), which opens the agent. An Autopilot from before this never
+ * asks; a dl from before this never sets DL_CHAT_SETUP, so the question isn't asked.
+ *
  * Anything else (no file, another version or action) is ignored, so an older Autopilot that
  * never writes the file just runs as before, and an older dl that never sets DL_GPU_HANDOFF
  * gets Autopilot's screens without the "this machine" model setup (Autopilot then says to run
@@ -59,6 +70,14 @@ export interface ModelUpRequest {
   pick?: boolean;
 }
 
+export interface ChatUpRequest {
+  version: 1;
+  action: "chat-up";
+  use: "browser" | "both";
+}
+
+export type HandoffRequest = ModelUpRequest | ChatUpRequest;
+
 /** Relaunches after a model-up request, at most: a loop of failures ends in plain Autopilot. */
 export const MAX_HANDOFFS = 5;
 
@@ -79,7 +98,7 @@ function gpuFrom(value: unknown): GpuSummary | undefined {
 }
 
 /** The request Autopilot wrote, or undefined (none, unreadable, or not one this dl knows). */
-export function parseHandoff(text: string): ModelUpRequest | undefined {
+export function parseHandoff(text: string): HandoffRequest | undefined {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -88,14 +107,16 @@ export function parseHandoff(text: string): ModelUpRequest | undefined {
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const object = raw as Record<string, unknown>;
-  if (object.version !== HANDOFF_VERSION || object.action !== "model-up") return undefined;
+  if (object.version !== HANDOFF_VERSION) return undefined;
+  if (object.action === "chat-up") return object.use === "browser" || object.use === "both" ? { version: 1, action: "chat-up", use: object.use } : undefined;
+  if (object.action !== "model-up") return undefined;
   const gpu = gpuFrom(object.gpu);
   const model = typeof object.model === "string" && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(object.model) ? object.model : undefined;
   return { version: 1, action: "model-up", ...(gpu ? { gpu } : {}), ...(model ? { model } : {}), ...(object.pick === true ? { pick: true } : {}) };
 }
 
 /** Reads and removes the request, so each one is acted on once. */
-export async function takeHandoff(path: string): Promise<ModelUpRequest | undefined> {
+export async function takeHandoff(path: string): Promise<HandoffRequest | undefined> {
   const text = await readFile(path, "utf8").catch(() => undefined);
   if (text === undefined) return undefined;
   await rm(path, { force: true });
@@ -113,6 +134,8 @@ export function resultEnv(result: ModelUpResult, gpu: GpuSummary | undefined): R
   const reason = result.ok ? "" : oneLine(result.message, 200);
   return {
     DL_GPU_RESULT: result.ok ? "ok" : "failed",
+    // The model is up: Autopilot may ask how the team will use it (team chat, above).
+    ...(result.ok ? { DL_CHAT_SETUP: "1" } : {}),
     ...(result.ok ? {} : { DL_GPU_ERROR: result.errorType satisfies ModelUpErrorType }),
     ...(gpu ? { DL_GPU: JSON.stringify(gpu) } : {}),
     ...(!result.ok && result.model ? { DL_GPU_MODEL: result.model } : {}),

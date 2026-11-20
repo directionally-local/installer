@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { autopilotConfigFile, freeTierAccount } from "./laptop/free-tier.js";
 import { chooseEngine, offersOptimizedEngine, type EngineChoiceOutcome, type PilotFetch } from "./model-engine-choice.js";
+import { refreshChatUi } from "./chat-ui.js";
 import { fittingModels, gpuCounts, recipe, type ModelRecipe } from "./model-catalog.js";
 import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Gpu, type Hardware, type LaunchExtras, containerName, maxContext, recipeFor } from "./model-runtime.js";
 import { chooseParallelism, type ParallelPlan } from "./model-parallel.js";
@@ -68,6 +69,8 @@ export interface ModelCommandOptions {
   pilotFetch?: PilotFetch;
   /** For tests; defaults to process.env (CI never asks the engine question). */
   env?: NodeJS.ProcessEnv;
+  /** For tests: Open WebUI's API, when a model change refreshes the team chat (dl ui). */
+  chatFetch?: FetchModel;
 }
 
 /** The run log a failed `dl model` command wrote, when it wrote one. */
@@ -339,6 +342,8 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
       },
     });
     ui.finish();
+    // Passed: from now on Docker starts it again after a reboot (a failed one is kept stopped for inspection, never restarted).
+    await system.run("docker", ["update", "--restart", "unless-stopped", container], { allowFailure: true });
     // The engine's startup goes in the run log too, for comparing a later failure with a good start.
     await recordLogs(options, container, server.label, 50);
     return deployment;
@@ -350,6 +355,9 @@ async function launch(options: ModelCommandOptions, model: ModelRecipe, port: nu
     throw error;
   }
 }
+
+/** The actions after which the team chat's model endpoints may differ. */
+const CHANGES_MODELS = new Set(["up", "update", "rollback", "down"]);
 
 export async function modelCommand(action: string, args: string[], options: ModelCommandOptions): Promise<number> {
   const records: string[] = [];
@@ -369,6 +377,8 @@ export async function modelCommand(action: string, args: string[], options: Mode
     const code = await modelCommandInner(action, args, wrapped);
     // Warnings given after the checklist (a failed comparison) are printed now.
     options.ui.finish();
+    // A running team chat (dl ui) follows the models here by itself: same link, same accounts.
+    if (code === 0 && CHANGES_MODELS.has(action)) await refreshChatUi({ system: options.system, ui: options.ui, ...(options.statePath ? { statePath: options.statePath } : {}), ...(options.delay ? { delay: options.delay } : {}), ...(options.chatFetch ? { fetch: options.chatFetch } : {}) });
     await persist();
     return code;
   } catch (error) {

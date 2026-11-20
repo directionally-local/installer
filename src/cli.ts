@@ -23,6 +23,7 @@ import { model } from "./laptop/settings.js";
 import { modelCommand as gpuModelCommand, runLogDir } from "./model-command.js";
 import { planCommand } from "./model-plan.js";
 import { evalsCommand } from "./model-evals.js";
+import { boxSummary } from "./box-status.js";
 import { chatUiCommand } from "./chat-ui.js";
 import { openSession, startHere, type SessionInput } from "./laptop/session.js";
 import { detectGitHubRepository } from "./laptop/git.js";
@@ -75,6 +76,7 @@ On your laptop:
   dl setup                set up or repair where background tasks run (safe to re-run)
   dl new                  the same as bare dl (a new session)
   dl status               where your agents run, their provider, model and versions, and what they're doing
+                          (on a GPU box, first: models, team chat, agent server and Tailscale)
   dl connect URL          connect to a server someone else set up (approve the code it shows)
   dl run "TASK"           run a task in a sandbox, in the background, from inside a GitHub
                           repository; it ends in a pull request
@@ -122,13 +124,15 @@ On your laptop:
                           OPENAI_MODEL set for each
   dl evals show           the saved evals        dl evals clear   remove them
   dl ui [up]              team chat: Open WebUI next to your dl model deployments, in Docker, on
-                          127.0.0.1:4800 (this machine only). The first run creates the admin
-                          (--admin-email EMAIL) and shows its password once. --port PORT;
-                          --listen [ADDRESS]: also reachable on the network (default 0.0.0.0)
+                          127.0.0.1:4800 only (from a laptop without Tailscale: an SSH tunnel,
+                          ssh -N -L 4800:127.0.0.1:4800 you@box). The first account made in the
+                          browser is the admin; everyone signs in with 2FA. It follows dl model
+                          up/update/down by itself. --port PORT; --admin-email EMAIL: dl makes
+                          the admin and shows its password once (it never keeps it)
   dl ui share             print one link for your team: private HTTPS on your tailnet with Tailscale
-                          (tailscale serve, never Funnel); without it, the LAN address after
-                          dl ui up --listen. --off stops sharing
-  dl ui invite EMAIL...   make their accounts and print what to send each person (dl sends no email)
+                          (tailscale serve, never Funnel; no plain-HTTP fallback). --off stops sharing
+  dl ui invite EMAIL...   make their accounts and print what to send each person (dl sends no email;
+                          asks once for an admin's Open WebUI API key, kept 0600)
   dl ui approve [EMAIL...|all]   who signed up and waits for approval; approve them
   dl ui status · dl ui logs [-f] · dl ui down [--purge]   (--purge deletes accounts and chats)
   dl update               update dl (when npm has a newer one) and the Autopilot it pins, then
@@ -206,6 +210,8 @@ export interface MainOptions {
   claude?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** `dl opencode`; the real one unless replaced. */
   opencode?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
+  /** What a GPU box runs, printed first by `dl status` and plain `dl` (box-status.ts); the real one unless replaced. */
+  boxSummary?: () => Promise<string | undefined>;
   /** `dl uninstall` on a server and on a laptop; the real ones unless replaced. */
   uninstall?: { server?: typeof uninstall; laptop?: typeof laptopUninstall };
 }
@@ -402,6 +408,11 @@ export async function main(
       case undefined:
       case "status": {
         const state = await readState(system);
+        // A GPU box (dl model deployments or a team chat) says what runs here first; elsewhere nothing is printed.
+        if (!values.brief) {
+          const summary = await (options.boxSummary ?? (() => boxSummary({ system, color: colorOn, ...(state ? { serverState: state } : {}) })))();
+          if (summary) io.out(summary);
+        }
         if (!state) {
           if (values.brief) return 0;
           // Bare dl with a place set up: a new session here. On this computer that's plain

@@ -4,6 +4,7 @@ import { AUTOPILOT_PORT, AUTO_UPGRADES, HOTCELL_PORT, NODE_AUTO_UPDATES, PATHS, 
 import { fileMtime, modelPricesHealth } from "./model-prices.js";
 import { providerFromAsterConfig } from "./provider.js";
 import { describeAccess, readState } from "./state.js";
+import { HTTPS_CERTS_URL } from "./tailscale.js";
 import { hotcellRoutes } from "./up.js";
 import { palette } from "./ui.js";
 import type { System } from "./system.js";
@@ -86,7 +87,7 @@ export async function doctor(system: System, now = new Date()): Promise<Check[]>
     const serving = serve.code === 0 && serve.stdout.includes(`127.0.0.1:${AUTOPILOT_PORT}`);
     add({ name: "private access", ok: serving, detail: serving ? `on ${state.access.url}` : "not published on your tailnet", fix: "dl up" });
     const remote = await system.probe("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10", `${state.access.url}/api/v1/health`]);
-    add({ name: "reachable", ok: remote.stdout.trim() === "401", detail: `${state.access.url}: HTTP ${remote.stdout.trim() || "none"}`, fix: "turn on HTTPS certificates at https://login.tailscale.com/admin/dns" });
+    add({ name: "reachable", ok: remote.stdout.trim() === "401", detail: `${state.access.url}: HTTP ${remote.stdout.trim() || "none"}`, fix: `turn on HTTPS certificates at ${HTTPS_CERTS_URL}` });
   }
   return checks;
 }
