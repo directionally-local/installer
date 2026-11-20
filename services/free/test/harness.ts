@@ -205,6 +205,10 @@ export interface Service {
   directory(): any;
   account(githubId: number): any;
   namespaces: Record<string, FakeNamespace<unknown>>;
+  /** Work started beside requests (HandlerOptions.background), not yet waited for. */
+  background: Array<Promise<unknown>>;
+  /** Waits for every piece of background work started so far. */
+  settle(): Promise<void>;
 }
 
 export interface Tokens {
@@ -338,6 +342,8 @@ export async function createService(vars: Record<string, string> = {}, options: 
     ADMIN_GITHUB_IDS: String(ADMIN_ID),
     // Tests sign many accounts up from @example.com; the per-domain daily cap has its own tests.
     DOMAIN_SIGNUPS_PER_DAY: "100000",
+    // Use descriptions make their own model calls; off unless a test turns them on (use-description.test.ts).
+    USE_DESCRIPTIONS: "false",
     ...vars,
     ...namespaces,
   };
@@ -465,7 +471,8 @@ export async function createService(vars: Record<string, string> = {}, options: 
     throw new Error(`unexpected fetch ${url}`);
   };
 
-  const handler = createHandler({ now: () => clock.now, fetch: fetcher as never, emailGapMs: 0 });
+  const background: Array<Promise<unknown>> = [];
+  const handler = createHandler({ now: () => clock.now, fetch: fetcher as never, emailGapMs: 0, background: (task) => void background.push(task) });
 
   const request: Service["request"] = async (method, path, options = {}) => {
     const headers = new Headers(options.headers);
@@ -500,6 +507,10 @@ export async function createService(vars: Record<string, string> = {}, options: 
   return {
     env: envRef.env,
     clock,
+    background,
+    settle: async () => {
+      while (background.length > 0) await Promise.allSettled(background.splice(0));
+    },
     handler: handler as never,
     calls,
     setOpenRouter: (next) => {

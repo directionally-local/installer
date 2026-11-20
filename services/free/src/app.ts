@@ -102,6 +102,7 @@ import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind } from "./
 import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
 import { allowedReturn, isInstallOption, ONE_TIME_CODE, planFor, WEB_SESSION_TTL_S, WEB_STATE, webCors, webFunnelCsv, type WebStep } from "./web-signup.js";
 import { grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, parseGrantUsd, parseLogins, type GrantResult } from "./grant.js";
+import { completionText, isUseRisk, parseUseLabel, USE_DESCRIPTIONS_PER_PERSON_PER_DAY, USE_KEEP_DAYS, USE_MAX_TOKENS, USE_REASONING_ROOM, USE_TIMEOUT_SECONDS, useInput, useMessages, type UseInput } from "./use-description.js";
 
 /**
  * The free managed tier's HTTP surface: device-flow sign-in with GitHub, the account and
@@ -287,6 +288,11 @@ export interface HandlerOptions {
   fetch?: Fetch;
   /** The pause between emails to users in the daily run and a broadcast (Resend allows 2 requests a second); tests set 0. */
   emailGapMs?: number;
+  /**
+   * Takes work that runs beside a request and is never awaited by it (use descriptions). Left
+   * out, the work just runs on; tests pass a collector to wait for it.
+   */
+  background?: (task: Promise<unknown>) => void;
 }
 
 interface Ctx {
@@ -309,6 +315,8 @@ interface Ctx {
   statusCache: { value?: FreeStatus; at: number };
   /** The pause between emails to users (HandlerOptions.emailGapMs). */
   emailGapMs: number;
+  /** HandlerOptions.background. */
+  background?: (task: Promise<unknown>) => void;
 }
 
 /** The daily digest's cron: 01:00 UTC, 09:00 in Singapore. Must match `triggers.crons` in both wrangler configs. */
@@ -367,7 +375,7 @@ export function createHandler(options: HandlerOptions = {}): {
       }
       const url = new URL(request.url);
       const ip = clientIp(request);
-      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin, statusCache, emailGapMs };
+      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin, statusCache, emailGapMs, ...(options.background ? { background: options.background } : {}) };
       return route(ctx);
     },
   };
@@ -2662,6 +2670,12 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     return openRouterChat(c, { model, config: gate.config, body, stream, maxTokens: res.maxTokens, user, sessionId, started, settle: settleFor, reservedAllowance: res.allowance, failingHosts });
   };
 
+  // What this session is about, beside the request and never awaited by it (use-description.ts).
+  // The input is taken now, before anything else touches the body.
+  if (!isAdmin && gate.config.useDescriptions) {
+    const task = describeUse(c, gate, { githubId: identity.githubId, sessionId: sessionId ?? null, input: useInput(body), user });
+    if (c.background) c.background(task);
+  }
   const response = await attempt(serving.model, serving.provider, reservation);
   if (!serving.fallback) return response;
   // The requested model's provider couldn't serve it, so its fallback did: say which.
@@ -2669,6 +2683,73 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   outHeaders.set("x-dl-fallback", serving.model.id);
   return new Response(response.body, { status: response.status, headers: outHeaders });
 
+}
+
+/**
+ * Describes the session this request belongs to, when it is due (see use-description.ts and the
+ * Directory's claimUseDescription): one DeepSeek V4.1 Flash call on the company key (Luminal,
+ * or OpenRouter where Luminal has no key or credit), then the label and its cost recorded, and
+ * the owner alerted for a "high" risk. Never throws and is never awaited by the request: any
+ * failure just means no description.
+ */
+async function describeUse(c: Ctx, gate: Runtime, input: { githubId: number; sessionId: string | null; input: UseInput | undefined; user: string }): Promise<void> {
+  try {
+    const { config } = gate;
+    const provider: Upstream | undefined = providerReady("luminal", config, gate) ? "luminal" : config.openRouterApiKey ? "openrouter" : undefined;
+    if (!provider) return;
+    const claim = await directory(c).claimUseDescription({
+      githubId: input.githubId,
+      sessionId: input.sessionId,
+      hasInput: input.input !== undefined,
+      now: c.now(),
+      perPersonCap: USE_DESCRIPTIONS_PER_PERSON_PER_DAY,
+      globalCap: config.useDescriptionDailyCap,
+    });
+    if (!claim || !input.input) return;
+    const model = modelById(DEEPSEEK_MODEL)!;
+    const messages = useMessages(input.input);
+    // DeepSeek reasons before it answers, and its reasoning counts as output: asked to reason
+    // little, with room for that on top of the ~60-token answer.
+    const payload: Record<string, unknown> =
+      provider === "luminal"
+        ? { model: model.upstreamModel, messages, max_completion_tokens: USE_MAX_TOKENS + USE_REASONING_ROOM, temperature: 0, stream: false, reasoning_effort: "low", user: input.user }
+        : { model: model.id, messages, max_tokens: USE_MAX_TOKENS, temperature: 0, stream: false, reasoning: { enabled: false }, usage: { include: true }, provider: providerPreferences(config), user: input.user };
+    const response = await fetchWithTimeout(
+      c.fetch,
+      provider === "luminal" ? LUMINAL_URL : OPENROUTER_URL,
+      {
+        method: "POST",
+        headers:
+          provider === "luminal"
+            ? { authorization: `Bearer ${c.config.luminalApiKey}`, "content-type": "application/json" }
+            : { authorization: `Bearer ${c.config.openRouterApiKey}`, "content-type": "application/json", "http-referer": "https://directionallylocal.com", "x-title": "Directionally Local" },
+        body: JSON.stringify(payload),
+      },
+      USE_TIMEOUT_SECONDS * 1000,
+    );
+    if (response === "timeout" || !response.ok) {
+      if (response !== "timeout") await response.body?.cancel().catch(() => undefined);
+      return;
+    }
+    const parsed = parseJson(await response.text());
+    const usage = parseUsage((parsed as { usage?: unknown } | undefined)?.usage);
+    const label = parseUseLabel(completionText(parsed));
+    const alerts = await directory(c).recordUseDescription({
+      githubId: input.githubId,
+      sessionId: input.sessionId,
+      label,
+      model: model.id,
+      upstream: provider,
+      tokens: usage ? usage.promptTokens + usage.completionTokens : 0,
+      cashUsd: provider === "openrouter" && usage ? costOf(usage, 0) : 0,
+      creditUsd: provider === "luminal" && usage ? costAtPrices(usage, creditPrices(model)) : 0,
+      now: c.now(),
+      blockUrl: `${c.base}/admin?view=tools#block`,
+    });
+    await alert(c, alerts);
+  } catch (error) {
+    console.error("use description failed", error instanceof Error ? error.name : "error");
+  }
 }
 
 /**
@@ -3045,6 +3126,20 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
   const actor = { githubId: identity.githubId, login: identity.login, now };
 
   if (method === "GET" && rest === "metrics") return adminMetrics(c);
+  if (method === "GET" && rest === "uses") {
+    // Recent use descriptions: ?days= (1 to 90, default 7), ?risk= (none: all, the default; low:
+    // low and high; high), ?githubId=, ?limit= (1 to 1000, default 200). Newest first.
+    const params = c.url.searchParams;
+    const days = params.get("days") === null ? 7 : Number(params.get("days"));
+    const risk = params.get("risk") ?? "none";
+    const limit = params.get("limit") === null ? 200 : Number(params.get("limit"));
+    const githubId = params.get("githubId") === null ? undefined : Number(params.get("githubId"));
+    if (!Number.isInteger(days) || days < 1 || days > USE_KEEP_DAYS || !isUseRisk(risk) || !Number.isInteger(limit) || limit < 1 || limit > 1000 || (githubId !== undefined && (!Number.isSafeInteger(githubId) || githubId <= 0))) {
+      return apiError(400, "invalid_request", `Use ?days=1 to ${USE_KEEP_DAYS}, ?risk=none|low|high (that risk or worse), ?githubId= and ?limit=1 to 1000.`);
+    }
+    const rows = await directory(c).useDescriptions({ since: now - days * DAY_MS, minRisk: risk, limit, ...(githubId !== undefined ? { githubId } : {}) });
+    return json({ days, risk, uses: rows.map((row) => ({ ...row, at: new Date(row.at).toISOString() })) });
+  }
   if (method === "POST" && rest === "recheck-below-bar") {
     const body = (await readJson(c)) ?? {};
     return json(await recheckBelowBar(c, config, actor, body.includeAdminStarters === true));
@@ -3081,6 +3176,8 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       weekStart: new Date(spend.weekStart).toISOString(),
       resetsAt: new Date(spend.resetsAt).toISOString(),
       paid: { usd: spend.paidUsd, tokens: spend.paidTokens, requests: spend.paidRequests },
+      // The service's own model calls this week (use descriptions): never a person's allowance or the caps.
+      internal: { usd: spend.internalUsd, creditUsd: spend.internalCreditUsd, tokens: spend.internalTokens, requests: spend.internalRequests },
       upstream: {
         primary: config.primaryUpstream,
         serving: chooseUpstream(config.primaryUpstream, c.config) ?? "none",
@@ -3166,12 +3263,13 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     if ("error" in page) return apiError(400, "invalid_request", page.error);
     // The Directory's per-person data in a few whole-table reads, not one call per person.
     const people = await directory(c).listPeople();
-    const [caps, networks, sessions, trialBonus, harnessUsage] = await Promise.all([
+    const [caps, networks, sessions, trialBonus, harnessUsage, uses] = await Promise.all([
       directory(c).personalCaps(),
       directory(c).networkCounts(),
       directory(c).weekSessions(now),
       directory(c).trialBonuses(policyOf(config)),
       directory(c).weekHarnessUsage(now),
+      directory(c).useSummaries(weekStart(now)),
     ]);
     const checks = peopleChecks(people, config, now);
     // Filter and page before any account call, so a page costs one account call per person on it.
@@ -3226,6 +3324,11 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
         dlSessionsThisWeek: sessions.get(person.github_id) ?? 0,
         // Requests and charged tokens from other tools through dl (`dl claude`, `dl opencode`) since Monday 00:00 UTC.
         otherHarnessThisWeek: harnessUsage.get(person.github_id) ?? { requests: 0, tokens: 0 },
+        // The automated description of their latest described session (use-description.ts), and
+        // the worst safety label since Monday 00:00 UTC (null: nothing described this week).
+        use: uses.get(person.github_id)?.use ?? null,
+        useAt: uses.has(person.github_id) ? new Date(uses.get(person.github_id)!.at).toISOString() : null,
+        worstRiskThisWeek: uses.get(person.github_id)?.worstRisk ?? null,
       };
     });
     // Without `limit`, everyone (as before) and `nextCursor: null`; with it, pass `nextCursor` back as `cursor`.
@@ -3791,7 +3894,12 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
 
 /** GET /admin: the home page, from the Directory's admin-home reads and the spend counters. */
 async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, now: number, login: string, signOut: boolean): Promise<Response> {
-  const [data, spend, webFunnel] = await Promise.all([directory(c).adminHome({ now, adminIds: [...c.config.adminGithubIds], trialCutoff: config.trialCutoff }), directory(c).spend(now), directory(c).webFunnel()]);
+  const [data, spend, webFunnel, flaggedUses] = await Promise.all([
+    directory(c).adminHome({ now, adminIds: [...c.config.adminGithubIds], trialCutoff: config.trialCutoff }),
+    directory(c).spend(now),
+    directory(c).webFunnel(),
+    directory(c).useDescriptions({ since: now - 7 * DAY_MS, minRisk: "low", limit: 50 }),
+  ]);
   const view = spendView(c, config, paused, spend);
   return adminHomePage({
     data,
@@ -3814,6 +3922,7 @@ async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, no
     login,
     signOut,
     webFunnel,
+    flaggedUses,
     now,
   });
 }

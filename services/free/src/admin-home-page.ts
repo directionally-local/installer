@@ -4,6 +4,7 @@ import { adminNav, barPath, compact, creditProviders, shell, SIMPLE_STYLE, type 
 import { BRAND_ORIGIN, PRODUCT_NAME } from "./pages.js";
 import { DAY_MS } from "./week.js";
 import { webFunnelCard, type WebFunnelRow } from "./web-signup.js";
+import type { UseRow } from "./directory-object.js";
 
 /**
  * The admin home (GET /admin): the data the old Kimiflare Cloud admin dashboard showed, in dl's
@@ -26,6 +27,34 @@ export interface AdminHomeInput {
   webFunnel?: WebFunnelRow[];
   /** The time the page is for (the funnel card's last 7 days). */
   now?: number;
+  /** Use descriptions labelled low or high risk in the last 7 days, newest first (use-description.ts); the card is left out without it. */
+  flaggedUses?: UseRow[];
+}
+
+/**
+ * The "Flagged use" card: automated session descriptions labelled low or high risk this last
+ * week, high first. Block from Tools.
+ */
+function flaggedUseCard(rows: UseRow[]): string {
+  const sorted = [...rows].sort((a, b) => (a.risk === b.risk ? b.at - a.at : a.risk === "high" ? -1 : 1));
+  const high = rows.filter((row) => row.risk === "high").length;
+  const body =
+    sorted.length === 0
+      ? `<p class="empty">Nothing labelled low or high risk in the last 7 days.</p>`
+      : `<div class="scroll"><table>
+<thead><tr><th class="l">User</th><th class="l">Risk</th><th class="l">Category</th><th class="l">Use</th><th>When</th></tr></thead>
+<tbody>${sorted
+          .map((row) => {
+            const who = escapeHtml(row.login ? `@${row.login}` : String(row.githubId));
+            const badge = `<span class="badge${row.risk === "high" ? " blocked" : ""}">${escapeHtml(row.risk)}</span>`;
+            return `<tr><td class="l">${who}</td><td class="l">${badge}</td><td class="l">${escapeHtml(row.category)}</td><td class="l">${escapeHtml(row.use)}</td><td>${monthDay(row.at)}</td></tr>`;
+          })
+          .join("")}</tbody>
+</table></div>`;
+  return `<section class="card" id="flagged-use"><h2>Flagged use <span class="n">(${high} high, ${rows.length - high} low)</span></h2>
+${body}
+<p class="empty">Automated from each session's latest message; the message itself isn't stored. Block from <a href="/admin?view=tools#block">Tools</a>. All: <code>GET /v1/admin/uses?risk=low</code>.</p>
+</section>`;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -375,6 +404,7 @@ ${grantsTable(data.endedGrants, true)}
 <main class="home">
 <p class="tools-link">Grants, requests, blocking, routing and emails are on <a href="/admin?view=tools">Tools</a>. Admins are left out of every total and marked in the table.</p>
 ${cards}
+${input.flaggedUses ? flaggedUseCard(input.flaggedUses) : ""}
 <div class="two">${health}${paid}</div>
 ${trial}
 ${input.webFunnel ? webFunnelCard(input.webFunnel, input.now ?? Date.now()) : ""}

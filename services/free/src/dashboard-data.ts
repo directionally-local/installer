@@ -52,7 +52,7 @@ export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
     "social",
   ],
   grants: ["github_id", "weekly_tokens", "weekly_usd"],
-  spend_weeks: ["week_start", "usd", "tokens", "requests", "admin_usd", "admin_tokens", "admin_requests", "paid_usd", "paid_tokens", "paid_requests", "credit_usd", "free_credit_usd", "openai_credit_usd", "openai_free_credit_usd"],
+  spend_weeks: ["week_start", "usd", "tokens", "requests", "admin_usd", "admin_tokens", "admin_requests", "paid_usd", "paid_tokens", "paid_requests", "credit_usd", "free_credit_usd", "openai_credit_usd", "openai_free_credit_usd", "internal_usd", "internal_credit_usd", "internal_tokens", "internal_requests"],
   upstream_daily: ["day", "upstream", "requests", "errors", "prompt_tokens", "cached_tokens", "completion_tokens", "cash_usd", "credit_usd"],
   // Who an upstream served, first and last day: ids and days only, for the people per upstream.
   upstream_people: ["upstream", "github_id", "first_day", "last_day"],

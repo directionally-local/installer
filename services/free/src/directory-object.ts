@@ -9,7 +9,7 @@ import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS
 import type { CleanEvent, GpuCount } from "./events.js";
 import { healthData, type HealthData, type HealthWindow } from "./health-data.js";
 import { adminHomeData, type AdminHomeData } from "./admin-home-data.js";
-import { milestoneCrossed, paymentAlert, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
+import { flaggedUseAlert, milestoneCrossed, paymentAlert, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
 import { DEEPSEEK_MODEL, familyOf, type Family } from "./models.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
@@ -17,6 +17,7 @@ import { bonuses, codeFor, countingPairs, everActiveFriends, trialBonuses, type 
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
 import { levelChecks, levelFor, type BasicRule, type GithubSignals, type Level, type LevelReason, type LevelThresholds, type SignalThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
+import { USE_KEEP_DAYS, USE_REFRESH_AT, type UseLabel } from "./use-description.js";
 import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
 import { WELCOME_KINDS, type UserEmailKind } from "./user-emails.js";
 import type { BroadcastAudience } from "./broadcast.js";
@@ -286,6 +287,18 @@ export interface QueueRun {
   budgetUsd: number | null;
 }
 
+/** One use description as the admin sees it. */
+export interface UseRow {
+  githubId: number;
+  login: string | null;
+  sessionId: string | null;
+  use: string;
+  risk: string;
+  category: string;
+  model: string;
+  at: number;
+}
+
 export interface SpendSummary {
   /** Paid usage (Pro and top-ups) this week, apart from the free caps. */
   paidUsd: number;
@@ -312,6 +325,11 @@ export interface SpendSummary {
   openaiCreditUsedUsd: number;
   openaiCreditWeekUsd: number;
   openaiFreeCreditWeekUsd: number;
+  /** The service's own model calls this week (use descriptions): cash, Luminal credit, tokens and calls. Never in the caps above. */
+  internalUsd: number;
+  internalCreditUsd: number;
+  internalTokens: number;
+  internalRequests: number;
 }
 
 /** One GPU early-access lead as the admin sees it. "" for a GPU model not sent, -1 for VRAM not sent. */
@@ -716,6 +734,36 @@ const SCHEMA = [
    )`,
   `CREATE INDEX IF NOT EXISTS grant_history_person ON grant_history (github_id, ended_at)`,
   // Feedback sent (POST /v1/feedback) per UTC day: a count only; the message is emailed, never stored.
+  // What people use the service for (use-description.ts): per (person, session) the requests
+  // seen and how many descriptions were made, description calls per person per day (the caps),
+  // and the descriptions themselves: about 60 characters and two labels, never the prompt.
+  `CREATE TABLE IF NOT EXISTS use_sessions (
+     github_id   INTEGER NOT NULL,
+     session_key TEXT NOT NULL,
+     requests    INTEGER NOT NULL,
+     described   INTEGER NOT NULL,
+     last_at     INTEGER NOT NULL,
+     PRIMARY KEY (github_id, session_key)
+   ) WITHOUT ROWID`,
+  `CREATE TABLE IF NOT EXISTS use_calls_daily (
+     day       INTEGER NOT NULL,
+     github_id INTEGER NOT NULL,
+     calls     INTEGER NOT NULL,
+     PRIMARY KEY (day, github_id)
+   ) WITHOUT ROWID`,
+  `CREATE TABLE IF NOT EXISTS use_descriptions (
+     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+     github_id  INTEGER NOT NULL,
+     session_id TEXT,
+     day        INTEGER NOT NULL,
+     use        TEXT NOT NULL,
+     risk       TEXT NOT NULL,
+     category   TEXT NOT NULL,
+     model      TEXT NOT NULL,
+     created_at INTEGER NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS use_descriptions_at ON use_descriptions (created_at)`,
+  `CREATE INDEX IF NOT EXISTS use_descriptions_person ON use_descriptions (github_id, created_at)`,
   `CREATE TABLE IF NOT EXISTS feedback_daily (
      day INTEGER PRIMARY KEY,
      n   INTEGER NOT NULL
@@ -787,6 +835,12 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   // ... and per person per day, how many requests and charged tokens came from such agents.
   ["daily_activity", "harness_requests", "INTEGER NOT NULL DEFAULT 0"],
   ["daily_activity", "harness_tokens", "INTEGER NOT NULL DEFAULT 0"],
+  // The service's own model calls (use descriptions): never a person's allowance or the free caps.
+  // Cash (OpenRouter) here; Luminal credit is also in credit_usd, so the balance stays true.
+  ["spend_weeks", "internal_usd", "REAL NOT NULL DEFAULT 0"],
+  ["spend_weeks", "internal_credit_usd", "REAL NOT NULL DEFAULT 0"],
+  ["spend_weeks", "internal_tokens", "INTEGER NOT NULL DEFAULT 0"],
+  ["spend_weeks", "internal_requests", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 /** Days of `daily_activity` whose DeepSeek cost is filled in from the request log when the column is added. */
@@ -2210,6 +2264,10 @@ export class DirectoryObject extends DurableObject {
       free_credit_usd: number;
       openai_credit_usd: number;
       openai_free_credit_usd: number;
+      internal_usd: number;
+      internal_credit_usd: number;
+      internal_tokens: number;
+      internal_requests: number;
     };
     const row = this.ctx.storage.sql.exec<Row>("SELECT * FROM spend_weeks WHERE week_start = ?", start).toArray()[0];
     const total = this.ctx.storage.sql
@@ -2237,6 +2295,10 @@ export class DirectoryObject extends DurableObject {
       openaiCreditUsedUsd: round(total?.openai_credit_usd ?? 0),
       openaiCreditWeekUsd: round(row?.openai_credit_usd ?? 0),
       openaiFreeCreditWeekUsd: round(row?.openai_free_credit_usd ?? 0),
+      internalUsd: round(row?.internal_usd ?? 0),
+      internalCreditUsd: round(row?.internal_credit_usd ?? 0),
+      internalTokens: row?.internal_tokens ?? 0,
+      internalRequests: row?.internal_requests ?? 0,
     };
   }
 
@@ -2569,6 +2631,165 @@ export class DirectoryObject extends DurableObject {
    * The alert for Luminal-served usage pausing because the credit ran out: once per balance.
    * Undefined when it was already sent.
    */
+  // ─── What people use the service for (use-description.ts) ────────────────
+
+  /**
+   * Counts one request of a (person, session) and says whether it gets a description: "first"
+   * for the first request with a user message, "refresh" once at the USE_REFRESH_AT-th request
+   * or later; without a session id, the first request with a user message of the UTC day. Only
+   * when under both daily caps (calls by this person, calls by everyone); a capped request
+   * changes nothing but the count, so a later request can still be described. Old counts and
+   * descriptions are pruned once a day.
+   */
+  async claimUseDescription(input: { githubId: number; sessionId: string | null; hasInput: boolean; now: number; perPersonCap: number; globalCap: number }): Promise<"first" | "refresh" | undefined> {
+    const sql = this.ctx.storage.sql;
+    const day = Math.floor(input.now / DAY_MS);
+    const key = input.sessionId ?? `day:${day}`;
+    return this.ctx.storage.transactionSync(() => {
+      this.#pruneUses(input.now, day);
+      const row = sql
+        .exec<{ requests: number; described: number }>(
+          `INSERT INTO use_sessions (github_id, session_key, requests, described, last_at) VALUES (?, ?, 1, 0, ?)
+           ON CONFLICT (github_id, session_key) DO UPDATE SET requests = requests + 1, last_at = excluded.last_at
+           RETURNING requests, described`,
+          input.githubId,
+          key,
+          input.now,
+        )
+        .one();
+      if (!input.hasInput) return undefined;
+      const kind = row.described === 0 ? "first" : row.described === 1 && input.sessionId !== null && row.requests >= USE_REFRESH_AT ? "refresh" : undefined;
+      if (!kind) return undefined;
+      const mine = sql.exec<{ calls: number }>("SELECT calls FROM use_calls_daily WHERE day = ? AND github_id = ?", day, input.githubId).toArray()[0]?.calls ?? 0;
+      if (mine >= input.perPersonCap) return undefined;
+      const all = sql.exec<{ calls: number | null }>("SELECT SUM(calls) AS calls FROM use_calls_daily WHERE day = ?", day).one().calls ?? 0;
+      if (all >= input.globalCap) return undefined;
+      sql.exec("UPDATE use_sessions SET described = described + 1 WHERE github_id = ? AND session_key = ?", input.githubId, key);
+      sql.exec(
+        `INSERT INTO use_calls_daily (day, github_id, calls) VALUES (?, ?, 1)
+         ON CONFLICT (day, github_id) DO UPDATE SET calls = calls + 1`,
+        day,
+        input.githubId,
+      );
+      return kind;
+    });
+  }
+
+  /** Session counts older than a week, call counts older than a week and descriptions older than USE_KEEP_DAYS go; once a UTC day. */
+  #pruneUses(now: number, day: number): void {
+    const sql = this.ctx.storage.sql;
+    const done = sql.exec<{ value: string }>("SELECT value FROM settings WHERE key = 'use:pruned_day'").toArray()[0]?.value;
+    if (done === String(day)) return;
+    sql.exec("DELETE FROM use_sessions WHERE last_at < ?", now - 7 * DAY_MS);
+    sql.exec("DELETE FROM use_calls_daily WHERE day < ?", day - 7);
+    sql.exec("DELETE FROM use_descriptions WHERE created_at < ?", now - USE_KEEP_DAYS * DAY_MS);
+    sql.exec("INSERT INTO settings (key, value) VALUES ('use:pruned_day', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", String(day));
+  }
+
+  /**
+   * One description call's outcome: its cost in the internal spend bucket (and Luminal's credit,
+   * which it used), never a person's allowance or the free caps; the description when the model
+   * gave one; and, for a "high" risk, the owner's alert, at most once per person per UTC day.
+   */
+  async recordUseDescription(input: {
+    githubId: number;
+    sessionId: string | null;
+    label: UseLabel | undefined;
+    model: string;
+    upstream: Upstream;
+    tokens: number;
+    cashUsd: number;
+    creditUsd: number;
+    now: number;
+    blockUrl: string;
+  }): Promise<Alert[]> {
+    const sql = this.ctx.storage.sql;
+    const day = Math.floor(input.now / DAY_MS);
+    const alerts: Alert[] = [];
+    this.ctx.storage.transactionSync(() => {
+      const luminal = input.upstream === "luminal" ? input.creditUsd : 0;
+      const openai = input.upstream === "openai" ? input.creditUsd : 0;
+      sql.exec(
+        `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests, credit_usd, openai_credit_usd, internal_usd, internal_credit_usd, internal_tokens, internal_requests)
+         VALUES (?, 0, 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, 1)
+         ON CONFLICT(week_start) DO UPDATE SET
+           credit_usd = credit_usd + excluded.credit_usd, openai_credit_usd = openai_credit_usd + excluded.openai_credit_usd,
+           internal_usd = internal_usd + excluded.internal_usd, internal_credit_usd = internal_credit_usd + excluded.internal_credit_usd,
+           internal_tokens = internal_tokens + excluded.internal_tokens, internal_requests = internal_requests + 1`,
+        weekStart(input.now),
+        luminal,
+        openai,
+        input.cashUsd,
+        luminal + openai,
+        input.tokens,
+      );
+      if (!input.label) return;
+      const { use, risk, category } = input.label;
+      sql.exec(
+        "INSERT INTO use_descriptions (github_id, session_id, day, use, risk, category, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        input.githubId,
+        input.sessionId,
+        day,
+        use,
+        risk,
+        category,
+        input.model,
+        input.now,
+      );
+      if (risk === "high" && this.#markAlert(`use-high:${input.githubId}:${day}`, input.now)) {
+        const login = sql.exec<{ login: string }>("SELECT login FROM people WHERE github_id = ?", input.githubId).toArray()[0]?.login ?? String(input.githubId);
+        alerts.push(flaggedUseAlert({ login, githubId: input.githubId, use, category, blockUrl: input.blockUrl }));
+      }
+    });
+    return alerts;
+  }
+
+  /**
+   * Recent descriptions, newest first, with the person's login: those at `minRisk` or worse
+   * ("none": all) since `since`, at most `limit`.
+   */
+  async useDescriptions(input: { since: number; minRisk: "none" | "low" | "high"; limit: number; githubId?: number }): Promise<UseRow[]> {
+    const risks = input.minRisk === "high" ? ["high"] : input.minRisk === "low" ? ["low", "high"] : ["none", "low", "high"];
+    return this.ctx.storage.sql
+      .exec<{ github_id: number; login: string | null; session_id: string | null; use: string; risk: string; category: string; model: string; created_at: number }>(
+        `SELECT d.github_id, p.login, d.session_id, d.use, d.risk, d.category, d.model, d.created_at
+         FROM use_descriptions d LEFT JOIN people p ON p.github_id = d.github_id
+         WHERE d.created_at >= ? AND d.risk IN (SELECT value FROM json_each(?)) AND (? IS NULL OR d.github_id = ?)
+         ORDER BY d.created_at DESC, d.id DESC LIMIT ?`,
+        input.since,
+        JSON.stringify(risks),
+        input.githubId ?? null,
+        input.githubId ?? null,
+        input.limit,
+      )
+      .toArray()
+      .map((row) => ({ githubId: row.github_id, login: row.login, sessionId: row.session_id, use: row.use, risk: row.risk, category: row.category, model: row.model, at: row.created_at }));
+  }
+
+  /** Per person: the latest description, and the worst risk since `since` (this week, for the admin people list). */
+  async useSummaries(since: number): Promise<Map<number, { use: string; at: number; worstRisk: string | null }>> {
+    const sql = this.ctx.storage.sql;
+    const out = new Map<number, { use: string; at: number; worstRisk: string | null }>();
+    const latest = sql
+      .exec<{ github_id: number; use: string; created_at: number }>(
+        `SELECT d.github_id, d.use, d.created_at FROM use_descriptions d
+         WHERE d.id = (SELECT d2.id FROM use_descriptions d2 WHERE d2.github_id = d.github_id ORDER BY d2.created_at DESC, d2.id DESC LIMIT 1)`,
+      )
+      .toArray();
+    for (const row of latest) out.set(row.github_id, { use: row.use, at: row.created_at, worstRisk: null });
+    const worst = sql
+      .exec<{ github_id: number; rank: number }>(
+        `SELECT github_id, MAX(CASE risk WHEN 'high' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) AS rank FROM use_descriptions WHERE created_at >= ? GROUP BY github_id`,
+        since,
+      )
+      .toArray();
+    for (const row of worst) {
+      const entry = out.get(row.github_id);
+      if (entry) entry.worstRisk = row.rank === 2 ? "high" : row.rank === 1 ? "low" : "none";
+    }
+    return out;
+  }
+
   async creditPausedAlert(balance: number, now: number, provider: "luminal" | "openai" = "luminal"): Promise<Alert | undefined> {
     if (!this.#markAlert(`credit-paused:${provider}:${balance}`, now)) return undefined;
     const spend = this.#spendSync(now);

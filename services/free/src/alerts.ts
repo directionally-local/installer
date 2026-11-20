@@ -161,6 +161,23 @@ export function accessRequestAlert(login: string, pending: number): Alert {
   };
 }
 
+/**
+ * A use description labelled high risk (use-description.ts): who, what the automated
+ * description says and its category, and where to block them. Once per person per UTC day.
+ */
+export function flaggedUseAlert(input: { login: string; githubId: number; use: string; category: string; blockUrl: string }): Alert {
+  return {
+    subject: `dl free tier: high-risk use by @${input.login}`,
+    text: [
+      `dl free tier: a session by @${input.login} (GitHub id ${input.githubId}) was labelled high risk.`,
+      `Description: ${input.use}`,
+      `Category: ${input.category}`,
+      `Block: ${input.blockUrl} (Tools, Block, @${input.login}). Recent descriptions: GET /v1/admin/uses?risk=high`,
+    ].join("\n"),
+    footer: "Sent at most once per person per UTC day. The description and label are automated, from the session's latest message; the message itself is not stored.",
+  };
+}
+
 export function pauseAlert(paused: boolean, login: string): Alert {
   return paused
     ? { subject: "dl free tier: free tokens paused (kill switch)", text: `dl free tier: free tokens paused for everyone by ${login} (kill switch).` }

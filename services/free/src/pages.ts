@@ -12,10 +12,11 @@ export const PRODUCT_NAME = "dl";
  * kind of data collected is named; the privacy policy has the detail.
  */
 const DISCLOSURE = `
-<details class="fine disclosure"><summary>Free tokens come with usage records, never your prompts or code. <span>What exactly?</span></summary>
+<details class="fine disclosure"><summary>Free tokens come with usage records and a short description of each session, never your prompts or code. <span>What exactly?</span></summary>
 <p>For each request: tokens in, cached and out, cost, model and time. Session events from dl: start and end, turns,
 tool-call counts, pull requests opened, error codes, version, OS and a hash of the repository's remote URL.
-We never store your prompts, completions, code, file paths or file contents. When you sign in, we read your GitHub account's age,
+For each session, to prevent abuse: a short automated description of what it is about and a safety label, made from
+your latest message and kept for 90 days. We never store your prompts, completions, code, file paths or file contents. When you sign in, we read your GitHub account's age,
 public repository, follower and contribution counts (numbers only) to set your level, and ask for a contact email,
 prefilled from your GitHub account.</p></details>`;
 
