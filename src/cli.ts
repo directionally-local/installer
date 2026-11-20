@@ -73,8 +73,8 @@ On your laptop:
                           sign-in; ARGS go to claude as they are. Needs claude installed; free
                           tokens work in it only while dl claude runs, on a smaller share of the
                           weekly allowance than Autopilot. Your ~/.claude settings aren't touched
-  dl opencode [ARGS]      your own OpenCode on free tokens (GPT-6 Luna by default; Sol, Astra and
-                          DeepSeek in /models), through dl's free tier sign-in; ARGS go to opencode
+  dl opencode [ARGS]      your own OpenCode on free tokens (DeepSeek V4.1 Flash by default; GPT-6
+                          models in /models), through dl's free tier sign-in; ARGS go to opencode
                           as they are. Needs opencode installed; free tokens work in it only while
                           dl opencode runs. Your OpenCode config files aren't touched
   dl claude-code hook install   when Claude Code hits its usage or rate limit, show how to continue
