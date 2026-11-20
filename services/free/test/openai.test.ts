@@ -177,6 +177,13 @@ describe("status and models", () => {
     ]);
   });
 
+  it("leaves GPT-6 out while the person's GPT-6 budget is zero, but not for the admin", async () => {
+    const { service, token, adminToken } = await member({ ...OPENAI, PER_PERSON_WEEKLY_USD_CAP: "0" });
+    const ids = async (t: string) => ((await (await service.request("GET", "/v1/models", { token: t })).json()) as { data: Array<{ id: string }> }).data.map((model) => model.id);
+    assert.deepEqual(await ids(token), [DEEPSEEK]);
+    assert.deepEqual(await ids(adminToken), [LUNA, SOL, ASTRA, DEEPSEEK]);
+  });
+
   it("says which models can serve now, without amounts", async () => {
     const openai = await createService({ ...OPENAI, OPENROUTER_API_KEY: "" });
     const body = (await (await openai.request("GET", "/v1/status")).json()) as { models: Array<{ id: string; available: boolean }> };
