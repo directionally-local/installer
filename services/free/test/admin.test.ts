@@ -197,6 +197,8 @@ describe("metrics", () => {
         errorEvents: 0,
         latencyP50Ms: 100,
         latencyP95Ms: 300,
+        securitySessionsOffGpt6: 0,
+        securityRefusalsOffGpt6: 0,
       },
     );
     assert.equal(metrics.daily[1].errors, 1);

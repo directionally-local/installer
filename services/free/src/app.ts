@@ -102,7 +102,8 @@ import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind } from "./
 import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
 import { allowedReturn, isInstallOption, ONE_TIME_CODE, planFor, WEB_SESSION_TTL_S, WEB_STATE, webCors, webFunnelCsv, type WebStep } from "./web-signup.js";
 import { grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, parseGrantUsd, parseLogins, type GrantResult } from "./grant.js";
-import { completionText, isUseRisk, parseUseLabel, USE_DESCRIPTIONS_PER_PERSON_PER_DAY, USE_KEEP_DAYS, USE_MAX_TOKENS, USE_REASONING_ROOM, USE_TIMEOUT_SECONDS, useInput, useMessages, type UseInput } from "./use-description.js";
+import { completionText, isUseRisk, parseUseLabel, USE_DESCRIPTIONS_PER_PERSON_PER_DAY, USE_KEEP_DAYS, USE_MAX_TOKENS, USE_REASONING_ROOM, USE_TIMEOUT_SECONDS, latestUserText, useInput, useMessages, type UseInput } from "./use-description.js";
+import { SECURITY_GPT6_MESSAGE, SECURITY_REASON, securityHoldEnds, securitySignal } from "./security-route.js";
 
 /**
  * The free managed tier's HTTP surface: device-flow sign-in with GitHub, the account and
@@ -2470,6 +2471,18 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   }
   // Every level gets every model; basic and Starter on their smaller allowance.
   const effective = requested;
+  const sessionId = c.request.headers.get("x-session-id") ?? (typeof body.session_id === "string" ? body.session_id : undefined);
+
+  // Security work never goes to GPT-6 (security-route.ts): a session its use description labels
+  // security, or whose latest message the local pre-check matches, gets the GPT-6 limit's
+  // refusal pointing at DeepSeek, for that session and the person's rest of the UTC day.
+  if (requested.family === "gpt6" && !isAdmin && gate.config.securityOffGpt6) {
+    const signal = securitySignal(latestUserText(body));
+    const held = await directory(c).gpt6SecurityCheck({ githubId: identity.githubId, sessionId: sessionId ?? null, now: c.now(), ...(signal ? { signal } : {}) });
+    if (held) {
+      return apiError(402, "gpt_limit", SECURITY_GPT6_MESSAGE, { family: "gpt6", resetsAt: securityHoldEnds(c.now()), reason: SECURITY_REASON, alternative: DEEPSEEK_MODEL }, await headers());
+    }
+  }
 
   if (gate.paused) return pausedError(await headers());
   // Which model actually serves: the requested one when its provider has a key and credit left,
@@ -2580,7 +2593,6 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
 
   const stream = body.stream === true;
   const user = `dl-${(await sha256Hex(`free:${identity.githubId}`)).slice(0, 32)}`;
-  const sessionId = c.request.headers.get("x-session-id") ?? (typeof body.session_id === "string" ? body.session_id : undefined);
   const cooldownMs = gate.config.openRouterHostCooldownMinutes * 60_000;
   const failingHosts = cooldownMs > 0 && serving.provider === "openrouter" ? await hosts(c).failingHosts(c.now() - cooldownMs) : [];
   const started = c.now();

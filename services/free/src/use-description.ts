@@ -89,6 +89,18 @@ function contentText(content: unknown): string {
     .join("\n");
 }
 
+/** The text of the last user message with any, trimmed, in full; "" when there is none. */
+export function latestUserText(body: Record<string, unknown>): string {
+  const messages = Array.isArray(body.messages) ? (body.messages as unknown[]) : [];
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index] as { role?: unknown; content?: unknown } | null;
+    if (!message || typeof message !== "object" || message.role !== "user") continue;
+    const text = contentText(message.content).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
 /**
  * The description's input from a chat completions body, or undefined when it has no user
  * message with text. Only the last user message, and the function names of the assistant's tool
@@ -97,13 +109,7 @@ function contentText(content: unknown): string {
  */
 export function useInput(body: Record<string, unknown>): UseInput | undefined {
   const messages = Array.isArray(body.messages) ? (body.messages as unknown[]) : [];
-  let text = "";
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index] as { role?: unknown; content?: unknown } | null;
-    if (!message || typeof message !== "object" || message.role !== "user") continue;
-    text = contentText(message.content).trim();
-    if (text) break;
-  }
+  const text = latestUserText(body);
   if (!text) return undefined;
   const tools: string[] = [];
   for (const message of messages) {

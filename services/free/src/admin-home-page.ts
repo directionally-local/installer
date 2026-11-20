@@ -345,7 +345,8 @@ ${stat("Global Budget", `${dollars(budget.usedUsd)} / ${budget.totalUsd === null
 ${stat("Est. Cost", dollars(data.totals.costUsd), "all time, at list prices")}
 ${stat("Feedback", data.feedback.total.toLocaleString("en-US"), feedbackNote)}
 ${stat("7-Day Prompts", compact(data.last7.promptTokens), "input tokens, last 7 days")}
-</div>`;
+</div>
+<p class="muted">Security sessions kept off GPT-6: ${data.securityOffGpt6Today.sessions.toLocaleString("en-US")} today (${data.securityOffGpt6Today.refusals.toLocaleString("en-US")} GPT-6 ${data.securityOffGpt6Today.refusals === 1 ? "request" : "requests"} refused).</p>`;
 
   const health = `<section class="card"><h2>Platform Health</h2><div class="quick">
 ${quick("Total Users", data.totalUsers.toLocaleString("en-US"))}

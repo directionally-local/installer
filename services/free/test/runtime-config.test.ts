@@ -87,6 +87,7 @@ describe("runtime settings (units)", () => {
       accessRequestAlerts: "each",
       useDescriptions: true,
       useDescriptionDailyCap: 2000,
+      securityOffGpt6: true,
     });
   });
 

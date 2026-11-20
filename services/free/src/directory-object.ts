@@ -18,6 +18,7 @@ import { applyOverrides, readOverrides, type Overrides, type SettingChange } fro
 import { levelChecks, levelFor, type BasicRule, type GithubSignals, type Level, type LevelReason, type LevelThresholds, type SignalThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 import { USE_KEEP_DAYS, USE_REFRESH_AT, type UseLabel } from "./use-description.js";
+import { labelKeepsOffGpt6 } from "./security-route.js";
 import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
 import { WELCOME_KINDS, type UserEmailKind } from "./user-emails.js";
 import type { BroadcastAudience } from "./broadcast.js";
@@ -768,6 +769,24 @@ const SCHEMA = [
      day INTEGER PRIMARY KEY,
      n   INTEGER NOT NULL
    )`,
+  // Security work kept off GPT-6 (security-route.ts). A hold per person: "s:<session id>" for a
+  // session (until pruned, a week after it was made) or "d:<UTC day>" for the rest of that day;
+  // `source` is "label" (its use description) or "precheck:<rule id>". Then the GPT-6 requests
+  // refused for it, per UTC day, person and session ("" without one): counts only, never content.
+  `CREATE TABLE IF NOT EXISTS gpt6_holds (
+     github_id  INTEGER NOT NULL,
+     hold_key   TEXT NOT NULL,
+     source     TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     PRIMARY KEY (github_id, hold_key)
+   ) WITHOUT ROWID`,
+  `CREATE TABLE IF NOT EXISTS security_refusals_daily (
+     day         INTEGER NOT NULL,
+     github_id   INTEGER NOT NULL,
+     session_key TEXT NOT NULL,
+     n           INTEGER NOT NULL,
+     PRIMARY KEY (day, github_id, session_key)
+   ) WITHOUT ROWID`,
 ];
 
 /** Columns added after their table first shipped: added in place on start. */
@@ -2683,6 +2702,8 @@ export class DirectoryObject extends DurableObject {
     sql.exec("DELETE FROM use_sessions WHERE last_at < ?", now - 7 * DAY_MS);
     sql.exec("DELETE FROM use_calls_daily WHERE day < ?", day - 7);
     sql.exec("DELETE FROM use_descriptions WHERE created_at < ?", now - USE_KEEP_DAYS * DAY_MS);
+    sql.exec("DELETE FROM gpt6_holds WHERE created_at < ?", now - 7 * DAY_MS);
+    sql.exec("DELETE FROM security_refusals_daily WHERE day < ?", day - USE_KEEP_DAYS);
     sql.exec("INSERT INTO settings (key, value) VALUES ('use:pruned_day', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", String(day));
   }
 
@@ -2725,6 +2746,8 @@ export class DirectoryObject extends DurableObject {
       );
       if (!input.label) return;
       const { use, risk, category } = input.label;
+      // Security work, or a high risk: this session, and the person for the rest of the day, off GPT-6.
+      if (labelKeepsOffGpt6(input.label)) this.#holdOffGpt6(input.githubId, input.sessionId, input.now, "label");
       sql.exec(
         "INSERT INTO use_descriptions (github_id, session_id, day, use, risk, category, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         input.githubId,
@@ -2742,6 +2765,49 @@ export class DirectoryObject extends DurableObject {
       }
     });
     return alerts;
+  }
+
+  /** Holds (person, session) and the person for the rest of the UTC day off GPT-6 (security-route.ts). */
+  #holdOffGpt6(githubId: number, sessionId: string | null, now: number, source: string): void {
+    const sql = this.ctx.storage.sql;
+    const keys = [`d:${Math.floor(now / DAY_MS)}`, ...(sessionId ? [`s:${sessionId}`] : [])];
+    for (const key of keys) {
+      sql.exec("INSERT INTO gpt6_holds (github_id, hold_key, source, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (github_id, hold_key) DO NOTHING", githubId, key, source, now);
+    }
+  }
+
+  /**
+   * A GPT-6 request from a non-admin while `securityOffGpt6` is on: whether it is refused as
+   * security work. `signal` is the pre-check's matching rule for this request (it adds the holds
+   * first); otherwise, whether this session or the person today is already held. A refusal is
+   * counted per UTC day, person and session.
+   */
+  async gpt6SecurityCheck(input: { githubId: number; sessionId: string | null; now: number; signal?: string }): Promise<boolean> {
+    const sql = this.ctx.storage.sql;
+    const day = Math.floor(input.now / DAY_MS);
+    return this.ctx.storage.transactionSync(() => {
+      this.#pruneUses(input.now, day);
+      if (input.signal) this.#holdOffGpt6(input.githubId, input.sessionId, input.now, `precheck:${input.signal}`);
+      const held =
+        input.signal !== undefined ||
+        sql
+          .exec<{ n: number }>(
+            "SELECT COUNT(*) AS n FROM gpt6_holds WHERE github_id = ? AND (hold_key = ? OR hold_key = ?)",
+            input.githubId,
+            `d:${day}`,
+            input.sessionId ? `s:${input.sessionId}` : `d:${day}`,
+          )
+          .one().n > 0;
+      if (!held) return false;
+      sql.exec(
+        `INSERT INTO security_refusals_daily (day, github_id, session_key, n) VALUES (?, ?, ?, 1)
+         ON CONFLICT (day, github_id, session_key) DO UPDATE SET n = n + 1`,
+        day,
+        input.githubId,
+        input.sessionId ?? "",
+      );
+      return true;
+    });
   }
 
   /**
@@ -3208,6 +3274,15 @@ export class DirectoryObject extends DurableObject {
       from,
       until,
     ).toArray());
+    // Security work kept off GPT-6 (security-route.ts): sessions held and GPT-6 requests refused.
+    const securityByDay = new Map<number, { sessions: number; refusals: number }>();
+    for (const row of sql
+      .exec<{ day: number; sessions: number; refusals: number }>(
+        "SELECT day, COUNT(*) AS sessions, SUM(n) AS refusals FROM security_refusals_daily WHERE day >= ? AND day < ? GROUP BY day",
+        from / DAY_MS,
+        until / DAY_MS,
+      )
+      .toArray()) securityByDay.set(row.day, { sessions: row.sessions, refusals: row.refusals });
     const latencies = new Map<number, number[]>();
     for (const row of sql
       .exec<{ day: number; latency_ms: number }>(
@@ -3240,6 +3315,8 @@ export class DirectoryObject extends DurableObject {
         errorEvents: errorEventsByDay.get(key) ?? 0,
         latencyP50Ms: percentile(sorted, 50),
         latencyP95Ms: percentile(sorted, 95),
+        securitySessionsOffGpt6: securityByDay.get(key)?.sessions ?? 0,
+        securityRefusalsOffGpt6: securityByDay.get(key)?.refusals ?? 0,
       });
     }
 
