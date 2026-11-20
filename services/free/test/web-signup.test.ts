@@ -232,6 +232,24 @@ describe("the web session", () => {
     assert.equal(form.get("cancel_url"), `${PAGE}?checkout=cancel`);
     assert.equal(form.get("line_items[0][price]"), "price_pro123");
   });
+
+  it("hides Pro while proOffered is off: no Pro in /web/me, and its checkout refused before it is counted", async () => {
+    const service = await createService({ ...OPEN, ...BILLING });
+    const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { proOffered: false } })).status, 200);
+    const token = await webToken(service, { id: 518, login: "browser" });
+    const me = (await (await service.request("GET", "/web/me", { token, headers: fromPage() })).json()) as Record<string, any>;
+    assert.equal("pro" in me.offers, false);
+    assert.ok(me.offers.topup);
+    const calls = service.calls.stripe.length;
+    const response = await service.request("POST", "/web/checkout", { token, headers: fromPage() });
+    assert.equal(response.status, 403);
+    assert.equal(response.headers.get("access-control-allow-origin"), ORIGIN);
+    assert.equal(await errorCode(response), "pro_not_offered");
+    assert.equal(service.calls.stripe.length, calls, "Stripe never called");
+    const funnel = await service.directory().webFunnel();
+    assert.equal(funnel.filter((row: { step: string }) => row.step === "plan_pro").length, 0, "not counted as a Pro checkout");
+  });
 });
 
 describe("the install code", () => {

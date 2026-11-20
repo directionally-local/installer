@@ -367,7 +367,8 @@ reflected: it says whether free tokens flow, not whether sign-up needs a code.
 | `POST /v1/billing/checkout {"product": "topup"}` | `{"url": …}`: a one-time payment Checkout |
 | `POST /v1/billing/portal` | `{"url": "https://billing.stripe.com/…"}`: the Customer Portal (cancel Pro, change card) |
 
-Refusals: 400 `invalid_request` (unknown product), 403 `not_invited` / `suspended`, 409
+Refusals: 400 `invalid_request` (unknown product), 403 `not_invited` / `suspended`, 403
+`pro_not_offered` (a Pro checkout, here or at `POST /web/checkout`, while `proOffered` is off), 409
 `already_pro`, 404 `no_billing_account` (portal before any purchase), 502 `billing_error`
 (Stripe refused), 503 `billing_unavailable` (Stripe isn't configured). Checkout returns to
 `https://dl.new/billing/success` or `/billing/cancel` (`BILLING_SUCCESS_URL`,
@@ -788,6 +789,7 @@ with who made it and when.
 | `dlOnly` | `DL_ONLY` | true (free tokens inside dl only; see below) |
 | `allowOtherHarnesses` | `ALLOW_OTHER_HARNESSES` | true: Claude Code through `dl claude` and OpenCode through `dl opencode` may use free tokens; false refuses both (`harness_not_allowed`) |
 | `otherHarnessShare` | `OTHER_HARNESS_SHARE` | 0.5: the share (0 to 1) of the free weekly allowance and of the trial Claude Code and OpenCode may use; Pro is exempt (see below) |
+| `proOffered` | `PRO_OFFERED` | true: dl Pro is offered. false hides it from everyone new: `offers` has no `pro` (the `topup` stays), free users' refusals, sign-in lines and trial emails stop naming Pro, and a new Pro checkout gets 403 `pro_not_offered`. Existing subscribers keep Pro, their Pro wording and the billing portal |
 | `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request); `daily` (one line in the daily digest); `off` |
 | `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 50,000,000, as Full (0: no free tokens below Basic) |
 | `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |

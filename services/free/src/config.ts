@@ -237,6 +237,13 @@ export interface FreeConfig {
    */
   otherHarnessShare: number;
   /**
+   * Whether dl Pro is offered to anyone new (PRO_OFFERED, default on); also a runtime setting.
+   * Off: `offers` leaves Pro out (the top-up stays), free users' refusals stop naming Pro, and a
+   * new Pro checkout is refused (403 pro_not_offered). Existing subscribers keep their plan, their
+   * Pro wording and the billing portal.
+   */
+  proOffered: boolean;
+  /**
    * The owner's email about access requests (/request in dl), ACCESS_REQUEST_ALERTS: "each" (one
    * per request, the default), "daily" (counted in the daily digest instead) or "off". Also a
    * runtime setting.
@@ -322,6 +329,7 @@ export const DEFAULTS = {
   dlOnly: true,
   allowOtherHarnesses: true,
   otherHarnessShare: 0.5,
+  proOffered: true,
   accessRequestAlerts: "each" as AccessRequestAlerts,
   /**
    * OpenRouter's cache-read price over its input price for deepseek/deepseek-v4.1-flash-1017,
@@ -497,6 +505,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     dlOnly: flag(env.DL_ONLY, DEFAULTS.dlOnly, "DL_ONLY"),
     allowOtherHarnesses: flag(env.ALLOW_OTHER_HARNESSES, DEFAULTS.allowOtherHarnesses, "ALLOW_OTHER_HARNESSES"),
     otherHarnessShare: share(env.OTHER_HARNESS_SHARE, DEFAULTS.otherHarnessShare, "OTHER_HARNESS_SHARE"),
+    proOffered: flag(env.PRO_OFFERED, DEFAULTS.proOffered, "PRO_OFFERED"),
     accessRequestAlerts: accessRequestAlerts(env.ACCESS_REQUEST_ALERTS),
   };
 }

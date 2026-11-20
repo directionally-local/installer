@@ -852,20 +852,14 @@ export function usdLabel(amount: number): string {
  * The paid offers, from config (Stripe billing sells them). `price` is the exact text to show
  * ("$3.99/month"), so a client never formats or rounds the number itself; `usdPerWeek` is Pro's
  * weekly GPT-6 budget and `deepseekUsdPerWeek` its DeepSeek one (null: no dollar cap), and
- * `valueLine` one short sentence to show with it.
+ * `valueLine` one short sentence to show with it. While Pro isn't offered (`proOffered` off) there
+ * is no `pro` at all, so clients (Autopilot, dl.new) offer only the top-up; existing subscribers
+ * see their plan in `plan` and manage it from the billing portal.
  */
 export function offers(config: FreeConfig) {
   const { pro, topup } = config.offers;
   return {
-    pro: {
-      priceUsdMonthly: pro.priceUsdMonthly,
-      price: `${usdLabel(pro.priceUsdMonthly)}/month`,
-      tokensPerWeek: pro.tokensPerWeek,
-      // Pro's GPT-6 budget (the field older clients read) and its DeepSeek budget.
-      usdPerWeek: config.proWeeklyUsdCap ?? null,
-      deepseekUsdPerWeek: config.proDeepseekWeeklyUsdCap ?? null,
-      valueLine: pro.valueLine,
-    },
+    ...(config.proOffered ? { pro: proOffer(config, pro) } : {}),
     // A dollar top-up: whole units of `unitPriceUsd`, each adding `usageMultiplier` times its price in usage.
     topup: {
       unitPriceUsd: topup.unitPriceUsd,
@@ -875,6 +869,19 @@ export function offers(config: FreeConfig) {
       validDays: topup.validDays,
       fromPrice: usdLabel(topup.unitPriceUsd * topup.minQuantity),
     },
+  };
+}
+
+/** Pro as `offers` shows it. */
+function proOffer(config: FreeConfig, pro: FreeConfig["offers"]["pro"]) {
+  return {
+    priceUsdMonthly: pro.priceUsdMonthly,
+    price: `${usdLabel(pro.priceUsdMonthly)}/month`,
+    tokensPerWeek: pro.tokensPerWeek,
+    // Pro's GPT-6 budget (the field older clients read) and its DeepSeek budget.
+    usdPerWeek: config.proWeeklyUsdCap ?? null,
+    deepseekUsdPerWeek: config.proDeepseekWeeklyUsdCap ?? null,
+    valueLine: pro.valueLine,
   };
 }
 
@@ -1290,9 +1297,9 @@ function effectiveLevel(person: { level: Level; level_reason: LevelReason | null
 async function levelDetails(c: Ctx, person: PersonRow | undefined, signIn: SignInLevel): Promise<{ line: string }> {
   const { config } = await runtime(c);
   const level = servedLevel(effectiveLevel(person, signIn), config);
-  if (level === "basic") return { line: basicLine(config.basicWeeklyTokens, config.basicWeeklyUsdCap, config.basicDeepseekWeeklyUsdCap) };
+  if (level === "basic") return { line: basicLine(config.basicWeeklyTokens, config.basicWeeklyUsdCap, config.basicDeepseekWeeklyUsdCap, config.proOffered) };
   const flagged = signIn.batchFlagged === true || person?.batch_flag === 1;
-  return { line: starterLine(levelThresholds(config), flagged ? 0 : config.starterWeeklyTokens, config.starterWeeklyUsdCap, config.starterDeepseekWeeklyUsdCap) };
+  return { line: starterLine(levelThresholds(config), flagged ? 0 : config.starterWeeklyTokens, config.starterWeeklyUsdCap, config.starterDeepseekWeeklyUsdCap, config.proOffered) };
 }
 
 /** The welcome email for the level a new sign-up was admitted at. */
@@ -1779,17 +1786,27 @@ async function billingCheckout(c: Ctx): Promise<Response> {
   return checkoutFor(c, identity, product, quantity, c.config.stripe);
 }
 
+/**
+ * The refusal of a new Pro checkout while Pro isn't offered (`proOffered` off): 403
+ * pro_not_offered. The top-up and the billing portal still work.
+ */
+function proNotOffered(): Response {
+  return apiError(403, "pro_not_offered", "dl Pro isn't open to new subscribers. A one-time top-up still works: type /upgrade in dl.");
+}
+
 /** A Stripe Checkout page for `product`, returning to the URLs in `stripe` (the CLI's, or dl.new's web sign-up). */
 async function checkoutFor(c: Ctx, identity: Identity, product: Product, quantity: number, stripe: FreeConfig["stripe"]): Promise<Response> {
   const range = c.config.offers.topup;
   const unavailable = billingReady(c, product);
   if (unavailable) return unavailable;
   const person = account(c, identity.githubId);
-  const allowance = await person.allowance(c.now(), limitsFor((await runtime(c)).config));
+  const { config } = await runtime(c);
+  const allowance = await person.allowance(c.now(), limitsFor(config));
   if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
   if (allowance.status === "blocked") return blockedError();
   if (allowance.status === "suspended") return apiError(403, "suspended", "This account is suspended from the free tier.");
   if (product === "pro" && allowance.plan === "pro") return apiError(409, "already_pro", "This account already has Pro. Manage it from the billing portal.");
+  if (product === "pro" && !config.proOffered) return proNotOffered();
   const billing = await person.billing();
   try {
     const session = await createCheckout(c.fetch, {
@@ -2516,7 +2533,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       const wholeLeft = whole.remaining === null || whole.remaining > 0;
       if (wholeLeft && !(whole.plan === "free" && whole.trial?.ended)) {
         const resetsAt = reservation.code === "trial_ended" ? undefined : new Date(reservation.allowance.resetsAt).toISOString();
-        return apiError(402, "harness_limit", harnessLimitMessage(gate.config.otherHarnessShare, resetsAt, reservation.allowance.plan, harness), { harness, share: gate.config.otherHarnessShare, ...(resetsAt ? { resetsAt } : {}), offers: offers(gate.config) }, quota);
+        return apiError(402, "harness_limit", harnessLimitMessage(gate.config.otherHarnessShare, resetsAt, reservation.allowance.plan, harness, gate.config.proOffered), { harness, share: gate.config.otherHarnessShare, ...(resetsAt ? { resetsAt } : {}), offers: offers(gate.config) }, quota);
       }
     }
     if (reservation.code === "quota_exceeded") {
@@ -2527,7 +2544,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
         return apiError(
           402,
           "gpt_limit",
-          gptLimitMessage(reservation.allowance.plan),
+          gptLimitMessage(reservation.allowance.plan, gate.config.proOffered),
           { family: "gpt6", resetsAt, reason: reservation.reason, alternative: DEEPSEEK_MODEL, offers: offers(gate.config) },
           quota,
         );
@@ -2545,7 +2562,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       return apiError(402, "quota_exceeded", quotaMessage(reservation.reason, resetsAt, reservation.allowance.plan), { resetsAt, reason: reservation.reason, offers: offers(gate.config), referralLink: link }, quota);
     }
     if (reservation.code === "trial_ended") {
-      return apiError(402, "trial_ended", trialEndedMessage(reservation.trial.tokens, usdLabel(gate.config.offers.pro.priceUsdMonthly)), { trial: trialView(reservation.allowance), offers: offers(gate.config) }, quota);
+      return apiError(402, "trial_ended", trialEndedMessage(reservation.trial.tokens, gate.config.proOffered ? usdLabel(gate.config.offers.pro.priceUsdMonthly) : null), { trial: trialView(reservation.allowance), offers: offers(gate.config) }, quota);
     }
     if (reservation.code === "blocked") return blockedError(quota);
     if (reservation.code === "suspended") return apiError(403, "suspended", "This account is suspended from the free tier.", {}, quota);
@@ -3791,6 +3808,7 @@ async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, no
       proWeeklyUsd: config.proWeeklyUsdCap ?? null,
       proDeepseekWeeklyUsd: config.proDeepseekWeeklyUsdCap ?? null,
       proPriceUsdMonthly: config.offers.pro.priceUsdMonthly,
+      proOffered: config.proOffered,
     },
     login,
     signOut,
@@ -4253,6 +4271,8 @@ async function webChoice(c: Ctx): Promise<Response> {
 async function webCheckout(c: Ctx): Promise<Response> {
   const found = await webPerson(c);
   if (found instanceof Response) return found;
+  // Refused before it counts as a Pro checkout on the funnel (checkoutFor checks again, after `already_pro`).
+  if (!(await runtime(c)).config.proOffered) return proNotOffered();
   await countWebStep(c, "plan_pro");
   const page = c.config.webSignupUrl;
   return checkoutFor(c, found.identity, "pro", c.config.offers.topup.minQuantity, { ...c.config.stripe, successUrl: `${page}?checkout=done`, cancelUrl: `${page}?checkout=cancel` });

@@ -204,9 +204,15 @@ export function resetsText(at: number): string {
   return `${DAYS[date.getUTCDay()]} ${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]}`;
 }
 
-/** One email, placeholders filled in, footer added. */
-export function renderUserEmail(kind: UserEmailKind, values: { resets: string; unsubscribeUrl: string }): UserEmailCopy {
-  const fill = (text: string) => text.replace(/\{(resets|unsubscribeUrl)\}/g, (_, name: "resets" | "unsubscribeUrl") => values[name]);
+/** "dl pro or a top up" in the trial emails, as said while Pro isn't offered (`proOffered` off). */
+const PRO_OR_TOPUP = /dl pro or a top up/g;
+
+/** One email, placeholders filled in, footer added. `proOffered` false leaves dl pro out of it (top ups stay). */
+export function renderUserEmail(kind: UserEmailKind, values: { resets: string; unsubscribeUrl: string; proOffered?: boolean }): UserEmailCopy {
+  const fill = (text: string) => {
+    const filled = text.replace(/\{(resets|unsubscribeUrl)\}/g, (_, name: "resets" | "unsubscribeUrl") => values[name]);
+    return values.proOffered === false ? filled.replace(PRO_OR_TOPUP, "a top up") : filled;
+  };
   const copy = USER_EMAILS[kind];
   return { subject: fill(copy.subject), body: `${fill(copy.body)}\n\n${fill(FOOTER)}\n` };
 }

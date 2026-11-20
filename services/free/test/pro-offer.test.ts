@@ -39,8 +39,8 @@ describe("the Pro offer", () => {
     assert.equal(usdLabel(4), "$4");
     assert.equal(usdLabel(10), "$10");
     assert.equal(usdLabel(0.5), "$0.50");
-    assert.equal(offers(config({ PRO_PRICE_USD_MONTHLY: "10" })).pro.price, "$10/month");
-    assert.equal(offers(config({ PRO_PRICE_USD_MONTHLY: "4.5" })).pro.price, "$4.50/month");
+    assert.equal(offers(config({ PRO_PRICE_USD_MONTHLY: "10" })).pro!.price, "$10/month");
+    assert.equal(offers(config({ PRO_PRICE_USD_MONTHLY: "4.5" })).pro!.price, "$4.50/month");
   });
 
   it("takes the price as dollars and cents, and the value line as one short line", () => {
@@ -61,7 +61,7 @@ describe("the Pro offer", () => {
     assert.equal(config({ PRO_DEEPSEEK_WEEKLY_USD_CAP: "none" }).proDeepseekWeeklyUsdCap, undefined);
     assert.equal(config({ PRO_WEEKLY_USD_CAP: "12.5" }).proWeeklyUsdCap, 12.5);
     assert.equal(config({ PRO_WEEKLY_USD_CAP: "none" }).proWeeklyUsdCap, undefined);
-    assert.equal(offers(config({ PRO_WEEKLY_USD_CAP: "none" })).pro.usdPerWeek, null);
+    assert.equal(offers(config({ PRO_WEEKLY_USD_CAP: "none" })).pro!.usdPerWeek, null);
   });
 
   it("matches the deployed config: Pro $3.99 with a $6 GPT-6 ceiling, top-ups $2 to $20 at 1.25x for 90 days", async () => {

@@ -187,14 +187,20 @@ export function thresholdText(thresholds: LevelThresholds): string {
  * names a level: what the free allowance is and the ways to more. With no Starter tokens (the
  * setting at 0, or an account that gets none), the below-the-bar line.
  */
-export function starterLine(thresholds: LevelThresholds, starterTokens: number, starterUsd?: number, starterDeepseekUsd?: number): string {
+export function starterLine(thresholds: LevelThresholds, starterTokens: number, starterUsd?: number, starterDeepseekUsd?: number, proOffered = true): string {
   if (starterTokens <= 0) return belowBarLine(thresholds);
-  return freeLine(starterTokens, starterUsd, starterDeepseekUsd);
+  return freeLine(starterTokens, starterUsd, starterDeepseekUsd, proOffered);
 }
 
-/** The free allowance in plain words, with no level name: Free and Pro are the only public plans. */
-function freeLine(weeklyTokens: number, weeklyUsd: number | undefined, deepseekUsd?: number): string {
-  return `Free: ${allowanceText(weeklyTokens, weeklyUsd, deepseekUsd)}. It resets every Monday. Want more? Get dl Pro, type /request in dl and tell us what you're building, or use your own API key with /provider.`;
+/**
+ * The free allowance in plain words, with no level name: Free and Pro are the only public plans.
+ * dl Pro is named among the ways to more only while it is offered (`proOffered`).
+ */
+function freeLine(weeklyTokens: number, weeklyUsd: number | undefined, deepseekUsd?: number, proOffered = true): string {
+  const more = proOffered
+    ? "Get dl Pro, type /request in dl and tell us what you're building, or use your own API key with /provider."
+    : "Type /request in dl and tell us what you're building, or use your own API key with /provider.";
+  return `Free: ${allowanceText(weeklyTokens, weeklyUsd, deepseekUsd)}. It resets every Monday. Want more? ${more}`;
 }
 
 /** The bar in plain words: "1 year old with 100+ contributions in the last year". */
@@ -235,8 +241,8 @@ function allowanceText(weeklyTokens: number, weeklyUsd: number | undefined, deep
  * The sign-in page's line for a basic account: what it gets and how to ask for more. Never why
  * (the rule behind the level is private), and never the level's name: publicly it is Free.
  */
-export function basicLine(weeklyTokens: number, weeklyUsd: number | undefined, deepseekUsd?: number): string {
-  return freeLine(weeklyTokens, weeklyUsd, deepseekUsd);
+export function basicLine(weeklyTokens: number, weeklyUsd: number | undefined, deepseekUsd?: number, proOffered = true): string {
+  return freeLine(weeklyTokens, weeklyUsd, deepseekUsd, proOffered);
 }
 
 /** What a basic or Starter account is told when this week's allowance is used up: "free", never the level's name. */

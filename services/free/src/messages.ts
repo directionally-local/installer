@@ -104,20 +104,24 @@ export function quotaMessage(reason: "tokens" | "spend", resetsAt: string, plan:
 
 /**
  * A new account's one-time trial is used up (402 trial_ended): free requests stop for good, and
- * Pro or a top-up keeps it going. `/upgrade` in dl opens both. `proPrice` as the offers show it ("$3.99").
+ * Pro or a top-up keeps it going. `/upgrade` in dl opens both. `proPrice` as the offers show it
+ * ("$3.99"); null while Pro isn't offered (`proOffered` off): then only the top-up is named.
  */
-export function trialEndedMessage(tokens: number, proPrice = "$3.99"): string {
-  return `Your ${formatTokens(tokens)} free trial tokens are used up. Keep going with dl Pro for ${proPrice} a month, or add a top-up: /upgrade`;
+export function trialEndedMessage(tokens: number, proPrice: string | null = "$3.99"): string {
+  const way = proPrice === null ? "Keep going with a top-up" : `Keep going with dl Pro for ${proPrice} a month, or add a top-up`;
+  return `Your ${formatTokens(tokens)} free trial tokens are used up. ${way}: /upgrade`;
 }
 
 /**
  * GPT-6's weekly budget is used up but DeepSeek's isn't (402 gpt_limit): not a dead end. Pro
- * already has Pro, so its line leaves the offer out.
+ * already has Pro, so its line leaves the offer out, as does a free account's while Pro isn't
+ * offered (`proOffered` off).
  */
-export function gptLimitMessage(plan: "free" | "pro" = "free"): string {
-  return plan === "pro"
-    ? "You've used this week's Pro GPT-6 allowance. DeepSeek V4.1 Flash still has usage this week: switch with /model."
-    : "You've used this week's GPT-6 allowance. DeepSeek V4.1 Flash still has free usage this week: switch with /model, or get dl Pro.";
+export function gptLimitMessage(plan: "free" | "pro" = "free", proOffered = true): string {
+  if (plan === "pro") return "You've used this week's Pro GPT-6 allowance. DeepSeek V4.1 Flash still has usage this week: switch with /model.";
+  return proOffered
+    ? "You've used this week's GPT-6 allowance. DeepSeek V4.1 Flash still has free usage this week: switch with /model, or get dl Pro."
+    : "You've used this week's GPT-6 allowance. DeepSeek V4.1 Flash still has free usage this week: switch with /model.";
 }
 
 export const QUEUED_SIGNED_IN =
@@ -156,15 +160,16 @@ export const HARNESS_NOT_ALLOWED_MESSAGE = harnessNotAllowedMessage("claude-code
 
 /**
  * Another agent's share of the week (or of the trial) is used up while the account still has
- * free usage left for Autopilot (402 harness_limit). `share` is 0 to 1.
+ * free usage left for Autopilot (402 harness_limit). `share` is 0 to 1. A free account is pointed
+ * at dl Pro only while Pro is offered (`proOffered`).
  */
-export function harnessLimitMessage(share: number, resetsAt: string | undefined, plan: "free" | "pro" = "free", harness: Harness = "claude-code"): string {
+export function harnessLimitMessage(share: number, resetsAt: string | undefined, plan: "free" | "pro" = "free", harness: Harness = "claude-code", proOffered = true): string {
   const part = share >= 1 ? "all" : share <= 0 ? "none" : `${Math.round(share * 100)}%`;
   const when = resetsAt ? ` It resets at ${resetsAt}.` : "";
   const { product } = HARNESS_WORDS[harness];
   return plan === "pro"
     ? `${product} through dl gets ${part} of your Pro allowance, and that part is used up.${when} The rest works in dl (Autopilot): run dl.`
-    : `${product} through dl gets ${part} of your free allowance, and that part is used up.${when} Your remaining free usage works in dl (Autopilot): run dl. Or get dl Pro: run dl and type /upgrade.`;
+    : `${product} through dl gets ${part} of your free allowance, and that part is used up.${when} Your remaining free usage works in dl (Autopilot): run dl.${proOffered ? " Or get dl Pro: run dl and type /upgrade." : ""}`;
 }
 
 /**
