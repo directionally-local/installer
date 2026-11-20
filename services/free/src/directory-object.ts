@@ -1666,7 +1666,7 @@ export class DirectoryObject extends DurableObject {
    * sent, or failed 3 times. `emailedToday`: they had another email today, so the one-a-day cap
    * holds this one until tomorrow.
    */
-  async broadcastAudience(input: { id: string; audience: BroadcastAudience; from: number | null; to: number | null; now: number; adminIds: number[]; includeAdmins: boolean }): Promise<Array<{ githubId: number; login: string; email: string; emailedToday: boolean }>> {
+  async broadcastAudience(input: { id: string; audience: BroadcastAudience; from: number | null; to: number | null; now: number; adminIds: number[]; includeAdmins: boolean; skipIfSent?: string | null }): Promise<Array<{ githubId: number; login: string; email: string; emailedToday: boolean }>> {
     const sql = this.ctx.storage.sql;
     const day = Math.floor(input.now / DAY_MS);
     return sql
@@ -1680,6 +1680,8 @@ export class DirectoryObject extends DurableObject {
            AND NOT EXISTS (
              SELECT 1 FROM user_emails e WHERE e.github_id = p.github_id AND e.kind = 'broadcast' AND e.period = ?
                AND (e.status = 'sent' OR (e.status = 'pending' AND e.claimed_at > ?) OR e.attempts >= 3))
+           AND (? IS NULL OR NOT EXISTS (
+             SELECT 1 FROM user_emails s WHERE s.github_id = p.github_id AND s.kind = 'broadcast' AND s.period = ? AND s.status = 'sent'))
          ORDER BY p.github_id`,
         day,
         input.audience,
@@ -1690,6 +1692,8 @@ export class DirectoryObject extends DurableObject {
         input.to,
         input.id,
         input.now - 3_600_000,
+        input.skipIfSent ?? null,
+        input.skipIfSent ?? null,
       )
       .toArray()
       .filter((row) => input.includeAdmins || (row.admitted_via !== "admin" && !input.adminIds.includes(row.github_id)))
@@ -1702,7 +1706,7 @@ export class DirectoryObject extends DurableObject {
    * hasn't gone to them (a failed one may be tried again, 3 attempts in all; a claim left
    * pending for an hour counts as failed). Atomic, so two calls can't both send it.
    */
-  async claimBroadcast(input: { githubId: number; id: string; now: number; adminIds: number[]; includeAdmins: boolean }): Promise<BroadcastClaim | undefined> {
+  async claimBroadcast(input: { githubId: number; id: string; now: number; adminIds: number[]; includeAdmins: boolean; skipIfSent?: string | null }): Promise<BroadcastClaim | undefined> {
     const sql = this.ctx.storage.sql;
     const day = Math.floor(input.now / DAY_MS);
     return this.ctx.storage.transactionSync((): BroadcastClaim | undefined => {
@@ -1715,6 +1719,7 @@ export class DirectoryObject extends DurableObject {
         .exec<{ status: string; attempts: number; claimed_at: number }>("SELECT status, attempts, claimed_at FROM user_emails WHERE github_id = ? AND kind = 'broadcast' AND period = ?", input.githubId, input.id)
         .toArray()[0];
       if (existing && (existing.status === "sent" || existing.attempts >= 3 || (existing.status === "pending" && existing.claimed_at > input.now - 3_600_000))) return undefined;
+      if (input.skipIfSent && sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND kind = 'broadcast' AND period = ? AND status = 'sent' LIMIT 1", input.githubId, input.skipIfSent).toArray().length > 0) return undefined;
       if (sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND day = ? AND status IN ('pending', 'sent') LIMIT 1", input.githubId, day).toArray().length > 0) return undefined;
       sql.exec(
         `INSERT INTO user_emails (github_id, kind, period, status, attempts, day, claimed_at) VALUES (?, 'broadcast', ?, 'pending', 1, ?, ?)

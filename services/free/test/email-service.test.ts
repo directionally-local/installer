@@ -242,6 +242,24 @@ describe("POST /admin/emails/broadcast", () => {
     assert.deepEqual(await ids({ audience: "full", signedUpFrom: "2026-10-21", signedUpTo: "2026-11-01T00:00:00Z" }), []);
   });
 
+  it("skipIfSent: a reworded resend skips people who got the earlier broadcast", async () => {
+    const setUp = await setup();
+    const s = setUp.s;
+    let admin = setUp.admin;
+    const first = await broadcast(s, admin, { ...COPY, audience: "full", dryRun: false });
+    assert.equal(first.body.sent, 2, "gail and iris got the first wording");
+    s.clock.now += DAY;
+    admin = (await s.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    const reworded = { ...COPY, subject: "a shorter check-in" };
+    const dry = await broadcast(s, admin, { ...reworded, audience: "all", dryRun: true, skipIfSent: first.body.id });
+    assert.deepEqual(dry.body.sample.map((person: { githubId: number }) => person.githubId), [501], "only hal, who didn't get it");
+    const before = s.calls.userEmail.length;
+    const second = await broadcast(s, admin, { ...reworded, audience: "all", dryRun: false, skipIfSent: first.body.id });
+    assert.equal(second.body.sent, 1);
+    assert.deepEqual(s.calls.userEmail.slice(before).map((message) => message.to), ["hal@example.com"]);
+    assert.equal((await broadcast(s, admin, { ...reworded, audience: "all", dryRun: true, skipIfSent: "not-an-id" })).status, 400);
+  });
+
   it("sends to the audience with the stop link and List-Unsubscribe, and a retried call sends nothing twice", async () => {
     const { s, admin } = await setup();
     const before = s.calls.userEmail.length;
