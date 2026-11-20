@@ -7,15 +7,15 @@ import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } fro
  * harness-launch.ts's; this file is how OpenCode is told where the free tier is.
  *
  * OpenCode speaks the OpenAI-compatible chat completions API, which the free tier serves to
- * Autopilot, so every free tier model works in it: GPT-6 Luna (the default), Sol, Astra and
- * DeepSeek V4.1 Flash, with the same allowance, caps and refusals as Autopilot's (on the share
+ * Autopilot, so every free tier model works in it: DeepSeek V4.1 Flash (the default; GPT-6 is
+ * paused on the free tier), GPT-6 Luna, Sol and Astra, with the same allowance, caps and refusals as Autopilot's (on the share
  * for other tools).
  *
  * How it's configured, for this run only and without touching any OpenCode file:
  *  - `OPENCODE_CONFIG_CONTENT`: inline config that OpenCode 1 and 2 both read, merged above the
  *    person's global and project files. It adds a provider "dl" (`@ai-sdk/openai-compatible`,
  *    `baseURL` the service's /v1), lists the free tier's models with their context and output
- *    limits, and makes dl/gpt-6-luna the model (DeepSeek for titles). Their own providers and
+ *    limits, and makes dl/deepseek/deepseek-v4.1-flash-1017 the model (and for titles). Their own providers and
  *    settings stay; they can switch to them in /models as usual. It's the OpenCode 1 config shape,
  *    which OpenCode 2 reads unchanged (and maps the package to its built-in compatible runtime).
  *  - The key isn't in that config: it says `{env:DL_FREE_TIER_KEY}`, and the key is in that
@@ -58,8 +58,8 @@ export const FREE_TIER_MODELS: readonly FreeTierModel[] = [
   { id: "gpt-6-astra", name: "GPT-6 Astra", contextWindow: 1_050_000, maxOutputTokens: 128_000, vision: true },
   { id: "deepseek/deepseek-v4.1-flash-1017", name: "DeepSeek V4.1 Flash 1017", contextWindow: 1_048_576, maxOutputTokens: 65_536, vision: false },
 ];
-/** The free tier's default model (DEFAULT_MODEL in the service). */
-export const DEFAULT_MODEL = "gpt-6-luna";
+/** OpenCode's default model under "dl": DeepSeek V4.1 Flash (GPT-6 is paused on the free tier; its models stay listed). */
+export const DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash-1017";
 /** The cheap model OpenCode uses for session titles. */
 export const SMALL_MODEL = "deepseek/deepseek-v4.1-flash-1017";
 

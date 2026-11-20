@@ -142,7 +142,7 @@ describe("dl opencode", () => {
     const { io, err } = capture();
     await opencodeCommand([], io, deps({ env: parent, fetch: fakeService().fetch, spawn: child.spawn }));
     const env = child.started[0]!.options.env as Record<string, string>;
-    assert.equal(configOf(child.started[0]!.options).model, "dl/gpt-6-luna");
+    assert.equal(configOf(child.started[0]!.options).model, "dl/deepseek/deepseek-v4.1-flash-1017");
     assert.equal(env.OPENCODE_CONFIG, "/home/alice/oc.json", "their config file still loads, below dl's");
     assert.equal(parent.OPENCODE_CONFIG_CONTENT, '{"model":"anthropic/x"}', "dl's own environment is unchanged");
     assert.equal(err(), "  dl opencode: not passing OPENCODE_CONFIG_CONTENT to OpenCode for this session (it runs on dl's free tier).\n");
@@ -218,10 +218,10 @@ describe("dl opencode", () => {
 });
 
 describe("OpenCode's config for a run", () => {
-  it("adds an OpenAI-compatible provider \"dl\" at the service's /v1 with every free tier model, GPT-6 Luna by default", () => {
+  it("adds an OpenAI-compatible provider \"dl\" at the service's /v1 with every free tier model, DeepSeek V4.1 Flash by default and GPT-6 still listed", () => {
     const config = opencodeConfig({ origin: ORIGIN, models: FREE_TIER_MODELS });
     assert.equal(config.$schema, "https://opencode.ai/config.json");
-    assert.equal(config.model, "dl/gpt-6-luna");
+    assert.equal(config.model, "dl/deepseek/deepseek-v4.1-flash-1017");
     assert.equal(config.small_model, "dl/deepseek/deepseek-v4.1-flash-1017");
     const provider = (config.provider as Record<string, any>).dl;
     assert.equal(provider.npm, "@ai-sdk/openai-compatible");
@@ -231,9 +231,10 @@ describe("OpenCode's config for a run", () => {
     assert.deepEqual(Object.keys(provider.models), ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "deepseek/deepseek-v4.1-flash-1017"]);
   });
 
-  it("falls back to the first model when Luna isn't listed", () => {
-    const config = opencodeConfig({ origin: ORIGIN, models: FREE_TIER_MODELS.slice(3) });
-    assert.equal(config.model, "dl/deepseek/deepseek-v4.1-flash-1017");
+  it("falls back to the first model when DeepSeek isn't listed", () => {
+    const config = opencodeConfig({ origin: ORIGIN, models: FREE_TIER_MODELS.slice(0, 3) });
+    assert.equal(config.model, "dl/gpt-6-luna");
+    assert.equal(config.small_model, "dl/gpt-6-luna");
   });
 
   it("keeps the built-in list in step with the service's models", async () => {

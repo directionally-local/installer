@@ -106,7 +106,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl -c`, `dl --continue` | On this computer, `autopilot -c`. On a server, reopen the latest conversation started from this folder there. |
 | `dl --from-claude-code` | Continue this folder's latest Claude Code conversation in a new Autopilot session on this computer (`autopilot --from-claude-code`): it asks first, then sends your last request, the files changed, commands run and Claude's last message as the first message. The transcript is read here and goes only to your model. |
 | `dl claude [ARGS]` | Your own Claude Code on dl's free tokens, served by DeepSeek. See [Claude Code with free tokens: dl claude](#claude-code-with-free-tokens-dl-claude). |
-| `dl opencode [ARGS]` | Your own OpenCode on dl's free tokens: GPT-6 Luna by default, Sol, Astra and DeepSeek in `/models`. See [OpenCode with free tokens: dl opencode](#opencode-with-free-tokens-dl-opencode). |
+| `dl opencode [ARGS]` | Your own OpenCode on dl's free tokens: DeepSeek V4.1 Flash by default, GPT-6 Luna, Sol and Astra in `/models`. See [OpenCode with free tokens: dl opencode](#opencode-with-free-tokens-dl-opencode). |
 | `dl claude-code hook install` / `remove` | Opt in to a Claude Code hook that, when Claude Code stops on a usage or rate limit, shows `Claude Code hit its limit. Continue in dl: dl --from-claude-code` as a terminal notification and window title. Shows the entry and asks before adding it to `~/.claude/settings.json`, backs the file up first, and merges into it; `remove` takes out only dl's entry. |
 | `dl setup` | Set up or repair where background tasks run. Safe to re-run. `--identity FILE` names the SSH key to use. |
 | `dl new` | The same as bare `dl`: a new session here. Kept as an alias for a release. |
@@ -177,9 +177,9 @@ Every argument after `opencode` goes to it unchanged (`dl opencode run "fix the 
 - **OpenCode itself:** dl never installs it. Without `opencode` on your PATH it prints the
   official install command (`curl -fsSL https://opencode.ai/v2/install | bash`, or
   `npm install -g @opencode/cli`) and stops.
-- **The models:** every free tier model, as provider "dl" in OpenCode's `/models`: GPT-6 Luna
-  (the default), GPT-6.1 Sol, GPT-6 Astra and DeepSeek V4.1 Flash, with their context and output
-  limits. Session titles use DeepSeek. Your own providers stay in `/models` too, on your own keys.
+- **The models:** every free tier model, as provider "dl" in OpenCode's `/models`: DeepSeek V4.1
+  Flash (the default; GPT-6 is paused on the free tier), GPT-6 Luna, GPT-6.1 Sol and GPT-6 Astra,
+  with their context and output limits. Session titles use DeepSeek. Your own providers stay in `/models` too, on your own keys.
 - **Only while dl opencode runs:** the same 15-minute key as `dl claude`, refreshed while OpenCode
   runs and ended when it exits; free tokens don't work in OpenCode started any other way.
 - **The same allowance:** OpenCode shares the allowance other tools get through dl (see `dl claude`
