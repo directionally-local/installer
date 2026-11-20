@@ -617,8 +617,36 @@ service writes **a short automated description of what it is about, and a safety
 - **Alert:** a `high` label emails the owner (the usual alert channels) once per person per UTC
   day with the login, the description, the category and a link to block on the Tools page.
 - **Limits:** the label is a cheap model's guess from one message; a person can word a message to
-  avoid it. It is a signal for a human to look at, not a verdict, and nothing is blocked
-  automatically.
+  avoid it. It is a signal for a human to look at, not a verdict; the one thing it changes
+  automatically is that security work is kept off GPT-6 (below).
+
+**Security work kept off GPT-6** (`src/security-route.ts`). OpenAI counts security requests on
+GPT-6 against our organisation, so security work, defensive or offensive, is served by DeepSeek
+only. A (person, session) is held off GPT-6, and the person with it for the rest of the UTC day,
+when:
+
+- its use description has category `security-defensive`, `security-offensive`, `malware` or
+  `credential-theft`, or risk `high` (any category); the description comes after the session's
+  first request, so this covers the requests after it; or
+- before a GPT-6 request is forwarded, the latest user message (its first 4096 characters)
+  matches one of `SECURITY_SIGNALS`: local regular expressions, no network call. Terms that only
+  security work uses match alone (CTF, flag formats like `flag{…}`, reverse shell, shellcode,
+  privilege escalation, sqlmap, metasploit, nmap, phishing, keylogger, ransomware, botnet, DDoS,
+  command-and-control, credential stuffing, bypassing 2FA, injection payloads…); words with an
+  ordinary coding sense (flag, payload, inject, brute force, exploit, pcap, C2) match only as
+  phrases or with security context, so a feature flag, a JSON payload or dependency injection
+  never do.
+
+A held GPT-6 request (any GPT-6 model, also through OpenCode; Claude Code through dl only ever
+gets DeepSeek) is refused like the weekly GPT-6 limit: 402 `gpt_limit` with `family: "gpt6"`,
+`reason: "security"`, `resetsAt` the next UTC midnight and `alternative` DeepSeek, without
+`offers` (Pro doesn't lift it), and the message "GPT-6 isn't available for security work on the
+free tier. DeepSeek V4.1 Flash still works: switch with /model." DeepSeek requests and admins are
+never affected; `securityOffGpt6` (`SECURITY_OFF_GPT6`, default true) turns it off. Holds are in
+`gpt6_holds` (a week); each refused request is counted in `security_refusals_daily` (day,
+person, session, count; 90 days), shown on the admin home ("Security sessions kept off GPT-6: N
+today") and per day in `GET /admin/metrics` (`securitySessionsOffGpt6`,
+`securityRefusalsOffGpt6`).
 
 **Luminal slowing people down.** Each Luminal request's outcome is logged (`luminal_outcomes`,
 an hour kept, and `requests.upstream_outcome`): `ok`, `rate_limited` (Luminal's 429), `error`
@@ -840,6 +868,7 @@ with who made it and when.
 | `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request); `daily` (one line in the daily digest); `off` |
 | `useDescriptions` | `USE_DESCRIPTIONS` | true: a short automated description and safety label per session (see [use descriptions](#what-people-use-the-service-for-use-descriptions)) |
 | `useDescriptionDailyCap` | `USE_DESCRIPTION_DAILY_CAP` | 2000: description calls a UTC day across everyone (0 stops them) |
+| `securityOffGpt6` | `SECURITY_OFF_GPT6` | true: security work is served by DeepSeek only, never GPT-6 (see [security work kept off GPT-6](#what-people-use-the-service-for-use-descriptions)) |
 | `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 50,000,000, as Full (0: no free tokens below Basic) |
 | `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
 | `starterDeepseekWeeklyUsdCap` | `STARTER_DEEPSEEK_WEEKLY_USD_CAP` | 8, as Full |

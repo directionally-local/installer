@@ -11,6 +11,7 @@ import { DAY_MS, weekStart } from "./week.js";
  *   person_totals   all-time tokens, cost and requests per person (kept with each request)
  *   daily_activity  per person per day (admins left out): this week's spend, the usage chart
  *   people, grants, grant_history, subscriptions, payments, person_networks (a count), feedback_daily
+ *   security_refusals_daily  security work kept off GPT-6 today (security-route.ts)
  *
  * Admins are left out of every total, as everywhere else, and shown (marked) in the users table.
  * Counts, sums, logins and times only: no email, no content. `ADMIN_HOME_COLUMNS` lists every
@@ -31,6 +32,7 @@ export const ADMIN_HOME_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   payments: ["github_id", "kind", "amount_cents"],
   person_networks: ["github_id"],
   feedback_daily: ["day", "n"],
+  security_refusals_daily: ["day", "n"],
 };
 
 /** A Pro subscription whose period ended this long ago without a renewal no longer counts as active. */
@@ -110,6 +112,8 @@ export interface AdminHomeData {
   totalUsers: number;
   blockedUsers: number;
   feedback: { total: number; sinceDay: number | null };
+  /** Security work kept off GPT-6 today (UTC): sessions (person and session) held, and GPT-6 requests refused. */
+  securityOffGpt6Today: { sessions: number; refusals: number };
   /** Admins left out: the last 7 UTC days, today included. */
   last7: { promptTokens: number; completionTokens: number };
   /** Admins left out, all time. */
@@ -227,6 +231,9 @@ export function adminHomeData(store: Sql, input: { now: number; adminIds: readon
     )
     .toArray()[0];
   const feedback = sql.exec<{ total: number | null; since: number | null }>("SELECT SUM(n) AS total, MIN(day) AS since FROM feedback_daily").toArray()[0];
+  const security = sql
+    .exec<{ sessions: number; refusals: number | null }>("SELECT COUNT(*) AS sessions, SUM(n) AS refusals FROM security_refusals_daily WHERE day = ?", today)
+    .toArray()[0];
 
   // The trial's conversions: trial accounts that subscribed to Pro or paid for anything.
   const trialUsers = users.filter((user) => user.trial);
@@ -312,6 +319,7 @@ export function adminHomeData(store: Sql, input: { now: number; adminIds: readon
     totalUsers: users.length,
     blockedUsers: users.filter((user) => user.status === "blocked").length,
     feedback: { total: feedback?.total ?? 0, sinceDay: feedback?.since ?? null },
+    securityOffGpt6Today: { sessions: security?.sessions ?? 0, refusals: security?.refusals ?? 0 },
     last7: { promptTokens: last7.reduce((sum, row) => sum + row.prompt, 0), completionTokens: last7.reduce((sum, row) => sum + row.completion, 0) },
     totals,
     subscriptions,

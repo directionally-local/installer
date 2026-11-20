@@ -132,6 +132,8 @@ export const RUNTIME_SETTINGS = {
   useDescriptions: { kind: "flag", env: "USE_DESCRIPTIONS" },
   /** Description calls a UTC day across everyone; 0 stops them. */
   useDescriptionDailyCap: { kind: "count", env: "USE_DESCRIPTION_DAILY_CAP" },
+  /** Security work (by its use description or the request's own words) served by DeepSeek only, never GPT-6 (security-route.ts); false turns it off. */
+  securityOffGpt6: { kind: "flag", env: "SECURITY_OFF_GPT6" },
 } as const;
 
 export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;

@@ -251,6 +251,11 @@ export interface FreeConfig {
   /** Description calls a UTC day across everyone (USE_DESCRIPTION_DAILY_CAP, default 2000); also a runtime setting. */
   useDescriptionDailyCap: number;
   /**
+   * Security work is served by DeepSeek only, never GPT-6 (security-route.ts):
+   * SECURITY_OFF_GPT6, default on; also a runtime setting.
+   */
+  securityOffGpt6: boolean;
+  /**
    * The owner's email about access requests (/request in dl), ACCESS_REQUEST_ALERTS: "each" (one
    * per request, the default), "daily" (counted in the daily digest instead) or "off". Also a
    * runtime setting.
@@ -340,6 +345,7 @@ export const DEFAULTS = {
   accessRequestAlerts: "each" as AccessRequestAlerts,
   useDescriptions: true,
   useDescriptionDailyCap: 2000,
+  securityOffGpt6: true,
   /**
    * OpenRouter's cache-read price over its input price for deepseek/deepseek-v4.1-flash-1017,
    * from https://openrouter.ai/api/v1/models on 2026-11-03: input $0.30/M, cache read
@@ -518,6 +524,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     accessRequestAlerts: accessRequestAlerts(env.ACCESS_REQUEST_ALERTS),
     useDescriptions: flag(env.USE_DESCRIPTIONS, DEFAULTS.useDescriptions, "USE_DESCRIPTIONS"),
     useDescriptionDailyCap: whole(env.USE_DESCRIPTION_DAILY_CAP, DEFAULTS.useDescriptionDailyCap, "USE_DESCRIPTION_DAILY_CAP"),
+    securityOffGpt6: flag(env.SECURITY_OFF_GPT6, DEFAULTS.securityOffGpt6, "SECURITY_OFF_GPT6"),
   };
 }
 
