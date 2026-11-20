@@ -9,7 +9,7 @@ import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
 import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, LevelSignalRow, PersonRow, PersonState, PersonStatus, RequestRecord, SpendSummary } from "./directory-object.js";
-import { createCheckout, createPortal, githubIdFrom, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
+import { createCheckout, createPortal, githubIdFrom, isMissingCustomer, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
 import { accessRequestAlert, deliverAlerts, isHeaderSafeAddress, pauseAlert, sendEmail, type Alert, type EmailBinding, type ServingContext, type UpstreamOutcome } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
 import { normalizeReferralCode, referralLink } from "./referrals.js";
@@ -1838,6 +1838,7 @@ async function billingPortal(c: Ctx): Promise<Response> {
   try {
     return json(await createPortal(c.fetch, { config: c.config.stripe, customerId: billing.customerId }));
   } catch (error) {
+    if (isMissingCustomer(error)) return apiError(404, "no_billing_account", "There is nothing to manage yet: this account hasn't bought anything.");
     if (error instanceof StripeError) return apiError(502, "billing_error", "Stripe couldn't open the billing portal. Try again in a minute.");
     throw error;
   }
