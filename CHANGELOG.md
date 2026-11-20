@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.43.0](https://github.com/directionally-local/installer/compare/v0.42.0...v0.43.0) (2026-11-20)
+
+
+### Features
+
+* **free:** broadcasts can skip people who got an earlier broadcast (skipIfSent) ([#295](https://github.com/directionally-local/installer/issues/295)) ([044468d](https://github.com/directionally-local/installer/commit/044468db6f03bf6d64ed60c7cf3ef51f2b123a32))
+* **free:** keep security work off GPT-6, serve it with DeepSeek only ([#300](https://github.com/directionally-local/installer/issues/300)) ([b616b73](https://github.com/directionally-local/installer/commit/b616b7313740f5a8180872c55ce01bb7a7a38c27))
+* **free:** short automated description and safety label per session ([#299](https://github.com/directionally-local/installer/issues/299)) ([8c618ae](https://github.com/directionally-local/installer/commit/8c618ae0144e5a183eef4d054eed0d3397b5f8ab))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.28.1 ([#302](https://github.com/directionally-local/installer/issues/302)) ([5ae1d4e](https://github.com/directionally-local/installer/commit/5ae1d4ecc1d08a9e52a6a602b6873bcba5d116f2))
+* **free:** default dl opencode to DeepSeek V4.1 Flash ([#301](https://github.com/directionally-local/installer/issues/301)) ([46a8e7b](https://github.com/directionally-local/installer/commit/46a8e7b8977ede3cb7009103678c8c5dec3fabb1))
+* **free:** read whole requests for abuse, not just the first 4 KB ([#303](https://github.com/directionally-local/installer/issues/303)) ([661b748](https://github.com/directionally-local/installer/commit/661b74861f3bdcb536e12357db9073d96f724754))
+* **free:** start a checkout without a customer saved from an old Stripe account ([#293](https://github.com/directionally-local/installer/issues/293)) ([cbdda3a](https://github.com/directionally-local/installer/commit/cbdda3ae5aab752e7e8f220f75396ddb6e97fce9))
+
 ## [0.42.0](https://github.com/directionally-local/installer/compare/v0.41.0...v0.42.0) (2026-11-20)
 
 
