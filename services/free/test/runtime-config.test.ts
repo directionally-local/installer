@@ -83,6 +83,7 @@ describe("runtime settings (units)", () => {
       dlOnly: true,
       allowOtherHarnesses: true,
       otherHarnessShare: 0.5,
+      proOffered: true,
       accessRequestAlerts: "each",
     });
   });

@@ -18,7 +18,8 @@ import { webFunnelCard, type WebFunnelRow } from "./web-signup.js";
 export interface AdminHomeInput {
   data: AdminHomeData;
   spend: SpendView;
-  settings: LevelSettings & { proWeeklyUsd: number | null; proDeepseekWeeklyUsd: number | null; proPriceUsdMonthly: number };
+  /** `proOffered`: the runtime setting; false hides Pro from everyone new (left out: offered). */
+  settings: LevelSettings & { proWeeklyUsd: number | null; proDeepseekWeeklyUsd: number | null; proPriceUsdMonthly: number; proOffered?: boolean };
   login: string;
   signOut: boolean;
   /** dl.new's web sign-up funnel, per day (web-signup.ts); the card is left out without it. */
@@ -332,7 +333,8 @@ ${quick("Canceled", data.subscriptions.canceled.toLocaleString("en-US"))}
 ${quick("MRR", dollars(paying * settings.proPriceUsdMonthly))}
 ${quick("Top-ups", data.payments.topups.toLocaleString("en-US"))}
 ${quick("Top-up Revenue", dollars(data.payments.topupCents / 100))}
-</div></section>`;
+${quick("Pro Offered", settings.proOffered === false ? "No (hidden)" : "Yes")}
+</div>${settings.proOffered === false ? `<p class="empty">Pro is hidden from new people (<code>proOffered</code> is off): only the top-up is offered. Existing subscribers keep Pro and the billing portal.</p>` : ""}</section>`;
 
   // The new-user trial: who is on it (everyone else is grandfathered) and who of them paid.
   const t = data.trial;

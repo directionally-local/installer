@@ -240,7 +240,7 @@ export async function deliverUserEmail(input: {
   }
   if (!claim) return "skipped";
   const unsubscribeUrl = await stopUrl(input.base, input.signingKey, claim.githubId);
-  const email = renderUserEmail(claim.kind, { resets: resetsText(weekEnd(input.now)), unsubscribeUrl });
+  const email = renderUserEmail(claim.kind, { resets: resetsText(weekEnd(input.now)), unsubscribeUrl, proOffered: config.proOffered });
   const { ok } = await sendPlainEmail(transport, config, {
     to: claim.email,
     subject: email.subject,

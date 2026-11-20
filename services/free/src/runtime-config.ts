@@ -124,6 +124,8 @@ export const RUNTIME_SETTINGS = {
   allowOtherHarnesses: { kind: "flag", env: "ALLOW_OTHER_HARNESSES" },
   /** The share of the weekly free allowance (and the trial) other coding agents may use, 0 to 1 (Pro is exempt). */
   otherHarnessShare: { kind: "weight", env: "OTHER_HARNESS_SHARE" },
+  /** dl Pro offered to new subscribers; false hides it (offers, refusals, checkout) while existing subscribers keep it. */
+  proOffered: { kind: "flag", env: "PRO_OFFERED" },
   /** The owner's email about access requests: "each" (one per request), "daily" (in the daily digest) or "off". */
   accessRequestAlerts: { kind: "alertMode", env: "ACCESS_REQUEST_ALERTS" },
 } as const;
