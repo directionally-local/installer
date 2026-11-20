@@ -22,6 +22,8 @@ export interface BroadcastRequest {
   /** Signed up before this, Unix ms; null for no bound. A plain date includes that whole day. */
   to: number | null;
   dryRun: boolean;
+  /** An earlier broadcast's id: people it was sent to are skipped (resending a reworded email to the rest). */
+  skipIfSent: string | null;
 }
 
 export const MAX_BROADCAST_SUBJECT = 200;
@@ -80,7 +82,9 @@ export function parseBroadcast(body: Record<string, unknown>): { ok: true; value
   const from = parseTime(body.signedUpFrom, false);
   const to = parseTime(body.signedUpTo, true);
   if (from === "invalid" || to === "invalid") return { ok: false, message: usage };
-  return { ok: true, value: { subject: copy.subject, text: copy.text, audience, from, to, dryRun } };
+  const skip = body.skipIfSent;
+  if (skip !== undefined && skip !== null && (typeof skip !== "string" || !/^b[0-9a-f]{16}$/.test(skip))) return { ok: false, message: `${usage} skipIfSent is an earlier broadcast's id.` };
+  return { ok: true, value: { subject: copy.subject, text: copy.text, audience, from, to, dryRun, skipIfSent: typeof skip === "string" ? skip : null } };
 }
 
 /** The id recorded per person (user_emails kind "broadcast", period = id). */

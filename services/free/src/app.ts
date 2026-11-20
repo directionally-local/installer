@@ -3384,7 +3384,7 @@ async function runBroadcast(c: Ctx, config: FreeConfig, request: BroadcastReques
   if (!request.dryRun && !config.userEmails) return { status: 409, code: "emails_off", message: "Emails to users are off (the userEmails setting)." };
   const id = await broadcastId(request.subject, request.text);
   const filter = { adminIds: [...c.config.adminGithubIds], includeAdmins: config.userEmailsToAdmins };
-  const audience = await directory(c).broadcastAudience({ id, audience: request.audience, from: request.from, to: request.to, now: c.now(), ...filter });
+  const audience = await directory(c).broadcastAudience({ id, audience: request.audience, from: request.from, to: request.to, now: c.now(), skipIfSent: request.skipIfSent, ...filter });
   const ready = audience.filter((person) => !person.emailedToday);
   const waiting = audience.length - ready.length;
   if (request.dryRun) {
@@ -3406,7 +3406,7 @@ async function runBroadcast(c: Ctx, config: FreeConfig, request: BroadcastReques
   let stoppedBy: string | null = null;
   const batch = ready.slice(0, BROADCAST_BATCH);
   for (const [index, person] of batch.entries()) {
-    const claim = await directory(c).claimBroadcast({ githubId: person.githubId, id, now: c.now(), ...filter });
+    const claim = await directory(c).claimBroadcast({ githubId: person.githubId, id, now: c.now(), skipIfSent: request.skipIfSent, ...filter });
     if (!claim) {
       skipped++;
       continue;
