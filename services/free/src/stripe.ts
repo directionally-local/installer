@@ -111,9 +111,22 @@ export async function createCheckout(
   fetcher: Fetch,
   input: { product: Product; config: StripeConfig; githubId: number; login: string; customerId: string | null; idempotencyKey: string; topup?: TopupQuantity },
 ): Promise<{ id: string; url: string }> {
-  const session = await call(fetcher, input.config.secretKey!, "/v1/checkout/sessions", checkoutParams(input), input.idempotencyKey);
+  let session: Record<string, unknown>;
+  try {
+    session = await call(fetcher, input.config.secretKey!, "/v1/checkout/sessions", checkoutParams(input), input.idempotencyKey);
+  } catch (error) {
+    // A customer saved from another Stripe account (after moving accounts) doesn't exist here:
+    // start without it; checkout.session.completed then saves the new customer.
+    if (!(input.customerId && isMissingCustomer(error))) throw error;
+    session = await call(fetcher, input.config.secretKey!, "/v1/checkout/sessions", checkoutParams({ ...input, customerId: null }), `${input.idempotencyKey}-new-customer`);
+  }
   if (typeof session.url !== "string" || typeof session.id !== "string") throw new StripeError("Stripe didn't return a Checkout URL.", 502);
   return { id: session.id, url: session.url };
+}
+
+/** Stripe's answer for a customer id this account doesn't have (e.g. one saved before moving accounts). */
+export function isMissingCustomer(error: unknown): boolean {
+  return error instanceof StripeError && /no such customer/i.test(error.message);
 }
 
 export async function createPortal(fetcher: Fetch, input: { config: StripeConfig; customerId: string }): Promise<{ url: string }> {

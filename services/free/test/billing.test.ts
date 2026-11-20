@@ -216,6 +216,25 @@ describe("Checkout and the portal", () => {
     assert.equal(((await response.json()) as { error: { code: string } }).error.code, "billing_error");
   });
 
+  it("starts a checkout without a customer saved from an old Stripe account, and the portal treats it as none", async () => {
+    const svc = await service();
+    const { access } = await person(svc);
+    await deliver(svc, "checkout.session.completed", topupSession(100));
+    svc.setStripe((path, form) =>
+      form.get("customer") === "cus_100"
+        ? Response.json({ error: { message: "No such customer: 'cus_100'", code: "resource_missing" } }, { status: 400 })
+        : Response.json(path.includes("billing_portal") ? { url: "https://billing.stripe.com/p/x" } : { id: "cs_new", url: "https://checkout.stripe.com/c/pay/cs_new" }),
+    );
+    const response = await svc.request("POST", "/v1/billing/checkout", { token: access, body: { product: "topup" } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { url: "https://checkout.stripe.com/c/pay/cs_new" });
+    const retry = Object.fromEntries(svc.calls.stripe.at(-1)!.form.entries());
+    assert.equal(retry.customer, undefined);
+    assert.equal(retry.customer_creation, "always");
+    const portal = await svc.request("POST", "/v1/billing/portal", { token: access });
+    assert.equal(portal.status, 404);
+  });
+
   it("opens the Customer Portal for someone who has bought something", async () => {
     const svc = await service();
     const { access } = await person(svc);
