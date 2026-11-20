@@ -17,7 +17,7 @@ import { bonuses, codeFor, countingPairs, everActiveFriends, trialBonuses, type 
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
 import { levelChecks, levelFor, type BasicRule, type GithubSignals, type Level, type LevelReason, type LevelThresholds, type SignalThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
-import { USE_KEEP_DAYS, USE_REFRESH_AT, type UseLabel } from "./use-description.js";
+import { USE_CHECKPOINTS, USE_KEEP_DAYS, type UseLabel } from "./use-description.js";
 import { labelKeepsOffGpt6 } from "./security-route.js";
 import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
 import { WELCOME_KINDS, type UserEmailKind } from "./user-emails.js";
@@ -2654,8 +2654,8 @@ export class DirectoryObject extends DurableObject {
 
   /**
    * Counts one request of a (person, session) and says whether it gets a description: "first"
-   * for the first request with a user message, "refresh" once at the USE_REFRESH_AT-th request
-   * or later; without a session id, the first request with a user message of the UTC day. Only
+   * for the first request with a user message, "refresh" once at each later USE_CHECKPOINTS
+   * request (the 10th, the 30th) or the first after it; without a session id, the first request with a user message of the UTC day. Only
    * when under both daily caps (calls by this person, calls by everyone); a capped request
    * changes nothing but the count, so a later request can still be described. Old counts and
    * descriptions are pruned once a day.
@@ -2677,7 +2677,8 @@ export class DirectoryObject extends DurableObject {
         )
         .one();
       if (!input.hasInput) return undefined;
-      const kind = row.described === 0 ? "first" : row.described === 1 && input.sessionId !== null && row.requests >= USE_REFRESH_AT ? "refresh" : undefined;
+      const next = USE_CHECKPOINTS[row.described];
+      const kind = row.described === 0 ? "first" : next !== undefined && input.sessionId !== null && row.requests >= next ? "refresh" : undefined;
       if (!kind) return undefined;
       const mine = sql.exec<{ calls: number }>("SELECT calls FROM use_calls_daily WHERE day = ? AND github_id = ?", day, input.githubId).toArray()[0]?.calls ?? 0;
       if (mine >= input.perPersonCap) return undefined;
@@ -2745,26 +2746,59 @@ export class DirectoryObject extends DurableObject {
         input.tokens,
       );
       if (!input.label) return;
-      const { use, risk, category } = input.label;
-      // Security work, or a high risk: this session, and the person for the rest of the day, off GPT-6.
-      if (labelKeepsOffGpt6(input.label)) this.#holdOffGpt6(input.githubId, input.sessionId, input.now, "label");
-      sql.exec(
-        "INSERT INTO use_descriptions (github_id, session_id, day, use, risk, category, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        input.githubId,
-        input.sessionId,
-        day,
-        use,
-        risk,
-        category,
-        input.model,
-        input.now,
-      );
-      if (risk === "high" && this.#markAlert(`use-high:${input.githubId}:${day}`, input.now)) {
-        const login = sql.exec<{ login: string }>("SELECT login FROM people WHERE github_id = ?", input.githubId).toArray()[0]?.login ?? String(input.githubId);
-        alerts.push(flaggedUseAlert({ login, githubId: input.githubId, use, category, blockUrl: input.blockUrl }));
-      }
+      alerts.push(...this.#storeUseLabel({ ...input, label: input.label, source: "label" }));
     });
     return alerts;
+  }
+
+  /**
+   * A keyword pre-check match (security-route.ts keywordLabel), stored as a description with no
+   * model call: at most once per (person, session, label) per UTC day (without a session, per
+   * person per day). It holds the session and the person's day off GPT-6 like any security label,
+   * and a "high" one alerts the owner (at most once per person per day, shared with descriptions).
+   */
+  async recordKeywordMatch(input: { githubId: number; sessionId: string | null; signal: string; label: UseLabel; now: number; blockUrl: string }): Promise<Alert[]> {
+    const sql = this.ctx.storage.sql;
+    const day = Math.floor(input.now / DAY_MS);
+    return this.ctx.storage.transactionSync(() => {
+      const seen =
+        sql
+          .exec<{ n: number }>(
+            "SELECT COUNT(*) AS n FROM use_descriptions WHERE github_id = ? AND day = ? AND session_id IS ? AND use = ? AND model = 'keyword'",
+            input.githubId,
+            day,
+            input.sessionId,
+            input.label.use,
+          )
+          .one().n > 0;
+      if (seen) return [];
+      return this.#storeUseLabel({ ...input, model: "keyword", source: `precheck:${input.signal}` });
+    });
+  }
+
+  /** Stores a description (inside a transaction): the GPT-6 hold it calls for, the row, and a "high" one's alert. */
+  #storeUseLabel(input: { githubId: number; sessionId: string | null; label: UseLabel; model: string; now: number; blockUrl: string; source: string }): Alert[] {
+    const sql = this.ctx.storage.sql;
+    const day = Math.floor(input.now / DAY_MS);
+    const { use, risk, category } = input.label;
+    // Security work, or a high risk: this session, and the person for the rest of the day, off GPT-6.
+    if (labelKeepsOffGpt6(input.label)) this.#holdOffGpt6(input.githubId, input.sessionId, input.now, input.source);
+    sql.exec(
+      "INSERT INTO use_descriptions (github_id, session_id, day, use, risk, category, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      input.githubId,
+      input.sessionId,
+      day,
+      use,
+      risk,
+      category,
+      input.model,
+      input.now,
+    );
+    if (risk === "high" && this.#markAlert(`use-high:${input.githubId}:${day}`, input.now)) {
+      const login = sql.exec<{ login: string }>("SELECT login FROM people WHERE github_id = ?", input.githubId).toArray()[0]?.login ?? String(input.githubId);
+      return [flaggedUseAlert({ login, githubId: input.githubId, use, category, blockUrl: input.blockUrl })];
+    }
+    return [];
   }
 
   /** Holds (person, session) and the person for the rest of the UTC day off GPT-6 (security-route.ts). */

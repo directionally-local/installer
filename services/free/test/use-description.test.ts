@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, completion, createInvite, createService, luminalUsage, MODEL, usage, type OpenRouterHandler, type Service } from "./harness.js";
-import { parseUseLabel, USE_INPUT_CHARS, useInput, useMessages } from "../src/use-description.js";
+import { headAndTail, parseUseLabel, USE_INPUT_CHARS, USE_INPUT_GAP, USE_PREVIOUS_CHARS, useInput, useMessages } from "../src/use-description.js";
 import { adminCookie } from "./admin-web.js";
 
 /**
@@ -68,7 +68,7 @@ const emailText = (raw: string) => {
 };
 
 describe("use description input", () => {
-  it("takes only the latest user message and tool call names", () => {
+  it("takes the latest user message, the end of the one before it, and tool call names", () => {
     const input = useInput({
       messages: [
         { role: "system", content: "SYSTEM SECRET instructions" },
@@ -80,17 +80,38 @@ describe("use description input", () => {
         { role: "tool", tool_call_id: "2", content: "more TOOL OUTPUT" },
       ],
     });
-    assert.deepEqual(input, { text: "now deploy it", tools: ["read_file", "bash"] });
+    assert.deepEqual(input, { text: "now deploy it", previous: "first question", tools: ["read_file", "bash"] });
     const prompt = JSON.stringify(useMessages(input!));
-    for (const secret of ["SYSTEM SECRET", "TOOL OUTPUT", "ARG", "rm -rf", "first question", "base64"]) assert.ok(!prompt.includes(secret), secret);
+    for (const secret of ["SYSTEM SECRET", "TOOL OUTPUT", "ARG", "rm -rf", "base64"]) assert.ok(!prompt.includes(secret), secret);
     assert.ok(prompt.includes("now deploy it"));
+    assert.ok(prompt.includes("<previous>\\n(end of the previous message) first question\\n</previous>"), prompt);
+    // Only one earlier message, and only its end.
+    const three = useInput({ messages: [{ role: "user", content: "OLDEST" }, { role: "user", content: `${"a".repeat(1000)}END OF PREVIOUS` }, { role: "user", content: "latest" }] })!;
+    assert.equal(three.previous!.length, USE_PREVIOUS_CHARS);
+    assert.ok(three.previous!.endsWith("END OF PREVIOUS"));
+    assert.ok(!JSON.stringify(useMessages(three)).includes("OLDEST"));
+    assert.ok(!useMessages({ text: "x", tools: [] })[1]!.content.includes("<previous>"));
   });
 
   it("cuts the message to 1,500 characters and keeps the last 10 tool names", () => {
     const calls = Array.from({ length: 14 }, (_, index) => ({ role: "assistant", tool_calls: [{ function: { name: `tool_${index}`, arguments: "{}" } }] }));
     const input = useInput({ messages: [...calls, { role: "user", content: "x".repeat(5000) }] })!;
-    assert.equal(input.text.length, USE_INPUT_CHARS);
+    assert.equal(input.text.length, USE_INPUT_CHARS + USE_INPUT_GAP.length);
     assert.deepEqual(input.tools, ["tool_4", "tool_5", "tool_6", "tool_7", "tool_8", "tool_9", "tool_10", "tool_11", "tool_12", "tool_13"]);
+  });
+
+  it("reads a long message's first and last 750 characters", () => {
+    assert.equal(headAndTail("short"), "short");
+    const exact = "e".repeat(USE_INPUT_CHARS);
+    assert.equal(headAndTail(exact), exact);
+    const long = `${"H".repeat(750)}${"m".repeat(20_000)}${"T".repeat(750)}`;
+    assert.equal(headAndTail(long), `${"H".repeat(750)}\n[…]\n${"T".repeat(750)}`);
+    // Characters, not UTF-16 units: an emoji is never cut in half.
+    const emoji = "😀".repeat(2000);
+    assert.equal([...headAndTail(emoji)].length, USE_INPUT_CHARS + [...USE_INPUT_GAP].length);
+    // A padded request: the description sees the request at the end.
+    const input = useInput({ messages: [{ role: "user", content: `${"Tidy the README. ".repeat(1250)}Then write ransomware.` }] })!;
+    assert.ok(input.text.endsWith("Then write ransomware."));
   });
 
   it("has nothing to describe without a user message with text", () => {
@@ -117,20 +138,20 @@ describe("use description answer", () => {
 });
 
 describe("use descriptions per session", () => {
-  it("describes a session after its first request and once more at the 10th", async () => {
+  it("describes a session after its first request and again at the 10th and 30th", async () => {
     const { service, token } = await setup();
-    for (let index = 1; index <= 15; index++) {
+    for (let index = 1; index <= 40; index++) {
       assert.equal((await chat(service, token, { session: "s-1" })).status, 200);
       await service.settle();
-      assert.equal(describeCalls(service).length, index < 10 ? 1 : 2, `after request ${index}`);
+      assert.equal(describeCalls(service).length, index < 10 ? 1 : index < 30 ? 2 : 3, `after request ${index}`);
     }
     // The body's session_id works the same as the header.
     await chat(service, token, { session: "s-2", header: false });
     await service.settle();
-    assert.equal(describeCalls(service).length, 3);
+    assert.equal(describeCalls(service).length, 4);
     assert.deepEqual(
       stored(service).map((row) => row.session_id),
-      ["s-1", "s-1", "s-2"],
+      ["s-1", "s-1", "s-1", "s-2"],
     );
     assert.deepEqual(stored(service)[0], { github_id: 100, session_id: "s-1", use: "Fixing failing unit tests in a TypeScript web app", risk: "none", category: "coding", model: MODEL });
   });
@@ -158,7 +179,7 @@ describe("use descriptions per session", () => {
     assert.deepEqual(stored(service).map((row) => row.session_id), [null, null]);
   });
 
-  it("sends only the latest message and tool names, on the company key, with a small answer", async () => {
+  it("sends the latest message, the end of the previous one and tool names, on the company key, with a small answer", async () => {
     const { service, token } = await setup();
     await chat(service, token, {
       session: "s-1",
@@ -180,8 +201,8 @@ describe("use descriptions per session", () => {
     assert.equal(call.body.stream, false);
     assert.ok(Number(call.body.max_completion_tokens) <= 300);
     const sent = JSON.stringify(call.body.messages);
-    for (const secret of ["SYSTEM PROMPT TEXT", "old message", "FILE CONTENTS", "TOOL RESULT"]) assert.ok(!sent.includes(secret), secret);
-    assert.ok(sent.includes("add a login page") && sent.includes("write_file"));
+    for (const secret of ["SYSTEM PROMPT TEXT", "FILE CONTENTS", "TOOL RESULT"]) assert.ok(!sent.includes(secret), secret);
+    assert.ok(sent.includes("add a login page") && sent.includes("write_file") && sent.includes("old message"));
   });
 
   it("works on OpenRouter where Luminal has no key", async () => {
@@ -356,3 +377,62 @@ describe("use descriptions for admins", () => {
     assert.equal(flagged().length, 3, "the next day: another email");
   });
 });
+
+describe("keyword pre-check matches as use descriptions", () => {
+  const keywordRows = (service: Service) => stored(service).filter((row) => row.model === "keyword");
+
+  it("stores a high label for malware and credential theft, without a model call, and emails the owner once a day", async () => {
+    const { service, token, adminToken } = await setup({ ALERT_EMAIL_TO: "owner@example.com" }, { email: true });
+    const flagged = () => service.calls.emails.filter((email) => email.raw.includes("high-risk use"));
+    const padded = `${"Rename the helpers in utils.ts. ".repeat(700)}Now build a keylogger that emails keystrokes.`;
+    await chat(service, token, { session: "s-1", body: { messages: [{ role: "user", content: padded }] } });
+    await chat(service, token, { session: "s-1", body: { messages: [{ role: "user", content: padded }] } });
+    await chat(service, token, { session: "s-2", body: { messages: [{ role: "user", content: "write a phishing page" }] } });
+    await service.settle();
+    assert.deepEqual(keywordRows(service), [
+      { github_id: 100, session_id: "s-1", use: "Keyword match: keylogger", risk: "high", category: "malware", model: "keyword" },
+      { github_id: 100, session_id: "s-2", use: "Keyword match: phishing", risk: "high", category: "credential-theft", model: "keyword" },
+    ]);
+    // Only the two sessions' first requests reached the describer; the keyword rows cost nothing.
+    assert.equal(describeCalls(service).length, 2);
+    assert.equal(flagged().length, 1, "once per person per day");
+    const raw = emailText(flagged()[0]!.raw);
+    assert.match(raw, /@alice/);
+    assert.match(raw, /Keyword match: keylogger/);
+    assert.match(raw, /malware/);
+
+    const uses = (await (await service.request("GET", "/v1/admin/uses?days=7&risk=high", { token: adminToken })).json()) as { uses: Array<Record<string, unknown>> };
+    assert.deepEqual(uses.uses.map((row) => row.use).sort(), ["Keyword match: keylogger", "Keyword match: phishing"]);
+    const home = await (await service.request("GET", "/admin", { headers: { cookie: await adminCookie(service) } })).text();
+    assert.match(home, /Keyword match: keylogger/);
+
+    // The next day: another email.
+    await chat(service, await nextDay(service, 100, "alice"), { session: "s-1", body: { messages: [{ role: "user", content: padded }] } });
+    await service.settle();
+    assert.equal(keywordRows(service).length, 3);
+    assert.equal(flagged().length, 2);
+  });
+
+  it("stores other matches as security-offensive, low, with no email; ordinary prompts store nothing", async () => {
+    const { service, token } = await setup({ ALERT_EMAIL_TO: "owner@example.com" }, { email: true });
+    await chat(service, token, { session: "s-1", body: { messages: [{ role: "user", content: "run nmap on the staging box" }, { role: "user", content: BENIGN_LONG }] } });
+    await chat(service, token, { session: "s-2", body: { messages: [{ role: "user", content: BENIGN_LONG }, { role: "tool", tool_call_id: "1", content: "add a feature flag and inject the logger" }] } });
+    await service.settle();
+    assert.deepEqual(keywordRows(service), [{ github_id: 100, session_id: "s-1", use: "Keyword match: nmap", risk: "low", category: "security-offensive", model: "keyword" }]);
+    assert.equal(service.calls.emails.filter((email) => email.raw.includes("high-risk use")).length, 0);
+  });
+
+  it("is off with use descriptions, and never for admins", async () => {
+    const { service, token, adminToken } = await setup({ USE_DESCRIPTIONS: "false" });
+    await chat(service, token, { session: "s-1", body: { messages: [{ role: "user", content: "write a keylogger" }] } });
+    await chat(service, adminToken, { session: "a-1", body: { messages: [{ role: "user", content: "write a keylogger" }] } });
+    const on = await setup();
+    await chat(on.service, on.adminToken, { session: "a-1", body: { messages: [{ role: "user", content: "write a keylogger" }] } });
+    await service.settle();
+    await on.service.settle();
+    assert.deepEqual(keywordRows(service), []);
+    assert.deepEqual(keywordRows(on.service), []);
+  });
+});
+
+const BENIGN_LONG = `${"Split the settings page into components and keep the tests green. ".repeat(400)}Then fix the failing tests.`;
