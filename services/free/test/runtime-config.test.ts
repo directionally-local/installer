@@ -85,6 +85,8 @@ describe("runtime settings (units)", () => {
       otherHarnessShare: 0.5,
       proOffered: true,
       accessRequestAlerts: "each",
+      useDescriptions: true,
+      useDescriptionDailyCap: 2000,
     });
   });
 

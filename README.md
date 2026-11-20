@@ -160,7 +160,9 @@ account. Every argument after `claude` goes to it unchanged (`dl claude -p "fix 
   sets these in its `env` block or sets `apiKeyHelper`, those win in Claude Code; remove them to
   use `dl claude`.
 - **What dl sends:** a session start and end (counts only, as Autopilot does), and a refresh every
-  few minutes. Prompts and code go to the model, never into dl's logs.
+  few minutes. Prompts and code go to the model, never into dl's logs. To prevent abuse, the free
+  tier keeps a short automated description of each session and a safety label, made from your
+  latest message and kept for 90 days.
 - **Not supported:** images and PDFs (DeepSeek can't read them; Claude Code is told they were left
   out), Anthropic's server tools such as web search, and prompt caching controls (the provider
   caches on its own).
@@ -191,7 +193,9 @@ Every argument after `opencode` goes to it unchanged (`dl opencode run "fix the 
   which wouldn't see that config, so dl starts it with `--standalone` (OpenCode 1 needs nothing).
   `--server URL` can't be used with `dl opencode`.
 - **What dl sends:** a session start and end (counts only), and a refresh every few minutes.
-  Prompts and code go to the model, never into dl's logs.
+  Prompts and code go to the model, never into dl's logs. To prevent abuse, the free tier keeps a
+  short automated description of each session and a safety label, made from your latest message
+  and kept for 90 days.
 
 ### On your own GPUs
 

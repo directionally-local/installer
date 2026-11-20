@@ -128,6 +128,10 @@ export const RUNTIME_SETTINGS = {
   proOffered: { kind: "flag", env: "PRO_OFFERED" },
   /** The owner's email about access requests: "each" (one per request), "daily" (in the daily digest) or "off". */
   accessRequestAlerts: { kind: "alertMode", env: "ACCESS_REQUEST_ALERTS" },
+  /** A short automated description and safety label per session (use-description.ts); false turns it off. */
+  useDescriptions: { kind: "flag", env: "USE_DESCRIPTIONS" },
+  /** Description calls a UTC day across everyone; 0 stops them. */
+  useDescriptionDailyCap: { kind: "count", env: "USE_DESCRIPTION_DAILY_CAP" },
 } as const;
 
 export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;

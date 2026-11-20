@@ -571,7 +571,54 @@ dl free tier: the queue started ($200 of the $250 weekly cap used). New sign-ups
 dl free tier: OpenRouter host <slug> failed 9 of 40 requests in the last hour (23%). New requests avoid it while it keeps failing.
 dl free tier: $1,600 of the $2,000 Luminal credit used (80%).
 dl free tier: requests are refused with upstream_credit_exhausted: $2,000.12 of the $2,000 Luminal credit is used. Top up and raise luminalCreditUsd (POST /admin/config), or switch primaryUpstream to "openrouter".
+dl free tier: a session by @<login> (GitHub id <id>) was labelled high risk. (with the description, category and a link to block; once per person per UTC day)
 ```
+
+## What people use the service for (use descriptions)
+
+Usage records are counts, and counts can't show abuse: a provider can flag one person (through
+the per-person `safety_identifier`) and we couldn't see what they did. So for each session the
+service writes **a short automated description of what it is about, and a safety label**
+(`src/use-description.ts`). Prompts and code are still never stored.
+
+- **When:** per (person, session id: `x-session-id` or `session_id`), once after the first
+  request with a user message, and once more at the session's 10th request (sessions drift).
+  A request without a session id is described at most once per person per UTC day. Admins are
+  never described.
+- **Input:** only the latest user message's text, cut to 1,500 characters, and the names (never
+  the arguments) of up to 10 tool calls in the request. Never the system prompt, earlier
+  messages, files or tool outputs.
+- **Model:** DeepSeek V4.1 Flash on the company key: Luminal, or OpenRouter where Luminal has no
+  key or credit. Temperature 0, a ~60-token answer (on Luminal, where DeepSeek's reasoning
+  counts as output, asked for low reasoning effort with 240 tokens of room for it). It answers
+  `{"use": "<40–60 characters>", "risk": "none|low|high", "category": "<coding, data, writing,
+  research, security-defensive, security-offensive, malware, credential-theft, spam, fraud or
+  other>"}`. `use` is cut to 60 characters on one line; an unknown category is `other`; an answer
+  that doesn't parse stores nothing.
+- **Off the request path:** it runs beside the request and the request never waits for it, so
+  it can't slow or fail anyone's request. The portable runtime has no `waitUntil` (see
+  `docs/plans/portable-services.md`), so the work starts with the upstream call and runs while
+  the answer streams; a failure, a timeout (20 s) or a cut-short run just means no description.
+- **Caps:** at most 20 calls per person per UTC day and `useDescriptionDailyCap` (2000) across
+  everyone; `useDescriptions` false turns it off (both runtime settings).
+- **Cost:** never a person's allowance and never the free caps. It goes in `spend_weeks`'
+  internal bucket (`internal_usd` for OpenRouter cash, `internal_credit_usd`, `internal_tokens`,
+  `internal_requests`), and Luminal's share also in `credit_usd`, so the credit balance stays
+  true. `GET /admin/spend` shows it as `internal`.
+- **Storage:** `use_descriptions` in the Directory: GitHub id, session id, day, the description,
+  risk, category, model and time. Kept 90 days. Per-session request counts (`use_sessions`) and
+  per-day call counts (`use_calls_daily`) are kept a week.
+- **Admin:** `GET /admin/people` has `use` (the latest description), `useAt` and
+  `worstRiskThisWeek` per person. `GET /admin/uses?days=7&risk=high` lists descriptions newest
+  first (`githubId`, `login`, `sessionId`, `use`, `risk`, `category`, `model`, `at`); `risk` is
+  that risk or worse (`none`, the default, is all), and it also takes `githubId` and `limit`
+  (1–1000, default 200). The admin home has a **Flagged use** card: low and high risk in the last
+  7 days, high first.
+- **Alert:** a `high` label emails the owner (the usual alert channels) once per person per UTC
+  day with the login, the description, the category and a link to block on the Tools page.
+- **Limits:** the label is a cheap model's guess from one message; a person can word a message to
+  avoid it. It is a signal for a human to look at, not a verdict, and nothing is blocked
+  automatically.
 
 **Luminal slowing people down.** Each Luminal request's outcome is logged (`luminal_outcomes`,
 an hour kept, and `requests.upstream_outcome`): `ok`, `rate_limited` (Luminal's 429), `error`
@@ -791,6 +838,8 @@ with who made it and when.
 | `otherHarnessShare` | `OTHER_HARNESS_SHARE` | 0.5: the share (0 to 1) of the free weekly allowance and of the trial Claude Code and OpenCode may use; Pro is exempt (see below) |
 | `proOffered` | `PRO_OFFERED` | true: dl Pro is offered. false hides it from everyone new: `offers` has no `pro` (the `topup` stays), free users' refusals, sign-in lines and trial emails stop naming Pro, and a new Pro checkout gets 403 `pro_not_offered`. Existing subscribers keep Pro, their Pro wording and the billing portal |
 | `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request); `daily` (one line in the daily digest); `off` |
+| `useDescriptions` | `USE_DESCRIPTIONS` | true: a short automated description and safety label per session (see [use descriptions](#what-people-use-the-service-for-use-descriptions)) |
+| `useDescriptionDailyCap` | `USE_DESCRIPTION_DAILY_CAP` | 2000: description calls a UTC day across everyone (0 stops them) |
 | `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 50,000,000, as Full (0: no free tokens below Basic) |
 | `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
 | `starterDeepseekWeeklyUsdCap` | `STARTER_DEEPSEEK_WEEKLY_USD_CAP` | 8, as Full |
@@ -1259,6 +1308,9 @@ users table.
   added up, else `globalWeeklyUsdCap`), Est. Cost (all-time cost at the allowance's list prices,
   free and paid), Feedback (messages sent; a count per day in `feedback_daily`, kept from this
   version on, nothing of the message), 7-Day Prompts (input tokens over the last 7 UTC days).
+- **Flagged use:** automated session descriptions labelled low or high risk in the last 7
+  days, high first (see [use descriptions](#what-people-use-the-service-for-use-descriptions)).
+  Read apart from the home's other numbers, from `use_descriptions` only.
 - **Platform Health:** Total Users, Active Grants, Total Cost, Total Tokens (input + output, all time).
 - **Paid:** paying users (active + past due), active, past due and canceled Pro subscriptions,
   MRR (paying users × the Pro price), top-ups and top-up revenue (before tax).

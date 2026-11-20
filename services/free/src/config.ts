@@ -244,6 +244,13 @@ export interface FreeConfig {
    */
   proOffered: boolean;
   /**
+   * A short automated description of what each session is about, with a safety label
+   * (use-description.ts), USE_DESCRIPTIONS, default on; also a runtime setting.
+   */
+  useDescriptions: boolean;
+  /** Description calls a UTC day across everyone (USE_DESCRIPTION_DAILY_CAP, default 2000); also a runtime setting. */
+  useDescriptionDailyCap: number;
+  /**
    * The owner's email about access requests (/request in dl), ACCESS_REQUEST_ALERTS: "each" (one
    * per request, the default), "daily" (counted in the daily digest instead) or "off". Also a
    * runtime setting.
@@ -331,6 +338,8 @@ export const DEFAULTS = {
   otherHarnessShare: 0.5,
   proOffered: true,
   accessRequestAlerts: "each" as AccessRequestAlerts,
+  useDescriptions: true,
+  useDescriptionDailyCap: 2000,
   /**
    * OpenRouter's cache-read price over its input price for deepseek/deepseek-v4.1-flash-1017,
    * from https://openrouter.ai/api/v1/models on 2026-11-03: input $0.30/M, cache read
@@ -507,6 +516,8 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     otherHarnessShare: share(env.OTHER_HARNESS_SHARE, DEFAULTS.otherHarnessShare, "OTHER_HARNESS_SHARE"),
     proOffered: flag(env.PRO_OFFERED, DEFAULTS.proOffered, "PRO_OFFERED"),
     accessRequestAlerts: accessRequestAlerts(env.ACCESS_REQUEST_ALERTS),
+    useDescriptions: flag(env.USE_DESCRIPTIONS, DEFAULTS.useDescriptions, "USE_DESCRIPTIONS"),
+    useDescriptionDailyCap: whole(env.USE_DESCRIPTION_DAILY_CAP, DEFAULTS.useDescriptionDailyCap, "USE_DESCRIPTION_DAILY_CAP"),
   };
 }
 
