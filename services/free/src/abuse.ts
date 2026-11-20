@@ -38,3 +38,9 @@ export function outsideDl(store: Sql, githubId: number, now: number): boolean {
       .toArray()[0]?.n ?? 0;
   return uncovered >= DL_ONLY_MIN_REQUESTS;
 }
+
+export const PROXY_ROUTER_MESSAGE = "The free tier can't be used behind account-pooling routers such as 9router. Use it directly from dl, or bring your own key.";
+const PROXY_ROUTER_PATTERN = /9[-_ ]?router/i;
+export function isProxyRouter(sessionId: string | undefined, userAgent: string | null): boolean {
+  return PROXY_ROUTER_PATTERN.test(sessionId ?? "") || PROXY_ROUTER_PATTERN.test(userAgent ?? "");
+}

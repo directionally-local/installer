@@ -1,4 +1,5 @@
 import type { DurableObjectNamespace } from "cloudflare:workers";
+import { isProxyRouter, PROXY_ROUTER_MESSAGE } from "./abuse.js";
 import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.js";
 import { githubAuthorizeUrl, githubPrimaryEmail, githubPublicProfile, githubSignInFromCode, githubUserByLogin, githubUserFromCode, type Fetch, type GitHubAppCredentials } from "../../shared/src/github.js";
 import { githubSignals } from "../../shared/src/github-signals.js";
@@ -2472,6 +2473,12 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // Every level gets every model; basic and Starter on their smaller allowance.
   const effective = requested;
   const sessionId = c.request.headers.get("x-session-id") ?? (typeof body.session_id === "string" ? body.session_id : undefined);
+
+  // Account-pooling routers (resale or sharing of free accounts) are refused outright: the free
+  // tier is for one person's own coding, not an upstream for a proxy.
+  if (!isAdmin && isProxyRouter(sessionId, c.request.headers.get("user-agent"))) {
+    return apiError(403, "proxy_not_allowed", PROXY_ROUTER_MESSAGE, {}, await headers());
+  }
 
   // Security work never goes to GPT-6 (security-route.ts): a session its use description labels
   // security, or whose text (user messages and tool results) the local pre-check matches, gets
