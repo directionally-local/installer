@@ -102,8 +102,8 @@ import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind } from "./
 import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
 import { allowedReturn, isInstallOption, ONE_TIME_CODE, planFor, WEB_SESSION_TTL_S, WEB_STATE, webCors, webFunnelCsv, type WebStep } from "./web-signup.js";
 import { grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, parseGrantUsd, parseLogins, type GrantResult } from "./grant.js";
-import { completionText, isUseRisk, parseUseLabel, USE_DESCRIPTIONS_PER_PERSON_PER_DAY, USE_KEEP_DAYS, USE_MAX_TOKENS, USE_REASONING_ROOM, USE_TIMEOUT_SECONDS, latestUserText, useInput, useMessages, type UseInput } from "./use-description.js";
-import { SECURITY_GPT6_MESSAGE, SECURITY_REASON, securityHoldEnds, securitySignal } from "./security-route.js";
+import { completionText, isUseRisk, parseUseLabel, USE_DESCRIPTIONS_PER_PERSON_PER_DAY, USE_KEEP_DAYS, USE_MAX_TOKENS, USE_REASONING_ROOM, USE_TIMEOUT_SECONDS, useInput, useMessages, type UseInput } from "./use-description.js";
+import { keywordLabel, precheckTexts, SECURITY_GPT6_MESSAGE, SECURITY_REASON, securityHoldEnds, securitySignal } from "./security-route.js";
 
 /**
  * The free managed tier's HTTP surface: device-flow sign-in with GitHub, the account and
@@ -2474,10 +2474,17 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   const sessionId = c.request.headers.get("x-session-id") ?? (typeof body.session_id === "string" ? body.session_id : undefined);
 
   // Security work never goes to GPT-6 (security-route.ts): a session its use description labels
-  // security, or whose latest message the local pre-check matches, gets the GPT-6 limit's
-  // refusal pointing at DeepSeek, for that session and the person's rest of the UTC day.
-  if (requested.family === "gpt6" && !isAdmin && gate.config.securityOffGpt6) {
-    const signal = securitySignal(latestUserText(body));
+  // security, or whose text (user messages and tool results) the local pre-check matches, gets
+  // the GPT-6 limit's refusal pointing at DeepSeek, for that session and the person's rest of the
+  // UTC day. A match on any model is also recorded as the session's use description (no model
+  // call), beside the request.
+  const gpt6Check = requested.family === "gpt6" && !isAdmin && gate.config.securityOffGpt6;
+  const signal = gpt6Check || (!isAdmin && gate.config.useDescriptions) ? securitySignal(precheckTexts(body)) : undefined;
+  if (signal && gate.config.useDescriptions) {
+    const task = recordKeywordMatch(c, { githubId: identity.githubId, sessionId: sessionId ?? null, signal });
+    if (c.background) c.background(task);
+  }
+  if (gpt6Check) {
     const held = await directory(c).gpt6SecurityCheck({ githubId: identity.githubId, sessionId: sessionId ?? null, now: c.now(), ...(signal ? { signal } : {}) });
     if (held) {
       return apiError(402, "gpt_limit", SECURITY_GPT6_MESSAGE, { family: "gpt6", resetsAt: securityHoldEnds(c.now()), reason: SECURITY_REASON, alternative: DEEPSEEK_MODEL }, await headers());
@@ -2695,6 +2702,16 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   outHeaders.set("x-dl-fallback", serving.model.id);
   return new Response(response.body, { status: response.status, headers: outHeaders });
 
+}
+
+/** Records a pre-check match as a use description and sends its alert, if any. Never throws. */
+async function recordKeywordMatch(c: Ctx, input: { githubId: number; sessionId: string | null; signal: string }): Promise<void> {
+  try {
+    const alerts = await directory(c).recordKeywordMatch({ ...input, label: keywordLabel(input.signal), now: c.now(), blockUrl: `${c.base}/admin?view=tools#block` });
+    await alert(c, alerts);
+  } catch (error) {
+    console.error("keyword match record failed", error instanceof Error ? error.name : "error");
+  }
 }
 
 /**

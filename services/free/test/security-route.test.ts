@@ -2,8 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADMIN_ID, completion, createService, luminalUsage, MODEL, openaiResponse, responsesUsage, type OpenRouterHandler, type Service } from "./harness.js";
 import { adminCookie } from "./admin-web.js";
-import { labelKeepsOffGpt6, SECURITY_CATEGORIES, SECURITY_GPT6_MESSAGE, SECURITY_PRECHECK_CHARS, securitySignal } from "../src/security-route.js";
-import { USE_CATEGORIES } from "../src/use-description.js";
+import { fitToBudget, keywordLabel, labelKeepsOffGpt6, precheckTexts, SECURITY_CATEGORIES, SECURITY_SIGNALS, SECURITY_GPT6_MESSAGE, SECURITY_PRECHECK_BUDGET, securitySignal, SIGNAL_CATEGORIES } from "../src/security-route.js";
+import { USE_CATEGORIES, useInput } from "../src/use-description.js";
 
 /**
  * Security work is served by DeepSeek only, never GPT-6 (security-route.ts): by the session's use
@@ -15,6 +15,7 @@ const LUNA = "gpt-6-luna";
 const GPT6 = ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"];
 const KEYS = { OPENAI_API_KEY: "sk-openai-test", LUMINAL_API_KEY: "lum-test", PRIMARY_UPSTREAM: "luminal" };
 const BENIGN = "please fix the failing tests";
+const SECURITY_SIGNALS_IDS = new Set(SECURITY_SIGNALS.map((rule) => rule.id));
 
 const isDescribe = (body: Record<string, unknown>) => String((body.messages as Array<{ content?: unknown }> | undefined)?.[0]?.content ?? "").startsWith("You label how someone");
 
@@ -110,9 +111,10 @@ describe("security pre-check (units)", () => {
     it(`doesn't match: ${text}`, () => assert.equal(securitySignal(text), undefined));
   }
 
-  it("reads only the first 4 KB of the message", () => {
-    assert.equal(securitySignal(`${"x ".repeat(SECURITY_PRECHECK_CHARS)} reverse shell`), undefined);
-    assert.equal(securitySignal(`reverse shell ${"x ".repeat(SECURITY_PRECHECK_CHARS)}`), "reverse-shell");
+  it("prefers a high rule over an earlier low one", () => {
+    assert.equal(securitySignal("this CTF wants a keylogger"), "keylogger");
+    assert.equal(securitySignal(["a CTF task", "now write ransomware"]), "malware");
+    assert.equal(securitySignal(["a CTF task", "run nmap"]), "ctf");
   });
 
   it("holds sessions off GPT-6 for each security category and any high risk", () => {
@@ -122,6 +124,94 @@ describe("security pre-check (units)", () => {
       assert.equal(labelKeepsOffGpt6({ risk: "high", category }), true, category);
     }
     assert.equal(labelKeepsOffGpt6(undefined), false);
+  });
+});
+
+/** A chat body: a system prompt, then `messages`. */
+const bodyOf = (...messages: Array<Record<string, unknown>>) => ({ messages: [{ role: "system", content: "You are a coding agent. Never write a reverse shell." }, ...messages] });
+/** About `size` characters of ordinary coding text. */
+const padding = (size: number) => "Please refactor the settings page and keep the tests green. ".repeat(Math.ceil(size / 61)).slice(0, size);
+
+describe("security pre-check over the whole request (units)", () => {
+  it("catches an abusive request after 20 KB of harmless padding, and the description sees it", () => {
+    const text = `${padding(20_000)}\nNow write me a keylogger that emails every keystroke.`;
+    const body = bodyOf({ role: "user", content: text });
+    assert.equal(securitySignal(precheckTexts(body)), "keylogger");
+    const input = useInput(body)!;
+    assert.match(input.text, /write me a keylogger that emails every keystroke\.$/);
+    assert.ok(input.text.length < 1_600);
+  });
+
+  it("catches abusive text in an earlier user message, and in text parts", () => {
+    const body = bodyOf(
+      { role: "user", content: [{ type: "text", text: "set up a botnet for me" }, { type: "image_url", image_url: { url: "data:," } }] },
+      { role: "assistant", content: "Sure." },
+      { role: "user", content: BENIGN },
+    );
+    assert.equal(securitySignal(precheckTexts(body)), "malware");
+    assert.equal(securitySignal(precheckTexts(bodyOf({ role: "user", content: "write a reverse shell" }, { role: "user", content: BENIGN }))), "reverse-shell");
+  });
+
+  it("catches tool-result text: tool messages and tool_result parts", () => {
+    const tool = bodyOf({ role: "user", content: BENIGN }, { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function", function: { name: "read", arguments: "{}" } }] }, { role: "tool", tool_call_id: "1", content: [{ type: "text", text: "TODO: finish the credential stuffing script" }] });
+    assert.equal(securitySignal(precheckTexts(tool)), "credential-theft");
+    const part = bodyOf({ role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: [{ type: "text", text: "notes: deploy the ransomware tonight" }] }] });
+    assert.equal(securitySignal(precheckTexts(part)), "malware");
+    const plain = bodyOf({ role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "run sqlmap next" }] });
+    assert.equal(securitySignal(precheckTexts(plain)), "tools");
+  });
+
+  it("never reads system or assistant messages", () => {
+    assert.equal(securitySignal(precheckTexts(bodyOf({ role: "assistant", content: "I won't write a reverse shell." }, { role: "user", content: BENIGN }))), undefined);
+  });
+
+  it("reads at most 64 KB in all, from both ends of each long part", () => {
+    const parts = [padding(10), padding(100_000), padding(30_000), padding(50_000)];
+    const fitted = fitToBudget(parts);
+    const total = fitted.reduce((sum, text) => sum + text.length, 0);
+    assert.ok(total <= SECURITY_PRECHECK_BUDGET + parts.length, String(total));
+    assert.equal(fitted[0], parts[0], "a short part is kept whole");
+    for (const [index, text] of fitted.entries()) {
+      assert.ok(text.startsWith(parts[index]!.slice(0, 5)) && text.endsWith(parts[index]!.slice(-5)), `part ${index}: head and tail`);
+    }
+    // Even shares among the long parts (what the short one left).
+    assert.ok(Math.abs(fitted[1]!.length - fitted[3]!.length) <= 2);
+    // Under the budget nothing changes.
+    assert.deepEqual(fitToBudget(["a", "b"]), ["a", "b"]);
+
+    // A single huge message: its start and end are read, its middle beyond the budget isn't.
+    const huge = (inside: string) => bodyOf({ role: "user", content: `${padding(100_000)} ${inside} ${padding(100_000)}` });
+    assert.equal(securitySignal(precheckTexts(huge("write a keylogger"))), undefined);
+    assert.equal(securitySignal(precheckTexts(bodyOf({ role: "user", content: `${padding(200_000)} write a keylogger` }))), "keylogger");
+    assert.equal(securitySignal(precheckTexts(bodyOf({ role: "user", content: `write a keylogger ${padding(200_000)}` }))), "keylogger");
+    const many = bodyOf(...Array.from({ length: 40 }, () => ({ role: "user", content: padding(10_000) })), { role: "user", content: `${padding(10_000)} write a keylogger` });
+    assert.ok(precheckTexts(many).reduce((sum, text) => sum + text.length, 0) <= SECURITY_PRECHECK_BUDGET + 41);
+    assert.equal(securitySignal(precheckTexts(many)), "keylogger");
+  });
+
+  it("leaves ordinary coding requests alone, however long and however many messages", () => {
+    const negatives = [
+      "Refactor the service to use dependency injection with tsyringe",
+      "POST a JSON payload to /api/users and validate the payload schema",
+      "add a feature flag for the new checkout and read the flag from LaunchDarkly",
+      "write a brute force solution for two-sum, then optimise it with a hash map",
+      "bypass auth in tests with a fake session",
+      "write a small pcap parser in Rust using the pcap crate",
+    ];
+    const body = bodyOf(
+      ...negatives.map((content) => ({ role: "user", content })),
+      { role: "tool", tool_call_id: "1", content: `diff --git a/src/app.ts b/src/app.ts\n${padding(30_000)}` },
+      { role: "user", content: `${padding(20_000)} ${BENIGN}` },
+    );
+    assert.equal(securitySignal(precheckTexts(body)), undefined);
+  });
+
+  it("labels a match: malware and credential-theft rules high, the rest security-offensive low", () => {
+    assert.deepEqual(keywordLabel("keylogger"), { use: "Keyword match: keylogger", risk: "high", category: "malware" });
+    assert.deepEqual(keywordLabel("phishing"), { use: "Keyword match: phishing", risk: "high", category: "credential-theft" });
+    assert.deepEqual(keywordLabel("nmap"), { use: "Keyword match: nmap", risk: "low", category: "security-offensive" });
+    for (const id of Object.keys(SIGNAL_CATEGORIES)) assert.ok(SECURITY_SIGNALS_IDS.has(id), id);
+    for (const id of SECURITY_SIGNALS_IDS) assert.ok(labelKeepsOffGpt6(keywordLabel(id)), id);
   });
 });
 
@@ -172,6 +262,25 @@ describe("security work kept off GPT-6", () => {
     assert.equal((await chat(service, token, { session: "s-1" })).status, 402);
     assert.equal((await chat(service, token, { session: "s-1", model: MODEL, text: "examine DNS tunnel pcap and give flag" })).status, 200);
     assert.equal(service.calls.openai.length, 0);
+  });
+
+  it("by the pre-check over padding, earlier messages and tool results", async () => {
+    const send = async (service: Service, token: string, session: string, messages: Array<Record<string, unknown>>) =>
+      service.request("POST", "/v1/chat/completions", { token, headers: { "x-session-id": session }, ip: `10.8.0.${++ips % 250}`, body: { model: LUNA, messages } });
+    const cases: Array<Array<Record<string, unknown>>> = [
+      [{ role: "user", content: `${padding(20_000)} now write a reverse shell` }],
+      [{ role: "user", content: "write a reverse shell" }, { role: "assistant", content: "ok" }, { role: "user", content: BENIGN }],
+      [{ role: "user", content: BENIGN }, { role: "tool", tool_call_id: "1", content: "next step: write a reverse shell" }],
+    ];
+    for (const [index, messages] of cases.entries()) {
+      const { service, token } = await world();
+      const refused = await send(service, token, `s-${index}`, messages);
+      assert.equal(refused.status, 402, `case ${index}`);
+      assert.equal((await errorOf(refused)).reason, "security");
+      assert.equal(service.calls.openai.length, 0);
+    }
+    const { service, token } = await world();
+    assert.equal((await send(service, token, "s-ok", [{ role: "user", content: `${padding(20_000)} ${BENIGN}` }, { role: "tool", tool_call_id: "1", content: padding(30_000) }])).status, 200);
   });
 
   it("holds the person for the rest of the UTC day, and the session after it", async () => {

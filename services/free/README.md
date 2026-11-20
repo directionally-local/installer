@@ -582,12 +582,21 @@ service writes **a short automated description of what it is about, and a safety
 (`src/use-description.ts`). Prompts and code are still never stored.
 
 - **When:** per (person, session id: `x-session-id` or `session_id`), once after the first
-  request with a user message, and once more at the session's 10th request (sessions drift).
+  request with a user message, and again at the session's 10th and 30th requests (sessions
+  drift).
   A request without a session id is described at most once per person per UTC day. Admins are
   never described.
-- **Input:** only the latest user message's text, cut to 1,500 characters, and the names (never
-  the arguments) of up to 10 tool calls in the request. Never the system prompt, earlier
-  messages, files or tool outputs.
+- **Input:** the latest user message's text (whole up to 1,500 characters; longer, its first 750
+  and last 750 joined by `[…]`, so harmless padding in front can't hide the request), the last
+  300 characters of the user message before it (labelled), and the names (never the arguments)
+  of up to 10 tool calls in the request. Never the system prompt, older messages, files or tool
+  outputs.
+- **Keyword matches:** when the security pre-check (below) matches a request, on any model, a
+  description is stored without a model call: `use` "Keyword match: <rule>", model `keyword`,
+  category `malware` (rules malware, keylogger, av-evasion, c2, malicious-payload) or
+  `credential-theft` (credential-theft, phishing, hack-into) with risk `high`, else
+  `security-offensive` with risk `low`. At most once per (person, session, rule) per UTC day; a
+  high one alerts the owner like any high label. Off with `useDescriptions`; never for admins.
 - **Model:** DeepSeek V4.1 Flash on the company key: Luminal, or OpenRouter where Luminal has no
   key or credit. Temperature 0, a ~60-token answer (on Luminal, where DeepSeek's reasoning
   counts as output, asked for low reasoning effort with 240 tokens of room for it). It answers
@@ -628,8 +637,11 @@ when:
 - its use description has category `security-defensive`, `security-offensive`, `malware` or
   `credential-theft`, or risk `high` (any category); the description comes after the session's
   first request, so this covers the requests after it; or
-- before a GPT-6 request is forwarded, the latest user message (its first 4096 characters)
-  matches one of `SECURITY_SIGNALS`: local regular expressions, no network call. Terms that only
+- before a GPT-6 request is forwarded, the request's text matches one of `SECURITY_SIGNALS`:
+  local regular expressions, no network call. It reads every user message (string content and
+  text parts) and every tool result (`tool` messages, `tool_result` parts), up to 64 KB of text
+  per request; a part longer than its share of that is read from both its start and its end, so
+  padding can't push a request out of view. Each part is matched on its own. Terms that only
   security work uses match alone (CTF, flag formats like `flag{…}`, reverse shell, shellcode,
   privilege escalation, sqlmap, metasploit, nmap, phishing, keylogger, ransomware, botnet, DDoS,
   command-and-control, credential stuffing, bypassing 2FA, injection payloads…); words with an
