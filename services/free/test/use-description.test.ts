@@ -4,6 +4,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, completion, createInvite, createService, luminalUsage, MODEL, usage, type OpenRouterHandler, type Service } from "./harness.js";
 import { headAndTail, parseUseLabel, USE_INPUT_CHARS, USE_INPUT_GAP, USE_PREVIOUS_CHARS, useInput, useMessages } from "../src/use-description.js";
 import { adminCookie } from "./admin-web.js";
+import { DEFAULT_DETECTION_RULES, parseDetectionRules } from "../src/detection-rules.js";
+import { SYNTHETIC_RULES_JSON } from "./detection-fixture.js";
 
 /**
  * Use descriptions (use-description.ts): one short automated description and safety label per
@@ -92,6 +94,15 @@ describe("use description input", () => {
     assert.ok(three.previous!.endsWith("END OF PREVIOUS"));
     assert.ok(!JSON.stringify(useMessages(three)).includes("OLDEST"));
     assert.ok(!useMessages({ text: "x", tools: [] })[1]!.content.includes("<previous>"));
+  });
+
+  it("gives the labeller the policy from the DETECTION_RULES secret, else the public default", () => {
+    const { rules } = parseDetectionRules(SYNTHETIC_RULES_JSON);
+    const system = useMessages({ text: "x", tools: [] }, rules)[0]!.content;
+    assert.ok(system.startsWith("You label how someone"));
+    assert.ok(system.includes("SYNTHETIC LABELLER POLICY"));
+    assert.ok(system.includes('"risk": "none|low|high"'), "the answer format stays");
+    assert.ok(useMessages({ text: "x", tools: [] })[0]!.content.endsWith(DEFAULT_DETECTION_RULES.labellerPolicy));
   });
 
   it("cuts the message to 1,500 characters and keeps the last 10 tool names", () => {
@@ -415,11 +426,12 @@ describe("keyword pre-check matches as use descriptions", () => {
   });
 
   it("stores other matches as security-offensive, low, with no email; ordinary prompts store nothing", async () => {
-    const { service, token } = await setup({ ALERT_EMAIL_TO: "owner@example.com" }, { email: true });
-    await chat(service, token, { session: "s-1", body: { messages: [{ role: "user", content: "run nmap on the staging box" }, { role: "user", content: BENIGN_LONG }] } });
+    // Synthetic rules in the DETECTION_RULES secret, so the match comes from the secret's list.
+    const { service, token } = await setup({ ALERT_EMAIL_TO: "owner@example.com", DETECTION_RULES: SYNTHETIC_RULES_JSON }, { email: true });
+    await chat(service, token, { session: "s-1", body: { messages: [{ role: "user", content: "run the frobnicator on the staging box" }, { role: "user", content: BENIGN_LONG }] } });
     await chat(service, token, { session: "s-2", body: { messages: [{ role: "user", content: BENIGN_LONG }, { role: "tool", tool_call_id: "1", content: "add a feature flag and inject the logger" }] } });
     await service.settle();
-    assert.deepEqual(keywordRows(service), [{ github_id: 100, session_id: "s-1", use: "Keyword match: nmap", risk: "low", category: "security-offensive", model: "keyword" }]);
+    assert.deepEqual(keywordRows(service), [{ github_id: 100, session_id: "s-1", use: "Keyword match: frobnicator", risk: "low", category: "security-offensive", model: "keyword" }]);
     assert.equal(service.calls.emails.filter((email) => email.raw.includes("high-risk use")).length, 0);
   });
 

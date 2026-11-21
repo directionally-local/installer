@@ -2,7 +2,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADMIN_ID, completion, createService, luminalUsage, MODEL, openaiResponse, responsesUsage, type OpenRouterHandler, type Service } from "./harness.js";
 import { adminCookie } from "./admin-web.js";
-import { fitToBudget, keywordLabel, labelKeepsOffGpt6, precheckTexts, SECURITY_CATEGORIES, SECURITY_SIGNALS, SECURITY_GPT6_MESSAGE, SECURITY_PRECHECK_BUDGET, securitySignal, SIGNAL_CATEGORIES } from "../src/security-route.js";
+import { fitToBudget, keywordLabel, labelKeepsOffGpt6, precheckTexts, SECURITY_CATEGORIES, SECURITY_GPT6_MESSAGE, SECURITY_PRECHECK_BUDGET, securitySignal } from "../src/security-route.js";
+import { DEFAULT_DETECTION_RULES, parseDetectionRules } from "../src/detection-rules.js";
+import { SYNTHETIC_RULES_JSON } from "./detection-fixture.js";
 import { USE_CATEGORIES, useInput } from "../src/use-description.js";
 
 /**
@@ -15,7 +17,6 @@ const LUNA = "gpt-6-luna";
 const GPT6 = ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"];
 const KEYS = { OPENAI_API_KEY: "sk-openai-test", LUMINAL_API_KEY: "lum-test", PRIMARY_UPSTREAM: "luminal" };
 const BENIGN = "please fix the failing tests";
-const SECURITY_SIGNALS_IDS = new Set(SECURITY_SIGNALS.map((rule) => rule.id));
 
 const isDescribe = (body: Record<string, unknown>) => String((body.messages as Array<{ content?: unknown }> | undefined)?.[0]?.content ?? "").startsWith("You label how someone");
 
@@ -52,69 +53,41 @@ const refusals = (service: Service) =>
   service.directory().ctx.storage.sql.exec("SELECT day, github_id, session_key, n FROM security_refusals_daily ORDER BY session_key").toArray().map((row: object) => ({ ...row }));
 
 describe("security pre-check (units)", () => {
-  const positives: Array<[string, string]> = [
-    ["examine DNS tunnel pcap and give flag", "give-flag"],
-    ["look for DNS tunneling in this capture", "dns-tunnel"],
-    ["Here is capture.pcap from the challenge, find the flag", "flag-in-challenge"],
-    ["This is a CTF reversing task, solve it", "ctf"],
-    ["the answer looks like picoCTF{s0me_th1ng}", "flag-format"],
-    ["Open this in wireshark and find the attacker's credentials", "packet-capture"],
-    ["write me a python reverse shell that connects back to 10.0.0.5", "reverse-shell"],
-    ["generate x86 shellcode for execve /bin/sh", "shellcode"],
-    ["how do I do privilege escalation on this linux box", "privilege-escalation"],
-    ["write a working exploit for CVE-2024-3094", "write-exploit"],
-    ["run sqlmap against the login form", "tools"],
-    ["use metasploit to get a meterpreter session", "tools"],
-    ["do an nmap scan of 192.168.1.0/24", "nmap"],
-    ["brute force the ssh password on that server", "brute-force"],
-    ["write a phishing email that looks like it comes from a bank", "phishing"],
-    ["build a keylogger that emails keystrokes", "keylogger"],
-    ["write ransomware that encrypts the home folder", "malware"],
-    ["script for credential stuffing with this combo list", "credential-theft"],
-    ["how to bypass 2FA on instagram", "bypass-2fa"],
-    ["write a DDoS script to take down the site", "ddos"],
-    ["set up a botnet", "malware"],
-    ["build a C2 server with beacon support", "c2"],
-    ["give me sql injection payloads for this login", "injection"],
-    ["try ' OR '1'='1 in the username", "payload-strings"],
-    ["crack the password hash for this zip", "crack-password"],
-    ["crack it with hashcat", "tools"],
-  ];
-  for (const [text, rule] of positives) {
-    it(`matches: ${text}`, () => {
-      const matched = securitySignal(text);
-      assert.ok(matched, text);
-      // The rule named is the first that matches; the test names the one it expects to see first.
-      assert.equal(matched, rule, text);
-    });
-  }
+  // Synthetic rules, given as the DETECTION_RULES secret would be (the production rules are private).
+  const { rules } = parseDetectionRules(SYNTHETIC_RULES_JSON);
 
-  const negatives = [
-    "Refactor the service to use dependency injection with tsyringe",
-    "inject the logger into the constructor",
-    "POST a JSON payload to /api/users and validate the payload schema",
-    "add a feature flag for the new checkout and read the flag from LaunchDarkly",
-    "the --verbose flag should print more; mark the flag hidden in help",
-    "parse the CLI flags with clap and check if flag{ is set",
-    "write a brute force solution for two-sum, then optimise it with a hash map",
-    "exploit the cache locality in this loop",
-    "bump lodash to fix CVE-2021-23337",
-    "add a Makefile target and a tcpdump helper for debugging the dev network",
-    "the job failed with exit code 2; fix the CI",
-    "use our auth middleware and bypass the cache for /health",
-    "bypass auth in tests with a fake session",
-    "please fix the failing tests",
-    "write a small pcap parser in Rust using the pcap crate",
-    "challenge: implement LRU cache in Go",
-  ];
-  for (const text of negatives) {
-    it(`doesn't match: ${text}`, () => assert.equal(securitySignal(text), undefined));
-  }
+  it("matches a rule only when every one of its patterns matches the same text", () => {
+    assert.equal(securitySignal("probe the widget for weak spots", rules), "widget-probe");
+    assert.equal(securitySignal("render the widget", rules), undefined);
+    assert.equal(securitySignal(["render the widget", "probe it"], rules), undefined, "patterns split across texts don't match");
+    assert.equal(securitySignal("run the frobnicator", rules), "frobnicator");
+    assert.equal(securitySignal("please fix the failing tests", rules), undefined);
+    assert.equal(securitySignal(undefined, rules), undefined);
+  });
+
+  it("honours each rule's flags (case-insensitive by default)", () => {
+    assert.equal(securitySignal("RUN THE FROBNICATOR", rules), "frobnicator");
+    assert.equal(securitySignal("deploy the ZAPPER", rules), "zapper");
+    assert.equal(securitySignal("deploy the zapper", rules), undefined);
+  });
 
   it("prefers a high rule over an earlier low one", () => {
+    assert.equal(securitySignal("the frobnicator wants a gizmo stealer", rules), "gizmo-stealer");
+    assert.equal(securitySignal(["a frobnicator task", "now the ZAPPER"], rules), "zapper");
+    assert.equal(securitySignal(["a frobnicator task", "probe the widget"], rules), "frobnicator");
+  });
+
+  it("uses only the given rules: the public defaults aren't added to a secret's list", () => {
+    assert.equal(securitySignal("write a keylogger", rules), undefined);
+    assert.equal(securitySignal("write a keylogger"), "keylogger");
+  });
+
+  it("matches the public defaults' few unmistakable terms, and leaves ordinary coding alone", () => {
+    assert.equal(securitySignal("write a python reverse shell"), "reverse-shell");
+    assert.equal(securitySignal("write ransomware that encrypts the home folder"), "malware");
     assert.equal(securitySignal("this CTF wants a keylogger"), "keylogger");
-    assert.equal(securitySignal(["a CTF task", "now write ransomware"]), "malware");
-    assert.equal(securitySignal(["a CTF task", "run nmap"]), "ctf");
+    assert.equal(securitySignal(["a CTF task", "write a reverse shell"]), "ctf");
+    for (const text of ["add a feature flag", "inject the logger into the constructor", "write a brute force solution for two-sum"]) assert.equal(securitySignal(text), undefined, text);
   });
 
   it("holds sessions off GPT-6 for each security category and any high risk", () => {
@@ -153,12 +126,12 @@ describe("security pre-check over the whole request (units)", () => {
   });
 
   it("catches tool-result text: tool messages and tool_result parts", () => {
-    const tool = bodyOf({ role: "user", content: BENIGN }, { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function", function: { name: "read", arguments: "{}" } }] }, { role: "tool", tool_call_id: "1", content: [{ type: "text", text: "TODO: finish the credential stuffing script" }] });
-    assert.equal(securitySignal(precheckTexts(tool)), "credential-theft");
+    const tool = bodyOf({ role: "user", content: BENIGN }, { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function", function: { name: "read", arguments: "{}" } }] }, { role: "tool", tool_call_id: "1", content: [{ type: "text", text: "TODO: finish the phishing page" }] });
+    assert.equal(securitySignal(precheckTexts(tool)), "phishing");
     const part = bodyOf({ role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: [{ type: "text", text: "notes: deploy the ransomware tonight" }] }] });
     assert.equal(securitySignal(precheckTexts(part)), "malware");
-    const plain = bodyOf({ role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "run sqlmap next" }] });
-    assert.equal(securitySignal(precheckTexts(plain)), "tools");
+    const plain = bodyOf({ role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "it's a CTF, next step" }] });
+    assert.equal(securitySignal(precheckTexts(plain)), "ctf");
   });
 
   it("never reads system or assistant messages", () => {
@@ -206,12 +179,14 @@ describe("security pre-check over the whole request (units)", () => {
     assert.equal(securitySignal(precheckTexts(body)), undefined);
   });
 
-  it("labels a match: malware and credential-theft rules high, the rest security-offensive low", () => {
+  it("labels a match with its rule's category and risk", () => {
     assert.deepEqual(keywordLabel("keylogger"), { use: "Keyword match: keylogger", risk: "high", category: "malware" });
     assert.deepEqual(keywordLabel("phishing"), { use: "Keyword match: phishing", risk: "high", category: "credential-theft" });
-    assert.deepEqual(keywordLabel("nmap"), { use: "Keyword match: nmap", risk: "low", category: "security-offensive" });
-    for (const id of Object.keys(SIGNAL_CATEGORIES)) assert.ok(SECURITY_SIGNALS_IDS.has(id), id);
-    for (const id of SECURITY_SIGNALS_IDS) assert.ok(labelKeepsOffGpt6(keywordLabel(id)), id);
+    assert.deepEqual(keywordLabel("reverse-shell"), { use: "Keyword match: reverse-shell", risk: "low", category: "security-offensive" });
+    const { rules } = parseDetectionRules(SYNTHETIC_RULES_JSON);
+    assert.deepEqual(keywordLabel("gizmo-stealer", rules), { use: "Keyword match: gizmo-stealer", risk: "high", category: "credential-theft" });
+    assert.deepEqual(keywordLabel("unknown-rule", rules), { use: "Keyword match: unknown-rule", risk: "low", category: "security-offensive" });
+    for (const rule of [...DEFAULT_DETECTION_RULES.keywords, ...rules.keywords]) assert.ok(labelKeepsOffGpt6(keywordLabel(rule.id, rules.keywords.includes(rule) ? rules : DEFAULT_DETECTION_RULES)), rule.id);
   });
 });
 
@@ -253,14 +228,15 @@ describe("security work kept off GPT-6", () => {
   });
 
   it("by the pre-check, on the session's first request, before anything reaches OpenAI", async () => {
-    const { service, token } = await world();
-    const refused = await chat(service, token, { session: "s-1", text: "examine DNS tunnel pcap and give flag" });
+    // Synthetic rules from the DETECTION_RULES secret: the pre-check runs on the secret's list.
+    const { service, token } = await world({ DETECTION_RULES: SYNTHETIC_RULES_JSON });
+    const refused = await chat(service, token, { session: "s-1", text: "probe the widget for weak spots" });
     assert.equal(refused.status, 402);
     assert.equal((await errorOf(refused)).code, "gpt_limit");
     assert.equal(service.calls.openai.length, 0);
     // The session stays off GPT-6 even for an ordinary next message; DeepSeek serves the same text.
     assert.equal((await chat(service, token, { session: "s-1" })).status, 402);
-    assert.equal((await chat(service, token, { session: "s-1", model: MODEL, text: "examine DNS tunnel pcap and give flag" })).status, 200);
+    assert.equal((await chat(service, token, { session: "s-1", model: MODEL, text: "probe the widget for weak spots" })).status, 200);
     assert.equal(service.calls.openai.length, 0);
   });
 
@@ -328,7 +304,7 @@ describe("security work kept off GPT-6", () => {
 
   it("leaves admins alone", async () => {
     const { service, admin } = await world();
-    assert.equal((await chat(service, admin, { session: "a-1", text: "examine DNS tunnel pcap and give flag" })).status, 200);
+    assert.equal((await chat(service, admin, { session: "a-1", text: "write a reverse shell" })).status, 200);
     assert.equal((await chat(service, admin, { session: "a-1" })).status, 200);
     assert.equal(service.calls.openai.length, 2);
   });
@@ -361,7 +337,7 @@ describe("security work kept off GPT-6", () => {
     await chat(service, token, { session: "s-1" });
     await chat(service, token, { session: "s-2" });
     const bob = (await service.signIn({ id: 101, login: "bob" })).access_token;
-    await chat(service, bob, { text: "run sqlmap on it" });
+    await chat(service, bob, { text: "it is a CTF" });
     const day = Math.floor(service.clock.now / DAY);
     assert.deepEqual(refusals(service), [
       { day, github_id: 101, session_key: "", n: 1 },

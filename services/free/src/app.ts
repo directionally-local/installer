@@ -2505,7 +2505,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
 
   // Account-pooling routers (resale or sharing of free accounts) are refused outright: the free
   // tier is for one person's own coding, not an upstream for a proxy.
-  if (!isAdmin && isProxyRouter(sessionId, c.request.headers.get("user-agent"))) {
+  if (!isAdmin && isProxyRouter(sessionId, c.request.headers.get("user-agent"), gate.config.detection)) {
     return apiError(403, "proxy_not_allowed", PROXY_ROUTER_MESSAGE, {}, await headers());
   }
 
@@ -2516,7 +2516,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // call), beside the request.
   const gpt6Check = requested.family === "gpt6" && !isAdmin && gate.config.securityOffGpt6;
   const precheck = gpt6Check || (!isAdmin && gate.config.useDescriptions) ? precheckTexts(body) : undefined;
-  const signal = securitySignal(precheck);
+  const signal = securitySignal(precheck, gate.config.detection);
   if (signal && precheck && gate.config.useDescriptions) {
     // A high match is reviewed by moderation, which sees what the pre-check read, cut to
     // MODERATION_INPUT_CHARS. The text lives only in this task; nothing stores it.
@@ -2769,7 +2769,7 @@ async function recordKeywordMatch(c: Ctx, gate: Runtime, input: { githubId: numb
       githubId: input.githubId,
       sessionId: input.sessionId,
       signal: input.signal,
-      label: keywordLabel(input.signal),
+      label: keywordLabel(input.signal, gate.config.detection),
       now: c.now(),
       blockUrl: blockUrl(c),
       ...(moderation ? { moderation } : {}),
@@ -2802,7 +2802,7 @@ async function describeUse(c: Ctx, gate: Runtime, input: { githubId: number; ses
       globalCap: config.useDescriptionDailyCap,
     });
     if (!claim || !input.input) return;
-    const messages = useMessages(input.input);
+    const messages = useMessages(input.input, config.detection);
     const result = await internalDeepseek(c, config, provider, { messages, maxTokens: USE_MAX_TOKENS, reasoningRoom: USE_REASONING_ROOM, timeoutSeconds: USE_TIMEOUT_SECONDS, user: input.user });
     if (!result) return;
     const label = parseUseLabel(result.text);
@@ -2897,7 +2897,7 @@ async function moderate(c: Ctx, gate: Runtime, input: { githubId: number; decisi
     if (provider) {
       try {
         const result = await internalDeepseek(c, config, provider, {
-          messages: moderationMessages(input.text, facts),
+          messages: moderationMessages(input.text, facts, config.detection),
           maxTokens: MODERATION_MAX_TOKENS,
           reasoningRoom: MODERATION_REASONING_ROOM,
           timeoutSeconds: MODERATION_TIMEOUT_SECONDS,
@@ -3923,6 +3923,8 @@ async function adminConfigView(c: Ctx): Promise<Response> {
     overrides: gate.overrides,
     paused: c.config.paused || gate.paused,
     pausedByEnv: c.config.paused,
+    // Whether the private DETECTION_RULES secret is loaded, and counts: never the rules.
+    detectionRules: c.config.detectionStatus,
     log: await directory(c).configLog(),
   });
 }

@@ -1,4 +1,5 @@
 import type { Sql } from "./dashboard-data.js";
+import { DEFAULT_DETECTION_RULES, type DetectionRules } from "./detection-rules.js";
 import { DAY_MS } from "./week.js";
 
 /** The dl-only check (`outsideDl`): free tokens are for use inside dl. */
@@ -40,7 +41,7 @@ export function outsideDl(store: Sql, githubId: number, now: number): boolean {
 }
 
 export const PROXY_ROUTER_MESSAGE = "The free tier can't be used behind account-pooling routers such as 9router. Use it directly from dl, or bring your own key.";
-const PROXY_ROUTER_PATTERN = /9[-_ ]?router/i;
-export function isProxyRouter(sessionId: string | undefined, userAgent: string | null): boolean {
-  return PROXY_ROUTER_PATTERN.test(sessionId ?? "") || PROXY_ROUTER_PATTERN.test(userAgent ?? "");
+/** Whether the session id or user agent names an account-pooling router (detection-rules.ts `proxyRouters`). */
+export function isProxyRouter(sessionId: string | undefined, userAgent: string | null, rules: DetectionRules = DEFAULT_DETECTION_RULES): boolean {
+  return rules.proxyRouters.some((pattern) => pattern.test(sessionId ?? "") || pattern.test(userAgent ?? ""));
 }
