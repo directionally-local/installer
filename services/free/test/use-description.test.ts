@@ -26,7 +26,8 @@ const LABEL = (risk = "none", use = "Fixing failing unit tests in a TypeScript w
 let ips = 0;
 async function setup(vars: Record<string, string> = {}, options: { email?: boolean; describe?: OpenRouterHandler; luminal?: boolean } = {}) {
   const service = await createService(
-    { USE_DESCRIPTIONS: "true", DL_ONLY: "false", ...(options.luminal === false ? {} : { LUMINAL_API_KEY: LUMINAL_KEY, PRIMARY_UPSTREAM: "luminal" }), ...vars },
+    // Moderation off: these tests are about the labels and the plain high-risk email (moderation.test.ts covers reviews).
+    { USE_DESCRIPTIONS: "true", DL_ONLY: "false", MODERATION: "off", ...(options.luminal === false ? {} : { LUMINAL_API_KEY: LUMINAL_KEY, PRIMARY_UPSTREAM: "luminal" }), ...vars },
     { email: options.email ?? false },
   );
   const describe = options.describe ?? (() => answer(LABEL()));

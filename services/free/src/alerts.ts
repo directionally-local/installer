@@ -178,6 +178,58 @@ export function flaggedUseAlert(input: { login: string; githubId: number; use: s
   };
 }
 
+/**
+ * A moderation review's outcome (moderation.ts), in place of flaggedUseAlert: who, the verdict,
+ * the reviewer's reason and evidence, the label that started it, and how to undo or do the block.
+ * An auto-block is always sent; a "watch" (or a block verdict that didn't block) at most once per
+ * person per UTC day. A "pass" sends nothing (the daily digest counts it).
+ */
+export function moderationAlert(input: {
+  login: string;
+  githubId: number;
+  verdict: string;
+  confidence: number;
+  reason: string;
+  signals: readonly string[];
+  action: string;
+  mode: string;
+  label: { use: string; category: string; model: string };
+  blockUrl: string;
+}): Alert {
+  const confidence = input.confidence.toFixed(2);
+  const blocked = input.action === "blocked";
+  const why: Record<string, string> = {
+    shadow: 'not blocked: moderation is in "shadow" mode',
+    allowlisted: "not blocked: the person is in moderationAllowlist",
+    admin: "not blocked: the person is an admin",
+    already_blocked: "already blocked",
+    none: input.verdict === "block" ? "not blocked: below moderationBlockConfidence" : "nothing done",
+  };
+  const subject = blocked ? `dl free tier: auto-blocked @${input.login} (${confidence})` : `dl free tier: review @${input.login}: ${input.verdict} (${confidence})`;
+  const lines = [
+    blocked
+      ? `dl free tier: @${input.login} (GitHub id ${input.githubId}) was blocked by automated moderation, and their sign-ins and server keys revoked.`
+      : `dl free tier: automated moderation reviewed @${input.login} (GitHub id ${input.githubId}): ${input.verdict}, ${why[input.action] ?? input.action}.`,
+    "",
+    `Verdict: ${input.verdict} (confidence ${confidence}, mode ${input.mode})`,
+    `Reason: ${input.reason}`,
+    ...(input.signals.length > 0 ? ["Signals:", ...input.signals.map((signal) => `  - ${signal}`)] : []),
+    `Flagged by: ${input.label.model === "keyword" ? "keyword pre-check" : "model label"}: ${input.label.use} (${input.label.category})`,
+    "",
+    blocked
+      ? `Unblock: ${input.blockUrl} (Tools, Block or unblock, @${input.login}, Unblock), or POST /v1/admin/people/${input.githubId}/unblock.`
+      : `Block: ${input.blockUrl} (Tools, Block or unblock, @${input.login}), or POST /v1/admin/people/${input.githubId}/block and /revoke-tokens.`,
+    `Decisions: GET /v1/admin/moderation?days=7. Labels: GET /v1/admin/uses?githubId=${input.githubId}`,
+  ];
+  return {
+    subject,
+    text: lines.join("\n"),
+    footer: blocked
+      ? "Sent for every automated block. The verdict is automated, from the flagged request (not stored) and the person's stored labels and account signals."
+      : "Sent at most once per person per UTC day. The verdict is automated, from the flagged request (not stored) and the person's stored labels and account signals.",
+  };
+}
+
 export function pauseAlert(paused: boolean, login: string): Alert {
   return paused
     ? { subject: "dl free tier: free tokens paused (kill switch)", text: `dl free tier: free tokens paused for everyone by ${login} (kill switch).` }
@@ -418,6 +470,8 @@ export interface DailyDigest {
   paused: boolean;
   /** Only with accessRequestAlerts "daily": requests made that day (logins, at most DIGEST_MAX_LOGINS) and how many wait now. */
   accessRequests?: { count: number; logins: string[]; pending: number };
+  /** Moderation reviews that day (moderation.ts), by verdict, and how many blocked; absent when there were none. */
+  moderation?: { block: number; watch: number; pass: number; blocked: number };
 }
 
 /** Requests and tokens of people who aren't admins; dollars of free usage only. */
@@ -490,6 +544,10 @@ export function dailyDigestAlert(digest: DailyDigest): Alert {
   if (asks) {
     lines.push(`Access requests: ${count(asks.count)} new, ${count(asks.pending)} waiting for an answer${asks.pending > 0 ? " (answer them on the admin Tools page)" : ""}`);
     if (asks.logins.length > 0) lines.push(`  ${asks.logins.map((login) => `@${login}`).join(", ")}${asks.count > asks.logins.length ? ` and ${count(asks.count - asks.logins.length)} more` : ""}`);
+  }
+  const reviews = digest.moderation;
+  if (reviews) {
+    lines.push(`Moderation reviews: ${count(reviews.block + reviews.watch + reviews.pass)} (${count(reviews.block)} block, ${count(reviews.watch)} watch, ${count(reviews.pass)} pass), ${count(reviews.blocked)} auto-blocked. GET /v1/admin/moderation?days=1`);
   }
   return {
     subject: `dl free tier: daily, ${digest.date}: ${count(signups.count)} new, ${count(digest.active)} active`,

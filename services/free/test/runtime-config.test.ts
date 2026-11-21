@@ -88,6 +88,11 @@ describe("runtime settings (units)", () => {
       useDescriptions: true,
       useDescriptionDailyCap: 2000,
       securityOffGpt6: true,
+      moderation: "enforce",
+      moderationBlockConfidence: 0.85,
+      moderationAllowlist: [],
+      moderationCooldownMinutes: 60,
+      moderationDailyCap: 300,
     });
   });
 

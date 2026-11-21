@@ -571,7 +571,9 @@ dl free tier: the queue started ($200 of the $250 weekly cap used). New sign-ups
 dl free tier: OpenRouter host <slug> failed 9 of 40 requests in the last hour (23%). New requests avoid it while it keeps failing.
 dl free tier: $1,600 of the $2,000 Luminal credit used (80%).
 dl free tier: requests are refused with upstream_credit_exhausted: $2,000.12 of the $2,000 Luminal credit is used. Top up and raise luminalCreditUsd (POST /admin/config), or switch primaryUpstream to "openrouter".
-dl free tier: a session by @<login> (GitHub id <id>) was labelled high risk. (with the description, category and a link to block; once per person per UTC day)
+dl free tier: a session by @<login> (GitHub id <id>) was labelled high risk. (with the description, category and a link to block; once per person per UTC day; only with moderation off or over its daily cap)
+dl free tier: auto-blocked @<login> (0.92)   (subject; automated moderation blocked them: verdict, reason, signals, the label, how to unblock)
+dl free tier: review @<login>: watch (0.60)   (subject; a review that didn't block; once per person per UTC day)
 ```
 
 ## What people use the service for (use descriptions)
@@ -623,11 +625,54 @@ service writes **a short automated description of what it is about, and a safety
   that risk or worse (`none`, the default, is all), and it also takes `githubId` and `limit`
   (1–1000, default 200). The admin home has a **Flagged use** card: low and high risk in the last
   7 days, high first.
-- **Alert:** a `high` label emails the owner (the usual alert channels) once per person per UTC
-  day with the login, the description, the category and a link to block on the Tools page.
+- **Alert:** a `high` label starts an automated moderation review (below). With `moderation`
+  off, or past its daily cap, it emails the owner (the usual alert channels) once per person per
+  UTC day with the login, the description, the category and a link to block on the Tools page.
 - **Limits:** the label is a cheap model's guess from one message; a person can word a message to
-  avoid it. It is a signal for a human to look at, not a verdict; the one thing it changes
-  automatically is that security work is kept off GPT-6 (below).
+  avoid it. It is a signal, not a verdict: by itself it only keeps security work off GPT-6
+  (below); a block comes only from the moderation review, which weighs the whole case.
+
+## Automated moderation review
+
+A `high` label (a model description or a keyword match) used to email the owner and nothing more,
+so every block was by hand. Now it starts a **moderation review** (`src/moderation.ts`), beside
+the request and never awaited by it:
+
+- **The case:** the flagged request's text as the labeller or the pre-check saw it (cut to 12,000
+  characters, its start and end; in flight only, never stored); the person's labels over the last
+  30 days (use, risk, category, model, day; at most 100 shown), their keyword hits by category and
+  number of sessions; their account signals (GitHub account age, public repos, followers,
+  contributions, level, networks, when they joined) and earlier moderation verdicts.
+- **The reviewer:** DeepSeek V4.1 Flash on the company key, the same call path and internal
+  accounting as use descriptions (never a person's allowance). Its policy: block clear malicious
+  use (malware, credential theft, phishing kits, attacking systems they don't own, evasion for
+  malicious ends, spam or fraud tooling, reselling or pooling free accounts, CSAM); pass
+  legitimate work (defensive security, CTFs, research on their own systems, studying malware,
+  detectors, authorised pentesting, keyword coincidences); watch when unclear; weigh the whole
+  history. It answers `{"verdict": "block|watch|pass", "confidence": 0..1, "reason", "signals"}`.
+  Anything that doesn't parse, an error or a timeout (30 s) is `watch` with confidence 0 and reason
+  "review failed": never a block.
+- **The action:** `block` with confidence at least `moderationBlockConfidence` (0.85), with
+  `moderation` "enforce", for someone not an admin and not in `moderationAllowlist`, blocks the
+  person and revokes their sign-ins and server keys (the admin block and revoke-tokens code path;
+  the config log shows `moderation` as who did it). A blocked person gets the usual `blocked`
+  refusal, which says how to get in touch. "shadow" decides and emails but never blocks.
+- **The email:** an auto-block is always emailed (`auto-blocked @login (0.92)`), with how to
+  unblock (Tools, Block or unblock, or `POST /admin/people/<id>/unblock`). Any other block or
+  watch verdict is emailed at most once per person per UTC day (`review @login: watch (0.60)`),
+  with how to block. A `pass` sends nothing; the daily digest counts reviews by verdict.
+- **Limits:** one review per person per `moderationCooldownMinutes` (60) unless the new label's
+  category is different (a label inside the cooldown is covered by the last review, and sends
+  nothing); `moderationDailyCap` (300) reviews a UTC day, past which a high label gets the plain
+  alert above.
+- **Storage:** `moderation_decisions` in the Directory: GitHub id, the label's id and session id,
+  category, verdict, confidence, the reviewer's reason and up to five evidence bullets, the action,
+  model and time. Never the request's text: the reviewer is told to quote at most five words, and
+  any longer quote (and any code) is cut out before the row is written. Kept 90 days.
+- **Admin:** `GET /admin/moderation?days=7&verdict=block` lists decisions newest first
+  (`login`, `githubId`, `verdict`, `confidence`, `reason`, `signals`, `action`, `category`,
+  `sessionId`, `labelId`, `model`, `at`); `verdict` is optional, `limit` 1–1000 (default 200).
+  `action` is `blocked`, `shadow`, `allowlisted`, `admin`, `already_blocked` or `none`.
 
 **Security work kept off GPT-6** (`src/security-route.ts`). OpenAI counts security requests on
 GPT-6 against our organisation, so security work, defensive or offensive, is served by DeepSeek
@@ -881,6 +926,11 @@ with who made it and when.
 | `useDescriptions` | `USE_DESCRIPTIONS` | true: a short automated description and safety label per session (see [use descriptions](#what-people-use-the-service-for-use-descriptions)) |
 | `useDescriptionDailyCap` | `USE_DESCRIPTION_DAILY_CAP` | 2000: description calls a UTC day across everyone (0 stops them) |
 | `securityOffGpt6` | `SECURITY_OFF_GPT6` | true: security work is served by DeepSeek only, never GPT-6 (see [security work kept off GPT-6](#what-people-use-the-service-for-use-descriptions)) |
+| `moderation` | `MODERATION` | `enforce`: high-risk labels get an automated review that can block (see [automated moderation review](#automated-moderation-review)); `shadow` decides and emails, never blocks; `off` is the plain high-risk email |
+| `moderationBlockConfidence` | `MODERATION_BLOCK_CONFIDENCE` | 0.85: the lowest confidence (0 to 1) a block verdict needs to block |
+| `moderationAllowlist` | `MODERATION_ALLOWLIST` | []: GitHub logins or ids moderation never blocks (comma-separated in env) |
+| `moderationCooldownMinutes` | `MODERATION_COOLDOWN_MINUTES` | 60: minutes before the same person is reviewed again for the same category |
+| `moderationDailyCap` | `MODERATION_DAILY_CAP` | 300: reviews a UTC day across everyone; past it, the plain high-risk email (0 stops reviews) |
 | `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 50,000,000, as Full (0: no free tokens below Basic) |
 | `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
 | `starterDeepseekWeeklyUsdCap` | `STARTER_DEEPSEEK_WEEKLY_USD_CAP` | 8, as Full |

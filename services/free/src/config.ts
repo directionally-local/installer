@@ -256,6 +256,20 @@ export interface FreeConfig {
    */
   securityOffGpt6: boolean;
   /**
+   * Automated moderation review of high-risk labels (moderation.ts), MODERATION: "enforce" (the
+   * default: a confident "block" verdict blocks the person), "shadow" (decides and emails, never
+   * blocks) or "off" (no review: the owner gets today's high-risk email). Also a runtime setting.
+   */
+  moderation: ModerationMode;
+  /** The lowest confidence (0 to 1) a "block" verdict needs to block (MODERATION_BLOCK_CONFIDENCE, default 0.85). */
+  moderationBlockConfidence: number;
+  /** GitHub ids or logins moderation never blocks (MODERATION_ALLOWLIST, comma-separated; logins lowercased). */
+  moderationAllowlist: readonly string[];
+  /** Minutes before the same person is reviewed again for the same category (MODERATION_COOLDOWN_MINUTES, default 60). */
+  moderationCooldownMinutes: number;
+  /** Reviews a UTC day across everyone (MODERATION_DAILY_CAP, default 300); past it, the plain high-risk email. */
+  moderationDailyCap: number;
+  /**
    * The owner's email about access requests (/request in dl), ACCESS_REQUEST_ALERTS: "each" (one
    * per request, the default), "daily" (counted in the daily digest instead) or "off". Also a
    * runtime setting.
@@ -264,6 +278,13 @@ export interface FreeConfig {
 }
 
 export type AccessRequestAlerts = "each" | "daily" | "off";
+export type ModerationMode = "off" | "shadow" | "enforce";
+export const MODERATION_MODES: readonly ModerationMode[] = ["off", "shadow", "enforce"];
+
+/** A GitHub login or numeric id, as moderationAllowlist holds it (lowercased). */
+export function isAllowlistEntry(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(value.trim());
+}
 export const ACCESS_REQUEST_ALERT_MODES: readonly AccessRequestAlerts[] = ["each", "daily", "off"];
 
 export type Upstream = "openai" | "luminal" | "openrouter";
@@ -346,6 +367,11 @@ export const DEFAULTS = {
   useDescriptions: true,
   useDescriptionDailyCap: 2000,
   securityOffGpt6: true,
+  moderation: "enforce" as ModerationMode,
+  moderationBlockConfidence: 0.85,
+  moderationAllowlist: [] as string[],
+  moderationCooldownMinutes: 60,
+  moderationDailyCap: 300,
   /**
    * OpenRouter's cache-read price over its input price for deepseek/deepseek-v4.1-flash-1017,
    * from https://openrouter.ai/api/v1/models on 2026-11-03: input $0.30/M, cache read
@@ -525,6 +551,11 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     useDescriptions: flag(env.USE_DESCRIPTIONS, DEFAULTS.useDescriptions, "USE_DESCRIPTIONS"),
     useDescriptionDailyCap: whole(env.USE_DESCRIPTION_DAILY_CAP, DEFAULTS.useDescriptionDailyCap, "USE_DESCRIPTION_DAILY_CAP"),
     securityOffGpt6: flag(env.SECURITY_OFF_GPT6, DEFAULTS.securityOffGpt6, "SECURITY_OFF_GPT6"),
+    moderation: moderationMode(env.MODERATION),
+    moderationBlockConfidence: share(env.MODERATION_BLOCK_CONFIDENCE, DEFAULTS.moderationBlockConfidence, "MODERATION_BLOCK_CONFIDENCE"),
+    moderationAllowlist: moderationAllowlist(env.MODERATION_ALLOWLIST),
+    moderationCooldownMinutes: whole(env.MODERATION_COOLDOWN_MINUTES, DEFAULTS.moderationCooldownMinutes, "MODERATION_COOLDOWN_MINUTES"),
+    moderationDailyCap: whole(env.MODERATION_DAILY_CAP, DEFAULTS.moderationDailyCap, "MODERATION_DAILY_CAP"),
   };
 }
 
@@ -743,6 +774,19 @@ function accessRequestAlerts(value: unknown): AccessRequestAlerts {
   if (raw === undefined) return DEFAULTS.accessRequestAlerts;
   if ((ACCESS_REQUEST_ALERT_MODES as readonly string[]).includes(raw)) return raw as AccessRequestAlerts;
   throw new ConfigError(`ACCESS_REQUEST_ALERTS must be "each", "daily" or "off" (got "${raw}").`);
+}
+
+function moderationMode(value: unknown): ModerationMode {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return DEFAULTS.moderation;
+  if ((MODERATION_MODES as readonly string[]).includes(raw)) return raw as ModerationMode;
+  throw new ConfigError(`MODERATION must be "off", "shadow" or "enforce" (got "${raw}").`);
+}
+
+function moderationAllowlist(value: unknown): readonly string[] {
+  const entries = (text(value) ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+  for (const entry of entries) if (!isAllowlistEntry(entry)) throw new ConfigError(`MODERATION_ALLOWLIST must be comma-separated GitHub logins or ids (got "${entry}").`);
+  return entries.map((entry) => entry.toLowerCase());
 }
 
 function upstream(value: unknown): Upstream {
