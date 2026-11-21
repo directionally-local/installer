@@ -96,7 +96,8 @@ unprofitable without turning away real developers.
   by anyone; an established account created on a busy day is never flagged. Their thresholds are
   runtime settings (`humanSignalsNeeded`, `minActiveWeeks`, `minRepoAgeDays`, `minSocial`,
   `minFollowers`, `batchWindowDays`, `batchSize`; see `src/admission.ts` `levelChecks`) whose
-  real values live in the admin settings. Nothing a person is shown names them: an account
+  real values are private: they start from the [`DETECTION_RULES`](#detection-rules-detection_rules-private)
+  secret's `thresholds` (the defaults in the code are generic) and the admin settings override them. Nothing a person is shown names them: an account
   that misses them gets the same message as one below the public bar. `GET /admin/people` and
   the dashboard's Starter table show the stored signals and which checks pass.
 - **Basic**: below the public bar, but an account at least `basicMinAccountAgeDays` old that the
@@ -595,16 +596,16 @@ service writes **a short automated description of what it is about, and a safety
   outputs.
 - **Keyword matches:** when the security pre-check (below) matches a request, on any model, a
   description is stored without a model call: `use` "Keyword match: <rule>", model `keyword`,
-  category `malware` (rules malware, keylogger, av-evasion, c2, malicious-payload) or
-  `credential-theft` (credential-theft, phishing, hack-into) with risk `high`, else
-  `security-offensive` with risk `low`. At most once per (person, session, rule) per UTC day; a
+  with the matching rule's own category and risk (`low` or `high`; see
+  [detection rules](#detection-rules-detection_rules-private)). At most once per (person, session, rule) per UTC day; a
   high one alerts the owner like any high label. Off with `useDescriptions`; never for admins.
 - **Model:** DeepSeek V4.1 Flash on the company key: Luminal, or OpenRouter where Luminal has no
   key or credit. Temperature 0, a ~60-token answer (on Luminal, where DeepSeek's reasoning
   counts as output, asked for low reasoning effort with 240 tokens of room for it). It answers
   `{"use": "<40–60 characters>", "risk": "none|low|high", "category": "<coding, data, writing,
   research, security-defensive, security-offensive, malware, credential-theft, spam, fraud or
-  other>"}`. `use` is cut to 60 characters on one line; an unknown category is `other`; an answer
+  other>"}`, judged by the labeller policy (`labellerPolicy` in
+  [detection rules](#detection-rules-detection_rules-private)). `use` is cut to 60 characters on one line; an unknown category is `other`; an answer
   that doesn't parse stores nothing.
 - **Off the request path:** it runs beside the request and the request never waits for it, so
   it can't slow or fail anyone's request. The portable runtime has no `waitUntil` (see
@@ -644,12 +645,10 @@ the request and never awaited by it:
   number of sessions; their account signals (GitHub account age, public repos, followers,
   contributions, level, networks, when they joined) and earlier moderation verdicts.
 - **The reviewer:** DeepSeek V4.1 Flash on the company key, the same call path and internal
-  accounting as use descriptions (never a person's allowance). Its policy: block clear malicious
-  use (malware, credential theft, phishing kits, attacking systems they don't own, evasion for
-  malicious ends, spam or fraud tooling, reselling or pooling free accounts, CSAM); pass
-  legitimate work (defensive security, CTFs, research on their own systems, studying malware,
-  detectors, authorised pentesting, keyword coincidences); watch when unclear; weigh the whole
-  history. It answers `{"verdict": "block|watch|pass", "confidence": 0..1, "reason", "signals"}`.
+  accounting as use descriptions (never a person's allowance). Its policy (what to block, pass
+  and watch, and how to weigh the history) is `moderationPolicy` in
+  [detection rules](#detection-rules-detection_rules-private): private in production, generic by
+  default. It answers `{"verdict": "block|watch|pass", "confidence": 0..1, "reason", "signals"}`.
   Anything that doesn't parse, an error or a timeout (30 s) is `watch` with confidence 0 and reason
   "review failed": never a block.
 - **The action:** `block` with confidence at least `moderationBlockConfidence` (0.85), with
@@ -682,17 +681,13 @@ when:
 - its use description has category `security-defensive`, `security-offensive`, `malware` or
   `credential-theft`, or risk `high` (any category); the description comes after the session's
   first request, so this covers the requests after it; or
-- before a GPT-6 request is forwarded, the request's text matches one of `SECURITY_SIGNALS`:
-  local regular expressions, no network call. It reads every user message (string content and
+- before a GPT-6 request is forwarded, the request's text matches one of the keyword rules
+  ([detection rules](#detection-rules-detection_rules-private): private in production, a few
+  generic ones by default): local regular expressions, no network call. It reads every user message (string content and
   text parts) and every tool result (`tool` messages, `tool_result` parts), up to 64 KB of text
   per request; a part longer than its share of that is read from both its start and its end, so
-  padding can't push a request out of view. Each part is matched on its own. Terms that only
-  security work uses match alone (CTF, flag formats like `flag{…}`, reverse shell, shellcode,
-  privilege escalation, sqlmap, metasploit, nmap, phishing, keylogger, ransomware, botnet, DDoS,
-  command-and-control, credential stuffing, bypassing 2FA, injection payloads…); words with an
-  ordinary coding sense (flag, payload, inject, brute force, exploit, pcap, C2) match only as
-  phrases or with security context, so a feature flag, a JSON payload or dependency injection
-  never do.
+  padding can't push a request out of view. Each part is matched on its own: a rule matches
+  when all of its patterns match the same part, and a `high` rule wins over an earlier `low` one.
 
 A held GPT-6 request (any GPT-6 model, also through OpenCode; Claude Code through dl only ever
 gets DeepSeek) is refused like the weekly GPT-6 limit: 402 `gpt_limit` with `family: "gpt6"`,
@@ -934,7 +929,7 @@ with who made it and when.
 | `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 50,000,000, as Full (0: no free tokens below Basic) |
 | `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
 | `starterDeepseekWeeklyUsdCap` | `STARTER_DEEPSEEK_WEEKLY_USD_CAP` | 8, as Full |
-| `basicMinAccountAgeDays` | `BASIC_MIN_ACCOUNT_AGE_DAYS` | see `src/config.ts` |
+| `basicMinAccountAgeDays` | `BASIC_MIN_ACCOUNT_AGE_DAYS` | see `src/config.ts` (a generic default; production's comes from `DETECTION_RULES`) |
 | `basicWeeklyTokens` | `BASIC_WEEKLY_TOKENS` | 50,000,000, as Full (0 turns Basic off) |
 | `basicWeeklyUsdCap` | `BASIC_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
 | `basicDeepseekWeeklyUsdCap` | `BASIC_DEEPSEEK_WEEKLY_USD_CAP` | 8, as Full |
@@ -948,7 +943,65 @@ Env only: `REFERRAL_LINK_BASE` (`https://dl.new/r/`), the offers above, `ALERT_E
 `ALERT_TELEGRAM_CHAT_ID`, the prices `LUMINAL_PRICE_INPUT`, `LUMINAL_PRICE_CACHED`,
 `LUMINAL_PRICE_OUTPUT`, `OPENROUTER_PRICE_INPUT`, `OPENROUTER_PRICE_CACHED`,
 `OPENROUTER_PRICE_OUTPUT`, `EMAIL_FROM`, `EMAIL_REPLY_TO`, `USER_EMAILS_TO_ADMINS`, and the
-secrets `OPENAI_API_KEY`, `LUMINAL_API_KEY` and `RESEND_API_KEY`.
+secrets `OPENAI_API_KEY`, `LUMINAL_API_KEY`, `RESEND_API_KEY` and `DETECTION_RULES` (below).
+
+The farm-detection settings (`humanSignalsNeeded`, `minActiveWeeks`, `minRepoAgeDays`,
+`minSocial`, `minFollowers`, `batchWindowDays`, `batchSize`, `basicMinAccountAgeDays`,
+`domainSignupsPerDay`) start from the `DETECTION_RULES` secret's `thresholds` when it sets them:
+their env var still wins over it, and an admin override over both. The defaults in
+`src/config.ts` are generic starting values, not production's.
+
+## Detection rules (`DETECTION_RULES`, private)
+
+The anti-abuse machinery is public; the rules it runs are not, because published rules can be
+read by the farms they are meant to catch, which then tune themselves to stay just under them.
+So the rules come from one private secret, `DETECTION_RULES` (`src/detection-rules.ts`), read
+with the rest of the config, and the code carries only a small generic default set: enough for
+tests, local development and self-hosting, never the production values.
+
+```json
+{
+  "keywords": [
+    { "id": "rule-id", "pattern": "regex", "flags": "i", "category": "security-offensive", "risk": "low" },
+    { "id": "other-rule", "pattern": ["regex", "regex"], "category": "malware", "risk": "high" }
+  ],
+  "proxyRouters": ["regex"],
+  "labellerPolicy": "What the use-description labeller should call high, low and no risk.",
+  "moderationPolicy": "What the moderation reviewer should block, pass and watch, and how to weigh the case.",
+  "thresholds": { "batchSize": 10, "minFollowers": 1 }
+}
+```
+
+- **`keywords`**: the security pre-check's rules. A rule matches when every pattern in
+  `pattern` (one string or a list) matches the same text. `flags` defaults to `i` (only `i`, `m`,
+  `s` and `u`). `category` is a use-description category and `risk` is `low` or `high`; a match
+  is recorded as "Keyword match: <id>" with them, and a `high` one starts a moderation review.
+  Keep ids stable: they show in the admin pages.
+- **`proxyRouters`**: case-insensitive patterns for account-pooling routers, matched against the
+  session id and the user agent (`proxy_not_allowed`).
+- **`labellerPolicy`**, **`moderationPolicy`**: the policy part of the two model prompts. The
+  rest of each prompt (what the model is given and the JSON it must answer) stays in the code.
+- **`thresholds`**: starting values for the farm-detection settings listed above.
+
+Every field is optional, and a field that is present **replaces** its default whole (a secret's
+keyword list is the whole list). A secret that isn't valid JSON or fails validation (an invalid
+regex, an unknown field, an empty keyword list…) is ignored as a whole: the service logs the
+reason once (never the content), runs on the defaults, and never crashes or turns detection off.
+
+`GET /admin/config` has `detectionRules`: `source` (`secret`, `defaults` when unset, `invalid`
+when ignored, with `error`), counts of `keywords`, `highRiskKeywords`, `proxyRouters` and
+`thresholds`, and whether each policy came from the secret. Never the rules themselves.
+
+```sh
+# Set or replace the rules (from a file kept outside any repository)
+wrangler secret put DETECTION_RULES < private-detection-rules.json
+# Then check they loaded
+curl -H "authorization: Bearer $ADMIN_TOKEN" https://free.example.com/admin/config | jq .detectionRules
+```
+
+Upload the secret before deploying code that depends on it, so production never runs on the
+generic defaults. Refresh the production rules from time to time rather than keeping one list
+forever: earlier versions of this repository published older rules.
 
 ```sh
 # Read the effective values, the env values, the overrides and the change log

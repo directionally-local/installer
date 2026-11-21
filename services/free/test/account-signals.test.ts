@@ -22,6 +22,9 @@ const BAR = {
   FULL_MIN_PUBLIC_REPOS: "100000",
   NETWORK_SIGNUPS_PER_DAY: "1000",
   DOMAIN_SIGNUPS_PER_DAY: "1000",
+  // Synthetic farm-detection thresholds, given the way production gives its own: in the
+  // DETECTION_RULES secret (the rest are the public defaults).
+  DETECTION_RULES: JSON.stringify({ thresholds: { humanSignalsNeeded: 3, minFollowers: 2 } }),
 };
 const YOUNG = "2026-06-01T00:00:00Z"; // about 5 months before the harness clock: below the age bar
 const OLD = "2015-01-01T00:00:00Z";

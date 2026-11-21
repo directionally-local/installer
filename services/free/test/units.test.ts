@@ -13,7 +13,7 @@ const BASE_ENV = { OPENROUTER_API_KEY: "k", GITHUB_CLIENT_ID: "c", GITHUB_CLIENT
 describe("level checks", () => {
   // Test values only: the real thresholds are private runtime settings.
   const bar = { minAccountAgeDays: 365, minPublicRepos: 100_000, minContributions: 100 };
-  const rules = { humanSignalsNeeded: 3, minActiveWeeks: 8, minRepoAgeDays: 180, minSocial: 10, minFollowers: 3, batchWindowDays: 1, batchSize: 15 };
+  const rules = { humanSignalsNeeded: 3, minActiveWeeks: 6, minRepoAgeDays: 120, minSocial: 12, minFollowers: 2, batchWindowDays: 2, batchSize: 12 };
   const now = Date.parse("2026-11-11T00:00:00Z");
   const basic = { minAccountAgeDays: 30, weeklyTokens: 10_000_000 };
   const signals = (extra: Partial<GithubSignals>): GithubSignals => ({ accountAgeDays: 100, publicRepos: 0, followers: 0, contributions: 0, restrictedContributions: 0, ...extra });

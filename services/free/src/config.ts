@@ -4,6 +4,7 @@
  * the owner's decisions in installer#78.
  */
 
+import { detectionRulesFrom, type DetectionRules, type DetectionRulesStatus, type ThresholdKey } from "./detection-rules.js";
 import { DEFAULT_WEB_SIGNUP_URL } from "./web-signup.js";
 import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type DataCollection, type Quantization } from "./routing.js";
 
@@ -275,6 +276,13 @@ export interface FreeConfig {
    * runtime setting.
    */
   accessRequestAlerts: AccessRequestAlerts;
+  /**
+   * The anti-abuse rules (detection-rules.ts): the DETECTION_RULES secret's over the public
+   * defaults. Its thresholds are already folded into the settings above.
+   */
+  detection: DetectionRules;
+  /** Where `detection` came from, with counts only: what /admin/config shows. */
+  detectionStatus: DetectionRulesStatus;
 }
 
 export type AccessRequestAlerts = "each" | "daily" | "off";
@@ -338,25 +346,27 @@ export const DEFAULTS = {
   fullMinAccountAgeDays: 90,
   fullMinPublicRepos: 3,
   fullMinContributions: 50,
-  humanSignalsNeeded: 3,
-  minActiveWeeks: 8,
-  minRepoAgeDays: 180,
-  minSocial: 10,
-  minFollowers: 3,
-  batchWindowDays: 1,
-  batchSize: 15,
+  // The farm-detection thresholds below are generic public starting values; production sets its
+  // own in the DETECTION_RULES secret's `thresholds` (detection-rules.ts) or in /admin/config.
+  humanSignalsNeeded: 2,
+  minActiveWeeks: 4,
+  minRepoAgeDays: 90,
+  minSocial: 5,
+  minFollowers: 1,
+  batchWindowDays: 2,
+  batchSize: 10,
   // Publicly there is only Free and Pro: by default basic and Starter get exactly Full's weekly
   // tokens and dollar budgets (the settings can still differ later).
   starterWeeklyTokens: 50_000_000,
   starterWeeklyUsdCap: 2,
   starterDeepseekWeeklyUsdCap: 8,
-  basicMinAccountAgeDays: 365,
+  basicMinAccountAgeDays: 180,
   basicWeeklyTokens: 50_000_000,
   basicWeeklyUsdCap: 2,
   basicDeepseekWeeklyUsdCap: 8,
   networkSignupsPerDay: 3,
   blockedEmails: [],
-  domainSignupsPerDay: 5,
+  domainSignupsPerDay: 10,
   openAdmission: false,
   requireGithubActivity: true,
   dlOnly: true,
@@ -445,6 +455,9 @@ export const MAX_HOST_COOLDOWN_MINUTES = 1440;
 export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
   const signingKey = required(env, "TOKEN_SIGNING_KEY");
   if (new TextEncoder().encode(signingKey).length < 32) throw new ConfigError("TOKEN_SIGNING_KEY must be at least 32 bytes.");
+  const detection = detectionRulesFrom(env.DETECTION_RULES);
+  // A farm-detection threshold: its env var, else the secret's value, else the public default.
+  const threshold = (key: ThresholdKey, name: string) => whole(env[name], detection.rules.thresholds[key] ?? DEFAULTS[key], name);
   return {
     openRouterApiKey: text(env.OPENROUTER_API_KEY),
     githubClientId: required(env, "GITHUB_CLIENT_ID"),
@@ -464,23 +477,23 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     fullMinAccountAgeDays: whole(env.FULL_MIN_ACCOUNT_AGE_DAYS, DEFAULTS.fullMinAccountAgeDays, "FULL_MIN_ACCOUNT_AGE_DAYS"),
     fullMinPublicRepos: whole(env.FULL_MIN_PUBLIC_REPOS, DEFAULTS.fullMinPublicRepos, "FULL_MIN_PUBLIC_REPOS"),
     fullMinContributions: whole(env.FULL_MIN_CONTRIBUTIONS, DEFAULTS.fullMinContributions, "FULL_MIN_CONTRIBUTIONS"),
-    humanSignalsNeeded: whole(env.HUMAN_SIGNALS_NEEDED, DEFAULTS.humanSignalsNeeded, "HUMAN_SIGNALS_NEEDED"),
-    minActiveWeeks: whole(env.MIN_ACTIVE_WEEKS, DEFAULTS.minActiveWeeks, "MIN_ACTIVE_WEEKS"),
-    minRepoAgeDays: whole(env.MIN_REPO_AGE_DAYS, DEFAULTS.minRepoAgeDays, "MIN_REPO_AGE_DAYS"),
-    minSocial: whole(env.MIN_SOCIAL, DEFAULTS.minSocial, "MIN_SOCIAL"),
-    minFollowers: whole(env.MIN_FOLLOWERS, DEFAULTS.minFollowers, "MIN_FOLLOWERS"),
-    batchWindowDays: whole(env.BATCH_WINDOW_DAYS, DEFAULTS.batchWindowDays, "BATCH_WINDOW_DAYS"),
-    batchSize: whole(env.BATCH_SIZE, DEFAULTS.batchSize, "BATCH_SIZE"),
+    humanSignalsNeeded: threshold("humanSignalsNeeded", "HUMAN_SIGNALS_NEEDED"),
+    minActiveWeeks: threshold("minActiveWeeks", "MIN_ACTIVE_WEEKS"),
+    minRepoAgeDays: threshold("minRepoAgeDays", "MIN_REPO_AGE_DAYS"),
+    minSocial: threshold("minSocial", "MIN_SOCIAL"),
+    minFollowers: threshold("minFollowers", "MIN_FOLLOWERS"),
+    batchWindowDays: threshold("batchWindowDays", "BATCH_WINDOW_DAYS"),
+    batchSize: threshold("batchSize", "BATCH_SIZE"),
     starterWeeklyTokens: whole(env.STARTER_WEEKLY_TOKENS, DEFAULTS.starterWeeklyTokens, "STARTER_WEEKLY_TOKENS"),
     starterWeeklyUsdCap: usd(env.STARTER_WEEKLY_USD_CAP, DEFAULTS.starterWeeklyUsdCap, "STARTER_WEEKLY_USD_CAP"),
     starterDeepseekWeeklyUsdCap: usd(env.STARTER_DEEPSEEK_WEEKLY_USD_CAP, DEFAULTS.starterDeepseekWeeklyUsdCap, "STARTER_DEEPSEEK_WEEKLY_USD_CAP"),
-    basicMinAccountAgeDays: whole(env.BASIC_MIN_ACCOUNT_AGE_DAYS, DEFAULTS.basicMinAccountAgeDays, "BASIC_MIN_ACCOUNT_AGE_DAYS"),
+    basicMinAccountAgeDays: threshold("basicMinAccountAgeDays", "BASIC_MIN_ACCOUNT_AGE_DAYS"),
     basicWeeklyTokens: whole(env.BASIC_WEEKLY_TOKENS, DEFAULTS.basicWeeklyTokens, "BASIC_WEEKLY_TOKENS"),
     basicWeeklyUsdCap: usd(env.BASIC_WEEKLY_USD_CAP, DEFAULTS.basicWeeklyUsdCap, "BASIC_WEEKLY_USD_CAP"),
     basicDeepseekWeeklyUsdCap: usd(env.BASIC_DEEPSEEK_WEEKLY_USD_CAP, DEFAULTS.basicDeepseekWeeklyUsdCap, "BASIC_DEEPSEEK_WEEKLY_USD_CAP"),
     networkSignupsPerDay: whole(env.NETWORK_SIGNUPS_PER_DAY, DEFAULTS.networkSignupsPerDay, "NETWORK_SIGNUPS_PER_DAY"),
     blockedEmails: env.BLOCKED_EMAILS === undefined ? [...DEFAULTS.blockedEmails] : String(env.BLOCKED_EMAILS).split(",").map((v) => v.trim()).filter(Boolean),
-    domainSignupsPerDay: whole(env.DOMAIN_SIGNUPS_PER_DAY, DEFAULTS.domainSignupsPerDay, "DOMAIN_SIGNUPS_PER_DAY"),
+    domainSignupsPerDay: threshold("domainSignupsPerDay", "DOMAIN_SIGNUPS_PER_DAY"),
     openAdmission: flag(env.OPEN_ADMISSION, DEFAULTS.openAdmission, "OPEN_ADMISSION"),
     requireGithubActivity: flag(env.REQUIRE_GITHUB_ACTIVITY, DEFAULTS.requireGithubActivity, "REQUIRE_GITHUB_ACTIVITY"),
     countCachedTokens: flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS"),
@@ -556,6 +569,8 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     moderationAllowlist: moderationAllowlist(env.MODERATION_ALLOWLIST),
     moderationCooldownMinutes: whole(env.MODERATION_COOLDOWN_MINUTES, DEFAULTS.moderationCooldownMinutes, "MODERATION_COOLDOWN_MINUTES"),
     moderationDailyCap: whole(env.MODERATION_DAILY_CAP, DEFAULTS.moderationDailyCap, "MODERATION_DAILY_CAP"),
+    detection: detection.rules,
+    detectionStatus: detection.status,
   };
 }
 

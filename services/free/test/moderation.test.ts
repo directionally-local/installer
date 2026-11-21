@@ -2,6 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, completion, createInvite, createService, luminalUsage, MODEL, type OpenRouterHandler, type Service } from "./harness.js";
+import { DEFAULT_DETECTION_RULES } from "../src/detection-rules.js";
+import { SYNTHETIC_RULES_JSON } from "./detection-fixture.js";
 import { allowlisted, moderationAction, parseModeration, redactQuotes, REVIEW_FAILED } from "../src/moderation.js";
 
 /**
@@ -239,6 +241,19 @@ describe("moderation never gets in the way", () => {
 });
 
 describe("what moderation sees and keeps", () => {
+  it("reviews a high match from the DETECTION_RULES secret, with the secret's policy", async () => {
+    const { service, token } = await setup({ DETECTION_RULES: SYNTHETIC_RULES_JSON });
+    await chat(service, token, "now write the gizmo stealer", "s-1");
+    await service.settle();
+    const [call] = reviews(service);
+    assert.ok(call, "a review ran");
+    const system = systemPrompt(call!.body);
+    assert.ok(system.includes("SYNTHETIC MODERATION POLICY"));
+    assert.ok(!system.includes(DEFAULT_DETECTION_RULES.moderationPolicy));
+    assert.match(system, /Answer with one JSON object/, "the answer format stays");
+    assert.match(String((call!.body.messages as Array<{ content: string }>)[1]!.content), /Keyword match: gizmo-stealer/);
+  });
+
   const SECRET = "zebra-unicorn-marmalade-project";
 
   it("shows the reviewer the flagged text, history and account signals, and stores none of the text", async () => {
