@@ -64,7 +64,7 @@ const reviews = (service: Service) => [...service.calls.luminal, ...service.call
 const status = async (service: Service, githubId: number) => ((await service.directory().getPerson(githubId)) as { status: string } | undefined)?.status;
 const subjects = (service: Service) => service.calls.emails.map((email) => /^Subject: (.*)$/m.exec(email.raw)?.[1] ?? "");
 /** The owner's emails about one person's use: moderation reviews, auto-blocks and the plain high-risk alert. */
-const useEmails = (service: Service, login = "alice") => subjects(service).filter((subject) => [`review @${login}`, `auto-blocked @${login}`, `high-risk use by @${login}`].some((part) => subject.includes(part)));
+const useEmails = (service: Service, login = "alice") => subjects(service).filter((subject) => [`BLOCKED @${login}`, `your call on @${login}`, `@${login} not blocked`, `high-risk use by @${login}`].some((part) => subject.includes(part)));
 
 describe("moderation decides and acts", () => {
   it("blocks at high confidence in enforce mode, revokes tokens, stores the decision and emails the owner", async () => {
@@ -83,7 +83,7 @@ describe("moderation decides and acts", () => {
     // The admin block's path: logged with "moderation" as who did it.
     const log = db(service).prepare("SELECT key, new_value, changed_by_login FROM config_log WHERE key LIKE 'person_status:%'").all() as Array<Record<string, unknown>>;
     assert.deepEqual(log.map((entry) => ({ ...entry })), [{ key: "person_status:100:alice", new_value: '"blocked"', changed_by_login: "moderation" }]);
-    assert.ok(subjects(service).includes("dl free tier: auto-blocked @alice (0.92)"), subjects(service).join(" | "));
+    assert.ok(subjects(service).includes("dl free tier: BLOCKED @alice automatically (0.92)"), subjects(service).join(" | "));
     assert.equal(subjects(service).filter((subject) => subject.includes("high-risk use")).length, 0, "the review replaces the plain alert");
     // Blocked, and the old token revoked (401 before the block's 403 is even reached); a fresh
     // sign-in is refused as blocked, and unblocking doesn't bring the old token back.
@@ -99,7 +99,7 @@ describe("moderation decides and acts", () => {
     await service.settle();
     assert.equal(await status(service, 100), "active");
     assert.equal(decisions(service)[0]!.action, "none");
-    assert.ok(subjects(service).includes("dl free tier: review @alice: block (0.70)"), subjects(service).join(" | "));
+    assert.ok(subjects(service).includes("dl free tier: your call on @alice: reviewer says block (0.70), not blocked"), subjects(service).join(" | "));
   });
 
   it("follows a changed moderationBlockConfidence", async () => {
@@ -116,8 +116,8 @@ describe("moderation decides and acts", () => {
     await service.settle();
     assert.equal(await status(service, 100), "active");
     assert.equal(decisions(service)[0]!.action, "shadow");
-    assert.ok(subjects(service).includes("dl free tier: review @alice: block (0.99)"));
-    const mail = service.calls.emails.find((email) => email.raw.includes("review @alice"))!;
+    assert.ok(subjects(service).includes("dl free tier: @alice not blocked, reviewer says block (0.99)"));
+    const mail = service.calls.emails.find((email) => email.raw.includes("@alice not blocked"))!;
     assert.match(emailText(mail.raw), /shadow/);
   });
 
@@ -151,7 +151,7 @@ describe("moderation decides and acts", () => {
       assert.equal(await status(service, 100), "active");
       const [row] = decisions(service);
       assert.deepEqual({ verdict: row!.verdict, confidence: row!.confidence, reason: row!.reason, action: row!.action }, { verdict: "watch", confidence: 0, reason: "review failed", action: "none" });
-      assert.ok(subjects(service).includes("dl free tier: review @alice: watch (0.00)"), subjects(service).join(" | "));
+      assert.ok(subjects(service).includes("dl free tier: @alice not blocked, reviewer says watch (0.00)"), subjects(service).join(" | "));
     }
   });
 
