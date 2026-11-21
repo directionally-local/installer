@@ -728,6 +728,7 @@ laptop_main() {
     return "$code"
   fi
   if [ -n "$fix" ]; then remind "Then run: $fix && dl"; else say "  Then type: dl"; fi
+  hint "Already use Claude Code or OpenCode? Run dl claude or dl opencode to use your free dl tokens there."
 }
 
 # dl from npm (no bundle for this computer, or it didn't work). Uses $package, $npm and
@@ -749,6 +750,11 @@ install_with_npm() {
 # A line the person needs to act on: bold, so it stands out from the steps above.
 remind() {
   if [ -n "$FANCY" ]; then printf '  \033[1m%s\033[0m\n' "$*"; else say "  $*"; fi
+}
+
+# A tip after the line to act on: dim, so it doesn't compete with it.
+hint() {
+  if [ -n "$FANCY" ]; then printf '  \033[2m%s\033[0m\n' "$*"; else say "  $*"; fi
 }
 
 # Wrapped in a function so a truncated download never runs half a script.
