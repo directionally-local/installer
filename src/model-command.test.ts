@@ -41,6 +41,7 @@ test("up configures vllm provider and state; status shows GPU and tests", async 
   assert.equal(config.providers.vllm.baseUrl, "http://127.0.0.1:8000/v1");
   assert.equal(await modelCommand("status", [], options), 0);
   assert.match(lines.join(""), /GPU: NVIDIA RTX 6000 · 48 GB.*Last test: chat ✓ · tools ✓ · JSON ✓ · 10 tok\/s/s);
+  assert.match(lines.join(""), /Endpoint: off · dl model endpoint/, "status shows the API endpoint's exposure");
   assert.equal(system.modelCommands.length, 2);
   // Passed its tests: Docker starts it again after a reboot.
   assert.equal(system.modelCommands[1], "update --restart unless-stopped dl-model-1");

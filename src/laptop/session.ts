@@ -18,7 +18,7 @@ import { placeModel, saveModel } from "./settings.js";
 import { recordLastUsed, resolveTarget, type RemoteServer, type TargetReason } from "./config.js";
 import { detectGitHubRepository, snapshotWorkingTree, type WorkingTreeSnapshot } from "./git.js";
 import { describeSecretLocation, findLikelyProviderSecret, type SecretMatch } from "./secrets.js";
-import { agentsEnv, handoffFile, MAX_HANDOFFS, resultEnv, takeHandoff, type ChatUpRequest, type ModelUpRequest, type OtherAgent } from "./gpu-handoff.js";
+import { agentsEnv, handoffFile, MAX_HANDOFFS, resultEnv, takeHandoff, type ApiUpRequest, type ChatUpRequest, type ModelUpRequest, type OtherAgent } from "./gpu-handoff.js";
 import { readAgentChoice, saveAgentChoice } from "./agent-choice.js";
 import { AGENTS, installedAgents, installMessage, launchLocalAgent, readLocalModel, type AgentId, type LocalModel } from "./local-agents.js";
 import type { ChatSetupResult } from "../chat-first-run.js";
@@ -97,6 +97,8 @@ export interface SessionInput {
   handoffTmp?: string;
   /** Sets up the team chat when Autopilot asks for it (gpu-handoff.ts, chat-first-run.ts); the real one unless replaced (tests). */
   chatUp?: (request: ChatUpRequest, io: LaptopIO, context: { model?: string; signal: AbortSignal }) => Promise<ChatSetupResult>;
+  /** Turns on the API endpoint when Autopilot asks for it (gpu-handoff.ts, model-api.ts); the real one unless replaced (tests). */
+  apiUp?: (request: ApiUpRequest, io: LaptopIO) => Promise<{ ok: boolean }>;
   /** Open Autopilot whatever agent the box has chosen (dl --from-claude-code). */
   forceAutopilot?: boolean;
   /** The agent plain dl opens on this box (agent-choice.ts); read from dl's state unless replaced (tests). */
@@ -302,6 +304,8 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
         continue;
       }
       if (request.action === "agent") return await openChosen(request.agent);
+      // "How will your team use it?" API endpoint: the endpoint and how to use it, then dl exits.
+      if (request.action === "api-up") return (await (input.apiUp ?? realApiUp)(request, io)).ok ? 0 : 1;
       // Autopilot asked for a private model on this GPU: dl model up, then Autopilot again,
       // which opens on the new provider (or, when it failed, says so and asks again).
       // The request may name a model to retry, or ask for the picker with the last failure marked.
@@ -341,6 +345,12 @@ async function realChatUp(_request: ChatUpRequest, io: LaptopIO, context: { mode
     system: new RealSystem(), ui: new TerminalUi(io.out, undefined, io.color === true), prompter: new TtyPrompter({ settleMs: 300 }), root,
     io: { out: io.out, color: io.color === true }, signal: context.signal, ...(context.model ? { model: context.model } : {}),
   });
+}
+
+/** The real API endpoint setup, on this terminal (model-api.ts). */
+async function realApiUp(_request: ApiUpRequest, io: LaptopIO): Promise<{ ok: boolean }> {
+  const [{ firstRunApi }, { RealSystem }] = await Promise.all([import("../model-api.js"), import("../system.js")]);
+  return firstRunApi({ system: new RealSystem(), out: io.out, color: io.color === true });
 }
 
 /** The real first-run model setup, on this terminal (model-first-run.ts). */

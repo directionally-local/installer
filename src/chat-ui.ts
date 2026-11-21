@@ -481,14 +481,17 @@ async function requireRunning(options: ChatUiOptions): Promise<void> {
   if (!container?.running) throw new Error("The team chat isn't running: dl ui up");
 }
 
-/** Picks the tailnet HTTPS port: the one already serving Open WebUI, else the first free one; never one Funnel makes public. */
-async function tailnetPort(system: System, target: string, previous: number | undefined): Promise<number> {
+/**
+ * Picks the tailnet HTTPS port: the one already serving `target`, else the first free one of
+ * `ports`; never one Funnel makes public. `what` and `again` name the thing and the command in errors.
+ */
+export async function tailnetPort(system: System, target: string, previous: number | undefined, ports: readonly number[] = TAILNET_PORTS, what = "the chat", again = "dl ui share"): Promise<number> {
   const served = await serveStatus(system);
-  const candidates = previous ? [previous, ...TAILNET_PORTS.filter((port) => port !== previous)] : TAILNET_PORTS;
+  const candidates = previous ? [previous, ...ports.filter((port) => port !== previous)] : ports;
   const port = candidates.find((candidate) => { const entry = served.get(candidate); return !entry || entry.proxy === target; });
-  if (port === undefined) throw new Error(`Tailscale already serves other things on HTTPS ports ${TAILNET_PORTS.join(", ")}; free one (tailscale serve status) and run dl ui share again.`);
+  if (port === undefined) throw new Error(`Tailscale already serves other things on HTTPS ports ${ports.join(", ")}; free one (tailscale serve status) and run ${again} again.`);
   if (served.get(port)?.funnel) {
-    throw new Error(`Tailscale Funnel is on for HTTPS port ${port}, which would make the chat public. dl only shares on the tailnet; turn Funnel off for that port first.`);
+    throw new Error(`Tailscale Funnel is on for HTTPS port ${port}, which would make ${what} public. dl only shares on the tailnet; turn Funnel off for that port first.`);
   }
   return port;
 }

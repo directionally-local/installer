@@ -366,11 +366,30 @@ Each agent runs on the local model for that one run, and none of their own confi
 
 The output limit each agent is told is a quarter of the context, at most 32,000 tokens. No free tier sign-in is needed and no free tier key is used: the model is the box's own, on 127.0.0.1. (`dl claude` is the other way round: Claude Code on the free tier.) Codex isn't offered yet.
 
+#### Your GPU as an API: dl model endpoint
+
+`dl model endpoint` makes the box's model an OpenAI-compatible API any coding tool can use, behind API keys dl generates. It prints the base URL, the model id, the key (masked; `--show-key` for the full key) and copy-paste setup for OpenAI-compatible tools (`OPENAI_BASE_URL` / `OPENAI_API_KEY`), Autopilot (`AUTOPILOT_BASE_URL`), OpenCode (`opencode.json`), Cursor, and Claude Code when dl can already run it on that model (the engine's Messages API, a 32k context).
+
+```sh
+dl model endpoint             # on: http://127.0.0.1:8800/v1, this machine only, a key required (--port PORT)
+dl model share --lan          # your network: 0.0.0.0:8800 (firewall it if the box has a public IP)
+dl model share --tailscale    # your tailnet only: https://box.tail1234.ts.net:8443/v1 (tailscale serve, never Funnel)
+dl model share --public       # the internet, through a Cloudflare quick tunnel (testing only, see below)
+dl model share --off          # this machine only again
+dl model keys                 # the keys, masked; add NAME, revoke ID; --show-key
+dl model endpoint --off       # stop it (the keys are kept)
+```
+
+- **How:** the engine stays as `dl model up` runs it (127.0.0.1, no key, for Autopilot, the team chat and the agents dl opens). In front of it a small key-checking proxy runs in its own container (`dl-model-api`, Node, read-only, no capabilities, as your user). It forwards `/v1` paths only, GET and POST only, so the engines' admin and metrics endpoints stay private, and it takes `Authorization: Bearer KEY` or `x-api-key: KEY`. A key is required in every mode.
+- **Keys:** kept in full in `~/.local/state/directionallylocal/api.json` (0600); the proxy sees only their SHA-256 hashes. `dl model keys add NAME` and `revoke` take effect on the next request, without restarting the model or the proxy. Changing who can reach it restarts only the proxy.
+- **It follows the model:** after `dl model up`, `update`, `rollback` or `down` the endpoint serves the box's current model (the default deployment). `dl model status` shows where it's reachable.
+- **`--public`** runs `cloudflared tunnel --url` in a container (`dl-model-api-tunnel`). The URL is public and only the key protects it. Cloudflare's quick tunnels are for testing: no uptime guarantee, a new URL whenever the tunnel restarts, and no Server-Sent Events, so streamed answers may not work. For daily use from outside, `--tailscale`. Cursor calls custom URLs from its own servers, so it needs a public URL.
+
 #### Team chat: dl ui
 
 `dl ui` runs [Open WebUI](https://github.com/open-webui/open-webui) (v0.12.5, pinned by digest) in Docker as your team's chat, talking to every `dl model` deployment on this machine. It listens on `127.0.0.1:4800` only. Your team reaches it over HTTPS only: a private link on your Tailscale network. There is no plain-HTTP network mode.
 
-**On the GPU first run** (`curl dl.new/i/… | sh` with "My Nvidia GPU", or `dl` on a GPU box): once the model passes its tests, Autopilot asks "How will your team use it?": **Browser chat (you and your team)**, **Terminal agent** or **Both**. Terminal opens the agent on the model, as before. Browser chat and Both set up the chat for you:
+**On the GPU first run** (`curl dl.new/i/… | sh` with "My Nvidia GPU", or `dl` on a GPU box): once the model passes its tests, Autopilot asks "How will your team use it?": **Browser chat (you and your team)**, **Terminal agent**, **Both** or **API endpoint (any coding tool)**. Terminal opens the agent on the model, as before. API endpoint runs `dl model endpoint` (below) and prints the base URL, key and setup for other tools. Browser chat and Both set up the chat for you:
 
 1. **Tailscale.** Installed if it's missing (the same install as `dl up`). If this machine isn't signed in, dl runs `tailscale up --qr`, which prints a sign-in link and a QR code: open it on your laptop or phone and sign in with Google, Microsoft or GitHub (or your org's existing Tailscale account). If your tailnet has HTTPS certificates off, dl shows the admin-console link ([login.tailscale.com/admin/dns](https://login.tailscale.com/admin/dns), HTTPS Certificates, Enable) and waits until they're on. Not running as root, these use `sudo` once, and your login becomes Tailscale's operator so later `dl ui` commands don't need sudo.
 2. **`dl ui up` and `dl ui share`.**
