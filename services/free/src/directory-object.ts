@@ -9,7 +9,7 @@ import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS
 import type { CleanEvent, GpuCount } from "./events.js";
 import { healthData, type HealthData, type HealthWindow } from "./health-data.js";
 import { adminHomeData, type AdminHomeData } from "./admin-home-data.js";
-import { flaggedUseAlert, milestoneCrossed, paymentAlert, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
+import { flaggedUseAlert, moderationAlert, milestoneCrossed, paymentAlert, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
 import { DEEPSEEK_MODEL, familyOf, type Family } from "./models.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
@@ -19,6 +19,7 @@ import { levelChecks, levelFor, type BasicRule, type GithubSignals, type Level, 
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 import { USE_CHECKPOINTS, USE_KEEP_DAYS, type UseLabel } from "./use-description.js";
 import { labelKeepsOffGpt6 } from "./security-route.js";
+import { dayIso, MODERATION_HISTORY_DAYS, MODERATION_HISTORY_ROWS, MODERATION_VERDICTS, type ModerationAction, type ModerationAnswer, type ModerationCase, type ModerationVerdict, type TriggerLabel } from "./moderation.js";
 import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
 import { WELCOME_KINDS, type UserEmailKind } from "./user-emails.js";
 import type { BroadcastAudience } from "./broadcast.js";
@@ -80,6 +81,36 @@ export interface PendingAccessRequest {
 
 /** "blocked" is an admin's abuse block: no requests, no refresh, no new sign-in. */
 export type PersonStatus = "active" | "suspended" | "blocked";
+
+/** What moderation needs to claim a review when a high label is stored (moderation.ts); absent: moderation is off. */
+export interface ModerationLimits {
+  cooldownMs: number;
+  dailyCap: number;
+  /** The reviewer's model id, stored on the decision. */
+  model: string;
+}
+
+/** A stored label's outcome: alerts to send now, and a claimed moderation review to run. */
+export interface LabelOutcome {
+  alerts: Alert[];
+  review?: { decisionId: number; label: TriggerLabel };
+}
+
+/** One moderation decision, as GET /admin/moderation lists it. No user content. */
+export interface ModerationRow {
+  githubId: number;
+  login: string | null;
+  labelId: number | null;
+  sessionId: string | null;
+  category: string;
+  verdict: string;
+  confidence: number;
+  reason: string;
+  signals: string[];
+  action: string;
+  model: string;
+  at: number;
+}
 
 export interface PersonRow {
   github_id: number;
@@ -780,6 +811,27 @@ const SCHEMA = [
      created_at INTEGER NOT NULL,
      PRIMARY KEY (github_id, hold_key)
    ) WITHOUT ROWID`,
+  // Automated moderation reviews of high-risk labels (moderation.ts): the verdict, the reviewer's
+  // short reason and evidence bullets (quotes of the person's words redacted), and what was done.
+  // Never the request's text. A row is written when the review is claimed (as "review failed")
+  // and filled in when it ends, so a review that dies half way still counts toward the cooldown
+  // and the daily cap.
+  `CREATE TABLE IF NOT EXISTS moderation_decisions (
+     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+     github_id  INTEGER NOT NULL,
+     label_id   INTEGER,
+     session_id TEXT,
+     category   TEXT NOT NULL,
+     verdict    TEXT NOT NULL,
+     confidence REAL NOT NULL,
+     reason     TEXT NOT NULL,
+     signals    TEXT NOT NULL,
+     action     TEXT NOT NULL,
+     model      TEXT NOT NULL,
+     created_at INTEGER NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS moderation_decisions_at ON moderation_decisions (created_at)`,
+  `CREATE INDEX IF NOT EXISTS moderation_decisions_person ON moderation_decisions (github_id, created_at)`,
   `CREATE TABLE IF NOT EXISTS security_refusals_daily (
      day         INTEGER NOT NULL,
      github_id   INTEGER NOT NULL,
@@ -2703,6 +2755,7 @@ export class DirectoryObject extends DurableObject {
     sql.exec("DELETE FROM use_sessions WHERE last_at < ?", now - 7 * DAY_MS);
     sql.exec("DELETE FROM use_calls_daily WHERE day < ?", day - 7);
     sql.exec("DELETE FROM use_descriptions WHERE created_at < ?", now - USE_KEEP_DAYS * DAY_MS);
+    sql.exec("DELETE FROM moderation_decisions WHERE created_at < ?", now - USE_KEEP_DAYS * DAY_MS);
     sql.exec("DELETE FROM gpt6_holds WHERE created_at < ?", now - 7 * DAY_MS);
     sql.exec("DELETE FROM security_refusals_daily WHERE day < ?", day - USE_KEEP_DAYS);
     sql.exec("INSERT INTO settings (key, value) VALUES ('use:pruned_day', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", String(day));
@@ -2724,31 +2777,38 @@ export class DirectoryObject extends DurableObject {
     creditUsd: number;
     now: number;
     blockUrl: string;
-  }): Promise<Alert[]> {
-    const sql = this.ctx.storage.sql;
-    const day = Math.floor(input.now / DAY_MS);
-    const alerts: Alert[] = [];
+    moderation?: ModerationLimits;
+  }): Promise<LabelOutcome> {
+    let outcome: LabelOutcome = { alerts: [] };
     this.ctx.storage.transactionSync(() => {
-      const luminal = input.upstream === "luminal" ? input.creditUsd : 0;
-      const openai = input.upstream === "openai" ? input.creditUsd : 0;
-      sql.exec(
-        `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests, credit_usd, openai_credit_usd, internal_usd, internal_credit_usd, internal_tokens, internal_requests)
-         VALUES (?, 0, 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, 1)
-         ON CONFLICT(week_start) DO UPDATE SET
-           credit_usd = credit_usd + excluded.credit_usd, openai_credit_usd = openai_credit_usd + excluded.openai_credit_usd,
-           internal_usd = internal_usd + excluded.internal_usd, internal_credit_usd = internal_credit_usd + excluded.internal_credit_usd,
-           internal_tokens = internal_tokens + excluded.internal_tokens, internal_requests = internal_requests + 1`,
-        weekStart(input.now),
-        luminal,
-        openai,
-        input.cashUsd,
-        luminal + openai,
-        input.tokens,
-      );
+      this.#recordInternalSpend(input);
       if (!input.label) return;
-      alerts.push(...this.#storeUseLabel({ ...input, label: input.label, source: "label" }));
+      outcome = this.#storeUseLabel({ ...input, label: input.label, source: "label" });
     });
-    return alerts;
+    return outcome;
+  }
+
+  /**
+   * An internal model call's cost (use descriptions, moderation reviews): the internal spend
+   * bucket and the provider's credit it used, never a person's allowance or the free caps.
+   */
+  #recordInternalSpend(input: { upstream: Upstream; tokens: number; cashUsd: number; creditUsd: number; now: number }): void {
+    const luminal = input.upstream === "luminal" ? input.creditUsd : 0;
+    const openai = input.upstream === "openai" ? input.creditUsd : 0;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests, credit_usd, openai_credit_usd, internal_usd, internal_credit_usd, internal_tokens, internal_requests)
+       VALUES (?, 0, 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT(week_start) DO UPDATE SET
+         credit_usd = credit_usd + excluded.credit_usd, openai_credit_usd = openai_credit_usd + excluded.openai_credit_usd,
+         internal_usd = internal_usd + excluded.internal_usd, internal_credit_usd = internal_credit_usd + excluded.internal_credit_usd,
+         internal_tokens = internal_tokens + excluded.internal_tokens, internal_requests = internal_requests + 1`,
+      weekStart(input.now),
+      luminal,
+      openai,
+      input.cashUsd,
+      luminal + openai,
+      input.tokens,
+    );
   }
 
   /**
@@ -2757,7 +2817,7 @@ export class DirectoryObject extends DurableObject {
    * person per day). It holds the session and the person's day off GPT-6 like any security label,
    * and a "high" one alerts the owner (at most once per person per day, shared with descriptions).
    */
-  async recordKeywordMatch(input: { githubId: number; sessionId: string | null; signal: string; label: UseLabel; now: number; blockUrl: string }): Promise<Alert[]> {
+  async recordKeywordMatch(input: { githubId: number; sessionId: string | null; signal: string; label: UseLabel; now: number; blockUrl: string; moderation?: ModerationLimits }): Promise<LabelOutcome> {
     const sql = this.ctx.storage.sql;
     const day = Math.floor(input.now / DAY_MS);
     return this.ctx.storage.transactionSync(() => {
@@ -2771,20 +2831,24 @@ export class DirectoryObject extends DurableObject {
             input.label.use,
           )
           .one().n > 0;
-      if (seen) return [];
+      if (seen) return { alerts: [] };
       return this.#storeUseLabel({ ...input, model: "keyword", source: `precheck:${input.signal}` });
     });
   }
 
-  /** Stores a description (inside a transaction): the GPT-6 hold it calls for, the row, and a "high" one's alert. */
-  #storeUseLabel(input: { githubId: number; sessionId: string | null; label: UseLabel; model: string; now: number; blockUrl: string; source: string }): Alert[] {
+  /**
+   * Stores a description (inside a transaction): the GPT-6 hold it calls for, the row, and for a
+   * "high" one either a moderation review (claimed here, run by the caller) or, with moderation
+   * off or over its daily cap, the owner's alert.
+   */
+  #storeUseLabel(input: { githubId: number; sessionId: string | null; label: UseLabel; model: string; now: number; blockUrl: string; source: string; moderation?: ModerationLimits | undefined }): LabelOutcome {
     const sql = this.ctx.storage.sql;
     const day = Math.floor(input.now / DAY_MS);
     const { use, risk, category } = input.label;
     // Security work, or a high risk: this session, and the person for the rest of the day, off GPT-6.
     if (labelKeepsOffGpt6(input.label)) this.#holdOffGpt6(input.githubId, input.sessionId, input.now, input.source);
-    sql.exec(
-      "INSERT INTO use_descriptions (github_id, session_id, day, use, risk, category, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    const inserted = sql.exec<{ id: number }>(
+      "INSERT INTO use_descriptions (github_id, session_id, day, use, risk, category, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
       input.githubId,
       input.sessionId,
       day,
@@ -2793,12 +2857,204 @@ export class DirectoryObject extends DurableObject {
       category,
       input.model,
       input.now,
-    );
-    if (risk === "high" && this.#markAlert(`use-high:${input.githubId}:${day}`, input.now)) {
-      const login = sql.exec<{ login: string }>("SELECT login FROM people WHERE github_id = ?", input.githubId).toArray()[0]?.login ?? String(input.githubId);
-      return [flaggedUseAlert({ login, githubId: input.githubId, use, category, blockUrl: input.blockUrl })];
+    ).one();
+    if (risk !== "high") return { alerts: [] };
+    if (input.moderation) {
+      const label: TriggerLabel = { labelId: inserted.id, sessionId: input.sessionId, use, category, model: input.model };
+      const claim = this.#claimModeration(input.githubId, label, input.moderation, input.now);
+      if (claim === "cooldown") return { alerts: [] };
+      if (claim !== "capped") return { alerts: [], review: { decisionId: claim, label } };
     }
-    return [];
+    if (this.#markAlert(`use-high:${input.githubId}:${day}`, input.now)) {
+      const login = sql.exec<{ login: string }>("SELECT login FROM people WHERE github_id = ?", input.githubId).toArray()[0]?.login ?? String(input.githubId);
+      return { alerts: [flaggedUseAlert({ login, githubId: input.githubId, use, category, blockUrl: input.blockUrl })] };
+    }
+    return { alerts: [] };
+  }
+
+  /**
+   * Claims a moderation review for a high label (inside a transaction): "cooldown" when this
+   * person was reviewed for the same category within the cooldown (the review then covers this
+   * label too, and nothing is sent), "capped" past the daily cap (the caller falls back to the
+   * plain alert), else the new decision's id, stored as "review failed" until finishModeration.
+   */
+  #claimModeration(githubId: number, label: TriggerLabel, limits: ModerationLimits, now: number): number | "cooldown" | "capped" {
+    const sql = this.ctx.storage.sql;
+    const recent =
+      limits.cooldownMs > 0 &&
+      sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM moderation_decisions WHERE github_id = ? AND category = ? AND created_at > ?", githubId, label.category, now - limits.cooldownMs).one().n > 0;
+    if (recent) return "cooldown";
+    const dayStart = Math.floor(now / DAY_MS) * DAY_MS;
+    const today = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM moderation_decisions WHERE created_at >= ?", dayStart).one().n;
+    if (today >= limits.dailyCap) return "capped";
+    return sql
+      .exec<{ id: number }>(
+        `INSERT INTO moderation_decisions (github_id, label_id, session_id, category, verdict, confidence, reason, signals, action, model, created_at)
+         VALUES (?, ?, ?, ?, 'watch', 0, 'review failed', '[]', 'none', ?, ?) RETURNING id`,
+        githubId,
+        label.labelId,
+        label.sessionId,
+        label.category,
+        limits.model,
+        now,
+      )
+      .one().id;
+  }
+
+  /**
+   * The case a moderation review is shown (moderation.ts), from stored rows only: the person's
+   * labels over the last MODERATION_HISTORY_DAYS days, keyword hits by category, their account
+   * signals and earlier verdicts. Undefined when the person or the claimed decision is gone.
+   */
+  async moderationCase(input: { githubId: number; decisionId: number; label: TriggerLabel; now: number }): Promise<ModerationCase | undefined> {
+    const sql = this.ctx.storage.sql;
+    const person = sql
+      .exec<{ login: string; status: string; level: string; account_age_days: number | null; public_repos: number | null; followers: number | null; contributions: number | null; admitted_at: number }>(
+        "SELECT login, status, level, account_age_days, public_repos, followers, contributions, admitted_at FROM people WHERE github_id = ?",
+        input.githubId,
+      )
+      .toArray()[0];
+    if (!person) return undefined;
+    const since = input.now - MODERATION_HISTORY_DAYS * DAY_MS;
+    const history = sql
+      .exec<{ day: number; use: string; risk: string; category: string; model: string }>(
+        "SELECT day, use, risk, category, model FROM use_descriptions WHERE github_id = ? AND created_at >= ? ORDER BY created_at DESC, id DESC LIMIT ?",
+        input.githubId,
+        since,
+        MODERATION_HISTORY_ROWS,
+      )
+      .toArray()
+      .map((row) => ({ day: dayIso(row.day), use: row.use, risk: row.risk, category: row.category, model: row.model }));
+    const totals = sql
+      .exec<{ labels: number; sessions: number }>("SELECT COUNT(*) AS labels, COUNT(DISTINCT session_id) AS sessions FROM use_descriptions WHERE github_id = ? AND created_at >= ?", input.githubId, since)
+      .one();
+    const keywordHits: Record<string, number> = {};
+    for (const row of sql
+      .exec<{ category: string; n: number }>("SELECT category, COUNT(*) AS n FROM use_descriptions WHERE github_id = ? AND created_at >= ? AND model = 'keyword' GROUP BY category ORDER BY n DESC, category", input.githubId, since)
+      .toArray()) {
+      keywordHits[row.category] = row.n;
+    }
+    const priorDecisions = Object.fromEntries(MODERATION_VERDICTS.map((verdict) => [verdict, 0])) as Record<ModerationVerdict, number>;
+    for (const row of sql
+      .exec<{ verdict: string; n: number }>("SELECT verdict, COUNT(*) AS n FROM moderation_decisions WHERE github_id = ? AND id != ? AND reason != 'review failed' GROUP BY verdict", input.githubId, input.decisionId)
+      .toArray()) {
+      if (row.verdict in priorDecisions) priorDecisions[row.verdict as ModerationVerdict] = row.n;
+    }
+    const networks = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM person_networks WHERE github_id = ?", input.githubId).one().n;
+    return {
+      githubId: input.githubId,
+      login: person.login,
+      status: person.status,
+      label: input.label,
+      history,
+      labels: totals.labels,
+      sessions: totals.sessions,
+      keywordHits,
+      account: {
+        accountAgeDays: person.account_age_days,
+        publicRepos: person.public_repos,
+        followers: person.followers,
+        contributions: person.contributions,
+        level: person.level,
+        networks,
+        admittedDay: isoDay(person.admitted_at),
+      },
+      priorDecisions,
+    };
+  }
+
+  /**
+   * A moderation review's end: the decision filled in, the review call's cost in the internal
+   * spend bucket (like use descriptions), and the owner's email: always for an auto-block, at most
+   * once per person per UTC day otherwise (shared with the plain high-risk alert), none for "pass".
+   */
+  async finishModeration(input: {
+    decisionId: number;
+    githubId: number;
+    answer: ModerationAnswer;
+    action: ModerationAction;
+    mode: string;
+    label: TriggerLabel;
+    model: string;
+    upstream: Upstream;
+    tokens: number;
+    cashUsd: number;
+    creditUsd: number;
+    now: number;
+    blockUrl: string;
+  }): Promise<Alert[]> {
+    const sql = this.ctx.storage.sql;
+    const day = Math.floor(input.now / DAY_MS);
+    return this.ctx.storage.transactionSync(() => {
+      if (input.tokens > 0) this.#recordInternalSpend(input);
+      sql.exec(
+        "UPDATE moderation_decisions SET verdict = ?, confidence = ?, reason = ?, signals = ?, action = ?, model = ? WHERE id = ?",
+        input.answer.verdict,
+        input.answer.confidence,
+        input.answer.reason,
+        JSON.stringify(input.answer.signals),
+        input.action,
+        input.model,
+        input.decisionId,
+      );
+      if (input.answer.verdict === "pass" && input.action === "none") return [];
+      if (input.action !== "blocked" && !this.#markAlert(`use-high:${input.githubId}:${day}`, input.now)) return [];
+      const login = sql.exec<{ login: string }>("SELECT login FROM people WHERE github_id = ?", input.githubId).toArray()[0]?.login ?? String(input.githubId);
+      return [moderationAlert({ login, githubId: input.githubId, ...input.answer, action: input.action, mode: input.mode, label: input.label, blockUrl: input.blockUrl })];
+    });
+  }
+
+  /** Moderation decisions since `since`, newest first, optionally one verdict (GET /admin/moderation). */
+  async moderationDecisions(input: { since: number; verdict?: ModerationVerdict; limit: number }): Promise<ModerationRow[]> {
+    return this.ctx.storage.sql
+      .exec<{ github_id: number; login: string | null; label_id: number | null; session_id: string | null; category: string; verdict: string; confidence: number; reason: string; signals: string; action: string; model: string; created_at: number }>(
+        `SELECT m.github_id, p.login, m.label_id, m.session_id, m.category, m.verdict, m.confidence, m.reason, m.signals, m.action, m.model, m.created_at
+         FROM moderation_decisions m LEFT JOIN people p ON p.github_id = m.github_id
+         WHERE m.created_at >= ? AND (? IS NULL OR m.verdict = ?)
+         ORDER BY m.created_at DESC, m.id DESC LIMIT ?`,
+        input.since,
+        input.verdict ?? null,
+        input.verdict ?? null,
+        input.limit,
+      )
+      .toArray()
+      .map((row) => {
+        let signals: string[] = [];
+        try {
+          const parsed: unknown = JSON.parse(row.signals);
+          if (Array.isArray(parsed)) signals = parsed.filter((signal): signal is string => typeof signal === "string");
+        } catch {
+          // A row is only ever written with a JSON list; anything else shows as none.
+        }
+        return {
+          githubId: row.github_id,
+          login: row.login,
+          labelId: row.label_id,
+          sessionId: row.session_id,
+          category: row.category,
+          verdict: row.verdict,
+          confidence: row.confidence,
+          reason: row.reason,
+          signals,
+          action: row.action,
+          model: row.model,
+          at: row.created_at,
+        };
+      });
+  }
+
+  /** Moderation reviews in [from, until), by verdict, and how many blocked (the daily digest). */
+  #moderationDay(from: number, until: number): { block: number; watch: number; pass: number; blocked: number } | undefined {
+    const row = this.ctx.storage.sql
+      .exec<{ total: number; block: number | null; watch: number | null; pass: number | null; blocked: number | null }>(
+        `SELECT COUNT(*) AS total, SUM(verdict = 'block') AS block, SUM(verdict = 'watch') AS watch, SUM(verdict = 'pass') AS pass, SUM(action = 'blocked') AS blocked
+         FROM moderation_decisions WHERE created_at >= ? AND created_at < ?`,
+        from,
+        until,
+      )
+      .one();
+    if (row.total === 0) return undefined;
+    return { block: row.block ?? 0, watch: row.watch ?? 0, pass: row.pass ?? 0, blocked: row.blocked ?? 0 };
   }
 
   /** Holds (person, session) and the person for the rest of the UTC day off GPT-6 (security-route.ts). */
@@ -3208,6 +3464,7 @@ export class DirectoryObject extends DurableObject {
       .toArray()
       .map((row) => ({ login: row.login, how: { via: row.admitted_via === "open" ? "open" : "invite", referral: row.referral === 1 } satisfies SignupHow }));
     const { platforms, failedSteps } = installBreakdown(sql, from / DAY_MS, until / DAY_MS);
+    const moderation = this.#moderationDay(from, until);
     return dailyDigestAlert({
       date,
       signups: { count: day.signedUp, people },
@@ -3227,6 +3484,7 @@ export class DirectoryObject extends DurableObject {
       queueWaiting: data.queue.waiting,
       paused: envPaused || this.#paused(),
       ...(policy.accessRequestAlerts === "daily" ? { accessRequests: this.#accessRequestDay(from, until) } : {}),
+      ...(moderation ? { moderation } : {}),
     });
   }
 

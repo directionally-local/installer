@@ -17,7 +17,8 @@
  *      both ends (its start and its end), so harmless padding never pushes a request out of view.
  *
  * A pre-check match is also recorded as a use description (keywordLabel: "Keyword match:
- * <rule>", no model call), so it shows on the admin page and a high one alerts the owner.
+ * <rule>", no model call), so it shows on the admin page and a high one gets a moderation review
+ * (moderation.ts).
  *
  * DeepSeek requests and admins are never affected; the `securityOffGpt6` runtime setting turns it
  * off. Holds and refusal counts live in the Directory (`gpt6_holds`, `security_refusals_daily`).

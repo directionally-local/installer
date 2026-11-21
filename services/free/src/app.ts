@@ -104,7 +104,23 @@ import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, parseBroadcas
 import { allowedReturn, isInstallOption, ONE_TIME_CODE, planFor, WEB_SESSION_TTL_S, WEB_STATE, webCors, webFunnelCsv, type WebStep } from "./web-signup.js";
 import { grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, parseGrantUsd, parseLogins, type GrantResult } from "./grant.js";
 import { completionText, isUseRisk, parseUseLabel, USE_DESCRIPTIONS_PER_PERSON_PER_DAY, USE_KEEP_DAYS, USE_MAX_TOKENS, USE_REASONING_ROOM, USE_TIMEOUT_SECONDS, useInput, useMessages, type UseInput } from "./use-description.js";
-import { keywordLabel, precheckTexts, SECURITY_GPT6_MESSAGE, SECURITY_REASON, securityHoldEnds, securitySignal } from "./security-route.js";
+import { fitToBudget, keywordLabel, precheckTexts, SECURITY_GPT6_MESSAGE, SECURITY_REASON, securityHoldEnds, securitySignal } from "./security-route.js";
+import {
+  allowlisted,
+  MODERATION_INPUT_CHARS,
+  MODERATION_MAX_TOKENS,
+  MODERATION_REASONING_ROOM,
+  MODERATION_TIMEOUT_SECONDS,
+  MODERATION_VERDICTS,
+  moderationAction,
+  moderationMessages,
+  parseModeration,
+  REVIEW_FAILED,
+  type ModerationAction,
+  type ModerationVerdict,
+  type TriggerLabel,
+} from "./moderation.js";
+import type { ModerationLimits } from "./directory-object.js";
 
 /**
  * The free managed tier's HTTP surface: device-flow sign-in with GitHub, the account and
@@ -2499,9 +2515,13 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // UTC day. A match on any model is also recorded as the session's use description (no model
   // call), beside the request.
   const gpt6Check = requested.family === "gpt6" && !isAdmin && gate.config.securityOffGpt6;
-  const signal = gpt6Check || (!isAdmin && gate.config.useDescriptions) ? securitySignal(precheckTexts(body)) : undefined;
-  if (signal && gate.config.useDescriptions) {
-    const task = recordKeywordMatch(c, { githubId: identity.githubId, sessionId: sessionId ?? null, signal });
+  const precheck = gpt6Check || (!isAdmin && gate.config.useDescriptions) ? precheckTexts(body) : undefined;
+  const signal = securitySignal(precheck);
+  if (signal && precheck && gate.config.useDescriptions) {
+    // A high match is reviewed by moderation, which sees what the pre-check read, cut to
+    // MODERATION_INPUT_CHARS. The text lives only in this task; nothing stores it.
+    const reviewText = fitToBudget(precheck, MODERATION_INPUT_CHARS).join("\n\n");
+    const task = recordKeywordMatch(c, gate, { githubId: identity.githubId, sessionId: sessionId ?? null, signal, reviewText });
     if (c.background) c.background(task);
   }
   if (gpt6Check) {
@@ -2619,7 +2639,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   }
 
   const stream = body.stream === true;
-  const user = `dl-${(await sha256Hex(`free:${identity.githubId}`)).slice(0, 32)}`;
+  const user = await safetyIdentifier(identity.githubId);
   const cooldownMs = gate.config.openRouterHostCooldownMinutes * 60_000;
   const failingHosts = cooldownMs > 0 && serving.provider === "openrouter" ? await hosts(c).failingHosts(c.now() - cooldownMs) : [];
   const started = c.now();
@@ -2724,11 +2744,38 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
 
 }
 
-/** Records a pre-check match as a use description and sends its alert, if any. Never throws. */
-async function recordKeywordMatch(c: Ctx, input: { githubId: number; sessionId: string | null; signal: string }): Promise<void> {
+/** The per-person `safety_identifier` / `user` sent upstream: a hash, never the GitHub id itself. */
+async function safetyIdentifier(githubId: number): Promise<string> {
+  return `dl-${(await sha256Hex(`free:${githubId}`)).slice(0, 32)}`;
+}
+
+/** Where the owner blocks or unblocks someone by hand: the admin Tools tab's form. */
+const blockUrl = (c: Ctx) => `${c.base}/admin?view=tools#block`;
+
+/** What the Directory needs to claim a moderation review for a high label; undefined with moderation off. */
+function moderationLimits(config: FreeConfig): ModerationLimits | undefined {
+  if (config.moderation === "off") return undefined;
+  return { cooldownMs: config.moderationCooldownMinutes * 60_000, dailyCap: config.moderationDailyCap, model: DEEPSEEK_MODEL };
+}
+
+/**
+ * Records a pre-check match as a use description and sends its alert, if any, or runs the
+ * moderation review a high match claimed. Never throws.
+ */
+async function recordKeywordMatch(c: Ctx, gate: Runtime, input: { githubId: number; sessionId: string | null; signal: string; reviewText: string }): Promise<void> {
   try {
-    const alerts = await directory(c).recordKeywordMatch({ ...input, label: keywordLabel(input.signal), now: c.now(), blockUrl: `${c.base}/admin?view=tools#block` });
-    await alert(c, alerts);
+    const moderation = moderationLimits(gate.config);
+    const outcome = await directory(c).recordKeywordMatch({
+      githubId: input.githubId,
+      sessionId: input.sessionId,
+      signal: input.signal,
+      label: keywordLabel(input.signal),
+      now: c.now(),
+      blockUrl: blockUrl(c),
+      ...(moderation ? { moderation } : {}),
+    });
+    await alert(c, outcome.alerts);
+    if (outcome.review) await moderate(c, gate, { githubId: input.githubId, ...outcome.review, text: input.reviewText });
   } catch (error) {
     console.error("keyword match record failed", error instanceof Error ? error.name : "error");
   }
@@ -2738,7 +2785,7 @@ async function recordKeywordMatch(c: Ctx, input: { githubId: number; sessionId: 
  * Describes the session this request belongs to, when it is due (see use-description.ts and the
  * Directory's claimUseDescription): one DeepSeek V4.1 Flash call on the company key (Luminal,
  * or OpenRouter where Luminal has no key or credit), then the label and its cost recorded, and
- * the owner alerted for a "high" risk. Never throws and is never awaited by the request: any
+ * for a "high" risk a moderation review (or, with moderation off, the owner's alert). Never throws and is never awaited by the request: any
  * failure just means no description.
  */
 async function describeUse(c: Ctx, gate: Runtime, input: { githubId: number; sessionId: string | null; input: UseInput | undefined; user: string }): Promise<void> {
@@ -2755,49 +2802,145 @@ async function describeUse(c: Ctx, gate: Runtime, input: { githubId: number; ses
       globalCap: config.useDescriptionDailyCap,
     });
     if (!claim || !input.input) return;
-    const model = modelById(DEEPSEEK_MODEL)!;
     const messages = useMessages(input.input);
-    // DeepSeek reasons before it answers, and its reasoning counts as output: asked to reason
-    // little, with room for that on top of the ~60-token answer.
-    const payload: Record<string, unknown> =
-      provider === "luminal"
-        ? { model: model.upstreamModel, messages, max_completion_tokens: USE_MAX_TOKENS + USE_REASONING_ROOM, temperature: 0, stream: false, reasoning_effort: "low", user: input.user }
-        : { model: model.id, messages, max_tokens: USE_MAX_TOKENS, temperature: 0, stream: false, reasoning: { enabled: false }, usage: { include: true }, provider: providerPreferences(config), user: input.user };
-    const response = await fetchWithTimeout(
-      c.fetch,
-      provider === "luminal" ? LUMINAL_URL : OPENROUTER_URL,
-      {
-        method: "POST",
-        headers:
-          provider === "luminal"
-            ? { authorization: `Bearer ${c.config.luminalApiKey}`, "content-type": "application/json" }
-            : { authorization: `Bearer ${c.config.openRouterApiKey}`, "content-type": "application/json", "http-referer": "https://directionallylocal.com", "x-title": "Directionally Local" },
-        body: JSON.stringify(payload),
-      },
-      USE_TIMEOUT_SECONDS * 1000,
-    );
-    if (response === "timeout" || !response.ok) {
-      if (response !== "timeout") await response.body?.cancel().catch(() => undefined);
-      return;
-    }
-    const parsed = parseJson(await response.text());
-    const usage = parseUsage((parsed as { usage?: unknown } | undefined)?.usage);
-    const label = parseUseLabel(completionText(parsed));
-    const alerts = await directory(c).recordUseDescription({
+    const result = await internalDeepseek(c, config, provider, { messages, maxTokens: USE_MAX_TOKENS, reasoningRoom: USE_REASONING_ROOM, timeoutSeconds: USE_TIMEOUT_SECONDS, user: input.user });
+    if (!result) return;
+    const label = parseUseLabel(result.text);
+    const moderation = moderationLimits(config);
+    const outcome = await directory(c).recordUseDescription({
       githubId: input.githubId,
       sessionId: input.sessionId,
       label,
-      model: model.id,
+      model: DEEPSEEK_MODEL,
+      ...result.cost,
+      now: c.now(),
+      blockUrl: blockUrl(c),
+      ...(moderation ? { moderation } : {}),
+    });
+    await alert(c, outcome.alerts);
+    // A high label: the reviewer sees what the labeller saw (never stored).
+    if (outcome.review) await moderate(c, gate, { githubId: input.githubId, ...outcome.review, text: labellerText(input.input) });
+  } catch (error) {
+    console.error("use description failed", error instanceof Error ? error.name : "error");
+  }
+}
+
+/** The text the use-description labeller was shown, for the moderation reviewer. */
+function labellerText(input: UseInput): string {
+  const previous = input.previous ? `(end of the previous message) ${input.previous}\n\n` : "";
+  return `${previous}${input.text}\n\nTools called: ${input.tools.length > 0 ? input.tools.join(", ") : "none"}`;
+}
+
+/**
+ * One internal, non-streamed DeepSeek V4.1 Flash call on the company key (use descriptions and
+ * moderation reviews): Luminal asked to reason little, with room for it, or OpenRouter asked not
+ * to reason. Its cost is for the internal spend bucket, never a person's allowance. Undefined for
+ * a timeout or an error status; a thrown fetch is the caller's to catch.
+ */
+async function internalDeepseek(
+  c: Ctx,
+  config: FreeConfig,
+  provider: Upstream,
+  input: { messages: Array<{ role: string; content: string }>; maxTokens: number; reasoningRoom: number; timeoutSeconds: number; user: string },
+): Promise<{ text: string | undefined; cost: { upstream: Upstream; tokens: number; cashUsd: number; creditUsd: number } } | undefined> {
+  const model = modelById(DEEPSEEK_MODEL)!;
+  const payload: Record<string, unknown> =
+    provider === "luminal"
+      ? { model: model.upstreamModel, messages: input.messages, max_completion_tokens: input.maxTokens + input.reasoningRoom, temperature: 0, stream: false, reasoning_effort: "low", user: input.user }
+      : { model: model.id, messages: input.messages, max_tokens: input.maxTokens, temperature: 0, stream: false, reasoning: { enabled: false }, usage: { include: true }, provider: providerPreferences(config), user: input.user };
+  const response = await fetchWithTimeout(
+    c.fetch,
+    provider === "luminal" ? LUMINAL_URL : OPENROUTER_URL,
+    {
+      method: "POST",
+      headers:
+        provider === "luminal"
+          ? { authorization: `Bearer ${c.config.luminalApiKey}`, "content-type": "application/json" }
+          : { authorization: `Bearer ${c.config.openRouterApiKey}`, "content-type": "application/json", "http-referer": "https://directionallylocal.com", "x-title": "Directionally Local" },
+      body: JSON.stringify(payload),
+    },
+    input.timeoutSeconds * 1000,
+  );
+  if (response === "timeout" || !response.ok) {
+    if (response !== "timeout") await response.body?.cancel().catch(() => undefined);
+    return undefined;
+  }
+  const parsed = parseJson(await response.text());
+  const usage = parseUsage((parsed as { usage?: unknown } | undefined)?.usage);
+  return {
+    text: completionText(parsed),
+    cost: {
       upstream: provider,
       tokens: usage ? usage.promptTokens + usage.completionTokens : 0,
       cashUsd: provider === "openrouter" && usage ? costOf(usage, 0) : 0,
       creditUsd: provider === "luminal" && usage ? costAtPrices(usage, creditPrices(model)) : 0,
+    },
+  };
+}
+
+/**
+ * Runs a claimed moderation review (moderation.ts): the case from the Directory, one DeepSeek
+ * call with the flagged text (in flight only), then the action (a confident block in "enforce"
+ * mode blocks the person and revokes their tokens, the admin block's own code path), the decision
+ * stored and the owner emailed. Any failure on the way is a "watch" with confidence 0, never a
+ * block. Never throws; runs beside the request, never awaited by it.
+ */
+async function moderate(c: Ctx, gate: Runtime, input: { githubId: number; decisionId: number; label: TriggerLabel; text: string }): Promise<void> {
+  try {
+    const { config } = gate;
+    const now = c.now();
+    const facts = await directory(c).moderationCase({ githubId: input.githubId, decisionId: input.decisionId, label: input.label, now });
+    if (!facts) return;
+    let answer = REVIEW_FAILED;
+    let cost: { upstream: Upstream; tokens: number; cashUsd: number; creditUsd: number } = { upstream: "luminal", tokens: 0, cashUsd: 0, creditUsd: 0 };
+    const provider: Upstream | undefined = providerReady("luminal", config, gate) ? "luminal" : config.openRouterApiKey ? "openrouter" : undefined;
+    if (provider) {
+      try {
+        const result = await internalDeepseek(c, config, provider, {
+          messages: moderationMessages(input.text, facts),
+          maxTokens: MODERATION_MAX_TOKENS,
+          reasoningRoom: MODERATION_REASONING_ROOM,
+          timeoutSeconds: MODERATION_TIMEOUT_SECONDS,
+          user: await safetyIdentifier(input.githubId),
+        });
+        if (result) {
+          answer = parseModeration(result.text);
+          cost = result.cost;
+        }
+      } catch (error) {
+        console.error("moderation review call failed", error instanceof Error ? error.name : "error");
+      }
+    }
+    let action: ModerationAction = moderationAction({
+      answer,
+      mode: config.moderation,
+      threshold: config.moderationBlockConfidence,
+      isAdmin: c.config.adminGithubIds.has(input.githubId),
+      allowlisted: allowlisted(config.moderationAllowlist, input.githubId, facts.login),
+      alreadyBlocked: facts.status === "blocked",
+    });
+    if (action === "blocked") {
+      // The admin block's own path; the config log shows "moderation" as who did it.
+      const status = await setBlocked(c, input.githubId, true, { githubId: 0, login: "moderation", now });
+      if (status === "blocked") await revokeTokens(c, input.githubId, now);
+      else action = "none";
+    }
+    const alerts = await directory(c).finishModeration({
+      decisionId: input.decisionId,
+      githubId: input.githubId,
+      answer,
+      action,
+      mode: config.moderation,
+      label: input.label,
+      model: DEEPSEEK_MODEL,
+      ...cost,
       now: c.now(),
-      blockUrl: `${c.base}/admin?view=tools#block`,
+      blockUrl: blockUrl(c),
     });
     await alert(c, alerts);
+    console.log(`moderation review: ${answer.verdict} ${answer.confidence} ${action}`);
   } catch (error) {
-    console.error("use description failed", error instanceof Error ? error.name : "error");
+    console.error("moderation review failed", error instanceof Error ? error.name : "error");
   }
 }
 
@@ -3189,6 +3332,23 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     const rows = await directory(c).useDescriptions({ since: now - days * DAY_MS, minRisk: risk, limit, ...(githubId !== undefined ? { githubId } : {}) });
     return json({ days, risk, uses: rows.map((row) => ({ ...row, at: new Date(row.at).toISOString() })) });
   }
+  if (method === "GET" && rest === "moderation") {
+    // Automated moderation decisions: ?days= (1 to 90, default 7), ?verdict= (block, watch or
+    // pass; all by default), ?limit= (1 to 1000, default 200). Newest first. No user content.
+    const params = c.url.searchParams;
+    const days = params.get("days") === null ? 7 : Number(params.get("days"));
+    const verdict = params.get("verdict") || undefined;
+    const limit = params.get("limit") === null ? 200 : Number(params.get("limit"));
+    if (!Number.isInteger(days) || days < 1 || days > USE_KEEP_DAYS || (verdict !== undefined && !(MODERATION_VERDICTS as readonly string[]).includes(verdict)) || !Number.isInteger(limit) || limit < 1 || limit > 1000) {
+      return apiError(400, "invalid_request", `Use ?days=1 to ${USE_KEEP_DAYS}, ?verdict=block|watch|pass and ?limit=1 to 1000.`);
+    }
+    const rows = await directory(c).moderationDecisions({ since: now - days * DAY_MS, limit, ...(verdict ? { verdict: verdict as ModerationVerdict } : {}) });
+    return json({
+      days,
+      verdict: verdict ?? null,
+      decisions: rows.map((row) => ({ login: row.login, githubId: row.githubId, verdict: row.verdict, confidence: row.confidence, reason: row.reason, signals: row.signals, action: row.action, category: row.category, sessionId: row.sessionId, labelId: row.labelId, model: row.model, at: new Date(row.at).toISOString() })),
+    });
+  }
   if (method === "POST" && rest === "recheck-below-bar") {
     const body = (await readJson(c)) ?? {};
     return json(await recheckBelowBar(c, config, actor, body.includeAdminStarters === true));
@@ -3407,10 +3567,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     if (action === "revoke-tokens" && method === "POST") {
       // Ends every sign-in session and deletes every server key; the person can sign in again.
       if (!(await directory(c).getPerson(githubId))) return apiError(404, "not_found", "No such person.");
-      const sessions = await auth(c).revokeAllFor(githubId);
-      await account(c, githubId).revokeSessions({ sids: sessions, until: now + REVOKED_SESSION_TTL_MS, notBefore: Math.floor(now / 1000), now });
-      const serverKeys = await account(c, githubId).revokeAllKeys();
-      return json({ githubId, sessions: sessions.length, serverKeys });
+      return json({ githubId, ...(await revokeTokens(c, githubId, now)) });
     }
     if ((action === "suspend" || action === "unsuspend") && method === "POST") {
       const status = action === "suspend" ? "suspended" : "active";
@@ -3737,6 +3894,14 @@ async function setBlocked(c: Ctx, githubId: number, blocked: boolean, actor: { g
   if (!(await directory(c).setPersonStatus(githubId, status, actor))) return undefined;
   await account(c, githubId).setStatus(status);
   return status;
+}
+
+/** Ends every sign-in session of a person and deletes every server key (they can sign in again unless blocked). */
+async function revokeTokens(c: Ctx, githubId: number, now: number): Promise<{ sessions: number; serverKeys: number }> {
+  const sessions = await auth(c).revokeAllFor(githubId);
+  await account(c, githubId).revokeSessions({ sids: sessions, until: now + REVOKED_SESSION_TTL_MS, notBefore: Math.floor(now / 1000), now });
+  const serverKeys = await account(c, githubId).revokeAllKeys();
+  return { sessions: sessions.length, serverKeys };
 }
 
 function nullableWhole(value: unknown): number | null | undefined | "invalid" {

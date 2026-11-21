@@ -1,4 +1,4 @@
-import { ACCESS_REQUEST_ALERT_MODES, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
+import { ACCESS_REQUEST_ALERT_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
@@ -134,6 +134,16 @@ export const RUNTIME_SETTINGS = {
   useDescriptionDailyCap: { kind: "count", env: "USE_DESCRIPTION_DAILY_CAP" },
   /** Security work (by its use description or the request's own words) served by DeepSeek only, never GPT-6 (security-route.ts); false turns it off. */
   securityOffGpt6: { kind: "flag", env: "SECURITY_OFF_GPT6" },
+  /** Automated moderation review of high-risk labels (moderation.ts): "enforce", "shadow" (never blocks) or "off" (the plain high-risk email). */
+  moderation: { kind: "moderationMode", env: "MODERATION" },
+  /** The lowest confidence, 0 to 1, a "block" verdict needs to block in "enforce" mode. */
+  moderationBlockConfidence: { kind: "weight", env: "MODERATION_BLOCK_CONFIDENCE" },
+  /** GitHub logins or ids moderation never blocks (it still reviews and emails). */
+  moderationAllowlist: { kind: "people", env: "MODERATION_ALLOWLIST" },
+  /** Minutes before the same person is reviewed again for a label of the same category. */
+  moderationCooldownMinutes: { kind: "count", env: "MODERATION_COOLDOWN_MINUTES" },
+  /** Reviews a UTC day across everyone; past it, the plain high-risk email; 0 stops reviews. */
+  moderationDailyCap: { kind: "count", env: "MODERATION_DAILY_CAP" },
 } as const;
 
 export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;
@@ -189,6 +199,10 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= MAX_FIRST_BYTE_TIMEOUT_SECONDS ? value : "invalid";
     case "alertMode":
       return typeof value === "string" && (ACCESS_REQUEST_ALERT_MODES as readonly string[]).includes(value) ? value : "invalid";
+    case "moderationMode":
+      return typeof value === "string" && (MODERATION_MODES as readonly string[]).includes(value) ? value : "invalid";
+    case "people":
+      return Array.isArray(value) && value.length <= 500 && value.every(isAllowlistEntry) ? value.map((v) => v.trim().toLowerCase()) : "invalid";
     case "instant": {
       // Stored as Unix ms; "none" (null) turns it off whatever the env says.
       const parsed = parseInstant(value);
@@ -212,6 +226,8 @@ const RULES: Record<Kind, string> = {
   amount: `a number of dollars, 0 to ${MAX_USD}`,
   seconds: `a number of seconds, more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS}`,
   alertMode: '"each", "daily" or "off"',
+  moderationMode: '"enforce", "shadow" or "off"',
+  people: 'a list of up to 500 GitHub logins or numeric ids, e.g. ["octocat", "12345"], or [] for none',
   instant: 'an ISO time with its zone, e.g. "2026-11-20T00:00:00Z", Unix ms, or "none" to turn it off',
 };
 

@@ -21,7 +21,8 @@
  * Output: `{use, risk, category}` from DeepSeek V4.1 Flash on the company key. `use` is cut to
  * USE_MAX_CHARS characters; an answer that doesn't parse is dropped (nothing stored). Only the
  * description and labels are kept (the Directory's `use_descriptions`, USE_KEEP_DAYS days),
- * never the input.
+ * never the input. A "high" label starts a moderation review (moderation.ts), which sees the same
+ * input in flight.
  *
  * It runs beside the request, never awaited by it: a failure or a slow answer never slows or
  * fails the person's request. Its cost goes to the provider's credit and an internal spend
