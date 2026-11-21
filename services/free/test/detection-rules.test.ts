@@ -1,6 +1,6 @@
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
-import { readFreeConfig } from "../src/config.js";
+import { joinedSecret, readFreeConfig } from "../src/config.js";
 import { DEFAULT_DETECTION_RULES, detectionRulesFrom, parseDetectionRules } from "../src/detection-rules.js";
 import { securitySignal } from "../src/security-route.js";
 import { ADMIN_ID, createService } from "./harness.js";
@@ -147,5 +147,13 @@ describe("DETECTION_RULES in the service", () => {
     const { service } = await view({ DETECTION_RULES: SYNTHETIC_RULES_JSON, OPEN_ADMISSION: "true" });
     const user = (await service.signIn({ id: 100, login: "alice" })).access_token;
     assert.notEqual((await service.request("GET", "/admin/config", { token: user })).status, 200);
+  });
+});
+
+describe("a secret split into parts", () => {
+  it("joins NAME, NAME_2, NAME_3 in order, and stops at the first missing part", () => {
+    assert.equal(joinedSecret({ R: '{"a":', R_2: '[1,', R_3: "2]}" }, "R"), '{"a":[1,2]}');
+    assert.equal(joinedSecret({ R: "x", R_3: "z" }, "R"), "x");
+    assert.equal(joinedSecret({}, "R"), undefined);
   });
 });
