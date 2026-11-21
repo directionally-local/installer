@@ -198,18 +198,29 @@ export function moderationAlert(input: {
 }): Alert {
   const confidence = input.confidence.toFixed(2);
   const blocked = input.action === "blocked";
-  const why: Record<string, string> = {
-    shadow: 'not blocked: moderation is in "shadow" mode',
-    allowlisted: "not blocked: the person is in moderationAllowlist",
-    admin: "not blocked: the person is an admin",
-    already_blocked: "already blocked",
-    none: input.verdict === "block" ? "not blocked: below moderationBlockConfidence" : "nothing done",
+  // The first line answers "was this person blocked?" in plain words; the details follow.
+  const notBlocked: Record<string, string> = {
+    shadow: "Not blocked: moderation is in shadow mode (decides, never blocks).",
+    allowlisted: "Not blocked: this person is on the moderation allowlist.",
+    admin: "Not blocked: this person is an admin.",
+    already_blocked: "Already blocked before this review.",
+    none:
+      input.verdict === "block"
+        ? `Not blocked. The reviewer recommends blocking, but its confidence (${confidence}) is below the auto-block line (moderationBlockConfidence). Your call.`
+        : input.verdict === "watch"
+          ? "Not blocked. The reviewer isn't sure; worth a look."
+          : "Not blocked. The reviewer found nothing to act on.",
   };
-  const subject = blocked ? `dl free tier: auto-blocked @${input.login} (${confidence})` : `dl free tier: review @${input.login}: ${input.verdict} (${confidence})`;
+  const needsCall = !blocked && input.verdict === "block" && input.action === "none";
+  const subject = blocked
+    ? `dl free tier: BLOCKED @${input.login} automatically (${confidence})`
+    : needsCall
+      ? `dl free tier: your call on @${input.login}: reviewer says block (${confidence}), not blocked`
+      : `dl free tier: @${input.login} not blocked, reviewer says ${input.verdict} (${confidence})`;
   const lines = [
     blocked
-      ? `dl free tier: @${input.login} (GitHub id ${input.githubId}) was blocked by automated moderation, and their sign-ins and server keys revoked.`
-      : `dl free tier: automated moderation reviewed @${input.login} (GitHub id ${input.githubId}): ${input.verdict}, ${why[input.action] ?? input.action}.`,
+      ? `Blocked. @${input.login} (GitHub id ${input.githubId}) was blocked by automated moderation; their sign-ins and server keys are revoked.`
+      : `${notBlocked[input.action] ?? `Not blocked (${input.action}).`} @${input.login}, GitHub id ${input.githubId}.`,
     "",
     `Verdict: ${input.verdict} (confidence ${confidence}, mode ${input.mode})`,
     `Reason: ${input.reason}`,
