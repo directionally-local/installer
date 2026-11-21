@@ -455,7 +455,7 @@ export const MAX_HOST_COOLDOWN_MINUTES = 1440;
 export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
   const signingKey = required(env, "TOKEN_SIGNING_KEY");
   if (new TextEncoder().encode(signingKey).length < 32) throw new ConfigError("TOKEN_SIGNING_KEY must be at least 32 bytes.");
-  const detection = detectionRulesFrom(env.DETECTION_RULES);
+  const detection = detectionRulesFrom(joinedSecret(env, "DETECTION_RULES"));
   // A farm-detection threshold: its env var, else the secret's value, else the public default.
   const threshold = (key: ThresholdKey, name: string) => whole(env[name], detection.rules.thresholds[key] ?? DEFAULTS[key], name);
   return {
@@ -576,6 +576,23 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
 
 function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * A secret that may be split into parts: Cloudflare caps one secret at about 5 KB, so a longer
+ * value is stored as NAME, NAME_2, NAME_3, ... and joined here in order (up to NAME_9). NAME
+ * alone, unsplit, still works.
+ */
+export function joinedSecret(env: Record<string, unknown>, name: string): string | undefined {
+  const first = env[name];
+  if (typeof first !== "string") return first === undefined ? undefined : String(first);
+  let joined = first;
+  for (let part = 2; part <= 9; part++) {
+    const next = env[`${name}_${part}`];
+    if (typeof next !== "string") break;
+    joined += next;
+  }
+  return joined;
 }
 
 function required(env: Record<string, unknown>, name: string): string {
