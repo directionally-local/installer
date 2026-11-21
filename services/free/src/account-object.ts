@@ -1073,8 +1073,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
    * Every pool's allowance this week. The Luna pool is the one the weekly grant and the
    * referral bonus apply to (it is the free tier's default model); Sol and Astra keep their
    * own fixed grants. Pro's weekly tokens replace the Luna grant, as before. DeepSeek has no
-   * token cap (null): its dollar budget is its limit, so tokens never stop it first. A level
-   * with 0 tokens (a batch-flagged Starter account) gets 0 DeepSeek tokens too.
+   * token cap (null) on Full: its dollar budget is its limit. Basic and Starter get their level's
+   * weekly tokens on DeepSeek as well (0 for a batch-flagged Starter account).
    */
   #pools(row: AccountRow | undefined, now: number, limits: Limits, plan: Plan, bonus: number): Record<Pool, PoolAllowance> {
     const sql = this.ctx.storage.sql;
@@ -1090,7 +1090,9 @@ export class AccountObject extends DurableObject<AccountEnv> {
       const levelTokens = Math.max(0, limits.levelTokens ?? 0);
       const fixed = POOL_TOKENS[pool];
       if (fixed === null) {
-        const tokensPerWeek = limited && levelTokens === 0 ? 0 : null;
+        // Full: no token cap (the dollar budget is the limit). Basic and Starter: their level's
+        // weekly tokens, so the three levels get 3 different allowances on DeepSeek too.
+        const tokensPerWeek = limited ? levelTokens : null;
         out[pool] = { tokensPerWeek, usedThisWeek: used, reserved, remaining: tokensPerWeek === null ? null : Math.max(0, tokensPerWeek - used - reserved) };
         continue;
       }

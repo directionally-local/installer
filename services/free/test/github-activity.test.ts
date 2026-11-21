@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_ID, allowServerKeys, completion, createInvite, createService, MODEL, startBrowserFlow, type GitHubUserFixture, type Service } from "./harness.js";
+import { ADMIN_ID, allowServerKeys, completion, createInvite, createService, luminalUsage, MODEL, startBrowserFlow, type GitHubUserFixture, type Service } from "./harness.js";
 
 /**
  * Account levels: Full for accounts that look like working developers, Starter for everyone
@@ -165,11 +165,22 @@ describe("what a Starter account gets", () => {
     assert.equal(me.pools.luna!.tokensPerWeek, 50_000_000);
     assert.equal(me.pools.sol!.tokensPerWeek, 10_000_000);
     assert.equal(me.pools.astra!.tokensPerWeek, 3_000_000);
-    assert.equal(me.pools.deepseek!.tokensPerWeek, null, "no token cap on DeepSeek");
+    assert.equal(me.pools.deepseek!.tokensPerWeek, 50_000_000, "the Starter tokens on DeepSeek too");
     assert.equal((me as unknown as { allowance: { usdPerWeek: number } }).allowance.usdPerWeek, 2);
     assert.equal(me.signals.publicRepos, 0);
     // The person sees the public bar and its signals only.
     assert.deepEqual(Object.keys(me.signals).sort(), ["accountAgeDays", "checkedAt", "contributions", "followers", "publicRepos", "restrictedContributions"]);
+  });
+
+  it("stops DeepSeek at the Starter tokens, before the dollar budget", async () => {
+    const { service } = await open({ LUMINAL_API_KEY: "sk-luminal-test", STARTER_WEEKLY_TOKENS: "1000" });
+    const { access_token: token } = await service.signIn({ id: 100, login: "starter", createdAt: NEW, publicRepos: 0, contributions: 0 });
+    service.setLuminal(() => completion(luminalUsage(2000, 10)));
+    const first = await chat(service, token, "deepseek/deepseek-v4.1-flash-1017");
+    assert.equal(first.status, 200);
+    service.clock.now += 1000;
+    const second = await chat(service, token, "deepseek/deepseek-v4.1-flash-1017");
+    assert.notEqual(second.status, 200, "the week's Starter tokens are used up");
   });
 
   it("is promoted by an admin, and demoted again", async () => {
