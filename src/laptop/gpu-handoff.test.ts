@@ -21,7 +21,13 @@ test("the relaunch after a failure carries the model, one line of reason and the
   assert.deepEqual(resultEnv({ ok: false, errorType: "launch_failed", message: "Startup: vLLM\u001b[31m stopped\nwhile loading", log: "/l.log", model: "glm-flash" }, undefined), {
     DL_GPU_RESULT: "failed", DL_GPU_ERROR: "launch_failed", DL_GPU_MODEL: "glm-flash", DL_GPU_REASON: "Startup: vLLM [31m stopped while loading", DL_GPU_LOG: "/l.log",
   });
-  assert.deepEqual(resultEnv({ ok: true, model: "Qwen/Qwen3-4B" }, undefined), { DL_GPU_RESULT: "ok", DL_CHAT_SETUP: "1" }, "and dl can set up the team chat next");
+  assert.deepEqual(resultEnv({ ok: true, model: "Qwen/Qwen3-4B" }, undefined), { DL_GPU_RESULT: "ok", DL_CHAT_SETUP: "1", DL_API_SETUP: "1" }, "and dl can set up the team chat or the API endpoint next");
+});
+
+test("the answer to \"How will your team use it?\": API endpoint, with nothing else carried", () => {
+  assert.deepEqual(parseHandoff('{"version":1,"action":"api-up"}'), { version: 1, action: "api-up" });
+  assert.deepEqual(parseHandoff('{"version":1,"action":"api-up","use":"public","port":80}'), { version: 1, action: "api-up" }, "nothing from the request widens access");
+  assert.equal(parseHandoff('{"version":2,"action":"api-up"}'), undefined);
 });
 
 test("the answer to \"Which coding agent?\": another agent, alone or with Both; Autopilot never comes to dl", () => {

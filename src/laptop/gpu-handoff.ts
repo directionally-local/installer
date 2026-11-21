@@ -56,6 +56,14 @@ import { AGENT_IDS, agentSupport, type AgentId, type LocalModel } from "./local-
  * model, or, when its CLI isn't installed, prints the install command and stops. Without
  * DL_AGENTS (an older dl) the question isn't asked; an older Autopilot never asks.
  *
+ * API endpoint (dl 0.44): on that same relaunch dl also sets DL_API_SETUP=1: it can turn the model
+ * into an OpenAI-compatible API (dl model endpoint). Autopilot then adds "API endpoint" to "How
+ * will your team use it?"; picking it writes
+ *   {"version":1,"action":"api-up"}
+ * and exits: dl turns the endpoint on (this machine only, a dl-generated key required), prints
+ * the base URL, the model, the key (masked) and setup for other tools, and exits. Without
+ * DL_API_SETUP (an older dl) the option isn't shown; an older Autopilot never writes it.
+ *
  * Anything else (no file, another version or action) is ignored, so an older Autopilot that
  * never writes the file just runs as before, and an older dl that never sets DL_GPU_HANDOFF
  * gets Autopilot's screens without the "this machine" model setup (Autopilot then says to run
@@ -100,7 +108,12 @@ export interface AgentRequest {
   agent: OtherAgent;
 }
 
-export type HandoffRequest = ModelUpRequest | ChatUpRequest | AgentRequest;
+export interface ApiUpRequest {
+  version: 1;
+  action: "api-up";
+}
+
+export type HandoffRequest = ModelUpRequest | ChatUpRequest | AgentRequest | ApiUpRequest;
 
 function otherAgent(value: unknown): OtherAgent | undefined {
   return value === "claude-code" || value === "opencode" || value === "pi" ? value : undefined;
@@ -148,6 +161,7 @@ export function parseHandoff(text: string): HandoffRequest | undefined {
     const agent = object.use === "both" ? otherAgent(object.agent) : undefined;
     return { version: 1, action: "chat-up", use: object.use, ...(agent ? { agent } : {}) };
   }
+  if (object.action === "api-up") return { version: 1, action: "api-up" };
   if (object.action === "agent") {
     const agent = otherAgent(object.agent);
     return agent ? { version: 1, action: "agent", agent } : undefined;
@@ -179,6 +193,8 @@ export function resultEnv(result: ModelUpResult, gpu: GpuSummary | undefined): R
     DL_GPU_RESULT: result.ok ? "ok" : "failed",
     // The model is up: Autopilot may ask how the team will use it (team chat, above).
     ...(result.ok ? { DL_CHAT_SETUP: "1" } : {}),
+    // ...or use it from other tools, as an OpenAI-compatible API (API endpoint, above).
+    ...(result.ok ? { DL_API_SETUP: "1" } : {}),
     ...(result.ok ? {} : { DL_GPU_ERROR: result.errorType satisfies ModelUpErrorType }),
     ...(gpu ? { DL_GPU: JSON.stringify(gpu) } : {}),
     ...(!result.ok && result.model ? { DL_GPU_MODEL: result.model } : {}),

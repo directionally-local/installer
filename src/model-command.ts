@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { autopilotConfigFile, freeTierAccount } from "./laptop/free-tier.js";
 import { chooseEngine, offersOptimizedEngine, type EngineChoiceOutcome, type PilotFetch } from "./model-engine-choice.js";
 import { refreshChatUi } from "./chat-ui.js";
+import { endpointStatus, refreshModelApi } from "./model-api.js";
 import { fittingModels, gpuCounts, recipe, type ModelRecipe } from "./model-catalog.js";
 import { checkGpuDocker, containerRunning, containerSpec, detectHardware, dockerArgs, downloadedBytes, gpuLine, inspectContainer, logTail, modelDownloadBytes, removeContainer, type Gpu, type Hardware, type LaunchExtras, containerName, maxContext, recipeFor } from "./model-runtime.js";
 import { chooseParallelism, type ParallelPlan } from "./model-parallel.js";
@@ -378,6 +379,8 @@ export async function modelCommand(action: string, args: string[], options: Mode
     // Warnings given after the checklist (a failed comparison) are printed now.
     options.ui.finish();
     // A running team chat (dl ui) follows the models here by itself: same link, same accounts.
+    // So does the API endpoint (dl model endpoint): it serves whatever the box's model is now.
+    if (code === 0 && CHANGES_MODELS.has(action) && !options.system.dryRun) await refreshModelApi(options.system, options.statePath ?? modelStatePath()).catch(() => {});
     if (code === 0 && CHANGES_MODELS.has(action)) await refreshChatUi({ system: options.system, ui: options.ui, ...(options.statePath ? { statePath: options.statePath } : {}), ...(options.delay ? { delay: options.delay } : {}), ...(options.chatFetch ? { fetch: options.chatFetch } : {}) });
     await persist();
     return code;
@@ -518,6 +521,9 @@ async function modelCommandInner(action: string, args: string[], options: ModelC
     const running = await containerRunning(system, state.active.container);
     ui.line(running ? "done" : "failed", "Model", state.active.repo);
     ui.line("info", "API", `${modelApiBase(state.active)} · ${running ? "running" : "stopped"}`);
+    // The key-protected endpoint for other tools (dl model endpoint), and who can reach it.
+    const shared = await endpointStatus(system, statePath);
+    ui.line(shared.ok ? "info" : "failed", "Endpoint", shared.text);
     // Beyond 0.30.1: the engine when it isn't vLLM, the image (and whether --image chose it), the GPUs when pinned or several.
     if (state.active.engine && state.active.engine !== "vllm") ui.line("info", "Engine", engine(state.active.engine).label);
     ui.line("info", "Image", imageText(state.active));
