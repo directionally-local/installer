@@ -117,6 +117,7 @@ import {
   parseModeration,
   REVIEW_FAILED,
   type ModerationAction,
+  type ModerationFailure,
   type ModerationVerdict,
   type TriggerLabel,
 } from "./moderation.js";
@@ -307,10 +308,23 @@ export interface HandlerOptions {
   /** The pause between emails to users in the daily run and a broadcast (Resend allows 2 requests a second); tests set 0. */
   emailGapMs?: number;
   /**
-   * Takes work that runs beside a request and is never awaited by it (use descriptions). Left
-   * out, the work just runs on; tests pass a collector to wait for it.
+   * Takes work that runs beside a request and is never awaited by it (use descriptions,
+   * moderation reviews). Tests pass a collector to wait for it. Left out, the runtime's execution
+   * context takes it (BackgroundContext); with neither, the work just runs on, and on Workers it
+   * is cancelled as soon as the response has been sent.
    */
   background?: (task: Promise<unknown>) => void;
+}
+
+/**
+ * The fetch handler's third argument on Workers (ExecutionContext), when the runtime gives one.
+ * Its keep-alive method keeps background work (a use description, a moderation review: a model call
+ * and Durable Object writes, seconds long) alive after the response is sent; without it Workers
+ * cancels that work when the response ends, so a review of a short request never finished. It is
+ * optional: a runtime without it (Serverless Objects) gets the old behaviour.
+ */
+export interface BackgroundContext {
+  waitUntil(task: Promise<unknown>): void; // portable-exception: optional, used only when the runtime passes it
 }
 
 interface Ctx {
@@ -355,7 +369,7 @@ export interface ScheduledController {
 const EMAIL_GAP_MS = 600;
 
 export function createHandler(options: HandlerOptions = {}): {
-  fetch(request: Request, env: Env): Promise<Response>;
+  fetch(request: Request, env: Env, execution?: BackgroundContext): Promise<Response>;
   scheduled(controller: ScheduledController, env: Env): Promise<void>;
 } {
   const now = options.now ?? (() => Date.now());
@@ -383,7 +397,7 @@ export function createHandler(options: HandlerOptions = {}): {
         console.error("user emails (daily): run failed", error instanceof Error ? error.name : "error");
       }
     },
-    async fetch(request: Request, env: Env): Promise<Response> {
+    async fetch(request: Request, env: Env, execution?: BackgroundContext): Promise<Response> {
       let config: FreeConfig;
       try {
         config = readFreeConfig(env as unknown as Record<string, unknown>);
@@ -393,10 +407,17 @@ export function createHandler(options: HandlerOptions = {}): {
       }
       const url = new URL(request.url);
       const ip = clientIp(request);
-      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin, statusCache, emailGapMs, ...(options.background ? { background: options.background } : {}) };
+      const background = options.background ?? backgroundOf(execution);
+      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin, statusCache, emailGapMs, ...(background ? { background } : {}) };
       return route(ctx);
     },
   };
+}
+
+/** The execution context's way to keep a task alive past the response, when there is one. */
+function backgroundOf(execution: BackgroundContext | undefined): ((task: Promise<unknown>) => void) | undefined {
+  if (!execution || typeof execution.waitUntil !== "function") return undefined; // portable-exception: optional, see BackgroundContext
+  return (task) => execution.waitUntil(task); // portable-exception: optional, see BackgroundContext
 }
 
 export default createHandler();
@@ -2804,7 +2825,10 @@ async function describeUse(c: Ctx, gate: Runtime, input: { githubId: number; ses
     if (!claim || !input.input) return;
     const messages = useMessages(input.input, config.detection);
     const result = await internalDeepseek(c, config, provider, { messages, maxTokens: USE_MAX_TOKENS, reasoningRoom: USE_REASONING_ROOM, timeoutSeconds: USE_TIMEOUT_SECONDS, user: input.user });
-    if (!result) return;
+    if ("failure" in result) {
+      console.error(`use description call failed: ${result.failure}`);
+      return;
+    }
     const label = parseUseLabel(result.text);
     const moderation = moderationLimits(config);
     const outcome = await directory(c).recordUseDescription({
@@ -2834,15 +2858,16 @@ function labellerText(input: UseInput): string {
 /**
  * One internal, non-streamed DeepSeek V4.1 Flash call on the company key (use descriptions and
  * moderation reviews): Luminal asked to reason little, with room for it, or OpenRouter asked not
- * to reason. Its cost is for the internal spend bucket, never a person's allowance. Undefined for
- * a timeout or an error status; a thrown fetch is the caller's to catch.
+ * to reason. Its cost is for the internal spend bucket, never a person's allowance. A timeout or
+ * an error status is a `failure` code ("timeout", "http_<status>"); a thrown fetch is the caller's
+ * to catch.
  */
 async function internalDeepseek(
   c: Ctx,
   config: FreeConfig,
   provider: Upstream,
   input: { messages: Array<{ role: string; content: string }>; maxTokens: number; reasoningRoom: number; timeoutSeconds: number; user: string },
-): Promise<{ text: string | undefined; cost: { upstream: Upstream; tokens: number; cashUsd: number; creditUsd: number } } | undefined> {
+): Promise<{ text: string | undefined; cost: { upstream: Upstream; tokens: number; cashUsd: number; creditUsd: number } } | { failure: ModerationFailure }> {
   const model = modelById(DEEPSEEK_MODEL)!;
   const payload: Record<string, unknown> =
     provider === "luminal"
@@ -2861,9 +2886,10 @@ async function internalDeepseek(
     },
     input.timeoutSeconds * 1000,
   );
-  if (response === "timeout" || !response.ok) {
-    if (response !== "timeout") await response.body?.cancel().catch(() => undefined);
-    return undefined;
+  if (response === "timeout") return { failure: "timeout" };
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    return { failure: `http_${response.status}` };
   }
   const parsed = parseJson(await response.text());
   const usage = parseUsage((parsed as { usage?: unknown } | undefined)?.usage);
@@ -2892,6 +2918,8 @@ async function moderate(c: Ctx, gate: Runtime, input: { githubId: number; decisi
     const facts = await directory(c).moderationCase({ githubId: input.githubId, decisionId: input.decisionId, label: input.label, now });
     if (!facts) return;
     let answer = REVIEW_FAILED;
+    // Why the review failed, when it did: stored on the decision and logged (a code, never content).
+    let failure: ModerationFailure | null = "no_provider";
     let cost: { upstream: Upstream; tokens: number; cashUsd: number; creditUsd: number } = { upstream: "luminal", tokens: 0, cashUsd: 0, creditUsd: 0 };
     const provider: Upstream | undefined = providerReady("luminal", config, gate) ? "luminal" : config.openRouterApiKey ? "openrouter" : undefined;
     if (provider) {
@@ -2903,14 +2931,19 @@ async function moderate(c: Ctx, gate: Runtime, input: { githubId: number; decisi
           timeoutSeconds: MODERATION_TIMEOUT_SECONDS,
           user: await safetyIdentifier(input.githubId),
         });
-        if (result) {
-          answer = parseModeration(result.text);
+        if ("failure" in result) {
+          failure = result.failure;
+        } else {
           cost = result.cost;
+          answer = parseModeration(result.text);
+          failure = answer !== REVIEW_FAILED ? null : result.text?.trim() ? "unparsable" : "empty_answer";
         }
       } catch (error) {
+        failure = "network";
         console.error("moderation review call failed", error instanceof Error ? error.name : "error");
       }
     }
+    if (failure) console.error(`moderation review failed: ${failure} (${provider ?? "no provider"})`);
     let action: ModerationAction = moderationAction({
       answer,
       mode: config.moderation,
@@ -2929,6 +2962,7 @@ async function moderate(c: Ctx, gate: Runtime, input: { githubId: number; decisi
       decisionId: input.decisionId,
       githubId: input.githubId,
       answer,
+      failure,
       action,
       mode: config.moderation,
       label: input.label,
@@ -2938,7 +2972,7 @@ async function moderate(c: Ctx, gate: Runtime, input: { githubId: number; decisi
       blockUrl: blockUrl(c),
     });
     await alert(c, alerts);
-    console.log(`moderation review: ${answer.verdict} ${answer.confidence} ${action}`);
+    console.log(`moderation review: ${answer.verdict} ${answer.confidence} ${action}${failure ? ` (failed: ${failure})` : ""}`);
   } catch (error) {
     console.error("moderation review failed", error instanceof Error ? error.name : "error");
   }
@@ -3346,7 +3380,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     return json({
       days,
       verdict: verdict ?? null,
-      decisions: rows.map((row) => ({ login: row.login, githubId: row.githubId, verdict: row.verdict, confidence: row.confidence, reason: row.reason, signals: row.signals, action: row.action, category: row.category, sessionId: row.sessionId, labelId: row.labelId, model: row.model, at: new Date(row.at).toISOString() })),
+      decisions: rows.map((row) => ({ login: row.login, githubId: row.githubId, verdict: row.verdict, confidence: row.confidence, reason: row.reason, signals: row.signals, action: row.action, category: row.category, sessionId: row.sessionId, labelId: row.labelId, model: row.model, error: row.error, at: new Date(row.at).toISOString() })),
     });
   }
   if (method === "POST" && rest === "recheck-below-bar") {

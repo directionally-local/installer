@@ -319,7 +319,7 @@ export function sse(chunks: string[], options: { split?: boolean } = {}): Respon
   return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
-export async function createService(vars: Record<string, string> = {}, options: { email?: boolean; userEmail?: boolean } = {}): Promise<Service> {
+export async function createService(vars: Record<string, string> = {}, options: { email?: boolean; userEmail?: boolean; executionContext?: boolean } = {}): Promise<Service> {
   const [{ createHandler }, { AuthObject }, { DirectoryObject }, { AccountObject }, { RateLimiterObject }] = await Promise.all([
     import("../src/app.js"),
     import("../src/auth-object.js"),
@@ -472,7 +472,12 @@ export async function createService(vars: Record<string, string> = {}, options: 
   };
 
   const background: Array<Promise<unknown>> = [];
-  const handler = createHandler({ now: () => clock.now, fetch: fetcher as never, emailGapMs: 0, background: (task) => void background.push(task) });
+  // As on Workers (`executionContext`): no background option, so background work is handed to the
+  // request's execution context (its waitUntil), which collects it the same way.
+  const handler = options.executionContext
+    ? createHandler({ now: () => clock.now, fetch: fetcher as never, emailGapMs: 0 })
+    : createHandler({ now: () => clock.now, fetch: fetcher as never, emailGapMs: 0, background: (task) => void background.push(task) });
+  const execution = options.executionContext ? { waitUntil: (task: Promise<unknown>) => void background.push(task) } : undefined;
 
   const request: Service["request"] = async (method, path, options = {}) => {
     const headers = new Headers(options.headers);
@@ -486,7 +491,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
       headers.set("content-type", "application/json");
       body = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
     }
-    return handler.fetch(new Request(`https://free.test${path}`, { method, headers, body }), envRef.env as never);
+    return handler.fetch(new Request(`https://free.test${path}`, { method, headers, body }), envRef.env as never, execution);
   };
 
   const signIn: Service["signIn"] = async (user, options = {}) => {
