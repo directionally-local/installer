@@ -110,6 +110,7 @@ import {
   MODERATION_INPUT_CHARS,
   MODERATION_MAX_TOKENS,
   MODERATION_REASONING_ROOM,
+  MODERATION_RETRY_ROOM,
   MODERATION_TIMEOUT_SECONDS,
   MODERATION_VERDICTS,
   moderationAction,
@@ -2924,19 +2925,23 @@ async function moderate(c: Ctx, gate: Runtime, input: { githubId: number; decisi
     const provider: Upstream | undefined = providerReady("luminal", config, gate) ? "luminal" : config.openRouterApiKey ? "openrouter" : undefined;
     if (provider) {
       try {
-        const result = await internalDeepseek(c, config, provider, {
-          messages: moderationMessages(input.text, facts, config.detection),
-          maxTokens: MODERATION_MAX_TOKENS,
-          reasoningRoom: MODERATION_REASONING_ROOM,
-          timeoutSeconds: MODERATION_TIMEOUT_SECONDS,
-          user: await safetyIdentifier(input.githubId),
-        });
-        if ("failure" in result) {
-          failure = result.failure;
-        } else {
-          cost = result.cost;
+        // An empty answer usually means the reasoning used up the output tokens: one retry with more room.
+        for (const reasoningRoom of [MODERATION_REASONING_ROOM, MODERATION_RETRY_ROOM]) {
+          const result = await internalDeepseek(c, config, provider, {
+            messages: moderationMessages(input.text, facts, config.detection),
+            maxTokens: MODERATION_MAX_TOKENS,
+            reasoningRoom,
+            timeoutSeconds: MODERATION_TIMEOUT_SECONDS,
+            user: await safetyIdentifier(input.githubId),
+          });
+          if ("failure" in result) {
+            failure = result.failure;
+            break;
+          }
+          cost = { ...result.cost, tokens: cost.tokens + result.cost.tokens, cashUsd: cost.cashUsd + result.cost.cashUsd, creditUsd: cost.creditUsd + result.cost.creditUsd };
           answer = parseModeration(result.text);
           failure = answer !== REVIEW_FAILED ? null : result.text?.trim() ? "unparsable" : "empty_answer";
+          if (failure !== "empty_answer") break;
         }
       } catch (error) {
         failure = "network";

@@ -38,8 +38,13 @@ export const MODERATION_HISTORY_DAYS = 30;
 export const MODERATION_HISTORY_ROWS = 100;
 /** The answer: a verdict, a 200-character reason and five short bullets fit in about 250 tokens. */
 export const MODERATION_MAX_TOKENS = 400;
-/** Room for DeepSeek's reasoning on Luminal, which counts as output and comes before the answer. */
-export const MODERATION_REASONING_ROOM = 1_200;
+/**
+ * Room for DeepSeek's reasoning on Luminal, which counts as output and comes before the answer.
+ * Hard cases (malware, keyloggers) can reason for well over 1k tokens and then have nothing left
+ * for the verdict, so this is generous; an empty answer is retried once with MODERATION_RETRY_ROOM.
+ */
+export const MODERATION_REASONING_ROOM = 4_000;
+export const MODERATION_RETRY_ROOM = 8_000;
 export const MODERATION_TIMEOUT_SECONDS = 30;
 export const MODERATION_REASON_CHARS = 200;
 export const MODERATION_SIGNAL_CHARS = 120;
