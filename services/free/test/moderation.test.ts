@@ -157,6 +157,28 @@ describe("moderation decides and acts", () => {
     }
   });
 
+  it("retries an empty answer once with more room to reason, and uses the second answer", async () => {
+    const budgets: number[] = [];
+    let calls = 0;
+    const reply: OpenRouterHandler = (body) => {
+      const tokens = (body as { max_tokens?: number; max_completion_tokens?: number }).max_tokens ?? (body as { max_completion_tokens?: number }).max_completion_tokens ?? 0;
+      const isReview = JSON.stringify(body).includes("verdict");
+      if (!isReview) return answer(VERDICT("pass", 0.9));
+      budgets.push(tokens);
+      calls++;
+      if (calls === 1) return Response.json({ id: "gen-m", object: "chat.completion", model: MODEL, choices: [{ index: 0, finish_reason: "length", message: { role: "assistant", content: "" } }], usage: luminalUsage(1200, tokens) });
+      return answer(VERDICT("block", 0.95));
+    };
+    const { service, token } = await setup({}, reply);
+    await chat(service, token, KEYLOGGER, "s-1");
+    await service.settle();
+    assert.equal(calls, 2, "one retry");
+    assert.ok(budgets[1]! > budgets[0]!, `the retry has more room (${budgets.join(" < ")})`);
+    const [row] = decisions(service);
+    assert.equal(row!.verdict, "block");
+    assert.equal(row!.error, null);
+  });
+
   it("stores and logs why a review failed, as a code and never the request's text", async (t) => {
     const empty = () => Response.json({ id: "gen-m", object: "chat.completion", model: MODEL, choices: [{ index: 0, finish_reason: "length", message: { role: "assistant", content: "" } }], usage: luminalUsage(1200, 1600) });
     const cases: Array<[OpenRouterHandler, string]> = [
