@@ -61,6 +61,18 @@ export interface ModerationAnswer {
 export const REVIEW_FAILED: ModerationAnswer = { verdict: "watch", confidence: 0, reason: "review failed", signals: [] };
 
 /**
+ * Why a review failed (stored on the decision as `error`, and logged; a code, never content):
+ *   unfinished    the review was claimed but never finished (the row's value until it does)
+ *   no_provider   no provider had a key and credit
+ *   timeout       no answer within MODERATION_TIMEOUT_SECONDS
+ *   http_<status> the provider answered with an error status
+ *   network       the call threw (a network error, or the call was cancelled)
+ *   empty_answer  the answer had no text (e.g. reasoning used up the output tokens)
+ *   unparsable    the answer's text isn't a valid verdict
+ */
+export type ModerationFailure = "unfinished" | "no_provider" | "timeout" | `http_${number}` | "network" | "empty_answer" | "unparsable";
+
+/**
  * What was done about a decision:
  *   blocked          blocked and tokens revoked
  *   shadow           would have been blocked, but `moderation` is "shadow"

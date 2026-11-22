@@ -109,6 +109,8 @@ export interface ModerationRow {
   signals: string[];
   action: string;
   model: string;
+  /** Why the review failed (moderation.ts ModerationFailure), or null. */
+  error: string | null;
   at: number;
 }
 
@@ -912,6 +914,8 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["spend_weeks", "internal_credit_usd", "REAL NOT NULL DEFAULT 0"],
   ["spend_weeks", "internal_tokens", "INTEGER NOT NULL DEFAULT 0"],
   ["spend_weeks", "internal_requests", "INTEGER NOT NULL DEFAULT 0"],
+  // Why a moderation review failed (moderation.ts ModerationFailure): a code, never content; NULL when it worked.
+  ["moderation_decisions", "error", "TEXT"],
 ];
 
 /** Days of `daily_activity` whose DeepSeek cost is filled in from the request log when the column is added. */
@@ -2889,8 +2893,8 @@ export class DirectoryObject extends DurableObject {
     if (today >= limits.dailyCap) return "capped";
     return sql
       .exec<{ id: number }>(
-        `INSERT INTO moderation_decisions (github_id, label_id, session_id, category, verdict, confidence, reason, signals, action, model, created_at)
-         VALUES (?, ?, ?, ?, 'watch', 0, 'review failed', '[]', 'none', ?, ?) RETURNING id`,
+        `INSERT INTO moderation_decisions (github_id, label_id, session_id, category, verdict, confidence, reason, signals, action, model, error, created_at)
+         VALUES (?, ?, ?, ?, 'watch', 0, 'review failed', '[]', 'none', ?, 'unfinished', ?) RETURNING id`,
         githubId,
         label.labelId,
         label.sessionId,
@@ -2972,6 +2976,8 @@ export class DirectoryObject extends DurableObject {
     decisionId: number;
     githubId: number;
     answer: ModerationAnswer;
+    /** Why the review failed (ModerationFailure), or null. */
+    failure: string | null;
     action: ModerationAction;
     mode: string;
     label: TriggerLabel;
@@ -2988,13 +2994,14 @@ export class DirectoryObject extends DurableObject {
     return this.ctx.storage.transactionSync(() => {
       if (input.tokens > 0) this.#recordInternalSpend(input);
       sql.exec(
-        "UPDATE moderation_decisions SET verdict = ?, confidence = ?, reason = ?, signals = ?, action = ?, model = ? WHERE id = ?",
+        "UPDATE moderation_decisions SET verdict = ?, confidence = ?, reason = ?, signals = ?, action = ?, model = ?, error = ? WHERE id = ?",
         input.answer.verdict,
         input.answer.confidence,
         input.answer.reason,
         JSON.stringify(input.answer.signals),
         input.action,
         input.model,
+        input.failure,
         input.decisionId,
       );
       if (input.answer.verdict === "pass" && input.action === "none") return [];
@@ -3007,8 +3014,8 @@ export class DirectoryObject extends DurableObject {
   /** Moderation decisions since `since`, newest first, optionally one verdict (GET /admin/moderation). */
   async moderationDecisions(input: { since: number; verdict?: ModerationVerdict; limit: number }): Promise<ModerationRow[]> {
     return this.ctx.storage.sql
-      .exec<{ github_id: number; login: string | null; label_id: number | null; session_id: string | null; category: string; verdict: string; confidence: number; reason: string; signals: string; action: string; model: string; created_at: number }>(
-        `SELECT m.github_id, p.login, m.label_id, m.session_id, m.category, m.verdict, m.confidence, m.reason, m.signals, m.action, m.model, m.created_at
+      .exec<{ github_id: number; login: string | null; label_id: number | null; session_id: string | null; category: string; verdict: string; confidence: number; reason: string; signals: string; action: string; model: string; error: string | null; created_at: number }>(
+        `SELECT m.github_id, p.login, m.label_id, m.session_id, m.category, m.verdict, m.confidence, m.reason, m.signals, m.action, m.model, m.error, m.created_at
          FROM moderation_decisions m LEFT JOIN people p ON p.github_id = m.github_id
          WHERE m.created_at >= ? AND (? IS NULL OR m.verdict = ?)
          ORDER BY m.created_at DESC, m.id DESC LIMIT ?`,
@@ -3038,6 +3045,7 @@ export class DirectoryObject extends DurableObject {
           signals,
           action: row.action,
           model: row.model,
+          error: row.error,
           at: row.created_at,
         };
       });

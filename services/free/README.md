@@ -650,7 +650,12 @@ the request and never awaited by it:
   [detection rules](#detection-rules-detection_rules-private): private in production, generic by
   default. It answers `{"verdict": "block|watch|pass", "confidence": 0..1, "reason", "signals"}`.
   Anything that doesn't parse, an error or a timeout (30 s) is `watch` with confidence 0 and reason
-  "review failed": never a block.
+  "review failed": never a block. Why is stored on the decision as `error` and logged as one line
+  (`moderation review failed: <code>`, never content): `no_provider`, `timeout`, `http_<status>`,
+  `network`, `empty_answer`, `unparsable`, or `unfinished` for a review claimed but never finished.
+- **Runs past the response:** the review (like the use description) is handed to the request's
+  execution context (`waitUntil` on Workers), so it finishes after a short response has been sent;
+  without that, Workers cancels it when the response ends.
 - **The action:** `block` with confidence at least `moderationBlockConfidence` (0.85), with
   `moderation` "enforce", for someone not an admin and not in `moderationAllowlist`, blocks the
   person and revokes their sign-ins and server keys (the admin block and revoke-tokens code path;
@@ -666,11 +671,11 @@ the request and never awaited by it:
   alert above.
 - **Storage:** `moderation_decisions` in the Directory: GitHub id, the label's id and session id,
   category, verdict, confidence, the reviewer's reason and up to five evidence bullets, the action,
-  model and time. Never the request's text: the reviewer is told to quote at most five words, and
+  model, the failure code (if any) and time. Never the request's text: the reviewer is told to quote at most five words, and
   any longer quote (and any code) is cut out before the row is written. Kept 90 days.
 - **Admin:** `GET /admin/moderation?days=7&verdict=block` lists decisions newest first
   (`login`, `githubId`, `verdict`, `confidence`, `reason`, `signals`, `action`, `category`,
-  `sessionId`, `labelId`, `model`, `at`); `verdict` is optional, `limit` 1–1000 (default 200).
+  `sessionId`, `labelId`, `model`, `error`, `at`); `verdict` is optional, `limit` 1–1000 (default 200).
   `action` is `blocked`, `shadow`, `allowlisted`, `admin`, `already_blocked` or `none`.
 
 **Security work kept off GPT-6** (`src/security-route.ts`). OpenAI counts security requests on
