@@ -3637,8 +3637,8 @@ export class DirectoryObject extends DurableObject {
       set.add(row.week);
       weeksByPerson.set(row.github_id, set);
     }
-    const cohort = sql.exec<{ github_id: number; admitted_at: number }>(
-      "SELECT github_id, admitted_at FROM people WHERE admitted_at >= ? AND admitted_at < ?",
+    const cohort = sql.exec<{ github_id: number; admitted_at: number; status: string }>(
+      "SELECT github_id, admitted_at, status FROM people WHERE admitted_at >= ? AND admitted_at < ?",
       from,
       until,
     ).toArray();
@@ -3651,7 +3651,10 @@ export class DirectoryObject extends DurableObject {
       list.push(person.github_id);
       cohorts.set(week, list);
     }
-    const retention = [...cohorts.entries()]
+    // The same with blocked accounts (farms, bots, abuse) left out: the numbers about real people.
+    const blockedIds = new Set(cohort.filter((person) => person.status === "blocked").map((person) => person.github_id));
+    const retentionOf = (cohortMap: Map<number, number[]>) => [...cohortMap.entries()]
+      .filter(([, members]) => members.length > 0)
       .sort(([a], [b]) => a - b)
       .map(([week, members]) => {
         const weeks = [];
@@ -3662,19 +3665,23 @@ export class DirectoryObject extends DurableObject {
         }
         return { signupWeek: isoDay(week), size: members.length, weeks };
       });
+    const retention = retentionOf(cohorts);
+    const retentionNotBlocked = retentionOf(new Map([...cohorts.entries()].map(([week, members]) => [week, members.filter((id) => !blockedIds.has(id))])));
 
     const has = (query: string) => new Set(sql.exec<{ github_id: number }>(query).toArray().map((row) => row.github_id));
     const requested = has("SELECT DISTINCT github_id FROM requests");
     const ended = has("SELECT DISTINCT github_id FROM events WHERE type = 'session.end'");
     const opened = has("SELECT DISTINCT github_id FROM events WHERE type = 'pr.opened'");
-    const ids = cohort.map((person) => person.github_id);
-    const funnel = {
+    const funnelOf = (ids: number[]) => ({
       signedIn: ids.length,
       firstRequest: ids.filter((id) => requested.has(id)).length,
       firstSessionEnd: ids.filter((id) => ended.has(id)).length,
       activeSecondWeek: ids.filter((id) => (weeksByPerson.get(id)?.size ?? 0) >= 2).length,
       firstPrOpened: ids.filter((id) => opened.has(id)).length,
-    };
+    });
+    const ids = cohort.map((person) => person.github_id);
+    const funnel = funnelOf(ids);
+    const funnelNotBlocked = { ...funnelOf(ids.filter((id) => !blockedIds.has(id))), blocked: blockedIds.size };
 
     type TopRow = { github_id: number; login: string | null; is_admin: number; tokens: number; tokens_in: number; cached: number; cost: number; requests: number };
     const byPerson = (order: "tokens" | "cost", limit: number) =>
@@ -3735,6 +3742,7 @@ export class DirectoryObject extends DurableObject {
       githubChecks,
       weeklyActive,
       retention,
+      retentionNotBlocked,
       // Daily retention as the dashboard shows it (the last sign-up days, whatever from and to say):
       // the share of each cohort that made a request on day N after signing up; null until that day
       // has ended. Only people who could use dl: they had free tokens at sign-up.
@@ -3755,6 +3763,7 @@ export class DirectoryObject extends DurableObject {
         adminCostUsd: round(totals?.admin_cost ?? 0),
       },
       funnel,
+      funnelNotBlocked,
       top: { byTokens: byPerson("tokens", top), byCost: byPerson("cost", top) },
       cacheByPerson: byPerson("tokens", 1000).map(({ githubId, login, tokensIn, tokensCached, cachedShare, costUsd }) => ({
         githubId,
