@@ -172,6 +172,23 @@ describe("metrics", () => {
     return service;
   }
 
+  it("also reports the funnel and retention with blocked accounts left out", async () => {
+    const service = await fixture();
+    const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    const get = async () => (await (await service.request("GET", "/admin/metrics?from=2026-10-26&to=2026-11-03", { token: adminToken })).json()) as any;
+    const before = await get();
+    assert.deepEqual(before.funnelNotBlocked, { ...before.funnel, blocked: 0 });
+    assert.deepEqual(before.retentionNotBlocked, before.retention);
+    assert.equal((await service.request("POST", "/admin/people/10/block", { token: adminToken })).status, 200);
+    const after = await get();
+    assert.deepEqual(after.funnel, before.funnel, "the all-accounts funnel is unchanged");
+    assert.equal(after.funnelNotBlocked.blocked, 1);
+    assert.equal(after.funnelNotBlocked.signedIn, before.funnel.signedIn - 1);
+    assert.equal(after.funnelNotBlocked.firstPrOpened, before.funnel.firstPrOpened - 1, "person 10 opened the only PR");
+    const sizes = (r: any[]) => r.reduce((n, c) => n + c.size, 0);
+    assert.equal(sizes(after.retentionNotBlocked), sizes(after.retention) - 1);
+  });
+
   it("computes the daily series, weekly active, retention, funnel and top people", async () => {
     const service = await fixture();
     const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
