@@ -10,8 +10,10 @@ import type { StripeConfig } from "./config.js";
  *                                       tax or the card needs one)
  *   POST /v1/billing_portal/sessions    the Customer Portal, for cancelling or changing the card
  *
- * Prices are Stripe Price ids from config (STRIPE_PRICE_PRO, STRIPE_PRICE_TOPUP); see
- * scripts/stripe-setup.mjs. Webhooks are verified with STRIPE_WEBHOOK_SECRET (`verifyWebhook`).
+ * Pro is priced inline (`price_data`: USD, monthly, the amount from PRO_PRICE_USD_MONTHLY), so no
+ * Stripe Product or Price has to exist before the first checkout. The top-up is a Stripe Price id
+ * from config (STRIPE_PRICE_TOPUP; see scripts/stripe-setup.mjs). Webhooks are verified with
+ * STRIPE_WEBHOOK_SECRET (`verifyWebhook`).
  */
 
 export const STRIPE_API = "https://api.stripe.com";
@@ -66,18 +68,22 @@ export function checkoutParams(input: {
   githubId: number;
   login: string;
   customerId: string | null;
+  /** Pro's monthly price in USD cents (PRO_PRICE_USD_MONTHLY), charged with inline `price_data`. */
+  proPriceCents?: number;
   /** A top-up: how many $1 units to start at, and the range the buyer may change it to on the page. */
   topup?: TopupQuantity;
 }): Record<string, unknown> {
   const { product, config } = input;
-  const price = product === "pro" ? config.pricePro : config.priceTopup;
+  const price = config.priceTopup;
   // `topup_kind: usd`: a dollar top-up (usage dollars); a top-up session without it is the old token kind.
   const metadata = { github_id: String(input.githubId), github_login: input.login, product, ...(product === "topup" ? { topup_kind: "usd" } : {}) };
   const topup = input.topup;
   const line =
     product === "topup" && topup
       ? { price, quantity: topup.quantity, adjustable_quantity: { enabled: true, minimum: topup.minQuantity, maximum: topup.maxQuantity } }
-      : { price, quantity: 1 };
+      : product === "pro"
+        ? { price_data: proPriceData(input.proPriceCents), quantity: 1 }
+        : { price, quantity: 1 };
   return {
     mode: product === "pro" ? "subscription" : "payment",
     line_items: [line],
@@ -100,6 +106,25 @@ export function checkoutParams(input: {
   };
 }
 
+/** The name Pro's inline price shows on Checkout, receipts and the Customer Portal. */
+export const PRO_PRODUCT_NAME = "dl Pro";
+
+/**
+ * Pro's inline price: USD, every month, tax added on top (exclusive, as the top-up's Price is).
+ * Stripe keeps the price it creates for the subscription; nothing is set up ahead of time.
+ */
+export function proPriceData(cents: number | undefined): Record<string, unknown> {
+  if (cents === undefined || !Number.isSafeInteger(cents) || cents <= 0) throw new StripeError("Pro has no price set.", 503);
+  return {
+    currency: "usd",
+    unit_amount: cents,
+    recurring: { interval: "month" },
+    tax_behavior: "exclusive",
+    // The same tax code as scripts/stripe-setup.mjs gives its products (electronically supplied services).
+    product_data: { name: PRO_PRODUCT_NAME, tax_code: "txcd_10000000", metadata: { product: "pro" } },
+  };
+}
+
 /** A dollar top-up's quantity ($1 units) and the range Checkout lets the buyer adjust it in. */
 export interface TopupQuantity {
   quantity: number;
@@ -109,7 +134,7 @@ export interface TopupQuantity {
 
 export async function createCheckout(
   fetcher: Fetch,
-  input: { product: Product; config: StripeConfig; githubId: number; login: string; customerId: string | null; idempotencyKey: string; topup?: TopupQuantity },
+  input: { product: Product; config: StripeConfig; githubId: number; login: string; customerId: string | null; idempotencyKey: string; proPriceCents?: number; topup?: TopupQuantity },
 ): Promise<{ id: string; url: string }> {
   let session: Record<string, unknown>;
   try {

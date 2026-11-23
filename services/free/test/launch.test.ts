@@ -115,7 +115,7 @@ async function spendLive(service: Service, usd: number): Promise<void> {
 const chat = (service: Service, token: string) => service.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } });
 
 const OFFERS = {
-  pro: { priceUsdMonthly: 3.99, price: "$3.99/month", tokensPerWeek: 300_000_000, usdPerWeek: 6, deepseekUsdPerWeek: 40, valueLine: "Lots of DeepSeek every week, plus more GPT-6." },
+  pro: { priceUsdMonthly: 7, price: "$7/month", tokensPerWeek: 300_000_000, usdPerWeek: 2, deepseekUsdPerWeek: 32, openModelsMultiplier: 4, valueLine: "Higher limits and early access to new models." },
   topup: { unitPriceUsd: 1, minQuantity: 2, maxQuantity: 20, usageMultiplier: 1.25, validDays: 90, fromPrice: "$2" },
 };
 
@@ -561,10 +561,15 @@ describe("402 quota_exceeded", () => {
     assert.equal(response.status, 402);
     const error = ((await response.json()) as { error: Record<string, unknown> }).error;
     assert.equal(error.code, "quota_exceeded");
-    assert.deepEqual(error.offers, OFFERS);
+    // Pro's DeepSeek is 4x the free budget, so 0 here too.
+    assert.deepEqual(error.offers, { ...OFFERS, pro: { ...OFFERS.pro, deepseekUsdPerWeek: 0 } });
     assert.equal(error.referralLink, "https://dl.new/r/alice");
     assert.equal(error.resetsAt, new Date(NEXT_MONDAY).toISOString());
     assert.equal(error.reason, "spend");
+    // dl Pro's prompt: the open models' week is used up and Pro is offered.
+    const text = "You've hit this week's free limit. dl Pro: $7/month for higher limits and early access to new models.";
+    assert.deepEqual(error.proPrompt, { text, price: "$7/month", upgradeUrl: "https://dl.new/account" });
+    assert.equal(error.message, `${text} Upgrade: https://dl.new/account`);
   });
 });
 

@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { ADMIN_ID, allowServerKeys, completion, createService, MODEL, usage, type Service } from "./harness.js";
 import { ConfigError, readFreeConfig } from "../src/config.js";
 // app.js imports cloudflare:workers, which the harness maps once it has loaded.
-const { ADMIN_PEOPLE_CONCURRENCY, mapLimited, offers, topupUsage, usdLabel } = await import("../src/app.js");
+const { ADMIN_PEOPLE_CONCURRENCY, mapLimited, offers, proDeepseekWeeklyUsd, topupUsage, usdLabel } = await import("../src/app.js");
 import type { Limits } from "../src/account-object.js";
 
 /**
- * dl Pro as the way to keep going: its price shown exactly ("$3.99/month"), its weekly dollar
+ * dl Pro as the way to keep going: its price shown exactly ("$7/month"), its weekly dollar
  * ceiling held like the free caps, top-ups bounded by their tokens, and the admin people list
  * staying within a bounded number of Durable Object calls at a time.
  */
@@ -19,15 +19,16 @@ function config(vars: Record<string, string> = {}) {
 }
 
 describe("the Pro offer", () => {
-  it("defaults to $3.99 a month with $6 of GPT-6 and $40 of DeepSeek a week, and dollar top-ups from $2", () => {
+  it("defaults to $7 a month with 4x the free DeepSeek ($32 a week), the free plan's GPT-6, and dollar top-ups from $2", () => {
     const shown = offers(config());
     assert.deepEqual(shown.pro, {
-      priceUsdMonthly: 3.99,
-      price: "$3.99/month",
+      priceUsdMonthly: 7,
+      price: "$7/month",
       tokensPerWeek: 300_000_000,
-      usdPerWeek: 6,
-      deepseekUsdPerWeek: 40,
-      valueLine: "Lots of DeepSeek every week, plus more GPT-6.",
+      usdPerWeek: 2,
+      deepseekUsdPerWeek: 32,
+      openModelsMultiplier: 4,
+      valueLine: "Higher limits and early access to new models.",
     });
     // The value line names no amounts: they are runtime settings.
     assert.doesNotMatch(shown.pro.valueLine, /\$|\d+x|\d+M/);
@@ -55,21 +56,26 @@ describe("the Pro offer", () => {
     assert.throws(() => config({ PRO_VALUE_LINE: "x".repeat(81) }), ConfigError);
   });
 
-  it("has a $6 weekly GPT-6 ceiling and $40 of DeepSeek by default; \"none\" means tokens only", () => {
-    assert.equal(config().proWeeklyUsdCap, 6);
-    assert.equal(config().proDeepseekWeeklyUsdCap, 40);
-    assert.equal(config({ PRO_DEEPSEEK_WEEKLY_USD_CAP: "none" }).proDeepseekWeeklyUsdCap, undefined);
-    assert.equal(config({ PRO_WEEKLY_USD_CAP: "12.5" }).proWeeklyUsdCap, 12.5);
-    assert.equal(config({ PRO_WEEKLY_USD_CAP: "none" }).proWeeklyUsdCap, undefined);
-    assert.equal(offers(config({ PRO_WEEKLY_USD_CAP: "none" })).pro!.usdPerWeek, null);
+  it("gives Pro 4x the free open-models budget by default (PRO_OPEN_MODELS_MULTIPLIER), and no GPT-6 of its own", () => {
+    assert.equal(config().proOpenModelsMultiplier, 4);
+    assert.equal(config({ PRO_OPEN_MODELS_MULTIPLIER: "2.5" }).proOpenModelsMultiplier, 2.5);
+    assert.throws(() => config({ PRO_OPEN_MODELS_MULTIPLIER: "0.5" }), ConfigError);
+    assert.throws(() => config({ PRO_OPEN_MODELS_MULTIPLIER: "abc" }), ConfigError);
+    assert.equal(proDeepseekWeeklyUsd(config()), 32, "4 x the $8 free DeepSeek budget");
+    assert.equal(proDeepseekWeeklyUsd(config({ DEEPSEEK_WEEKLY_USD_CAP: "none" })), null);
+    const pro = offers(config()).pro!;
+    assert.equal(pro.deepseekUsdPerWeek, 32);
+    assert.equal(pro.openModelsMultiplier, 4);
+    assert.equal(pro.usdPerWeek, config().perPersonWeeklyUsdCap, "GPT-6: the free plan's, never more");
+    assert.equal(pro.price, "$7/month");
   });
 
-  it("matches the deployed config: Pro $3.99 with a $6 GPT-6 ceiling, top-ups $2 to $20 at 1.25x for 90 days", async () => {
+  it("matches the deployed config: Pro $7, top-ups $2 to $20 at 1.25x for 90 days", async () => {
     const { readFile } = await import("node:fs/promises");
     const raw = await readFile(new URL("../wrangler.cloudflare.jsonc", import.meta.url), "utf8");
     const vars = (JSON.parse(raw.replace(/^\s*\/\/.*$/gm, "")) as { vars: Record<string, string> }).vars;
-    assert.equal(vars.PRO_PRICE_USD_MONTHLY, "3.99");
-    assert.equal(vars.PRO_WEEKLY_USD_CAP, "6");
+    assert.equal(vars.PRO_PRICE_USD_MONTHLY, "7");
+    assert.equal(vars.PRO_WEEKLY_USD_CAP, undefined, "Pro has no GPT-6 budget of its own");
     assert.equal(vars.TOPUP_UNIT_PRICE_USD, "1");
     assert.equal(vars.TOPUP_MIN_QUANTITY, "2");
     assert.equal(vars.TOPUP_MAX_QUANTITY, "20");
@@ -81,7 +87,7 @@ describe("the Pro offer", () => {
 });
 
 const SECRET = "whsec_test_0123456789abcdef";
-const BILLING = { STRIPE_SECRET_KEY: "sk_test_fake", STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_PRICE_PRO: "price_pro123", STRIPE_PRICE_TOPUP: "price_topup123" };
+const BILLING = { STRIPE_SECRET_KEY: "sk_test_fake", STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_PRICE_TOPUP: "price_topup123" };
 
 async function goPro(svc: Service, githubId: number): Promise<void> {
   const { signatureHeader } = await import("../src/stripe.js");
@@ -103,7 +109,7 @@ async function goPro(svc: Service, githubId: number): Promise<void> {
 }
 
 describe("Pro's weekly dollar ceiling", () => {
-  it("stops Pro's DeepSeek at $40 a week through the API, as a spend limit, and says it is Pro's", async () => {
+  it("stops Pro's DeepSeek at $32 a week (4x free) through the API, as a spend limit, and says it is Pro's", async () => {
     const svc = await createService({ ...BILLING, OPEN_ADMISSION: "true" });
     const admin = (await svc.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
     const tokens = await svc.signIn({ id: 100, login: "user100" });
@@ -112,15 +118,17 @@ describe("Pro's weekly dollar ceiling", () => {
     await goPro(svc, 100);
     const me = (await (await svc.request("GET", "/v1/me", { token: key })).json()) as { plan: string; allowance: { usdPerWeek: number | null } };
     assert.equal(me.plan, "pro");
-    assert.equal(me.allowance.usdPerWeek, 6);
+    assert.equal(me.allowance.usdPerWeek, 2, "GPT-6: the free plan's $2, Pro adds none");
 
     svc.setOpenRouter(() => completion(usage(1000, 1000, 0, 0.01)));
     const chat = () => svc.request("POST", "/v1/chat/completions", { token: key, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } });
     assert.equal((await chat()).status, 200);
     // GPT-6's Pro week used up doesn't touch DeepSeek's.
-    await svc.request("POST", "/admin/people/100/grant", { token: admin, body: { spentUsdThisWeek: 6 } });
+    await svc.request("POST", "/admin/people/100/grant", { token: admin, body: { spentUsdThisWeek: 2 } });
     assert.equal((await chat()).status, 200);
-    await svc.request("POST", "/admin/people/100/grant", { token: admin, body: { deepseekSpentUsdThisWeek: 40 } });
+    await svc.request("POST", "/admin/people/100/grant", { token: admin, body: { deepseekSpentUsdThisWeek: 31.9 } });
+    assert.equal((await chat()).status, 200, "8 x 4 = $32: more than the free $8");
+    await svc.request("POST", "/admin/people/100/grant", { token: admin, body: { deepseekSpentUsdThisWeek: 32 } });
     const refused = await chat();
     assert.equal(refused.status, 402);
     const error = ((await refused.json()) as { error: { code: string; reason: string; message: string } }).error;
@@ -134,7 +142,8 @@ describe("Pro's weekly dollar ceiling", () => {
     await svc.signIn({ id: 100, login: "user100" });
     const account = svc.account(100) as any;
     await account.applySubscription({ subscriptionId: "sub_1", state: "active", periodEnd: svc.clock.now + 30 * 86_400_000, eventAt: 1 });
-    const limits: Limits = { weeklyTokens: 50_000_000, weeklyUsd: 0.1, proTokensPerWeek: 300_000_000, proUsdPerWeek: config().proWeeklyUsdCap };
+    // Pro's GPT-6 budget is the free plan's ($6 here).
+    const limits: Limits = { weeklyTokens: 50_000_000, weeklyUsd: 6, proTokensPerWeek: 300_000_000 };
     const reserve = () => account.reserve({ pool: "astra", promptEstimate: 100_000, requestedMaxTokens: undefined, limits, now: svc.clock.now, model: "gpt-6-astra" });
     const results = await Promise.all(Array.from({ length: 40 }, reserve));
     const held = results.filter((r) => r.ok);

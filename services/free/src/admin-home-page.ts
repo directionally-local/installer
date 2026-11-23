@@ -21,7 +21,7 @@ export interface AdminHomeInput {
   data: AdminHomeData;
   spend: SpendView;
   /** `proOffered`: the runtime setting; false hides Pro from everyone new (left out: offered). */
-  settings: LevelSettings & { proWeeklyUsd: number | null; proDeepseekWeeklyUsd: number | null; proPriceUsdMonthly: number; proOffered?: boolean };
+  settings: LevelSettings & { proOpenModelsMultiplier?: number; proDeepseekWeeklyUsd: number | null; proPriceUsdMonthly: number; proOffered?: boolean };
   login: string;
   signOut: boolean;
   /** dl.new's web sign-up funnel, per day (web-signup.ts); the card is left out without it. */
@@ -81,13 +81,14 @@ export function planLabel(user: Pick<AdminUserRow, "plan" | "status">): (typeof 
 }
 
 /**
- * A person's weekly dollar caps and what's left this week. Pro (and past due) get Pro's caps;
+ * A person's weekly dollar caps and what's left this week. Pro (and past due) get Pro's DeepSeek
+ * cap and the free plan's GPT-6 cap (Pro adds no GPT-6);
  * everyone else their personal cap if an admin set one, else their level's. Remaining is the
  * GPT-6 budget less this week's GPT-6 spend from the daily roll-up (an admin's weekly reset
  * isn't seen there); none for Pro, whose use is paid, for blocked accounts, and for no cap.
  */
 export function userCaps(user: AdminUserRow, settings: AdminHomeInput["settings"]): { usd: number | null; deepseekUsd: number | null; own: boolean; remaining: number | null; deepseekRemaining: number | null } {
-  if (user.plan === "pro" || user.plan === "past_due") return { usd: settings.proWeeklyUsd, deepseekUsd: settings.proDeepseekWeeklyUsd, own: false, remaining: null, deepseekRemaining: null };
+  if (user.plan === "pro" || user.plan === "past_due") return { usd: settings.perPersonWeeklyUsd, deepseekUsd: settings.proDeepseekWeeklyUsd, own: false, remaining: null, deepseekRemaining: null };
   const allowance = realAllowance({ level: user.level, batchFlagged: user.batchFlagged, grantTokens: user.grantTokens, grantUsd: user.grantUsd, allocatorStage: user.allocatorStage }, settings);
   const blocked = user.status === "blocked";
   return {

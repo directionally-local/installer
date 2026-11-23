@@ -325,14 +325,14 @@ describe("pre-send checks on GPT-6 requests", () => {
 });
 
 describe("GPT-6 trust gate", () => {
-  const facts = (over: Partial<TrustFacts> = {}): TrustFacts => ({ known: true, status: "active", level: "full", batchFlagged: false, paid: false, activeWeeks: 2, multiTurn: true, highRiskLabel: false, moderation: false, ...over });
+  const facts = (over: Partial<TrustFacts> = {}): TrustFacts => ({ known: true, status: "active", level: "full", batchFlagged: false, activeWeeks: 2, multiTurn: true, highRiskLabel: false, moderation: false, ...over });
 
-  it("rules: admin, paid, or earned use with a clean record", () => {
+  it("rules: admin, or earned use with a clean record (paying is not a trust signal)", () => {
     assert.deepEqual(trustOf(facts(), false), { trusted: true, reasons: ["earned"] });
     assert.deepEqual(trustOf(facts({ level: "starter" }), true), { trusted: true, reasons: ["admin"] });
-    assert.deepEqual(trustOf(facts({ level: "starter", activeWeeks: 0, multiTurn: false, paid: true }), false), { trusted: true, reasons: ["paid"] });
+    assert.deepEqual(trustOf(facts({ level: "starter", activeWeeks: 0, multiTurn: false }), false), { trusted: false, reasons: ["level", "weeks", "multi_turn"] });
     assert.deepEqual(trustOf(facts({ level: "basic", activeWeeks: 1, multiTurn: false, highRiskLabel: true, moderation: true, batchFlagged: true }), false).reasons, ["level", "batch_flagged", "weeks", "multi_turn", "high_risk_label", "moderation"]);
-    assert.deepEqual(trustOf(facts({ status: "blocked", paid: true }), false), { trusted: false, reasons: ["inactive"] });
+    assert.deepEqual(trustOf(facts({ status: "blocked" }), false), { trusted: false, reasons: ["inactive"] });
   });
 
   it("off by default (cap 0): nothing changes", async () => {
@@ -361,15 +361,26 @@ describe("GPT-6 trust gate", () => {
     assert.deepEqual(unknown.allowed, [MODEL]);
   });
 
-  it("trusts a person who paid (a top-up), served within the trusted cap", async () => {
+  it("never trusts a person for paying: a top-up, a Pro payment or an active Pro subscription leaves GPT-6 refused", async () => {
     // Production-like: no GPT-6 for the free plan, the trusted budget only.
     const { service, token } = await world({ GPT6_TRUSTED_WEEKLY_USD_CAP: "5", PER_PERSON_WEEKLY_USD_CAP: "0" });
     await service.directory().recordPayment({ id: "pi_1", githubId: 100, kind: "topup", amountCents: 300, at: service.clock.now - DAY });
+    await service.directory().recordPayment({ id: "in_1", githubId: 100, kind: "pro", amountCents: 700, at: service.clock.now - DAY });
+    await service.directory().mirrorSubscription({ githubId: 100, state: "active", periodEnd: service.clock.now + 30 * DAY, eventAt: service.clock.now - DAY });
     const response = await chat(service, token, AUTOPILOT, "s-1");
-    assert.equal(response.status, 200, await response.clone().text());
-    assert.equal(service.calls.openai.length, 1);
+    assert.equal(response.status, 402);
+    assert.equal((await errorOf(response)).reason, "trust");
+    assert.equal(service.calls.openai.length, 0);
     const models = (await (await service.request("GET", "/v1/models", { token })).json()) as { data: Array<{ id: string }> };
-    assert.ok(models.data.some((model) => model.id === LUNA), "GPT-6 is listed for a trusted person");
+    assert.ok(!models.data.some((model) => model.id === LUNA), "GPT-6 isn't listed for someone who only paid");
+  });
+
+  it("works out again a trust cached as \"paid\" before paying stopped counting", async () => {
+    const { service, token } = await world({ GPT6_TRUSTED_WEEKLY_USD_CAP: "5", PER_PERSON_WEEKLY_USD_CAP: "0" });
+    sql(service, "INSERT INTO gpt6_trust (github_id, trusted, reasons, computed_at) VALUES (100, 1, '[\"paid\"]', ?)", service.clock.now);
+    const response = await chat(service, token, AUTOPILOT, "s-1");
+    assert.equal(response.status, 402);
+    assert.equal((await errorOf(response)).reason, "trust");
   });
 
   it("trusts an Autopilot user who earned it: two active weeks and a 5-turn session from events", async () => {
@@ -415,11 +426,6 @@ describe("GPT-6 trust gate", () => {
 
   it("a high-risk label removes earned trust at once", async () => {
     const { service, token } = await world({ GPT6_TRUSTED_WEEKLY_USD_CAP: "5", PER_PERSON_WEEKLY_USD_CAP: "0", GPT6_PRESEND_GUARD: "off" });
-    await service.directory().recordPayment({ id: "pi_1", githubId: 100, kind: "topup", amountCents: 300, at: service.clock.now - DAY });
-    // Paid trust: served. Then the payment is gone, and trust is earned instead.
-    assert.equal((await chat(service, token, simple("hi"), "s-1")).status, 200);
-    sql(service, "DELETE FROM payments");
-    sql(service, "DELETE FROM gpt6_trust");
     assert.equal((await chat(service, token, simple("hi", MODEL), "s-1")).status, 200);
     await turns(service, token, "s-1", 5);
     const next = await later(service, 7 * DAY);

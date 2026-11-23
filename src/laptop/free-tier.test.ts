@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { autopilotAuth, parseActiveProvider } from "./autopilot.js";
-import { autopilotConfigFile, formatTokens, formatUsd, freeTierAccount, freeTierLine, loginFromToken, type FreeTierOptions } from "./free-tier.js";
+import { autopilotConfigFile, formatTokens, formatUsd, freeTierAccount, freeTierLine, freeTierProPrompt, loginFromToken, type FreeTierOptions } from "./free-tier.js";
 
 const NOW = Date.parse("2026-11-04T03:00:00.000Z"); // Wednesday 12:00 in Tokyo
 const RESETS = "2026-11-09T00:00:00.000Z"; // Monday 00:00 UTC, the service's week end
@@ -116,6 +116,25 @@ describe("the free tier account in dl status", () => {
     for (const [email, expected] of [["octo@example.com", "octo@example.com"], ["not an email", undefined], [42, undefined], [null, undefined]] as const) {
       const { options } = stubs({ apiKey: ACCESS }, () => Response.json({ login: "octo", email }));
       assert.equal((await freeTierAccount(options))?.email, expected);
+    }
+  });
+
+  it("carries dl Pro's prompt when the service sends one, and asks it to count as seen only when dl status shows it", async () => {
+    const text = "You've hit this week's free limit. dl Pro: $7/month for higher limits and early access to new models.";
+    const body = { login: "octo", proPrompt: { text, price: "$7/month", upgradeUrl: "https://dl.new/account" } };
+    const shown = stubs({ apiKey: ACCESS }, () => Response.json(body));
+    const account = await freeTierAccount({ ...shown.options, showsProPrompt: true });
+    assert.deepEqual(account?.proPrompt, { text, upgradeUrl: "https://dl.new/account" });
+    assert.equal(freeTierProPrompt(account!), `${text} Upgrade: https://dl.new/account`);
+    assert.match(shown.calls[0]!.url, /\/v1\/me\?prompt=shown$/);
+    const quiet = stubs({ apiKey: ACCESS }, () => Response.json(body));
+    await freeTierAccount(quiet.options);
+    assert.match(quiet.calls[0]!.url, /\/v1\/me$/);
+    for (const proPrompt of [null, { text }, { text, upgradeUrl: "javascript:alert(1)" }, { text: 42, upgradeUrl: "https://dl.new/account" }]) {
+      const { options } = stubs({ apiKey: ACCESS }, () => Response.json({ login: "octo", proPrompt }));
+      const read = await freeTierAccount(options);
+      assert.equal(read?.proPrompt, undefined);
+      assert.equal(freeTierProPrompt(read!), undefined);
     }
   });
 

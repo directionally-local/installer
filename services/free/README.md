@@ -74,8 +74,8 @@ Off until the owner sets `trialCutoff` (a runtime setting, below). Then:
   `referralBonusTokens` (10M) once to **both** people's trial, up to `referralBonusCap` (50M) per
   person (see [Referrals](#referrals)). `trial.tokens` includes it.
 - Pro and top-ups work past the trial as they always do, and don't count against it. Pro for a
-  trial account is the same weekly allowance current free users get when `proWeeklyUsdCap` and
-  `proDeepseekWeeklyUsdCap` are set to the free levels (2 and 8).
+  trial account is the same weekly allowance current free users get when
+  `proOpenModelsMultiplier` is 1.
 - The count (`account.trial_used`) is every free (unpaid weekly) token since this shipped, kept
   for everyone but only applied to trial accounts.
 
@@ -210,10 +210,11 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
   "queue": null,                        // or { "position": 214, "etaAt": "2026-11-16T00:00:00.000Z", "waiting": 300 }
   "referral": { "code": "alice", "link": "https://dl.new/r/alice", "joined": 2, "activeThisWeek": 1,
                 "bonusTokensPerWeek": 10000000, "bonusCapPerWeek": 50000000 },
-  "offers": { "pro": { "priceUsdMonthly": 3.99, "price": "$3.99/month", "tokensPerWeek": 300000000, "usdPerWeek": 6,
-                       "deepseekUsdPerWeek": 40, "valueLine": "Lots of DeepSeek every week, plus more GPT-6." },
+  "offers": { "pro": { "priceUsdMonthly": 7, "price": "$7/month", "tokensPerWeek": 300000000, "usdPerWeek": 2,
+                       "deepseekUsdPerWeek": 32, "openModelsMultiplier": 4, "valueLine": "Higher limits and early access to new models." },
               "topup": { "unitPriceUsd": 1, "minQuantity": 2, "maxQuantity": 20, "usageMultiplier": 1.25, "validDays": 90, "fromPrice": "$2" } },
-  "trial": null                         // or, for a trial account: { "tokens": 10000000, "used": 3800000, "remaining": 6200000, "ended": false }
+  "trial": null,                        // or, for a trial account: { "tokens": 10000000, "used": 3800000, "remaining": 6200000, "ended": false }
+  "proPrompt": null                     // or dl Pro's prompt (below): { "text": "…", "price": "$7/month", "upgradeUrl": "https://dl.new/account" }
 }
 ```
 
@@ -227,15 +228,20 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
 - A personal cap (an admin's grant) replaces the GPT-6 budget; DeepSeek's is then the larger of
   the personal cap and the plan's DeepSeek budget.
 - With Pro, `allowance` is Pro's: 300M tokens a week (`PRO_TOKENS_PER_WEEK`), no referral bonus,
-  and $6 of GPT-6 and $40 of DeepSeek a week (`PRO_WEEKLY_USD_CAP`, `PRO_DEEPSEEK_WEEKLY_USD_CAP`), held like the
-  free caps (settled spend plus the estimates of requests in flight). `queue` is null for Pro (a place in
+  `proOpenModelsMultiplier` (4) times the free DeepSeek budget ($32 a week by default), and the
+  free plan's GPT-6 budget (Pro adds no GPT-6), held like the free caps (settled spend plus the
+  estimates of requests in flight). `queue` is null for Pro (a place in
   line is kept in case Pro ends).
 - `referral.joined`: sign-ups with this person's code that count. `activeThisWeek`: those friends
   whose pair counts toward this week's bonus (see [Referrals](#referrals)).
 - `offers` come from config (`PRO_PRICE_USD_MONTHLY` in dollars and cents, `PRO_TOKENS_PER_WEEK`,
-  `PRO_WEEKLY_USD_CAP`, `PRO_VALUE_LINE`, `TOPUP_UNIT_PRICE_USD`, `TOPUP_MIN_QUANTITY`,
+  `PRO_OPEN_MODELS_MULTIPLIER`, `PRO_VALUE_LINE`, `TOPUP_UNIT_PRICE_USD`, `TOPUP_MIN_QUANTITY`,
   `TOPUP_MAX_QUANTITY`, `TOPUP_USAGE_MULTIPLIER`, `TOPUP_VALID_DAYS`). `pro.price` is the exact
-  text to show ("$3.99/month"): clients never round it.
+  text to show ("$7/month"): clients never round it.
+- `proPrompt` (dl Pro, phase 1): for a free account (not on the trial, not queued, not an admin)
+  whose week of open models (DeepSeek) is used up, while `proOffered` is on: the exact text, the
+  price and where Upgrade goes (`https://dl.new/account`). `GET /v1/me?prompt=shown` (what
+  `dl status` sends) also counts it as seen; a plain read doesn't.
 
 ### Refusals for free tokens (`POST /v1/chat/completions`, HTTP 402)
 
@@ -244,8 +250,23 @@ Out of tokens (a free user):
 ```json
 { "error": { "code": "quota_exceeded", "message": "This week's free token allowance is used up. It resets at 2026-11-09T00:00:00.000Z.",
              "reason": "tokens", "resetsAt": "2026-11-09T00:00:00.000Z",
-             "offers": { "pro": { "priceUsdMonthly": 3.99, "price": "$3.99/month", "...": "…" }, "topup": { "unitPriceUsd": 1, "minQuantity": 2, "...": "…" } },
+             "offers": { "pro": { "priceUsdMonthly": 7, "price": "$7/month", "...": "…" }, "topup": { "unitPriceUsd": 1, "minQuantity": 2, "...": "…" } },
              "referralLink": "https://dl.new/r/alice" } }
+```
+
+Open models (DeepSeek) used up on the free plan while Pro is offered (`proOffered`): dl Pro's
+prompt (phase 1), as the message with its Upgrade link and as `proPrompt` for clients that show
+their own [Upgrade] (Autopilot opens Checkout from `/upgrade`). Counted as seen (pro-funnel.ts).
+A basic or Starter account gets it in `basic_limit`/`starter_limit` too, with ", or type
+/request in dl and tell us what you're building." added. While Pro isn't offered, the messages
+below.
+
+```json
+{ "error": { "code": "quota_exceeded",
+             "message": "You've hit this week's free limit. dl Pro: $7/month for higher limits and early access to new models. Upgrade: https://dl.new/account",
+             "proPrompt": { "text": "You've hit this week's free limit. dl Pro: $7/month for higher limits and early access to new models.",
+                            "price": "$7/month", "upgradeUrl": "https://dl.new/account" },
+             "reason": "spend", "resetsAt": "2026-11-09T00:00:00.000Z", "offers": { "...": "as above" }, "referralLink": "https://dl.new/r/alice" } }
 ```
 
 GPT-6's week used up while DeepSeek's isn't (free or Pro; Pro's message leaves the offer out):
@@ -264,7 +285,7 @@ Queued:
 { "error": { "code": "free_tier_queued",
              "message": "You're #214 in line for free tokens (about 3 days). Each friend who starts using dl moves you up. Your own key works now.",
              "position": 214, "etaAt": "2026-11-09T00:00:00.000Z",
-             "offers": { "pro": { "priceUsdMonthly": 3.99, "price": "$3.99/month", "...": "…" }, "topup": { "unitPriceUsd": 1, "minQuantity": 2, "...": "…" } },
+             "offers": { "pro": { "priceUsdMonthly": 7, "price": "$7/month", "...": "…" }, "topup": { "unitPriceUsd": 1, "minQuantity": 2, "...": "…" } },
              "referralLink": "https://dl.new/r/alice" } }
 ```
 
@@ -287,7 +308,7 @@ A trial account's trial used up (free plan, no top-up left), whatever the model:
 
 ```json
 { "error": { "code": "trial_ended",
-             "message": "Your 10M free trial tokens are used up. Keep going with dl Pro for $3.99 a month, or add a top-up: /upgrade",
+             "message": "Your 10M free trial tokens are used up. Keep going with dl Pro for $7 a month, or add a top-up: /upgrade",
              "trial": { "tokens": 10000000, "used": 10000000, "remaining": 0, "ended": true },
              "offers": { "...": "as above" } } }
 ```
@@ -430,9 +451,12 @@ Sent by the free tier service. The message and the reply address aren't stored a
 
 ## Paid plans (Stripe)
 
-- **Pro**, $3.99 a month: up to $6 of GPT-6 (`PRO_WEEKLY_USD_CAP`) and $40 of DeepSeek
-  (`PRO_DEEPSEEK_WEEKLY_USD_CAP`) a week, in place of the free allowance; its 300M weekly tokens
-  sit above what the GPT-6 budget buys, so the dollars are what bind. Pro starts when its Checkout completes and stays on while the subscription is active and
+- **Pro** (dl Pro), $7 a month (`PRO_PRICE_USD_MONTHLY`), USD, monthly, no trial, no coupons,
+  no annual plan: `proOpenModelsMultiplier` (default 4, `PRO_OPEN_MODELS_MULTIPLIER`, also a
+  runtime setting) times the free DeepSeek budget ($32 of DeepSeek a week against the free $8),
+  in place of the free allowance. DeepSeek stays free for everyone; Pro is more of it (and, in a
+  later phase, new models first). Pro adds **no GPT-6**: its GPT-6 budget is the free plan's, and
+  paying is not a trust signal for the GPT-6 trust gate (`gpt6-trust.ts`). Pro starts when its Checkout completes and stays on while the subscription is active and
   its paid period (plus 3 days' grace for a late renewal webhook) hasn't ended.
 - **Top-up**, $2 to $20 once (2 to 20 units of a $1 price, adjustable on Checkout): each $1
   adds $1.25 of usage dollars (`TOPUP_USAGE_MULTIPLIER`), valid 90 days, spent only after the
@@ -448,8 +472,10 @@ Sent by the free tier service. The message and the reply address aren't stored a
   spend alerts or the queue forecast. The kill switch still stops everything.
 - **Checkout** is created server-side with Stripe Tax (`automatic_tax[enabled]=true`) and the
   billing address collected (`billing_address_collection=required`; an existing customer gets
-  `customer_update[address]=auto`). Prices are Stripe Price ids from config, never amounts in
-  code. The GitHub id rides along as `client_reference_id` and metadata on the session, the
+  `customer_update[address]=auto`). Pro is priced inline (`line_items[0][price_data]`: USD,
+  `PRO_PRICE_USD_MONTHLY` in cents, `recurring[interval]=month`, tax-exclusive, product "dl Pro"),
+  so no Pro Product or Price has to exist before the first checkout; the top-up is a Stripe
+  Price id from config (`STRIPE_PRICE_TOPUP`). The GitHub id rides along as `client_reference_id` and metadata on the session, the
   subscription and the payment.
 - **Webhook** `POST /v1/billing/webhook`: the `Stripe-Signature` header is verified
   (HMAC-SHA256 of `<t>.<raw body>` with `STRIPE_WEBHOOK_SECRET`, 5-minute tolerance), and each
@@ -466,6 +492,15 @@ Sent by the free tier service. The message and the reply address aren't stored a
   | `customer.subscription.updated` | `active`/`trialing` → Pro; `past_due`, `unpaid`, `incomplete` → free; period end and cancel-at-period-end kept |
   | `customer.subscription.deleted` | free |
 
+- **dl Pro's funnel** (`pro-funnel.ts`), per UTC day, each person once a step a day (a hash of
+  the GitHub id with that day's random salt, both dropped once the day is over; counts are all
+  that's kept): **seen** (a coding agent got the prompt's 402, `dl status` showed it with
+  `?prompt=shown`, or dl.new/account showed it), **clicked** (a Pro checkout started: Autopilot's
+  `/upgrade` or the limit screen, `POST /web/checkout`), **paid** (`checkout.session.completed` for
+  Pro) and **cancelled** (a subscription first set to end at its period's end, or ended without
+  that). Admins aren't counted. `GET /v1/admin/metrics` has `proFunnel: {days: [{day, seen,
+  clicked, paid, cancelled}], activePro}`, and the daily digest one line under `Paid:`:
+  `dl Pro: 12 saw the prompt, 3 clicked Upgrade, 1 paid, 0 cancelled (total active Pro: 4)`.
 - **Revenue** on the dashboard is before tax (`amount_subtotal` of a top-up session,
   `total_excluding_tax` of a Pro invoice), in USD.
 
@@ -473,9 +508,10 @@ Sent by the free tier service. The message and the reply address aren't stored a
 
 1. **Products and prices.** In test mode first:
    `STRIPE_SECRET_KEY=sk_test_… node services/free/scripts/stripe-setup.mjs --webhook https://free.directionallylocal.com/v1/billing/webhook`
-   creates "dl Pro" ($3.99/month) and "dl top-up" ($1.00 once, bought 2 to 20 at a time), both tax-exclusive
-   with tax code `txcd_10000000`, and the webhook endpoint, and prints `STRIPE_PRICE_PRO`,
-   `STRIPE_PRICE_TOPUP` and `STRIPE_WEBHOOK_SECRET`. For live mode, create the same in the
+   creates "dl top-up" ($1.00 once, bought 2 to 20 at a time), tax-exclusive
+   with tax code `txcd_10000000`, and the webhook endpoint, and prints
+   `STRIPE_PRICE_TOPUP` and `STRIPE_WEBHOOK_SECRET`. dl Pro needs no Product or Price: Checkout
+   prices it inline. For live mode, create the same in the
    Dashboard (the script refuses live keys).
 2. **Stripe Tax.** Dashboard → Tax: add the business address and turn on collection where
    registered.
@@ -485,7 +521,7 @@ Sent by the free tier service. The message and the reply address aren't stored a
    with the events `checkout.session.completed`, `invoice.paid`, `invoice.payment_failed`,
    `customer.subscription.updated`, `customer.subscription.deleted`.
 5. **Secrets and vars:** `wrangler secret put STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`;
-   vars `STRIPE_PRICE_PRO`, `STRIPE_PRICE_TOPUP`. Without the secret key, the billing endpoints
+   var `STRIPE_PRICE_TOPUP` (`STRIPE_PRICE_PRO` is no longer read). Without the secret key, the billing endpoints
    answer `billing_unavailable` and everything else works as before.
 
 ## The queue for free tokens
@@ -1018,8 +1054,7 @@ with who made it and when.
 | `trialTokens` | `TRIAL_TOKENS` | 10,000,000: the one-time trial (prompt with cached, plus completion) |
 | `perPersonWeeklyUsdCap` | `PER_PERSON_WEEKLY_USD_CAP` | 2: a Full person's weekly GPT-6 budget (every GPT-6 model) |
 | `deepseekWeeklyUsdCap` | `DEEPSEEK_WEEKLY_USD_CAP` | 8: a Full person's weekly DeepSeek budget |
-| `proWeeklyUsdCap` | `PRO_WEEKLY_USD_CAP` | 6: Pro's weekly GPT-6 budget |
-| `proDeepseekWeeklyUsdCap` | `PRO_DEEPSEEK_WEEKLY_USD_CAP` | 40: Pro's weekly DeepSeek budget |
+| `proOpenModelsMultiplier` | `PRO_OPEN_MODELS_MULTIPLIER` | 4: Pro's weekly DeepSeek budget as a multiple of `deepseekWeeklyUsdCap` (1 to 100); Pro's GPT-6 budget is the free plan's |
 | `grantWeeklyUsdCap` | `GRANT_WEEKLY_USD_CAP` | 20: the personal weekly dollar cap an admin's grant gives (never lowers a higher one); 0 or `none`: a grant sets only the level |
 | `globalWeeklyUsdCap` | `GLOBAL_WEEKLY_USD_CAP` | 2000 |
 | `globalTotalUsdCap` | `GLOBAL_TOTAL_USD_CAP` | 7000 |
@@ -1516,10 +1551,11 @@ dl.new's sign-up page signs people in with GitHub, lets them choose where dl run
 | --- | --- | --- |
 | `GET /web/signin?return=<WEB_SIGNUP_URL>&state=<page state>[&ref=<referral>]` | the page's Sign in button (a navigation) | Starts the CLI's own browser sign-in: a device code (no device id), GitHub, the details step (contact email) and the invite step when one is needed, and the same `admit` (open admission, account age, levels, batch flag, blocked emails, network sign-up limit, cohort). On success it 303s to `<WEB_SIGNUP_URL>#signin=<one-time code>` instead of "return to your terminal". `return` must be exactly `WEB_SIGNUP_URL`. |
 | `POST /web/session {code, state}` | the page (CORS) | The one-time code (5 minutes, once, bound to the page's state) → `{token, expires_in, login}`, a web session: a JWT of type `web`, one hour, accepted only by `/web/*`. |
-| `GET /web/me` | the page | `{login, email, emailUpdates, plan, trial, weeklyTokens, offers, referral: {link, joined, kind, bonusTokens, capTokens, trialBonusTokens}}`. `referral.kind` is `"trial"` on the trial (each friend who becomes weekly active adds `bonusTokens` once to both people's trial, up to `capTokens` in all; `trialBonusTokens` is what this person has earned so far, already in `trial.tokens`) or `"weekly"` otherwise (`bonusTokens` a week to both while both stay weekly active, up to `capTokens` a week; `trialBonusTokens` 0). |
+| `GET /web/me` | the page | `{login, email, emailUpdates, plan, trial, weeklyTokens, offers, pro, proPrompt, referral: {link, joined, kind, bonusTokens, capTokens, trialBonusTokens}}`. `referral.kind` is `"trial"` on the trial (each friend who becomes weekly active adds `bonusTokens` once to both people's trial, up to `capTokens` in all; `trialBonusTokens` is what this person has earned so far, already in `trial.tokens`) or `"weekly"` otherwise (`bonusTokens` a week to both while both stay weekly active, up to `capTokens` a week; `trialBonusTokens` 0). |
 | `POST /web/email {email, updates?}` | the page | Changes the contact email with the details step's checks (plausible, blocked, one account per inbox). |
 | `POST /web/choice {option}` | the page | `computer` or `gpu`; counted only. |
-| `POST /web/checkout` | the page | Stripe Checkout for Pro, returning to `WEB_SIGNUP_URL?checkout=done` (or `cancel`). |
+| `POST /web/checkout` | the page | Stripe Checkout for Pro, returning to `WEB_SIGNUP_URL?checkout=done` (or `cancel`); with `{"return": "account"}` (dl.new/account), to `https://dl.new/account?checkout=done` (or `cancel`). `proPrompt` in `/web/me` is counted as seen. |
+| `POST /web/portal` | dl.new/account | `{url}`: Stripe's Customer Portal (manage or cancel Pro), returning to dl.new/account; 404 `no_billing_account` before anything was bought. |
 | `POST /web/install-code {option, plan}` | the page | `{code, expires_in}`: 160 random bits, stored as SHA-256, one use, 60 minutes, for this account; a new one replaces an unused older one. `plan` (`free` or `pro`) only with `option: "computer"`. |
 | `POST /v1/install-code/exchange {code, device_id?}` | the installed dl (Autopilot) | Once: the device-code poll's token response plus `{login, option, plan}`. A device id is bound as in device sign-in (`device_taken` when it holds another account). Used, expired or unknown: 400 `invalid_install_code` with `reason` (`used`, `expired`, `unknown`); Autopilot then falls back to the device code. 20 tries an hour per network. |
 | `POST /v1/telemetry/web {step: "visited"}` | the dl.new Worker, when it serves `/start` | Counted only. |

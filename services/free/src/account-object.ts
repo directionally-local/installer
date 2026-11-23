@@ -190,10 +190,13 @@ export interface Limits {
    * allowance grows in the same proportion, so the bonus isn't cut short by the dollar cap.
    */
   bonusTokens?: number;
-  /** Pro's weekly tokens and dollar ceiling (none when undefined). */
+  /** Pro's weekly tokens. */
   proTokensPerWeek?: number;
-  proUsdPerWeek?: number | undefined;
-  /** Pro's DeepSeek budget; null for none, left out: the same as `proUsdPerWeek`. */
+  /**
+   * Pro's DeepSeek (open models) budget; null for none, left out: the plan's own DeepSeek budget.
+   * Pro has no GPT-6 budget of its own: it gets the free plan's (`weeklyUsd`), so paying never
+   * unlocks GPT-6.
+   */
   proDeepseekUsdPerWeek?: number | null;
   /**
    * Free tokens are unavailable to a free-plan person for now (queued, or a global cap reached):
@@ -1035,18 +1038,22 @@ export class AccountObject extends DurableObject<AccountEnv> {
   }
 
   /**
-   * Both weekly dollar budgets. GPT-6's is the level's cap (or Pro's), replaced by a personal cap
+   * Both weekly dollar budgets. GPT-6's is the level's cap (the same on Pro), replaced by a personal cap
    * when an admin set one, and grown by the referral bonus in the same proportion as the Luna
-   * pool. DeepSeek's is its own level's (or Pro's) budget; a personal cap gives it the larger of
+   * pool. DeepSeek's is its own level's (or Pro's larger) budget; a personal cap gives it the larger of
    * the personal cap and that budget, so a grant never leaves DeepSeek below the level.
    */
   #budgets(row: AccountRow | undefined, now: number, limits: Limits, pro: boolean, bonus: number, lunaTokens: number | null): Record<Family, FamilyBudget> {
     const personal = pro ? null : (row?.weekly_usd ?? null);
-    const gptBase = pro ? (limits.proUsdPerWeek ?? null) : (personal ?? limits.weeklyUsd ?? null);
+    // GPT-6 on Pro is exactly what the free plan gets (a personal cap included): Pro buys more
+    // open models, never GPT-6.
+    const gptBase = (row?.weekly_usd ?? null) ?? limits.weeklyUsd ?? null;
     const gpt6 = gptBase !== null && bonus > 0 && lunaTokens !== null && lunaTokens > bonus ? Math.round(gptBase * (lunaTokens / (lunaTokens - bonus)) * 1e6) / 1e6 : gptBase;
     const levelDeepseek = pro
       ? limits.proDeepseekUsdPerWeek === undefined
-        ? (limits.proUsdPerWeek ?? null)
+        ? limits.deepseekWeeklyUsd === undefined
+          ? (limits.weeklyUsd ?? null)
+          : limits.deepseekWeeklyUsd
         : limits.proDeepseekUsdPerWeek
       : limits.deepseekWeeklyUsd === undefined
         ? (limits.weeklyUsd ?? null)

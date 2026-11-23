@@ -262,7 +262,7 @@ describe("home: the page", () => {
     assert.equal(quick(html, "Active"), "1");
     assert.equal(quick(html, "Past Due"), "0");
     assert.equal(quick(html, "Canceled"), "0");
-    assert.equal(quick(html, "MRR"), "$3.99");
+    assert.equal(quick(html, "MRR"), "$7.00");
     assert.equal(quick(html, "Top-ups"), "1");
     assert.equal(quick(html, "Top-up Revenue"), "$5.00");
     // The old home and views are gone; Tools is linked.
@@ -278,7 +278,7 @@ describe("home: the page", () => {
     assert.deepEqual(rows.get("fullfay"), ["fullfay", "Free", "$5.00 own DeepSeek $8.00", "34k", "$3.60 DeepSeek $8.00", "3.4k", "$1.90", "2", "Nov 4, 2026", "2", "Oct 15, 2026"]);
     assert.deepEqual(rows.get("basicbo"), ["basicbo", "Free", "$3.00 DeepSeek $8.00", "2k", "$2.40 DeepSeek $8.00", "200", "$0.60", "1", "Nov 2, 2026", "1", "Oct 20, 2026"]);
     assert.deepEqual(rows.get("flaggedfy")!.slice(1, 5), ["Free", "$0.00 DeepSeek $0.00", "0", "$0.00 DeepSeek $0.00"]);
-    assert.deepEqual(rows.get("propat")!.slice(1, 8), ["Pro", "$6.00 DeepSeek $40.00", "700", "—", "70", "$0.30", "1"]);
+    assert.deepEqual(rows.get("propat")!.slice(1, 8), ["Pro", "$20.00 DeepSeek $32.00", "700", "—", "70", "$0.30", "1"]);
     assert.deepEqual(rows.get("blockbea")!.slice(1, 5), ["Blocked", "$4.00 own DeepSeek $8.00", "0", "—"]);
     assert.deepEqual(rows.get("owner")!.slice(0, 2), ["owner Admin", "Free"]);
     assert.deepEqual(rows.get("smallsam")!.slice(7, 9), ["0", "—"]);

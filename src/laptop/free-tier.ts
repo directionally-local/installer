@@ -41,6 +41,11 @@ export interface FreeTierAccount {
   resetsAt?: string;
   /** The contact email given at sign-in (from /v1/me, when the service sends it). */
   email?: string;
+  /**
+   * dl Pro's prompt, when the service sends one (this free week's open models are used up and
+   * Pro is offered): its exact text and where Upgrade goes (dl.new/account).
+   */
+  proPrompt?: { text: string; upgradeUrl: string };
 }
 
 type Env = Record<string, string | undefined>;
@@ -53,6 +58,8 @@ export interface FreeTierOptions {
   exists?: (path: string) => boolean;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
   timeoutMs?: number;
+  /** The caller shows dl Pro's prompt when there is one (`dl status`): the service then counts it as seen. */
+  showsProPrompt?: boolean;
 }
 
 /** Autopilot's config.json: ${XDG_CONFIG_HOME:-~/.config}/autopilot, or the pre-rename kimiflare one. */
@@ -108,7 +115,7 @@ export async function freeTierAccount(options: FreeTierOptions = {}): Promise<Fr
   const expired = typeof saved?.expiresAt === "number" && saved.expiresAt <= now;
   const origin = serviceOrigin(env, saved?.baseUrl);
   if (expired || !origin) return login ? { login } : undefined;
-  const me = await readMe(`${origin}/v1/me`, token, options).catch(() => undefined);
+  const me = await readMe(`${origin}/v1/me${options.showsProPrompt ? "?prompt=shown" : ""}`, token, options).catch(() => undefined);
   if (!me) return login ? { login } : undefined;
   return me.login || login ? { ...me, login: me.login ?? login! } : undefined;
 }
@@ -135,11 +142,17 @@ async function readMe(url: string, token: string, options: FreeTierOptions): Pro
   const gpt6 = (count(gpt6Budget.usdPerWeek) ?? 0) > 0 ? familyBudget({}, gpt6Budget, queued) : undefined;
   // A service that sends per-model figures never falls back to the top-level (Luna) allowance.
   const perModel = body.pools !== undefined || body.budgets !== undefined || allowance.budgets !== undefined;
+  const prompt = record(body.proPrompt);
+  const proPrompt =
+    typeof prompt.text === "string" && prompt.text.trim() && prompt.text.length <= 300 && typeof prompt.upgradeUrl === "string" && /^https:\/\/[^\s]+$/.test(prompt.upgradeUrl) && prompt.upgradeUrl.length <= 200
+      ? { text: prompt.text.trim(), upgradeUrl: prompt.upgradeUrl }
+      : undefined;
   return {
     ...(typeof body.login === "string" && GITHUB_LOGIN.test(body.login) ? { login: body.login } : {}),
     ...(perModel ? { ...(deepseek ? { deepseek } : {}), ...(gpt6 ? { gpt6 } : {}) } : remaining !== undefined && tokensPerWeek !== undefined ? { remaining, tokensPerWeek } : {}),
     ...(resetsAt ? { resetsAt } : {}),
     ...(typeof body.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email) && body.email.length <= 254 ? { email: body.email } : {}),
+    ...(proPrompt ? { proPrompt } : {}),
   };
 }
 
@@ -151,6 +164,7 @@ interface MeBody {
   budgets?: unknown;
   pools?: unknown;
   queue?: unknown;
+  proPrompt?: unknown;
 }
 
 const record = (value: unknown): Rec => (value && typeof value === "object" && !Array.isArray(value) ? (value as Rec) : {});
@@ -215,4 +229,13 @@ export function freeTierLine(account: FreeTierAccount, options: { now?: number; 
   }
   if (parts.length > 1 && account.resetsAt) parts.push(`resets ${formatLocalTime(Date.parse(account.resetsAt), options)}`);
   return parts.join(" · ");
+}
+
+/**
+ * dl Pro's prompt as `dl status` shows it under the free tier line, or undefined: "You've hit
+ * this week's free limit. dl Pro: $7/month for higher limits and early access to new models.
+ * Upgrade: https://dl.new/account"
+ */
+export function freeTierProPrompt(account: FreeTierAccount): string | undefined {
+  return account.proPrompt ? `${account.proPrompt.text} Upgrade: ${account.proPrompt.upgradeUrl}` : undefined;
 }

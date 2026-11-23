@@ -18,7 +18,7 @@ const { offers } = await import("../src/app.js");
 
 const BASE = { TOKEN_SIGNING_KEY: "x".repeat(32), OPENROUTER_API_KEY: "k", GITHUB_CLIENT_ID: "i", GITHUB_CLIENT_SECRET: "s" };
 const SECRET = "whsec_test_0123456789abcdef";
-const BILLING = { STRIPE_SECRET_KEY: "sk_test_fake", STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_PRICE_PRO: "price_pro123", STRIPE_PRICE_TOPUP: "price_topup123" };
+const BILLING = { STRIPE_SECRET_KEY: "sk_test_fake", STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_PRICE_TOPUP: "price_topup123" };
 const LUNA = "gpt-6-luna";
 const TRIAL_EMAILS: UserEmailKind[] = ["welcome_trial", "access_granted_trial", "trial_80"];
 const BAR = { minAccountAgeDays: 365, minPublicRepos: 3, minContributions: 100 };
@@ -77,7 +77,7 @@ describe("the proOffered setting", () => {
 
   it("leaves Pro out of the offers when off, and keeps the top-up either way", () => {
     const on = offers(config());
-    assert.equal(on.pro?.price, "$3.99/month");
+    assert.equal(on.pro?.price, "$7/month");
     const off = offers(config({ PRO_OFFERED: "false" }));
     assert.equal("pro" in off, false);
     assert.deepEqual(off.topup, on.topup);
@@ -135,7 +135,7 @@ describe("free users' words with proOffered", () => {
 describe("the service with proOffered", () => {
   it("offers Pro and sells it while on (the default)", async () => {
     const { service, admin, alice } = await world();
-    assert.equal((await me(service, alice)).offers.pro.price, "$3.99/month");
+    assert.equal((await me(service, alice)).offers.pro.price, "$7/month");
     assert.equal((await service.request("POST", "/v1/billing/checkout", { token: alice, body: { product: "pro" } })).status, 200);
     const settings = (await (await service.request("GET", "/admin/config", { token: admin })).json()) as { effective: Record<string, unknown> };
     assert.equal(settings.effective.proOffered, true);
@@ -170,7 +170,7 @@ describe("the service with proOffered", () => {
     await setProOffered(service, admin, false);
     const body = await me(service, paid);
     assert.equal(body.plan, "pro");
-    assert.equal(body.allowance.usdPerWeek, 6, "Pro's budget, unchanged");
+    assert.equal(body.budgets.deepseek.usdPerWeek, 32, "Pro's budget, unchanged");
     const portal = await service.request("POST", "/v1/billing/portal", { token: paid });
     assert.equal(portal.status, 200, await portal.clone().text());
     assert.match(((await portal.json()) as { url: string }).url, /^https:\/\//);
@@ -213,7 +213,7 @@ describe("the service with proOffered", () => {
     await setProOffered(service, admin, false);
     assert.equal("pro" in (await me(service, alice)).offers, false);
     await setProOffered(service, admin, true);
-    assert.equal((await me(service, alice)).offers.pro.price, "$3.99/month");
+    assert.equal((await me(service, alice)).offers.pro.price, "$7/month");
     assert.equal((await service.request("POST", "/v1/billing/checkout", { token: alice, body: { product: "pro" } })).status, 200);
   });
 });

@@ -150,17 +150,18 @@ describe("the weekly dollar cap with requests in flight", () => {
     }
   });
 
-  it("leaves Pro uncapped unless Pro has its own cap, and then holds that one", async () => {
+  it("holds Pro to the free plan's GPT-6 cap: paying never adds GPT-6", async () => {
     const { service, account } = await person();
     await account.applySubscription({ subscriptionId: "sub_1", state: "active", periodEnd: service.clock.now + 30 * 86_400_000, eventAt: 1 });
-    // The free cap ($0.10) doesn't apply to Pro, and Pro has no cap of its own here.
-    const uncapped: Limits = { ...FULL, weeklyUsd: 0.1, proTokensPerWeek: 50_000_000 };
+    // No free GPT-6 cap: none on Pro either.
+    const uncapped: Limits = { ...FULL, weeklyUsd: undefined, proTokensPerWeek: 50_000_000 };
     const results = await burst(service, account, uncapped, 20);
     assert.ok(results.every((r) => r.ok && r.paid));
 
     const other = await person(101);
     await other.account.applySubscription({ subscriptionId: "sub_2", state: "active", periodEnd: other.service.clock.now + 30 * 86_400_000, eventAt: 1 });
-    const capped: Limits = { ...uncapped, proUsdPerWeek: 3 };
+    // Pro's GPT-6 budget is the free plan's.
+    const capped: Limits = { ...uncapped, weeklyUsd: 3 };
     const held = await burst(other.service, other.account, capped, 20);
     assert.equal(held.filter((r) => r.ok).length, admits(3, estimate(SOL)));
     assert.ok(held.filter((r) => !r.ok).every((r) => r.reason === "spend"));

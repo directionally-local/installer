@@ -1,5 +1,5 @@
 import { ALLOCATOR_MODES } from "./allocator.js";
-import { ACCESS_REQUEST_ALERT_MODES, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
+import { ACCESS_REQUEST_ALERT_MODES, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, PRO_MULTIPLIER_MAX, PRO_MULTIPLIER_MIN, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
@@ -73,10 +73,8 @@ export const RUNTIME_SETTINGS = {
   basicWeeklyUsdCap: { kind: "usd", env: "BASIC_WEEKLY_USD_CAP" },
   /** A basic account's weekly DeepSeek budget, USD. */
   basicDeepseekWeeklyUsdCap: { kind: "usd", env: "BASIC_DEEPSEEK_WEEKLY_USD_CAP" },
-  /** Pro's weekly GPT-6 budget, USD. */
-  proWeeklyUsdCap: { kind: "usd", env: "PRO_WEEKLY_USD_CAP" },
-  /** Pro's weekly DeepSeek budget, USD. */
-  proDeepseekWeeklyUsdCap: { kind: "usd", env: "PRO_DEEPSEEK_WEEKLY_USD_CAP" },
+  /** Pro's weekly open-models (DeepSeek) budget as a multiple of a Full free account's, 1 to 100 (default 4). */
+  proOpenModelsMultiplier: { kind: "multiplier", env: "PRO_OPEN_MODELS_MULTIPLIER" },
   /** New sign-ins one network gets a day before the rest are Starter. */
   networkSignupsPerDay: { kind: "count", env: "NETWORK_SIGNUPS_PER_DAY" },
   /** Inboxes and domains that can't sign up for the free tier. */
@@ -214,6 +212,8 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "string" && (UPSTREAMS as readonly string[]).includes(value) ? value : "invalid";
     case "amount":
       return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= MAX_USD ? value : "invalid";
+    case "multiplier":
+      return typeof value === "number" && Number.isFinite(value) && value >= PRO_MULTIPLIER_MIN && value <= PRO_MULTIPLIER_MAX ? value : "invalid";
     case "seconds":
       return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= MAX_FIRST_BYTE_TIMEOUT_SECONDS ? value : "invalid";
     case "alertMode":
@@ -247,6 +247,7 @@ const RULES: Record<Kind, string> = {
   minutes: `a whole number of minutes, 0 to ${MAX_HOST_COOLDOWN_MINUTES} (0 turns it off)`,
   upstream: '"openai", "luminal" or "openrouter"',
   amount: `a number of dollars, 0 to ${MAX_USD}`,
+  multiplier: `a number from ${PRO_MULTIPLIER_MIN} to ${PRO_MULTIPLIER_MAX}`,
   seconds: `a number of seconds, more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS}`,
   alertMode: '"each", "daily" or "off"',
   guardMode: '"enforce" or "off"',

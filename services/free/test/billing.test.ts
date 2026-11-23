@@ -8,7 +8,7 @@ const SECRET = "whsec_test_0123456789abcdef";
 const VARS = {
   STRIPE_SECRET_KEY: "sk_test_fake",
   STRIPE_WEBHOOK_SECRET: SECRET,
-  STRIPE_PRICE_PRO: "price_pro123",
+ 
   STRIPE_PRICE_TOPUP: "price_topup123",
 };
 
@@ -152,7 +152,14 @@ describe("Checkout and the portal", () => {
     const form = Object.fromEntries(call.form.entries());
     assert.deepEqual(form, {
       mode: "subscription",
-      "line_items[0][price]": "price_pro123",
+      // Priced inline: no Stripe Price has to exist (USD, monthly, $7 before tax).
+      "line_items[0][price_data][currency]": "usd",
+      "line_items[0][price_data][unit_amount]": "700",
+      "line_items[0][price_data][recurring][interval]": "month",
+      "line_items[0][price_data][tax_behavior]": "exclusive",
+      "line_items[0][price_data][product_data][name]": "dl Pro",
+      "line_items[0][price_data][product_data][tax_code]": "txcd_10000000",
+      "line_items[0][price_data][product_data][metadata][product]": "pro",
       "line_items[0][quantity]": "1",
       success_url: "https://dl.new/billing/success",
       cancel_url: "https://dl.new/billing/cancel",
@@ -186,7 +193,7 @@ describe("Checkout and the portal", () => {
     assert.equal(form.customer, "cus_100");
     assert.equal(form["customer_update[address]"], "auto");
     assert.equal(form.customer_creation, undefined);
-    assert.deepEqual(checkoutParams({ product: "pro", config: { secretKey: "k", webhookSecret: undefined, pricePro: "price_p", priceTopup: "price_t", successUrl: "https://s", cancelUrl: "https://c", portalReturnUrl: "https://r" }, githubId: 1, login: "a", customerId: null }).automatic_tax, { enabled: true });
+    assert.deepEqual(checkoutParams({ product: "pro", config: { secretKey: "k", webhookSecret: undefined, priceTopup: "price_t", successUrl: "https://s", cancelUrl: "https://c", portalReturnUrl: "https://r" }, githubId: 1, login: "a", customerId: null, proPriceCents: 700 }).automatic_tax, { enabled: true });
   });
 
   it("refuses bad requests, server keys, a second Pro, and says when billing isn't set up", async () => {
@@ -259,8 +266,8 @@ describe("Pro through its payment events", () => {
     let body = await me(svc, key);
     assert.equal(body.plan, "pro");
     assert.equal(body.allowance.tokensPerWeek, 300_000_000);
-    assert.equal(body.allowance.usdPerWeek, 6, "Pro's weekly GPT-6 budget (PRO_WEEKLY_USD_CAP, default $6)");
-    assert.equal(body.budgets.deepseek.usdPerWeek, 40, "Pro's weekly DeepSeek budget (PRO_DEEPSEEK_WEEKLY_USD_CAP, default $40)");
+    assert.equal(body.allowance.usdPerWeek, 2, "Pro's weekly GPT-6 budget is the free plan's: paying never adds GPT-6");
+    assert.equal(body.budgets.deepseek.usdPerWeek, 32, "Pro's weekly DeepSeek budget: 4x the free $8 (PRO_OPEN_MODELS_MULTIPLIER)");
 
     const periodEnd = Math.floor((NOW + 30 * DAY) / 1000);
     await deliver(svc, "invoice.paid", invoice(100, "in_1", periodEnd));

@@ -458,6 +458,8 @@ export interface DailyDigest {
   usage: DigestUsage;
   /** Payments that day: revenue before tax. */
   payments: { count: number; usd: number };
+  /** dl Pro's funnel that day (pro-funnel.ts proDigestLine), shown under the payments. */
+  proLine?: string;
   installs: {
     ok: number;
     failed: number;
@@ -538,6 +540,7 @@ export function dailyDigestAlert(digest: DailyDigest): Alert {
   lines.push(`Active people: ${count(digest.active)}`, ...usageLines(digest.usage, "", `Free credit spent: ${dollars(digest.usage.freeCreditUsd)} (Luminal credit)`));
   lines.push(`Luminal credit left: ${dollars(digest.credit.leftUsd)} of ${dollars(digest.credit.balanceUsd)}`);
   lines.push(`Paid: ${payments(digest.payments)}`);
+  if (digest.proLine) lines.push(digest.proLine);
   lines.push(`Installs: ${count(digest.installs.ok)} finished, ${count(digest.installs.failed)} failed`);
   for (const platform of digest.installs.platforms) {
     lines.push(`  ${platform.os} ${platform.arch} ${platform.mode}: ${count(platform.ok)} ok, ${count(platform.failed)} failed`);

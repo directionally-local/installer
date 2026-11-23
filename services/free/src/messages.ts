@@ -103,6 +103,21 @@ export function quotaMessage(reason: "tokens" | "spend", resetsAt: string, plan:
 }
 
 /**
+ * dl Pro's prompt (phase 1), for a free account whose week of open models (DeepSeek) is used up,
+ * while Pro is offered (`proOffered`). `price` as the offers show it ("$7/month"). The refusal
+ * carries it as `proPrompt.text`; its `message` adds where to upgrade (`proPromptMessage`), for
+ * agents that show the service's own words.
+ */
+export function proPromptText(price: string): string {
+  return `You've hit this week's free limit. dl Pro: ${price} for higher limits and early access to new models.`;
+}
+
+/** The prompt with its Upgrade link, as one line: "… Upgrade: https://dl.new/account" */
+export function proPromptMessage(price: string, upgradeUrl: string): string {
+  return `${proPromptText(price)} Upgrade: ${upgradeUrl}`;
+}
+
+/**
  * A new account's one-time trial is used up (402 trial_ended): free requests stop for good, and
  * Pro or a top-up keeps it going. `/upgrade` in dl opens both. `proPrice` as the offers show it
  * ("$3.99"); null while Pro isn't offered (`proOffered` off): then only the top-up is named.

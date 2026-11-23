@@ -22,7 +22,7 @@ const HOUR = 3_600_000;
 const MINUTE = 60_000;
 /** Minutes apart, so access tokens signed in before it stay valid. */
 const CUTOFF = NOW + MINUTE;
-const TRIAL_MESSAGE = "Your 10M free trial tokens are used up. Keep going with dl Pro for $3.99 a month, or add a top-up: /upgrade";
+const TRIAL_MESSAGE = "Your 10M free trial tokens are used up. Keep going with dl Pro for $7 a month, or add a top-up: /upgrade";
 
 const chat = (service: Service, token: string, model = MODEL) =>
   service.request("POST", "/v1/chat/completions", { token, body: { model, messages: [{ role: "user", content: "hello" }] } });
@@ -84,7 +84,7 @@ describe("the new-user trial", () => {
       assert.equal(error.code, "trial_ended");
       assert.equal(error.message, TRIAL_MESSAGE);
       assert.deepEqual(error.trial, { tokens: 10_000_000, used: 10_000_000, remaining: 0, ended: true });
-      assert.equal(error.offers.pro.price, "$3.99/month");
+      assert.equal(error.offers.pro.price, "$7/month");
       assert.ok(error.offers.topup);
     }
     // A new week doesn't bring it back: the trial is for the account's lifetime.

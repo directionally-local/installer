@@ -13,7 +13,7 @@ const PAGE = "https://dl.new/start";
 const ORIGIN = "https://dl.new";
 const STATE = "page-state-0123456789abcdef";
 const OPEN = { OPEN_ADMISSION: "true" };
-const BILLING = { STRIPE_SECRET_KEY: "sk_test_fake", STRIPE_WEBHOOK_SECRET: "whsec_test", STRIPE_PRICE_PRO: "price_pro123", STRIPE_PRICE_TOPUP: "price_topup123" };
+const BILLING = { STRIPE_SECRET_KEY: "sk_test_fake", STRIPE_WEBHOOK_SECRET: "whsec_test", STRIPE_PRICE_TOPUP: "price_topup123" };
 const ghCode = (user: GitHubUserFixture) => encodeURIComponent(JSON.stringify(user));
 
 /** /web/signin → GitHub → the callback (and the details step when asked): the last response. */
@@ -150,7 +150,7 @@ describe("the web session", () => {
     assert.equal(me.email, "reader.510@example.com");
     assert.equal(me.plan, "free");
     assert.equal(me.trial.tokens, 10_000_000);
-    assert.equal(me.offers.pro.price, "$3.99/month");
+    assert.equal(me.offers.pro.price, "$7/month");
     assert.match(me.referral.link, /\/r\/reader$/);
     assert.equal(me.referral.joined, 0);
   });
@@ -230,7 +230,7 @@ describe("the web session", () => {
     const form = service.calls.stripe.at(-1)!.form;
     assert.equal(form.get("success_url"), `${PAGE}?checkout=done`);
     assert.equal(form.get("cancel_url"), `${PAGE}?checkout=cancel`);
-    assert.equal(form.get("line_items[0][price]"), "price_pro123");
+    assert.equal(form.get("line_items[0][price_data][unit_amount]"), "700");
   });
 
   it("hides Pro while proOffered is off: no Pro in /web/me, and its checkout refused before it is counted", async () => {
