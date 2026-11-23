@@ -12,6 +12,7 @@ import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, se
 import { cancel, connect, describeError, laptopHome, laptopReady, pull, run, runs, servers, use, watch, type ReadyHere } from "./laptop/commands.js";
 import { autopilotAuth, autopilotOnPath, bundledAutopilotVersion, findAutopilot, type AutopilotAuth } from "./laptop/autopilot.js";
 import { FREE_TIER_PROVIDER, freeTierAccount, freeTierLine, freeTierProPrompt, type FreeTierAccount } from "./laptop/free-tier.js";
+import { freeModelStatus, modelsCommand } from "./laptop/free-providers.js";
 import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
 import { claudeCommand } from "./laptop/claude.js";
 import { opencodeCommand } from "./laptop/opencode.js";
@@ -114,6 +115,7 @@ On your laptop:
   dl provider set         pick another provider, key and model in Autopilot's list (--server NAME)
   dl provider github      replace the GitHub token
   dl model [ID]           the model for tasks and sessions on a place (no ID: Autopilot's list)
+  dl models               the free tier's models, their providers and measured speeds (--json)
   dl model up [MODEL]     serve a curated model (vLLM or SGLang) on this machine's Nvidia GPUs (--dry-run: plan only)
   dl model up MODEL --plan  the exact docker command, GPUs, layout and memory math; runs nothing
                           (--hardware DIR: plan for another machine's nvidia-smi output)
@@ -225,6 +227,10 @@ export interface MainOptions {
   autopilotAuth?: () => Promise<AutopilotAuth | undefined>;
   /** The free tier account (`dl status`, when Autopilot uses the free tier); reads Autopilot's sign-in and GET /v1/me unless replaced. */
   freeTierAccount?: (options?: { showsProPrompt?: boolean }) => Promise<FreeTierAccount | undefined>;
+  /** The chosen free model with its provider and speed (`dl status`, when Autopilot uses the free tier); reads Autopilot's config and GET /v1/providers unless replaced. */
+  freeModel?: () => Promise<string | undefined>;
+  /** `dl models`; the real one unless replaced. */
+  modelsCommand?: typeof modelsCommand;
   /** `dl claude`; the real one unless replaced. */
   claude?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** `dl opencode`; the real one unless replaced. */
@@ -474,13 +480,13 @@ export async function main(
           // otherwise, what this is and how to start.
           // What Autopilot here uses, asked once and only when it's shown.
           const local = !command || command === "status" ? localAutopilot(options) : undefined;
-          if ((!command || command === "status") && await laptopHome(laptopIO, undefined, undefined, { ssh: realSshExec, local: localVersions }, local?.then((state) => state.freeTier))) return 0;
+          if ((!command || command === "status") && await laptopHome(laptopIO, undefined, undefined, { ssh: realSshExec, local: localVersions }, local?.then((state) => state.freeTier), local?.then((state) => state.freeModel))) return 0;
           // A laptop with no places is still set up: plain dl runs Autopilot here. Say what's
           // installed and how to start. Root without a server install is the same: the install
           // script gives it the plain install too, and a server only with DL_MODE=server.
           if (local) {
-            const { setUp, freeTier } = await local;
-            laptopReady({ ...(await readyHere()), ...(setUp === undefined ? {} : { setUp }), ...(freeTier ? { freeTier } : {}) }, laptopIO);
+            const { setUp, freeTier, freeModel } = await local;
+            laptopReady({ ...(await readyHere()), ...(setUp === undefined ? {} : { setUp }), ...(freeTier ? { freeTier } : {}), ...(freeModel ? { freeModel } : {}) }, laptopIO);
             return 0;
           }
           io.out(NOT_A_SERVER(colors));
@@ -627,6 +633,9 @@ export async function main(
         return await servers(parsed.positionals.slice(1), laptopIO);
       case "use":
         return await use(parsed.positionals.slice(1), laptopIO);
+      case "models":
+        // The free tier's providers and models, with measured speeds (GET /v1/providers).
+        return await (options.modelsCommand ?? modelsCommand)({ out: io.out, color: colorOn }, { json: Boolean(values.json) });
       case "model": {
         const [action, ...args] = parsed.positionals.slice(1);
         if (action === "up" || action === "update" || action === "rollback" || action === "status" || action === "bench" || action === "list" || action === "down" || action === "attach") {
@@ -818,16 +827,19 @@ async function localVersions(): Promise<{ autopilot: string; hotcell: string } |
  * is the free tier, the account line. Read-only; never throws, and anything it can't tell is
  * left out.
  */
-async function localAutopilot(options: MainOptions): Promise<{ setUp?: boolean; freeTier?: string }> {
+async function localAutopilot(options: MainOptions): Promise<{ setUp?: boolean; freeTier?: string; freeModel?: string }> {
   try {
     const auth = await (options.autopilotAuth ?? (async () => autopilotAuth(await findAutopilot())))();
     if (!auth) return {};
     if (auth.active !== FREE_TIER_PROVIDER || !auth.setUp) return { setUp: auth.setUp };
-    const account = await (options.freeTierAccount ?? ((o) => freeTierAccount(o)))({ showsProPrompt: true }).catch(() => undefined);
-    if (!account) return { setUp: true };
+    const [account, freeModel] = await Promise.all([
+      (options.freeTierAccount ?? ((o) => freeTierAccount(o)))({ showsProPrompt: true }).catch(() => undefined),
+      (options.freeModel ?? (() => freeModelStatus()))().catch(() => undefined),
+    ]);
+    if (!account) return { setUp: true, ...(freeModel ? { freeModel } : {}) };
     // dl Pro's prompt, when the service sent one, on the next line under the account (aligned with it).
     const prompt = freeTierProPrompt(account);
-    return { setUp: true, freeTier: prompt ? `${freeTierLine(account)}\n${" ".repeat(13)}${prompt}` : freeTierLine(account) };
+    return { setUp: true, freeTier: prompt ? `${freeTierLine(account)}\n${" ".repeat(13)}${prompt}` : freeTierLine(account), ...(freeModel ? { freeModel } : {}) };
   } catch {
     return {};
   }

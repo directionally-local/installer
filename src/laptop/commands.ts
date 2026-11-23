@@ -310,6 +310,8 @@ export async function laptopHome(
   versions?: { ssh: SshExec; latest?: () => Promise<ServerVersions | undefined>; laptop?: string; hotcell?: string; local?: () => Promise<ServerVersions | undefined> },
   /** The free tier account line (see free-tier.ts), when Autopilot here uses the free tier. */
   freeTier?: Promise<string | undefined>,
+  /** The chosen free model line (see free-providers.ts), when Autopilot here uses the free tier. */
+  freeModel?: Promise<string | undefined>,
 ): Promise<boolean> {
   const c = palette(io.color === true);
   const remotes = await loadRemotes();
@@ -327,11 +329,12 @@ export async function laptopHome(
       providers.set(remote.name, { ...(catalog?.provider ? { provider: catalog.provider.name } : {}), ...(catalog?.defaultModel ? { model: catalog.defaultModel } : {}) });
     }
   });
-  const [current, outdated, installed, freeTierText] = await Promise.all([
+  const [current, outdated, installed, freeTierText, freeModelText] = await Promise.all([
     defaultName(),
     versions ? outdatedServers(remotes, versions).catch(() => []) : Promise.resolve([]),
     versions ? placeVersions(remotes, versions).catch(() => new Map<string, ServerVersions>()) : Promise.resolve(new Map<string, ServerVersions>()),
     (freeTier ?? Promise.resolve(undefined)).catch(() => undefined),
+    (freeModel ?? Promise.resolve(undefined)).catch(() => undefined),
   ]);
   const models = new Map(await Promise.all(remotes.map(async (remote) => [remote.name, await model(remote.name)] as const)));
   io.out(`\n  ${c.bold("Directionally Local")}  ${c.dim("on this computer")}\n\n`);
@@ -352,6 +355,7 @@ export async function laptopHome(
   io.out(`  ${c.dim("Autopilot".padEnd(11))}${laptop} here · ${places((entry) => entry.autopilot)}\n`);
   io.out(`  ${c.dim("Hotcell".padEnd(11))}${laptopHotcell} here · ${places((entry) => entry.hotcell)}\n`);
   if (freeTierText) io.out(`  ${c.dim("Free tier".padEnd(11))}${freeTierText}\n`);
+  if (freeModelText) io.out(`  ${c.dim("Free model".padEnd(11))}${freeModelText}   ${c.dim("dl models")}\n`);
   for (const remote of remotes) {
     const version = installed.get(remote.name);
     if (version && version.autopilot !== laptop) io.out(`  ${c.yellow("!")} ${remote.name} runs Autopilot ${version.autopilot}, this laptop ${laptop}   ${c.dim(`dl update ${remote.name}`)}\n`);
@@ -380,6 +384,8 @@ export interface ReadyHere {
   setUp?: boolean;
   /** The free tier account line ("@login · 49.9M of 50M tokens left this week · resets Mon 09:00"), when Autopilot uses the free tier. */
   freeTier?: string;
+  /** The chosen free model with its provider and speed ("DeepSeek V4.1 Flash · Luminal · ~85 tok/s"), when Autopilot uses the free tier. */
+  freeModel?: string;
 }
 
 /** `dl status`'s line when Autopilot can't start a session yet. */
@@ -398,7 +404,10 @@ export function laptopReady(info: ReadyHere, io: LaptopIO = processIO): void {
     ? `${info.autopilot} ${c.dim(info.bundled === false ? "· the one on your PATH" : "· comes with dl")}`
     : `${c.yellow("not installed")}   ${c.dim(DL_UPDATE)}`);
   if (info.autopilot && info.setUp === false) io.out(`  ${c.yellow("!")} ${NOT_SIGNED_IN}\n`);
-  else if (info.autopilot && info.freeTier) row("Free tier", info.freeTier);
+  else if (info.autopilot) {
+    if (info.freeTier) row("Free tier", info.freeTier);
+    if (info.freeModel) row("Free model", `${info.freeModel}   ${c.dim("dl models")}`);
+  }
   io.out("\n");
   io.out(`  ${c.dim("Start, in a project folder:")}\n`);
   io.out(`     ${c.bold("dl")}          ${c.dim("a new session with Autopilot in that folder")}\n`);

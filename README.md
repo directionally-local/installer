@@ -86,7 +86,7 @@ dl status                           # where agents run, their provider, model an
 
 `dl status` says when a place runs another Autopilot or Hotcell than this laptop's `dl` pins: `! box runs Hotcell 0.1.30, this dl pins 0.1.40   dl update box`.
 
-When Autopilot here uses the free tier, `dl status` also shows the account: who is signed in (`@octo`), the tokens left this week, and when the week resets (local time). When free usage runs out, Autopilot's `/upgrade` offers dl Pro or a one-time top-up. dl reads Autopilot's sign-in and asks the free tier service once (`GET /v1/me`, 3 seconds at most, never refreshing the sign-in); if that fails it shows only `@octo`, or nothing.
+When Autopilot here uses the free tier, `dl status` also shows the account: who is signed in (`@octo`), the tokens left this week, and when the week resets (local time). When free usage runs out, Autopilot's `/upgrade` offers dl Pro or a one-time top-up. dl reads Autopilot's sign-in and asks the free tier service once (`GET /v1/me`, 3 seconds at most, never refreshing the sign-in); if that fails it shows only `@octo`, or nothing. It also shows the free model Autopilot uses, with its provider and measured speed (`Free model DeepSeek V4.1 Flash · Luminal · ~85 tok/s`), from the public `GET /v1/providers` (2 seconds at most).
 
 The "fits ~N agents" figure is a conservative estimate: memory left after the host's own share (at least 1.5 GB or 15%), divided by 1 GB per sandbox, capped at two per CPU. Measured numbers will replace it.
 
@@ -125,6 +125,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl use [NAME]` | Where tasks and bare `dl` go without `--server`. With no name, shows it. |
 | `dl provider` | The provider and GitHub token on each place. `dl provider set` picks another provider, key and model in Autopilot's list; `dl provider github` replaces the GitHub token. `--server NAME` picks the place. `dl keys` is the same command. |
 | `dl model [ID]` | The model for tasks and sessions on a place. With no ID, Autopilot's own model picker. For a model served on this machine's GPU, see `dl model up` below. |
+| `dl models` | The free tier's models: provider, context, access, status, and the speed and first-token time measured every 10 minutes (`GET /v1/providers`). `--json` for scripts. |
 | `dl model up` / `update` / `rollback` / `status` / `bench` / `list` | Serve a curated open model on this machine's Nvidia GPUs with vLLM or SGLang, test it, and point Autopilot at it. See [On your own GPUs](#on-your-own-gpus). |
 | `dl evals set "COMMAND"` / `--data PATH` / `run` / `show` / `clear` | Your own eval command, run once per model with `OPENAI_BASE_URL` pointed at it, or your eval data (promptfoo configs and tests, JSONL, CSV, OpenAI Evals, Braintrust, LangSmith), run with promptfoo; `dl model update` switches only if the new model holds up. See [Your own evals](#your-own-evals). |
 | `dl ui` / `share` / `invite` / `approve` / `status` / `logs` / `down` | Open WebUI as your team's chat, next to the models on this machine. See [Team chat: dl ui](#team-chat-dl-ui). |
