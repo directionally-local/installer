@@ -305,9 +305,82 @@ export function liquidPayload(
   return payload;
 }
 
-/** What the exchange charged for a job, from a response body or the last stream chunk (`exchange.charge.total_usd`). */
-export function exchangeCharge(parsed: unknown): number | undefined {
-  const total = (parsed as { exchange?: { charge?: { total_usd?: unknown } } } | null)?.exchange?.charge?.total_usd;
-  const value = typeof total === "string" ? Number(total) : total;
+/**
+ * The `exchange` block Liquid puts on a response body and on a stream's last chunk. Seen live
+ * (2026-11-23): `job_id`, `provider_slug`, `offer_id`, `status`, `created_at`, `charge`, `usage`,
+ * `timing`, `addressing`, `failure`. Field names from the OpenAPI schemas ExchangeCharge,
+ * ExchangeUsage and ExchangeTiming (https://router.inference.ai.exchange/v1/openapi.json).
+ */
+function exchangeBlock(parsed: unknown): Record<string, unknown> | undefined {
+  const block = (parsed as { exchange?: unknown } | null)?.exchange;
+  return block && typeof block === "object" && !Array.isArray(block) ? (block as Record<string, unknown>) : undefined;
+}
+
+function usdField(record: Record<string, unknown> | undefined, key: string): number | undefined {
+  const raw = record?.[key];
+  const value = typeof raw === "string" ? Number(raw) : raw;
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * What the exchange charged for a job. Live, the last chunk's `charge` had no `total_usd`, and
+ * `supplier_usd` and `fee_usd` were still 0 (settled later), so in order: `total_usd` when above
+ * 0, else `supplier_usd + fee_usd` when above 0, else `estimated_usd` when above 0; undefined
+ * otherwise (the caller then charges the price ceilings plus the fee).
+ */
+export function exchangeCharge(parsed: unknown): number | undefined {
+  const charge = exchangeBlock(parsed)?.charge as Record<string, unknown> | undefined;
+  if (!charge || typeof charge !== "object") return undefined;
+  const total = usdField(charge, "total_usd");
+  if (total !== undefined && total > 0) return total;
+  const settled = (usdField(charge, "supplier_usd") ?? 0) + (usdField(charge, "fee_usd") ?? 0);
+  if (settled > 0) return settled;
+  const estimated = usdField(charge, "estimated_usd");
+  return estimated !== undefined && estimated > 0 ? estimated : undefined;
+}
+
+/**
+ * What the seller metered (`exchange.usage`), as the standard usage names. Live, the standard
+ * `usage` chunk of a Kimi stream said `completion_tokens: 0` although text came back, so this is
+ * what counts when present. `reasoning_tokens` ("hidden reasoning tokens, billed as output" in the
+ * docs) is added to `completion_tokens`: whether the latter already includes it is unverified, and
+ * counting it twice can only overcount a reasoning model's output, never undercount it.
+ */
+export function exchangeUsage(parsed: unknown): { promptTokens: number; completionTokens: number; cachedTokens: number } | undefined {
+  const usage = exchangeBlock(parsed)?.usage as Record<string, unknown> | undefined;
+  if (!usage || typeof usage !== "object") return undefined;
+  const count = (key: string) => {
+    const value = usage[key];
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  };
+  const prompt = count("prompt_tokens");
+  const completion = count("completion_tokens");
+  if (prompt === undefined || completion === undefined) return undefined;
+  return { promptTokens: prompt, completionTokens: completion + (count("reasoning_tokens") ?? 0), cachedTokens: Math.min(prompt, count("cached_tokens") ?? 0) };
+}
+
+/** The seller and the exchange's own timing of a job (`provider_slug`, `timing.ttft_ms`, `timing.tokens_per_second`). */
+export function exchangeFacts(parsed: unknown): { seller?: string; ttftMs?: number; tokensPerSecond?: number } | undefined {
+  const block = exchangeBlock(parsed);
+  if (!block) return undefined;
+  const timing = (block.timing && typeof block.timing === "object" ? block.timing : {}) as Record<string, unknown>;
+  const seller = typeof block.provider_slug === "string" && /^[\x20-\x7e]{1,64}$/.test(block.provider_slug) ? block.provider_slug : undefined;
+  const ttft = usdField(timing, "ttft_ms") ?? usdField(timing, "first_event_ms");
+  const tps = usdField(timing, "tokens_per_second");
+  return { ...(seller ? { seller } : {}), ...(ttft !== undefined ? { ttftMs: Math.round(ttft) } : {}), ...(tps !== undefined ? { tokensPerSecond: tps } : {}) };
+}
+
+/**
+ * The usage to charge: the standard `usage`, raised to the exchange's metering where that says
+ * more (each count the larger of the two). Either alone when the other is missing.
+ */
+export function mergedUsage<T extends { promptTokens: number; completionTokens: number; cachedTokens: number }>(standard: T | undefined, exchange: { promptTokens: number; completionTokens: number; cachedTokens: number } | undefined): T | undefined {
+  if (!exchange) return standard;
+  if (!standard) return { ...exchange, costUsd: undefined } as unknown as T;
+  return {
+    ...standard,
+    promptTokens: Math.max(standard.promptTokens, exchange.promptTokens),
+    completionTokens: Math.max(standard.completionTokens, exchange.completionTokens),
+    cachedTokens: Math.max(standard.cachedTokens, exchange.cachedTokens),
+  };
 }

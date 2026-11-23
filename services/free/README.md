@@ -118,9 +118,14 @@ Zero retention only; the price ceilings stop a repriced or vanished offer from m
 onto a dear one; `sticky` keeps a session on the seller that holds its prompt cache. The sellers
 and ceilings are runtime settings per model: `exchangeAllow.kimi-k3.1-pro` (a list of seller
 handles, `[]` for any seller that passes the other rules) and `exchangeMaxPrices.kimi-k3.1-pro`
-(`[input, cache read, output]`), and the same for `glm-5.3`. The credit is charged what the
-exchange reports (`exchange.charge.total_usd` on the response or the stream's last chunk), else
-the ceilings plus the 5% fee. Failures go back as transient errors with `Retry-After`, like
+(`[input, cache read, output]`), and the same for `glm-5.3`. The response, or the stream's last
+chunk, carries an `exchange` block (`job_id`, `provider_slug`, `charge`, `usage`, `timing`, ...).
+The credit is charged what it says: `charge.total_usd` when above 0, else `supplier_usd +
+fee_usd` when above 0 (live, both were still 0 at the end of a stream: they settle later), else
+`estimated_usd`, else the ceilings plus the 5% fee. Tokens are the larger of the standard `usage`
+and the exchange's `usage` (its `reasoning_tokens` added to `completion_tokens`): live, a Kimi
+stream's standard usage said 0 output tokens although text came back. Probes also keep the seller
+(`provider_slug`) and the exchange's own `timing.ttft_ms` and `timing.tokens_per_second`. Failures go back as transient errors with `Retry-After`, like
 Luminal's; there is no fallback to another model.
 
 ### Adding a provider

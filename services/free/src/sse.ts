@@ -1,5 +1,5 @@
 import { parseUsage, type Usage } from "./quota.js";
-import { exchangeCharge } from "./providers.js";
+import { exchangeCharge, exchangeFacts, exchangeUsage, mergedUsage } from "./providers.js";
 import { hostOf } from "./routing.js";
 
 /**
@@ -25,8 +25,10 @@ export interface StreamOutcome {
   firstContentAt: number | undefined;
   /** Whether any content reached the client. */
   contentSent: boolean;
-  /** What Liquid Inference charged, from its last chunk's `exchange.charge.total_usd`; undefined elsewhere. */
+  /** What Liquid Inference charged, from its last chunk's `exchange.charge` (providers.ts exchangeCharge); undefined elsewhere. */
   chargeUsd?: number;
+  /** Liquid's seller and its own timing of the job (providers.ts exchangeFacts); undefined elsewhere. */
+  exchange?: { seller?: string; ttftMs?: number; tokensPerSecond?: number };
   /** When the stream ended, by `now`. */
   endedAt?: number;
 }
@@ -56,6 +58,8 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
   let host: string | undefined;
   let firstContentAt: number | undefined;
   let chargeUsd: number | undefined;
+  let metered: ReturnType<typeof exchangeUsage>;
+  let facts: ReturnType<typeof exchangeFacts>;
   let ended = false;
 
   const scan = (final: boolean) => {
@@ -74,6 +78,8 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
         if (found) usage = found;
         host ??= hostOf(parsed);
         chargeUsd = exchangeCharge(parsed) ?? chargeUsd;
+        metered = exchangeUsage(parsed) ?? metered;
+        facts = exchangeFacts(parsed) ?? facts;
         if (firstContentAt === undefined && hasContent(parsed)) firstContentAt = now();
         if (parsed.error) {
           errored = true;
@@ -88,7 +94,8 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
   const finish = async () => {
     if (ended) return;
     ended = true;
-    await onEnd({ usage, errored, upstreamFailed, host, firstContentAt, contentSent: firstContentAt !== undefined, ...(chargeUsd !== undefined ? { chargeUsd } : {}), endedAt: now() });
+    // Liquid's own metering raises the standard usage where it says more (providers.ts mergedUsage).
+    await onEnd({ usage: mergedUsage(usage, metered), errored, upstreamFailed, host, firstContentAt, contentSent: firstContentAt !== undefined, ...(chargeUsd !== undefined ? { chargeUsd } : {}), ...(facts ? { exchange: facts } : {}), endedAt: now() });
   };
 
   return new ReadableStream<Uint8Array>({

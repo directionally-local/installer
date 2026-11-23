@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { DatabaseSync } from "node:sqlite";
-import { ADMIN_ID, completion, createService, liquidCompletion, liquidStream, luminalUsage, MODEL, openaiResponse, responsesUsage, sse, usage, type Service } from "./harness.js";
+import { ADMIN_ID, completion, createService, exchangeBlock, liquidCompletion, liquidStream, luminalUsage, MODEL, openaiResponse, responsesUsage, sse, usage, type Service } from "./harness.js";
 import { readFreeConfig } from "../src/config.js";
 import { FREE_MODELS, modelById } from "../src/models.js";
 import { PROBE_CRON, PROBE_MAX_TOKENS, PROBE_PROMPT } from "../src/probes.js";
@@ -210,6 +210,38 @@ describe("Liquid Inference routing", () => {
   });
 });
 
+describe("Liquid's own metering and charge", () => {
+  it("counts the exchange's usage when the standard usage says no output, and charges its estimate", async () => {
+    const { service, token } = await member({ ...LIQUID_ON, LIQUID_PERSON_WEEKLY_USD: "none" });
+    // As seen live: text came back, the standard usage chunk said 0 completion tokens.
+    service.setLiquid(() =>
+      liquidStream(luminalUsage(900, 0, 800), 0.001407, { usage: { prompt_tokens: 900, cached_tokens: 800, cache_write_tokens: 0, completion_tokens: 12, reasoning_tokens: 30, pricing: [] } }),
+    );
+    const response = await chat(service, token, KIMI, { stream: true });
+    assert.equal(response.status, 200);
+    await response.text();
+    const row = db(service).prepare("SELECT prompt_tokens, cached_tokens, completion_tokens, credit_usd, cost_usd FROM requests").get() as Record<string, number>;
+    assert.deepEqual([row.prompt_tokens, row.cached_tokens, row.completion_tokens], [900, 800, 42]);
+    assert.equal(row.credit_usd, 0.001407);
+    assert.ok(Math.abs(row.cost_usd! - (100 * 2.1 + 800 * 0.25 + 42 * 10.5) / 1e6) < 1e-12);
+  });
+
+  it("prefers total_usd, then supplier_usd + fee_usd, then estimated_usd", async () => {
+    const { service, token } = await member({ ...LIQUID_ON, LIQUID_PERSON_WEEKLY_USD: "none" });
+    const charges: Array<[Record<string, unknown>, number]> = [
+      [{ total_usd: 0.003, supplier_usd: 0.002, fee_usd: 0.0001 }, 0.003],
+      [{ supplier_usd: 0.002, fee_usd: 0.0001 }, 0.0021],
+      [{}, 0.001407],
+    ];
+    for (const [charge] of charges) {
+      service.setLiquid(() => liquidCompletion(luminalUsage(100, 10), 0.001407, { charge }));
+      assert.equal((await chat(service, token, KIMI)).status, 200);
+    }
+    const rows = db(service).prepare("SELECT credit_usd FROM requests ORDER BY id").all() as Array<{ credit_usd: number }>;
+    rows.forEach((row, index) => assert.ok(Math.abs(row.credit_usd - charges[index]![1]) < 1e-12, `charge ${index}: ${row.credit_usd}`));
+  });
+});
+
 describe("the open-models budget is shared", () => {
   it("Kimi's spend counts against the same weekly budget as DeepSeek's", async () => {
     // A $0.50 open-models week; a Kimi request that costs it all at Kimi's prices.
@@ -325,7 +357,7 @@ function timedStream(service: Service, completionTokens = 100): Response {
   const encoder = new TextEncoder();
   const chunks = [
     { delay: 400, data: { choices: [{ index: 0, delta: { content: "1, 2, 3" } }] } },
-    { delay: 1000, data: { choices: [], usage: luminalUsage(20, completionTokens), exchange: { job_id: "job_p", provider_slug: "deeprelay", status: "settled", charge: { total_usd: 0.001 } } } },
+    { delay: 1000, data: { choices: [], usage: luminalUsage(20, completionTokens), exchange: exchangeBlock(0.001) } },
   ];
   let index = 0;
   return new Response(
@@ -367,6 +399,9 @@ describe("speed probes", () => {
     const rows = db(service).prepare("SELECT at, provider, model, ok, ttft_ms, tokens_per_second, cost_usd, error FROM provider_probes ORDER BY model").all() as Array<Record<string, any>>;
     const kimi = rows.find((row) => row.model === KIMI)!;
     assert.deepEqual({ ok: kimi.ok, ttft: kimi.ttft_ms, tps: kimi.tokens_per_second, cost: kimi.cost_usd }, { ok: 1, ttft: 400, tps: 100, cost: 0.001 });
+    // The seller and the exchange's own timing are kept beside ours.
+    const reported = db(service).prepare("SELECT seller, reported_ttft_ms, reported_tps FROM provider_probes WHERE model = ?").get(KIMI) as Record<string, unknown>;
+    assert.deepEqual({ ...reported }, { seller: "deeprelay", reported_ttft_ms: 4012, reported_tps: 61.5 });
     assert.equal(rows.filter((row) => row.provider === "openai").every((row) => row.ok === 0 && row.error === "http_503"), true);
     // Probes aren't anyone's usage: no request rows, but the cost is on Liquid's credit.
     assert.equal((db(service).prepare("SELECT COUNT(*) AS n FROM requests").get() as { n: number }).n, 0);

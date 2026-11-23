@@ -303,22 +303,40 @@ export function responsesTextEvents(text: string, usageObject: Record<string, un
   ];
 }
 
-/** The `exchange` block Liquid puts on a response and on a stream's last chunk (as seen live on 2026-11-23). */
-export function exchangeBlock(totalUsd: number | undefined = 0.0004): Record<string, unknown> {
-  return { job_id: "job_1", provider_slug: "deeprelay", offer_id: "off_1", status: "settled", ...(totalUsd !== undefined ? { charge: { total_usd: totalUsd, cap_usd: 0.01 } } : {}) };
+/**
+ * The `exchange` block Liquid puts on a response and on a stream's last chunk, in the shape seen
+ * live on 2026-11-23: no `charge.total_usd`, `supplier_usd` and `fee_usd` still 0 at the end of
+ * the stream, the job's estimate in `estimated_usd`. `estimatedUsd` undefined leaves the charge out.
+ */
+export function exchangeBlock(estimatedUsd: number | undefined = 0.0004, options: { usage?: Record<string, unknown>; charge?: Record<string, unknown> } = {}): Record<string, unknown> {
+  const nanos = (usd: number) => Math.round(usd * 1e9);
+  return {
+    job_id: "job_1",
+    provider_slug: "deeprelay",
+    offer_id: "off_1",
+    status: "settled",
+    created_at: "2026-11-23T09:30:00Z",
+    ...(estimatedUsd !== undefined
+      ? { charge: { cap_usd: 0.05, cap_nanos: nanos(0.05), estimated_usd: estimatedUsd, estimated_nanos: nanos(estimatedUsd), supplier_usd: 0, supplier_nanos: 0, fee_usd: 0, fee_nanos: 0, credits_usd: 0, credits_nanos: 0, ...options.charge } }
+      : {}),
+    ...(options.usage ? { usage: options.usage } : {}),
+    timing: { ttft_ms: 4012, first_event_ms: 3990, tokens_per_second: 61.5, completion_ms: 6100 },
+    addressing: null,
+    failure: null,
+  };
 }
 
 /** A non-streaming Liquid completion with usage and the `exchange` block. */
-export function liquidCompletion(usageObject: Record<string, unknown> | undefined, totalUsd?: number): Response {
-  return Response.json({ id: "job_1", object: "chat.completion", model: "kimi-k3.1-pro", choices: [{ index: 0, message: { role: "assistant", content: "hi" } }], ...(usageObject ? { usage: usageObject } : {}), exchange: exchangeBlock(totalUsd) });
+export function liquidCompletion(usageObject: Record<string, unknown> | undefined, estimatedUsd?: number, options: Parameters<typeof exchangeBlock>[1] = {}): Response {
+  return Response.json({ id: "job_1", object: "chat.completion", model: "kimi-k3.1-pro", choices: [{ index: 0, message: { role: "assistant", content: "hi" } }], ...(usageObject ? { usage: usageObject } : {}), exchange: exchangeBlock(estimatedUsd, options) });
 }
 
 /** A Liquid stream: reasoning, then text, then usage and the `exchange` block in the last chunk. */
-export function liquidStream(usageObject: Record<string, unknown> | undefined, totalUsd?: number): Response {
+export function liquidStream(usageObject: Record<string, unknown> | undefined, estimatedUsd?: number, options: Parameters<typeof exchangeBlock>[1] = {}): Response {
   const chunks = [
     { choices: [{ index: 0, delta: { role: "assistant", reasoning: "Counting." } }] },
     { choices: [{ index: 0, delta: { content: "1, 2, 3" } }] },
-    { choices: [], ...(usageObject ? { usage: usageObject } : {}), exchange: exchangeBlock(totalUsd) },
+    { choices: [], ...(usageObject ? { usage: usageObject } : {}), exchange: exchangeBlock(estimatedUsd, options) },
   ];
   return sse(chunks.map((chunk) => JSON.stringify(chunk)));
 }

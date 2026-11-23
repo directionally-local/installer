@@ -81,7 +81,7 @@ export function probeRequest(config: FreeConfig, target: ProbeTarget): { url: st
 export async function probeOnce(fetcher: Fetch, config: FreeConfig, target: ProbeTarget, now: () => number): Promise<ProbeRecord> {
   const { provider, model } = target;
   const started = now();
-  const failed = (error: string, costUsd = 0): ProbeRecord => ({ at: started, provider: provider.id, model: model.id, ok: false, ttftMs: null, tokensPerSecond: null, completionTokens: null, costUsd, error });
+  const failed = (error: string, costUsd = 0, outcome?: StreamOutcome): ProbeRecord => ({ at: started, provider: provider.id, model: model.id, ok: false, ttftMs: null, tokensPerSecond: null, completionTokens: null, costUsd, error, ...reported(outcome) });
   const { url, body } = probeRequest(config, target);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
@@ -122,14 +122,20 @@ export async function probeOnce(fetcher: Fetch, config: FreeConfig, target: Prob
     if (!outcome) return failed(controller.signal.aborted ? "timeout" : "stream_error");
     const usage = outcome.usage;
     const costUsd = outcome.chargeUsd ?? (usage ? costAtPrices(usage, creditPrices(model)) : 0);
-    if (outcome.upstreamFailed || outcome.errored) return failed(controller.signal.aborted ? "timeout" : "stream_error", costUsd);
-    if (!usage) return failed("no_usage", costUsd);
-    if (outcome.firstContentAt === undefined) return failed("no_content", costUsd);
+    if (outcome.upstreamFailed || outcome.errored) return failed(controller.signal.aborted ? "timeout" : "stream_error", costUsd, outcome);
+    if (!usage) return failed("no_usage", costUsd, outcome);
+    if (outcome.firstContentAt === undefined) return failed("no_content", costUsd, outcome);
     const ttftMs = Math.max(0, outcome.firstContentAt - started);
     const generationMs = (outcome.endedAt ?? now()) - outcome.firstContentAt;
     const tokensPerSecond = generationMs > 0 && usage.completionTokens > 1 ? Math.round(((usage.completionTokens * 1000) / generationMs) * 10) / 10 : null;
-    return { at: started, provider: provider.id, model: model.id, ok: true, ttftMs, tokensPerSecond, completionTokens: usage.completionTokens, costUsd, error: null };
+    return { at: started, provider: provider.id, model: model.id, ok: true, ttftMs, tokensPerSecond, completionTokens: usage.completionTokens, costUsd, error: null, ...reported(outcome) };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Liquid's seller and its own timing of the probe, kept beside ours (ours is what /v1/providers shows). */
+function reported(outcome: StreamOutcome | undefined): Pick<ProbeRecord, "seller" | "reportedTtftMs" | "reportedTokensPerSecond"> {
+  const facts = outcome?.exchange;
+  return { seller: facts?.seller ?? null, reportedTtftMs: facts?.ttftMs ?? null, reportedTokensPerSecond: facts?.tokensPerSecond ?? null };
 }

@@ -7,7 +7,8 @@
  *   provider_person_weeks   per registry provider, person and week: their spend, for the
  *                           opt-in cap (ids and dollars only; older weeks are pruned)
  *   provider_probes         one row per speed probe (probes.ts): the model, whether it worked,
- *                           time to first token, tokens a second and its cost; 15 days kept
+ *                           time to first token, tokens a second and its cost, and on Liquid
+ *                           the seller that served it and the exchange's own timing; 15 days kept
  *
  * OpenAI's and Luminal's credit stays in `spend_weeks`, where it always was; `providerSpend`
  * reads both into one view. Counts, times and dollars only: never a prompt or an answer.
@@ -45,7 +46,10 @@ export const PROVIDER_SCHEMA = [
      tokens_per_second REAL,
      completion_tokens INTEGER,
      cost_usd          REAL NOT NULL DEFAULT 0,
-     error             TEXT
+     error             TEXT,
+     seller            TEXT,
+     reported_ttft_ms  INTEGER,
+     reported_tps      REAL
    )`,
   `CREATE INDEX IF NOT EXISTS provider_probes_model_at ON provider_probes (model, at)`,
 ];
@@ -158,11 +162,15 @@ export interface ProbeRecord {
   costUsd: number;
   /** What went wrong, as a short code ("http_503", "timeout", "no_usage"); never a response body. */
   error: string | null;
+  /** Liquid: the seller that served it (`exchange.provider_slug`), and the exchange's own `timing.ttft_ms` and `timing.tokens_per_second`. */
+  seller?: string | null;
+  reportedTtftMs?: number | null;
+  reportedTokensPerSecond?: number | null;
 }
 
 export function insertProbe(sql: Sql, probe: ProbeRecord): void {
   sql.exec(
-    "INSERT INTO provider_probes (at, provider, model, ok, ttft_ms, tokens_per_second, completion_tokens, cost_usd, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO provider_probes (at, provider, model, ok, ttft_ms, tokens_per_second, completion_tokens, cost_usd, error, seller, reported_ttft_ms, reported_tps) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     probe.at,
     probe.provider,
     probe.model,
@@ -172,14 +180,17 @@ export function insertProbe(sql: Sql, probe: ProbeRecord): void {
     probe.completionTokens,
     probe.costUsd,
     probe.error,
+    probe.seller ?? null,
+    probe.reportedTtftMs ?? null,
+    probe.reportedTokensPerSecond ?? null,
   );
   sql.exec("DELETE FROM provider_probes WHERE at < ?", probe.at - PROBES_KEEP_MS);
 }
 
 export function probeHistory(sql: Sql, since: number, limit = 500): ProbeRecord[] {
   return sql
-    .exec<{ at: number; provider: string; model: string; ok: number; ttft_ms: number | null; tokens_per_second: number | null; completion_tokens: number | null; cost_usd: number; error: string | null }>(
-      "SELECT at, provider, model, ok, ttft_ms, tokens_per_second, completion_tokens, cost_usd, error FROM provider_probes WHERE at >= ? ORDER BY at DESC, id DESC LIMIT ?",
+    .exec<{ at: number; provider: string; model: string; ok: number; ttft_ms: number | null; tokens_per_second: number | null; completion_tokens: number | null; cost_usd: number; error: string | null; seller: string | null; reported_ttft_ms: number | null; reported_tps: number | null }>(
+      "SELECT at, provider, model, ok, ttft_ms, tokens_per_second, completion_tokens, cost_usd, error, seller, reported_ttft_ms, reported_tps FROM provider_probes WHERE at >= ? ORDER BY at DESC, id DESC LIMIT ?",
       since,
       limit,
     )
@@ -194,6 +205,9 @@ export function probeHistory(sql: Sql, since: number, limit = 500): ProbeRecord[
       completionTokens: row.completion_tokens,
       costUsd: row.cost_usd,
       error: row.error,
+      seller: row.seller,
+      reportedTtftMs: row.reported_ttft_ms,
+      reportedTokensPerSecond: row.reported_tps,
     }));
 }
 

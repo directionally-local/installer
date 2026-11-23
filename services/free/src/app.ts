@@ -84,7 +84,7 @@ import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
 import { meterStream } from "./sse.js";
-import { accessOf, offeredModels, exchangeCharge, exchangeRules, isRegistryProvider, liquidPayload, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, registryBlock, type ProviderBlock, type ProviderSpend } from "./providers.js";
+import { accessOf, offeredModels, exchangeCharge, exchangeUsage, mergedUsage, exchangeRules, isRegistryProvider, liquidPayload, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, registryBlock, type ProviderBlock, type ProviderSpend } from "./providers.js";
 import { PROBE_CRON, probeOnce, probeTargets } from "./probes.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
 import { anthropicError, errorStatus, estimateInputTokens, toAnthropicMessage, toAnthropicStream, toChatRequest } from "./anthropic.js";
@@ -3783,7 +3783,7 @@ async function compatibleChat(
 
   const text = await response.text();
   const parsed = parseJson(text) as { usage?: unknown; error?: unknown } | undefined;
-  const usage = parseUsage(parsed?.usage);
+  const usage = mergedUsage(parseUsage(parsed?.usage), exchangeUsage(parsed));
   const charge = exchangeCharge(parsed);
   const allowance = await settle(usage, usage ? "ok" : "no_usage", { ttfbMs, ttftMs: c.now() - started, ...(parsed?.error ? { upstreamError: true } : {}), ...(charge !== undefined ? { creditUsd: charge } : {}) });
   return new Response(text, {
