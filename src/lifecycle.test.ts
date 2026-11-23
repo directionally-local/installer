@@ -219,7 +219,7 @@ describe("cli", () => {
     let out = "";
     const io = { out: (text: string) => { out += text; }, err: () => {} };
     // Stubs: never the real Autopilot, its config or the network.
-    const laptop = { root: false, serverState: async () => undefined, autopilotAuth: async () => ({ active: "openrouter", setUp: true }), freeTierAccount: async () => { throw new Error("not on the free tier: not asked"); } };
+    const laptop = { root: false, serverState: async () => undefined, autopilotAuth: async () => ({ active: "openrouter", setUp: true }), freeTierAccount: async () => { throw new Error("not on the free tier: not asked"); }, freeModel: async () => { throw new Error("not on the free tier: not asked"); } };
     // Right after the install script: no places yet, but plain dl works, so say what's installed and how to start.
     assert.equal(await main(["status"], io, laptop), 0);
     assert.doesNotMatch(out, /isn't set up/);
@@ -236,7 +236,7 @@ describe("cli", () => {
     assert.match(out, /comes with dl\n {2}! Not signed in yet: run dl in a project folder and choose Free, or use your own API key\.\n/);
     assert.doesNotMatch(out, /Free tier/);
     // Signed in to the free tier: who, what's left this week and when it comes back, in local time.
-    const free = { ...laptop, autopilotAuth: async () => ({ active: "directionally-local", setUp: true }) };
+    const free = { ...laptop, autopilotAuth: async () => ({ active: "directionally-local", setUp: true }), freeModel: async () => undefined };
     const resetsAt = "2026-11-09T00:00:00.000Z";
     const reset = new Date(resetsAt).toLocaleDateString("en-US", { weekday: "short" }) + " " + new Date(resetsAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
     out = "";
@@ -252,6 +252,10 @@ describe("cli", () => {
     assert.equal(await main(["status"], io, { ...free, freeTierAccount: async (options) => ((asked = options), { login: "octo", proPrompt: prompt }) }), 0);
     assert.ok(out.includes(`  Free tier  @octo\n             ${prompt.text} Upgrade: https://dl.new/account\n`), out);
     assert.deepEqual(asked, { showsProPrompt: true });
+    // The chosen free model, with its provider and measured speed.
+    out = "";
+    assert.equal(await main(["status"], io, { ...free, freeTierAccount: async () => ({ login: "octo" }), freeModel: async () => "DeepSeek V4.1 Flash · Luminal · ~85 tok/s" }), 0);
+    assert.match(out, /comes with dl\n {2}Free tier {2}@octo\n {2}Free model DeepSeek V4\.1 Flash · Luminal · ~85 tok\/s {3}dl models\n\n/);
     for (const account of [async () => undefined, async () => { throw new Error("offline"); }]) {
       out = "";
       assert.equal(await main(["status"], io, { ...free, freeTierAccount: account }), 0);
@@ -271,6 +275,10 @@ describe("cli", () => {
     out = "";
     assert.equal(await main(["status"], io, { ...free, freeTierAccount: async () => ({ login: "octo", remaining: 800, tokensPerWeek: 50_000_000, resetsAt }) }), 0);
     assert.match(out, /Hotcell .*\n {2}Free tier {2}@octo · 800 of 50M tokens left this week · resets /, "with places too");
+    out = "";
+    assert.equal(await main(["status"], io, { ...free, freeTierAccount: async () => ({ login: "octo" }), freeModel: async () => "GPT-6 Luna · OpenAI" }), 0);
+    assert.match(out, /Free tier {2}@octo\n {2}Free model GPT-6 Luna · OpenAI {3}dl models\n/, "with places too");
+    assert.match(await (async () => { out = ""; await main(["--help"], io); return out; })(), /dl models +the free tier's models, their providers and measured speeds/);
     assert.match(await (async () => { out = ""; await main(["--help"], io); return out; })(), /dl status +where your agents run, their provider, model and versions, and what they're doing/);
   });
 
@@ -288,5 +296,18 @@ describe("cli", () => {
     open.push('{"githubToken":\n"ghp_x"}\n');
     assert.equal(await readAnswers(open), '{"githubToken":\n"ghp_x"}\n');
     await assert.rejects(readAnswers(Object.assign(Readable.from([]), { isTTY: true })), /from a pipe, not a terminal/);
+  });
+});
+
+describe("dl models", () => {
+  it("prints the free tier's providers table, as JSON with --json", async () => {
+    let out = "";
+    const io = { out: (text: string) => { out += text; }, err: () => {} };
+    const seen: Array<{ json?: boolean }> = [];
+    const modelsCommand = async (cmdIo: { out: (text: string) => void }, options: { json?: boolean } = {}) => { seen.push(options); cmdIo.out("table\n"); return 0; };
+    assert.equal(await main(["models"], io, { modelsCommand }), 0);
+    assert.equal(await main(["models", "--json"], io, { modelsCommand }), 0);
+    assert.equal(out, "table\ntable\n");
+    assert.deepEqual(seen.map((options) => options.json), [false, true]);
   });
 });
