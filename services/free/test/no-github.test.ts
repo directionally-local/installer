@@ -235,3 +235,40 @@ describe("the admin side", () => {
     assert.equal(clicks, "date,device,web,dlnew,other,total,answers\r\n2026-11-04,0,0,1,0,1,1\r\n");
   });
 });
+
+describe("a Directory still on the previous code (just after a deploy)", () => {
+  // Production, 23 Nov: right after the deploy that added /no-github, the one Directory object kept
+  // running the previous code for a few minutes, so the RPC threw "The RPC receiver does not
+  // implement the method "noGithubClick"" and the page answered 500. The page must still show.
+  const missing = (method: string) => () => {
+    throw new TypeError(`The RPC receiver does not implement the method "${method}".`);
+  };
+  async function withoutMethods<T>(run: () => Promise<T>): Promise<T> {
+    const { DirectoryObject } = await import("../src/directory-object.js");
+    const proto = DirectoryObject.prototype as unknown as Record<string, unknown>;
+    const saved = { noGithubClick: proto.noGithubClick, noGithubLead: proto.noGithubLead };
+    proto.noGithubClick = missing("noGithubClick");
+    proto.noGithubLead = missing("noGithubLead");
+    try {
+      return await run();
+    } finally {
+      Object.assign(proto, saved);
+    }
+  }
+
+  it("GET still shows the form (200), counting and emailing nothing", async () => {
+    const { s } = await open();
+    const response = await withoutMethods(() => click(s, "web"));
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /name="email"/);
+    assert.equal(emails(s).length, 0);
+  });
+
+  it("POST asks to try again (503), not a 500", async () => {
+    const { s } = await open();
+    const response = await withoutMethods(() => answer(s, { from: "web", email: "someone@example.com" }));
+    assert.equal(response.status, 503);
+    assert.match(await response.text(), /try again in a minute/);
+    assert.equal(emails(s).length, 0);
+  });
+});
