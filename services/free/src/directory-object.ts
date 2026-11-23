@@ -1,4 +1,5 @@
 import { DurableObject, type DurableObjectState } from "cloudflare:workers";
+import { NO_GITHUB_SCHEMA, noGithubDays, noGithubDigestLine, noGithubReport, recordNoGithubClick, saveNoGithubLead, withNoGithubLine, type NoGithubAlerts, type NoGithubDay, type NoGithubReport, type NoGithubSource } from "./no-github.js";
 import { normalizeEmail } from "./email-guard.js";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
@@ -387,6 +388,8 @@ const ACTIVITY = `(SELECT github_id, at FROM requests UNION ALL SELECT github_id
 const WEEK_OF = (column: string) => `(((${column}) / ${DAY_MS}) - ((((${column}) / ${DAY_MS}) + 3) % 7)) * ${DAY_MS}`;
 
 const SCHEMA = [
+  // "Don't have GitHub?" clicks and answers (no-github.ts).
+  ...NO_GITHUB_SCHEMA,
   `CREATE TABLE IF NOT EXISTS people (
      github_id    INTEGER PRIMARY KEY,
      login        TEXT NOT NULL,
@@ -3465,6 +3468,28 @@ export class DirectoryObject extends DurableObject {
     );
   }
 
+  // ─── "Don't have GitHub?" (no-github.ts) ─────────────────────────────────
+
+  /** Counts a click; `email`: whether to email the owner about it now. */
+  async noGithubClick(input: { now: number; source: NoGithubSource; mode: NoGithubAlerts }): Promise<ReturnType<typeof recordNoGithubClick>> {
+    return recordNoGithubClick(this.ctx.storage.sql, input);
+  }
+
+  /** Keeps an answer from the page; `email`: whether to email the owner about it now. */
+  async noGithubLead(input: { now: number; source: NoGithubSource; email: string | null; uses: string | null; ipHash: string; mode: NoGithubAlerts }): Promise<ReturnType<typeof saveNoGithubLead>> {
+    return saveNoGithubLead(this.ctx.storage.sql, input);
+  }
+
+  /** Clicks per day and source in [from, until), totals, and the newest answers (admins). */
+  async noGithub(input: { from: number; until: number }): Promise<NoGithubReport> {
+    return noGithubReport(this.ctx.storage.sql, input);
+  }
+
+  /** Clicks and answers per day in [from, until), for /v1/admin/metrics. */
+  async noGithubDays(input: { from: number; until: number }): Promise<NoGithubDay[]> {
+    return noGithubDays(this.ctx.storage.sql, input.from, input.until);
+  }
+
   /** Early-access leads, newest first (the admin Tools tab and its CSV). */
   async earlyAccessLeads(): Promise<EarlyAccessLead[]> {
     return this.ctx.storage.sql
@@ -3584,7 +3609,8 @@ export class DirectoryObject extends DurableObject {
     const moderation = this.#moderationDay(from, until);
     const allocator = allocatorCounts(sql, from, until);
     const allocated = allocator.raised10m + allocator.raisedFull + allocator.stayed + allocator.errors + allocator.graces > 0;
-    return dailyDigestAlert({
+    const noGithubLine = noGithubDigestLine(sql, from);
+    return withNoGithubLine(dailyDigestAlert({
       date,
       signups: { count: day.signedUp, people },
       active: day.active,
@@ -3605,7 +3631,7 @@ export class DirectoryObject extends DurableObject {
       ...(policy.accessRequestAlerts === "daily" ? { accessRequests: this.#accessRequestDay(from, until) } : {}),
       ...(moderation ? { moderation } : {}),
       ...(allocated ? { allocator } : {}),
-    });
+    }), noGithubLine);
   }
 
   /** Access requests made in [from, until): how many, the first logins, and how many wait now. Never what they wrote. */
