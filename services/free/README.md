@@ -884,6 +884,39 @@ The two global budget codes mean "free tokens are paused for everyone, and your 
 works". The weekly one says when free tokens come back. The total one has no reset time: free
 tokens come back only if the owner raises the cap.
 
+### Refusal counts (`refusals_daily`)
+
+Every sign-in refusal and request gate is counted per UTC day, reason and client
+(`src/refusals.ts`), so the cost of each gate is visible. Counts only: the Directory's
+`refusals_daily` table holds `(day, reason, client, n, people)` and nothing about who. `people`
+is how many distinct accounts met that reason on that client that day, kept with a salted hash
+set (`refusal_people`, with a random salt per day in `refusal_salts`); the hashes and the salt
+are deleted once the day is over, so only the number stays. Rows older than 120 days are pruned.
+
+- **Clients**: `autopilot` (a sign-in token or server key: plain dl, GPT-6 requests served
+  through OpenAI's Responses API included), `opencode` (`dl opencode`'s harness key on
+  `/v1/chat/completions`), `claude-code` (`dl claude`'s harness key on `/anthropic/v1/messages`),
+  `other` (`dl_only` and `proxy_not_allowed`: the request isn't from dl), and `signin` for the
+  browser sign-in.
+- **Sign-in reasons**: `invite_page_shown`, `invite_accepted`, `invite_code_invalid`,
+  `invite_rate_limited`, `invite_required`, `account_too_new`, `no_github_activity`,
+  `few_repos_and_contributions` and `network_limit` (a new account placed below Full, and why),
+  `network_signup_limit`, `cohort_full`, `queued` (placed on the waitlist), `device_taken`,
+  `blocked`, `email_blocked`, `email_domain_blocked`, `email_in_use`, `email_domain_daily_cap`,
+  `signin_paused`. They are counted on the browser side only, so a terminal polling the same
+  refusal doesn't count it twice.
+- **Request reasons** (from the refusal's code, on every chat path): `dl_only`,
+  `harness_not_allowed` (also when minting a harness key), `harness_limit`,
+  `proxy_not_allowed`, `gpt_limit:cap`, `gpt_limit:security_hold`,
+  `allowance_exhausted:full` (Full or Pro), `allowance_exhausted:basic`,
+  `allowance_exhausted:starter`, `trial_ended`, `below_bar`, `api_queued`,
+  `global_cap:weekly`, `global_cap:total`, `paused`, `credit_exhausted`, `rate_limited`,
+  `model_not_allowed`, `api_not_invited`, `api_blocked`, `api_suspended`.
+
+`GET /v1/admin/metrics` returns `refusals: [{day, reason, client, count, people}]` for its
+`from`/`to` window, `/admin/dashboard/refusals.csv` has every kept row, and the admin home has a
+"Refusals" card (today, last 7 and last 30 days per reason and client).
+
 ## Runtime settings
 
 These settings come from `env`. An admin can override them while the service runs, with no

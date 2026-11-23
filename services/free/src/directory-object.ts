@@ -4,6 +4,7 @@ import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
 import type { WebFunnelRow, WebStep } from "./web-signup.js";
+import { REFUSALS_KEEP_DAYS, type RefusalRow } from "./refusals.js";
 import { outsideDl } from "./abuse.js";
 import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, signupFunnel, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent, GpuCount } from "./events.js";
@@ -841,6 +842,28 @@ const SCHEMA = [
      n           INTEGER NOT NULL,
      PRIMARY KEY (day, github_id, session_key)
    ) WITHOUT ROWID`,
+  // Every refusal and gate per UTC day, reason and client (refusals.ts): counts only. `people` is the
+  // distinct accounts that day, from today's salted hashes (refusal_people, refusal_salts),
+  // which are dropped once the day is over. Kept REFUSALS_KEEP_DAYS days.
+  `CREATE TABLE IF NOT EXISTS refusals_daily (
+     day    INTEGER NOT NULL,
+     reason TEXT NOT NULL,
+     client TEXT NOT NULL,
+     n      INTEGER NOT NULL,
+     people INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (day, reason, client)
+   ) WITHOUT ROWID`,
+  `CREATE TABLE IF NOT EXISTS refusal_people (
+     day    INTEGER NOT NULL,
+     reason TEXT NOT NULL,
+     client TEXT NOT NULL,
+     hash   TEXT NOT NULL,
+     PRIMARY KEY (day, reason, client, hash)
+   ) WITHOUT ROWID`,
+  `CREATE TABLE IF NOT EXISTS refusal_salts (
+     day  INTEGER PRIMARY KEY,
+     salt TEXT NOT NULL
+   )`,
 ];
 
 /** Columns added after their table first shipped: added in place on start. */
@@ -3272,6 +3295,49 @@ export class DirectoryObject extends DurableObject {
       day,
       step,
     );
+  }
+
+  /**
+   * Adds one to the day's count of a refusal or gate for a client (refusals.ts). `subject` (a GitHub id, when
+   * known) only counts distinct people: it is hashed with the day's random salt, and the hashes
+   * and the salt are dropped once the day is over. Nothing about who is kept.
+   */
+  async countRefusal(reason: string, client: string, now: number, subject?: number): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const day = Math.floor(now / DAY_MS);
+    this.#pruneRefusals(day);
+    sql.exec("INSERT INTO refusals_daily (day, reason, client, n) VALUES (?, ?, ?, 1) ON CONFLICT (day, reason, client) DO UPDATE SET n = n + 1", day, reason, client);
+    if (subject === undefined) return;
+    let salt = sql.exec<{ salt: string }>("SELECT salt FROM refusal_salts WHERE day = ?", day).toArray()[0]?.salt;
+    if (!salt) {
+      salt = [...crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      sql.exec("INSERT OR IGNORE INTO refusal_salts (day, salt) VALUES (?, ?)", day, salt);
+      salt = sql.exec<{ salt: string }>("SELECT salt FROM refusal_salts WHERE day = ?", day).toArray()[0]!.salt;
+    }
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${salt}:${subject}`));
+    const hash = [...new Uint8Array(digest)].slice(0, 12).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    // No await from here on: the check and the two writes happen together.
+    if (sql.exec("SELECT 1 FROM refusal_people WHERE day = ? AND reason = ? AND client = ? AND hash = ?", day, reason, client, hash).toArray().length > 0) return;
+    sql.exec("INSERT INTO refusal_people (day, reason, client, hash) VALUES (?, ?, ?, ?)", day, reason, client, hash);
+    sql.exec("UPDATE refusals_daily SET people = people + 1 WHERE day = ? AND reason = ? AND client = ?", day, reason, client);
+  }
+
+  /** Refusal counts for UTC days `fromDay` to `toDay` (inclusive; default: all kept), oldest first. */
+  async refusals(fromDay = 0, toDay = Number.MAX_SAFE_INTEGER): Promise<RefusalRow[]> {
+    return this.ctx.storage.sql
+      .exec<RefusalRow>("SELECT day, reason, client, n AS count, people FROM refusals_daily WHERE day >= ? AND day <= ? ORDER BY day, reason, client", fromDay, toDay)
+      .toArray();
+  }
+
+  /** Once a UTC day: yesterday's hashes and salt go, and counts older than REFUSALS_KEEP_DAYS. */
+  #pruneRefusals(day: number): void {
+    const sql = this.ctx.storage.sql;
+    const done = sql.exec<{ value: string }>("SELECT value FROM settings WHERE key = 'refusals:pruned_day'").toArray()[0]?.value;
+    if (done === String(day)) return;
+    sql.exec("DELETE FROM refusal_people WHERE day < ?", day);
+    sql.exec("DELETE FROM refusal_salts WHERE day < ?", day);
+    sql.exec("DELETE FROM refusals_daily WHERE day < ?", day - REFUSALS_KEEP_DAYS);
+    sql.exec("INSERT INTO settings (key, value) VALUES ('refusals:pruned_day', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", String(day));
   }
 
   /** Every day's web sign-up step counts, oldest first. */

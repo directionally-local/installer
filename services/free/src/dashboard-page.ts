@@ -92,7 +92,7 @@ export const HEALTH_CSV_TABLES = [
 ] as const;
 export type HealthCsvTable = (typeof HEALTH_CSV_TABLES)[number];
 
-export const CSV_TABLES = ["early-access", "spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams", "web-signup", ...HEALTH_CSV_TABLES] as const;
+export const CSV_TABLES = ["early-access", "spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams", "web-signup", "refusals", ...HEALTH_CSV_TABLES] as const;
 export type CsvTable = (typeof CSV_TABLES)[number];
 
 export function isCsvTable(name: string): name is CsvTable {
@@ -837,7 +837,7 @@ function csv(header: string[], rows: unknown[][]): string {
   return [header, ...rows].map((row) => row.map(csvField).join(",")).join("\r\n") + "\r\n";
 }
 
-export function dashboardCsv(table: Exclude<CsvTable, HealthCsvTable | "early-access" | "web-signup">, data: DashboardData, spend: SpendView): Response {
+export function dashboardCsv(table: Exclude<CsvTable, HealthCsvTable | "early-access" | "web-signup" | "refusals">, data: DashboardData, spend: SpendView): Response {
   let body: string;
   switch (table) {
     case "spend": {
