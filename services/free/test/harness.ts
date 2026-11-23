@@ -169,6 +169,8 @@ export interface Service {
     openRouter: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     /** Calls to Luminal's chat completions (a fake: nothing leaves the process). */
     luminal: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
+    /** Calls to Liquid Inference's chat completions (a fake: nothing leaves the process). */
+    liquid: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     /** Calls to OpenAI's Responses API (a fake: nothing leaves the process). */
     openai: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     /** Calls to OpenAI's Moderation API (a fake: nothing leaves the process). */
@@ -200,6 +202,8 @@ export interface Service {
   setGithubProfile(handler: (login: string) => Response | Promise<Response>): void;
   /** Answers calls to Luminal (default: a completion with Luminal-shaped usage, no cost). */
   setLuminal(handler: OpenRouterHandler): void;
+  /** Answers calls to Liquid Inference (default: a Kimi completion with usage and an `exchange` block, streamed when asked). */
+  setLiquid(handler: OpenRouterHandler): void;
   /** Answers calls to OpenAI's Responses API (default: a "hi" response, streamed when asked, with Responses usage). */
   setOpenAI(handler: OpenRouterHandler): void;
   /** Answers calls to OpenAI's Moderation API (default: nothing flagged). */
@@ -299,6 +303,44 @@ export function responsesTextEvents(text: string, usageObject: Record<string, un
   ];
 }
 
+/**
+ * The `exchange` block Liquid puts on a response and on a stream's last chunk, in the shape seen
+ * live on 2026-11-23: no `charge.total_usd`, `supplier_usd` and `fee_usd` still 0 at the end of
+ * the stream, the job's estimate in `estimated_usd`. `estimatedUsd` undefined leaves the charge out.
+ */
+export function exchangeBlock(estimatedUsd: number | undefined = 0.0004, options: { usage?: Record<string, unknown>; charge?: Record<string, unknown> } = {}): Record<string, unknown> {
+  const nanos = (usd: number) => Math.round(usd * 1e9);
+  return {
+    job_id: "job_1",
+    provider_slug: "deeprelay",
+    offer_id: "off_1",
+    status: "settled",
+    created_at: "2026-11-23T09:30:00Z",
+    ...(estimatedUsd !== undefined
+      ? { charge: { cap_usd: 0.05, cap_nanos: nanos(0.05), estimated_usd: estimatedUsd, estimated_nanos: nanos(estimatedUsd), supplier_usd: 0, supplier_nanos: 0, fee_usd: 0, fee_nanos: 0, credits_usd: 0, credits_nanos: 0, ...options.charge } }
+      : {}),
+    ...(options.usage ? { usage: options.usage } : {}),
+    timing: { ttft_ms: 4012, first_event_ms: 3990, tokens_per_second: 61.5, completion_ms: 6100 },
+    addressing: null,
+    failure: null,
+  };
+}
+
+/** A non-streaming Liquid completion with usage and the `exchange` block. */
+export function liquidCompletion(usageObject: Record<string, unknown> | undefined, estimatedUsd?: number, options: Parameters<typeof exchangeBlock>[1] = {}): Response {
+  return Response.json({ id: "job_1", object: "chat.completion", model: "kimi-k3.1-pro", choices: [{ index: 0, message: { role: "assistant", content: "hi" } }], ...(usageObject ? { usage: usageObject } : {}), exchange: exchangeBlock(estimatedUsd, options) });
+}
+
+/** A Liquid stream: reasoning, then text, then usage and the `exchange` block in the last chunk. */
+export function liquidStream(usageObject: Record<string, unknown> | undefined, estimatedUsd?: number, options: Parameters<typeof exchangeBlock>[1] = {}): Response {
+  const chunks = [
+    { choices: [{ index: 0, delta: { role: "assistant", reasoning: "Counting." } }] },
+    { choices: [{ index: 0, delta: { content: "1, 2, 3" } }] },
+    { choices: [], ...(usageObject ? { usage: usageObject } : {}), exchange: exchangeBlock(estimatedUsd, options) },
+  ];
+  return sse(chunks.map((chunk) => JSON.stringify(chunk)));
+}
+
 export function completion(usageObject: Record<string, unknown> | undefined): Response {
   return new Response(
     JSON.stringify({ id: "gen-1", object: "chat.completion", model: MODEL, choices: [{ index: 0, message: { role: "assistant", content: "hi" } }], ...(usageObject ? { usage: usageObject } : {}) }),
@@ -356,7 +398,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
     ...namespaces,
   };
   const clock = { now: NOW };
-  const calls: Service["calls"] = { openRouter: [], luminal: [], openai: [], moderations: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [], resend: [], userEmail: [] };
+  const calls: Service["calls"] = { openRouter: [], luminal: [], liquid: [], openai: [], moderations: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [], resend: [], userEmail: [] };
   let resend = (_body: Record<string, unknown>): Response | Promise<Response> => Response.json({ id: `email-${calls.resend.length}` });
   let stripe = (path: string, _form?: URLSearchParams): Response | Promise<Response> =>
     path === "/v1/checkout/sessions"
@@ -381,6 +423,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
   let openRouter: OpenRouterHandler = () => completion(usage(100, 10));
   let githubProfile = (login: string): Response | Promise<Response> => Response.json({ login, email: null });
   let luminal: OpenRouterHandler = () => completion(luminalUsage(100, 10));
+  let liquid: OpenRouterHandler = (body) => (body.stream ? liquidStream(luminalUsage(100, 10)) : liquidCompletion(luminalUsage(100, 10)));
   let moderations: OpenRouterHandler = () => Response.json({ id: "modr-1", model: "omni-moderation-latest", results: [{ flagged: false, categories: {}, category_scores: {} }] });
   let openai: OpenRouterHandler = (body) => (body.stream ? responsesSse(responsesTextEvents("hi", responsesUsage(100, 10))) : openaiResponse(responsesUsage(100, 10)));
 
@@ -456,6 +499,11 @@ export async function createService(vars: Record<string, string> = {}, options: 
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       calls.luminal.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
       return luminal(body, init);
+    }
+    if (url === "https://router.inference.ai.exchange/v1/chat/completions") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      calls.liquid.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
+      return liquid(body, init);
     }
     if (url === "https://api.openai.com/v1/responses") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -540,6 +588,9 @@ export async function createService(vars: Record<string, string> = {}, options: 
     },
     setLuminal: (next) => {
       luminal = next;
+    },
+    setLiquid: (next) => {
+      liquid = next;
     },
     setOpenAI: (next) => {
       openai = next;

@@ -11,8 +11,10 @@ import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS
 import type { CleanEvent, GpuCount } from "./events.js";
 import { healthData, type HealthData, type HealthWindow } from "./health-data.js";
 import { adminHomeData, type AdminHomeData } from "./admin-home-data.js";
-import { flaggedUseAlert, moderationAlert, milestoneCrossed, paymentAlert, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
+import { providerCreditAlert, flaggedUseAlert, moderationAlert, milestoneCrossed, paymentAlert, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
+import { addProviderCharge, insertProbe, modelMeasures, personProviderWeek, probeHistory, PROVIDER_SCHEMA, providerSpend, providerWeeks, type ModelMeasure, type ProbeRecord } from "./provider-store.js";
+import { isRegistryProvider, PROVIDERS, providerSettings, REGISTRY_CREDIT_ALERT_SHARE, type ProviderConfig, type ProviderId, type ProviderSpend } from "./providers.js";
 import { DEEPSEEK_MODEL, familyOf, type Family } from "./models.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, trialBonuses, type Pair, type ReferralOutcome } from "./referrals.js";
@@ -321,6 +323,29 @@ export interface Gate {
   waiting: number;
   overrides: Overrides;
   person?: PersonState;
+  /** Every provider's credit used, since the start and this week (providers.ts). */
+  providerSpend: ProviderSpend;
+  /** The caller's spend on each registry provider this week, for the opt-in cap (with `githubId`). */
+  personProviderWeekUsd?: Partial<Record<ProviderId, number>>;
+}
+
+/** A registry provider's credit for GET /admin/providers: never shown publicly. */
+export interface ProviderAdminView {
+  id: ProviderId;
+  name: string;
+  /** "legacy" (OpenAI, Luminal: their own settings) or "registry" (providers.ts). */
+  kind: "legacy" | "registry";
+  status: string;
+  balanceUsd: number;
+  usedUsd: number;
+  leftUsd: number;
+  weeklyBudgetUsd: number | null;
+  /** This week: everyone, people but admins (what the weekly budget counts), free usage, and the probes. */
+  weekUsd: number | null;
+  userWeekUsd: number;
+  freeWeekUsd: number | null;
+  probeWeekUsd: number | null;
+  probeTotalUsd: number | null;
 }
 
 /** One Monday's admission from the queue. */
@@ -990,7 +1015,7 @@ export class DirectoryObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA]) this.ctx.storage.sql.exec(statement);
+      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA]) this.ctx.storage.sql.exec(statement);
       ensureAllocatorSchema(this.ctx.storage.sql);
       const added = new Set<string>();
       for (const [table, column, definition] of ADDED_COLUMNS) {
@@ -2347,6 +2372,8 @@ export class DirectoryObject extends DurableObject {
       waiting: this.#waitingCount(),
       overrides,
       ...(policy && githubId !== undefined ? { person: this.#personState(githubId, now, policy) } : {}),
+      providerSpend: providerSpend(this.ctx.storage.sql, now, spend),
+      ...(githubId !== undefined ? { personProviderWeekUsd: personProviderWeek(this.ctx.storage.sql, githubId, now) } : {}),
     };
   }
 
@@ -2373,6 +2400,65 @@ export class DirectoryObject extends DurableObject {
 
   async spend(now: number): Promise<SpendSummary> {
     return this.#spendSync(now);
+  }
+
+  // ─── Providers (providers.ts, provider-store.ts) ─────────────────────────
+
+  /**
+   * One speed probe (probes.ts): its row, and its cost as the service's own spend on the
+   * provider's credit (never a person's allowance or the free caps). Returns the 80% credit
+   * alert when this probe crossed it.
+   */
+  async recordProbe(probe: ProbeRecord, envPolicy?: Policy): Promise<Alert[]> {
+    const policy = envPolicy ? this.#policy(envPolicy) : undefined;
+    return this.ctx.storage.transactionSync(() => {
+      insertProbe(this.ctx.storage.sql, probe);
+      if (probe.costUsd > 0) this.#recordInternalSpend({ upstream: probe.provider, tokens: probe.completionTokens ?? 0, cashUsd: 0, creditUsd: probe.costUsd, now: probe.at });
+      return policy && probe.costUsd > 0 && isRegistryProvider(probe.provider) ? this.#registryCreditAlerts(probe.at, policy, probe.provider) : [];
+    });
+  }
+
+  /** One person's spend on each registry provider this week (the opt-in caps). */
+  async personProviderWeek(githubId: number, now: number): Promise<Partial<Record<ProviderId, number>>> {
+    return personProviderWeek(this.ctx.storage.sql, githubId, now);
+  }
+
+  /** Measured speed per model over the last 24 hours (provider-store.ts modelMeasures), for /v1/providers. */
+  async providerMeasures(now: number): Promise<Record<string, ModelMeasure>> {
+    return Object.fromEntries(modelMeasures(this.ctx.storage.sql, now));
+  }
+
+  /** GET /admin/providers: each provider's credit, used and left, and the probes since `since`. */
+  async providersAdmin(now: number, envPolicy: Policy, since: number): Promise<{ providers: ProviderAdminView[]; probes: ProbeRecord[] }> {
+    return { providers: this.#providersAdmin(now, this.#policy(envPolicy)), probes: probeHistory(this.ctx.storage.sql, since) };
+  }
+
+  #providersAdmin(now: number, policy: Policy): ProviderAdminView[] {
+    const spend = this.#spendSync(now);
+    const used = providerSpend(this.ctx.storage.sql, now, spend);
+    return PROVIDERS.map((spec) => {
+      const registry = spec.kind === "registry";
+      const settings = registry ? providerSettings(policy as unknown as ProviderConfig, spec.id) : undefined;
+      const balance = registry ? (settings?.creditUsd ?? 0) : spec.id === "openai" ? policy.openaiCreditUsd : policy.luminalCreditUsd;
+      const weekly = registry ? settings?.weeklyCreditUsd : spec.id === "openai" ? policy.openaiWeeklyCreditUsd : policy.luminalWeeklyCreditUsd;
+      const usedUsd = used.usedUsd[spec.id] ?? 0;
+      const weeks = registry ? providerWeeks(this.ctx.storage.sql, spec.id, now) : undefined;
+      return {
+        id: spec.id,
+        name: spec.name,
+        kind: spec.kind,
+        status: settings?.status ?? "on",
+        balanceUsd: balance,
+        usedUsd,
+        leftUsd: Math.max(0, round(balance - usedUsd)),
+        weeklyBudgetUsd: weekly ?? null,
+        weekUsd: weeks ? weeks.weekUsd : spec.id === "openai" ? spend.openaiCreditWeekUsd : spend.creditWeekUsd,
+        userWeekUsd: used.weekUsd[spec.id] ?? 0,
+        freeWeekUsd: weeks ? weeks.freeWeekUsd : null,
+        probeWeekUsd: weeks ? weeks.probeWeekUsd : null,
+        probeTotalUsd: weeks ? weeks.probeTotalUsd : null,
+      };
+    });
   }
 
   #spendSync(now: number): SpendSummary {
@@ -2532,6 +2618,9 @@ export class DirectoryObject extends DurableObject {
       const cash = upstream === "openrouter" ? record.costUsd : 0;
       const credit = upstream === "luminal" ? (record.creditUsd ?? 0) : 0;
       const openaiCredit = upstream === "openai" ? (record.creditUsd ?? 0) : 0;
+      // A registry provider's credit (providers.ts) is kept in its own table, by week and person.
+      const registryCredit = isRegistryProvider(upstream) ? (record.creditUsd ?? 0) : 0;
+      if (registryCredit > 0) addProviderCharge(this.ctx.storage.sql, { provider: upstream as ProviderId, at: record.at, usd: registryCredit, githubId: record.githubId, isAdmin: record.isAdmin, paid: record.paid === true });
       this.ctx.storage.sql.exec(
         `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests, paid_usd, paid_tokens, paid_requests, credit_usd, free_credit_usd, openai_credit_usd, openai_free_credit_usd)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2595,8 +2684,8 @@ export class DirectoryObject extends DurableObject {
         record.cachedTokens,
         record.completionTokens,
         cash,
-        // Each upstream's own credit: Luminal's, or OpenAI's (only one is non-zero per request).
-        credit + openaiCredit,
+        // Each upstream's own credit: Luminal's, OpenAI's or a registry provider's (only one is non-zero per request).
+        credit + openaiCredit + registryCredit,
       );
       if (!admin) {
         const day = Math.floor(record.at / DAY_MS);
@@ -2618,7 +2707,8 @@ export class DirectoryObject extends DurableObject {
         if (policy && credit > 0) alerts.push(...this.#creditAlerts(record.at, policy, "luminal"));
       }
       if (upstream === "openai" && policy && openaiCredit > 0) alerts.push(...this.#creditAlerts(record.at, policy, "openai"));
-      if (credit > 0 || openaiCredit > 0 || cash > 0) {
+      if (policy && registryCredit > 0) alerts.push(...this.#registryCreditAlerts(record.at, policy, upstream as ProviderId));
+      if (credit > 0 || openaiCredit > 0 || registryCredit > 0 || cash > 0) {
         const milestone = this.#milestoneAlert(record.at);
         if (milestone) alerts.push(milestone);
       }
@@ -2701,7 +2791,8 @@ export class DirectoryObject extends DurableObject {
   #milestoneAlert(now: number): Alert | undefined {
     const spend = this.#spendSync(now);
     const cashUsd = spend.totalSpentUsd + spend.adminTotalSpentUsd;
-    const totalUsd = spend.openaiCreditUsedUsd + spend.creditUsedUsd + cashUsd;
+    const registry = this.ctx.storage.sql.exec<{ usd: number | null }>("SELECT SUM(credit_usd) AS usd FROM provider_credit_weeks").toArray()[0]?.usd ?? 0;
+    const totalUsd = spend.openaiCreditUsedUsd + spend.creditUsedUsd + registry + cashUsd;
     const hit = milestoneCrossed(totalUsd, this.#sentThresholds("spend-milestone:"));
     if (!hit) return undefined;
     for (const m of hit.mark) this.#markAlert(`spend-milestone:${m}`, now);
@@ -2741,6 +2832,23 @@ export class DirectoryObject extends DurableObject {
     // Re-armed once the host is healthy again.
     if (requests >= HOST_MIN_REQUESTS) this.ctx.storage.sql.exec("DELETE FROM alerts_sent WHERE key = ?", key);
     return undefined;
+  }
+
+  /** A registry provider's credit crossing 80% of its balance: one alert per balance (a new balance re-arms it). */
+  #registryCreditAlerts(now: number, policy: Policy, provider: ProviderId): Alert[] {
+    const balance = this.#registryBalance(policy, provider);
+    if (balance === undefined || balance <= 0) return [];
+    const used = providerSpend(this.ctx.storage.sql, now, this.#spendSync(now)).usedUsd[provider] ?? 0;
+    if (used < balance * REGISTRY_CREDIT_ALERT_SHARE) return [];
+    if (!this.#markAlert(`provider-credit:${provider}:${balance}:80`, now)) return [];
+    const spec = PROVIDERS.find((entry) => entry.id === provider)!;
+    return [providerCreditAlert(spec, used, balance)];
+  }
+
+  /** A registry provider's credit balance from the policy (with overrides), when the policy carries it. */
+  #registryBalance(policy: Policy, provider: ProviderId): number | undefined {
+    const value = (policy as unknown as Record<string, unknown>)[`providerCredit.${provider}`];
+    return typeof value === "number" ? value : undefined;
   }
 
   /** A provider's credit crossing 50%, 80% and 100% of its balance: once each per balance (a new balance re-arms them). */
@@ -2852,6 +2960,7 @@ export class DirectoryObject extends DurableObject {
    * bucket and the provider's credit it used, never a person's allowance or the free caps.
    */
   #recordInternalSpend(input: { upstream: Upstream; tokens: number; cashUsd: number; creditUsd: number; now: number }): void {
+    if (isRegistryProvider(input.upstream)) addProviderCharge(this.ctx.storage.sql, { provider: input.upstream, at: input.now, usd: input.creditUsd, internal: true });
     const luminal = input.upstream === "luminal" ? input.creditUsd : 0;
     const openai = input.upstream === "openai" ? input.creditUsd : 0;
     this.ctx.storage.sql.exec(
@@ -3724,6 +3833,10 @@ export class DirectoryObject extends DurableObject {
         creditBudgetUsd: policy.luminalWeeklyCreditUsd,
       },
       credit: { balanceUsd: policy.luminalCreditUsd, leftUsd: Math.max(0, round(policy.luminalCreditUsd - live.creditUsedUsd)) },
+      providers: this.#providersAdmin(now, policy)
+        // OpenAI and Luminal have their own lines; a registry provider once it's on or has spent.
+        .filter((provider) => provider.kind === "registry" && (provider.status === "on" || provider.usedUsd > 0))
+        .map((provider) => ({ name: provider.name, status: provider.status, balanceUsd: provider.balanceUsd, leftUsd: provider.leftUsd, weekUsd: provider.userWeekUsd, weeklyUsd: provider.weeklyBudgetUsd ?? undefined })),
       queueWaiting: data.queue.waiting,
       paused: envPaused || this.#paused(),
       ...(policy.accessRequestAlerts === "daily" ? { accessRequests: this.#accessRequestDay(from, until) } : {}),

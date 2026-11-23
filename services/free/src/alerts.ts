@@ -280,6 +280,17 @@ export function creditPausedAlert(usedUsd: number, balanceUsd: number, provider 
   };
 }
 
+/**
+ * A registry provider's credit (providers.ts) at 80%: the one warning it gets, once per balance.
+ * At 100% its models leave /v1/models on their own; the daily digest shows what's left.
+ */
+export function providerCreditAlert(provider: { id: string; name: string }, usedUsd: number, balanceUsd: number): Alert {
+  return {
+    subject: `dl free tier: ${percentOf(usedUsd / balanceUsd)} of the ${dollars(balanceUsd)} ${provider.name} credit used`,
+    text: `dl free tier: ${dollars(usedUsd)} of the ${dollars(balanceUsd)} ${provider.name} credit used (${percentOf(usedUsd / balanceUsd)}). At 100% its models are hidden and requests for them get 402 provider_limit with DeepSeek as the alternative. After a top-up, raise providerCredit.${provider.id} (POST /admin/config).`,
+  };
+}
+
 /** Sign-ups a day let through because GitHub's API didn't answer the activity check, before the alert. */
 export const GITHUB_CHECK_ERROR_ALERT = 5;
 
@@ -479,6 +490,8 @@ export interface DailyDigest {
   };
   /** Luminal credit: the balance and what's left of it now (everyone, since the start). */
   credit: { balanceUsd: number; leftUsd: number };
+  /** Registry providers (providers.ts): credit left of the balance, and this week's use against the weekly budget. */
+  providers?: Array<{ name: string; status: string; balanceUsd: number; leftUsd: number; weekUsd: number; weeklyUsd: number | undefined }>;
   queueWaiting: number;
   paused: boolean;
   /** Only with accessRequestAlerts "daily": requests made that day (logins, at most DIGEST_MAX_LOGINS) and how many wait now. */
@@ -539,6 +552,10 @@ export function dailyDigestAlert(digest: DailyDigest): Alert {
   }
   lines.push(`Active people: ${count(digest.active)}`, ...usageLines(digest.usage, "", `Free credit spent: ${dollars(digest.usage.freeCreditUsd)} (Luminal credit)`));
   lines.push(`Luminal credit left: ${dollars(digest.credit.leftUsd)} of ${dollars(digest.credit.balanceUsd)}`);
+  for (const provider of digest.providers ?? []) {
+    const week = provider.weeklyUsd === undefined ? `${dollars(provider.weekUsd)} this week` : `${dollars(provider.weekUsd)} of ${dollars(provider.weeklyUsd)} this week`;
+    lines.push(`${provider.name} credit left: ${dollars(provider.leftUsd)} of ${dollars(provider.balanceUsd)} (${week}; ${provider.status})`);
+  }
   lines.push(`Paid: ${payments(digest.payments)}`);
   if (digest.proLine) lines.push(digest.proLine);
   lines.push(`Installs: ${count(digest.installs.ok)} finished, ${count(digest.installs.failed)} failed`);

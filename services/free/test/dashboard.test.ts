@@ -493,7 +493,7 @@ describe("admin dashboard install funnel", () => {
 describe("admin dashboard privacy", () => {
   // Columns that hold anything but counts, tokens, cost, time or who: never read by the dashboard.
   const FORBIDDEN = ["props", "session_id", "type", "model", "status", "received_at", "latency_ms", "note", "code_hash", "device_id", "old_value", "new_value", "changed_by_login"];
-  const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_people", "upstream_timings", "download_daily", "install_daily", "refused_days"]);
+  const TABLES = new Set(["daily_activity", "people", "grants", "spend_weeks", "settings", "json_each", "queue", "queue_runs", "referrals", "subscriptions", "payments", "upstream_daily", "upstream_people", "upstream_timings", "download_daily", "install_daily", "refused_days", "provider_credit_weeks"]);
 
   it("reads only allowed tables and columns", async () => {
     const { DASHBOARD_COLUMNS } = await import("../src/dashboard-data.js");

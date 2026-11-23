@@ -7,11 +7,12 @@
 import { ALLOCATOR_MODES, type AllocatorMode } from "./allocator.js";
 import { detectionRulesFrom, type DetectionRules, type DetectionRulesStatus, type ThresholdKey } from "./detection-rules.js";
 import { DEFAULT_WEB_SIGNUP_URL } from "./web-signup.js";
+import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_STATUSES, REGISTRY_DEFAULTS, type ProviderId, type ProviderStatus, type RegistrySettingsConfig } from "./providers.js";
 import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type DataCollection, type Quantization } from "./routing.js";
 
 export class ConfigError extends Error {}
 
-export interface FreeConfig {
+export interface FreeConfig extends RegistrySettingsConfig {
   /** Optional: without it the service never calls OpenRouter (Luminal serves, or nothing does). */
   openRouterApiKey: string | undefined;
   githubClientId: string;
@@ -174,7 +175,7 @@ export interface FreeConfig {
    * happens when the model's provider has no key. OpenAI failures fall back to DeepSeek on
    * Luminal (see models.ts `fallback`); Luminal failures go back to the client as transient.
    */
-  primaryUpstream: Upstream;
+  primaryUpstream: PrimaryUpstream;
   /** OpenAI's API key (OPENAI_API_KEY, a secret). Never logged. */
   openaiApiKey: string | undefined;
   /** Seconds to wait for OpenAI's response headers before falling back (OPENAI_FIRST_BYTE_TIMEOUT_SECONDS). */
@@ -199,6 +200,15 @@ export interface FreeConfig {
   luminalCreditUsd: number;
   /** Free Luminal credit a week the queue protects (LUMINAL_WEEKLY_CREDIT_USD); undefined: no weekly credit budget. */
   luminalWeeklyCreditUsd: number | undefined;
+  /**
+   * Liquid Inference's API key (LIQUID_INFERENCE_API_KEY, a secret). Never logged. Its other
+   * settings are the registry ones (`providerCredit.liquid` and the like, providers.ts).
+   */
+  liquidApiKey: string | undefined;
+  /** Seconds to wait for Liquid's response headers before a transient 503 (LIQUID_FIRST_BYTE_TIMEOUT_SECONDS). */
+  liquidFirstByteTimeoutSeconds: number;
+  /** The speed probes (SPEED_PROBES, default on; also a runtime setting): one tiny request per model every 10 minutes (probes.ts). */
+  speedProbes: boolean;
   /** The kill switch from `env`; the admin endpoint has its own, and either one pauses. */
   paused: boolean;
   /** The public origin for links, when the request's own origin isn't it (behind a proxy). */
@@ -327,8 +337,11 @@ export function isAllowlistEntry(value: unknown): value is string {
 }
 export const ACCESS_REQUEST_ALERT_MODES: readonly AccessRequestAlerts[] = ["each", "daily", "off"];
 
-export type Upstream = "openai" | "luminal" | "openrouter";
-export const UPSTREAMS: readonly Upstream[] = ["openai", "luminal", "openrouter"];
+/** Who served a request: a provider (providers.ts), or OpenRouter, the old upstream. */
+export type Upstream = ProviderId | "openrouter";
+/** The upstreams PRIMARY_UPSTREAM can name. A registry provider never serves by default. */
+export type PrimaryUpstream = "openai" | "luminal" | "openrouter";
+export const UPSTREAMS: readonly PrimaryUpstream[] = ["openai", "luminal", "openrouter"];
 
 /** USD per million tokens. Cached is the price of a cached prompt token; reasoning is billed as output. */
 export interface Prices {
@@ -464,7 +477,7 @@ export const DEFAULTS = {
   billingSuccessUrl: "https://dl.new/billing/success",
   billingCancelUrl: "https://dl.new/billing/cancel",
   billingPortalReturnUrl: "https://dl.new/billing",
-  primaryUpstream: "openai" as Upstream,
+  primaryUpstream: "openai" as PrimaryUpstream,
   openaiFirstByteTimeoutSeconds: 30,
   openaiCreditUsd: 5000,
   openaiWeeklyCreditUsd: 2000,
@@ -585,6 +598,10 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     openRouterPrices: prices(env, "OPENROUTER_PRICE", DEFAULTS.openRouterPrices),
     luminalCreditUsd: amount(env.LUMINAL_CREDIT_USD, DEFAULTS.luminalCreditUsd, "LUMINAL_CREDIT_USD"),
     luminalWeeklyCreditUsd: usd(env.LUMINAL_WEEKLY_CREDIT_USD, DEFAULTS.luminalWeeklyCreditUsd, "LUMINAL_WEEKLY_CREDIT_USD"),
+    liquidApiKey: text(env.LIQUID_INFERENCE_API_KEY),
+    liquidFirstByteTimeoutSeconds: timeoutSeconds(env.LIQUID_FIRST_BYTE_TIMEOUT_SECONDS, 30, "LIQUID_FIRST_BYTE_TIMEOUT_SECONDS"),
+    speedProbes: flag(env.SPEED_PROBES, true, "SPEED_PROBES"),
+    ...registrySettings(env),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
     webSignupUrl: webSignupUrl(env.WEB_SIGNUP_URL),
@@ -617,6 +634,45 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     allocatorGraceShare: share(env.ALLOCATOR_GRACE_SHARE, DEFAULTS.allocatorGraceShare, "ALLOCATOR_GRACE_SHARE"),
     detection: detection.rules,
     detectionStatus: detection.status,
+  };
+}
+
+/** The registry providers' settings from env (REGISTRY_ENV), else their defaults. */
+function registrySettings(env: Record<string, unknown>): RegistrySettingsConfig {
+  const d = REGISTRY_DEFAULTS;
+  const list = (name: string, fallback: readonly string[], valid: (value: readonly unknown[]) => boolean, rule: string): readonly string[] => {
+    const raw = text(env[name]);
+    if (raw === undefined) return fallback;
+    const parts = raw.toLowerCase() === "none" ? [] : raw.split(",").map((part) => part.trim()).filter(Boolean);
+    if (!valid(parts)) throw new ConfigError(`${name} must be ${rule} (got "${raw}").`);
+    return parts;
+  };
+  const priceList = (name: string, fallback: readonly number[]): readonly number[] => {
+    const raw = text(env[name]);
+    if (raw === undefined) return fallback;
+    const parts = raw.split(",").map((part) => Number(part.trim()));
+    if (!isPriceList(parts)) throw new ConfigError(`${name} must be three prices, input,cached,output USD per million tokens (got "${raw}").`);
+    return parts;
+  };
+  const status = (name: string, fallback: ProviderStatus): ProviderStatus => {
+    const raw = text(env[name])?.toLowerCase();
+    if (raw === undefined) return fallback;
+    if (!(PROVIDER_STATUSES as readonly string[]).includes(raw)) throw new ConfigError(`${name} must be "on" or "paused" (got "${raw}").`);
+    return raw as ProviderStatus;
+  };
+  const sellers = "a comma-separated list of up to 10 seller handles";
+  return {
+    "providerStatus.liquid": status("LIQUID_STATUS", d["providerStatus.liquid"]),
+    "providerCredit.liquid": amount(env.LIQUID_CREDIT_USD, d["providerCredit.liquid"], "LIQUID_CREDIT_USD"),
+    "providerWeeklyCredit.liquid": usd(env.LIQUID_WEEKLY_CREDIT_USD, d["providerWeeklyCredit.liquid"]!, "LIQUID_WEEKLY_CREDIT_USD"),
+    "providerPersonWeeklyUsd.liquid": usd(env.LIQUID_PERSON_WEEKLY_USD, d["providerPersonWeeklyUsd.liquid"]!, "LIQUID_PERSON_WEEKLY_USD"),
+    "providerOptIn.liquid": flag(env.LIQUID_OPT_IN, d["providerOptIn.liquid"], "LIQUID_OPT_IN"),
+    "providerProFirst.liquid": flag(env.LIQUID_PRO_FIRST, d["providerProFirst.liquid"], "LIQUID_PRO_FIRST"),
+    "providerModels.liquid": list("LIQUID_MODELS", d["providerModels.liquid"], isRegistryModelList, "a comma-separated list of Liquid model ids"),
+    "exchangeAllow.kimi-k3.1-pro": list("LIQUID_ALLOW_KIMI_K3_1_PRO", d["exchangeAllow.kimi-k3.1-pro"], isSellerList, sellers),
+    "exchangeMaxPrices.kimi-k3.1-pro": priceList("LIQUID_MAX_PRICES_KIMI_K3_1_PRO", d["exchangeMaxPrices.kimi-k3.1-pro"]),
+    "exchangeAllow.glm-5.3": list("LIQUID_ALLOW_GLM_5_3", d["exchangeAllow.glm-5.3"], isSellerList, sellers),
+    "exchangeMaxPrices.glm-5.3": priceList("LIQUID_MAX_PRICES_GLM_5_3", d["exchangeMaxPrices.glm-5.3"]),
   };
 }
 
@@ -902,10 +958,10 @@ function moderationAllowlist(value: unknown): readonly string[] {
   return entries.map((entry) => entry.toLowerCase());
 }
 
-function upstream(value: unknown): Upstream {
+function upstream(value: unknown): PrimaryUpstream {
   const raw = text(value)?.toLowerCase();
   if (raw === undefined) return DEFAULTS.primaryUpstream;
-  if ((UPSTREAMS as readonly string[]).includes(raw)) return raw as Upstream;
+  if ((UPSTREAMS as readonly string[]).includes(raw)) return raw as PrimaryUpstream;
   throw new ConfigError(`PRIMARY_UPSTREAM must be "openai", "luminal" or "openrouter" (got "${raw}").`);
 }
 

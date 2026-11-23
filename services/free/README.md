@@ -18,6 +18,8 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
 | `gpt-6.1-sol` | OpenAI | `gpt-6.1-sol` | GPT-6 | `sol`, 10M | 2 / 0.10 / 10 |
 | `gpt-6-astra` | OpenAI | `gpt-6-astra` | GPT-6 | `astra`, 3M | 10 / 1 / 50 |
 | `deepseek/deepseek-v4.1-flash-1017` | Luminal | `deepseek-ai/DeepSeek-V4.1-Flash-1017` | DeepSeek | `deepseek`, no token cap | 0.035 / 0.006 / 0.315 |
+| `moonshotai/kimi-k3.1-pro` (opt-in) | Liquid Inference | `kimi-k3.1-pro` | DeepSeek (open models) | `deepseek`, no token cap | 2.10 / 0.25 / 10.50 |
+| `z-ai/glm-5.3` (defined, off) | Liquid Inference | `glm-5.3` | DeepSeek (open models) | `deepseek`, no token cap | 0.15 / 0.03 / 0.60 |
 
 - **Two weekly dollar budgets.** Every person has a GPT-6 budget (all GPT-6 models together) and a
   DeepSeek budget. DeepSeek is much cheaper per token for us and fast, so we give far more of it:
@@ -56,6 +58,107 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
   to the chat names, so charging is unchanged. Luminal and OpenRouter stay on Chat Completions.
 - Any other model or provider needs the person’s own key (`model_not_allowed`; its message and
   `allowed` list only the models that person can use there).
+
+### The provider registry (`src/providers.ts`)
+
+Every provider is one typed entry: `id`, `name`, `website`, `baseUrl`, `apiStyle`
+(`openai-chat` or `openai-responses`), `keyEnv` (the secret holding its key) and `kind`. Its
+models are the `FREE_MODELS` entries with that `provider` (`src/models.ts`).
+
+- **Legacy providers, unchanged.** OpenAI and Luminal keep their settings (`openaiCreditUsd`,
+  `luminalCreditUsd` and the weekly ones; `providerCredit.openai`, `providerWeeklyCredit.luminal`
+  and so on are aliases that change the same values) and their behaviour when credit runs out
+  (OpenAI falls back to DeepSeek; Luminal answers 503 `upstream_credit_exhausted`).
+- **Registry providers** (Liquid Inference so far) have the generic runtime settings, per provider:
+
+  | setting | Liquid default | |
+  |---|---|---|
+  | `providerStatus.<id>` | `"paused"` | `"on"` or `"paused"`; Liquid serves nothing until it's turned on |
+  | `providerCredit.<id>` | 100 | prepaid credit, USD; at or past it the provider is out of credit |
+  | `providerWeeklyCredit.<id>` | 25 | the most everyone but admins may spend a week; `"none"` for no budget |
+  | `providerOptIn.<id>` | `true` | served only to people who pick its models, never a default or fallback |
+  | `providerPersonWeeklyUsd.<id>` | 0.50 | one person's weekly spend on it at most, while it's opt-in |
+  | `providerProFirst.<id>` | `true` | for later (Pro first); nothing gates on it yet |
+  | `providerModels.<id>` | `["moonshotai/kimi-k3.1-pro"]` | the models that are on |
+
+  Each also reads from env (`LIQUID_STATUS`, `LIQUID_CREDIT_USD`, `LIQUID_WEEKLY_CREDIT_USD`,
+  `LIQUID_OPT_IN`, `LIQUID_PERSON_WEEKLY_USD`, `LIQUID_PRO_FIRST`, `LIQUID_MODELS`).
+- **One open-models budget.** DeepSeek, Kimi and GLM all spend the person's DeepSeek budget
+  (`deepseekWeeklyUsdCap` and the level and Pro variants): more providers never means more free
+  usage a week. GPT-6 stays separate and trusted-only. An opt-in provider's cap is on top of it.
+- **Spend per provider.** A registry provider's credit is kept in `provider_credit_weeks` (all
+  of it, what people but admins used, the free part, and the probes'), and per person in
+  `provider_person_weeks` (ids and dollars only). OpenAI's and Luminal's stay in `spend_weeks`.
+- **When it can't serve** (paused, out of credit, its weekly budget used, or the person's opt-in
+  cap reached) its models leave `/v1/models` and a request for one gets the `gpt_limit` shape
+  with its own code: HTTP 402
+  `{"error": {"code": "provider_limit", "reason": "paused"|"out_of_credit"|"weekly_budget"|"person_cap", "provider": "liquid", "family": "deepseek", "resetsAt": <ISO or null>, "alternative": "deepseek/deepseek-v4.1-flash-1017"}}`.
+  Without its key, or with a model off, the model is unknown (`model_not_allowed`), as if it
+  weren't defined. `/v1/models` carries each model's `access`: `free`, `trusted` or `opt-in`.
+- **Alerts.** At 80% of a registry provider's credit, one alert (email and webhook), once per
+  balance; the daily digest has a line with its credit left and this week's spend.
+
+### Liquid Inference
+
+[Liquid Inference](https://liquidinference.ai/) is an exchange: each request is auctioned to the
+cheapest seller offer that passes the request's rules. Requests go to
+`https://router.inference.ai.exchange/v1/chat/completions` with only the fields it accepts
+(`messages`, `tools`, `tool_choice`, `response_format`, sampling fields, `reasoning`,
+`reasoning_effort`; it refuses rather than ignores what it doesn't support), the person's hashed
+id as `user`, the session id at the top level (`session_id`), and the service's rules in
+`exchange`:
+
+```json
+{"candidates": {"providers": {"allow": ["deeprelay"]}}, "privacy": {"retention": "none"},
+ "limits": {"price": {"input_usd_per_mtok": 2.1, "cache_read_usd_per_mtok": 0.25, "output_usd_per_mtok": 10.5}},
+ "session": {"sticky": true}}
+```
+
+Zero retention only; the price ceilings stop a repriced or vanished offer from moving a session
+onto a dear one; `sticky` keeps a session on the seller that holds its prompt cache. The sellers
+and ceilings are runtime settings per model: `exchangeAllow.kimi-k3.1-pro` (a list of seller
+handles, `[]` for any seller that passes the other rules) and `exchangeMaxPrices.kimi-k3.1-pro`
+(`[input, cache read, output]`), and the same for `glm-5.3`. The response, or the stream's last
+chunk, carries an `exchange` block (`job_id`, `provider_slug`, `charge`, `usage`, `timing`, ...).
+The credit is charged what it says: `charge.total_usd` when above 0, else `supplier_usd +
+fee_usd` when above 0 (live, both were still 0 at the end of a stream: they settle later), else
+`estimated_usd`, else the ceilings plus the 5% fee. Tokens are the larger of the standard `usage`
+and the exchange's `usage` (its `reasoning_tokens` added to `completion_tokens`): live, a Kimi
+stream's standard usage said 0 output tokens although text came back. Probes also keep the seller
+(`provider_slug`) and the exchange's own `timing.ttft_ms` and `timing.tokens_per_second`. Failures go back as transient errors with `Retry-After`, like
+Luminal's; there is no fallback to another model.
+
+### Adding a provider
+
+1. Add its entry to `PROVIDERS` in `src/providers.ts` (`kind: "registry"`) and its id to
+   `ProviderId`, and its key to `providerKey` and `FreeConfig` (`config.ts`).
+2. Add its models to `FREE_MODELS` (`src/models.ts`), with `family: "deepseek"` for an open model
+   (one budget) and `line` for what /v1/providers calls it. Mark anything not checked against the
+   provider's docs in a comment.
+3. Add its `provider<Setting>.<id>` settings to `RegistrySettingsConfig` and `REGISTRY_DEFAULTS`
+   (`providers.ts`), `RUNTIME_SETTINGS` (`runtime-config.ts`) and `registrySettings` (`config.ts`).
+4. Its request shape: an `openai-chat` provider like Luminal or Liquid goes through
+   `compatibleChat` in `app.ts`.
+5. Upload its key: `wrangler secret put LIQUID_INFERENCE_API_KEY` (for Liquid; its `keyEnv` for
+   another). Then deploy, check `GET /v1/admin/providers`, and turn it on with
+   `POST /admin/config {"providerStatus.<id>": "on"}`.
+
+### Speed probes
+
+A cron trigger every 10 minutes (`*/10 * * * *`, in `triggers.crons` beside the digest's) sends
+one tiny streaming request per model that can serve, on the service's key: "Count from 1 to 40."
+with at most 120 output tokens. Each records whether it worked, the time to the first token
+(reasoning counts) and tokens a second after it, in `provider_probes` (15 days kept). A provider
+that can't serve (no key, paused, out of credit, weekly budget used) is skipped; a model whose
+output costs $20 a million tokens or more (Astra) is probed once an hour. Probes run one at a time.
+Their cost is the service's own spend on the provider's credit, never anyone's allowance or the
+free caps. `speedProbes` (`SPEED_PROBES`) turns them off; so does the kill switch.
+
+### `GET /v1/admin/providers` (admins)
+
+Each provider's credit: `balanceUsd`, `usedUsd`, `leftUsd`, `weeklyBudgetUsd`, this week's
+`weekUsd` (everyone), `userWeekUsd` (everyone but admins: what the weekly budget counts),
+`freeWeekUsd` and `probeWeekUsd`; and the probes over `?hours=` (1 to 360, default 24), newest first.
 
 ## The new-user trial
 
@@ -382,6 +485,33 @@ The same tests as chat and sign-up, in this order:
 `message` is one sentence for display; the two other pauses read "The free tier is paused for now.
 Bring your own key, or check back soon." Invite-only admission (`OPEN_ADMISSION` off) isn't
 reflected: it says whether free tokens flow, not whether sign-up needs a code.
+
+### `GET /v1/providers` (public)
+
+The providers that serve free tokens, their models that are on, and measured speed, for dl.new and
+the clients. No auth, `access-control-allow-origin: *` (OPTIONS answers 204),
+`cache-control: public, max-age=60`; computed at most once a minute per isolate; rate-limited per
+network like `/v1/status`. Never credit amounts, keys, spend, sellers or terms. Logos are the
+website's: `logo` is only the path.
+
+```json
+{"updatedAt": "2026-11-23T10:00:00.000Z", "providers": [
+  {"id": "liquid", "name": "Liquid Inference", "website": "https://liquidinference.ai/",
+   "url": "https://liquidinference.ai/?utm_source=dl.new&utm_medium=referral&utm_campaign=providers",
+   "logo": "/logos/liquid.svg",
+   "models": [{"id": "moonshotai/kimi-k3.1-pro", "name": "Kimi K3.1 Pro", "family": "kimi", "contextWindow": 1048576,
+               "access": "opt-in", "status": "on", "tokensPerSecond": 142.5, "ttftMs": 950,
+               "successRate24h": 1, "measuredAt": "2026-11-23T09:50:01.000Z"}]}]}
+```
+
+- A provider is listed once it has its key; only its models that are on.
+- `family`: what the model is (`gpt6`, `deepseek`, `kimi`, `glm`), not the budget.
+- `access`: `trusted` (GPT-6), `free`, `opt-in`; `pro` is kept for when Pro gets a provider first.
+- `status`: `on`, `out_of_credit`, or `paused` (the kill switch, the provider paused, its weekly
+  budget used, no credit-backed way to serve).
+- Speed over the last 24 hours: the median tokens a second (after the first token) and time to
+  first token, and the share of requests that didn't fail upstream, from real traffic once a
+  model had 20 requests in that time, else from the probes. `null` when nothing was measured.
 
 ### Billing (`Authorization: Bearer <access token>`; a server key is refused)
 
@@ -810,7 +940,7 @@ both wrangler configs), runs the Worker's `scheduled()` handler, which sends a d
 previous UTC day. It goes out on a quiet day too, with zeros: no digest by 09:30 Singapore means
 the Worker or its alerts are broken. Each date's digest is marked in `alerts_sent`
 (`digest:<date>`), so a retried or doubled cron run never sends it twice. `scheduled()` handles
-only this cron; the weekly queue needs none (it runs on the first request of the week). The
+only this cron and the speed probes' (`*/10 * * * *`, see "Speed probes"); the weekly queue needs none (it runs on the first request of the week). The
 numbers come from the dashboard's queries as of the end of that day (sign-ups, active people,
 installs, the queue), the install counts by OS, chip and mode, the request log and the payments.
 Admins are left out; "active" is a request that day (that week, for the week). The launch

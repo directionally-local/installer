@@ -1,10 +1,11 @@
 /**
  * The models the free tier serves, and the weekly allowance each one draws from.
  *
- * Two providers, each on its own prepaid credit: OpenAI (the default) and Luminal, which
- * serves DeepSeek. A model's `family` is the weekly dollar budget it spends: every GPT-6 model
- * shares the GPT-6 budget, and DeepSeek has its own, much larger one (it costs a fraction as
- * much per token). A model's `pool` is its weekly token allowance inside that: Luna, Sol and
+ * The providers (providers.ts), each on its own prepaid credit: OpenAI (the default), Luminal,
+ * which serves DeepSeek, and Liquid Inference, which serves Kimi (and GLM, off for now). A model's
+ * `family` is the weekly dollar budget it spends: every GPT-6 model shares the GPT-6 budget, and
+ * the open models (DeepSeek, Kimi, GLM) share the "deepseek" one, much larger (DeepSeek costs a
+ * fraction as much per token). A model's `pool` is its weekly token allowance inside that: Luna, Sol and
  * Astra each have one; DeepSeek has no token cap, only its dollar budget.
  *
  * Prices are USD per million tokens, from the providers' own pages on 2026-11-06:
@@ -17,8 +18,24 @@
 
 import type { Prices } from "./config.js";
 
-/** Who serves a model. OpenRouter stays for the old setting; the free tier doesn't use it. */
-export type Provider = "openai" | "luminal" | "openrouter";
+/** Who serves a model (see providers.ts). OpenRouter stays for the old setting; the free tier doesn't use it. */
+export type Provider = "openai" | "luminal" | "liquid" | "openrouter";
+
+/**
+ * A model's line, as /v1/providers shows it: what the model is, whoever serves it. Not a
+ * budget: DeepSeek, GLM and Kimi all spend the one open-models budget (`family` "deepseek").
+ */
+export type ModelLine = "gpt6" | "deepseek" | "glm" | "kimi";
+
+/**
+ * A marketplace provider's per-request rules (Liquid Inference): the sellers that may serve the
+ * model and the most it may cost, USD per million tokens. Both are runtime settings too
+ * (providers.ts `exchangeRules`); these are the defaults.
+ */
+export interface ExchangeDefaults {
+  allow: readonly string[];
+  maxPrices: Prices;
+}
 
 /** A weekly token allowance: one per model. */
 export type Pool = "luna" | "sol" | "astra" | "deepseek";
@@ -37,7 +54,11 @@ export const POOL_TOKENS: Readonly<Record<Pool, number | null>> = {
   deepseek: null,
 };
 
-/** A weekly dollar budget: every GPT-6 model shares "gpt6"; DeepSeek has "deepseek". */
+/**
+ * A weekly dollar budget: every GPT-6 model shares "gpt6"; the open models (DeepSeek, Kimi,
+ * GLM) share "deepseek", the open-models budget. Adding a provider or an open model never adds a
+ * budget: a person's open-models week is the same whichever of them they use.
+ */
 export type Family = "gpt6" | "deepseek";
 
 export const FAMILIES: readonly Family[] = ["gpt6", "deepseek"];
@@ -62,6 +83,12 @@ export interface FreeModel {
   reasoning: boolean;
   /** The model to retry on when this one's provider fails or its credit runs out. */
   fallback?: string;
+  /** What the model is (see ModelLine); the budget is `family`. */
+  line: ModelLine;
+  /** Marketplace rules (Liquid Inference only). */
+  exchange?: ExchangeDefaults;
+  /** Off until the provider's `providerModels.<id>` setting lists it (default: on). */
+  enabledByDefault?: boolean;
 }
 
 export const FREE_MODELS: readonly FreeModel[] = [
@@ -78,6 +105,7 @@ export const FREE_MODELS: readonly FreeModel[] = [
     vision: true,
     reasoning: true,
     fallback: "deepseek/deepseek-v4.1-flash-1017",
+    line: "gpt6",
   },
   {
     id: "gpt-6.1-sol",
@@ -92,6 +120,7 @@ export const FREE_MODELS: readonly FreeModel[] = [
     vision: true,
     reasoning: true,
     fallback: "deepseek/deepseek-v4.1-flash-1017",
+    line: "gpt6",
   },
   {
     id: "gpt-6-astra",
@@ -106,6 +135,7 @@ export const FREE_MODELS: readonly FreeModel[] = [
     vision: true,
     reasoning: true,
     fallback: "deepseek/deepseek-v4.1-flash-1017",
+    line: "gpt6",
   },
   {
     id: "deepseek/deepseek-v4.1-flash-1017",
@@ -123,6 +153,65 @@ export const FREE_MODELS: readonly FreeModel[] = [
     maxOutputTokens: 65_536,
     vision: false,
     reasoning: true,
+    line: "deepseek",
+  },
+  // Liquid Inference (an exchange: each request goes to the cheapest seller that passes the
+  // request's rules). Ids, limits and prices from https://liquidinference.ai/models/<id> and the
+  // public offers (https://router.inference.ai.exchange/v1/exchange/offers) on 2026-11-23.
+  // Both draw the open-models budget, and both are opt-in with a small per-person cap
+  // (providers.ts), because the Liquid credit is small.
+  {
+    id: "moonshotai/kimi-k3.1-pro",
+    name: "Kimi K3.1 Pro",
+    provider: "liquid",
+    upstreamModel: "kimi-k3.1-pro",
+    pool: "deepseek",
+    family: "deepseek",
+    // Charged at the request's price ceilings (below), so a person's open-models week can't
+    // stretch further on Kimi than it costs. Moonshot's list price is $2 / $0.20 / $10.
+    prices: { input: 2.1, cached: 0.25, output: 10.5 },
+    // The credit is charged what the exchange reports (`exchange.charge.total_usd`) when it
+    // says; these, the ceilings plus the 5% exchange fee, only when it doesn't.
+    creditPrices: { input: 2.205, cached: 0.2625, output: 11.025 },
+    // 1,048,576 on every offer seen; 131,072 out on the zero-retention ones.
+    contextWindow: 1_048_576,
+    maxOutputTokens: 131_072,
+    vision: true,
+    // Always reasons; reasoning is billed as output.
+    reasoning: true,
+    line: "kimi",
+    exchange: {
+      // Sellers that declare zero retention. Unverified: the handle is as the research saw it
+      // on the providers page; the public offers carry no seller names. `privacy.retention:
+      // "none"` is sent too, so a seller that can't keep it is never eligible either way.
+      allow: ["deeprelay"],
+      maxPrices: { input: 2.1, cached: 0.25, output: 10.5 },
+    },
+  },
+  {
+    id: "z-ai/glm-5.3",
+    name: "GLM 5.3",
+    provider: "liquid",
+    upstreamModel: "glm-5.3",
+    pool: "deepseek",
+    family: "deepseek",
+    prices: { input: 0.15, cached: 0.03, output: 0.6 },
+    creditPrices: { input: 0.1575, cached: 0.0315, output: 0.63 },
+    // 1,048,576 in and 65,536 out on the cheapest zero-retention offer (blackfuel); unverified
+    // for the others.
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    // Text only.
+    vision: false,
+    reasoning: true,
+    line: "glm",
+    exchange: {
+      // Checked by a live request on 2026-11-23 (served by blackfuel).
+      allow: ["blackfuel", "Asari AI"],
+      maxPrices: { input: 0.15, cached: 0.03, output: 0.6 },
+    },
+    // Defined, off: Kimi is the Liquid model the free tier starts with.
+    enabledByDefault: false,
   },
 ];
 

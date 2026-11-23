@@ -1,6 +1,7 @@
 import { ALLOCATOR_MODES } from "./allocator.js";
 import { ACCESS_REQUEST_ALERT_MODES, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, PRO_MULTIPLIER_MAX, PRO_MULTIPLIER_MIN, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
+import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_STATUSES } from "./providers.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
 /**
@@ -115,6 +116,32 @@ export const RUNTIME_SETTINGS = {
   luminalWeeklyCreditUsd: { kind: "usd", env: "LUMINAL_WEEKLY_CREDIT_USD" },
   /** Seconds to wait for Luminal's first byte before a transient 503. */
   luminalFirstByteTimeoutSeconds: { kind: "seconds", env: "LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS" },
+  // Registry providers (providers.ts): `provider<Setting>.<id>`. OpenAI's and Luminal's credit
+  // settings keep their names above; `providerCredit.openai` and the like are aliases (ALIASES).
+  /** Liquid Inference "on" or "paused" (the default: it serves nothing until the owner turns it on). */
+  "providerStatus.liquid": { kind: "providerStatus", env: "LIQUID_STATUS" },
+  /** Prepaid Liquid credit, USD; raise it after a top-up. At 80% one alert; at 100% its models are hidden. */
+  "providerCredit.liquid": { kind: "amount", env: "LIQUID_CREDIT_USD" },
+  /** The most Liquid credit everyone but admins may use a week, USD; "none" for no weekly budget. */
+  "providerWeeklyCredit.liquid": { kind: "usd", env: "LIQUID_WEEKLY_CREDIT_USD" },
+  /** One person's weekly Liquid spend at most, USD, while Liquid is opt-in; "none" for no cap. */
+  "providerPersonWeeklyUsd.liquid": { kind: "usd", env: "LIQUID_PERSON_WEEKLY_USD" },
+  /** Liquid opt-in: served only to people who pick its models, held to the per-person cap. */
+  "providerOptIn.liquid": { kind: "flag", env: "LIQUID_OPT_IN" },
+  /** For later: Pro gets Liquid first. Nothing gates on it yet. */
+  "providerProFirst.liquid": { kind: "flag", env: "LIQUID_PRO_FIRST" },
+  /** The Liquid models that are on, by id; [] for none. */
+  "providerModels.liquid": { kind: "models", env: "LIQUID_MODELS" },
+  /** Sellers that may serve Kimi K3.1 Pro on Liquid (exchange `providers.allow`); [] for any that passes the other rules. */
+  "exchangeAllow.kimi-k3.1-pro": { kind: "sellers", env: "LIQUID_ALLOW_KIMI_K3_1_PRO" },
+  /** Kimi K3.1 Pro's price ceilings on Liquid, [input, cache read, output] USD per million tokens. */
+  "exchangeMaxPrices.kimi-k3.1-pro": { kind: "prices", env: "LIQUID_MAX_PRICES_KIMI_K3_1_PRO" },
+  /** Sellers that may serve GLM 5.3 on Liquid. */
+  "exchangeAllow.glm-5.3": { kind: "sellers", env: "LIQUID_ALLOW_GLM_5_3" },
+  /** GLM 5.3's price ceilings on Liquid, [input, cache read, output] USD per million tokens. */
+  "exchangeMaxPrices.glm-5.3": { kind: "prices", env: "LIQUID_MAX_PRICES_GLM_5_3" },
+  /** The speed probes (probes.ts): one tiny request per model every 10 minutes; false stops them. */
+  speedProbes: { kind: "flag", env: "SPEED_PROBES" },
   /** Emails to users (user-emails.ts) on or off; they also need the USER_EMAIL binding or RESEND_API_KEY. */
   userEmails: { kind: "flag", env: "USER_EMAILS" },
   /** Free tokens inside dl only: chat requests without session events are refused (app.ts). */
@@ -167,7 +194,18 @@ export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;
 type Kind = (typeof RUNTIME_SETTINGS)[RuntimeKey]["kind"];
 
 /** A stored override: a number, a boolean, null for "no cap" (USD caps only), a list or a word. */
-export type OverrideValue = number | boolean | null | string | string[];
+export type OverrideValue = number | boolean | null | string | string[] | number[];
+
+/**
+ * Other names for settings: the generic provider names of OpenAI's and Luminal's credit settings.
+ * An update under an alias changes the setting it names; the admin view shows both.
+ */
+export const ALIASES: Readonly<Record<string, RuntimeKey>> = {
+  "providerCredit.openai": "openaiCreditUsd",
+  "providerWeeklyCredit.openai": "openaiWeeklyCreditUsd",
+  "providerCredit.luminal": "luminalCreditUsd",
+  "providerWeeklyCredit.luminal": "luminalWeeklyCreditUsd",
+};
 export type Overrides = Partial<Record<RuntimeKey, OverrideValue>>;
 
 /** One change: `value` undefined clears the override. */
@@ -226,6 +264,14 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "string" && (ALLOCATOR_MODES as readonly string[]).includes(value) ? value : "invalid";
     case "people":
       return Array.isArray(value) && value.length <= 500 && value.every(isAllowlistEntry) ? value.map((v) => v.trim().toLowerCase()) : "invalid";
+    case "providerStatus":
+      return typeof value === "string" && (PROVIDER_STATUSES as readonly string[]).includes(value) ? value : "invalid";
+    case "models":
+      return Array.isArray(value) && isRegistryModelList(value) ? [...value] : "invalid";
+    case "sellers":
+      return Array.isArray(value) && isSellerList(value) ? value.map((v) => v.trim()) : "invalid";
+    case "prices":
+      return Array.isArray(value) && isPriceList(value) ? [...value] : "invalid";
     case "instant": {
       // Stored as Unix ms; "none" (null) turns it off whatever the env says.
       const parsed = parseInstant(value);
@@ -254,6 +300,10 @@ const RULES: Record<Kind, string> = {
   moderationMode: '"enforce", "shadow" or "off"',
   allocatorMode: '"on" or "off"',
   people: 'a list of up to 500 GitHub logins or numeric ids, e.g. ["octocat", "12345"], or [] for none',
+  providerStatus: '"on" or "paused"',
+  models: 'a list of the provider\'s model ids, e.g. ["moonshotai/kimi-k3.1-pro"], or [] for none',
+  sellers: 'a list of up to 10 seller handles, e.g. ["deeprelay"], or [] for any seller that passes the other rules',
+  prices: "three prices, [input, cache read, output], USD per million tokens",
   instant: 'an ISO time with its zone, e.g. "2026-11-20T00:00:00Z", Unix ms, or "none" to turn it off',
 };
 
@@ -265,7 +315,8 @@ export function parseSettingsUpdate(body: Record<string, unknown>): { changes: S
   const entries = Object.entries(body);
   if (entries.length === 0) return { error: `Send one or more of ${Object.keys(RUNTIME_SETTINGS).join(", ")}.` };
   const changes: SettingChange[] = [];
-  for (const [key, raw] of entries) {
+  for (const [name, raw] of entries) {
+    const key = ALIASES[name] ?? name;
     if (!isRuntimeKey(key)) return { error: `"${key}" isn't a runtime setting. Use ${Object.keys(RUNTIME_SETTINGS).join(", ")}.` };
     if (raw === null) {
       changes.push({ key, value: undefined });
@@ -318,9 +369,11 @@ export function applyOverrides<T extends Partial<FreeConfig>>(config: T, overrid
 /** The runtime settings of a config, as the admin API shows them (no secrets). */
 export function settingsView(config: FreeConfig): Record<RuntimeKey, OverrideValue> {
   const out = {} as Record<RuntimeKey, OverrideValue>;
-  for (const key of Object.keys(RUNTIME_SETTINGS) as RuntimeKey[]) {
+  const read = (key: RuntimeKey): OverrideValue => {
     const value = (config as unknown as Record<string, unknown>)[key];
-    out[key] = value === undefined ? null : Array.isArray(value) ? [...(value as string[])] : (value as OverrideValue);
-  }
+    return value === undefined ? null : Array.isArray(value) ? ([...value] as OverrideValue) : (value as OverrideValue);
+  };
+  for (const key of Object.keys(RUNTIME_SETTINGS) as RuntimeKey[]) out[key] = read(key);
+  for (const [alias, key] of Object.entries(ALIASES)) (out as Record<string, OverrideValue>)[alias] = read(key);
   return out;
 }
