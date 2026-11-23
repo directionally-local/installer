@@ -7,6 +7,7 @@ import { FREE_MODELS, modelById } from "../src/models.js";
 import { PROBE_CRON, PROBE_MAX_TOKENS, PROBE_PROMPT } from "../src/probes.js";
 import { PROVIDERS, providerSettings, registryBlock } from "../src/providers.js";
 import { parseSettingsUpdate } from "../src/runtime-config.js";
+import { signatureHeader } from "../src/stripe.js";
 
 /**
  * The provider registry (providers.ts): OpenAI and Luminal moved into it unchanged, Liquid
@@ -256,6 +257,45 @@ describe("the open-models budget is shared", () => {
     const kimi = await chat(service, token, KIMI);
     assert.equal(kimi.status, 402);
     assert.equal((await errorOf(kimi)).code, "quota_exceeded");
+  });
+});
+
+describe("dl Pro and the shared open-models budget", () => {
+  const SECRET = "whsec_test_0123456789abcdef";
+  const BILLING = { STRIPE_SECRET_KEY: "sk_test_fake", STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_PRICE_TOPUP: "price_topup123" };
+
+  async function makePro(service: Service, githubId: number): Promise<void> {
+    const at = Math.floor(service.clock.now / 1000);
+    const object = { id: `cs_pro_${githubId}`, object: "checkout.session", mode: "subscription", client_reference_id: String(githubId), customer: `cus_${githubId}`, subscription: `sub_${githubId}`, payment_status: "paid", amount_subtotal: 700, amount_total: 700, metadata: { github_id: String(githubId), product: "pro" } };
+    const body = JSON.stringify({ id: `evt_pro_${githubId}`, object: "event", type: "checkout.session.completed", created: at, data: { object } });
+    const response = await service.request("POST", "/v1/billing/webhook", { body, headers: { "stripe-signature": await signatureHeader(SECRET, at, body) } });
+    assert.equal(response.status, 200, await response.clone().text());
+  }
+
+  it("gives Pro 4x the open-models budget whichever open model spends it, Kimi included", async () => {
+    // A $0.50 free open-models week, so Pro's is $2; each Kimi request here costs $0.60.
+    const { service, token } = await member({ ...BILLING, ...LIQUID_ON, DEEPSEEK_WEEKLY_USD_CAP: "0.5", LIQUID_PERSON_WEEKLY_USD: "none" });
+    await makePro(service, 100);
+    service.setLiquid(() => liquidCompletion(luminalUsage(240_000, 0), 0.1));
+    const me = async () => ((await (await service.request("GET", "/v1/me", { token, ip: ip() })).json()) as { plan: string; budgets: { deepseek: { spentUsd: number; usdPerWeek: number } } });
+    assert.equal((await me()).plan, "pro");
+    assert.equal((await me()).budgets.deepseek.usdPerWeek, 2);
+    // Past the free $0.50, Pro still gets Kimi and DeepSeek from the one budget.
+    assert.equal((await chat(service, token, KIMI)).status, 200);
+    assert.equal((await chat(service, token, KIMI)).status, 200);
+    assert.equal((await chat(service, token, MODEL)).status, 200);
+    assert.ok((await me()).budgets.deepseek.spentUsd > 0.5);
+  });
+
+  it("still holds Pro to the provider's opt-in cap (Pro gating for Kimi comes later)", async () => {
+    const { service, token } = await member({ ...BILLING, ...LIQUID_ON, LIQUID_PERSON_WEEKLY_USD: "0.001" });
+    await makePro(service, 100);
+    service.setLiquid(() => liquidCompletion(luminalUsage(100, 10), 0.002));
+    assert.equal((await chat(service, token, KIMI)).status, 200);
+    const capped = await chat(service, token, KIMI);
+    assert.equal(capped.status, 402);
+    assert.equal((await errorOf(capped)).reason, "person_cap");
+    assert.equal((await chat(service, token, MODEL)).status, 200);
   });
 });
 
