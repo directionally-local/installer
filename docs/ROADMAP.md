@@ -40,7 +40,7 @@ Also shipped: free tier dl Pro and top-ups when free usage runs out, and `/usage
 
 Next
 1. **A native Mac app (Swift)** that opens the team's Open WebUI, with Tailscale built in and a guided invite step. Planned, not started.
-2. **Other coding tools beyond Claude Code** on dl-launched sessions: `dl opencode` (OpenCode, every free tier model) has a pull request open; Pi and Codex planned.
+2. **Other coding tools beyond Claude Code** on dl-launched sessions: `dl opencode` (OpenCode, every free tier model) has a pull request open; `dl t3` (T3 Code's server with its Claude Code and OpenCode) has a pull request open; Pi and Codex planned.
 3. **Opt-in traffic capture, replayed against the candidate during `dl model update`:** evals for teams with no hand-written tests.
 4. **The multi-GPU hardware test** on a rented 4x RTX PRO 6000 machine (PCIe, Blackwell): `dl model up deepseek-v4.1-flash-fp8 --image vllm/vllm-openai:v0.34.0rc2 --workspace <dir>` passes every step in [the 4x RTX PRO 6000 test procedure](gpu-test-4x6000.md), which also decides whether v0.34.0rc2 becomes the default image. **Paused until there's budget for the rental;** until then everything multi-GPU stays "built, untested". After it: every `dl model` screen on camouflage-tui, and `dl model bench` on a real multi-GPU deployment.
 
