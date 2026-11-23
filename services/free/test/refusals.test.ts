@@ -56,7 +56,7 @@ async function counts(
 /** Every row of the refusal tables, as text. */
 function stored(service: Service): string {
   const db = (
-    service.namespaces.DIRECTORY.instances.get("directory") as {
+    service.namespaces.DIRECTORY!.instances.get("directory") as unknown as {
       state: { db: { prepare(sql: string): { all(): unknown[] } } };
     }
   ).state.db;
@@ -336,7 +336,7 @@ describe("refusal counts: requests", () => {
       "harness_limit",
       "model_not_allowed",
     ])
-      assert.ok(requestRefusalReason(403, { code }) in REFUSAL_REASONS, code);
+      assert.ok((requestRefusalReason(403, { code }) ?? "") in REFUSAL_REASONS, code);
   });
 });
 
@@ -529,7 +529,7 @@ describe("refusal counts: storage", () => {
       ],
     );
     const db = (
-      service.namespaces.DIRECTORY.instances.get("directory") as {
+      service.namespaces.DIRECTORY!.instances.get("directory") as unknown as {
         state: {
           db: { prepare(sql: string): { all(): Array<{ day: number }> } };
         };
