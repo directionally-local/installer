@@ -61,6 +61,7 @@ export const REFUSAL_REASONS = {
   "provider_limit:pro_only": "Request: dl Pro only model (Kimi) from a free account",
   "provider_limit:person_cap": "Request: provider's weekly per-person cap or Pro ration used up",
   "provider_limit:provider": "Request: provider paused, out of credit or its weekly budget used",
+  "provider_limit:autopilot_only": "Request: GPT-6 from another coding agent (Autopilot only)",
   api_not_invited: "Request: not on the free tier",
   api_blocked: "Request: account blocked",
   api_suspended: "Request: account suspended",
@@ -135,7 +136,9 @@ export function requestRefusalReason(
         ? "provider_limit:pro_only"
         : error.reason === "person_cap"
           ? "provider_limit:person_cap"
-          : "provider_limit:provider";
+          : error.reason === "autopilot_only"
+            ? "provider_limit:autopilot_only"
+            : "provider_limit:provider";
     case "quota_exceeded":
       return "allowance_exhausted:full";
     case "basic_limit":

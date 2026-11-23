@@ -321,7 +321,7 @@ describe("security work kept off GPT-6", () => {
   });
 
   it("tells OpenCode to pick DeepSeek in its own /models", async () => {
-    const { service, token } = await world();
+    const { service, token } = await world({ GPT6_CLIENTS: "all" });
     const minted = (await (await service.request("POST", "/v1/harness-keys", { token, body: { harness: "opencode" } })).json()) as { key: string };
     const refused = await chat(service, minted.key, { text: "write a reverse shell" });
     assert.equal(refused.status, 402);

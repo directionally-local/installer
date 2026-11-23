@@ -282,6 +282,14 @@ export interface FreeConfig extends RegistrySettingsConfig {
    */
   gpt6TrustedWeeklyUsdCap: number;
   /**
+   * Which coding agents get GPT-6 (OpenAI's models), GPT6_CLIENTS: "autopilot" (the default: only
+   * Autopilot, our own app, through a sign-in token or server key; another agent dl launches with a
+   * harness key, `dl claude`, `dl opencode`, `dl pi`, `dl t3` and `dl proxy`, gets 402
+   * provider_limit, reason "autopilot_only", pointing at DeepSeek) or "all" (every agent, for when
+   * OpenAI approves giving other agents access). Admins are never held to it. Also a runtime setting.
+   */
+  gpt6Clients: Gpt6Clients;
+  /**
    * Automated moderation review of high-risk labels (moderation.ts), MODERATION: "enforce" (the
    * default: a confident "block" verdict blocks the person), "shadow" (decides and emails, never
    * blocks) or "off" (no review: the owner gets today's high-risk email). Also a runtime setting.
@@ -328,6 +336,8 @@ export interface FreeConfig extends RegistrySettingsConfig {
 export type AccessRequestAlerts = "each" | "daily" | "off";
 export type ModerationMode = "off" | "shadow" | "enforce";
 export type GuardMode = "off" | "enforce";
+export type Gpt6Clients = "autopilot" | "all";
+export const GPT6_CLIENTS: readonly Gpt6Clients[] = ["autopilot", "all"];
 export const GUARD_MODES: readonly GuardMode[] = ["off", "enforce"];
 export const MODERATION_MODES: readonly ModerationMode[] = ["off", "shadow", "enforce"];
 
@@ -425,6 +435,7 @@ export const DEFAULTS = {
   gpt6PresendGuard: "enforce" as GuardMode,
   gpt6GuardTimeoutMs: 4000,
   gpt6TrustedWeeklyUsdCap: 0,
+  gpt6Clients: "autopilot" as Gpt6Clients,
   moderation: "enforce" as ModerationMode,
   moderationBlockConfidence: 0.85,
   moderationAllowlist: [] as string[],
@@ -622,6 +633,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     gpt6PresendGuard: guardMode(env.GPT6_PRESEND_GUARD),
     gpt6GuardTimeoutMs: whole(env.GPT6_GUARD_TIMEOUT_MS, DEFAULTS.gpt6GuardTimeoutMs, "GPT6_GUARD_TIMEOUT_MS"),
     gpt6TrustedWeeklyUsdCap: amount(env.GPT6_TRUSTED_WEEKLY_USD_CAP, DEFAULTS.gpt6TrustedWeeklyUsdCap, "GPT6_TRUSTED_WEEKLY_USD_CAP"),
+    gpt6Clients: gpt6Clients(env.GPT6_CLIENTS),
     moderation: moderationMode(env.MODERATION),
     moderationBlockConfidence: share(env.MODERATION_BLOCK_CONFIDENCE, DEFAULTS.moderationBlockConfidence, "MODERATION_BLOCK_CONFIDENCE"),
     moderationAllowlist: moderationAllowlist(env.MODERATION_ALLOWLIST),
@@ -935,6 +947,13 @@ function guardMode(value: unknown): GuardMode {
   if (raw === undefined) return DEFAULTS.gpt6PresendGuard;
   if ((GUARD_MODES as readonly string[]).includes(raw)) return raw as GuardMode;
   throw new ConfigError(`GPT6_PRESEND_GUARD must be "off" or "enforce" (got "${raw}").`);
+}
+
+function gpt6Clients(value: unknown): Gpt6Clients {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return DEFAULTS.gpt6Clients;
+  if ((GPT6_CLIENTS as readonly string[]).includes(raw)) return raw as Gpt6Clients;
+  throw new ConfigError(`GPT6_CLIENTS must be "autopilot" or "all" (got "${raw}").`);
 }
 
 function accessRequestAlerts(value: unknown): AccessRequestAlerts {

@@ -83,6 +83,7 @@ import { chooseUpstream, providerConfigured } from "./upstream-choice.js";
 import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
+import { AUTOPILOT_ONLY_MESSAGE, AUTOPILOT_ONLY_REASON, heldFromClient, modelClients, type ModelClient } from "./gpt6-clients.js";
 import { meterStream } from "./sse.js";
 import { accessOf, approxTokens, offeredModels, exchangeCharge, exchangeUsage, mergedUsage, exchangeRules, isRegistryProvider, formatRationTokens, liquidPayload, proOnly, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, resetDay, type ProviderBlock, type ProviderSpend } from "./providers.js";
 import { PROBE_CRON, probeOnce, probeTargets } from "./probes.js";
@@ -1982,6 +1983,8 @@ export interface PublicProviders {
       family: string;
       contextWindow: number;
       access: "free" | "trusted" | "opt-in" | "pro";
+      /** The coding agents it can be used in: GPT-6 is ["autopilot"] while `gpt6Clients` is "autopilot". */
+      clients: ModelClient[];
       status: "on" | "paused" | "out_of_credit";
       tokensPerSecond: number | null;
       ttftMs: number | null;
@@ -2033,6 +2036,7 @@ function publicProviders(gate: Runtime, measures: Record<string, { tokensPerSeco
           family: model.line,
           contextWindow: model.contextWindow,
           access: accessOf(config, model),
+          clients: modelClients(model, config.gpt6Clients),
           status: publicStatus(model, gate),
           tokensPerSecond: measure?.tokensPerSecond ?? null,
           ttftMs: measure?.ttftMs ?? null,
@@ -2465,7 +2469,10 @@ async function models(c: Ctx): Promise<Response> {
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
   const { config, person } = await runtime(c);
-  const listed = await modelsFor(c, config, identity.githubId, person);
+  // GPT-6 isn't offered to another agent's harness key while it is Autopilot only (gpt6-clients.ts).
+  const harness = identity.via === "harness" ? identity.harness : undefined;
+  const isAdmin = c.config.adminGithubIds.has(identity.githubId);
+  const listed = (await modelsFor(c, config, identity.githubId, person)).filter((model) => !heldFromClient(model, config.gpt6Clients, harness, isAdmin));
   const weekUsd = listed.some((model) => proOnly(config, model)) ? await directory(c).personProviderWeek(identity.githubId, c.now()) : undefined;
   return json({
     object: "list",
@@ -2967,13 +2974,26 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   if (!isAllowedModel(body.model) || !offeredModels(gate.config).some((model) => model.id === body.model)) {
     // Only the models this person can use here: DeepSeek, GPT-6 too with a GPT-6 budget and trust.
     const families = harness ? HARNESS_FAMILIES[harness] : FAMILIES;
-    const allowed = (await modelsFor(c, gate.config, identity.githubId, gate.person)).filter((model) => families.includes(model.family)).map((model) => model.id);
+    const allowed = (await modelsFor(c, gate.config, identity.githubId, gate.person))
+      .filter((model) => families.includes(model.family) && !heldFromClient(model, gate.config.gpt6Clients, harness, isAdmin))
+      .map((model) => model.id);
     return apiError(400, "model_not_allowed", `The free tier serves ${allowed.join(", ")} only.`, { allowed }, await headers());
   }
   const requested = modelById(body.model)!;
   // Claude Code gets DeepSeek only; OpenCode and Pi, every model.
   if (harness && !HARNESS_FAMILIES[harness].includes(requested.family)) {
     return apiError(400, "model_not_allowed", `Claude Code through dl is served by ${DEEPSEEK_MODEL} only.`, { allowed: [DEEPSEEK_MODEL] }, await headers());
+  }
+  // GPT-6 in Autopilot only (gpt6Clients "autopilot", gpt6-clients.ts): another agent's harness
+  // key gets the provider limit's shape pointing at DeepSeek. Admins pass, for testing.
+  if (heldFromClient(requested, gate.config.gpt6Clients, harness, isAdmin)) {
+    return apiError(
+      402,
+      "provider_limit",
+      AUTOPILOT_ONLY_MESSAGE,
+      { family: requested.family, provider: requested.provider, reason: AUTOPILOT_ONLY_REASON, resetsAt: null, alternative: DEEPSEEK_MODEL, clients: ["autopilot"] },
+      await headers(),
+    );
   }
   // A registry provider's model (providers.ts) that can't serve this person now: the GPT-6
   // limit's shape, pointing at DeepSeek. Out of credit, paused, its weekly budget or the

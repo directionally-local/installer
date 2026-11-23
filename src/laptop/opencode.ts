@@ -7,9 +7,9 @@ import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } fro
  * harness-launch.ts's; this file is how OpenCode is told where the free tier is.
  *
  * OpenCode speaks the OpenAI-compatible chat completions API, which the free tier serves to
- * Autopilot, so every free tier model works in it: DeepSeek V4.1 Flash (the default; GPT-6 is
- * paused on the free tier), GPT-6 Luna, Sol and Astra, with the same allowance, caps and refusals as Autopilot's (on the share
- * for other tools).
+ * Autopilot, with the same allowance, caps and refusals as Autopilot's (on the share for other
+ * tools). It gets DeepSeek V4.1 Flash: GPT-6 is available only in Autopilot for now (the service's
+ * `gpt6Clients`), so it isn't offered here; the service's /v1/models says what a run may use.
  *
  * How it's configured, for this run only and without touching any OpenCode file:
  *  - `OPENCODE_CONFIG_CONTENT`: inline config that OpenCode 1 and 2 both read, merged above the
@@ -49,16 +49,14 @@ export interface FreeTierModel {
 }
 
 /**
- * The free tier's models (services/free/src/models.ts), for when the service's /v1/models can't
- * be read. dl asks the service first, so a new model shows up without a new dl.
+ * The free tier's models other agents may use (services/free/src/models.ts), for when the
+ * service's /v1/models can't be read: DeepSeek only, as GPT-6 is available only in Autopilot for
+ * now. dl asks the service first, so a model opened to other agents shows up without a new dl.
  */
 export const FREE_TIER_MODELS: readonly FreeTierModel[] = [
-  { id: "gpt-6-luna", name: "GPT-6 Luna", contextWindow: 1_050_000, maxOutputTokens: 128_000, vision: true },
-  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", contextWindow: 1_050_000, maxOutputTokens: 128_000, vision: true },
-  { id: "gpt-6-astra", name: "GPT-6 Astra", contextWindow: 1_050_000, maxOutputTokens: 128_000, vision: true },
   { id: "deepseek/deepseek-v4.1-flash-1017", name: "DeepSeek V4.1 Flash 1017", contextWindow: 1_048_576, maxOutputTokens: 65_536, vision: false },
 ];
-/** OpenCode's default model under "dl": DeepSeek V4.1 Flash (GPT-6 is paused on the free tier; its models stay listed). */
+/** OpenCode's default model under "dl": DeepSeek V4.1 Flash. */
 export const DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash-1017";
 /** The cheap model OpenCode uses for session titles. */
 export const SMALL_MODEL = "deepseek/deepseek-v4.1-flash-1017";

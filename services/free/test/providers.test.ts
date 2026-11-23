@@ -654,6 +654,7 @@ describe("GET /v1/providers", () => {
           family: "kimi",
           contextWindow: 1_048_576,
           access: "opt-in",
+          clients: ["autopilot", "opencode", "pi"],
           status: "on",
           tokensPerSecond: null,
           ttftMs: null,
@@ -663,19 +664,20 @@ describe("GET /v1/providers", () => {
       ],
     });
     const deepseek = body.providers[1].models[0];
-    assert.deepEqual([deepseek.id, deepseek.family, deepseek.access, deepseek.status], [MODEL, "deepseek", "free", "on"]);
+    assert.deepEqual([deepseek.id, deepseek.family, deepseek.access, deepseek.clients, deepseek.status], [MODEL, "deepseek", "free", ["autopilot", "claude-code", "opencode", "pi"], "on"]);
+    // GPT-6 stays listed as trusted, in Autopilot only (gpt6Clients "autopilot").
     assert.deepEqual(
-      body.providers[0].models.map((model: Record<string, unknown>) => [model.id, model.family, model.access]),
+      body.providers[0].models.map((model: Record<string, unknown>) => [model.id, model.family, model.access, model.clients]),
       [
-        ["gpt-6-luna", "gpt6", "trusted"],
-        ["gpt-6.1-sol", "gpt6", "trusted"],
-        ["gpt-6-astra", "gpt6", "trusted"],
+        ["gpt-6-luna", "gpt6", "trusted", ["autopilot"]],
+        ["gpt-6.1-sol", "gpt6", "trusted", ["autopilot"]],
+        ["gpt-6-astra", "gpt6", "trusted", ["autopilot"]],
       ],
     );
     for (const provider of body.providers) {
       assert.deepEqual(Object.keys(provider), ["id", "name", "website", "url", "logo", "models"]);
       for (const model of provider.models) {
-        assert.deepEqual(Object.keys(model), ["id", "name", "family", "contextWindow", "access", "status", "tokensPerSecond", "ttftMs", "successRate24h", "measuredAt"]);
+        assert.deepEqual(Object.keys(model), ["id", "name", "family", "contextWindow", "access", "clients", "status", "tokensPerSecond", "ttftMs", "successRate24h", "measuredAt"]);
       }
     }
     const preflight = await service.request("OPTIONS", "/v1/providers", { ip: ip() });
