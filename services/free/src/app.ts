@@ -102,7 +102,7 @@ import {
   type UserEmailTransport,
 } from "./user-email-send.js";
 import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind } from "./user-emails.js";
-import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
+import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, onlyListed, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
 import { refusalsCsv, refusalsView, requestClient, requestRefusalReason, type RefusalClient, type RefusalReason } from "./refusals.js";
 import { allowedReturn, isInstallOption, ONE_TIME_CODE, planFor, WEB_SESSION_TTL_S, WEB_STATE, webCors, webFunnelCsv, type WebStep } from "./web-signup.js";
 import { grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, parseGrantUsd, parseLogins, type GrantResult } from "./grant.js";
@@ -3983,9 +3983,9 @@ async function sendTestEmail(c: Ctx, adminId: number, body: Record<string, unkno
 }
 
 /**
- * POST /admin/emails/broadcast {subject, text, audience, signedUpFrom?, signedUpTo?, dryRun}: a
+ * POST /admin/emails/broadcast {subject, text, audience, signedUpFrom?, signedUpTo?, dryRun, skipIfSent?, githubIds?}: a
  * one-off email, see broadcast.ts, to active people of the audience's level who signed up in the
- * range. Never to blocked or suspended accounts, people who pressed stop, or admins; each gets the
+ * range (and, with githubIds, are on that list). Never to blocked or suspended accounts, people who pressed stop, or admins; each gets the
  * stop link and the List-Unsubscribe headers. The broadcast's id (a hash of subject and text) is
  * recorded per person, so a retried call never sends twice; the one-a-day cap applies, and
  * people already emailed today are left for a call tomorrow. At most BROADCAST_BATCH sends per
@@ -4009,7 +4009,8 @@ async function runBroadcast(c: Ctx, config: FreeConfig, request: BroadcastReques
   if (!request.dryRun && !config.userEmails) return { status: 409, code: "emails_off", message: "Emails to users are off (the userEmails setting)." };
   const id = await broadcastId(request.subject, request.text);
   const filter = { adminIds: [...c.config.adminGithubIds], includeAdmins: config.userEmailsToAdmins };
-  const audience = await directory(c).broadcastAudience({ id, audience: request.audience, from: request.from, to: request.to, now: c.now(), skipIfSent: request.skipIfSent, ...filter });
+  const everyone = await directory(c).broadcastAudience({ id, audience: request.audience, from: request.from, to: request.to, now: c.now(), skipIfSent: request.skipIfSent, ...filter });
+  const audience = onlyListed(everyone, request.githubIds);
   const ready = audience.filter((person) => !person.emailedToday);
   const waiting = audience.length - ready.length;
   if (request.dryRun) {
