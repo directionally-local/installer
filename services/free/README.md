@@ -77,12 +77,29 @@ models are the `FREE_MODELS` entries with that `provider` (`src/models.ts`).
   | `providerCredit.<id>` | 100 | prepaid credit, USD; at or past it the provider is out of credit |
   | `providerWeeklyCredit.<id>` | 25 | the most everyone but admins may spend a week; `"none"` for no budget |
   | `providerOptIn.<id>` | `true` | served only to people who pick its models, never a default or fallback |
-  | `providerPersonWeeklyUsd.<id>` | 0.50 | one person's weekly spend on it at most, while it's opt-in |
-  | `providerProFirst.<id>` | `true` | for later (Pro first); nothing gates on it yet |
+  | `providerPersonWeeklyUsd.<id>` | 0.25 | one person's weekly spend on it at most, while it's opt-in or Pro-only (then it is Pro's weekly ration) |
+  | `providerPlans.<id>` | `"pro"` | `"pro"`: dl Pro subscribers (and admins, for testing) only; `"all"`: every plan, held to the per-person cap |
   | `providerModels.<id>` | `["moonshotai/kimi-k3.1-pro"]` | the models that are on |
 
   Each also reads from env (`LIQUID_STATUS`, `LIQUID_CREDIT_USD`, `LIQUID_WEEKLY_CREDIT_USD`,
-  `LIQUID_OPT_IN`, `LIQUID_PERSON_WEEKLY_USD`, `LIQUID_PRO_FIRST`, `LIQUID_MODELS`).
+  `LIQUID_OPT_IN`, `LIQUID_PERSON_WEEKLY_USD`, `LIQUID_PLANS`, `LIQUID_MODELS`).
+- **Kimi is a dl Pro perk** while `providerPlans.liquid` is `"pro"` (the default). A free
+  account's request for a Liquid model gets 402 `provider_limit` reason `pro_only`, with
+  `upgradeUrl` (dl.new/account; null while Pro isn't offered), `plans: "pro"` and
+  `approxTokensPerWeek`:
+  "Kimi K3.1 Pro is a dl Pro perk: about 140K tokens a week, then DeepSeek. Upgrade: https://dl.new/account".
+  It counts in the refusals (`provider_limit:pro_only`) and as "seen" in Pro's funnel (once a
+  person a day, like every other Pro prompt). Pro gets `providerPersonWeeklyUsd.liquid` a week;
+  past it, reason `person_cap` with `resetsAt`: "You've used this week's Kimi K3.1 Pro with dl
+  Pro (about 140K tokens a week). It resets on Monday 30 Nov, 00:00 UTC; DeepSeek keeps working:
+  /model." Admins pass both. Free accounts don't get Liquid models in `/v1/models`; `/v1/providers`
+  marks them `access: "pro"`; `/v1/me` states them upfront in `proModels` (`available`,
+  `usdPerWeek`, `approxTokensPerWeek`, for Pro `ration` `{usdPerWeek, usedUsd, remainingUsd,
+  approxTokensPerWeek, approxTokensLeft, resetsAt}`, and a `text` line), and Pro's `/v1/models`
+  entry carries the same `ration`. "About N tokens" is the dollars at the model's credit prices
+  for a typical coding-agent mix (60% cache reads, 32% fresh input, 8% output; providers.ts
+  `RATION_MIX`), to two significant digits: an estimate, the dollars are what count. `"all"`
+  opens it to every plan (if more credit comes), each held to the per-person cap while opt-in.
 - **One open-models budget.** DeepSeek, Kimi and GLM all spend the person's DeepSeek budget
   (`deepseekWeeklyUsdCap` and the level and Pro variants): more providers never means more free
   usage a week. GPT-6 stays separate and trusted-only. An opt-in provider's cap is on top of it.
@@ -92,7 +109,7 @@ models are the `FREE_MODELS` entries with that `provider` (`src/models.ts`).
 - **When it can't serve** (paused, out of credit, its weekly budget used, or the person's opt-in
   cap reached) its models leave `/v1/models` and a request for one gets the `gpt_limit` shape
   with its own code: HTTP 402
-  `{"error": {"code": "provider_limit", "reason": "paused"|"out_of_credit"|"weekly_budget"|"person_cap", "provider": "liquid", "family": "deepseek", "resetsAt": <ISO or null>, "alternative": "deepseek/deepseek-v4.1-flash-1017"}}`.
+  `{"error": {"code": "provider_limit", "reason": "paused"|"out_of_credit"|"weekly_budget"|"pro_only"|"person_cap", "provider": "liquid", "family": "deepseek", "resetsAt": <ISO or null>, "alternative": "deepseek/deepseek-v4.1-flash-1017"}}`.
   Without its key, or with a model off, the model is unknown (`model_not_allowed`), as if it
   weren't defined. `/v1/models` carries each model's `access`: `free`, `trusted` or `opt-in`.
 - **Alerts.** At 80% of a registry provider's credit, one alert (email and webhook), once per

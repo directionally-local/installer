@@ -7,7 +7,7 @@
 import { ALLOCATOR_MODES, type AllocatorMode } from "./allocator.js";
 import { detectionRulesFrom, type DetectionRules, type DetectionRulesStatus, type ThresholdKey } from "./detection-rules.js";
 import { DEFAULT_WEB_SIGNUP_URL } from "./web-signup.js";
-import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_STATUSES, REGISTRY_DEFAULTS, type ProviderId, type ProviderStatus, type RegistrySettingsConfig } from "./providers.js";
+import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_PLANS, PROVIDER_STATUSES, REGISTRY_DEFAULTS, type ProviderId, type ProviderPlans, type ProviderStatus, type RegistrySettingsConfig } from "./providers.js";
 import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type DataCollection, type Quantization } from "./routing.js";
 
 export class ConfigError extends Error {}
@@ -660,6 +660,12 @@ function registrySettings(env: Record<string, unknown>): RegistrySettingsConfig 
     if (!(PROVIDER_STATUSES as readonly string[]).includes(raw)) throw new ConfigError(`${name} must be "on" or "paused" (got "${raw}").`);
     return raw as ProviderStatus;
   };
+  const plans = (name: string, fallback: ProviderPlans): ProviderPlans => {
+    const raw = text(env[name])?.toLowerCase();
+    if (raw === undefined) return fallback;
+    if (!(PROVIDER_PLANS as readonly string[]).includes(raw)) throw new ConfigError(`${name} must be "pro" or "all" (got "${raw}").`);
+    return raw as ProviderPlans;
+  };
   const sellers = "a comma-separated list of up to 10 seller handles";
   return {
     "providerStatus.liquid": status("LIQUID_STATUS", d["providerStatus.liquid"]),
@@ -667,7 +673,7 @@ function registrySettings(env: Record<string, unknown>): RegistrySettingsConfig 
     "providerWeeklyCredit.liquid": usd(env.LIQUID_WEEKLY_CREDIT_USD, d["providerWeeklyCredit.liquid"]!, "LIQUID_WEEKLY_CREDIT_USD"),
     "providerPersonWeeklyUsd.liquid": usd(env.LIQUID_PERSON_WEEKLY_USD, d["providerPersonWeeklyUsd.liquid"]!, "LIQUID_PERSON_WEEKLY_USD"),
     "providerOptIn.liquid": flag(env.LIQUID_OPT_IN, d["providerOptIn.liquid"], "LIQUID_OPT_IN"),
-    "providerProFirst.liquid": flag(env.LIQUID_PRO_FIRST, d["providerProFirst.liquid"], "LIQUID_PRO_FIRST"),
+    "providerPlans.liquid": plans("LIQUID_PLANS", d["providerPlans.liquid"]),
     "providerModels.liquid": list("LIQUID_MODELS", d["providerModels.liquid"], isRegistryModelList, "a comma-separated list of Liquid model ids"),
     "exchangeAllow.kimi-k3.1-pro": list("LIQUID_ALLOW_KIMI_K3_1_PRO", d["exchangeAllow.kimi-k3.1-pro"], isSellerList, sellers),
     "exchangeMaxPrices.kimi-k3.1-pro": priceList("LIQUID_MAX_PRICES_KIMI_K3_1_PRO", d["exchangeMaxPrices.kimi-k3.1-pro"]),

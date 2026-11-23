@@ -27,6 +27,10 @@ export type ApiStyle = "openai-chat" | "openai-responses";
 export type ProviderStatus = "on" | "paused";
 export const PROVIDER_STATUSES: readonly ProviderStatus[] = ["on", "paused"];
 
+/** Who a registry provider serves: dl Pro only (admins too, for testing), or every plan. */
+export type ProviderPlans = "pro" | "all";
+export const PROVIDER_PLANS: readonly ProviderPlans[] = ["pro", "all"];
+
 export interface ProviderSpec {
   id: ProviderId;
   name: string;
@@ -88,8 +92,12 @@ export interface ProviderSettings {
    */
   optIn: boolean;
   personWeeklyUsd: number | undefined;
-  /** For later: Pro gets it first. Nothing gates on it yet, so access stays what `optIn` says. */
-  proFirst: boolean;
+  /**
+   * Which plans may use its models: "pro" (dl Pro subscribers and admins only; free accounts get
+   * 402 `provider_limit` reason `pro_only`) or "all". With "pro", `personWeeklyUsd` is Pro's
+   * weekly ration of it, opt-in or not.
+   */
+  plans: ProviderPlans;
   /** The model ids that are on. */
   models: readonly string[];
 }
@@ -101,7 +109,7 @@ export type RegistrySettingsConfig = {
   "providerWeeklyCredit.liquid": number | undefined;
   "providerPersonWeeklyUsd.liquid": number | undefined;
   "providerOptIn.liquid": boolean;
-  "providerProFirst.liquid": boolean;
+  "providerPlans.liquid": ProviderPlans;
   "providerModels.liquid": readonly string[];
   "exchangeAllow.kimi-k3.1-pro": readonly string[];
   "exchangeMaxPrices.kimi-k3.1-pro": readonly number[];
@@ -109,14 +117,17 @@ export type RegistrySettingsConfig = {
   "exchangeMaxPrices.glm-5.3": readonly number[];
 };
 
-/** The defaults: Liquid paused until the owner turns it on, $100 of credit, $25 a week, opt-in at $0.50 a person a week. */
+/**
+ * The defaults: Liquid paused until the owner turns it on, $100 of credit, $25 a week, dl Pro
+ * only, opt-in, with a $0.25 weekly ration a person (about 140K tokens of Kimi K3.1 Pro).
+ */
 export const REGISTRY_DEFAULTS: RegistrySettingsConfig = {
   "providerStatus.liquid": "paused",
   "providerCredit.liquid": 100,
   "providerWeeklyCredit.liquid": 25,
-  "providerPersonWeeklyUsd.liquid": 0.5,
+  "providerPersonWeeklyUsd.liquid": 0.25,
   "providerOptIn.liquid": true,
-  "providerProFirst.liquid": true,
+  "providerPlans.liquid": "pro",
   "providerModels.liquid": providerModels("liquid")
     .filter((model) => model.enabledByDefault !== false)
     .map((model) => model.id),
@@ -141,15 +152,15 @@ export type ProviderConfig = Pick<FreeConfig, "openaiCreditUsd" | "openaiWeeklyC
 
 export function providerSettings(config: ProviderConfig, id: ProviderId): ProviderSettings {
   const all = (provider: ProviderId) => providerModels(provider).map((model) => model.id);
-  if (id === "openai") return { status: "on", creditUsd: config.openaiCreditUsd, weeklyCreditUsd: config.openaiWeeklyCreditUsd, optIn: false, personWeeklyUsd: undefined, proFirst: false, models: all("openai") };
-  if (id === "luminal") return { status: "on", creditUsd: config.luminalCreditUsd, weeklyCreditUsd: config.luminalWeeklyCreditUsd, optIn: false, personWeeklyUsd: undefined, proFirst: false, models: all("luminal") };
+  if (id === "openai") return { status: "on", creditUsd: config.openaiCreditUsd, weeklyCreditUsd: config.openaiWeeklyCreditUsd, optIn: false, personWeeklyUsd: undefined, plans: "all", models: all("openai") };
+  if (id === "luminal") return { status: "on", creditUsd: config.luminalCreditUsd, weeklyCreditUsd: config.luminalWeeklyCreditUsd, optIn: false, personWeeklyUsd: undefined, plans: "all", models: all("luminal") };
   return {
     status: config["providerStatus.liquid"],
     creditUsd: config["providerCredit.liquid"],
     weeklyCreditUsd: config["providerWeeklyCredit.liquid"],
     optIn: config["providerOptIn.liquid"],
     personWeeklyUsd: config["providerPersonWeeklyUsd.liquid"],
-    proFirst: config["providerProFirst.liquid"],
+    plans: config["providerPlans.liquid"],
     models: config["providerModels.liquid"],
   };
 }
@@ -178,16 +189,19 @@ export interface ProviderSpend {
 
 /**
  * Why a registry provider's model can't be served right now, or undefined when it can. In order:
- * no key, the provider or the model paused, the credit used up, the weekly budget used, the
- * person's opt-in cap reached (`personWeekUsd`; admins pass undefined).
+ * no key, the provider or the model paused, the credit used up, the weekly budget used, a free
+ * account asking for a Pro-only provider (`plan` "free"), the person's weekly cap reached
+ * (`personWeekUsd`; admins pass undefined for both). The cap is the opt-in cap, and with `plans`
+ * "pro" Pro's weekly ration.
  */
-export type ProviderBlock = "no_key" | "paused" | "out_of_credit" | "weekly_budget" | "person_cap";
+export type ProviderBlock = "no_key" | "paused" | "out_of_credit" | "weekly_budget" | "pro_only" | "person_cap";
 
 export function registryBlock(
   config: ProviderConfig & Pick<FreeConfig, "openaiApiKey" | "luminalApiKey" | "liquidApiKey">,
   model: FreeModel,
   spend: ProviderSpend,
   personWeekUsd?: number,
+  plan?: "free" | "pro",
 ): ProviderBlock | undefined {
   if (!isRegistryProvider(model.provider)) return undefined;
   const id = model.provider;
@@ -196,8 +210,58 @@ export function registryBlock(
   if (settings.status !== "on" || !settings.models.includes(model.id)) return "paused";
   if ((spend.usedUsd[id] ?? 0) >= settings.creditUsd) return "out_of_credit";
   if (settings.weeklyCreditUsd !== undefined && (spend.weekUsd[id] ?? 0) >= settings.weeklyCreditUsd) return "weekly_budget";
-  if (personWeekUsd !== undefined && settings.optIn && settings.personWeeklyUsd !== undefined && personWeekUsd >= settings.personWeeklyUsd) return "person_cap";
+  if (plan === "free" && settings.plans === "pro") return "pro_only";
+  if (personWeekUsd !== undefined && personCapped(settings) && personWeekUsd >= settings.personWeeklyUsd!) return "person_cap";
   return undefined;
+}
+
+/** Whether a person's weekly spend on the provider is capped: opt-in, or Pro-only (Pro's ration). */
+function personCapped(settings: ProviderSettings): boolean {
+  return (settings.optIn || settings.plans === "pro") && settings.personWeeklyUsd !== undefined;
+}
+
+/** Whether a provider's models are for dl Pro only (`provider<Plans>.<id>` "pro"). */
+export function proOnly(config: ProviderConfig, model: FreeModel): boolean {
+  return isRegistryProvider(model.provider) && providerSettings(config, model.provider).plans === "pro";
+}
+
+/**
+ * The token mix a ration in dollars is shown in: a coding agent's typical turn, mostly cache
+ * reads. An estimate for "about N tokens", never what is charged (that is the dollars).
+ */
+export const RATION_MIX = { cached: 0.6, input: 0.32, output: 0.08 } as const;
+
+/** About how many tokens `usd` buys of `model` at its credit prices and RATION_MIX, to two significant digits. */
+export function approxTokens(model: FreeModel, usd: number): number {
+  const prices = model.creditPrices ?? model.prices;
+  const perMillion = RATION_MIX.cached * prices.cached + RATION_MIX.input * prices.input + RATION_MIX.output * prices.output;
+  if (!(usd > 0) || !(perMillion > 0)) return 0;
+  const tokens = (usd / perMillion) * 1_000_000;
+  const step = 10 ** Math.max(0, Math.floor(Math.log10(tokens)) - 1);
+  return Math.round(tokens / step) * step;
+}
+
+/** A person's weekly ration of a Pro-only model: its dollars, what is used, and about how many tokens. */
+export interface Ration {
+  usdPerWeek: number;
+  usedUsd: number;
+  remainingUsd: number;
+  approxTokensPerWeek: number;
+  approxTokensLeft: number;
+}
+
+/** The ration of `model` for someone who spent `usedUsd` of the provider this week; undefined with no per-person cap. */
+export function rationOf(config: ProviderConfig, model: FreeModel, usedUsd: number): Ration | undefined {
+  if (!isRegistryProvider(model.provider)) return undefined;
+  const cap = providerSettings(config, model.provider).personWeeklyUsd;
+  if (cap === undefined) return undefined;
+  const used = Math.min(cap, Math.max(0, usedUsd));
+  const remaining = Math.max(0, cap - used);
+  return { usdPerWeek: cap, usedUsd: round6(used), remainingUsd: round6(remaining), approxTokensPerWeek: approxTokens(model, cap), approxTokensLeft: approxTokens(model, remaining) };
+}
+
+function round6(value: number): number {
+  return Math.round(value * 1e6) / 1e6;
 }
 
 /**
@@ -215,13 +279,48 @@ export type Access = "free" | "trusted" | "opt-in" | "pro";
 export function accessOf(config: ProviderConfig, model: FreeModel): Access {
   if (model.family === "gpt6") return "trusted";
   if (!isRegistryProvider(model.provider)) return "free";
-  // `proFirst` doesn't change access yet: nothing gates on Pro, so "pro" waits for that.
-  return providerSettings(config, model.provider).optIn ? "opt-in" : "free";
+  const settings = providerSettings(config, model.provider);
+  return settings.plans === "pro" ? "pro" : settings.optIn ? "opt-in" : "free";
 }
 
-/** The 402 a blocked registry model gets: the same shape as `gpt_limit`, with DeepSeek as the alternative. */
-export function providerLimitMessage(model: FreeModel, block: ProviderBlock, providerName: string): string {
+/** What the Pro-only lines need: the ration's size, the Upgrade link (null while Pro isn't offered) and when the week resets. */
+export interface ProLimitContext {
+  approxTokensPerWeek?: number;
+  upgradeUrl?: string | null;
+  /** The week's end, ISO. */
+  resetsAt?: string | null;
+}
+
+/** "Monday 30 Nov, 00:00 UTC": when a week ending at `iso` resets. */
+export function resetDay(iso: string): string {
+  const date = new Date(iso);
+  const weekday = date.toLocaleDateString("en-GB", { weekday: "long", timeZone: "UTC" });
+  const day = date.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+  return `${weekday} ${day}, 00:00 UTC`;
+}
+
+/** "about 140K tokens a week" (the ration's size), or "" without one. */
+function rationPhrase(tokens: number | undefined): string {
+  return tokens && tokens > 0 ? `about ${formatRationTokens(tokens)} tokens a week` : "";
+}
+
+/** 140000 → "140K", 1200000 → "1.2M". */
+export function formatRationTokens(n: number): string {
+  const trim = (v: number) => v.toFixed(1).replace(/\.0$/, "");
+  if (n >= 1_000_000) return `${trim(n / 1_000_000)}M`;
+  if (n >= 1_000) return `${trim(n / 1_000)}K`;
+  return String(Math.round(n));
+}
+
+/**
+ * The 402 a blocked registry model gets: the same shape as `gpt_limit`, with DeepSeek as the
+ * alternative. `plans` "pro" changes two lines: a free account's (`pro_only`) names the Pro perk
+ * and its Upgrade link, and Pro's used-up ration (`person_cap`) says when it resets.
+ */
+export function providerLimitMessage(model: FreeModel, block: ProviderBlock, providerName: string, plans: ProviderPlans = "all", pro: ProLimitContext = {}): string {
   const use = `Use ${DEEPSEEK_MODEL} instead: /model.`;
+  // Plain "DeepSeek": the alternative's id is in the error's `alternative`.
+  const deepseek = "DeepSeek";
   switch (block) {
     case "no_key":
     case "paused":
@@ -230,8 +329,17 @@ export function providerLimitMessage(model: FreeModel, block: ProviderBlock, pro
       return `${model.name} on ${providerName} is out of free credit for now. ${use}`;
     case "weekly_budget":
       return `${model.name} on ${providerName} has used its free budget for this week. ${use}`;
-    case "person_cap":
-      return `You've used this week's free ${model.name}. ${use}`;
+    case "pro_only": {
+      const ration = rationPhrase(pro.approxTokensPerWeek);
+      if (!pro.upgradeUrl) return `${model.name} is for dl Pro subscribers only. ${use}`;
+      return ration ? `${model.name} is a dl Pro perk: ${ration}, then ${deepseek}. Upgrade: ${pro.upgradeUrl}` : `${model.name} is a dl Pro perk. Upgrade: ${pro.upgradeUrl}`;
+    }
+    case "person_cap": {
+      if (plans !== "pro") return `You've used this week's free ${model.name}. ${use}`;
+      const ration = rationPhrase(pro.approxTokensPerWeek);
+      const resets = pro.resetsAt ? ` It resets on ${resetDay(pro.resetsAt)}` : " It resets next week";
+      return `You've used this week's ${model.name} with dl Pro${ration ? ` (${ration})` : ""}.${resets}; ${deepseek} keeps working: /model.`;
+    }
   }
 }
 
