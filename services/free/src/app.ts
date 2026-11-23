@@ -18,7 +18,8 @@ import { networkOf, rateLimitNetwork } from "./network.js";
 import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, type Sender } from "./feedback.js";
 import { apiError, json } from "./errors.js";
 import { adminHomePage } from "./admin-home-page.js";
-import { dashboardCsv, deniedPage, earlyAccessCsv, healthCsv, isCsvTable, isHealthCsvTable, signedInPage, signInPage, toolsPage, type SpendView, type ToolsState } from "./dashboard-page.js";
+import { dashboardCsv, deniedPage, earlyAccessCsv, healthCsv, isCsvTable, isHealthCsvTable, noGithubCsv, signedInPage, signInPage, toolsPage, type SpendView, type ToolsState } from "./dashboard-page.js";
+import { NO_GITHUB_PATH, noGithubBody, noGithubClickAlert, noGithubJson, noGithubLeadAlert, noGithubSource, parseNoGithubLead } from "./no-github.js";
 import { ACCESS_REQUEST_MAX_BYTES, ACCESS_REQUEST_USAGE, ACCESS_REQUESTS_PER_DAY, parseAccessRequest } from "./access-request.js";
 import { cleanBatch, cleanGpuTelemetry, earlyAccessEmail, type GpuCount } from "./events.js";
 import { cleanDownload, cleanInstall, MAX_TELEMETRY_BYTES } from "./telemetry.js";
@@ -49,7 +50,7 @@ import {
   weeklyBudgetMessage,
   type SignInRefusal,
 } from "./messages.js";
-import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
+import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, shell, signedInDonePage, tooNewIntro } from "./pages.js";
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, MIN_OUTPUT_TOKENS, parseUsage, type Usage } from "./quota.js";
 import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FAMILIES, FREE_MODELS, POOLS, creditPrices, fallbackOf, familyOfPool, modelById, type Family, type FreeModel, type Pool } from "./models.js";
 import { emailBlocked, emailDomain, normalizeEmail, plausibleEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
@@ -213,6 +214,9 @@ const LIMITS = {
   installCodePerson: { capacity: 10, perHour: 10 },
   installExchangeIp: { capacity: 20, perHour: 20 },
   telemetryWebIp: perMinute(600),
+  // "Don't have GitHub?" (no-github.ts): each counted click and answer emails the owner.
+  noGithubClickIp: { capacity: 20, perHour: 20 },
+  noGithubLeadIp: { capacity: 5, perHour: 5 },
 } satisfies Record<string, Limit>;
 
 export interface Env {
@@ -464,6 +468,7 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/device/no-invite") return deviceNoInvite(c);
   if (method === "POST" && path === "/device/details") return deviceDetails(c);
   if ((method === "GET" || method === "POST") && path === "/email/stop") return emailStop(c, method);
+  if ((method === "GET" || method === "POST") && path === NO_GITHUB_PATH) return noGithub(c, method);
   if (method === "GET" && path === LEGACY_ADMIN_CALLBACK_PATH) return adminCallback(c, LEGACY_ADMIN_CALLBACK_PATH);
 
   if (path === "/admin" || path === "/admin/signin" || path === "/admin/signout" || path.startsWith("/admin/dashboard/")) return adminWeb(c, path, method);
@@ -965,6 +970,38 @@ function proOffer(config: FreeConfig, pro: FreeConfig["offers"]["pro"]) {
 
 function linkFor(config: FreeConfig, person: PersonState | undefined): string | null {
   return person?.referral ? referralLink(config.referralLinkBase, person.referral.code) : null;
+}
+
+/**
+ * GET /no-github?from=: counts the click and shows the form; POST keeps the answer (no-github.ts).
+ * Each counted click and answer emails the owner per noGithubAlerts. Over the per-network limit a
+ * GET still shows the page but counts nothing, and a POST gets 429.
+ */
+async function noGithub(c: Ctx, method: string): Promise<Response> {
+  const mode = (await runtime(c)).config.noGithubAlerts;
+  if (method === "GET") {
+    const source = noGithubSource(c.url.searchParams.get("from"));
+    if ((await limited(c, `nogithub:ip:${c.ipNet}`, LIMITS.noGithubClickIp)) === undefined) {
+      const now = c.now();
+      const click = await directory(c).noGithubClick({ now, source, mode });
+      if (click.email) await alert(c, [noGithubClickAlert(source, now, click)]);
+    }
+    return shell("No GitHub account?", noGithubBody(source));
+  }
+  const form = await readForm(c);
+  const source = noGithubSource(form.get("from"));
+  const parsed = parseNoGithubLead(form);
+  if (!parsed.ok) return shell("No GitHub account?", noGithubBody(source, parsed.message, form), 400);
+  const retry = await limited(c, `nogithub-lead:ip:${c.ipNet}`, LIMITS.noGithubLeadIp);
+  if (retry !== undefined) return donePage("Too many tries", `Too many answers from this network. Try again in ${Math.ceil(retry / 60)} minutes.`, 429);
+  const now = c.now();
+  // Never the IP: a keyed hash of the network, only to drop the same anonymous answer twice.
+  const ipHash = await sha256Hex(`nogithub:${c.config.tokenSigningKey}:${networkOf(c.ip) ?? c.ipNet}`);
+  const lead = await directory(c).noGithubLead({ ...parsed, now, source, ipHash, mode });
+  if (lead.email) await alert(c, [noGithubLeadAlert(source, now, parsed, lead.repeat, lead)]);
+  return parsed.email
+    ? donePage("Thanks", "We'll email you when other ways to sign in open. Only about that.")
+    : donePage("Thanks", "Thanks for telling us.");
 }
 
 /** A keyed hash of the caller's network (IPv4 address or IPv6 /64), for referral anti-abuse. */
@@ -3464,6 +3501,14 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
   const actor = { githubId: identity.githubId, login: identity.login, now };
 
   if (method === "GET" && rest === "metrics") return adminMetrics(c);
+  if (method === "GET" && rest === "no-github") {
+    // "Don't have GitHub?" clicks per day and source over ?days= (1 to 366, default 30), and the answers.
+    const raw = c.url.searchParams.get("days");
+    const days = raw === null ? 30 : Number(raw);
+    if (!Number.isInteger(days) || days < 1 || days > 366) return apiError(400, "invalid_request", "Use ?days=1 to 366.");
+    const until = Math.floor(now / DAY_MS) * DAY_MS + DAY_MS;
+    return json({ days, ...noGithubJson(await directory(c).noGithub({ from: until - days * DAY_MS, until })) });
+  }
   if (method === "GET" && rest === "uses") {
     // Recent use descriptions: ?days= (1 to 90, default 7), ?risk= (none: all, the default; low:
     // low and high; high), ?githubId=, ?limit= (1 to 1000, default 200). Newest first.
@@ -4099,11 +4144,12 @@ async function adminMetrics(c: Ctx): Promise<Response> {
   const from = parse("from") ?? to - 27 * DAY_MS;
   if (Number.isNaN(to) || Number.isNaN(from) || from > to) return apiError(400, "invalid_request", "from and to must be ISO dates with from <= to.");
   if (to - from > 366 * DAY_MS) return apiError(400, "invalid_request", "The range can't be longer than 366 days.");
-  const [metrics, refusals] = await Promise.all([
+  const [metrics, refusals, noGithub] = await Promise.all([
     directory(c).metrics({ from, to, now, adminIds: [...c.config.adminGithubIds] }),
     directory(c).refusals(Math.floor(from / DAY_MS), Math.floor(to / DAY_MS)),
+    directory(c).noGithubDays({ from: Math.floor(from / DAY_MS) * DAY_MS, until: Math.floor(to / DAY_MS) * DAY_MS + DAY_MS }),
   ]);
-  return json({ ...metrics, refusals: refusalsView(refusals), generatedAt: new Date(now).toISOString(), today: isoDay(now) });
+  return json({ ...metrics, refusals: refusalsView(refusals), noGithub, generatedAt: new Date(now).toISOString(), today: isoDay(now) });
 }
 
 // ─── Admin dashboard (browser) ──────────────────────────────────────────────
@@ -4245,6 +4291,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
   if (csv === undefined) return adminHomeResponse(c, config, paused, now, identity.login, viaCookie);
   if (!isCsvTable(csv)) return apiError(404, "not_found", `GET ${c.url.pathname} isn't a route.`);
   if (csv === "early-access") return earlyAccessCsv(await directory(c).earlyAccessLeads(), now);
+  if (csv === "no-github" || csv === "no-github-clicks") return noGithubCsv(csv, await directory(c).noGithub({ from: 0, until: Math.floor(now / DAY_MS) * DAY_MS + DAY_MS }), now);
   if (csv === "web-signup") return webFunnelCsvResponse(c);
   if (csv === "refusals") return refusalsCsvResponse(c);
   // The health CSVs read only health-data.ts's queries.
@@ -4373,11 +4420,12 @@ async function toolsState(
   csrf: string | undefined,
   posted: ToolsPosted,
 ): Promise<ToolsState> {
-  const [cohorts, me, requests, leads] = await Promise.all([
+  const [cohorts, me, requests, leads, noGithub] = await Promise.all([
     directory(c).broadcastCohorts({ days: COHORT_PICKER_DAYS, adminIds: [...c.config.adminGithubIds], includeAdmins: config.userEmailsToAdmins }),
     directory(c).getPerson(identity.githubId),
     directory(c).pendingAccessRequests(c.now()),
     directory(c).earlyAccessLeads(),
+    directory(c).noGithub({ from: Math.floor(c.now() / DAY_MS) * DAY_MS - 13 * DAY_MS, until: Math.floor(c.now() / DAY_MS) * DAY_MS + DAY_MS }),
   ]);
   return {
     login: identity.login,
@@ -4389,6 +4437,7 @@ async function toolsState(
     cohorts,
     requests,
     leads,
+    noGithub,
     grantUsd: config.grantWeeklyUsdCap ?? 0,
     routing: {
       primaryUpstream: config.primaryUpstream,

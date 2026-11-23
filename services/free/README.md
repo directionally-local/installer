@@ -989,6 +989,7 @@ with who made it and when.
 | `otherHarnessShare` | `OTHER_HARNESS_SHARE` | 0.5: the share (0 to 1) of the free weekly allowance and of the trial Claude Code and OpenCode may use; Pro is exempt (see below) |
 | `proOffered` | `PRO_OFFERED` | true: dl Pro is offered. false hides it from everyone new: `offers` has no `pro` (the `topup` stays), free users' refusals, sign-in lines and trial emails stop naming Pro, and a new Pro checkout gets 403 `pro_not_offered`. Existing subscribers keep Pro, their Pro wording and the billing portal |
 | `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request); `daily` (one line in the daily digest); `off` |
+| `noGithubAlerts` | `NO_GITHUB_ALERTS` | `each` (an email per "Don't have GitHub?" click and answer, at most 50 a UTC day, the rest in the daily digest); `daily` (one line in the daily digest); `off` |
 | `useDescriptions` | `USE_DESCRIPTIONS` | true: a short automated description and safety label per session (see [use descriptions](#what-people-use-the-service-for-use-descriptions)) |
 | `useDescriptionDailyCap` | `USE_DESCRIPTION_DAILY_CAP` | 2000: description calls a UTC day across everyone (0 stops them) |
 | `securityOffGpt6` | `SECURITY_OFF_GPT6` | true: security work is served by DeepSeek only, never GPT-6 (see [security work kept off GPT-6](#what-people-use-the-service-for-use-descriptions)) |
@@ -1466,6 +1467,14 @@ The funnel (counts only, per UTC day): `visited`, `signed_in`, `chose_computer`,
 
 Settings: `WEB_SIGNUP_URL` (default `https://dl.new/start`). The GitHub OAuth app needs nothing new (the callback is still `/device/callback`).
 
+## Don't have GitHub?
+
+A small "Don't have GitHub?" link sits under every "Sign in with GitHub" button: the device sign-in page here (`from=device`) and dl.new's sign-up form (`from=dlnew`; `from=web` is also accepted). It goes to `GET /no-github?from=<source>`, which counts the click (per UTC day and source, in `no_github_clicks`) and shows a short form: an optional email and an optional one-line "What do you use instead?". `POST /no-github` keeps the answer in `no_github_leads` (one row per email address; an answer without an email is dropped when the same network sent the same answer that day). The email must look like an address and the answer is at most 100 characters; at least one of them is needed. No IP is stored: a lead keeps a keyed hash of the network (IPv4 address or IPv6 /64) for that de-duplication only. Clicks are counted at most 20 an hour per network and answers 5 an hour; past that the page still shows but nothing is counted, and a POST gets 429.
+
+Each click and each answer emails the owner (the alert channel: `ALERT_EMAIL` to `ALERT_EMAIL_TO`, and the webhook), subject `dl free tier: someone clicked Don't have GitHub? (from dl.new)`, with the source, the time and the running counts; an answer's email adds the address and the "uses instead" answer. The runtime setting `noGithubAlerts` makes it `daily` (a line in the daily digest) or `off`; at most 50 such emails go out a UTC day and the rest are counted in the next digest.
+
+`GET /v1/admin/no-github?days=30` (admins; 1 to 366 days) returns `{days: [{date, clicks: {device, web, dlnew, other}, total, leads}], totals: {clicks, leads, emails}, leads: [{at, source, email, uses}]}` (newest 1000 leads). `/v1/admin/metrics` has the same per-day counts as `noGithub`. The admin Tools tab has a "Don't have GitHub?" card, and `/admin/dashboard/no-github.csv` (answers) and `/admin/dashboard/no-github-clicks.csv` (clicks per day and source) download them.
+
 ## Install counts
 
 Two public endpoints count the top of the funnel, anonymously. No sign-in; each adds one to a
@@ -1565,12 +1574,12 @@ never the request log, and no email or content. A test holds its queries to `ADM
 
 **Tools.** `GET /admin?view=tools`: the actions. Access requests (Grant / Decline), give free
 tokens by GitHub username, block or unblock by username, the routing setting (`primaryUpstream`),
-re-check below-bar accounts, write an email, and the GPU early-access leads.
+re-check below-bar accounts, write an email, the GPU early-access leads, and "Don't have GitHub?" clicks and answers.
 
 **CSVs.** Every table the stats questions use is a CSV at `/admin/dashboard/<table>.csv`
 (`spend`, `weekly-active`, `retention`, `retention-daily`, `weekly-cost`, `top-cost?week=YYYY-MM-DD`,
 `limits`, `queue`, `referrals`, `funnel`, `install-funnel`, `installs`, `paid`, `upstreams`,
-`early-access`, and `health-errors`, `health-request-failures`, `health-ends`, `health-turns`,
+`early-access`, `no-github`, `no-github-clicks`, and `health-errors`, `health-request-failures`, `health-ends`, `health-turns`,
 `health-versions`, `health-sessions`, `health-tools`, `health-models`, `health-upstreams`,
 `health-installs`, `health-gpus`, which take `?days=1|7|30`). Weekly active developers are 3+
 request days and any day, last 8 weeks; cohort retention is weeks 1, 2 and 4 after sign-up; cost

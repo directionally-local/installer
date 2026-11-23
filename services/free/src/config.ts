@@ -288,6 +288,11 @@ export interface FreeConfig {
    */
   accessRequestAlerts: AccessRequestAlerts;
   /**
+   * The owner's email about "Don't have GitHub?" clicks and answers (no-github.ts),
+   * NO_GITHUB_ALERTS: "each" (the default), "daily" (in the daily digest) or "off". Also a runtime setting.
+   */
+  noGithubAlerts: AccessRequestAlerts;
+  /**
    * The anti-abuse rules (detection-rules.ts): the DETECTION_RULES secret's over the public
    * defaults. Its thresholds are already folded into the settings above.
    */
@@ -385,6 +390,7 @@ export const DEFAULTS = {
   otherHarnessShare: 0.5,
   proOffered: true,
   accessRequestAlerts: "each" as AccessRequestAlerts,
+  noGithubAlerts: "each" as AccessRequestAlerts,
   useDescriptions: true,
   useDescriptionDailyCap: 2000,
   securityOffGpt6: true,
@@ -577,6 +583,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     otherHarnessShare: share(env.OTHER_HARNESS_SHARE, DEFAULTS.otherHarnessShare, "OTHER_HARNESS_SHARE"),
     proOffered: flag(env.PRO_OFFERED, DEFAULTS.proOffered, "PRO_OFFERED"),
     accessRequestAlerts: accessRequestAlerts(env.ACCESS_REQUEST_ALERTS),
+    noGithubAlerts: alertMode(env.NO_GITHUB_ALERTS, DEFAULTS.noGithubAlerts, "NO_GITHUB_ALERTS"),
     useDescriptions: flag(env.USE_DESCRIPTIONS, DEFAULTS.useDescriptions, "USE_DESCRIPTIONS"),
     useDescriptionDailyCap: whole(env.USE_DESCRIPTION_DAILY_CAP, DEFAULTS.useDescriptionDailyCap, "USE_DESCRIPTION_DAILY_CAP"),
     securityOffGpt6: flag(env.SECURITY_OFF_GPT6, DEFAULTS.securityOffGpt6, "SECURITY_OFF_GPT6"),
@@ -820,6 +827,13 @@ function hostCooldown(value: unknown): number {
   const minutes = whole(value, DEFAULTS.openRouterHostCooldownMinutes, "OPENROUTER_HOST_COOLDOWN_MINUTES");
   if (minutes > MAX_HOST_COOLDOWN_MINUTES) throw new ConfigError(`OPENROUTER_HOST_COOLDOWN_MINUTES must be 0 to ${MAX_HOST_COOLDOWN_MINUTES} (got "${minutes}").`);
   return minutes;
+}
+
+function alertMode(value: unknown, fallback: AccessRequestAlerts, name: string): AccessRequestAlerts {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return fallback;
+  if ((ACCESS_REQUEST_ALERT_MODES as readonly string[]).includes(raw)) return raw as AccessRequestAlerts;
+  throw new ConfigError(`${name} must be "each", "daily" or "off" (got "${raw}").`);
 }
 
 function accessRequestAlerts(value: unknown): AccessRequestAlerts {

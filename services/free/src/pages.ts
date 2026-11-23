@@ -115,7 +115,7 @@ function alertHtml(error?: string): string {
 }
 
 /** `title` names the tab; `body` is the page's main column (a big `h1`, one line, at most one action). */
-function shell(title: string, body: string, status = 200): Response {
+export function shell(title: string, body: string, status = 200): Response {
   return page({ title: `${title} · ${PRODUCT_NAME}`, body: `${HEADER}\n<main>\n${body}\n</main>\n${FOOTER}`, status, style: STYLE, csp: PAGES_CSP });
 }
 
@@ -145,6 +145,7 @@ export function confirmPage(userCode: string, ref?: string): Response {
 <p class="chip"><code>${code}</code></p>
 <div class="actions">
   <a class="btn" href="${escapeHtml(authorize)}">${GITHUB_MARK}Continue with GitHub</a>
+  <a class="link" href="/no-github?from=device">Don't have GitHub?</a>
   <form method="post" action="/device/deny">
     <input type="hidden" name="user_code" value="${code}">
     <button class="link" type="submit">This isn't my code</button>

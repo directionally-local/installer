@@ -4,6 +4,7 @@ import { REGULAR_DAYS, RETENTION_DAYS, RETENTION_OFFSETS, type DashboardData } f
 import { BRAND_ORIGIN, BRAND_TOKENS, PRODUCT_NAME } from "./pages.js";
 import { isoDay } from "./week.js";
 import type { EarlyAccessLead, PendingAccessRequest } from "./directory-object.js";
+import { noGithubCard, noGithubCsvRows, type NoGithubReport } from "./no-github.js";
 import { hasCapitals, type BroadcastAudience } from "./broadcast.js";
 import { GRANT_LABELS, grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, type GrantResult } from "./grant.js";
 import { GPU_VENDOR_NAMES, type HealthData } from "./health-data.js";
@@ -92,7 +93,7 @@ export const HEALTH_CSV_TABLES = [
 ] as const;
 export type HealthCsvTable = (typeof HEALTH_CSV_TABLES)[number];
 
-export const CSV_TABLES = ["early-access", "spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams", "web-signup", "refusals", ...HEALTH_CSV_TABLES] as const;
+export const CSV_TABLES = ["early-access", "no-github", "no-github-clicks", "spend", "weekly-active", "retention", "retention-daily", "weekly-cost", "top-cost", "limits", "queue", "referrals", "funnel", "install-funnel", "installs", "paid", "upstreams", "web-signup", "refusals", ...HEALTH_CSV_TABLES] as const;
 export type CsvTable = (typeof CSV_TABLES)[number];
 
 export function isCsvTable(name: string): name is CsvTable {
@@ -416,6 +417,8 @@ export interface ToolsState {
   requestNotice?: { error: boolean; text: string };
   /** GPU early-access leads, newest first: emails people chose to leave (user content, escaped). */
   leads: EarlyAccessLead[];
+  /** "Don't have GitHub?" clicks and answers (no-github.ts); answers are user content (escaped). */
+  noGithub?: NoGithubReport;
   /** What the last "delete a lead" did. */
   leadNotice?: { error: boolean; text: string };
   /** What the last "re-check below-bar accounts" did. */
@@ -733,6 +736,15 @@ ${remove}
 </section>`;
 }
 
+/** GET /admin/dashboard/no-github.csv (answers, newest first) and no-github-clicks.csv (clicks per day and source). */
+export function noGithubCsv(table: "no-github" | "no-github-clicks", report: NoGithubReport, now: number): Response {
+  const { header, rows } = noGithubCsvRows(table, report);
+  return new Response(csv(header, rows), {
+    status: 200,
+    headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="free-${table}-${isoDay(now)}.csv"`, ...dashboardHeaders() },
+  });
+}
+
 /** GET /admin/dashboard/early-access.csv: every lead, newest first. */
 export function earlyAccessCsv(leads: EarlyAccessLead[], now: number): Response {
   const body = csv(
@@ -819,7 +831,7 @@ export function toolsPage(state: ToolsState): Response {
 ${adminNav("tools")}
 ${state.signOut ? `<form method="post" action="/admin/signout"><button type="submit" class="out">Sign out</button></form>` : ""}
 </div></header>`;
-  const cards = [requestsCard(state), grantCard(state), blockCard(state), routingCard(state), recheckCard(state), emailCard(state), leadsCard(state)];
+  const cards = [requestsCard(state), grantCard(state), blockCard(state), routingCard(state), recheckCard(state), emailCard(state), leadsCard(state), ...(state.noGithub ? [noGithubCard(state.noGithub)] : [])];
   return shell(`Tools · ${PRODUCT_NAME}`, `${header}\n<main class="tools">\n${cards.join("\n")}\n</main>`, 200, {}, "", TOOLS_STYLE);
 }
 
@@ -837,7 +849,7 @@ function csv(header: string[], rows: unknown[][]): string {
   return [header, ...rows].map((row) => row.map(csvField).join(",")).join("\r\n") + "\r\n";
 }
 
-export function dashboardCsv(table: Exclude<CsvTable, HealthCsvTable | "early-access" | "web-signup" | "refusals">, data: DashboardData, spend: SpendView): Response {
+export function dashboardCsv(table: Exclude<CsvTable, HealthCsvTable | "early-access" | "web-signup" | "refusals" | "no-github" | "no-github-clicks">, data: DashboardData, spend: SpendView): Response {
   let body: string;
   switch (table) {
     case "spend": {
