@@ -102,6 +102,16 @@ describe("dl models", () => {
     assert.doesNotMatch(table, /\x1b\[/);
   });
 
+  it("marks dl Pro only models Pro, says what Pro gives and where to upgrade", () => {
+    const kimi = { id: "moonshotai/kimi-k3.1-pro", name: "Kimi K3.1 Pro", family: "kimi", contextWindow: 1_048_576, access: "pro", status: "on", tokensPerSecond: 40, ttftMs: 1500, successRate24h: 1, measuredAt: "2026-11-23T08:55:00.000Z" };
+    const list = parseProviders({ ...BODY, providers: [...BODY.providers, { id: "liquid", name: "Liquid Inference", models: [kimi] }] })!;
+    const table = formatProvidersTable(list);
+    assert.match(table, /Liquid Inference\s+Kimi K3\.1 Pro\s+1M\s+Pro\s+on\s+~40 tok\/s/);
+    assert.match(table, /Pro: dl Pro only, a small weekly allowance, then DeepSeek\. Upgrade: https:\/\/dl\.new\/account/);
+    assert.equal(freeModelLine("moonshotai/kimi-k3.1-pro", list), "Kimi K3.1 Pro · Liquid Inference · ~40 tok/s · Pro");
+    assert.doesNotMatch(formatProvidersTable(parseProviders(BODY)!), /dl Pro only/);
+  });
+
   it("says when it shows the built-in list", async () => {
     let out = "";
     assert.equal(await modelsCommand({ out: (t) => (out += t) }, options(() => new Response("", { status: 404 }))), 0);

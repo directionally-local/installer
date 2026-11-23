@@ -173,6 +173,12 @@ const formatContext = (tokens?: number) => (!tokens ? "" : tokens >= 1_000_000 ?
 
 const STATUS_TEXT: Record<ModelStatus, string> = { on: "on", paused: "paused", out_of_credit: "out of credit" };
 
+/** The Access column: "Pro" for a dl Pro only model (Kimi K3.1 Pro), which free accounts can't use. */
+const ACCESS_TEXT: Record<ModelAccess, string> = { free: "free", trusted: "trusted", "opt-in": "opt-in", pro: "Pro" };
+
+/** Where dl Pro is bought (dl.new's account page). */
+export const PRO_UPGRADE_URL = "https://dl.new/account";
+
 /**
  * `dl status`'s free model line: "DeepSeek V4.1 Flash · Luminal · ~85 tok/s" (the speed left
  * out when unmeasured), or the bare id when the list doesn't have it.
@@ -185,6 +191,7 @@ export function freeModelLine(id: string | undefined, list: FreeProviders): stri
   const parts = [`${found.model.name}${suffix}`, found.provider.name];
   const speed = formatSpeed(found.model);
   if (speed) parts.push(speed);
+  if (found.model.access === "pro") parts.push("Pro");
   if (found.model.status !== "on") parts.push(STATUS_TEXT[found.model.status]);
   return parts.join(" · ");
 }
@@ -202,7 +209,7 @@ export function formatProvidersTable(list: FreeProviders, options: { color?: boo
   const rows: string[][] = [];
   for (const provider of list.providers) {
     for (const model of provider.models) {
-      rows.push([model.id === options.chosen ? "✓" : "", provider.name, model.name, formatContext(model.contextWindow), model.access, STATUS_TEXT[model.status], formatSpeed(model), formatTtft(model)]);
+      rows.push([model.id === options.chosen ? "✓" : "", provider.name, model.name, formatContext(model.contextWindow), ACCESS_TEXT[model.access], STATUS_TEXT[model.status], formatSpeed(model), formatTtft(model)]);
     }
   }
   const widths = header.map((title, index) => Math.max(title.length, ...rows.map((row) => row[index]!.length)));
@@ -215,6 +222,10 @@ export function formatProvidersTable(list: FreeProviders, options: { color?: boo
   else if (list.updatedAt) out += `  ${c.dim(`Updated ${list.updatedAt}`)}\n`;
   const links = list.providers.filter((provider) => provider.url || provider.website);
   for (const provider of links) out += `  ${c.dim(`${provider.name}: ${provider.url ?? provider.website}`)}\n`;
+  // Pro-only models are listed so people know they exist, but free accounts can't use them.
+  if (rows.length > 0 && list.providers.some((provider) => provider.models.some((model) => model.access === "pro"))) {
+    out += `  ${c.dim(`Pro: dl Pro only, a small weekly allowance, then DeepSeek. Upgrade: ${PRO_UPGRADE_URL}`)}\n`;
+  }
   out += `  ${c.dim("Choose one in Autopilot with /model.")}\n\n`;
   return out;
 }
