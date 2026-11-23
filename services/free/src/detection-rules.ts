@@ -18,6 +18,7 @@
  *     "proxyRouters": ["regex", ...],
  *     "labellerPolicy": "text",
  *     "moderationPolicy": "text",
+ *     "allocatorPolicy": "text",
  *     "thresholds": { "batchSize": 10, ... }
  *   }
  *
@@ -67,6 +68,8 @@ export interface DetectionRules {
   labellerPolicy: string;
   /** What the moderation reviewer is told to block, pass and watch, and how to weigh the case. */
   moderationPolicy: string;
+  /** What the token allocator (allocator.ts) is told counts as real use worth a raise. */
+  allocatorPolicy: string;
   thresholds: Readonly<Partial<Record<ThresholdKey, number>>>;
 }
 
@@ -81,6 +84,7 @@ export interface DetectionRulesStatus {
   proxyRouters: number;
   labellerPolicy: "secret" | "default";
   moderationPolicy: "secret" | "default";
+  allocatorPolicy: "secret" | "default";
   /** How many thresholds the secret sets. */
   thresholds: number;
 }
@@ -106,6 +110,10 @@ PASS legitimate work, including defensive security and keyword coincidences in o
 WATCH when it is unclear.
 
 Weigh the whole history, not a single request.`,
+  allocatorPolicy: `Policy.
+Raise ("10m", or "full" for a long, clearly real record) only with clear evidence of a real developer doing real software work: several multi-turn sessions, varied coding descriptions, human pacing across several days.
+Answer "stay" for one-shot or tiny sessions, greetings only, scripted bursts, non-coding bulk use, signs of reselling or sharing the account, or anything unclear.
+When unsure, "stay".`,
   thresholds: {},
 };
 
@@ -115,7 +123,7 @@ const MAX_PATTERNS_PER_RULE = 8;
 const MAX_POLICY_CHARS = 16_000;
 const MAX_THRESHOLD = 1_000_000;
 const RULE_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
-const TOP_LEVEL = new Set(["keywords", "proxyRouters", "labellerPolicy", "moderationPolicy", "thresholds"]);
+const TOP_LEVEL = new Set(["keywords", "proxyRouters", "labellerPolicy", "moderationPolicy", "allocatorPolicy", "thresholds"]);
 
 class RulesError extends Error {}
 
@@ -185,6 +193,7 @@ function statusOf(rules: DetectionRules, source: DetectionRulesStatus["source"],
     proxyRouters: rules.proxyRouters.length,
     labellerPolicy: "labellerPolicy" in given ? "secret" : "default",
     moderationPolicy: "moderationPolicy" in given ? "secret" : "default",
+    allocatorPolicy: "allocatorPolicy" in given ? "secret" : "default",
     thresholds: Object.keys(rules.thresholds).length,
   };
 }
@@ -214,6 +223,7 @@ export function parseDetectionRules(raw: unknown): { rules: DetectionRules; stat
       proxyRouters: "proxyRouters" in given ? proxyRouters(given.proxyRouters) : DEFAULT_DETECTION_RULES.proxyRouters,
       labellerPolicy: "labellerPolicy" in given ? policy(given.labellerPolicy, "labellerPolicy") : DEFAULT_DETECTION_RULES.labellerPolicy,
       moderationPolicy: "moderationPolicy" in given ? policy(given.moderationPolicy, "moderationPolicy") : DEFAULT_DETECTION_RULES.moderationPolicy,
+      allocatorPolicy: "allocatorPolicy" in given ? policy(given.allocatorPolicy, "allocatorPolicy") : DEFAULT_DETECTION_RULES.allocatorPolicy,
       thresholds: "thresholds" in given ? thresholds(given.thresholds) : DEFAULT_DETECTION_RULES.thresholds,
     };
     return { rules, status: statusOf(rules, "secret", given) };

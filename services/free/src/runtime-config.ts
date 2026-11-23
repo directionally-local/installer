@@ -1,3 +1,4 @@
+import { ALLOCATOR_MODES } from "./allocator.js";
 import { ACCESS_REQUEST_ALERT_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
@@ -144,6 +145,16 @@ export const RUNTIME_SETTINGS = {
   moderationCooldownMinutes: { kind: "count", env: "MODERATION_COOLDOWN_MINUTES" },
   /** Reviews a UTC day across everyone; past it, the plain high-risk email; 0 stops reviews. */
   moderationDailyCap: { kind: "count", env: "MODERATION_DAILY_CAP" },
+  /** The token allocator (allocator.ts): "on" or "off". */
+  allocator: { kind: "allocatorMode", env: "ALLOCATOR" },
+  /** Every account's weekly start grant while the allocator is on; never lowers a higher allowance. */
+  allocatorStartTokens: { kind: "tokens", env: "ALLOCATOR_START_TOKENS" },
+  /** The share of the week's allowance, 0 to 1, that starts an allocator decision. */
+  allocatorTriggerShare: { kind: "weight", env: "ALLOCATOR_TRIGGER_SHARE" },
+  /** Milliseconds to wait for the allocator's answer. */
+  allocatorTimeoutMs: { kind: "count", env: "ALLOCATOR_TIMEOUT_MS" },
+  /** The one-time weekly grace, as a share of the allowance, when the allocator is down or failed. */
+  allocatorGraceShare: { kind: "weight", env: "ALLOCATOR_GRACE_SHARE" },
 } as const;
 
 export type RuntimeKey = keyof typeof RUNTIME_SETTINGS;
@@ -201,6 +212,8 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "string" && (ACCESS_REQUEST_ALERT_MODES as readonly string[]).includes(value) ? value : "invalid";
     case "moderationMode":
       return typeof value === "string" && (MODERATION_MODES as readonly string[]).includes(value) ? value : "invalid";
+    case "allocatorMode":
+      return typeof value === "string" && (ALLOCATOR_MODES as readonly string[]).includes(value) ? value : "invalid";
     case "people":
       return Array.isArray(value) && value.length <= 500 && value.every(isAllowlistEntry) ? value.map((v) => v.trim().toLowerCase()) : "invalid";
     case "instant": {
@@ -227,6 +240,7 @@ const RULES: Record<Kind, string> = {
   seconds: `a number of seconds, more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS}`,
   alertMode: '"each", "daily" or "off"',
   moderationMode: '"enforce", "shadow" or "off"',
+  allocatorMode: '"on" or "off"',
   people: 'a list of up to 500 GitHub logins or numeric ids, e.g. ["octocat", "12345"], or [] for none',
   instant: 'an ISO time with its zone, e.g. "2026-11-20T00:00:00Z", Unix ms, or "none" to turn it off',
 };

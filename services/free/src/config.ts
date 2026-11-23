@@ -4,6 +4,7 @@
  * the owner's decisions in installer#78.
  */
 
+import { ALLOCATOR_MODES, type AllocatorMode } from "./allocator.js";
 import { detectionRulesFrom, type DetectionRules, type DetectionRulesStatus, type ThresholdKey } from "./detection-rules.js";
 import { DEFAULT_WEB_SIGNUP_URL } from "./web-signup.js";
 import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type DataCollection, type Quantization } from "./routing.js";
@@ -270,6 +271,16 @@ export interface FreeConfig {
   moderationCooldownMinutes: number;
   /** Reviews a UTC day across everyone (MODERATION_DAILY_CAP, default 300); past it, the plain high-risk email. */
   moderationDailyCap: number;
+  /** The token allocator (allocator.ts), ALLOCATOR: "on" (the default) or "off". Also a runtime setting. */
+  allocator: AllocatorMode;
+  /** Every account's weekly start grant while the allocator is on (ALLOCATOR_START_TOKENS, default 1,000,000). */
+  allocatorStartTokens: number;
+  /** The share of the week's allowance (0 to 1) that starts a decision (ALLOCATOR_TRIGGER_SHARE, default 0.8). */
+  allocatorTriggerShare: number;
+  /** Milliseconds to wait for the allocator's answer (ALLOCATOR_TIMEOUT_MS, default 5000). */
+  allocatorTimeoutMs: number;
+  /** The one-time weekly grace when the allocator is down, as a share of the allowance (ALLOCATOR_GRACE_SHARE, default 0.2). */
+  allocatorGraceShare: number;
   /**
    * The owner's email about access requests (/request in dl), ACCESS_REQUEST_ALERTS: "each" (one
    * per request, the default), "daily" (counted in the daily digest instead) or "off". Also a
@@ -382,6 +393,11 @@ export const DEFAULTS = {
   moderationAllowlist: [] as string[],
   moderationCooldownMinutes: 60,
   moderationDailyCap: 300,
+  allocator: "on" as AllocatorMode,
+  allocatorStartTokens: 1_000_000,
+  allocatorTriggerShare: 0.8,
+  allocatorTimeoutMs: 5_000,
+  allocatorGraceShare: 0.2,
   /**
    * OpenRouter's cache-read price over its input price for deepseek/deepseek-v4.1-flash-1017,
    * from https://openrouter.ai/api/v1/models on 2026-11-03: input $0.30/M, cache read
@@ -569,6 +585,11 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     moderationAllowlist: moderationAllowlist(env.MODERATION_ALLOWLIST),
     moderationCooldownMinutes: whole(env.MODERATION_COOLDOWN_MINUTES, DEFAULTS.moderationCooldownMinutes, "MODERATION_COOLDOWN_MINUTES"),
     moderationDailyCap: whole(env.MODERATION_DAILY_CAP, DEFAULTS.moderationDailyCap, "MODERATION_DAILY_CAP"),
+    allocator: allocatorMode(env.ALLOCATOR),
+    allocatorStartTokens: whole(env.ALLOCATOR_START_TOKENS, DEFAULTS.allocatorStartTokens, "ALLOCATOR_START_TOKENS"),
+    allocatorTriggerShare: share(env.ALLOCATOR_TRIGGER_SHARE, DEFAULTS.allocatorTriggerShare, "ALLOCATOR_TRIGGER_SHARE"),
+    allocatorTimeoutMs: whole(env.ALLOCATOR_TIMEOUT_MS, DEFAULTS.allocatorTimeoutMs, "ALLOCATOR_TIMEOUT_MS"),
+    allocatorGraceShare: share(env.ALLOCATOR_GRACE_SHARE, DEFAULTS.allocatorGraceShare, "ALLOCATOR_GRACE_SHARE"),
     detection: detection.rules,
     detectionStatus: detection.status,
   };
@@ -813,6 +834,13 @@ function moderationMode(value: unknown): ModerationMode {
   if (raw === undefined) return DEFAULTS.moderation;
   if ((MODERATION_MODES as readonly string[]).includes(raw)) return raw as ModerationMode;
   throw new ConfigError(`MODERATION must be "off", "shadow" or "enforce" (got "${raw}").`);
+}
+
+function allocatorMode(value: unknown): AllocatorMode {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return DEFAULTS.allocator;
+  if ((ALLOCATOR_MODES as readonly string[]).includes(raw)) return raw as AllocatorMode;
+  throw new ConfigError(`ALLOCATOR must be "on" or "off" (got "${raw}").`);
 }
 
 function moderationAllowlist(value: unknown): readonly string[] {

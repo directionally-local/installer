@@ -50,7 +50,7 @@ import {
   type SignInRefusal,
 } from "./messages.js";
 import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, signedInDonePage, tooNewIntro } from "./pages.js";
-import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, parseUsage, type Usage } from "./quota.js";
+import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, MIN_OUTPUT_TOKENS, parseUsage, type Usage } from "./quota.js";
 import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FAMILIES, FREE_MODELS, POOLS, creditPrices, fallbackOf, familyOfPool, modelById, type Family, type FreeModel, type Pool } from "./models.js";
 import { emailBlocked, emailDomain, normalizeEmail, plausibleEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
 import {
@@ -83,6 +83,7 @@ import { meterStream } from "./sse.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
 import { anthropicError, errorStatus, estimateInputTokens, toAnthropicMessage, toAnthropicStream, toChatRequest } from "./anthropic.js";
 import { DAY_MS, isoDay, weekEnd, weekStart } from "./week.js";
+import { allocateIfDue, allocatedLimits, anthropicSessionHint, limitedLevel, rescue, sessionKeyOf, stageOf, stepOf, usedShare, type AllocatorRun } from "./allocator.js";
 import { healthWindow } from "./health-data.js";
 import {
   deliverUserEmail,
@@ -566,7 +567,35 @@ function levelLimits(config: FreeConfig, bonusTokens: number, level: Level, batc
 async function personLimits(c: Ctx, config: FreeConfig, githubId: number, now: number): Promise<{ level: Level; limits: Limits }> {
   const person = (await directory(c).gate(now, policyOf(c.config), githubId)).person;
   const level = servedLevel(person?.level ?? "full", config);
-  return { level, limits: limitsFor(config, person?.bonusTokens, level, person?.batchFlagged === true, onTrial(config, githubId, person?.admittedAt), person?.trialBonusTokens) };
+  return { level, limits: allocated(config, limitsFor(config, person?.bonusTokens, level, person?.batchFlagged === true, onTrial(config, githubId, person?.admittedAt), person?.trialBonusTokens), githubId, person, now) };
+}
+
+/**
+ * `limits` with the token allocator applied (allocator.ts): the start grant, the step reached and
+ * this week's grace. Admins, blocked accounts and unknown people are left as they are.
+ */
+function allocated(config: FreeConfig, limits: Limits, githubId: number, person: PersonState | undefined, now: number): Limits {
+  if (!person || person.blocked || config.adminGithubIds.has(githubId)) return limits;
+  return allocatedLimits(limits, {
+    settings: config,
+    state: person.allocator ?? null,
+    week: weekStart(now),
+    steps: { starter: levelLimits(config, 0, "starter", false), basic: levelLimits(config, 0, "basic", false), full: levelLimits(config, person.bonusTokens, "full", false) },
+  });
+}
+
+/** What an allocator decision needs from this request (allocator.ts AllocatorRun). */
+async function allocatorRun(c: Ctx, config: FreeConfig, githubId: number): Promise<AllocatorRun> {
+  return {
+    directory: directory(c),
+    fetch: c.fetch,
+    now: () => c.now(),
+    apiKey: c.config.openRouterApiKey,
+    settings: config,
+    rules: config.detection,
+    user: await safetyIdentifier(githubId),
+    fullTokens: config.weeklyTokens,
+  };
 }
 
 /** The level thresholds, from the effective config. */
@@ -1764,7 +1793,7 @@ async function me(c: Ctx): Promise<Response> {
   const { config, person } = await runtime(c);
   const allowance = await account(c, identity.githubId).allowance(
     c.now(),
-    limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens),
+    allocated(config, limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens), identity.githubId, person, c.now()),
   );
   if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
   // A Pro subscriber isn't waiting for anything; their place is kept if Pro ends.
@@ -2058,7 +2087,7 @@ async function models(c: Ctx): Promise<Response> {
   if (!isAdmin) {
     const allowance = await account(c, identity.githubId).allowance(
       c.now(),
-      limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens),
+      allocated(config, limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens), identity.githubId, person, c.now()),
     );
     const gpt6 = allowance.budgets.gpt6.usdPerWeek;
     if (gpt6 !== null && gpt6 <= 0) listed = FREE_MODELS.filter((model) => model.family !== "gpt6");
@@ -2212,7 +2241,8 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
   const model = modelById(DEEPSEEK_MODEL)!;
   const translated = toChatRequest(request, { model: model.id, vision: model.vision });
   if (!translated.ok) return anthropicErrorResponse(400, translated.message, "invalid_request");
-  const answer = await countedChat(c, identity, await chat(c, { identity, body: translated.body, bodyBytes }));
+  const hint = anthropicSessionHint(request);
+  const answer = await countedChat(c, identity, await chat(c, { identity, body: translated.body, bodyBytes, ...(hint ? { sessionHint: hint } : {}) }));
   if (answer.status !== 200) return toAnthropicErrorResponse(answer);
   const options = { model: translated.model, thinking: translated.thinking, stopSequences: Array.isArray(translated.body.stop) ? (translated.body.stop as string[]) : [] };
   const headers = passHeaders(answer);
@@ -2492,7 +2522,7 @@ const HARNESS_FAMILIES: Readonly<Record<Harness, readonly Family[]>> = {
   opencode: FAMILIES,
 };
 
-async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unknown>; bodyBytes?: number }): Promise<Response> {
+async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unknown>; bodyBytes?: number; sessionHint?: string }): Promise<Response> {
   const { identity } = input;
   const translated = input.body ? (input as TranslatedChat) : undefined;
   const person = account(c, identity.githubId);
@@ -2516,8 +2546,11 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   const level = servedLevel(gate.person?.level ?? "full", gate.config);
   const batchFlagged = gate.person?.batchFlagged === true;
   const trial = onTrial(gate.config, identity.githubId, gate.person?.admittedAt);
-  const fullLimits = limitsFor(gate.config, gate.person?.bonusTokens, level, batchFlagged, trial, gate.person?.trialBonusTokens);
-  const limits: Limits = harness ? { ...fullLimits, harnessShare: gate.config.otherHarnessShare } : fullLimits;
+  const baseLimits = limitsFor(gate.config, gate.person?.bonusTokens, level, batchFlagged, trial, gate.person?.trialBonusTokens);
+  // The token allocator (allocator.ts): the start grant, the step reached and this week's grace.
+  let fullLimits = allocated(gate.config, baseLimits, identity.githubId, gate.person, c.now());
+  let limits: Limits = harness ? { ...fullLimits, harnessShare: gate.config.otherHarnessShare } : fullLimits;
+  const allocatorOn = gate.config.allocator === "on" && !isAdmin && !trial && gate.person !== undefined && !gate.person.blocked;
   const link = linkFor(gate.config, gate.person);
   const headers = async () => quotaHeaders(await person.allowance(c.now(), limits));
 
@@ -2525,7 +2558,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   if (guarded) return guarded;
   // Below the bar with no free tokens: say who free tokens are for and how to ask anyway. The
   // refusal is counted per day for the sign-up funnel (ids and days only).
-  if (!isAdmin && noFreeTokens(level, gate.config, batchFlagged)) {
+  if (!isAdmin && fullLimits.level === "starter" && (fullLimits.levelTokens ?? 0) <= 0) {
     await directory(c).recordRefusal(identity.githubId, c.now());
     return apiError(403, "below_bar", belowBarLine(levelThresholds(gate.config)), { contact: CREDITS_REQUEST_EMAIL, request: ACCESS_REQUEST_PATH }, await headers());
   }
@@ -2558,6 +2591,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // Every level gets every model; basic and Starter on their smaller allowance.
   const effective = requested;
   const sessionId = c.request.headers.get("x-session-id") ?? (typeof body.session_id === "string" ? body.session_id : undefined);
+  // Any agent's session id, for the token allocator's session counts (allocator.ts).
+  const sessionKey = sessionKeyOf(c.request.headers, body, input.sessionHint);
 
   // Account-pooling routers (resale or sharing of free accounts) are refused outright: the free
   // tier is for one person's own coding, not an upstream for a proxy.
@@ -2648,7 +2683,37 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       provider: serves.provider,
       model: serves.model.id,
     });
-  const reservation = await reserveFor(pool, serving);
+  let reservation = await reserveFor(pool, serving);
+  // Out of tokens on a limited allowance: the allocator is waited for (or its grace given) rather
+  // than refusing on our own system's account (allocator.ts rescue).
+  if (
+    !reservation.ok &&
+    reservation.code === "quota_exceeded" &&
+    reservation.reason === "tokens" &&
+    reservation.allowance.plan === "free" &&
+    !freeBlock &&
+    allocatorOn &&
+    limitedLevel(fullLimits) &&
+    // Another agent's smaller share (otherHarnessShare) used up while the whole allowance isn't: that refusal stands.
+    (!harness || gate.config.otherHarnessShare >= 1 || ((await person.allowance(c.now(), fullLimits, pool)).remaining ?? Infinity) < promptEstimate + MIN_OUTPUT_TOKENS)
+  ) {
+    const state = gate.person?.allocator ?? null;
+    const step = stepOf(fullLimits, state, weekStart(c.now()));
+    const next = await rescue(await allocatorRun(c, gate.config, identity.githubId), {
+      githubId: identity.githubId,
+      fromTokens: step,
+      usedThisWeek: reservation.allowance.usedThisWeek,
+      stage: stageOf(step, state),
+      state,
+      ...(c.background ? { background: c.background } : {}),
+    });
+    if (next && gate.person) {
+      gate.person.allocator = next;
+      fullLimits = allocated(gate.config, baseLimits, identity.githubId, gate.person, c.now());
+      limits = harness ? { ...fullLimits, harnessShare: gate.config.otherHarnessShare } : fullLimits;
+      reservation = await reserveFor(pool, serving);
+    }
+  }
   if (!reservation.ok) {
     const quota = quotaHeaders(reservation.allowance);
     // Another coding agent's share is used up while the whole allowance isn't: say so, and that
@@ -2746,6 +2811,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       ...(harness ? { harness } : {}),
       // The requested model's budget paid, even when its fallback served.
       family: effective.family,
+      ...(sessionKey ? { sessionKey } : {}),
     };
     await alert(c, await directory(c).recordRequest(record, policyOf(gate.config), servingContext(c, gate.config)));
     // Most of the week's free tokens used: one email a week, on the settlement that crossed 80%.
@@ -2756,6 +2822,13 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       } else if (weekMostlyUsed(settled.allowance)) {
         await userEmail(c, gate.config, "week_80", identity.githubId, String(weekStart(c.now())));
       }
+    }
+    // Most of a limited allowance used: an allocator decision beside the request (allocator.ts).
+    if (!settled.paid && allocatorOn && settled.allowance.plan === "free" && limitedLevel(fullLimits) && usedShare({ tokensPerWeek: fullLimits.levelTokens ?? null, usedThisWeek: settled.allowance.usedThisWeek }) >= gate.config.allocatorTriggerShare) {
+      const state = gate.person?.allocator ?? null;
+      const step = stepOf(fullLimits, state, weekStart(c.now()));
+      const task = allocatorRun(c, gate.config, identity.githubId).then((run) => allocateIfDue(run, { githubId: identity.githubId, fromTokens: step, usedThisWeek: settled.allowance.usedThisWeek, stage: stageOf(step, state) }));
+      if (c.background) c.background(task);
     }
     return settled.allowance;
   };
@@ -3421,6 +3494,18 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       verdict: verdict ?? null,
       decisions: rows.map((row) => ({ login: row.login, githubId: row.githubId, verdict: row.verdict, confidence: row.confidence, reason: row.reason, signals: row.signals, action: row.action, category: row.category, sessionId: row.sessionId, labelId: row.labelId, model: row.model, error: row.error, at: new Date(row.at).toISOString() })),
     });
+  }
+  if (method === "GET" && rest === "allocator") {
+    // Token allocator decisions and graces (allocator.ts): ?days= (1 to 90, default 7), ?limit=
+    // (1 to 1000, default 200), newest first, and counts per UTC day. No content.
+    const params = c.url.searchParams;
+    const days = params.get("days") === null ? 7 : Number(params.get("days"));
+    const limit = params.get("limit") === null ? 200 : Number(params.get("limit"));
+    if (!Number.isInteger(days) || days < 1 || days > 90 || !Number.isInteger(limit) || limit < 1 || limit > 1000) {
+      return apiError(400, "invalid_request", "Use ?days=1 to 90 and ?limit=1 to 1000.");
+    }
+    const report = await directory(c).allocatorReport({ since: now - days * DAY_MS, limit, days, now });
+    return json({ days, allocator: config.allocator, decisions: report.decisions.map((row) => ({ ...row, at: new Date(row.at).toISOString() })), daily: report.daily });
   }
   if (method === "POST" && rest === "recheck-below-bar") {
     const body = (await readJson(c)) ?? {};
@@ -4637,7 +4722,7 @@ async function webMe(c: Ctx): Promise<Response> {
   const { config, person } = await runtime(c);
   const allowance = await account(c, identity.githubId).allowance(
     c.now(),
-    limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens),
+    allocated(config, limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens), identity.githubId, person, c.now()),
   );
   return json({
     login: identity.login,

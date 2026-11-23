@@ -483,6 +483,8 @@ export interface DailyDigest {
   accessRequests?: { count: number; logins: string[]; pending: number };
   /** Moderation reviews that day (moderation.ts), by verdict, and how many blocked; absent when there were none. */
   moderation?: { block: number; watch: number; pass: number; blocked: number };
+  /** Token allocator decisions that day (allocator.ts), by outcome; absent when there were none. */
+  allocator?: { raised10m: number; raisedFull: number; stayed: number; errors: number; graces: number };
 }
 
 /** Requests and tokens of people who aren't admins; dollars of free usage only. */
@@ -559,6 +561,10 @@ export function dailyDigestAlert(digest: DailyDigest): Alert {
   const reviews = digest.moderation;
   if (reviews) {
     lines.push(`Moderation reviews: ${count(reviews.block + reviews.watch + reviews.pass)} (${count(reviews.block)} block, ${count(reviews.watch)} watch, ${count(reviews.pass)} pass), ${count(reviews.blocked)} auto-blocked. GET /v1/admin/moderation?days=1`);
+  }
+  const allocator = digest.allocator;
+  if (allocator) {
+    lines.push(`Allocator: ${count(allocator.raised10m)} raised to 10M, ${count(allocator.raisedFull)} to full, ${count(allocator.stayed)} stayed, ${count(allocator.graces)} graces${allocator.errors > 0 ? ` (${count(allocator.errors)} failed)` : ""}. GET /v1/admin/allocator?days=1`);
   }
   return {
     subject: `dl free tier: daily, ${digest.date}: ${count(signups.count)} new, ${count(digest.active)} active`,
