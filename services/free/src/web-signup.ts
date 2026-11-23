@@ -111,3 +111,80 @@ export function webFunnelCsv(rows: readonly WebFunnelRow[]): string {
   }
   return `${lines.join("\n")}\n`;
 }
+
+/**
+ * Link campaigns: dl.new links carry `utm_source`, `utm_medium` and `utm_campaign` (blog posts:
+ * `blog`, `post`, the post's slug). The dl.new Worker counts a tagged visit, the page counts an
+ * install or sign-in click under the visit's first-touch campaign, and a web sign-in started with
+ * one (`/web/signin?...&utm_campaign=…`) counts as `signed_in` and, for a new account,
+ * `signed_up`. Counts per UTC day and tags only: nothing about who.
+ */
+export const CAMPAIGN_STEPS = ["visited", "install_click", "signup_started", "signed_in", "signed_up"] as const;
+export type CampaignStep = (typeof CAMPAIGN_STEPS)[number];
+/** The steps the dl.new Worker and page may send (the others are counted by the service itself). */
+export const CAMPAIGN_CLIENT_STEPS: ReadonlySet<string> = new Set<CampaignStep>(["visited", "install_click", "signup_started"]);
+/** How many different tag combinations are kept a day; the rest are counted under `_other`. */
+export const CAMPAIGN_KEYS_PER_DAY = 500;
+export const CAMPAIGN_OTHER = "_other";
+
+/** A link's tags: lowercase, at most 64 characters each; `ref` is the referring host, or "". */
+export interface Campaign {
+  source: string;
+  medium: string;
+  campaign: string;
+  ref: string;
+}
+export interface CampaignRow extends Campaign {
+  day: number;
+  step: string;
+  n: number;
+}
+
+const TAG = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const HOST = /^[a-z0-9]([a-z0-9.-]{0,98}[a-z0-9])?$/;
+
+/** One tag, lowercased, or "" when missing; undefined when it isn't a plain tag. */
+function tag(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string") return undefined;
+  const lower = value.trim().toLowerCase();
+  return lower === "" ? "" : TAG.test(lower) ? lower : undefined;
+}
+
+/**
+ * The campaign in `raw` ({source, medium, campaign, ref}), or undefined when there is none or any
+ * tag isn't plain (letters, digits, `.`, `_`, `-`). A campaign needs `campaign`; the rest may be "".
+ */
+export function parseCampaign(raw: unknown): Campaign | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  const source = tag(value.source);
+  const medium = tag(value.medium);
+  const campaign = tag(value.campaign);
+  const ref = tag(value.ref);
+  if (source === undefined || medium === undefined || !campaign || ref === undefined) return undefined;
+  if (ref !== "" && !HOST.test(ref)) return undefined;
+  return { source, medium, campaign, ref };
+}
+
+/** The campaign on a `/web/signin` link: `utm_source`, `utm_medium`, `utm_campaign`, `utm_ref`. */
+export function campaignFromParams(params: URLSearchParams): Campaign | undefined {
+  return parseCampaign({ source: params.get("utm_source"), medium: params.get("utm_medium"), campaign: params.get("utm_campaign"), ref: params.get("utm_ref") });
+}
+
+export interface CampaignTotals extends Campaign, Record<CampaignStep, number> {}
+
+/** Totals per tag combination (all steps) over `rows`, most visited first. */
+export function campaignTotals(rows: readonly CampaignRow[]): CampaignTotals[] {
+  const byKey = new Map<string, CampaignTotals>();
+  for (const row of rows) {
+    const key = JSON.stringify([row.source, row.medium, row.campaign, row.ref]);
+    let totals = byKey.get(key);
+    if (!totals) {
+      totals = { source: row.source, medium: row.medium, campaign: row.campaign, ref: row.ref, ...(Object.fromEntries(CAMPAIGN_STEPS.map((step) => [step, 0])) as Record<CampaignStep, number>) };
+      byKey.set(key, totals);
+    }
+    if ((CAMPAIGN_STEPS as readonly string[]).includes(row.step)) totals[row.step as CampaignStep] += row.n;
+  }
+  return [...byKey.values()].sort((a, b) => b.visited - a.visited || a.campaign.localeCompare(b.campaign));
+}

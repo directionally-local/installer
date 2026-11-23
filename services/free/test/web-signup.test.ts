@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADMIN_ID, createService, errorCode, NOW, submitDetails, type GitHubUserFixture, type Service } from "./harness.js";
-import { funnelTotals, webFunnelCsv } from "../src/web-signup.js";
+import { CAMPAIGN_KEYS_PER_DAY, campaignTotals, funnelTotals, parseCampaign, webFunnelCsv } from "../src/web-signup.js";
 
 /**
  * dl.new's web sign-up (web-signup.ts): the CLI's own browser sign-in, returned to dl.new with a
@@ -17,8 +17,8 @@ const BILLING = { STRIPE_SECRET_KEY: "sk_test_fake", STRIPE_WEBHOOK_SECRET: "whs
 const ghCode = (user: GitHubUserFixture) => encodeURIComponent(JSON.stringify(user));
 
 /** /web/signin → GitHub → the callback (and the details step when asked): the last response. */
-async function webSignIn(service: Service, user: GitHubUserFixture, options: { state?: string; ip?: string; ref?: string } = {}): Promise<Response> {
-  const start = await service.request("GET", `/web/signin?return=${encodeURIComponent(PAGE)}&state=${options.state ?? STATE}${options.ref ? `&ref=${options.ref}` : ""}`, options.ip ? { ip: options.ip } : {});
+async function webSignIn(service: Service, user: GitHubUserFixture, options: { state?: string; ip?: string; ref?: string; query?: string } = {}): Promise<Response> {
+  const start = await service.request("GET", `/web/signin?return=${encodeURIComponent(PAGE)}&state=${options.state ?? STATE}${options.ref ? `&ref=${options.ref}` : ""}${options.query ?? ""}`, options.ip ? { ip: options.ip } : {});
   assert.equal(start.status, 302, await start.clone().text());
   const location = new URL(start.headers.get("location")!);
   assert.equal(location.origin, "https://github.com");
@@ -384,5 +384,63 @@ describe("the web sign-up funnel", () => {
     const page = await (await service.request("GET", `/device/callback?code=${ghCode({ id: 531, login: "cli" })}&state=${location.searchParams.get("state")}`, { headers: { cookie } })).text();
     const done = await submitDetails(service.request, page);
     assert.match(done.page, /Return to your terminal/);
+  });
+});
+
+describe("link campaigns", () => {
+  const POST = { source: "blog", medium: "post", campaign: "self-hosted-agents", ref: "directionallylocal.com" };
+  const QUERY = "&utm_source=blog&utm_medium=post&utm_campaign=self-hosted-agents&utm_ref=directionallylocal.com";
+
+  it("takes plain tags only", () => {
+    assert.deepEqual(parseCampaign({ source: "Blog", medium: "post", campaign: "My-Post_1.2" }), { source: "blog", medium: "post", campaign: "my-post_1.2", ref: "" });
+    assert.equal(parseCampaign({ source: "blog" }), undefined);
+    assert.equal(parseCampaign({ campaign: "a b" }), undefined);
+    assert.equal(parseCampaign({ campaign: "x".repeat(65) }), undefined);
+    assert.equal(parseCampaign({ campaign: "ok", ref: "evil.com/path" }), undefined);
+    assert.equal(parseCampaign({ campaign: "<script>" }), undefined);
+    assert.equal(parseCampaign("blog"), undefined);
+  });
+
+  it("counts tagged visits, clicks, sign-ins and new accounts per campaign, in /v1/admin/metrics", async () => {
+    const service = await createService(OPEN);
+    const send = (body: unknown) => service.request("POST", "/v1/telemetry/web", { body });
+    assert.equal((await send({ step: "visited", campaign: POST })).status, 204);
+    assert.equal((await send({ step: "visited", campaign: POST })).status, 204);
+    assert.equal((await send({ step: "install_click", campaign: POST })).status, 204);
+    assert.equal((await send({ step: "signup_started", campaign: POST })).status, 204);
+    // Clicks need a campaign; the service's own steps can't be sent.
+    assert.equal((await send({ step: "install_click" })).status, 400);
+    assert.equal((await send({ step: "signed_up", campaign: POST })).status, 400);
+    // A tagged visit is still a visit on the web sign-up funnel; junk tags are left out.
+    assert.equal((await send({ step: "visited", campaign: { campaign: "not ok" } })).status, 204);
+    assert.equal(funnelTotals(await service.directory().webFunnel()).find((row) => row.step === "visited")!.n, 3);
+    // A new account, then the same person signing in again: one sign-up, two sign-ins.
+    handoffCode(await webSignIn(service, { id: 540, login: "reader" }, { query: QUERY }));
+    handoffCode(await webSignIn(service, { id: 540, login: "reader" }, { query: QUERY }));
+    // Without tags nothing is counted per campaign.
+    handoffCode(await webSignIn(service, { id: 541, login: "direct" }));
+    const totals = campaignTotals(await service.directory().campaignRows());
+    assert.deepEqual(totals, [{ ...POST, visited: 2, install_click: 1, signup_started: 1, signed_in: 2, signed_up: 1 }]);
+
+    const admin = await service.signIn({ id: ADMIN_ID, login: "owner" });
+    const metrics = (await (await service.request("GET", "/v1/admin/metrics", { token: admin.access_token })).json()) as {
+      campaigns: { days: Array<Record<string, unknown>>; totals: unknown[] };
+    };
+    assert.deepEqual(metrics.campaigns.totals, totals);
+    assert.deepEqual(metrics.campaigns.days.find((row) => row.step === "signed_up"), { date: "2026-11-04", ...POST, step: "signed_up", n: 1 });
+    // Tags and counts only: nothing about who.
+    assert.ok(!JSON.stringify(metrics.campaigns).includes("reader"));
+  });
+
+  it("keeps a day's tag combinations bounded", async () => {
+    const service = await createService(OPEN);
+    const day = Math.floor(service.clock.now / 86_400_000);
+    for (let i = 0; i < CAMPAIGN_KEYS_PER_DAY; i++) await service.directory().countCampaignStep({ source: "blog", medium: "post", campaign: `p${i}`, ref: "" }, "visited", day);
+    await service.directory().countCampaignStep({ source: "blog", medium: "post", campaign: "one-too-many", ref: "" }, "visited", day);
+    await service.directory().countCampaignStep({ source: "blog", medium: "post", campaign: "p0", ref: "" }, "install_click", day);
+    const totals = campaignTotals(await service.directory().campaignRows());
+    assert.equal(totals.length, CAMPAIGN_KEYS_PER_DAY + 1);
+    assert.equal(totals.find((row) => row.campaign === "_other")!.visited, 1);
+    assert.equal(totals.find((row) => row.campaign === "p0")!.install_click, 1);
   });
 });

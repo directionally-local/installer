@@ -1,6 +1,7 @@
 import { DurableObject, type DurableObjectState } from "cloudflare:workers";
 import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.js";
 import { newUserCode } from "./codes.js";
+import { parseCampaign, type Campaign } from "./web-signup.js";
 
 /**
  * Sign-in state: device codes, the OAuth `state` values that bind a GitHub round trip to one
@@ -73,6 +74,8 @@ interface DeviceRow {
   web_return: string | null;
   /** The SHA-256 of the web page's random state, for a web sign-up. */
   web_state_hash: string | null;
+  /** A web sign-up's link campaign (web-signup.ts Campaign) as JSON, or null. Tags only. */
+  web_campaign: string | null;
 }
 
 interface RefreshRow {
@@ -155,7 +158,7 @@ export class AuthObject extends DurableObject {
    * `web`: a dl.new web sign-up (web-signup.ts) instead of the CLI's: the same code, GitHub round
    * trip, details and invite steps and admission, then `finishWebSignIn` hands it back to `web.returnUrl`.
    */
-  async issueDeviceCode(input: { clientDeviceId: string | null; referralCode?: string | null; now: number; web?: { returnUrl: string; state: string } }): Promise<{ deviceCode: string; userCode: string; expiresAt: number; interval: number }> {
+  async issueDeviceCode(input: { clientDeviceId: string | null; referralCode?: string | null; now: number; web?: { returnUrl: string; state: string; campaign?: Campaign } }): Promise<{ deviceCode: string; userCode: string; expiresAt: number; interval: number }> {
     const deviceCode = randomToken();
     const deviceHash = await sha256Hex(deviceCode);
     const expiresAt = input.now + DEVICE_CODE_TTL_MS;
@@ -168,8 +171,8 @@ export class AuthObject extends DurableObject {
         continue;
       }
       this.ctx.storage.sql.exec(
-        `INSERT INTO device_codes (device_hash, user_code, status, created_at, expires_at, interval_s, client_device_id, referral_code, web_return, web_state_hash)
-         VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO device_codes (device_hash, user_code, status, created_at, expires_at, interval_s, client_device_id, referral_code, web_return, web_state_hash, web_campaign)
+         VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
         deviceHash,
         userCode,
         input.now,
@@ -179,6 +182,7 @@ export class AuthObject extends DurableObject {
         input.referralCode ?? null,
         input.web?.returnUrl ?? null,
         input.web ? await sha256Hex(input.web.state) : null,
+        input.web?.campaign ? JSON.stringify(input.web.campaign) : null,
       );
       await this.#scheduleCleanup(input.now);
       return { deviceCode, userCode, expiresAt, interval: POLL_INTERVAL_S };
@@ -414,7 +418,7 @@ export class AuthObject extends DurableObject {
    * a one-time handoff code is issued for the page to exchange (`claimWebHandoff`). Undefined for
    * a CLI sign-in, which the terminal's poll finishes as before.
    */
-  async finishWebSignIn(deviceRef: string, identity: Identity, now: number): Promise<{ returnUrl: string; code: string } | undefined> {
+  async finishWebSignIn(deviceRef: string, identity: Identity, now: number): Promise<{ returnUrl: string; code: string; campaign?: Campaign } | undefined> {
     const row = this.#byHash(deviceRef);
     if (!row || row.web_return === null || row.web_state_hash === null || row.expires_at <= now) return undefined;
     const code = randomToken();
@@ -431,7 +435,8 @@ export class AuthObject extends DurableObject {
       now + WEB_HANDOFF_TTL_MS,
     );
     await this.#scheduleCleanup(now);
-    return { returnUrl: row.web_return, code };
+    const campaign = row.web_campaign ? parseCampaign(JSON.parse(row.web_campaign)) : undefined;
+    return { returnUrl: row.web_return, code, ...(campaign ? { campaign } : {}) };
   }
 
   /** Whether this device code is a web sign-up's (its refusals then point back to the web page). */
@@ -563,11 +568,12 @@ export class AuthObject extends DurableObject {
     if (!columns.some((column) => column.name === "details_json")) this.ctx.storage.sql.exec("ALTER TABLE device_codes ADD COLUMN details_json TEXT");
   }
 
-  /** Adds `device_codes.web_return` and `web_state_hash` (dl.new's web sign-up) to databases created before them. */
+  /** Adds `device_codes.web_return`, `web_state_hash` and `web_campaign` (dl.new's web sign-up) to databases created before them. */
   #migrateWeb(): void {
     const columns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('device_codes')").toArray();
     if (!columns.some((column) => column.name === "web_return")) this.ctx.storage.sql.exec("ALTER TABLE device_codes ADD COLUMN web_return TEXT");
     if (!columns.some((column) => column.name === "web_state_hash")) this.ctx.storage.sql.exec("ALTER TABLE device_codes ADD COLUMN web_state_hash TEXT");
+    if (!columns.some((column) => column.name === "web_campaign")) this.ctx.storage.sql.exec("ALTER TABLE device_codes ADD COLUMN web_campaign TEXT");
   }
 
   /** Adds `device_codes.referral_code` to databases created before it existed. */
