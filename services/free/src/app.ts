@@ -109,7 +109,7 @@ import {
 import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind } from "./user-emails.js";
 import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, onlyListed, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
 import { refusalsCsv, refusalsView, requestClient, requestRefusalReason, type RefusalClient, type RefusalReason } from "./refusals.js";
-import { allowedReturn, isInstallOption, ONE_TIME_CODE, planFor, WEB_SESSION_TTL_S, WEB_STATE, webCors, webFunnelCsv, type WebStep } from "./web-signup.js";
+import { allowedReturn, CAMPAIGN_CLIENT_STEPS, campaignFromParams, campaignTotals, isInstallOption, ONE_TIME_CODE, parseCampaign, planFor, WEB_SESSION_TTL_S, WEB_STATE, webCors, webFunnelCsv, type Campaign, type CampaignStep, type WebStep } from "./web-signup.js";
 import { grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, parseGrantUsd, parseLogins, type GrantResult } from "./grant.js";
 import { completionText, isUseRisk, parseUseLabel, USE_DESCRIPTIONS_PER_PERSON_PER_DAY, USE_KEEP_DAYS, USE_MAX_TOKENS, USE_REASONING_ROOM, USE_TIMEOUT_SECONDS, useInput, useMessages, type UseInput } from "./use-description.js";
 import { fitToBudget, keywordLabel, precheckTexts, SECURITY_GPT6_MESSAGE, SECURITY_REASON, securityHoldEnds, securitySignal } from "./security-route.js";
@@ -1787,6 +1787,11 @@ async function admitAndFinish(
     const web = await auth(c).finishWebSignIn(deviceRef, identity, c.now());
     if (web) {
       await countWebStep(c, "signed_in");
+      // A sign-in from a tagged link (a blog post's dl.new link): counted under its campaign.
+      if (web.campaign) {
+        await countCampaignStep(c, web.campaign, "signed_in");
+        if (result.created) await countCampaignStep(c, web.campaign, "signed_up");
+      }
       return new Response(null, {
         status: 303,
         headers: { location: `${web.returnUrl}#signin=${web.code}`, "cache-control": "no-store", "referrer-policy": "no-referrer" },
@@ -4622,7 +4627,7 @@ async function adminMetrics(c: Ctx): Promise<Response> {
   const from = parse("from") ?? to - 27 * DAY_MS;
   if (Number.isNaN(to) || Number.isNaN(from) || from > to) return apiError(400, "invalid_request", "from and to must be ISO dates with from <= to.");
   if (to - from > 366 * DAY_MS) return apiError(400, "invalid_request", "The range can't be longer than 366 days.");
-  const [metrics, refusals, noGithub, guard, pro] = await Promise.all([
+  const [metrics, refusals, noGithub, guard, pro, campaigns] = await Promise.all([
     directory(c).metrics({ from, to, now, adminIds: [...c.config.adminGithubIds] }),
     directory(c).refusals(Math.floor(from / DAY_MS), Math.floor(to / DAY_MS)),
     directory(c).noGithubDays({ from: Math.floor(from / DAY_MS) * DAY_MS, until: Math.floor(to / DAY_MS) * DAY_MS + DAY_MS }),
@@ -4630,6 +4635,8 @@ async function adminMetrics(c: Ctx): Promise<Response> {
     directory(c).gpt6GuardMetrics({ from, to: to + DAY_MS, now, adminIds: [...c.config.adminGithubIds] }),
     // dl Pro's funnel per UTC day (people who saw the prompt, clicked Upgrade, paid, cancelled) and Pro now.
     directory(c).proFunnel({ from: Math.floor(from / DAY_MS) * DAY_MS, until: Math.floor(to / DAY_MS) * DAY_MS + DAY_MS, adminIds: [...c.config.adminGithubIds] }),
+    // dl.new's link campaigns per UTC day (web-signup.ts): tags and counts only.
+    directory(c).campaignRows(Math.floor(from / DAY_MS), Math.floor(to / DAY_MS)),
   ]);
   return json({
     ...metrics,
@@ -4638,6 +4645,10 @@ async function adminMetrics(c: Ctx): Promise<Response> {
     gpt6Guard: guard.days,
     gpt6Trusted: guard.trustedPeople,
     proFunnel: { days: pro.days, activePro: pro.activePro },
+    campaigns: {
+      days: campaigns.map((row) => ({ date: isoDay(row.day * DAY_MS), source: row.source, medium: row.medium, campaign: row.campaign, ref: row.ref, step: row.step, n: row.n })),
+      totals: campaignTotals(campaigns),
+    },
     generatedAt: new Date(now).toISOString(),
     today: isoDay(now),
   });
@@ -5118,6 +5129,15 @@ async function countWebStep(c: Ctx, step: WebStep): Promise<void> {
   }
 }
 
+/** Counts one step of a link campaign (web-signup.ts; tags and counts only). Never fails the request. */
+async function countCampaignStep(c: Ctx, campaign: Campaign, step: CampaignStep): Promise<void> {
+  try {
+    await directory(c).countCampaignStep(campaign, step, Math.floor(c.now() / DAY_MS));
+  } catch (error) {
+    console.error("campaigns: count failed", error instanceof Error ? error.name : "error");
+  }
+}
+
 /**
  * Counts one refusal or gate per UTC day and reason (refusals.ts): counts only, and `githubId`
  * only for the day's distinct-people count (hashed with a daily salt). Never fails the request.
@@ -5151,10 +5171,15 @@ async function webTelemetry(c: Ctx): Promise<Response> {
   if (Number(c.request.headers.get("content-length") ?? 0) > MAX_TELEMETRY_BYTES) return apiError(413, "too_large", "A telemetry body is under 1 KB.");
   const text = await c.request.text();
   if (text.length > MAX_TELEMETRY_BYTES) return apiError(413, "too_large", "A telemetry body is under 1 KB.");
-  const body = parseJson(text) as { step?: unknown } | undefined;
+  const body = parseJson(text) as { step?: unknown; campaign?: unknown } | undefined;
+  // A link campaign's step: a tagged visit (the Worker), or an install or sign-in click (the page,
+  // under the visit's first-touch tags). A campaign that isn't plain tags is left out, not refused.
+  const step = typeof body?.step === "string" && CAMPAIGN_CLIENT_STEPS.has(body.step) ? (body.step as CampaignStep) : undefined;
+  const campaign = parseCampaign(body?.campaign);
   // The other steps are counted where they happen, by the service itself.
-  if (body?.step !== "visited") return apiError(400, "invalid_request", 'Send {"step": "visited"}.');
-  await countWebStep(c, "visited");
+  if (!step || (step !== "visited" && !campaign)) return apiError(400, "invalid_request", 'Send {"step": "visited"}, optionally with a "campaign".');
+  if (step === "visited") await countWebStep(c, "visited");
+  if (campaign) await countCampaignStep(c, campaign, step);
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 }
 
@@ -5182,7 +5207,9 @@ async function webSignIn(c: Ctx): Promise<Response> {
   const retry = await limited(c, `device:ip:${c.ipNet}`, LIMITS.deviceCodeIp);
   if (retry !== undefined) return webSignInProblem(c, "Too many sign-ins", `Too many sign-ins from this network. Try again in ${Math.ceil(retry / 60)} minutes.`, 429);
   const ref = normalizeReferralCode(c.url.searchParams.get("ref") ?? undefined) ?? null;
-  const issued = await auth(c).issueDeviceCode({ clientDeviceId: null, referralCode: ref, now: c.now(), web: { returnUrl: signupUrl, state } });
+  // The link campaign the page's visit came from (first touch), if any: counted when the sign-in finishes.
+  const campaign = campaignFromParams(c.url.searchParams);
+  const issued = await auth(c).issueDeviceCode({ clientDeviceId: null, referralCode: ref, now: c.now(), web: { returnUrl: signupUrl, state, ...(campaign ? { campaign } : {}) } });
   const begun = await auth(c).beginOAuth(issued.userCode, c.now());
   if (!begun) return webSignInProblem(c, "Sign-in didn't start", "Something went wrong starting the sign-in.", 500);
   return toGitHub(c, begun);

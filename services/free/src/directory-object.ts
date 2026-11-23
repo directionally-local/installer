@@ -4,7 +4,7 @@ import { normalizeEmail } from "./email-guard.js";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
-import type { WebFunnelRow, WebStep } from "./web-signup.js";
+import { CAMPAIGN_KEYS_PER_DAY, CAMPAIGN_OTHER, type Campaign, type CampaignRow, type CampaignStep, type WebFunnelRow, type WebStep } from "./web-signup.js";
 import { REFUSALS_KEEP_DAYS, type RefusalRow } from "./refusals.js";
 import { outsideDl } from "./abuse.js";
 import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, signupFunnel, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
@@ -677,6 +677,18 @@ const SCHEMA = [
      step TEXT NOT NULL,
      n    INTEGER NOT NULL,
      PRIMARY KEY (day, step)
+   ) WITHOUT ROWID`,
+  // Link campaigns on dl.new (web-signup.ts CAMPAIGN_STEPS): per UTC day, a link's tags
+  // (utm_source, utm_medium, utm_campaign, referring host) and step, how many times. Counts only.
+  `CREATE TABLE IF NOT EXISTS web_campaign_daily (
+     day      INTEGER NOT NULL,
+     source   TEXT NOT NULL,
+     medium   TEXT NOT NULL,
+     campaign TEXT NOT NULL,
+     ref      TEXT NOT NULL,
+     step     TEXT NOT NULL,
+     n        INTEGER NOT NULL,
+     PRIMARY KEY (day, campaign, source, medium, ref, step)
    ) WITHOUT ROWID`,
   `CREATE TABLE IF NOT EXISTS download_daily (
      day       INTEGER NOT NULL,
@@ -3577,6 +3589,36 @@ export class DirectoryObject extends DurableObject {
     sql.exec("DELETE FROM refusal_salts WHERE day < ?", day);
     sql.exec("DELETE FROM refusals_daily WHERE day < ?", day - REFUSALS_KEEP_DAYS);
     sql.exec("INSERT INTO settings (key, value) VALUES ('refusals:pruned_day', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", String(day));
+  }
+
+  /**
+   * Adds one to the day's count of a campaign step (web-signup.ts). A day keeps at most
+   * CAMPAIGN_KEYS_PER_DAY different tag combinations; any more are counted under `_other`.
+   */
+  async countCampaignStep(campaign: Campaign, step: CampaignStep, day: number): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    let { source, medium, campaign: name, ref } = campaign;
+    const known = sql.exec("SELECT 1 FROM web_campaign_daily WHERE day = ? AND campaign = ? AND source = ? AND medium = ? AND ref = ? LIMIT 1", day, name, source, medium, ref).toArray().length > 0;
+    if (!known) {
+      const keys = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM (SELECT DISTINCT campaign, source, medium, ref FROM web_campaign_daily WHERE day = ?)", day).toArray()[0]?.n ?? 0;
+      if (keys >= CAMPAIGN_KEYS_PER_DAY) [source, medium, name, ref] = ["", "", CAMPAIGN_OTHER, ""];
+    }
+    sql.exec(
+      "INSERT INTO web_campaign_daily (day, source, medium, campaign, ref, step, n) VALUES (?, ?, ?, ?, ?, ?, 1) ON CONFLICT (day, campaign, source, medium, ref, step) DO UPDATE SET n = n + 1",
+      day,
+      source,
+      medium,
+      name,
+      ref,
+      step,
+    );
+  }
+
+  /** Campaign step counts for UTC days `fromDay` to `toDay` (inclusive), oldest first. */
+  async campaignRows(fromDay = 0, toDay = Number.MAX_SAFE_INTEGER): Promise<CampaignRow[]> {
+    return this.ctx.storage.sql
+      .exec<CampaignRow>("SELECT day, source, medium, campaign, ref, step, n FROM web_campaign_daily WHERE day >= ? AND day <= ? ORDER BY day, campaign, source, medium, ref, step", fromDay, toDay)
+      .toArray();
   }
 
   /** Every day's web sign-up step counts, oldest first. */
