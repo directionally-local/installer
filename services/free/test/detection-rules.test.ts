@@ -36,7 +36,7 @@ describe("DETECTION_RULES (units)", () => {
     assert.equal(rules.labellerPolicy, SYNTHETIC_RULES.labellerPolicy);
     assert.equal(rules.moderationPolicy, SYNTHETIC_RULES.moderationPolicy);
     assert.deepEqual(rules.thresholds, { batchSize: 7, minFollowers: 2 });
-    assert.deepEqual(status, { source: "secret", keywords: 4, highRiskKeywords: 2, proxyRouters: 1, labellerPolicy: "secret", moderationPolicy: "secret", allocatorPolicy: "default", thresholds: 2 });
+    assert.deepEqual(status, { source: "secret", keywords: 4, highRiskKeywords: 2, proxyRouters: 1, labellerPolicy: "secret", moderationPolicy: "secret", allocatorPolicy: "default", guardPolicy: "default", thresholds: 2 });
   });
 
   it("keeps the default for a field the secret leaves out", () => {
@@ -117,7 +117,7 @@ describe("DETECTION_RULES in the service", () => {
 
   it("shows admins whether the secret is loaded and how many rules it has, never the rules", async () => {
     const { text, body } = await view({ DETECTION_RULES: SYNTHETIC_RULES_JSON });
-    assert.deepEqual(body.detectionRules, { source: "secret", keywords: 4, highRiskKeywords: 2, proxyRouters: 1, labellerPolicy: "secret", moderationPolicy: "secret", allocatorPolicy: "default", thresholds: 2 });
+    assert.deepEqual(body.detectionRules, { source: "secret", keywords: 4, highRiskKeywords: 2, proxyRouters: 1, labellerPolicy: "secret", moderationPolicy: "secret", allocatorPolicy: "default", guardPolicy: "default", thresholds: 2 });
     for (const secret of ["frobnicator", "gizmo", "acme", "SYNTHETIC", "widget"]) assert.ok(!text.includes(secret), secret);
     assert.equal(body.effective.batchSize, 7, "its thresholds are the settings' starting values");
   });

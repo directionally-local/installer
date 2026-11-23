@@ -1,0 +1,19 @@
+{
+  "model": "gpt-6-luna",
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "max_tokens": 32000,
+  "messages": [
+    { "role": "system", "content": "SYSTEM-PROMPT You are opencode, an interactive CLI tool that helps users with software engineering tasks." },
+    { "role": "user", "content": [{ "type": "text", "text": "OLD-USER list the files in this project" }] },
+    { "role": "assistant", "content": "", "tool_calls": [{ "id": "toolu_a", "type": "function", "function": { "name": "list", "arguments": "{\"path\":\".\"}" } }] },
+    { "role": "tool", "tool_call_id": "toolu_a", "content": "OLD-TOOL src/\npackage.json\nREADME.md" },
+    { "role": "assistant", "content": "The project has src/, package.json and README.md." },
+    { "role": "user", "content": [{ "type": "text", "text": "NEW-USER add a unit test for the date formatter" }, { "type": "text", "text": "NEW-USER-2 <system-reminder>Plan mode is off.</system-reminder>" }] },
+    { "role": "assistant", "content": "", "tool_calls": [{ "id": "toolu_b", "type": "function", "function": { "name": "read", "arguments": "{\"filePath\":\"src/date.ts\"}" } }, { "id": "toolu_c", "type": "function", "function": { "name": "glob", "arguments": "{\"pattern\":\"**/*.test.ts\"}" } }] },
+    { "role": "tool", "tool_call_id": "toolu_b", "content": "NEW-TOOL export const format = (d: Date) => d.toISOString().slice(0, 10);" },
+    { "role": "tool", "tool_call_id": "toolu_c", "content": [{ "type": "text", "text": "NEW-TOOL-2 src/date.test.ts" }] }
+  ],
+  "tools": [{ "type": "function", "function": { "name": "read", "description": "Read a file", "parameters": { "type": "object", "properties": { "filePath": { "type": "string" } } } } }],
+  "tool_choice": "auto"
+}

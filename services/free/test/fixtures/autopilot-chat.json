@@ -1,0 +1,18 @@
+{
+  "model": "gpt-6-luna",
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "max_tokens": 8192,
+  "reasoning_effort": "medium",
+  "messages": [
+    { "role": "system", "content": "SYSTEM-PROMPT You are Autopilot, a coding agent working in the user's repository." },
+    { "role": "user", "content": "OLD-USER add a README that explains the build" },
+    { "role": "assistant", "content": null, "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "read_file", "arguments": "{\"path\":\"package.json\"}" } }] },
+    { "role": "tool", "tool_call_id": "call_1", "content": "OLD-TOOL {\"name\":\"parser\",\"scripts\":{\"build\":\"tsc\"}}" },
+    { "role": "assistant", "content": "I added README.md with the build steps." },
+    { "role": "user", "content": "NEW-USER now refactor the tokenizer in src/parser.ts into its own module" },
+    { "role": "assistant", "content": "Let me read the parser first.", "tool_calls": [{ "id": "call_2", "type": "function", "function": { "name": "read_file", "arguments": "{\"path\":\"src/parser.ts\"}" } }] },
+    { "role": "tool", "tool_call_id": "call_2", "content": "NEW-TOOL export function tokenize(input: string) { return input.split(/\\s+/); }" }
+  ],
+  "tools": [{ "type": "function", "function": { "name": "read_file", "description": "Read a file", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] } } }]
+}

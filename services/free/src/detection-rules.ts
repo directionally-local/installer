@@ -2,7 +2,8 @@
  * The anti-abuse rules: what the security pre-check matches (security-route.ts), which clients
  * count as account-pooling routers (abuse.ts), the policy the use-description labeller and the
  * moderation reviewer are given (use-description.ts, moderation.ts), and the farm-detection
- * thresholds' starting values (admission.ts).
+ * thresholds' starting values (admission.ts), and the GPT-6 pre-send safeguard's policy
+ * (presend-guard.ts).
  *
  * The machinery is public; the production rules are not. Published rules can be read by the
  * people they are meant to catch, who then stay just under them. So the production rules live in
@@ -19,6 +20,7 @@
  *     "labellerPolicy": "text",
  *     "moderationPolicy": "text",
  *     "allocatorPolicy": "text",
+ *     "guardPolicy": "text",
  *     "thresholds": { "batchSize": 10, ... }
  *   }
  *
@@ -70,6 +72,8 @@ export interface DetectionRules {
   moderationPolicy: string;
   /** What the token allocator (allocator.ts) is told counts as real use worth a raise. */
   allocatorPolicy: string;
+  /** The GPT-6 pre-send safeguard classifier's system prompt (presend-guard.ts): it answers "1" (violates) or "0". */
+  guardPolicy: string;
   thresholds: Readonly<Partial<Record<ThresholdKey, number>>>;
 }
 
@@ -85,6 +89,7 @@ export interface DetectionRulesStatus {
   labellerPolicy: "secret" | "default";
   moderationPolicy: "secret" | "default";
   allocatorPolicy: "secret" | "default";
+  guardPolicy: "secret" | "default";
   /** How many thresholds the secret sets. */
   thresholds: number;
 }
@@ -114,6 +119,8 @@ Weigh the whole history, not a single request.`,
 Raise ("10m", or "full" for a long, clearly real record) only with clear evidence of a real developer doing real software work: several multi-turn sessions, varied coding descriptions, human pacing across several days.
 Answer "stay" for one-shot or tiny sessions, greetings only, scripted bursts, non-coding bulk use, signs of reselling or sharing the account, or anything unclear.
 When unsure, "stay".`,
+  guardPolicy: `You classify requests sent to a coding agent service. Answer 1 when the request asks the agent to build, run, improve or hide malware, steal credentials, attack systems the person isn't authorised to test, or commit fraud or abuse at scale. Answer 0 for ordinary programming, defensive security and anything else.
+Answer with exactly one character: 1 or 0.`,
   thresholds: {},
 };
 
@@ -123,7 +130,7 @@ const MAX_PATTERNS_PER_RULE = 8;
 const MAX_POLICY_CHARS = 16_000;
 const MAX_THRESHOLD = 1_000_000;
 const RULE_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
-const TOP_LEVEL = new Set(["keywords", "proxyRouters", "labellerPolicy", "moderationPolicy", "allocatorPolicy", "thresholds"]);
+const TOP_LEVEL = new Set(["keywords", "proxyRouters", "labellerPolicy", "moderationPolicy", "allocatorPolicy", "guardPolicy", "thresholds"]);
 
 class RulesError extends Error {}
 
@@ -194,6 +201,7 @@ function statusOf(rules: DetectionRules, source: DetectionRulesStatus["source"],
     labellerPolicy: "labellerPolicy" in given ? "secret" : "default",
     moderationPolicy: "moderationPolicy" in given ? "secret" : "default",
     allocatorPolicy: "allocatorPolicy" in given ? "secret" : "default",
+    guardPolicy: "guardPolicy" in given ? "secret" : "default",
     thresholds: Object.keys(rules.thresholds).length,
   };
 }
@@ -224,6 +232,7 @@ export function parseDetectionRules(raw: unknown): { rules: DetectionRules; stat
       labellerPolicy: "labellerPolicy" in given ? policy(given.labellerPolicy, "labellerPolicy") : DEFAULT_DETECTION_RULES.labellerPolicy,
       moderationPolicy: "moderationPolicy" in given ? policy(given.moderationPolicy, "moderationPolicy") : DEFAULT_DETECTION_RULES.moderationPolicy,
       allocatorPolicy: "allocatorPolicy" in given ? policy(given.allocatorPolicy, "allocatorPolicy") : DEFAULT_DETECTION_RULES.allocatorPolicy,
+      guardPolicy: "guardPolicy" in given ? policy(given.guardPolicy, "guardPolicy") : DEFAULT_DETECTION_RULES.guardPolicy,
       thresholds: "thresholds" in given ? thresholds(given.thresholds) : DEFAULT_DETECTION_RULES.thresholds,
     };
     return { rules, status: statusOf(rules, "secret", given) };

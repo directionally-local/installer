@@ -1,0 +1,19 @@
+{
+  "model": "claude-sonnet-4-5",
+  "max_tokens": 32000,
+  "stream": true,
+  "system": [{ "type": "text", "text": "SYSTEM-PROMPT You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": { "type": "ephemeral" } }],
+  "messages": [
+    { "role": "user", "content": [{ "type": "text", "text": "OLD-USER what does this repo do?" }] },
+    { "role": "assistant", "content": [{ "type": "text", "text": "Let me look." }, { "type": "tool_use", "id": "toolu_01", "name": "Read", "input": { "file_path": "/repo/README.md" } }] },
+    { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "toolu_01", "content": "OLD-TOOL # Repo\nA small CLI." }] },
+    { "role": "assistant", "content": [{ "type": "text", "text": "It is a small CLI." }] },
+    { "role": "user", "content": [{ "type": "text", "text": "<system-reminder>Context.</system-reminder>" }, { "type": "text", "text": "NEW-USER fix the flag parsing bug in cli.ts" }] },
+    { "role": "assistant", "content": [{ "type": "tool_use", "id": "toolu_02", "name": "Read", "input": { "file_path": "/repo/cli.ts" } }, { "type": "tool_use", "id": "toolu_03", "name": "Grep", "input": { "pattern": "parseFlags" } }] },
+    { "role": "user", "content": [
+      { "type": "tool_result", "tool_use_id": "toolu_02", "content": [{ "type": "text", "text": "NEW-TOOL const flags = parseFlags(process.argv);" }] },
+      { "type": "tool_result", "tool_use_id": "toolu_03", "content": "NEW-TOOL-2 cli.ts:3: parseFlags" }
+    ] }
+  ],
+  "tools": [{ "name": "Read", "description": "Read a file", "input_schema": { "type": "object", "properties": { "file_path": { "type": "string" } } } }]
+}
