@@ -181,6 +181,10 @@ Every argument after `opencode` goes to it unchanged (`dl opencode run "fix the 
   `/models` (the default, with its context and output limits); session titles use it too. GPT-6 is
   paused on the free tier: GPT-6 Luna, GPT-6.1 Sol and GPT-6 Astra need your own OpenAI or
   OpenRouter key, as one of your own providers. Your own providers stay in `/models`, on your own keys.
+  Only listed models can be picked: `dl opencode -m dl/<a model the free tier doesn't serve>` fails
+  inside OpenCode ("Model unavailable", or "UnknownError … Unexpected server error" in older
+  versions) before any request is sent. OpenCode has no option to pass unlisted models through to a
+  provider, so use one of the `dl/…` models in `/models`, or your own provider for anything else.
 - **Only while dl opencode runs:** the same 15-minute key as `dl claude`, refreshed while OpenCode
   runs and ended when it exits; free tokens don't work in OpenCode started any other way.
 - **The same allowance:** OpenCode shares the allowance other tools get through dl (see `dl claude`

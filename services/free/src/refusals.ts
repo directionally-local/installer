@@ -45,6 +45,7 @@ export const REFUSAL_REASONS = {
   proxy_not_allowed: "Request: account-pooling proxy",
   "gpt_limit:cap": "Request: GPT-6 weekly limit",
   "gpt_limit:security_hold": "Request: GPT-6 security hold",
+  "gpt_limit:trust": "Request: GPT-6 for established accounts only (trust gate)",
   "allowance_exhausted:full": "Request: weekly allowance used up (Full or Pro)",
   "allowance_exhausted:basic": "Request: weekly allowance used up (basic)",
   "allowance_exhausted:starter": "Request: weekly allowance used up (Starter)",
@@ -122,7 +123,9 @@ export function requestRefusalReason(
     case "gpt_limit":
       return error.reason === "security"
         ? "gpt_limit:security_hold"
-        : "gpt_limit:cap";
+        : error.reason === "trust"
+          ? "gpt_limit:trust"
+          : "gpt_limit:cap";
     case "quota_exceeded":
       return "allowance_exhausted:full";
     case "basic_limit":

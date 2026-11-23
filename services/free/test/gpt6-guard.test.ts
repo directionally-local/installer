@@ -354,6 +354,11 @@ describe("GPT-6 trust gate", () => {
     assert.equal((await chat(service, token, { ...AUTOPILOT, model: MODEL }, "s-1")).status, 200);
     const models = (await (await service.request("GET", "/v1/models", { token })).json()) as { data: Array<{ id: string }> };
     assert.deepEqual(models.data.map((model) => model.id), [MODEL]);
+    // An unknown model's refusal names only what they can use.
+    const unknown = await errorOf(await chat(service, token, { ...AUTOPILOT, model: "not-a-model" }, "s-1"));
+    assert.equal(unknown.code, "model_not_allowed");
+    assert.equal(unknown.message, `The free tier serves ${MODEL} only.`);
+    assert.deepEqual(unknown.allowed, [MODEL]);
   });
 
   it("trusts a person who paid (a top-up), served within the trusted cap", async () => {
