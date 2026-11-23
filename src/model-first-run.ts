@@ -18,7 +18,8 @@ import { PromptCancelled } from "./prompt.js";
  *    fits, it is picked and the line says why. A retry (Autopilot's "Retry") names the model
  *    and skips the picker.
  * 3. The engine choice for a model the optimized engine serves (model-engine-choice.ts), the
- *    same step plain `dl model up` asks; a "stop here" there ends the setup as cancelled.
+ *    same step plain `dl model up` asks; a "stop here" there ends the setup as cancelled. Hidden
+ *    for now: asked only with DL_OPTIMIZED_ENGINE=1, otherwise the catalog's engine (vLLM).
  * 4. `modelCommand("up", [id])` non-interactively (default context and port): live progress,
  *    smoke tests, and the vllm provider written to Autopilot's config.
  *

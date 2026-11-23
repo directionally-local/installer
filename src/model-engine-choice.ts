@@ -17,7 +17,19 @@ import type { Ui } from "./ui.js";
  * Both `dl model up` (model-command.ts) and the GPU first run Autopilot hands to dl
  * (model-first-run.ts) call it once, right after their model picker. Runs that can't ask
  * (no terminal, CI, --dry-run) never get here: they use the open-source engine.
+ *
+ * Hidden for now: nothing asks it, and `--engine optimized` isn't accepted, unless
+ * DL_OPTIMIZED_ENGINE=1 is set (optimizedEngineEnabled). By default every model is set up on the
+ * catalog entry's open-source engine (vLLM, or SGLang for SGLang entries), as before the choice.
  */
+
+/** The environment variable that brings the engine choice back. */
+export const OPTIMIZED_ENGINE_ENV = "DL_OPTIMIZED_ENGINE";
+
+/** Whether the engine choice (and `--engine optimized`) is switched on: only with DL_OPTIMIZED_ENGINE=1. */
+export function optimizedEngineEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[OPTIMIZED_ENGINE_ENV] === "1";
+}
 
 export const PILOT_URL = "https://directionallylocal.com/api/pilot";
 export const PILOT_SOURCE = "dl model up";
@@ -77,7 +89,7 @@ export interface EngineChoiceOptions {
 /** "continue": set up the open-source engine as before; "stop": nothing more (the person said no). */
 export type EngineChoiceOutcome = "continue" | "stop";
 
-/** Whether `dl model up` asks the engine question for this model. */
+/** Whether the catalog marks this model for the engine choice (asked only when optimizedEngineEnabled). */
 export function offersOptimizedEngine(model: Pick<ModelRecipe, "optimizedEngine">): boolean {
   return model.optimizedEngine === true;
 }

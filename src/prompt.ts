@@ -8,7 +8,7 @@ export interface SelectOption {
   label: string;
   /** A dim note after the label. */
   detail?: string;
-  /** Words after the label in the accent colour, e.g. "(55% cheaper per token)". */
+  /** Words after the label in the accent colour, e.g. "(recommended)". */
   accent?: string;
   /** Show `detail` on its own line under the label (a list of a few options with longer notes). */
   detailBelow?: boolean;

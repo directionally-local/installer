@@ -55,8 +55,9 @@ export interface ModelRecipe {
    */
   caveats?: ReadonlyArray<{ computeCaps?: readonly string[]; text: string; advice?: string; fixedIn?: readonly string[] }>;
   /**
-   * The optimized engine (set up by our team) serves this model: `dl model up` then asks which
-   * engine to use (model-engine-choice.ts). Set from OPTIMIZED_ENGINE_FAMILIES, not by hand.
+   * The optimized engine serves this model: with DL_OPTIMIZED_ENGINE=1, `dl model up` then asks
+   * which engine to use (model-engine-choice.ts; hidden by default). Set from
+   * OPTIMIZED_ENGINE_FAMILIES, not by hand.
    */
   optimizedEngine?: boolean;
 }

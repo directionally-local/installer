@@ -292,7 +292,7 @@ describe("TtyPrompter.edit", () => {
 
 describe("select: an accent and notes below the label", () => {
   const ENGINES: SelectOption[] = [
-    { value: "optimized", label: "Optimized engine", accent: "(55% cheaper per token)", detail: "same speed as the model's official API · set up by our team · recommended", detailBelow: true },
+    { value: "first", label: "First engine", accent: "(an accent)", detail: "a note under the label · recommended", detailBelow: true },
     { value: "open-source", label: "Open-source engine (vLLM)", detail: "free · starts now · what most providers run", detailBelow: true },
   ];
 
@@ -302,22 +302,22 @@ describe("select: an accent and notes below the label", () => {
     await waitFor(() => t.out().includes("what most providers run"));
     assert.deepEqual(screen(t.out()), [
       "  How should this GPU serve glm-flash?  ↑/↓ to move · Enter to pick",
-      "    Optimized engine (55% cheaper per token)",
-      "    same speed as the model's official API · set up by our team · recommended",
+      "    First engine (an accent)",
+      "    a note under the label · recommended",
       "",
       "  › Open-source engine (vLLM)",
       "    free · starts now · what most providers run",
     ]);
     t.type("\x1b[A\r");
-    assert.deepEqual(await picked, { value: "optimized" });
-    assert.deepEqual(screen(t.out()), ["  How should this GPU serve glm-flash?  ↑/↓ to move · Enter to pick", "  › Optimized engine"]);
+    assert.deepEqual(await picked, { value: "first" });
+    assert.deepEqual(screen(t.out()), ["  How should this GPU serve glm-flash?  ↑/↓ to move · Enter to pick", "  › First engine"]);
   });
 
   it("the numbered fallback shows the accent and the note under the label", async () => {
     const t = fakeTerminal(false);
     const picked = t.prompter.select("  How should this GPU serve glm-flash?\n  › ", ENGINES);
     t.type("\n");
-    assert.deepEqual(await picked, { value: "optimized" });
-    assert.match(t.out(), /1  Optimized engine \(55% cheaper per token\)\n     same speed as the model's official API/);
+    assert.deepEqual(await picked, { value: "first" });
+    assert.match(t.out(), /1  First engine \(an accent\)\n     a note under the label/);
   });
 });
