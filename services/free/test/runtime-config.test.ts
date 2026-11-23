@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFreeConfig } from "../src/config.js";
 import { applyOverrides, parseSettingsUpdate, readOverrides, settingsView } from "../src/runtime-config.js";
 import { ADMIN_ID, completion, createInvite, createService, errorCode, MODEL, usage, type Service } from "./harness.js";
+import { OPENAI_SUPPORTED_COUNTRIES } from "../src/countries.js";
 
 const BASE_ENV = { OPENROUTER_API_KEY: "k", GITHUB_CLIENT_ID: "c", GITHUB_CLIENT_SECRET: "s", TOKEN_SIGNING_KEY: "x".repeat(32) };
 
@@ -104,6 +105,9 @@ describe("runtime settings (units)", () => {
       gpt6GuardTimeoutMs: 4000,
       gpt6TrustedWeeklyUsdCap: 0,
       gpt6Clients: "autopilot",
+      countryRules: "enforce",
+      gpt6Countries: [...OPENAI_SUPPORTED_COUNTRIES],
+      embargoedCountries: ["CU", "IR", "KP", "SY"],
       moderation: "enforce",
       moderationBlockConfidence: 0.85,
       moderationAllowlist: [],
