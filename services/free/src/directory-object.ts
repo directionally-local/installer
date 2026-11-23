@@ -17,7 +17,7 @@ import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, 
 import { bonuses, codeFor, countingPairs, everActiveFriends, trialBonuses, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
 import { ALLOCATOR_MODEL, type AllocatorFacts, type AllocatorOutcome, type AllocatorState, type FinishInput } from "./allocator.js";
-import { allocatorCounts, allocatorDaily, allocatorDecisions, allocatorFacts, allocatorGrace, allocatorState, allocatorStatus, claimAllocation, ensureAllocatorSchema, finishAllocation, type AllocatorCounts, type AllocatorRow } from "./allocator-store.js";
+import { allocatorCounts, allocatorDaily, allocatorDecisions, allocatorFacts, allocatorGrace, allocatorState, allocatorStates, allocatorStatus, claimAllocation, ensureAllocatorSchema, finishAllocation, type AllocatorCounts, type AllocatorRow } from "./allocator-store.js";
 import { levelChecks, levelFor, type BasicRule, type GithubSignals, type Level, type LevelReason, type LevelThresholds, type SignalThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 import { USE_CHECKPOINTS, USE_KEEP_DAYS, type UseLabel } from "./use-description.js";
@@ -3053,6 +3053,11 @@ export class DirectoryObject extends DurableObject {
 
   async allocatorStatus(input: { githubId: number; fromTokens: number; now: number }): Promise<{ id: number; outcome: AllocatorOutcome; at: number } | null> {
     return allocatorStatus(this.ctx.storage.sql, input);
+  }
+
+  /** Every person's allocator step and grace, for GET /admin/people (one read, not one per person). */
+  async allocatorStates(): Promise<Map<number, AllocatorState>> {
+    return allocatorStates(this.ctx.storage.sql);
   }
 
   async allocatorFacts(input: { githubId: number; now: number }): Promise<AllocatorFacts | undefined> {

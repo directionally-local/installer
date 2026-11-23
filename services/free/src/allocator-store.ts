@@ -72,6 +72,12 @@ export function allocatorState(sql: Sql, githubId: number): AllocatorState | nul
   return { stage: isStage(row.stage) ? row.stage : "start", graceWeek: row.grace_week, graceTokens: row.grace_tokens };
 }
 
+/** Every person's allocator state (those with one), for admin lists that show many people at once. */
+export function allocatorStates(sql: Sql): Map<number, AllocatorState> {
+  const rows = sql.exec<{ github_id: number; stage: string; grace_week: number | null; grace_tokens: number }>("SELECT github_id, stage, grace_week, grace_tokens FROM allocator_state").toArray();
+  return new Map(rows.map((row) => [row.github_id, { stage: isStage(row.stage) ? row.stage : "start", graceWeek: row.grace_week, graceTokens: row.grace_tokens }]));
+}
+
 /**
  * Claims a decision for (person, step): a "pending" row, or null when one was claimed for the
  * same step within ALLOCATOR_COOLDOWN_MS (graces aside).

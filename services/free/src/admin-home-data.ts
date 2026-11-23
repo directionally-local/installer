@@ -1,5 +1,6 @@
 import type { Sql } from "./dashboard-data.js";
 import { DAY_MS, weekStart } from "./week.js";
+import { ALLOCATOR_MID_TOKENS, ALLOCATOR_STAGES, type AllocatorStage } from "./allocator.js";
 
 /**
  * The admin home's numbers (GET /admin): the same data the old Kimiflare Cloud admin dashboard
@@ -33,6 +34,7 @@ export const ADMIN_HOME_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   person_networks: ["github_id"],
   feedback_daily: ["day", "n"],
   security_refusals_daily: ["day", "n"],
+  allocator_state: ["github_id", "stage"],
 };
 
 /** A Pro subscription whose period ended this long ago without a renewal no longer counts as active. */
@@ -69,6 +71,8 @@ export interface AdminUserRow {
   networks: number;
   /** On the new-user trial (admitted at or after the trial cutoff, not an admin); false: grandfathered. */
   trial: boolean;
+  /** The token allocator's step reached (allocator.ts), or null when nothing was decided. */
+  allocatorStage: AllocatorStage | null;
 }
 
 /**
@@ -169,6 +173,7 @@ export function adminHomeData(store: Sql, input: { now: number; adminIds: readon
     week_gpt: number | null;
     week_deepseek: number | null;
     networks: number;
+    allocator_stage: string | null;
   };
   // One row per person: people, their totals, their caps, their plan and this week's spend.
   const users = sql
@@ -176,12 +181,13 @@ export function adminHomeData(store: Sql, input: { now: number; adminIds: readon
       `SELECT p.github_id, p.login, p.status, p.level, p.batch_flag, p.admitted_at, p.admitted_via,
               t.prompt_tokens AS prompt, t.completion_tokens AS completion, t.cost_usd AS cost, t.requests, t.last_at,
               g.weekly_usd AS grant_usd, g.weekly_tokens AS grant_tokens, s.state AS sub_state, s.period_end,
-              w.gpt AS week_gpt, w.deepseek AS week_deepseek,
+              w.gpt AS week_gpt, w.deepseek AS week_deepseek, a.stage AS allocator_stage,
               (SELECT COUNT(*) FROM person_networks n WHERE n.github_id = p.github_id) AS networks
        FROM people p
        LEFT JOIN person_totals t ON t.github_id = p.github_id
        LEFT JOIN grants g ON g.github_id = p.github_id
        LEFT JOIN subscriptions s ON s.github_id = p.github_id
+       LEFT JOIN allocator_state a ON a.github_id = p.github_id
        LEFT JOIN (SELECT github_id, SUM(cost_usd - deepseek_cost_usd) AS gpt, SUM(deepseek_cost_usd) AS deepseek
                   FROM daily_activity WHERE day >= ? GROUP BY github_id) w ON w.github_id = p.github_id
        ORDER BY p.admitted_at DESC, p.github_id DESC`,
@@ -209,6 +215,7 @@ export function adminHomeData(store: Sql, input: { now: number; adminIds: readon
         weekDeepseekUsd: row.week_deepseek ?? 0,
         networks: row.networks,
         trial: input.trialCutoff !== undefined && !(adminIds.has(row.github_id) || row.admitted_via === "admin") && row.admitted_at >= input.trialCutoff,
+        allocatorStage: (ALLOCATOR_STAGES as readonly string[]).includes(row.allocator_stage ?? "") ? (row.allocator_stage as AllocatorStage) : null,
       }),
     );
 
@@ -346,6 +353,8 @@ export interface LevelSettings {
   starterWeeklyTokens: number;
   starterWeeklyUsd: number | null;
   starterDeepseekWeeklyUsd?: number | null;
+  /** The token allocator's start grant when the allocator is on (allocatorStartTokens); absent: off. */
+  allocatorStartTokens?: number;
 }
 
 /** The tier in plain words: full, middle (basic), small (Starter) or no tokens. */
@@ -355,9 +364,43 @@ export type Tier = "full" | "middle" | "small" | "no tokens";
  * A person's real weekly allowance, as app.ts `limitsFor` and the AccountObject compute it: basic
  * with its tokens at 0 is served as Starter; a batch-flagged Starter account gets 0 tokens and 0
  * of both budgets; an admin's grant sets Full's tokens and any level's GPT-6 budget, and DeepSeek
- * then gets the larger of the grant and the level's DeepSeek budget. Referral bonuses aren't counted.
+ * then gets the larger of the grant and the level's DeepSeek budget. With the token allocator on
+ * (`allocatorStartTokens` set), its start grant and the step reached apply on top, as for the
+ * person's own requests. Referral bonuses aren't counted.
  */
 export function realAllowance(
+  person: { level: string | null; batchFlagged: boolean; grantTokens: number | null; grantUsd: number | null; allocatorStage?: AllocatorStage | null },
+  settings: LevelSettings,
+): { tier: Tier; tokens: number; usd: number | null; deepseekUsd: number | null } {
+  const own = levelAllowance(person, settings);
+  if (settings.allocatorStartTokens === undefined || (own.tier !== "small" && own.tier !== "no tokens" && own.tier !== "middle")) return own;
+  // The token allocator (app.ts allocated, allocator.ts allocatedLimits): the start grant (with
+  // Starter's budgets for an account that had no tokens), Basic's budgets on the 10M step, Full on
+  // the Full step. Never lower than the level's. This week's grace isn't counted.
+  const stage = person.allocatorStage ?? "start";
+  if (stage === "full") return levelAllowance({ ...person, level: "full" }, settings);
+  const start = Math.max(0, settings.allocatorStartTokens);
+  let out = own;
+  if (own.tokens <= 0 && start > 0) out = { ...levelAllowance({ ...person, level: "starter", batchFlagged: false }, { ...settings, starterWeeklyTokens: start }), tokens: start };
+  out = { ...out, tokens: Math.max(out.tokens, start) };
+  if (stage === "10m") {
+    // Basic's budgets; with Basic off (its tokens at 0) that level is served as Starter, so Starter's.
+    const basic =
+      settings.basicWeeklyTokens > 0
+        ? levelAllowance({ ...person, level: "basic" }, settings)
+        : levelAllowance({ ...person, level: "starter", batchFlagged: false }, { ...settings, starterWeeklyTokens: Math.max(1, settings.starterWeeklyTokens) });
+    out = { tier: "middle", tokens: Math.max(out.tokens, ALLOCATOR_MID_TOKENS), usd: higher(out.usd, basic.usd), deepseekUsd: higher(out.deepseekUsd, basic.deepseekUsd) };
+  }
+  return out.tokens > 0 && out.tier === "no tokens" ? { ...out, tier: "small" } : out;
+}
+
+/** The higher of two weekly caps; null is no cap. */
+function higher(a: number | null, b: number | null): number | null {
+  return a === null || b === null ? null : Math.max(a, b);
+}
+
+/** A level's own allowance, before the token allocator. */
+function levelAllowance(
   person: { level: string | null; batchFlagged: boolean; grantTokens: number | null; grantUsd: number | null },
   settings: LevelSettings,
 ): { tier: Tier; tokens: number; usd: number | null; deepseekUsd: number | null } {

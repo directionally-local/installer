@@ -88,7 +88,7 @@ export function planLabel(user: Pick<AdminUserRow, "plan" | "status">): (typeof 
  */
 export function userCaps(user: AdminUserRow, settings: AdminHomeInput["settings"]): { usd: number | null; deepseekUsd: number | null; own: boolean; remaining: number | null; deepseekRemaining: number | null } {
   if (user.plan === "pro" || user.plan === "past_due") return { usd: settings.proWeeklyUsd, deepseekUsd: settings.proDeepseekWeeklyUsd, own: false, remaining: null, deepseekRemaining: null };
-  const allowance = realAllowance({ level: user.level, batchFlagged: user.batchFlagged, grantTokens: user.grantTokens, grantUsd: user.grantUsd }, settings);
+  const allowance = realAllowance({ level: user.level, batchFlagged: user.batchFlagged, grantTokens: user.grantTokens, grantUsd: user.grantUsd, allocatorStage: user.allocatorStage }, settings);
   const blocked = user.status === "blocked";
   return {
     usd: allowance.usd,

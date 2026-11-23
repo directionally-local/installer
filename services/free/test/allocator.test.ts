@@ -81,6 +81,30 @@ describe("the start grant", () => {
     assert.equal((await chat(service, token)).status, 200);
   });
 
+  it("shows the start grant in GET /admin/people for a batch-flagged account (as production is set)", async () => {
+    // Production's Starter: 1M tokens, $0 GPT-6, $8 DeepSeek. The batch flag alone gives 0 and $0.
+    const { service, admin, token } = await setup({ STARTER_WEEKLY_TOKENS: "1000000", STARTER_WEEKLY_USD_CAP: "0", STARTER_DEEPSEEK_WEEKLY_USD_CAP: "8" });
+    db(service).prepare("UPDATE people SET batch_flag = 1 WHERE github_id = ?").run(NEWBIE.id);
+    type Allowance = { tokensPerWeek: number; budgets: { gpt6: { usdPerWeek: number | null }; deepseek: { usdPerWeek: number | null } } };
+    const listed = async () => {
+      const people = ((await (await service.request("GET", "/v1/admin/people", { token: admin })).json()) as { people: Array<{ githubId: number; allowance: Allowance }> }).people;
+      return people.find((person) => person.githubId === NEWBIE.id)!.allowance;
+    };
+    const detail = async () => ((await (await service.request("GET", `/v1/admin/people/${NEWBIE.id}`, { token: admin })).json()) as { allowance: Allowance }).allowance;
+    for (const view of [await listed(), await detail()]) {
+      assert.equal(view.tokensPerWeek, 1_000_000);
+      assert.equal(view.budgets.deepseek.usdPerWeek, 8);
+      assert.equal(view.budgets.gpt6.usdPerWeek, 0);
+    }
+    // What the person gets: DeepSeek works on the start grant.
+    assert.equal(await weekly(service, token), 1_000_000);
+    assert.equal((await chat(service, token)).status, 200);
+    // With the allocator off, the list says 0 again, as the requests do.
+    assert.equal((await service.request("POST", "/v1/admin/config", { token: admin, body: { allocator: "off" } })).status, 200);
+    assert.equal((await listed()).tokensPerWeek, 0);
+    assert.equal((await chat(service, token)).status, 403);
+  });
+
   it("follows allocatorStartTokens, and is off with allocator \"off\"", async () => {
     const { service, admin, token } = await setup();
     assert.equal((await service.request("POST", "/v1/admin/config", { token: admin, body: { allocatorStartTokens: 2_000_000 } })).status, 200);
