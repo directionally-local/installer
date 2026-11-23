@@ -294,6 +294,10 @@ describe("refusal counts: requests", () => {
       "gpt_limit:cap",
     );
     assert.equal(
+      requestRefusalReason(402, { code: "gpt_limit", reason: "trust" }),
+      "gpt_limit:trust",
+    );
+    assert.equal(
       requestRefusalReason(402, { code: "starter_limit" }),
       "allowance_exhausted:starter",
     );

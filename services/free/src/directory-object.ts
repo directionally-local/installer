@@ -334,15 +334,24 @@ export interface QueueRun {
 }
 
 /** One use description as the admin sees it. */
+/** The coding agent a use description came from: Autopilot (sign-in token or server key), or one dl launched. */
+export type UseClient = "autopilot" | "opencode" | "claude-code";
+
 export interface UseRow {
   githubId: number;
   login: string | null;
   sessionId: string | null;
+  /** Null for descriptions stored before the client was kept. */
+  client: UseClient | null;
   use: string;
   risk: string;
   category: string;
   model: string;
   at: number;
+}
+
+function useClientOf(value: string | null): UseClient | null {
+  return value === "autopilot" || value === "opencode" || value === "claude-code" ? value : null;
 }
 
 export interface SpendSummary {
@@ -954,6 +963,8 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["moderation_decisions", "error", "TEXT"],
   // The client's session id (any coding agent that sends one), for the token allocator's session counts.
   ["requests", "session_key", "TEXT"],
+  // Which coding agent a use description came from (UseClient); NULL for rows stored before it was kept.
+  ["use_descriptions", "client", "TEXT"],
 ];
 
 /** Days of `daily_activity` whose DeepSeek cost is filled in from the request log when the column is added. */
@@ -2815,6 +2826,7 @@ export class DirectoryObject extends DurableObject {
   async recordUseDescription(input: {
     githubId: number;
     sessionId: string | null;
+    client?: UseClient;
     label: UseLabel | undefined;
     model: string;
     upstream: Upstream;
@@ -2863,7 +2875,7 @@ export class DirectoryObject extends DurableObject {
    * person per day). It holds the session and the person's day off GPT-6 like any security label,
    * and a "high" one alerts the owner (at most once per person per day, shared with descriptions).
    */
-  async recordKeywordMatch(input: { githubId: number; sessionId: string | null; signal: string; label: UseLabel; now: number; blockUrl: string; moderation?: ModerationLimits }): Promise<LabelOutcome> {
+  async recordKeywordMatch(input: { githubId: number; sessionId: string | null; client?: UseClient; signal: string; label: UseLabel; now: number; blockUrl: string; moderation?: ModerationLimits }): Promise<LabelOutcome> {
     const sql = this.ctx.storage.sql;
     const day = Math.floor(input.now / DAY_MS);
     return this.ctx.storage.transactionSync(() => {
@@ -2887,16 +2899,17 @@ export class DirectoryObject extends DurableObject {
    * "high" one either a moderation review (claimed here, run by the caller) or, with moderation
    * off or over its daily cap, the owner's alert.
    */
-  #storeUseLabel(input: { githubId: number; sessionId: string | null; label: UseLabel; model: string; now: number; blockUrl: string; source: string; moderation?: ModerationLimits | undefined }): LabelOutcome {
+  #storeUseLabel(input: { githubId: number; sessionId: string | null; client?: UseClient | undefined; label: UseLabel; model: string; now: number; blockUrl: string; source: string; moderation?: ModerationLimits | undefined }): LabelOutcome {
     const sql = this.ctx.storage.sql;
     const day = Math.floor(input.now / DAY_MS);
     const { use, risk, category } = input.label;
     // Security work, or a high risk: this session, and the person for the rest of the day, off GPT-6.
     if (labelKeepsOffGpt6(input.label)) this.#holdOffGpt6(input.githubId, input.sessionId, input.now, input.source);
     const inserted = sql.exec<{ id: number }>(
-      "INSERT INTO use_descriptions (github_id, session_id, day, use, risk, category, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+      "INSERT INTO use_descriptions (github_id, session_id, client, day, use, risk, category, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
       input.githubId,
       input.sessionId,
+      input.client ?? null,
       day,
       use,
       risk,
@@ -3207,6 +3220,7 @@ export class DirectoryObject extends DurableObject {
   async recordGpt6Guard(input: {
     githubId: number;
     sessionId: string | null;
+    client?: UseClient;
     outcomes: GuardOutcome[];
     flaggedBy?: Checker;
     spend?: { tokens: number; cashUsd: number };
@@ -3225,6 +3239,7 @@ export class DirectoryObject extends DurableObject {
       outcome = this.#storeUseLabel({
         githubId: input.githubId,
         sessionId: input.sessionId,
+        client: input.client,
         label: { use: `Pre-send check flagged (${input.flaggedBy})`, risk: "high", category: "other" },
         model,
         now: input.now,
@@ -3252,8 +3267,8 @@ export class DirectoryObject extends DurableObject {
   async useDescriptions(input: { since: number; minRisk: "none" | "low" | "high"; limit: number; githubId?: number }): Promise<UseRow[]> {
     const risks = input.minRisk === "high" ? ["high"] : input.minRisk === "low" ? ["low", "high"] : ["none", "low", "high"];
     return this.ctx.storage.sql
-      .exec<{ github_id: number; login: string | null; session_id: string | null; use: string; risk: string; category: string; model: string; created_at: number }>(
-        `SELECT d.github_id, p.login, d.session_id, d.use, d.risk, d.category, d.model, d.created_at
+      .exec<{ github_id: number; login: string | null; session_id: string | null; client: string | null; use: string; risk: string; category: string; model: string; created_at: number }>(
+        `SELECT d.github_id, p.login, d.session_id, d.client, d.use, d.risk, d.category, d.model, d.created_at
          FROM use_descriptions d LEFT JOIN people p ON p.github_id = d.github_id
          WHERE d.created_at >= ? AND d.risk IN (SELECT value FROM json_each(?)) AND (? IS NULL OR d.github_id = ?)
          ORDER BY d.created_at DESC, d.id DESC LIMIT ?`,
@@ -3264,7 +3279,7 @@ export class DirectoryObject extends DurableObject {
         input.limit,
       )
       .toArray()
-      .map((row) => ({ githubId: row.github_id, login: row.login, sessionId: row.session_id, use: row.use, risk: row.risk, category: row.category, model: row.model, at: row.created_at }));
+      .map((row) => ({ githubId: row.github_id, login: row.login, sessionId: row.session_id, client: useClientOf(row.client), use: row.use, risk: row.risk, category: row.category, model: row.model, at: row.created_at }));
   }
 
   /** Per person: the latest description, and the worst risk since `since` (this week, for the admin people list). */

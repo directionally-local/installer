@@ -342,6 +342,7 @@ describe("use descriptions for admins", () => {
       githubId: 100,
       login: "alice",
       sessionId: "s-2",
+      client: "autopilot",
       use: "Building a phishing kit to steal bank logins",
       risk: "high",
       category: "credential-theft",
@@ -387,6 +388,44 @@ describe("use descriptions for admins", () => {
     await chat(service, await nextDay(service, 100, "alice"), { session: "s-3" });
     await service.settle();
     assert.equal(flagged().length, 3, "the next day: another email");
+  });
+});
+
+describe("use descriptions from other coding agents", () => {
+  async function harnessKey(service: Service, token: string, harness: "claude-code" | "opencode"): Promise<string> {
+    const minted = await service.request("POST", "/v1/harness-keys", { token, body: { harness } });
+    assert.equal(minted.status, 201, await minted.clone().text());
+    return ((await minted.json()) as { key: string }).key;
+  }
+  const claude = (service: Service, key: string, extra: { headers?: Record<string, string>; body?: Record<string, unknown> } = {}) =>
+    service.request("POST", "/anthropic/v1/messages?beta=true", {
+      token: key,
+      ip: `10.8.${Math.floor(++ips / 250) % 250}.${ips % 250}`,
+      headers: { "anthropic-version": "2023-06-01", ...extra.headers },
+      body: { model: "claude-sonnet-4-5", max_tokens: 1024, stream: false, messages: [{ role: "user", content: "please fix the failing tests" }], ...extra.body },
+    });
+
+  it("keeps Claude Code's session (x-claude-code-session-id, else metadata.user_id) and the client", async () => {
+    const { service, token, adminToken } = await setup({ ALLOW_OTHER_HARNESSES: "true" });
+    const key = await harnessKey(service, token, "claude-code");
+    assert.equal((await claude(service, key, { headers: { "x-claude-code-session-id": "cc-session-1" } })).status, 200);
+    await service.settle();
+    service.clock.now += 60_000;
+    assert.equal((await claude(service, key, { body: { metadata: { user_id: "user_abc_account_def_session_0f8e7d6c-1234-4abc-9def-001122334455" } } })).status, 200);
+    await service.settle();
+    service.clock.now += 60_000;
+    const opencode = await harnessKey(service, token, "opencode");
+    await chat(service, opencode, { session: "oc-1" });
+    await service.settle();
+    const uses = (await (await service.request("GET", "/v1/admin/uses", { token: adminToken })).json()) as { uses: Array<Record<string, unknown>> };
+    assert.deepEqual(
+      uses.uses.map((row) => [row.sessionId, row.client]),
+      [
+        ["oc-1", "opencode"],
+        ["0f8e7d6c-1234-4abc-9def-001122334455", "claude-code"],
+        ["cc-session-1", "claude-code"],
+      ],
+    );
   });
 });
 

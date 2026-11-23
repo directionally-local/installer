@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { autopilotAuth, parseActiveProvider } from "./autopilot.js";
-import { autopilotConfigFile, formatTokens, freeTierAccount, freeTierLine, loginFromToken, type FreeTierOptions } from "./free-tier.js";
+import { autopilotConfigFile, formatTokens, formatUsd, freeTierAccount, freeTierLine, loginFromToken, type FreeTierOptions } from "./free-tier.js";
 
 const NOW = Date.parse("2026-11-04T03:00:00.000Z"); // Wednesday 12:00 in Tokyo
 const RESETS = "2026-11-09T00:00:00.000Z"; // Monday 00:00 UTC, the service's week end
@@ -36,7 +36,46 @@ function me(remaining = 49_900_000): Response {
   return Response.json({ login: "octo", githubId: 583231, status: "active", allowance: { tokensPerWeek: 50_000_000, usedThisWeek: 50_000_000 - remaining, remaining, resetsAt: RESETS, usdPerWeek: 5, spentUsdThisWeek: 0.1 } });
 }
 
+/**
+ * Today's /v1/me: the top-level allowance is GPT-6 Luna's pool (0 left with no GPT-6 budget);
+ * `pools` and `budgets` say what each model family has left.
+ */
+function meNow(over: { deepseekTokens?: number | null; deepseekRemaining?: number | null; deepseekUsd?: number | null; deepseekSpent?: number; gpt6Usd?: number | null; gpt6Spent?: number; queue?: unknown } = {}): Response {
+  const deepseekTokens = over.deepseekTokens ?? null;
+  return Response.json({
+    login: "octo",
+    allowance: { tokensPerWeek: 50_000_000, usedThisWeek: 0, remaining: 0, resetsAt: RESETS, usdPerWeek: over.gpt6Usd ?? 0, spentUsdThisWeek: over.gpt6Spent ?? 0 },
+    budgets: {
+      gpt6: { usdPerWeek: over.gpt6Usd === undefined ? 0 : over.gpt6Usd, spentUsd: over.gpt6Spent ?? 0, tokensThisWeek: 0 },
+      deepseek: { usdPerWeek: over.deepseekUsd === undefined ? 10 : over.deepseekUsd, spentUsd: over.deepseekSpent ?? 2.0714, tokensThisWeek: 1_200_000 },
+    },
+    pools: {
+      luna: { tokensPerWeek: 50_000_000, usedThisWeek: 0, remaining: 0, family: "gpt6", resetsAt: RESETS, models: ["gpt-6-luna"] },
+      deepseek: { tokensPerWeek: deepseekTokens, usedThisWeek: 1_200_000, remaining: deepseekTokens === null ? null : (over.deepseekRemaining ?? deepseekTokens - 1_200_000), family: "deepseek", resetsAt: RESETS, models: ["deepseek/deepseek-v4.1-flash-1017"] },
+    },
+    queue: over.queue ?? null,
+  });
+}
+
 describe("the free tier account in dl status", () => {
+  it("shows DeepSeek's allowance from pools and budgets, not the GPT-6 Luna pool at the top level", async () => {
+    const tokyo = { now: NOW, timeZone: "Asia/Tokyo" };
+    const read = async (respond: () => Response) => freeTierAccount(stubs({ apiKey: ACCESS }, respond).options);
+    // Full: no DeepSeek token cap, so its dollar budget; no GPT-6 budget, so no GPT-6.
+    assert.deepEqual(await read(() => meNow()), { login: "octo", deepseek: { usdLeft: 10 - 2.0714, usdPerWeek: 10 }, resetsAt: RESETS });
+    assert.equal(freeTierLine((await read(() => meNow()))!, tokyo), "@octo · $7.92 of $10 DeepSeek left this week · resets Mon 09:00");
+    // Basic and Starter: a DeepSeek token cap.
+    assert.equal(freeTierLine((await read(() => meNow({ deepseekTokens: 5_000_000 })))!, tokyo), "@octo · 3.8M of 5M DeepSeek tokens left this week · resets Mon 09:00");
+    // A GPT-6 budget shows beside it.
+    assert.equal(freeTierLine((await read(() => meNow({ gpt6Usd: 5, gpt6Spent: 1.5 })))!, tokyo), "@octo · $7.92 of $10 DeepSeek left this week · $3.50 of $5 GPT-6 left this week · resets Mon 09:00");
+    // Used up, and queued: nothing left.
+    assert.equal(freeTierLine((await read(() => meNow({ deepseekSpent: 12 })))!, tokyo), "@octo · $0 of $10 DeepSeek left this week · resets Mon 09:00");
+    assert.equal(freeTierLine((await read(() => meNow({ queue: { position: 3, etaAt: RESETS } })))!, tokyo), "@octo · $0 of $10 DeepSeek left this week · resets Mon 09:00");
+    // No DeepSeek cap at all (an admin): no amounts, rather than a wrong one.
+    assert.equal(freeTierLine((await read(() => meNow({ deepseekUsd: null })))!, tokyo), "@octo");
+  });
+
+
   it("reads Autopilot's saved sign-in and asks GET /v1/me with it, read-only, with a 3 s limit", async () => {
     const { options, calls, reads } = stubs({ apiKey: ACCESS, refreshToken: "refresh-secret", expiresAt: NOW + 30 * 60_000 });
     assert.deepEqual(await freeTierAccount(options), { login: "octo", remaining: 49_900_000, tokensPerWeek: 50_000_000, resetsAt: RESETS });
@@ -110,6 +149,10 @@ describe("the free tier account in dl status", () => {
     assert.equal(freeTierLine({ login: "octo", remaining: 0, tokensPerWeek: 50_000_000, resetsAt: RESETS }, { now: NOW, timeZone: "America/Los_Angeles" }), "@octo · 0 of 50M tokens left this week · resets Sun 16:00");
     assert.equal(freeTierLine({ login: "octo", remaining: 1_500, tokensPerWeek: 50_000_000 }, tokyo), "@octo · 1.5k of 50M tokens left this week");
     assert.equal(freeTierLine({ login: "octo" }, tokyo), "@octo");
+    assert.equal(freeTierLine({ login: "octo", resetsAt: RESETS }, tokyo), "@octo", "no reset time without an amount");
+    assert.equal(formatUsd(5), "$5");
+    assert.equal(formatUsd(7.929), "$7.92", "rounded down");
+    assert.equal(formatUsd(0.1 + 0.2), "$0.30");
     assert.equal(formatTokens(50_000_000), "50M");
     assert.equal(formatTokens(950), "950");
   });

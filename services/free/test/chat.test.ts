@@ -255,6 +255,14 @@ describe("chat completions", () => {
     assert.equal(service.calls.openRouter.length, 0);
   });
 
+  it("names only the models this person can use when refusing one", async () => {
+    const { service, token } = await member();
+    const listed = ((await (await service.request("GET", "/v1/models", { token })).json()) as { data: Array<{ id: string }> }).data.map((model) => model.id);
+    const error = ((await (await chat(service, token, { model: "openai/gpt-5" })).json()) as { error: { message: string; allowed: string[] } }).error;
+    assert.deepEqual(error.allowed, listed);
+    assert.equal(error.message, `The free tier serves ${listed.join(", ")} only.`);
+  });
+
   it("rate-limits each person to 60 requests a minute", async () => {
     // 60 requests without Autopilot's session events would hit dl_only first (dl-only.test.ts).
     const { service, token } = await member({ DL_ONLY: "false" });

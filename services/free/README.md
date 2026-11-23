@@ -54,7 +54,8 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
   with `"length"`) or, streamed, as chat chunks ending in a usage chunk and `data: [DONE]`.
   Usage maps `input_tokens`, `output_tokens` (reasoning included), cached and reasoning tokens
   to the chat names, so charging is unchanged. Luminal and OpenRouter stay on Chat Completions.
-- Any other model or provider needs the person’s own key (`model_not_allowed`).
+- Any other model or provider needs the person’s own key (`model_not_allowed`; its message and
+  `allowed` list only the models that person can use there).
 
 ## The new-user trial
 
@@ -617,12 +618,14 @@ service writes **a short automated description of what it is about, and a safety
   internal bucket (`internal_usd` for OpenRouter cash, `internal_credit_usd`, `internal_tokens`,
   `internal_requests`), and Luminal's share also in `credit_usd`, so the credit balance stays
   true. `GET /admin/spend` shows it as `internal`.
-- **Storage:** `use_descriptions` in the Directory: GitHub id, session id, day, the description,
-  risk, category, model and time. Kept 90 days. Per-session request counts (`use_sessions`) and
+- **Storage:** `use_descriptions` in the Directory: GitHub id, session id, client (`autopilot`,
+  `opencode` or `claude-code`; null on older rows), day, the description, risk, category, model
+  and time. Claude Code's session is its `x-claude-code-session-id`, else the session in its
+  `metadata.user_id`, the same key the token allocator counts. Kept 90 days. Per-session request counts (`use_sessions`) and
   per-day call counts (`use_calls_daily`) are kept a week.
 - **Admin:** `GET /admin/people` has `use` (the latest description), `useAt` and
   `worstRiskThisWeek` per person. `GET /admin/uses?days=7&risk=high` lists descriptions newest
-  first (`githubId`, `login`, `sessionId`, `use`, `risk`, `category`, `model`, `at`); `risk` is
+  first (`githubId`, `login`, `sessionId`, `client`, `use`, `risk`, `category`, `model`, `at`); `risk` is
   that risk or worse (`none`, the default, is all), and it also takes `githubId` and `limit`
   (1–1000, default 200). The admin home has a **Flagged use** card: low and high risk in the last
   7 days, high first.
@@ -990,7 +993,8 @@ are deleted once the day is over, so only the number stays. Rows older than 120 
   refusal doesn't count it twice.
 - **Request reasons** (from the refusal's code, on every chat path): `dl_only`,
   `harness_not_allowed` (also when minting a harness key), `harness_limit`,
-  `proxy_not_allowed`, `gpt_limit:cap`, `gpt_limit:security_hold`,
+  `proxy_not_allowed`, `gpt_limit:cap`, `gpt_limit:security_hold`, `gpt_limit:trust` (the GPT-6
+  trust gate),
   `allowance_exhausted:full` (Full or Pro), `allowance_exhausted:basic`,
   `allowance_exhausted:starter`, `trial_ended`, `below_bar`, `api_queued`,
   `global_cap:weekly`, `global_cap:total`, `paused`, `credit_exhausted`, `rate_limited`,

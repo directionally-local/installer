@@ -22,11 +22,21 @@ const ME_TIMEOUT_MS = 3_000;
 const WEEK_MS = 7 * 86_400_000;
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
+/** What one model family has left this week: tokens when it has a token cap, else dollars. */
+export type FreeTierBudget = { remaining: number; tokensPerWeek: number } | { usdLeft: number; usdPerWeek: number };
+
 export interface FreeTierAccount {
   login: string;
-  /** Tokens left this week and the weekly grant, from /v1/me; undefined when it wasn't read. */
+  /**
+   * Tokens left this week and the weekly grant, from an older service's /v1/me (its top-level
+   * `allowance`); only used when the service sends no per-model `pools` or `budgets`.
+   */
   remaining?: number;
   tokensPerWeek?: number;
+  /** DeepSeek's weekly allowance, from /v1/me's `pools` and `budgets`. */
+  deepseek?: FreeTierBudget;
+  /** GPT-6's weekly dollar budget, only for someone who has one. */
+  gpt6?: FreeTierBudget;
   /** When the week's allowance comes back (ISO time). */
   resetsAt?: string;
   /** The contact email given at sign-in (from /v1/me, when the service sends it). */
@@ -111,18 +121,66 @@ async function readMe(url: string, token: string, options: FreeTierOptions): Pro
     signal: AbortSignal.timeout(options.timeoutMs ?? ME_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const body = (await response.json()) as { login?: unknown; email?: unknown; allowance?: { remaining?: unknown; tokensPerWeek?: unknown; resetsAt?: unknown } };
-  const allowance = body.allowance ?? {};
-  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined);
+  const body = (await response.json()) as MeBody;
+  const allowance = record(body.allowance);
   const remaining = count(allowance.remaining);
   const tokensPerWeek = count(allowance.tokensPerWeek);
   const resetsAt = typeof allowance.resetsAt === "string" && Number.isFinite(Date.parse(allowance.resetsAt)) ? allowance.resetsAt : undefined;
+  // The top-level allowance describes GPT-6 Luna's pool; the per-model figures say what DeepSeek
+  // (the default) and GPT-6 have left. An older service sends only the top-level one.
+  const queued = body.queue !== null && body.queue !== undefined;
+  const budgets = record(body.budgets ?? allowance.budgets);
+  const deepseek = familyBudget(record(record(body.pools).deepseek), record(budgets.deepseek), queued);
+  const gpt6Budget = record(budgets.gpt6);
+  const gpt6 = (count(gpt6Budget.usdPerWeek) ?? 0) > 0 ? familyBudget({}, gpt6Budget, queued) : undefined;
+  // A service that sends per-model figures never falls back to the top-level (Luna) allowance.
+  const perModel = body.pools !== undefined || body.budgets !== undefined || allowance.budgets !== undefined;
   return {
     ...(typeof body.login === "string" && GITHUB_LOGIN.test(body.login) ? { login: body.login } : {}),
-    ...(remaining !== undefined && tokensPerWeek !== undefined ? { remaining, tokensPerWeek } : {}),
+    ...(perModel ? { ...(deepseek ? { deepseek } : {}), ...(gpt6 ? { gpt6 } : {}) } : remaining !== undefined && tokensPerWeek !== undefined ? { remaining, tokensPerWeek } : {}),
     ...(resetsAt ? { resetsAt } : {}),
     ...(typeof body.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email) && body.email.length <= 254 ? { email: body.email } : {}),
   };
+}
+
+type Rec = Record<string, unknown>;
+interface MeBody {
+  login?: unknown;
+  email?: unknown;
+  allowance?: unknown;
+  budgets?: unknown;
+  pools?: unknown;
+  queue?: unknown;
+}
+
+const record = (value: unknown): Rec => (value && typeof value === "object" && !Array.isArray(value) ? (value as Rec) : {});
+const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined);
+
+/**
+ * A family's week: its token pool when that has a token cap (`tokensPerWeek` a number), else its
+ * dollar budget (`usdPerWeek` and `spentUsd`); undefined when neither is capped or sent. Nothing
+ * is left while queued.
+ */
+function familyBudget(pool: Rec, budget: Rec, queued: boolean): FreeTierBudget | undefined {
+  const tokensPerWeek = count(pool.tokensPerWeek);
+  const remaining = count(pool.remaining);
+  if (tokensPerWeek !== undefined && remaining !== undefined) return { remaining: queued ? 0 : remaining, tokensPerWeek };
+  const usdPerWeek = count(budget.usdPerWeek);
+  const spentUsd = count(budget.spentUsd);
+  if (usdPerWeek === undefined || spentUsd === undefined) return undefined;
+  return { usdLeft: queued ? 0 : Math.max(0, usdPerWeek - spentUsd), usdPerWeek };
+}
+
+/** "$5", "$7.93": cents, rounded down so what's left is never overstated. */
+export function formatUsd(usd: number): string {
+  const cents = Math.floor(Math.max(0, usd) * 100 + 1e-6);
+  return cents % 100 === 0 ? `$${cents / 100}` : `$${(cents / 100).toFixed(2)}`;
+}
+
+/** "49.9M of 50M DeepSeek tokens left this week", "$7.93 of $10 DeepSeek left this week". */
+function budgetPart(name: string, budget: FreeTierBudget): string {
+  if ("tokensPerWeek" in budget) return `${formatTokens(Math.min(budget.remaining, budget.tokensPerWeek))} of ${formatTokens(budget.tokensPerWeek)} ${name} tokens left this week`;
+  return `${formatUsd(Math.min(budget.usdLeft, budget.usdPerWeek))} of ${formatUsd(budget.usdPerWeek)} ${name} left this week`;
 }
 
 /** "50M", "49.9M", "800k", "950", rounded down so what's left is never overstated. */
@@ -143,12 +201,18 @@ export function formatLocalTime(at: number, options: { now?: number; timeZone?: 
   return `${weekday}, ${date.toLocaleDateString("en-US", { month: "short", day: "numeric", ...tz })}, ${time}`;
 }
 
-/** `@login · 49.9M of 50M tokens left this week · resets Mon 09:00`, or as much of it as is known. */
+/**
+ * `@login · $7.93 of $10 DeepSeek left this week · resets Mon 09:00` (GPT-6's budget beside it
+ * for someone who has one), or an older service's `49.9M of 50M tokens left this week`, or as
+ * much of it as is known.
+ */
 export function freeTierLine(account: FreeTierAccount, options: { now?: number; timeZone?: string } = {}): string {
   const parts = [`@${account.login}`];
-  if (account.remaining !== undefined && account.tokensPerWeek !== undefined) {
+  if (account.deepseek) parts.push(budgetPart("DeepSeek", account.deepseek));
+  if (account.gpt6) parts.push(budgetPart("GPT-6", account.gpt6));
+  if (!account.deepseek && !account.gpt6 && account.remaining !== undefined && account.tokensPerWeek !== undefined) {
     parts.push(`${formatTokens(Math.min(account.remaining, account.tokensPerWeek))} of ${formatTokens(account.tokensPerWeek)} tokens left this week`);
-    if (account.resetsAt) parts.push(`resets ${formatLocalTime(Date.parse(account.resetsAt), options)}`);
   }
+  if (parts.length > 1 && account.resetsAt) parts.push(`resets ${formatLocalTime(Date.parse(account.resetsAt), options)}`);
   return parts.join(" · ");
 }

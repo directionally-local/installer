@@ -9,7 +9,7 @@ import { HARNESSES, HARNESS_KEY_TTL_MS, MAX_HARNESS_KEYS, MAX_SERVER_KEYS, parse
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
-import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, LevelSignalRow, PersonRow, PersonState, PersonStatus, RequestRecord, SpendSummary } from "./directory-object.js";
+import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, LevelSignalRow, PersonRow, PersonState, PersonStatus, RequestRecord, SpendSummary, UseClient } from "./directory-object.js";
 import { createCheckout, createPortal, githubIdFrom, isMissingCustomer, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
 import { accessRequestAlert, deliverAlerts, isHeaderSafeAddress, pauseAlert, sendEmail, type Alert, type EmailBinding, type ServingContext, type UpstreamOutcome } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
@@ -2127,25 +2127,30 @@ async function referralLookup(c: Ctx, raw: string): Promise<Response> {
   return json({ valid: true, login: owner.login, bonusTokensPerWeek: (await runtime(c)).config.referralBonusTokens }, 200, cache);
 }
 
+/**
+ * The free models this person can use: GPT-6 only for people with a GPT-6 budget (admins,
+ * personal grants) who pass the GPT-6 trust gate (gpt6-trust.ts) when it is on. While GPT-6 is
+ * paused on the free tier, tools reading this (dl opencode, the unknown-model refusal) offer DeepSeek only.
+ */
+async function modelsFor(c: Ctx, config: FreeConfig, githubId: number, person: Runtime["person"]): Promise<readonly FreeModel[]> {
+  if (c.config.adminGithubIds.has(githubId)) return FREE_MODELS;
+  // With the trust gate on, GPT-6 is listed only for trusted people, at the trusted budget.
+  const trust = await gpt6TrustFor(c, config, githubId);
+  if (trust && !trust.trusted) return FREE_MODELS.filter((model) => model.family !== "gpt6");
+  const ownLimits = allocated(config, limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, githubId, person?.admittedAt), person?.trialBonusTokens), githubId, person, c.now());
+  const allowance = await account(c, githubId).allowance(c.now(), trust?.trusted ? withTrustedGpt6Cap(ownLimits, config) : ownLimits);
+  const gpt6 = allowance.budgets.gpt6.usdPerWeek;
+  return gpt6 !== null && gpt6 <= 0 ? FREE_MODELS.filter((model) => model.family !== "gpt6") : FREE_MODELS;
+}
+
 async function models(c: Ctx): Promise<Response> {
   // OpenCode's harness key may list them too (dl opencode reads the list to configure it).
   const identity = await authenticate(c, { keys: true, harness: ["opencode"] });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
-  // GPT-6 is listed only for people with a GPT-6 budget (admins, personal grants): while it's
-  // paused on the free tier, tools reading this list (dl opencode) offer DeepSeek only.
   const { config, person } = await runtime(c);
-  const isAdmin = c.config.adminGithubIds.has(identity.githubId);
-  let listed = FREE_MODELS;
-  if (!isAdmin) {
-    // With the GPT-6 trust gate on (gpt6-trust.ts), GPT-6 is listed only for trusted people, at the trusted budget.
-    const trust = await gpt6TrustFor(c, config, identity.githubId);
-    const ownLimits = allocated(config, limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens), identity.githubId, person, c.now());
-    const allowance = await account(c, identity.githubId).allowance(c.now(), trust?.trusted ? withTrustedGpt6Cap(ownLimits, config) : ownLimits);
-    const gpt6 = allowance.budgets.gpt6.usdPerWeek;
-    if ((gpt6 !== null && gpt6 <= 0) || (trust && !trust.trusted)) listed = FREE_MODELS.filter((model) => model.family !== "gpt6");
-  }
+  const listed = await modelsFor(c, config, identity.githubId, person);
   return json({
     object: "list",
     data: listed.map((model) => ({
@@ -2635,7 +2640,10 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     }
   }
   if (!isAllowedModel(body.model)) {
-    return apiError(400, "model_not_allowed", `The free tier serves ${ALLOWED_MODELS.join(", ")} only.`, { allowed: [...ALLOWED_MODELS] }, await headers());
+    // Only the models this person can use here: DeepSeek, GPT-6 too with a GPT-6 budget and trust.
+    const families = harness ? HARNESS_FAMILIES[harness] : FAMILIES;
+    const allowed = (await modelsFor(c, gate.config, identity.githubId, gate.person)).filter((model) => families.includes(model.family)).map((model) => model.id);
+    return apiError(400, "model_not_allowed", `The free tier serves ${allowed.join(", ")} only.`, { allowed }, await headers());
   }
   const requested = modelById(body.model)!;
   // Claude Code gets DeepSeek only; OpenCode, every model.
@@ -2647,6 +2655,11 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   const sessionId = c.request.headers.get("x-session-id") ?? (typeof body.session_id === "string" ? body.session_id : undefined);
   // Any agent's session id, for the token allocator's session counts (allocator.ts).
   const sessionKey = sessionKeyOf(c.request.headers, body, input.sessionHint);
+  // The session use descriptions and keyword labels are kept under: the client's session id, else
+  // the allocator's key (Claude Code's x-claude-code-session-id or metadata.user_id session).
+  const labelSession = sessionId ?? sessionKey;
+  // Which coding agent asked: a dl-launched one by its harness key, else Autopilot.
+  const client: UseClient = harness ?? "autopilot";
 
   // Account-pooling routers (resale or sharing of free accounts) are refused outright: the free
   // tier is for one person's own coding, not an upstream for a proxy.
@@ -2666,11 +2679,11 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     // A high match is reviewed by moderation, which sees what the pre-check read, cut to
     // MODERATION_INPUT_CHARS. The text lives only in this task; nothing stores it.
     const reviewText = fitToBudget(precheck, MODERATION_INPUT_CHARS).join("\n\n");
-    const task = recordKeywordMatch(c, gate, { githubId: identity.githubId, sessionId: sessionId ?? null, signal, reviewText });
+    const task = recordKeywordMatch(c, gate, { githubId: identity.githubId, sessionId: labelSession, client, signal, reviewText });
     if (c.background) c.background(task);
   }
   if (gpt6Check) {
-    const held = await directory(c).gpt6SecurityCheck({ githubId: identity.githubId, sessionId: sessionId ?? null, now: c.now(), ...(signal ? { signal } : {}) });
+    const held = await directory(c).gpt6SecurityCheck({ githubId: identity.githubId, sessionId: labelSession, now: c.now(), ...(signal ? { signal } : {}) });
     if (held) {
       return apiError(402, "gpt_limit", SECURITY_GPT6_MESSAGE, { family: "gpt6", resetsAt: securityHoldEnds(c.now()), reason: SECURITY_REASON, alternative: DEEPSEEK_MODEL }, await headers());
     }
@@ -2691,7 +2704,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       limits = withTrustedGpt6Cap(limits, gate.config);
     }
     if (gate.config.gpt6PresendGuard === "enforce") {
-      const stopped = await presendGuard(c, gate, { githubId: identity.githubId, sessionId: sessionId ?? null, body });
+      const stopped = await presendGuard(c, gate, { githubId: identity.githubId, sessionId: labelSession, client, body });
       if (stopped) return apiError(402, "gpt_limit", GUARD_GPT6_MESSAGE, { family: "gpt6", resetsAt: securityHoldEnds(c.now()), reason: SECURITY_REASON, alternative: DEEPSEEK_MODEL }, await headers());
     }
   }
@@ -2939,7 +2952,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // What this session is about, beside the request and never awaited by it (use-description.ts).
   // The input is taken now, before anything else touches the body.
   if (!isAdmin && gate.config.useDescriptions) {
-    const task = describeUse(c, gate, { githubId: identity.githubId, sessionId: sessionId ?? null, input: useInput(body), user });
+    const task = describeUse(c, gate, { githubId: identity.githubId, sessionId: labelSession, client, input: useInput(body), user });
     if (c.background) c.background(task);
   }
   const response = await attempt(serving.model, serving.provider, reservation);
@@ -2985,7 +2998,7 @@ function withTrustedGpt6Cap<T extends Limits>(limits: T, config: FreeConfig): T 
  * stored as a high-risk label (holding the session and day off GPT-6), and its moderation review
  * or alert runs beside the response. Logs a reason code, never content.
  */
-async function presendGuard(c: Ctx, gate: Runtime, input: { githubId: number; sessionId: string | null; body: Record<string, unknown> }): Promise<boolean> {
+async function presendGuard(c: Ctx, gate: Runtime, input: { githubId: number; sessionId: string | null; client: UseClient; body: Record<string, unknown> }): Promise<boolean> {
   const { config } = gate;
   let result: Awaited<ReturnType<typeof runGuard>>;
   try {
@@ -3008,6 +3021,7 @@ async function presendGuard(c: Ctx, gate: Runtime, input: { githubId: number; se
     .recordGpt6Guard({
       githubId: input.githubId,
       sessionId: input.sessionId,
+      client: input.client,
       outcomes: outcomesOf(result),
       ...(result.flaggedBy[0] ? { flaggedBy: result.flaggedBy[0] } : {}),
       spend: result.spend,
@@ -3047,12 +3061,13 @@ async function presendGuard(c: Ctx, gate: Runtime, input: { githubId: number; se
  * Records a pre-check match as a use description and sends its alert, if any, or runs the
  * moderation review a high match claimed. Never throws.
  */
-async function recordKeywordMatch(c: Ctx, gate: Runtime, input: { githubId: number; sessionId: string | null; signal: string; reviewText: string }): Promise<void> {
+async function recordKeywordMatch(c: Ctx, gate: Runtime, input: { githubId: number; sessionId: string | null; client: UseClient; signal: string; reviewText: string }): Promise<void> {
   try {
     const moderation = moderationLimits(gate.config);
     const outcome = await directory(c).recordKeywordMatch({
       githubId: input.githubId,
       sessionId: input.sessionId,
+      client: input.client,
       signal: input.signal,
       label: keywordLabel(input.signal, gate.config.detection),
       now: c.now(),
@@ -3073,7 +3088,7 @@ async function recordKeywordMatch(c: Ctx, gate: Runtime, input: { githubId: numb
  * for a "high" risk a moderation review (or, with moderation off, the owner's alert). Never throws and is never awaited by the request: any
  * failure just means no description.
  */
-async function describeUse(c: Ctx, gate: Runtime, input: { githubId: number; sessionId: string | null; input: UseInput | undefined; user: string }): Promise<void> {
+async function describeUse(c: Ctx, gate: Runtime, input: { githubId: number; sessionId: string | null; client: UseClient; input: UseInput | undefined; user: string }): Promise<void> {
   try {
     const { config } = gate;
     const provider: Upstream | undefined = providerReady("luminal", config, gate) ? "luminal" : config.openRouterApiKey ? "openrouter" : undefined;
@@ -3098,6 +3113,7 @@ async function describeUse(c: Ctx, gate: Runtime, input: { githubId: number; ses
     const outcome = await directory(c).recordUseDescription({
       githubId: input.githubId,
       sessionId: input.sessionId,
+      client: input.client,
       label,
       model: DEEPSEEK_MODEL,
       ...result.cost,
