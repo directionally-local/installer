@@ -1,7 +1,7 @@
 import { ALLOCATOR_MODES } from "./allocator.js";
 import { ACCESS_REQUEST_ALERT_MODES, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, PRO_MULTIPLIER_MAX, PRO_MULTIPLIER_MIN, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
-import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_STATUSES } from "./providers.js";
+import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_PLANS, PROVIDER_STATUSES } from "./providers.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
 /**
@@ -124,12 +124,19 @@ export const RUNTIME_SETTINGS = {
   "providerCredit.liquid": { kind: "amount", env: "LIQUID_CREDIT_USD" },
   /** The most Liquid credit everyone but admins may use a week, USD; "none" for no weekly budget. */
   "providerWeeklyCredit.liquid": { kind: "usd", env: "LIQUID_WEEKLY_CREDIT_USD" },
-  /** One person's weekly Liquid spend at most, USD, while Liquid is opt-in; "none" for no cap. */
+  /**
+   * One person's weekly Liquid spend at most, USD, while Liquid is opt-in or Pro-only (then it is
+   * Pro's weekly Kimi ration, shown as "about N tokens"); "none" for no cap.
+   */
   "providerPersonWeeklyUsd.liquid": { kind: "usd", env: "LIQUID_PERSON_WEEKLY_USD" },
   /** Liquid opt-in: served only to people who pick its models, held to the per-person cap. */
   "providerOptIn.liquid": { kind: "flag", env: "LIQUID_OPT_IN" },
-  /** For later: Pro gets Liquid first. Nothing gates on it yet. */
-  "providerProFirst.liquid": { kind: "flag", env: "LIQUID_PRO_FIRST" },
+  /**
+   * Who gets Liquid's models: "pro" (the default: dl Pro subscribers and admins; a free account's
+   * request gets 402 provider_limit, reason pro_only, with the Upgrade link) or "all" (every plan,
+   * each held to providerPersonWeeklyUsd.liquid while opt-in). Replaces providerProFirst.liquid.
+   */
+  "providerPlans.liquid": { kind: "providerPlans", env: "LIQUID_PLANS" },
   /** The Liquid models that are on, by id; [] for none. */
   "providerModels.liquid": { kind: "models", env: "LIQUID_MODELS" },
   /** Sellers that may serve Kimi K3.1 Pro on Liquid (exchange `providers.allow`); [] for any that passes the other rules. */
@@ -266,6 +273,8 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return Array.isArray(value) && value.length <= 500 && value.every(isAllowlistEntry) ? value.map((v) => v.trim().toLowerCase()) : "invalid";
     case "providerStatus":
       return typeof value === "string" && (PROVIDER_STATUSES as readonly string[]).includes(value) ? value : "invalid";
+    case "providerPlans":
+      return typeof value === "string" && (PROVIDER_PLANS as readonly string[]).includes(value) ? value : "invalid";
     case "models":
       return Array.isArray(value) && isRegistryModelList(value) ? [...value] : "invalid";
     case "sellers":
@@ -301,6 +310,7 @@ const RULES: Record<Kind, string> = {
   allocatorMode: '"on" or "off"',
   people: 'a list of up to 500 GitHub logins or numeric ids, e.g. ["octocat", "12345"], or [] for none',
   providerStatus: '"on" or "paused"',
+  providerPlans: '"pro" (dl Pro and admins only) or "all"',
   models: 'a list of the provider\'s model ids, e.g. ["moonshotai/kimi-k3.1-pro"], or [] for none',
   sellers: 'a list of up to 10 seller handles, e.g. ["deeprelay"], or [] for any seller that passes the other rules',
   prices: "three prices, [input, cache read, output], USD per million tokens",

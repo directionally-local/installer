@@ -20,8 +20,8 @@ const KIMI = "moonshotai/kimi-k3.1-pro";
 const GLM = "z-ai/glm-5.3";
 const LIQUID_KEY = "sk-architect-test-secret";
 const HOOK = "https://alerts.test/hook";
-/** Liquid with a key and on. */
-const LIQUID_ON = { LIQUID_INFERENCE_API_KEY: LIQUID_KEY, LIQUID_STATUS: "on" };
+/** Liquid with a key and on, for every plan (the Pro-only default has its own tests below). */
+const LIQUID_ON = { LIQUID_INFERENCE_API_KEY: LIQUID_KEY, LIQUID_STATUS: "on", LIQUID_PLANS: "all" };
 const BASE_ENV = { OPENROUTER_API_KEY: "k", GITHUB_CLIENT_ID: "c", GITHUB_CLIENT_SECRET: "s", TOKEN_SIGNING_KEY: "x".repeat(32) };
 
 let ips = 0;
@@ -184,7 +184,7 @@ describe("Liquid Inference routing", () => {
   });
 
   it("is paused until the owner turns it on, and GLM stays unknown while it's off", async () => {
-    const { service, token, admin } = await member({ LIQUID_INFERENCE_API_KEY: LIQUID_KEY });
+    const { service, token, admin } = await member({ LIQUID_INFERENCE_API_KEY: LIQUID_KEY, LIQUID_PLANS: "all" });
     assert.ok(!(await listed(service, token)).includes(KIMI));
     const paused = await chat(service, token, KIMI);
     assert.equal(paused.status, 402);
@@ -287,7 +287,7 @@ describe("dl Pro and the shared open-models budget", () => {
     assert.ok((await me()).budgets.deepseek.spentUsd > 0.5);
   });
 
-  it("still holds Pro to the provider's opt-in cap (Pro gating for Kimi comes later)", async () => {
+  it("with every plan let in, still holds Pro to the provider's opt-in cap", async () => {
     const { service, token } = await member({ ...BILLING, ...LIQUID_ON, LIQUID_PERSON_WEEKLY_USD: "0.001" });
     await makePro(service, 100);
     service.setLiquid(() => liquidCompletion(luminalUsage(100, 10), 0.002));
@@ -296,6 +296,139 @@ describe("dl Pro and the shared open-models budget", () => {
     assert.equal(capped.status, 402);
     assert.equal((await errorOf(capped)).reason, "person_cap");
     assert.equal((await chat(service, token, MODEL)).status, 200);
+  });
+});
+
+describe("Kimi is a dl Pro perk (providerPlans.liquid \"pro\", the default)", () => {
+  const SECRET = "whsec_test_0123456789abcdef";
+  const BILLING = { STRIPE_SECRET_KEY: "sk_test_fake", STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_PRICE_TOPUP: "price_topup123" };
+  /** Liquid on with the default plans ("pro") and the default $0.25 ration. */
+  const PRO_ONLY = { LIQUID_INFERENCE_API_KEY: LIQUID_KEY, LIQUID_STATUS: "on" };
+  const PERK = "Kimi K3.1 Pro is a dl Pro perk: about 140K tokens a week, then DeepSeek. Upgrade: https://dl.new/account";
+
+  async function makePro(service: Service, githubId: number): Promise<void> {
+    const at = Math.floor(service.clock.now / 1000);
+    const object = { id: `cs_pro_${githubId}`, object: "checkout.session", mode: "subscription", client_reference_id: String(githubId), customer: `cus_${githubId}`, subscription: `sub_${githubId}`, payment_status: "paid", amount_subtotal: 700, amount_total: 700, metadata: { github_id: String(githubId), product: "pro" } };
+    const body = JSON.stringify({ id: `evt_pro_${githubId}`, object: "event", type: "checkout.session.completed", created: at, data: { object } });
+    const response = await service.request("POST", "/v1/billing/webhook", { body, headers: { "stripe-signature": await signatureHeader(SECRET, at, body) } });
+    assert.equal(response.status, 200, await response.clone().text());
+  }
+
+  const meOf = async (service: Service, token: string) => (await (await service.request("GET", "/v1/me", { token, ip: ip() })).json()) as Record<string, any>;
+  const refusals = (service: Service) => db(service).prepare("SELECT reason, client, n FROM refusals_daily WHERE reason LIKE 'provider_limit:%' ORDER BY reason").all().map((row) => ({ ...row }));
+  const seen = (service: Service) => (db(service).prepare("SELECT n FROM pro_funnel_daily WHERE step = 'seen'").get() as { n: number } | undefined)?.n ?? 0;
+
+  it("refuses a free account with the perk, its size and the Upgrade link; counts it once a day as a Pro prompt seen", async () => {
+    const { service, token } = await member({ ...BILLING, ...PRO_ONLY });
+    const refused = await chat(service, token, KIMI);
+    assert.equal(refused.status, 402);
+    const error = await errorOf(refused);
+    assert.deepEqual(
+      { code: error.code, reason: error.reason, message: error.message, alternative: error.alternative, provider: error.provider, plans: error.plans, approxTokensPerWeek: error.approxTokensPerWeek, upgradeUrl: error.upgradeUrl, resetsAt: error.resetsAt },
+      { code: "provider_limit", reason: "pro_only", message: PERK, alternative: MODEL, provider: "liquid", plans: "pro", approxTokensPerWeek: 140_000, upgradeUrl: "https://dl.new/account", resetsAt: null },
+    );
+    assert.equal(service.calls.liquid.length, 0);
+    await chat(service, token, KIMI);
+    assert.deepEqual(refusals(service), [{ reason: "provider_limit:pro_only", client: "autopilot", n: 2 }]);
+    assert.equal(seen(service), 1, "the funnel counts a person once a day");
+    // Not listed for them, but stated upfront: /v1/me's proModels and /v1/providers say "pro".
+    assert.ok(!(await listed(service, token)).includes(KIMI));
+    const me = await meOf(service, token);
+    assert.deepEqual(me.proModels, [
+      { id: KIMI, name: "Kimi K3.1 Pro", provider: "liquid", access: "pro", available: false, usdPerWeek: 0.25, approxTokensPerWeek: 140_000, ration: null, text: "Kimi K3.1 Pro is a dl Pro perk: about 140K tokens a week, then DeepSeek." },
+    ]);
+    const providers = (await (await service.request("GET", "/v1/providers", { ip: ip() })).json()) as { providers: Array<{ id: string; models: Array<{ id: string; access: string }> }> };
+    assert.equal(providers.providers.find((provider) => provider.id === "liquid")!.models[0]!.access, "pro");
+    // DeepSeek is untouched.
+    assert.equal((await chat(service, token, MODEL)).status, 200);
+  });
+
+  it("without Pro on offer, a free account is told it's Pro only, with no Upgrade link and no funnel count", async () => {
+    const { service, token } = await member({ ...PRO_ONLY, PRO_OFFERED: "false" });
+    const error = await errorOf(await chat(service, token, KIMI));
+    assert.equal(error.reason, "pro_only");
+    assert.equal(error.message, `Kimi K3.1 Pro is for dl Pro subscribers only. Use ${MODEL} instead: /model.`);
+    assert.equal(error.upgradeUrl, null);
+    assert.equal(seen(service), 0);
+  });
+
+  it("serves Pro up to the weekly ration, shows what is left, then refuses with the reset day and DeepSeek", async () => {
+    const { service, token } = await member({ ...BILLING, ...PRO_ONLY });
+    await makePro(service, 100);
+    // Each Kimi request is charged $0.10 of the $0.25 ration.
+    service.setLiquid(() => liquidCompletion(luminalUsage(100, 10), 0.1));
+    const before = await meOf(service, token);
+    assert.equal(before.proModels[0].available, true);
+    assert.equal(before.proModels[0].ration.approxTokensLeft, 140_000);
+    assert.equal(before.proModels[0].text, "Kimi K3.1 Pro with dl Pro: about 140K of 140K tokens left this week (resets Monday 9 Nov, 00:00 UTC).");
+    const models = (await (await service.request("GET", "/v1/models", { token, ip: ip() })).json()) as { data: Array<Record<string, any>> };
+    const kimi = models.data.find((model) => model.id === KIMI)!;
+    assert.equal(kimi.access, "pro");
+    assert.equal(kimi.ration.usdPerWeek, 0.25);
+    assert.equal(kimi.ration.resetsAt, "2026-11-09T00:00:00.000Z");
+    assert.equal((await chat(service, token, KIMI)).status, 200);
+    const middle = await meOf(service, token);
+    assert.equal(middle.proModels[0].ration.remainingUsd, 0.15);
+    assert.equal(middle.proModels[0].ration.approxTokensLeft, 86_000);
+    assert.equal((await chat(service, token, KIMI)).status, 200);
+    assert.equal((await chat(service, token, KIMI)).status, 200);
+    const capped = await chat(service, token, KIMI);
+    assert.equal(capped.status, 402);
+    const error = await errorOf(capped);
+    assert.equal(error.reason, "person_cap");
+    assert.equal(error.resetsAt, "2026-11-09T00:00:00.000Z");
+    assert.equal(error.message, "You've used this week's Kimi K3.1 Pro with dl Pro (about 140K tokens a week). It resets on Monday 9 Nov, 00:00 UTC; DeepSeek keeps working: /model.");
+    assert.equal(service.calls.liquid.length, 3);
+    assert.ok(!(await listed(service, token)).includes(KIMI));
+    assert.equal((await meOf(service, token)).proModels[0].text, "Kimi K3.1 Pro: this week's dl Pro ration is used up. It resets on Monday 9 Nov, 00:00 UTC; DeepSeek keeps working.");
+    assert.deepEqual(refusals(service), [{ reason: "provider_limit:person_cap", client: "autopilot", n: 1 }]);
+    assert.equal(seen(service), 0, "Pro isn't shown a Pro prompt");
+    assert.equal((await chat(service, token, MODEL)).status, 200);
+    // Next week the ration is back.
+    service.clock.now = Date.parse("2026-11-09T00:00:01Z");
+    const fresh = (await service.signIn({ id: 100, login: "alice" })).access_token;
+    assert.equal((await chat(service, fresh, KIMI)).status, 200);
+  });
+
+  it("lets admins through for testing, past the ration", async () => {
+    const { service, admin } = await member(PRO_ONLY);
+    service.setLiquid(() => liquidCompletion(luminalUsage(100, 10), 0.2));
+    assert.ok((await listed(service, admin)).includes(KIMI));
+    for (let i = 0; i < 3; i++) assert.equal((await chat(service, admin, KIMI)).status, 200);
+    assert.equal((await meOf(service, admin)).proModels[0].available, true);
+  });
+
+  it("\"all\" lets free accounts in, each held to the per-person cap", async () => {
+    const { service, token, admin } = await member({ ...PRO_ONLY, LIQUID_PERSON_WEEKLY_USD: "0.15" });
+    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { "providerPlans.liquid": "all" } })).status, 200);
+    service.setLiquid(() => liquidCompletion(luminalUsage(100, 10), 0.1));
+    const models = (await (await service.request("GET", "/v1/models", { token, ip: ip() })).json()) as { data: Array<Record<string, any>> };
+    assert.equal(models.data.find((model) => model.id === KIMI)?.access, "opt-in");
+    assert.deepEqual((await meOf(service, token)).proModels, []);
+    assert.equal((await chat(service, token, KIMI)).status, 200);
+    assert.equal((await chat(service, token, KIMI)).status, 200);
+    const capped = await errorOf(await chat(service, token, KIMI));
+    assert.equal(capped.reason, "person_cap");
+    assert.equal(capped.message, `You've used this week's free Kimi K3.1 Pro. Use ${MODEL} instead: /model.`);
+    assert.equal(capped.plans, undefined);
+  });
+
+  it("takes only \"pro\" or \"all\"", () => {
+    assert.deepEqual(parseSettingsUpdate({ "providerPlans.liquid": "all" }), { changes: [{ key: "providerPlans.liquid", value: "all" }] });
+    assert.ok("error" in parseSettingsUpdate({ "providerPlans.liquid": "free" }));
+    assert.throws(() => readFreeConfig({ ...BASE_ENV, LIQUID_PLANS: "everyone" }), /LIQUID_PLANS must be "pro" or "all"/);
+    assert.equal(providerSettings(readFreeConfig(BASE_ENV), "liquid").plans, "pro");
+  });
+
+  it("registryBlock: pro_only for a free account after the provider-wide blocks, before the ration", () => {
+    const config = readFreeConfig({ ...BASE_ENV, ...PRO_ONLY, LIQUID_WEEKLY_CREDIT_USD: "5" });
+    const kimi = modelById(KIMI)!;
+    assert.equal(registryBlock(config, kimi, { usedUsd: {}, weekUsd: {} }, 0, "free"), "pro_only");
+    assert.equal(registryBlock(config, kimi, { usedUsd: {}, weekUsd: { liquid: 5 } }, 0, "free"), "weekly_budget");
+    assert.equal(registryBlock(config, kimi, { usedUsd: {}, weekUsd: {} }, 0, "pro"), undefined);
+    assert.equal(registryBlock(config, kimi, { usedUsd: {}, weekUsd: {} }, 0.25, "pro"), "person_cap");
+    assert.equal(registryBlock({ ...config, "providerOptIn.liquid": false }, kimi, { usedUsd: {}, weekUsd: {} }, 0.25, "pro"), "person_cap", "the ration holds even when not opt-in");
+    assert.equal(registryBlock(config, kimi, { usedUsd: {}, weekUsd: {} }), undefined, "admins");
   });
 });
 

@@ -158,8 +158,9 @@ export const FREE_MODELS: readonly FreeModel[] = [
   // Liquid Inference (an exchange: each request goes to the cheapest seller that passes the
   // request's rules). Ids, limits and prices from https://liquidinference.ai/models/<id> and the
   // public offers (https://router.inference.ai.exchange/v1/exchange/offers) on 2026-11-23.
-  // Both draw the open-models budget, and both are opt-in with a small per-person cap
-  // (providers.ts), because the Liquid credit is small.
+  // Both draw the open-models budget, and both are dl Pro only by default
+  // (`providerPlans.liquid`), with a small weekly ration a person (providers.ts), because the
+  // Liquid credit is small.
   {
     id: "moonshotai/kimi-k3.1-pro",
     name: "Kimi K3.1 Pro",

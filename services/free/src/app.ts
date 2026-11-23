@@ -5,7 +5,7 @@ import { githubAuthorizeUrl, githubPrimaryEmail, githubPublicProfile, githubSign
 import { githubSignals } from "../../shared/src/github-signals.js";
 import { hmacKey, signJwt, verifyJwt } from "../../shared/src/jwt.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
-import { HARNESSES, HARNESS_KEY_TTL_MS, MAX_HARNESS_KEYS, MAX_SERVER_KEYS, parseHarnessKey, parseServerKey, type AccountObject, type Harness, type Allowance, type Limits, type ServerKeyView } from "./account-object.js";
+import { HARNESSES, HARNESS_KEY_TTL_MS, MAX_HARNESS_KEYS, MAX_SERVER_KEYS, parseHarnessKey, parseServerKey, type AccountObject, type Harness, type Allowance, type Limits, type Plan, type ServerKeyView } from "./account-object.js";
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
@@ -84,7 +84,7 @@ import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
 import { meterStream } from "./sse.js";
-import { accessOf, offeredModels, exchangeCharge, exchangeUsage, mergedUsage, exchangeRules, isRegistryProvider, liquidPayload, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, registryBlock, type ProviderBlock, type ProviderSpend } from "./providers.js";
+import { accessOf, approxTokens, offeredModels, exchangeCharge, exchangeUsage, mergedUsage, exchangeRules, isRegistryProvider, formatRationTokens, liquidPayload, proOnly, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, resetDay, type ProviderBlock, type ProviderSpend } from "./providers.js";
 import { PROBE_CRON, probeOnce, probeTargets } from "./probes.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
 import { anthropicError, errorStatus, estimateInputTokens, toAnthropicMessage, toAnthropicStream, toChatRequest } from "./anthropic.js";
@@ -879,9 +879,28 @@ function providerExhausted(provider: Upstream, config: FreeConfig, gate: Provide
  * Why a registry provider's model can't serve this caller now (providers.ts registryBlock), or
  * undefined. Admins skip the opt-in cap; nothing else.
  */
-function blockFor(model: FreeModel, config: FreeConfig, gate: Pick<Runtime, "providerSpend" | "personProviderWeekUsd">, isAdmin: boolean): ProviderBlock | undefined {
+function blockFor(model: FreeModel, config: FreeConfig, gate: Pick<Runtime, "providerSpend" | "personProviderWeekUsd">, isAdmin: boolean, plan?: Plan): ProviderBlock | undefined {
   if (!isRegistryProvider(model.provider)) return undefined;
-  return registryBlock(config, model, gate.providerSpend, isAdmin ? undefined : (gate.personProviderWeekUsd?.[model.provider] ?? 0));
+  return registryBlock(config, model, gate.providerSpend, isAdmin ? undefined : (gate.personProviderWeekUsd?.[model.provider] ?? 0), isAdmin ? undefined : plan);
+}
+
+/**
+ * The caller's plan when it matters for a registry provider (one of `models` is Pro-only and the
+ * caller isn't an admin), else undefined: one Account read, only then.
+ */
+async function planForProviders(c: Ctx, config: FreeConfig, githubId: number, models: readonly FreeModel[]): Promise<Plan | undefined> {
+  if (c.config.adminGithubIds.has(githubId) || !models.some((model) => proOnly(config, model))) return undefined;
+  return account(c, githubId).plan(c.now());
+}
+
+/**
+ * A Pro-only model's weekly ration for one person, as /v1/me and /v1/models show it, or null
+ * (not Pro-only, or no per-person cap). `resetsAt` is the week's end.
+ */
+function rationView(config: FreeConfig, model: FreeModel, weekUsd: Partial<Record<string, number>> | undefined, now: number) {
+  if (!proOnly(config, model)) return null;
+  const ration = rationOf(config, model, weekUsd?.[model.provider] ?? 0);
+  return ration ? { ...ration, resetsAt: new Date(weekEnd(now)).toISOString() } : null;
 }
 
 /** A provider's prepaid credit balance, for the pause alert. */
@@ -2102,6 +2121,12 @@ async function me(c: Ctx): Promise<Response> {
       ]),
     ),
     models: offeredModels(config).map((model) => model.id),
+    /**
+     * The models only dl Pro gets (providers.ts `plans` "pro"), stated upfront: for each, whether
+     * this account may use it, its weekly ration in dollars and about how many tokens, and for
+     * Pro what is left and when it resets. `text` is one line to show as it is.
+     */
+    proModels: await proModelsView(c, config, identity.githubId, allowance.plan),
     /** The part of the allowance (0 to 1) other agents launched by dl (dl claude, dl opencode) get; Autopilot gets all of it. */
     otherHarnessShare: config.otherHarnessShare,
     plan: allowance.plan,
@@ -2140,6 +2165,41 @@ async function me(c: Ctx): Promise<Response> {
       return prompt?.view ?? null;
     })(),
   });
+}
+
+/** /v1/me `proModels`: every offered Pro-only model, with this person's ration. */
+async function proModelsView(c: Ctx, config: FreeConfig, githubId: number, plan: Plan) {
+  const models = offeredModels(config).filter((model) => proOnly(config, model));
+  if (models.length === 0) return [];
+  const isAdmin = c.config.adminGithubIds.has(githubId);
+  const available = plan === "pro" || isAdmin;
+  const weekUsd = available && !isAdmin ? await directory(c).personProviderWeek(githubId, c.now()) : undefined;
+  return models.map((model) => {
+    const cap = providerSettings(config, model.provider as "liquid").personWeeklyUsd;
+    const approxTokensPerWeek = cap === undefined ? null : approxTokens(model, cap);
+    // Admins aren't held to it, so they get no ration.
+    const ration = available && !isAdmin ? rationView(config, model, weekUsd, c.now()) : null;
+    return {
+      id: model.id,
+      name: model.name,
+      provider: model.provider,
+      access: "pro" as const,
+      available,
+      usdPerWeek: cap ?? null,
+      approxTokensPerWeek,
+      ration,
+      text: proModelText(model, available, approxTokensPerWeek, ration),
+    };
+  });
+}
+
+/** The one line /v1/me gives a Pro-only model: the perk for a free account, the ration left for Pro. */
+function proModelText(model: FreeModel, available: boolean, approxTokensPerWeek: number | null, ration: ReturnType<typeof rationView>): string {
+  const perWeek = approxTokensPerWeek ? `about ${formatRationTokens(approxTokensPerWeek)} tokens a week` : null;
+  if (!available) return perWeek ? `${model.name} is a dl Pro perk: ${perWeek}, then DeepSeek.` : `${model.name} is a dl Pro perk.`;
+  if (!ration) return `${model.name} is included with dl Pro.`;
+  if (ration.remainingUsd <= 0) return `${model.name}: this week's dl Pro ration is used up. It resets on ${resetDay(ration.resetsAt)}; DeepSeek keeps working.`;
+  return `${model.name} with dl Pro: about ${formatRationTokens(ration.approxTokensLeft)} of ${formatRationTokens(ration.approxTokensPerWeek)} tokens left this week (resets ${resetDay(ration.resetsAt)}).`;
 }
 
 /** `{tokens, used, remaining, ended}` for a trial account, else null. */
@@ -2381,7 +2441,9 @@ async function modelsFor(c: Ctx, config: FreeConfig, githubId: number, person: R
   const gate = await runtime(c);
   const isAdmin = c.config.adminGithubIds.has(githubId);
   const personProviderWeekUsd = gate.personProviderWeekUsd ?? (isAdmin || !listed.some((model) => isRegistryProvider(model.provider)) ? undefined : await directory(c).personProviderWeek(githubId, c.now()));
-  return listed.filter((model) => blockFor(model, config, { providerSpend: gate.providerSpend, ...(personProviderWeekUsd ? { personProviderWeekUsd } : {}) }, isAdmin) === undefined);
+  // A Pro-only provider's models (providers.ts `plans`) aren't listed for a free account.
+  const plan = await planForProviders(c, config, githubId, listed);
+  return listed.filter((model) => blockFor(model, config, { providerSpend: gate.providerSpend, ...(personProviderWeekUsd ? { personProviderWeekUsd } : {}) }, isAdmin, plan) === undefined);
 }
 
 async function modelsByBudget(c: Ctx, config: FreeConfig, githubId: number, person: Runtime["person"]): Promise<readonly FreeModel[]> {
@@ -2404,6 +2466,7 @@ async function models(c: Ctx): Promise<Response> {
   if (guarded) return guarded;
   const { config, person } = await runtime(c);
   const listed = await modelsFor(c, config, identity.githubId, person);
+  const weekUsd = listed.some((model) => proOnly(config, model)) ? await directory(c).personProviderWeek(identity.githubId, c.now()) : undefined;
   return json({
     object: "list",
     data: listed.map((model) => ({
@@ -2414,8 +2477,11 @@ async function models(c: Ctx): Promise<Response> {
       context_window: model.contextWindow,
       max_output_tokens: model.maxOutputTokens,
       vision: model.vision,
-      // "free", "trusted" (GPT-6) or "opt-in" (a credit-limited provider, with its own weekly cap).
+      // "free", "trusted" (GPT-6), "opt-in" (a credit-limited provider, with its own weekly cap)
+      // or "pro" (dl Pro only; listed for Pro and admins, never for a free account).
       access: accessOf(config, model),
+      // A Pro-only model's weekly ration for this person, else absent (see /v1/me `proModels`).
+      ...(proOnly(config, model) ? { ration: rationView(config, model, weekUsd, c.now()) } : {}),
     })),
   });
 }
@@ -2912,11 +2978,35 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // A registry provider's model (providers.ts) that can't serve this person now: the GPT-6
   // limit's shape, pointing at DeepSeek. Out of credit, paused, its weekly budget or the
   // person's opt-in cap; checked before anything is reserved or sent.
-  const block = blockFor(requested, gate.config, gate, isAdmin);
+  // A Pro-only provider (`provider<Plans>.<id>` "pro") refuses a free account (reason pro_only)
+  // with the Upgrade link, and holds Pro to its weekly ration (person_cap, with the reset day).
+  const providerPlan = await planForProviders(c, gate.config, identity.githubId, [requested]);
+  const block = blockFor(requested, gate.config, gate, isAdmin, providerPlan);
   if (block) {
     const spec = providerSpec(requested.provider as "liquid");
+    const settings = providerSettings(gate.config, spec.id);
     const resetsAt = block === "weekly_budget" || block === "person_cap" ? new Date(weekEnd(c.now())).toISOString() : null;
-    return apiError(402, "provider_limit", providerLimitMessage(requested, block, spec.name), { family: requested.family, provider: spec.id, reason: block, resetsAt, alternative: DEEPSEEK_MODEL }, await headers());
+    const pro = settings.plans === "pro" && (block === "pro_only" || block === "person_cap");
+    const upgrade = block === "pro_only" && gate.config.proOffered ? upgradeUrl(c) : null;
+    const approxTokensPerWeek = settings.personWeeklyUsd !== undefined ? approxTokens(requested, settings.personWeeklyUsd) : undefined;
+    const message = providerLimitMessage(requested, block, spec.name, settings.plans, { ...(approxTokensPerWeek !== undefined ? { approxTokensPerWeek } : {}), upgradeUrl: upgrade, resetsAt });
+    // The Pro-only refusal is a Pro prompt: counted as seen in Pro's funnel (once a person a day).
+    if (upgrade) await countPro(c, "seen", identity.githubId);
+    return apiError(
+      402,
+      "provider_limit",
+      message,
+      {
+        family: requested.family,
+        provider: spec.id,
+        reason: block,
+        resetsAt,
+        alternative: DEEPSEEK_MODEL,
+        ...(pro ? { plans: "pro", approxTokensPerWeek: approxTokensPerWeek ?? null } : {}),
+        ...(block === "pro_only" ? { upgradeUrl: upgrade } : {}),
+      },
+      await headers(),
+    );
   }
   // Every level gets every model; basic and Starter on their smaller allowance.
   const effective = requested;
