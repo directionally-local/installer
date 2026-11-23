@@ -245,6 +245,13 @@ describe("cli", () => {
     out = "";
     assert.equal(await main(["status"], io, { ...free, freeTierAccount: async () => ({ login: "octo" }) }), 0);
     assert.match(out, /comes with dl\n {2}Free tier {2}@octo\n\n/, "the service couldn't be asked: the login only");
+    // dl Pro's prompt, when the service sends one, under the account line; dl status asks it to count as seen.
+    out = "";
+    let asked: { showsProPrompt?: boolean } | undefined;
+    const prompt = { text: "You've hit this week's free limit. dl Pro: $7/month for higher limits and early access to new models.", upgradeUrl: "https://dl.new/account" };
+    assert.equal(await main(["status"], io, { ...free, freeTierAccount: async (options) => ((asked = options), { login: "octo", proPrompt: prompt }) }), 0);
+    assert.ok(out.includes(`  Free tier  @octo\n             ${prompt.text} Upgrade: https://dl.new/account\n`), out);
+    assert.deepEqual(asked, { showsProPrompt: true });
     for (const account of [async () => undefined, async () => { throw new Error("offline"); }]) {
       out = "";
       assert.equal(await main(["status"], io, { ...free, freeTierAccount: account }), 0);

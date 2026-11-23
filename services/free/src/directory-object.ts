@@ -23,6 +23,7 @@ import { levelChecks, levelFor, type BasicRule, type GithubSignals, type Level, 
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 import { USE_CHECKPOINTS, USE_KEEP_DAYS, type UseLabel } from "./use-description.js";
 import { labelKeepsOffGpt6 } from "./security-route.js";
+import { activePro, countProStep, PRO_FUNNEL_SCHEMA, proDigestLine, proFunnelDays, type ProFunnelDay, type ProFunnelStep } from "./pro-funnel.js";
 import { countGuard, everyonesTrust, GPT6_GUARD_SCHEMA, guardDays, noteTrustSession, personTrust, type Trust } from "./gpt6-trust.js";
 import { GUARD_OUTCOMES, type Checker, type GuardOutcome } from "./presend-guard.js";
 import { dayIso, MODERATION_HISTORY_DAYS, MODERATION_HISTORY_ROWS, MODERATION_VERDICTS, type ModerationAction, type ModerationAnswer, type ModerationCase, type ModerationVerdict, type TriggerLabel } from "./moderation.js";
@@ -989,7 +990,7 @@ export class DirectoryObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA]) this.ctx.storage.sql.exec(statement);
+      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA]) this.ctx.storage.sql.exec(statement);
       ensureAllocatorSchema(this.ctx.storage.sql);
       const added = new Set<string>();
       for (const [table, column, definition] of ADDED_COLUMNS) {
@@ -3569,6 +3570,16 @@ export class DirectoryObject extends DurableObject {
   }
 
   /** Clicks and answers per day in [from, until), for /v1/admin/metrics. */
+  /** dl Pro's funnel (pro-funnel.ts): counts `githubId` at `step` today, once a day. */
+  async countProStep(input: { step: ProFunnelStep; githubId: number; now: number }): Promise<boolean> {
+    return countProStep(this.ctx.storage.sql, input.step, input.githubId, input.now);
+  }
+
+  /** dl Pro's funnel per UTC day in [from, until), and how many are on Pro now (admins left out). */
+  async proFunnel(input: { from: number; until: number; adminIds: number[] }): Promise<{ days: ProFunnelDay[]; activePro: number }> {
+    return { days: proFunnelDays(this.ctx.storage.sql, input.from, input.until), activePro: activePro(this.ctx.storage.sql, input.adminIds) };
+  }
+
   async noGithubDays(input: { from: number; until: number }): Promise<NoGithubDay[]> {
     return noGithubDays(this.ctx.storage.sql, input.from, input.until);
   }
@@ -3693,12 +3704,16 @@ export class DirectoryObject extends DurableObject {
     const allocator = allocatorCounts(sql, from, until);
     const allocated = allocator.raised10m + allocator.raisedFull + allocator.stayed + allocator.errors + allocator.graces > 0;
     const noGithubLine = noGithubDigestLine(sql, from);
+    const [proDay] = proFunnelDays(sql, from, until);
+    const proLine = proDigestLine(proDay ?? { seen: 0, clicked: 0, paid: 0, cancelled: 0 }, activePro(sql, [...policy.adminIds]));
     return withNoGithubLine(dailyDigestAlert({
       date,
       signups: { count: day.signedUp, people },
       active: day.active,
       usage: this.#usage(from, until),
       payments: this.#payments(from, until),
+      // dl Pro's day, every day (zeros included): saw the prompt, clicked Upgrade, paid, cancelled.
+      proLine,
       installs: { ok: day.installsOk, failed: day.installsFailed, platforms, failedSteps },
       week: {
         start: isoDay(week),

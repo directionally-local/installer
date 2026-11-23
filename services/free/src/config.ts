@@ -162,12 +162,12 @@ export interface FreeConfig {
   /** Stripe billing (stripe.ts). Without the secret key, the billing endpoints answer 503 billing_unavailable. */
   stripe: StripeConfig;
   /**
-   * Pro's weekly GPT-6 budget (PRO_WEEKLY_USD_CAP, default $6; "none" for tokens only). It is
-   * held exactly like the free caps: settled spend plus the estimate of every request in flight.
+   * Pro's weekly open-models (DeepSeek) budget as a multiple of a Full free account's
+   * (`deepseekWeeklyUsdCap`): PRO_OPEN_MODELS_MULTIPLIER, default 4; also a runtime setting.
+   * Pro buys more open models only: its GPT-6 budget is the free plan's (GPT-6 stays for
+   * trusted accounts, and paying is not a trust signal; gpt6-trust.ts).
    */
-  proWeeklyUsdCap: number | undefined;
-  /** Pro's weekly DeepSeek budget (PRO_DEEPSEEK_WEEKLY_USD_CAP, default $40; "none" for no cap). */
-  proDeepseekWeeklyUsdCap: number | undefined;
+  proOpenModelsMultiplier: number;
   /**
    * Which provider serves chat requests first (PRIMARY_UPSTREAM): "openai" (the default),
    * "luminal" or "openrouter". A model's own provider always wins: this only decides what
@@ -353,7 +353,6 @@ export interface Offers {
 export interface StripeConfig {
   secretKey: string | undefined;
   webhookSecret: string | undefined;
-  pricePro: string | undefined;
   priceTopup: string | undefined;
   successUrl: string;
   cancelUrl: string;
@@ -444,16 +443,15 @@ export const DEFAULTS = {
   referralBonusTokens: 10_000_000,
   referralBonusCap: 50_000_000,
   referralLinkBase: "https://dl.new/r/",
-  /** Dollars and cents: $3.99 a month. */
-  proPriceUsdMonthly: 3.99,
+  /** Dollars and cents: $7 a month (dl Pro phase 1). Checkout prices it inline (stripe.ts), so no Stripe Price is needed. */
+  proPriceUsdMonthly: 7,
   /**
    * Pro's weekly tokens sit well above what its weekly dollar ceiling buys on the default model,
    * so the dollar ceiling is the limit that binds, on cheap and expensive models alike.
    */
   proTokensPerWeek: 300_000_000,
-  proWeeklyUsdCap: 6,
-  proDeepseekWeeklyUsdCap: 40,
-  proValueLine: "Lots of DeepSeek every week, plus more GPT-6.",
+  proOpenModelsMultiplier: 4,
+  proValueLine: "Higher limits and early access to new models.",
   /** Top-ups: $1 units, 2 to 20 of them; each $1 adds $1.25 of usage, for 90 days. */
   topupUnitPriceUsd: 1,
   topupMinQuantity: 2,
@@ -570,14 +568,12 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     stripe: {
       secretKey: text(env.STRIPE_SECRET_KEY),
       webhookSecret: text(env.STRIPE_WEBHOOK_SECRET),
-      pricePro: stripeId(env.STRIPE_PRICE_PRO, "price_", "STRIPE_PRICE_PRO"),
       priceTopup: stripeId(env.STRIPE_PRICE_TOPUP, "price_", "STRIPE_PRICE_TOPUP"),
       successUrl: httpsUrl(env.BILLING_SUCCESS_URL, "BILLING_SUCCESS_URL") ?? DEFAULTS.billingSuccessUrl,
       cancelUrl: httpsUrl(env.BILLING_CANCEL_URL, "BILLING_CANCEL_URL") ?? DEFAULTS.billingCancelUrl,
       portalReturnUrl: httpsUrl(env.BILLING_PORTAL_RETURN_URL, "BILLING_PORTAL_RETURN_URL") ?? DEFAULTS.billingPortalReturnUrl,
     },
-    proWeeklyUsdCap: usd(env.PRO_WEEKLY_USD_CAP, DEFAULTS.proWeeklyUsdCap, "PRO_WEEKLY_USD_CAP"),
-    proDeepseekWeeklyUsdCap: usd(env.PRO_DEEPSEEK_WEEKLY_USD_CAP, DEFAULTS.proDeepseekWeeklyUsdCap, "PRO_DEEPSEEK_WEEKLY_USD_CAP"),
+    proOpenModelsMultiplier: proMultiplier(env.PRO_OPEN_MODELS_MULTIPLIER),
     primaryUpstream: upstream(env.PRIMARY_UPSTREAM),
     openaiApiKey: text(env.OPENAI_API_KEY),
     openaiFirstByteTimeoutSeconds: timeoutSeconds(env.OPENAI_FIRST_BYTE_TIMEOUT_SECONDS, DEFAULTS.openaiFirstByteTimeoutSeconds, "OPENAI_FIRST_BYTE_TIMEOUT_SECONDS"),
@@ -729,6 +725,20 @@ function multiplier(value: unknown): number {
   if (!Number.isFinite(parsed) || parsed < 0.5 || parsed > 5) throw new ConfigError(`TOPUP_USAGE_MULTIPLIER must be a number from 0.5 to 5 (got "${raw}").`);
   return parsed;
 }
+
+/** PRO_OPEN_MODELS_MULTIPLIER: a number from 1 to 100 (default 4). */
+function proMultiplier(value: unknown): number {
+  const raw = text(value);
+  if (raw === undefined) return DEFAULTS.proOpenModelsMultiplier;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < PRO_MULTIPLIER_MIN || parsed > PRO_MULTIPLIER_MAX) {
+    throw new ConfigError(`PRO_OPEN_MODELS_MULTIPLIER must be a number from ${PRO_MULTIPLIER_MIN} to ${PRO_MULTIPLIER_MAX} (got "${raw}").`);
+  }
+  return parsed;
+}
+
+export const PRO_MULTIPLIER_MIN = 1;
+export const PRO_MULTIPLIER_MAX = 100;
 
 /** PRO_VALUE_LINE: one short sentence, at most 80 characters. */
 function valueLine(value: unknown): string {

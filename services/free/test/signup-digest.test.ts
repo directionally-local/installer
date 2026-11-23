@@ -192,6 +192,7 @@ describe("daily digest", () => {
         "Free credit spent: $0.75 (Luminal credit)",
         "Luminal credit left: $1,980.25 of $2,000",
         "Paid: $3 from 1 payment",
+        "dl Pro: 0 saw the prompt, 0 clicked Upgrade, 0 paid, 0 cancelled (total active Pro: 0)",
         "Installs: 3 finished, 1 failed",
         "  linux arm64 server: 2 ok, 1 failed",
         "  darwin arm64 laptop: 1 ok, 0 failed",
@@ -236,7 +237,7 @@ describe("daily digest", () => {
     assert.match(text, /^dl free tier: daily digest for Tue 2026-11-03 \(UTC\)\./);
     assert.match(text, /\nNew sign-ups: 0\nActive people: 0\nRequests: 0\n/);
     assert.match(text, /\nInstalls: 0 finished, 0 failed\n/);
-    assert.match(text, /\nPaid: none\n/);
+    assert.match(text, /\nPaid: none\ndl Pro: 0 saw the prompt, 0 clicked Upgrade, 0 paid, 0 cancelled \(total active Pro: 0\)\n/);
     assert.match(text, /\nQueue: 0 waiting\nFree tokens: on$/);
   });
 

@@ -10,7 +10,7 @@ import { ADMIN_ID, allowServerKeys, completion, createService, luminalUsage, MOD
 
 const MINUTE = 60_000;
 const SECRET = "whsec_test_0123456789abcdef";
-const BILLING = { STRIPE_SECRET_KEY: "sk_test_fake", STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_PRICE_PRO: "price_pro123", STRIPE_PRICE_TOPUP: "price_topup123" };
+const BILLING = { STRIPE_SECRET_KEY: "sk_test_fake", STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_PRICE_TOPUP: "price_topup123" };
 
 /** A paid Pro subscription, through Stripe's webhook (as billing tests do). */
 async function goPro(service: Service, githubId: number): Promise<void> {
@@ -276,11 +276,11 @@ describe("Claude Code's share of the allowance", () => {
   });
 
   it("exempts Pro: a subscriber gets the whole Pro allowance in Claude Code", async () => {
-    const { service, token } = await world({ ...BILLING, PRO_DEEPSEEK_WEEKLY_USD_CAP: "1" });
+    const { service, token } = await world({ ...BILLING, DEEPSEEK_WEEKLY_USD_CAP: "0.25", PRO_OPEN_MODELS_MULTIPLIER: "4" });
     await goPro(service, 100);
     const { key } = await mint(service, token);
     service.setLuminal(() => completion(luminalUsage(10_000_000, 0)));
-    // $0.35 a request against Pro's $1: past half of it, still served.
+    // $0.35 a request against Pro's $1 (4 x the free $0.25): past half of it, still served.
     assert.deepEqual([(await messages(service, key)).status, (await messages(service, key)).status, (await messages(service, key)).status], [200, 200, 200]);
     const me = (await (await service.request("GET", "/v1/me", { token })).json()) as { plan: string };
     assert.equal(me.plan, "pro");
@@ -318,7 +318,7 @@ describe("Claude Code's share of the allowance", () => {
     assert.equal(ended.status, 402);
     const error = await anthropicError(ended);
     assert.deepEqual([error.type, error.code], ["billing_error", "trial_ended"]);
-    assert.match(error.message, /Keep going with dl Pro for \$3\.99 a month, or add a top-up: run dl and type \/upgrade$/);
+    assert.match(error.message, /Keep going with dl Pro for \$7 a month, or add a top-up: run dl and type \/upgrade$/);
   });
 });
 

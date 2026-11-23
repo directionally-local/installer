@@ -10,6 +10,7 @@ import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
 import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, LevelSignalRow, PersonRow, PersonState, PersonStatus, RequestRecord, SpendSummary, UseClient } from "./directory-object.js";
+import type { ProFunnelStep } from "./pro-funnel.js";
 import { createCheckout, createPortal, githubIdFrom, isMissingCustomer, idOf, invoicePeriodEnd, invoiceSubscription, periodEnd, proState, StripeError, verifyWebhook, type Product, type StripeEvent } from "./stripe.js";
 import { accessRequestAlert, deliverAlerts, isHeaderSafeAddress, pauseAlert, sendEmail, type Alert, type EmailBinding, type ServingContext, type UpstreamOutcome } from "./alerts.js";
 import { policyOf, waitText } from "./queue.js";
@@ -43,6 +44,8 @@ import {
   UPSTREAM_UNAVAILABLE_MESSAGE,
   queuedMessage,
   gptLimitMessage,
+  proPromptMessage,
+  proPromptText,
   quotaMessage,
   signInRefusal,
   trialEndedMessage,
@@ -265,12 +268,11 @@ export interface Env {
   ALERT_EMAIL_FROM?: string;
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
-  STRIPE_PRICE_PRO?: string;
   STRIPE_PRICE_TOPUP?: string;
   BILLING_SUCCESS_URL?: string;
   BILLING_CANCEL_URL?: string;
   BILLING_PORTAL_RETURN_URL?: string;
-  PRO_WEEKLY_USD_CAP?: string;
+  PRO_OPEN_MODELS_MULTIPLIER?: string;
   PRIMARY_UPSTREAM?: string;
   /** A secret. Without it, OpenRouter serves every request. Never logged. */
   LUMINAL_API_KEY?: string;
@@ -556,14 +558,22 @@ function levelLimits(config: FreeConfig, bonusTokens: number, level: Level, batc
   const base = {
     weeklyTokens: config.weeklyTokens,
     proTokensPerWeek: config.offers.pro.tokensPerWeek,
-    proUsdPerWeek: config.proWeeklyUsdCap,
-    proDeepseekUsdPerWeek: config.proDeepseekWeeklyUsdCap ?? null,
+    proDeepseekUsdPerWeek: proDeepseekWeeklyUsd(config),
   };
   if (served === "full") return { ...base, weeklyUsd: config.perPersonWeeklyUsdCap, deepseekWeeklyUsd: config.deepseekWeeklyUsdCap ?? null, level: "full", ...(bonusTokens > 0 ? { bonusTokens } : {}) };
   if (served === "basic") return { ...base, weeklyUsd: config.basicWeeklyUsdCap, deepseekWeeklyUsd: config.basicDeepseekWeeklyUsdCap ?? null, level: "basic", levelTokens: config.basicWeeklyTokens };
   // A batch-flagged Starter account gets nothing of either.
   if (batchFlagged) return { ...base, weeklyUsd: 0, deepseekWeeklyUsd: 0, level: "starter", levelTokens: 0 };
   return { ...base, weeklyUsd: config.starterWeeklyUsdCap, deepseekWeeklyUsd: config.starterDeepseekWeeklyUsdCap ?? null, level: "starter", levelTokens: config.starterWeeklyTokens };
+}
+
+/**
+ * Pro's weekly open-models (DeepSeek) budget: `proOpenModelsMultiplier` times a Full free
+ * account's (`deepseekWeeklyUsdCap`); null (no cap) when the free one has none.
+ */
+export function proDeepseekWeeklyUsd(config: Pick<FreeConfig, "deepseekWeeklyUsdCap" | "proOpenModelsMultiplier">): number | null {
+  if (config.deepseekWeeklyUsdCap === undefined) return null;
+  return Math.round(config.deepseekWeeklyUsdCap * config.proOpenModelsMultiplier * 1e6) / 1e6;
 }
 
 /**
@@ -963,11 +973,49 @@ function proOffer(config: FreeConfig, pro: FreeConfig["offers"]["pro"]) {
     priceUsdMonthly: pro.priceUsdMonthly,
     price: `${usdLabel(pro.priceUsdMonthly)}/month`,
     tokensPerWeek: pro.tokensPerWeek,
-    // Pro's GPT-6 budget (the field older clients read) and its DeepSeek budget.
-    usdPerWeek: config.proWeeklyUsdCap ?? null,
-    deepseekUsdPerWeek: config.proDeepseekWeeklyUsdCap ?? null,
+    // Pro's DeepSeek budget (`openModelsMultiplier` times the free one). Pro adds no GPT-6:
+    // `usdPerWeek`, the GPT-6 field older clients read, is the free plan's.
+    usdPerWeek: config.perPersonWeeklyUsdCap ?? null,
+    deepseekUsdPerWeek: proDeepseekWeeklyUsd(config),
+    openModelsMultiplier: config.proOpenModelsMultiplier,
     valueLine: pro.valueLine,
   };
+}
+
+/** Where [Upgrade] goes outside Autopilot: dl.new/account (the web sign-up's origin), which starts Pro's checkout. */
+function upgradeUrl(c: Ctx): string {
+  return `${webOrigin(c)}/account`;
+}
+
+/**
+ * dl Pro's prompt (phase 1) while Pro is offered: `view` is what a refusal or /v1/me carries
+ * (`proPrompt`: the exact text, the price, and the Upgrade link), `message` the one-line version.
+ * Null while Pro isn't offered (`proOffered` off).
+ */
+function proPromptFor(c: Ctx, config: FreeConfig): { view: { text: string; price: string; upgradeUrl: string }; message: string } | null {
+  if (!config.proOffered) return null;
+  const price = `${usdLabel(config.offers.pro.priceUsdMonthly)}/month`;
+  const url = upgradeUrl(c);
+  return { view: { text: proPromptText(price), price, upgradeUrl: url }, message: proPromptMessage(price, url) };
+}
+
+/** Whether a free account's week of open models (DeepSeek) is used up: its dollar budget, or its tokens on a smaller level. */
+function openModelsUsedUp(allowance: Allowance): boolean {
+  const budget = allowance.budgets.deepseek;
+  const pool = allowance.pools.deepseek;
+  return (budget.usdPerWeek !== null && budget.spentUsd >= budget.usdPerWeek) || (pool.tokensPerWeek !== null && (pool.remaining ?? 1) <= 0);
+}
+
+/** The prompt for an account page or `dl status`: free (not on the trial, not an admin), its open models used up, Pro offered. */
+function accountProPrompt(c: Ctx, config: FreeConfig, githubId: number, allowance: Allowance) {
+  if (c.config.adminGithubIds.has(githubId) || allowance.plan !== "free" || allowance.trial || !openModelsUsedUp(allowance)) return null;
+  return proPromptFor(c, config);
+}
+
+/** Counts a step of dl Pro's funnel (pro-funnel.ts), once per person a day; never fails the request. */
+async function countPro(c: Ctx, step: ProFunnelStep, githubId: number): Promise<void> {
+  if (c.config.adminGithubIds.has(githubId)) return;
+  await bestEffort(`pro funnel: ${step} not counted`, () => directory(c).countProStep({ step, githubId, now: c.now() }));
 }
 
 function linkFor(config: FreeConfig, person: PersonState | undefined): string | null {
@@ -1909,6 +1957,15 @@ async function me(c: Ctx): Promise<Response> {
      * together). Null for everyone else (grandfathered accounts keep the weekly free allowance).
      */
     trial: trialView(allowance),
+    /**
+     * dl Pro's prompt, when this free account's week of open models is used up and Pro is
+     * offered: `{text, price, upgradeUrl}`, else null. `?prompt=shown` (dl status) counts it as seen.
+     */
+    proPrompt: await (async () => {
+      const prompt = queue ? null : accountProPrompt(c, config, identity.githubId, allowance);
+      if (prompt && c.url.searchParams.get("prompt") === "shown") await countPro(c, "seen", identity.githubId);
+      return prompt?.view ?? null;
+    })(),
   });
 }
 
@@ -1922,7 +1979,8 @@ function trialView(allowance: Allowance): { tokens: number; used: number; remain
 
 function billingReady(c: Ctx, product?: Product): Response | undefined {
   const { stripe } = c.config;
-  const price = product === "pro" ? stripe.pricePro : product === "topup" ? stripe.priceTopup : "n/a";
+  // Pro is priced inline (stripe.ts proPriceData): only the top-up needs a Stripe Price id.
+  const price = product === "topup" ? stripe.priceTopup : "n/a";
   if (!stripe.secretKey || !price) return apiError(503, "billing_unavailable", "Paid plans aren't available yet. Your own key and the free tier still work.");
   return undefined;
 }
@@ -1969,6 +2027,8 @@ async function checkoutFor(c: Ctx, identity: Identity, product: Product, quantit
   if (allowance.status === "suspended") return apiError(403, "suspended", "This account is suspended from the free tier.");
   if (product === "pro" && allowance.plan === "pro") return apiError(409, "already_pro", "This account already has Pro. Manage it from the billing portal.");
   if (product === "pro" && !config.proOffered) return proNotOffered();
+  // dl Pro's funnel: an Upgrade click (from Autopilot's /upgrade, the limit's screen, or dl.new).
+  if (product === "pro") await countPro(c, "clicked", identity.githubId);
   const billing = await person.billing();
   try {
     const session = await createCheckout(c.fetch, {
@@ -1978,6 +2038,7 @@ async function checkoutFor(c: Ctx, identity: Identity, product: Product, quantit
       login: identity.login,
       customerId: billing.customerId,
       idempotencyKey: crypto.randomUUID(),
+      proPriceCents: Math.round(config.offers.pro.priceUsdMonthly * 100),
       ...(product === "topup" ? { topup: { quantity, minQuantity: range.minQuantity, maxQuantity: range.maxQuantity } } : {}),
     });
     return json({ url: session.url });
@@ -2033,9 +2094,14 @@ async function applyBillingEvent(c: Ctx, event: StripeEvent): Promise<string> {
   const owner = async (...candidates: unknown[]) => githubIdFrom(...candidates) ?? (customerId ? await directory(c).customerOwner(customerId) : undefined);
   const subscription = async (githubId: number, input: { subscriptionId: string; state: "active" | "past_due" | "canceled"; periodEnd: number | null | undefined; cancelAtPeriodEnd?: boolean }) => {
     const person = account(c, githubId);
+    const before = await person.billing();
     const applied = await person.applySubscription({ ...input, ...(customerId ? { customerId } : {}), eventAt });
     if (!applied) return "stale";
     const state = await person.billing();
+    // dl Pro's funnel: a cancellation is counted once, when the subscription is first set to end
+    // (cancel at period end, from the Customer Portal) or ends without that.
+    const ending = (s: { subscriptionId: string | null; proState: string; cancelAtPeriodEnd: boolean }) => s.subscriptionId === input.subscriptionId && (s.proState === "canceled" || s.cancelAtPeriodEnd);
+    if (ending(state) && !ending(before)) await countPro(c, "cancelled", githubId);
     await directory(c).mirrorSubscription({ githubId, state: state.proState, periodEnd: state.periodEnd, eventAt });
     return `pro_${input.state}`;
   };
@@ -2069,7 +2135,10 @@ async function applyBillingEvent(c: Ctx, event: StripeEvent): Promise<string> {
       }
       const subscriptionId = idOf(object.subscription);
       if (!subscriptionId) return "ignored";
-      return subscription(githubId, { subscriptionId, state: "active", periodEnd: undefined });
+      const outcome = await subscription(githubId, { subscriptionId, state: "active", periodEnd: undefined });
+      // dl Pro's funnel: paid (each completed Pro checkout is one event, handled once).
+      if (outcome !== "stale") await countPro(c, "paid", githubId);
+      return outcome;
     }
     case "invoice.paid":
     case "invoice.payment_failed": {
@@ -2827,17 +2896,29 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
           quota,
         );
       }
+      // dl Pro's prompt: a free account's week of open models (DeepSeek) is used up, Pro is offered.
+      const proPrompt =
+        !isAdmin && reservation.allowance.plan === "free" && !reservation.allowance.trial && (reservation.family === "deepseek" || !reservation.deepseekLeft) ? proPromptFor(c, gate.config) : null;
+      if (proPrompt) await countPro(c, "seen", identity.githubId);
       // A basic or Starter week used up: what the level gets, when it resets, and the ways to more.
       if (!isAdmin && reservation.allowance.plan === "free" && (level === "basic" || level === "starter")) {
         return apiError(
           402,
           `${level}_limit`,
-          limitLine(level, limits.levelTokens ?? 0, limits.weeklyUsd, limits.deepseekWeeklyUsd ?? undefined),
-          { resetsAt, reason: reservation.reason, request: ACCESS_REQUEST_PATH, offers: offers(gate.config), referralLink: link },
+          proPrompt
+            ? `${proPrompt.message}, or type /request in dl and tell us what you're building.`
+            : limitLine(level, limits.levelTokens ?? 0, limits.weeklyUsd, limits.deepseekWeeklyUsd ?? undefined),
+          { resetsAt, reason: reservation.reason, request: ACCESS_REQUEST_PATH, offers: offers(gate.config), referralLink: link, ...(proPrompt ? { proPrompt: proPrompt.view } : {}) },
           quota,
         );
       }
-      return apiError(402, "quota_exceeded", quotaMessage(reservation.reason, resetsAt, reservation.allowance.plan), { resetsAt, reason: reservation.reason, offers: offers(gate.config), referralLink: link }, quota);
+      return apiError(
+        402,
+        "quota_exceeded",
+        proPrompt ? proPrompt.message : quotaMessage(reservation.reason, resetsAt, reservation.allowance.plan),
+        { resetsAt, reason: reservation.reason, offers: offers(gate.config), referralLink: link, ...(proPrompt ? { proPrompt: proPrompt.view } : {}) },
+        quota,
+      );
     }
     if (reservation.code === "trial_ended") {
       return apiError(402, "trial_ended", trialEndedMessage(reservation.trial.tokens, gate.config.proOffered ? usdLabel(gate.config.offers.pro.priceUsdMonthly) : null), { trial: trialView(reservation.allowance), offers: offers(gate.config) }, quota);
@@ -4289,14 +4370,25 @@ async function adminMetrics(c: Ctx): Promise<Response> {
   const from = parse("from") ?? to - 27 * DAY_MS;
   if (Number.isNaN(to) || Number.isNaN(from) || from > to) return apiError(400, "invalid_request", "from and to must be ISO dates with from <= to.");
   if (to - from > 366 * DAY_MS) return apiError(400, "invalid_request", "The range can't be longer than 366 days.");
-  const [metrics, refusals, noGithub, guard] = await Promise.all([
+  const [metrics, refusals, noGithub, guard, pro] = await Promise.all([
     directory(c).metrics({ from, to, now, adminIds: [...c.config.adminGithubIds] }),
     directory(c).refusals(Math.floor(from / DAY_MS), Math.floor(to / DAY_MS)),
     directory(c).noGithubDays({ from: Math.floor(from / DAY_MS) * DAY_MS, until: Math.floor(to / DAY_MS) * DAY_MS + DAY_MS }),
     // GPT-6's pre-send checks per UTC day, and how many non-admins its trust gate would serve now.
     directory(c).gpt6GuardMetrics({ from, to: to + DAY_MS, now, adminIds: [...c.config.adminGithubIds] }),
+    // dl Pro's funnel per UTC day (people who saw the prompt, clicked Upgrade, paid, cancelled) and Pro now.
+    directory(c).proFunnel({ from: Math.floor(from / DAY_MS) * DAY_MS, until: Math.floor(to / DAY_MS) * DAY_MS + DAY_MS, adminIds: [...c.config.adminGithubIds] }),
   ]);
-  return json({ ...metrics, refusals: refusalsView(refusals), noGithub, gpt6Guard: guard.days, gpt6Trusted: guard.trustedPeople, generatedAt: new Date(now).toISOString(), today: isoDay(now) });
+  return json({
+    ...metrics,
+    refusals: refusalsView(refusals),
+    noGithub,
+    gpt6Guard: guard.days,
+    gpt6Trusted: guard.trustedPeople,
+    proFunnel: { days: pro.days, activePro: pro.activePro },
+    generatedAt: new Date(now).toISOString(),
+    today: isoDay(now),
+  });
 }
 
 // ─── Admin dashboard (browser) ──────────────────────────────────────────────
@@ -4488,8 +4580,8 @@ async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, no
       starterWeeklyUsd: config.starterWeeklyUsdCap ?? null,
       starterDeepseekWeeklyUsd: config.starterDeepseekWeeklyUsdCap ?? null,
       ...(config.allocator === "on" ? { allocatorStartTokens: config.allocatorStartTokens } : {}),
-      proWeeklyUsd: config.proWeeklyUsdCap ?? null,
-      proDeepseekWeeklyUsd: config.proDeepseekWeeklyUsdCap ?? null,
+      proOpenModelsMultiplier: config.proOpenModelsMultiplier,
+      proDeepseekWeeklyUsd: proDeepseekWeeklyUsd(config),
       proPriceUsdMonthly: config.offers.pro.priceUsdMonthly,
       proOffered: config.proOffered,
     },
@@ -4874,6 +4966,7 @@ const WEB_ROUTES: Record<string, { method: "GET" | "POST"; handle: (c: Ctx) => P
   "/web/email": { method: "POST", handle: webEmail },
   "/web/choice": { method: "POST", handle: webChoice },
   "/web/checkout": { method: "POST", handle: webCheckout },
+  "/web/portal": { method: "POST", handle: webPortal },
   "/web/install-code": { method: "POST", handle: webInstallCode },
 };
 
@@ -4930,6 +5023,16 @@ async function webMe(c: Ctx): Promise<Response> {
     /** The free weekly tokens, for an account not on the trial (grandfathered); 0 when there are none. */
     weeklyTokens: allowance.trial ? 0 : allowance.tokensPerWeek,
     offers: offers(config),
+    /** Pro's state for the account page: when it renews or ends, and whether it was set to end. */
+    pro: allowance.plan === "pro" || allowance.proPeriodEnd !== null
+      ? { periodEnd: allowance.proPeriodEnd === null ? null : new Date(allowance.proPeriodEnd).toISOString(), cancelAtPeriodEnd: allowance.proCancelAtPeriodEnd }
+      : null,
+    /** dl Pro's prompt (`{text, price, upgradeUrl}`) when the week's open models are used up; dl.new/account shows it (counted as seen). */
+    proPrompt: await (async () => {
+      const prompt = accountProPrompt(c, config, identity.githubId, allowance);
+      if (prompt) await countPro(c, "seen", identity.githubId);
+      return prompt?.view ?? null;
+    })(),
     /**
      * The invite link and what a referral earns, so the page can describe it. `kind`: "trial" for
      * an account on the trial (each friend who becomes weekly active adds `bonusTokens` once to both
@@ -4984,9 +5087,29 @@ async function webCheckout(c: Ctx): Promise<Response> {
   if (found instanceof Response) return found;
   // Refused before it counts as a Pro checkout on the funnel (checkoutFor checks again, after `already_pro`).
   if (!(await runtime(c)).config.proOffered) return proNotOffered();
-  await countWebStep(c, "plan_pro");
-  const page = c.config.webSignupUrl;
+  // {return: "account"}: from dl.new/account, which Checkout comes back to; else the sign-up page.
+  const body = (await readJson(c)) ?? {};
+  const fromAccount = body.return === "account";
+  if (!fromAccount) await countWebStep(c, "plan_pro");
+  const page = fromAccount ? upgradeUrl(c) : c.config.webSignupUrl;
   return checkoutFor(c, found.identity, "pro", c.config.offers.topup.minQuantity, { ...c.config.stripe, successUrl: `${page}?checkout=done`, cancelUrl: `${page}?checkout=cancel` });
+}
+
+/** POST /web/portal → {url}: Stripe's Customer Portal for dl.new/account (manage or cancel Pro), coming back there. */
+async function webPortal(c: Ctx): Promise<Response> {
+  const found = await webPerson(c);
+  if (found instanceof Response) return found;
+  const unavailable = billingReady(c);
+  if (unavailable) return unavailable;
+  const billing = await account(c, found.identity.githubId).billing();
+  if (!billing.customerId) return apiError(404, "no_billing_account", "There is nothing to manage yet: this account hasn't bought anything.");
+  try {
+    return json(await createPortal(c.fetch, { config: { ...c.config.stripe, portalReturnUrl: upgradeUrl(c) }, customerId: billing.customerId }));
+  } catch (error) {
+    if (isMissingCustomer(error)) return apiError(404, "no_billing_account", "There is nothing to manage yet: this account hasn't bought anything.");
+    if (error instanceof StripeError) return apiError(502, "billing_error", "Stripe couldn't open the billing portal. Try again in a minute.");
+    throw error;
+  }
 }
 
 /**

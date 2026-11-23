@@ -7,8 +7,6 @@
  * Trusted is any of:
  *
  *   - an admin;
- *   - someone who has paid: a Pro payment or a top-up (the Directory's `payments`), or an active
- *     Pro subscription;
  *   - someone who earned it, all of:
  *       level "full", and not flagged by the creation-batch check;
  *       active (a request or an event) on at least TRUST_MIN_WEEKS distinct UTC weeks;
@@ -18,7 +16,8 @@
  *         TRUST_MIN_TURNS requests spread over at least TRUST_MIN_SPREAD_MS (`trust_sessions`);
  *       no high-risk use label and no moderation "block" or "watch" in TRUST_CLEAN_DAYS days.
  *
- * Every signal comes from the service's own records, never from Autopilot's events alone. A
+ * Paying is not a trust signal: a Pro subscription or a top-up never unlocks GPT-6 (dl Pro buys
+ * more open models, not GPT-6). Every signal comes from the service's own records, never from Autopilot's events alone. A
  * blocked or suspended account is never trusted. The answer is cached per person for an hour
  * (`gpt6_trust`); a high-risk label or a block/watch verdict newer than the cached answer
  * drops a cached trust at once.
@@ -39,11 +38,11 @@ export const UNTRUSTED_GPT6_MESSAGE = "GPT-6 on the free tier is for established
 export const TRUST_REASON = "trust";
 
 /**
- * Why someone is or isn't trusted. Trusted: "admin", "paid" or "earned". Not trusted, every
+ * Why someone is or isn't trusted. Trusted: "admin" or "earned". Not trusted, every
  * check that fails: "inactive" (blocked or suspended), "level", "batch_flagged", "weeks",
  * "multi_turn", "high_risk_label", "moderation".
  */
-export type TrustReason = "admin" | "paid" | "earned" | "unknown" | "inactive" | "level" | "batch_flagged" | "weeks" | "multi_turn" | "high_risk_label" | "moderation";
+export type TrustReason = "admin" | "earned" | "unknown" | "inactive" | "level" | "batch_flagged" | "weeks" | "multi_turn" | "high_risk_label" | "moderation";
 
 export interface Trust {
   trusted: boolean;
@@ -56,7 +55,6 @@ export interface TrustFacts {
   status: string;
   level: string;
   batchFlagged: boolean;
-  paid: boolean;
   activeWeeks: number;
   multiTurn: boolean;
   highRiskLabel: boolean;
@@ -68,7 +66,6 @@ export function trustOf(facts: TrustFacts, isAdmin = false): Trust {
   if (isAdmin) return { trusted: true, reasons: ["admin"] };
   if (!facts.known) return { trusted: false, reasons: ["unknown"] };
   if (facts.status !== "active") return { trusted: false, reasons: ["inactive"] };
-  if (facts.paid) return { trusted: true, reasons: ["paid"] };
   const failing: TrustReason[] = [];
   if (facts.level !== "full") failing.push("level");
   if (facts.batchFlagged) failing.push("batch_flagged");
@@ -142,7 +139,7 @@ export function trustFacts(sql: Sql, now: number, githubIds?: readonly number[])
   for (const row of sql
     .exec<{ github_id: number; status: string; level: string; batch_flag: number }>(`SELECT github_id, status, level, batch_flag FROM people WHERE 1 = 1${filter("github_id")}`)
     .toArray()) {
-    out.set(row.github_id, { known: true, status: row.status, level: row.level, batchFlagged: row.batch_flag === 1, paid: false, activeWeeks: 0, multiTurn: false, highRiskLabel: false, moderation: false });
+    out.set(row.github_id, { known: true, status: row.status, level: row.level, batchFlagged: row.batch_flag === 1, activeWeeks: 0, multiTurn: false, highRiskLabel: false, moderation: false });
   }
   const each = (ids: Iterable<{ github_id: number }>, set: (facts: TrustFacts, row: never) => void) => {
     for (const row of ids) {
@@ -150,8 +147,6 @@ export function trustFacts(sql: Sql, now: number, githubIds?: readonly number[])
       if (facts) set(facts, row as never);
     }
   };
-  each(sql.exec<{ github_id: number }>(`SELECT DISTINCT github_id FROM payments WHERE kind IN ('pro', 'topup')${filter("github_id")}`).toArray(), (facts) => (facts.paid = true));
-  each(sql.exec<{ github_id: number }>(`SELECT github_id FROM subscriptions WHERE state = 'active'${filter("github_id")}`).toArray(), (facts) => (facts.paid = true));
   each(
     sql.exec<{ github_id: number; weeks: number }>(`SELECT github_id, COUNT(DISTINCT ${WEEK_INDEX("day")}) AS weeks FROM daily_activity WHERE (requests > 0 OR events > 0)${filter("github_id")} GROUP BY github_id`).toArray(),
     (facts, row: { weeks: number }) => (facts.activeWeeks = row.weeks),
@@ -180,7 +175,7 @@ export function trustFacts(sql: Sql, now: number, githubIds?: readonly number[])
   return out;
 }
 
-const UNKNOWN: TrustFacts = { known: false, status: "", level: "", batchFlagged: false, paid: false, activeWeeks: 0, multiTurn: false, highRiskLabel: false, moderation: false };
+const UNKNOWN: TrustFacts = { known: false, status: "", level: "", batchFlagged: false, activeWeeks: 0, multiTurn: false, highRiskLabel: false, moderation: false };
 
 /** Whether anything that drops trust happened to `githubId` at or after `at`. */
 function droppedSince(sql: Sql, githubId: number, at: number): boolean {
@@ -194,7 +189,9 @@ function droppedSince(sql: Sql, githubId: number, at: number): boolean {
 /** One person's trust (not an admin: the caller checks that), from the hour's cache or worked out and cached. */
 export function personTrust(sql: Sql, githubId: number, now: number): Trust {
   const cached = sql.exec<{ trusted: number; reasons: string; computed_at: number }>("SELECT trusted, reasons, computed_at FROM gpt6_trust WHERE github_id = ?", githubId).toArray()[0];
-  if (cached && now - cached.computed_at < TRUST_CACHE_MS && now >= cached.computed_at && !(cached.trusted === 1 && droppedSince(sql, githubId, cached.computed_at))) {
+  // A cached "paid" (from before paying stopped counting) is worked out again.
+  const stale = cached !== undefined && cached.reasons.includes('"paid"');
+  if (cached && !stale && now - cached.computed_at < TRUST_CACHE_MS && now >= cached.computed_at && !(cached.trusted === 1 && droppedSince(sql, githubId, cached.computed_at))) {
     return { trusted: cached.trusted === 1, reasons: JSON.parse(cached.reasons) as TrustReason[] };
   }
   const trust = trustOf(trustFacts(sql, now, [githubId]).get(githubId) ?? UNKNOWN);

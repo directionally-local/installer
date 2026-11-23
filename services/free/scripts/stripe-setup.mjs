@@ -6,12 +6,14 @@
  *     [--webhook https://free.directionallylocal.com/v1/billing/webhook]
  *
  * Creates, through Stripe's API:
- *   - Product "dl Pro" with a Price of $3.99 a month (recurring), tax behaviour exclusive
  *   - Product "dl top-up" with a one-time Price of $1.00 (bought 2 to 20 at a time), tax behaviour exclusive
  *   - with --webhook: an endpoint for checkout.session.completed, invoice.paid,
  *     invoice.payment_failed, customer.subscription.updated and customer.subscription.deleted
  *
- * Prints the values to set: STRIPE_PRICE_PRO, STRIPE_PRICE_TOPUP and, with --webhook,
+ * dl Pro needs nothing here: its Checkout prices it inline (stripe.ts proPriceData, $7 a month from
+ * PRO_PRICE_USD_MONTHLY), so no Pro Product or Price is created ahead of time.
+ *
+ * Prints the values to set: STRIPE_PRICE_TOPUP and, with --webhook,
  * STRIPE_WEBHOOK_SECRET (shown by Stripe only at creation). Refuses a live key: for live mode,
  * repeat the same steps in the Dashboard (or run this with a live key after removing the check,
  * deliberately). Each run creates new objects; run it once.
@@ -51,13 +53,6 @@ async function stripe(path, body) {
 
 // txcd_10000000: "General - Electronically Supplied Services". Change it in the Dashboard if
 // your tax adviser prefers a SaaS code.
-const pro = await stripe("/v1/products", {
-  name: "dl Pro",
-  description: "More usage every week on the Directionally Local managed tier, every model.",
-  tax_code: "txcd_10000000",
-  metadata: { product: "pro" },
-  default_price_data: { currency: "usd", unit_amount: 399, recurring: { interval: "month" }, tax_behavior: "exclusive" },
-});
 const topup = await stripe("/v1/products", {
   name: "dl top-up",
   description: "Each $1 adds $1.25 of usage, spent after the weekly allowance, valid 90 days.",
@@ -66,7 +61,6 @@ const topup = await stripe("/v1/products", {
   default_price_data: { currency: "usd", unit_amount: 100, tax_behavior: "exclusive" },
 });
 
-console.log(`STRIPE_PRICE_PRO=${pro.default_price}`);
 console.log(`STRIPE_PRICE_TOPUP=${topup.default_price}`);
 
 if (webhookUrl) {

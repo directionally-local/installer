@@ -124,6 +124,8 @@ describe("the basic level", () => {
     const { access_token: token } = await service.signIn(belowBar(100, OLD));
     // GPT-6's tokens are too few for a request, and DeepSeek's dollars are spent.
     await service.request("POST", "/admin/people/100/grant", { token: admin, body: { deepseekSpentUsdThisWeek: 8 } });
+    // With Pro not offered, the plain line; with it offered, dl Pro's prompt (below).
+    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { proOffered: false } })).status, 200);
     const response = await chat(service, token, "gpt-6-luna");
     assert.equal(response.status, 402);
     const error = ((await response.json()) as { error: Record<string, any> }).error;
@@ -135,6 +137,14 @@ describe("the basic level", () => {
     );
     assert.doesNotMatch(error.message, HIDDEN);
     assert.doesNotMatch(error.message, LEVEL_NAMES);
+    assert.equal(error.proPrompt, undefined);
+    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { proOffered: null } })).status, 200);
+    const offered = ((await (await chat(service, token, "gpt-6-luna")).json()) as { error: Record<string, any> }).error;
+    assert.equal(offered.code, "basic_limit");
+    assert.equal(offered.request, "/v1/access-request");
+    assert.match(offered.message, /^You've hit this week's free limit\. dl Pro: \$7\/month for higher limits and early access to new models\. Upgrade: https:\/\/dl\.new\/account, or type \/request in dl/);
+    assert.equal(offered.proPrompt.upgradeUrl, "https://dl.new/account");
+    assert.doesNotMatch(offered.message, LEVEL_NAMES);
   });
 
   it("shows the free line and the invite field on the sign-in page, never the rule or the level's name", async () => {
@@ -205,7 +215,7 @@ describe("the Starter allowance", () => {
     assert.equal(error.code, "starter_limit");
     assert.equal(error.reason, "tokens");
     assert.equal(error.request, "/v1/access-request");
-    assert.match(error.message, /^You've used this week's free allowance \(every model, up to \$2 of GPT-6 and \$8 of DeepSeek a week\)\. It resets on Monday\./);
+    assert.match(error.message, /^You've hit this week's free limit\. dl Pro: \$7\/month for higher limits and early access to new models\. Upgrade: https:\/\/dl\.new\/account, or type \/request in dl/);
   });
 
   it("stops at the Starter dollar cap", async () => {

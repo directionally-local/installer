@@ -74,7 +74,7 @@ describe("two weekly budgets: accounting", () => {
     assert.equal(body.pools.sol.family, "gpt6");
     assert.equal(body.level, undefined);
     assert.equal(body.levelReason, undefined);
-    assert.equal(body.offers.pro.valueLine, "Lots of DeepSeek every week, plus more GPT-6.");
+    assert.equal(body.offers.pro.valueLine, "Higher limits and early access to new models.");
   });
 
   it("holds in-flight estimates per budget: GPT-6's full of estimates doesn't stop DeepSeek, and DeepSeek's don't count for GPT-6", async () => {
@@ -126,7 +126,7 @@ describe("two weekly budgets: refusals", () => {
       assert.equal(error.family, "gpt6");
       assert.equal(error.resetsAt, RESETS);
       assert.equal(error.alternative, DEEPSEEK);
-      assert.equal(error.offers.pro.price, "$3.99/month");
+      assert.equal(error.offers.pro.price, "$7/month");
       assert.doesNotMatch(error.message, /basic|starter/i);
     }
     assert.equal(service.calls.openai.length, 0, "nothing was forwarded");
@@ -157,7 +157,7 @@ describe("two weekly budgets: refusals", () => {
     const error = await errorOf(await chat(service, token, LUNA));
     assert.equal(error.code, "starter_limit");
     assert.doesNotMatch(error.message, /basic|starter/i);
-    assert.match(error.message, /^You've used this week's free allowance/);
+    assert.match(error.message, /^You've hit this week's free limit\. dl Pro/);
   });
 
   it("doesn't point at DeepSeek when nothing can serve it", async () => {
@@ -168,13 +168,13 @@ describe("two weekly budgets: refusals", () => {
 });
 
 describe("two weekly budgets: Pro, personal caps and creation batches", () => {
-  it("gives Pro $6 of GPT-6 and $40 of DeepSeek, and a gpt_limit without the Pro offer", async () => {
+  it("gives Pro the free plan's $2 of GPT-6 and 4x its DeepSeek ($32), and a gpt_limit without the Pro offer", async () => {
     const { service, token, admin } = await member();
     const account = service.account(100) as any;
     await account.applySubscription({ subscriptionId: "sub_1", state: "active", periodEnd: service.clock.now + 30 * 86_400_000, eventAt: 1 });
     const body = await me(service, token);
     assert.equal(body.plan, "pro");
-    assert.deepEqual(body.budgets, { gpt6: { usdPerWeek: 6, spentUsd: 0, tokensThisWeek: 0 }, deepseek: { usdPerWeek: 40, spentUsd: 0, tokensThisWeek: 0 } });
+    assert.deepEqual(body.budgets, { gpt6: { usdPerWeek: 2, spentUsd: 0, tokensThisWeek: 0 }, deepseek: { usdPerWeek: 32, spentUsd: 0, tokensThisWeek: 0 } });
     await service.request("POST", "/admin/people/100/grant", { token: admin, body: { spentUsdThisWeek: 6 } });
     const error = await errorOf(await chat(service, token, LUNA));
     assert.equal(error.code, "gpt_limit");

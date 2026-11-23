@@ -106,7 +106,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl -c`, `dl --continue` | On this computer, `autopilot -c`. On a server, reopen the latest conversation started from this folder there. |
 | `dl --from-claude-code` | Continue this folder's latest Claude Code conversation in a new Autopilot session on this computer (`autopilot --from-claude-code`): it asks first, then sends your last request, the files changed, commands run and Claude's last message as the first message. The transcript is read here and goes only to your model. |
 | `dl claude [ARGS]` | Your own Claude Code on dl's free tokens, served by DeepSeek. See [Claude Code with free tokens: dl claude](#claude-code-with-free-tokens-dl-claude). |
-| `dl opencode [ARGS]` | Your own OpenCode on dl's free tokens: DeepSeek V4.1 Flash, plus GPT-6 Luna, Sol and Astra for accounts that have used dl for a while or paid (otherwise GPT-6 needs your own key). See [OpenCode with free tokens: dl opencode](#opencode-with-free-tokens-dl-opencode). |
+| `dl opencode [ARGS]` | Your own OpenCode on dl's free tokens: DeepSeek V4.1 Flash, plus GPT-6 Luna, Sol and Astra for accounts that have used dl for a while (otherwise GPT-6 needs your own key). See [OpenCode with free tokens: dl opencode](#opencode-with-free-tokens-dl-opencode). |
 | `dl claude-code hook install` / `remove` | Opt in to a Claude Code hook that, when Claude Code stops on a usage or rate limit, shows `Claude Code hit its limit. Continue in dl: dl --from-claude-code` as a terminal notification and window title. Shows the entry and asks before adding it to `~/.claude/settings.json`, backs the file up first, and merges into it; `remove` takes out only dl's entry. |
 | `dl setup` | Set up or repair where background tasks run. Safe to re-run. `--identity FILE` names the SSH key to use. |
 | `dl new` | The same as bare `dl`: a new session here. Kept as an alias for a release. |
@@ -179,7 +179,7 @@ Every argument after `opencode` goes to it unchanged (`dl opencode run "fix the 
 - **The models:** the free tier serves DeepSeek V4.1 Flash, as provider "dl" in OpenCode's
   `/models` (the default, with its context and output limits); session titles use it too.
   GPT-6 Luna, GPT-6.1 Sol and GPT-6 Astra are listed there too for accounts that have used dl for
-  a while or paid; otherwise use them with your own OpenAI or OpenRouter key, as one of your own
+  a while (paying doesn't unlock them); otherwise use them with your own OpenAI or OpenRouter key, as one of your own
   providers. Your own providers stay in `/models`, on your own keys.
   Only listed models can be picked: `dl opencode -m dl/<a model the free tier doesn't serve>` fails
   inside OpenCode ("Model unavailable", or "UnknownError … Unexpected server error" in older

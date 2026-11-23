@@ -11,7 +11,7 @@ import { serverKeysCommand } from "./keys.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
 import { cancel, connect, describeError, laptopHome, laptopReady, pull, run, runs, servers, use, watch, type ReadyHere } from "./laptop/commands.js";
 import { autopilotAuth, autopilotOnPath, bundledAutopilotVersion, findAutopilot, type AutopilotAuth } from "./laptop/autopilot.js";
-import { FREE_TIER_PROVIDER, freeTierAccount, freeTierLine, type FreeTierAccount } from "./laptop/free-tier.js";
+import { FREE_TIER_PROVIDER, freeTierAccount, freeTierLine, freeTierProPrompt, type FreeTierAccount } from "./laptop/free-tier.js";
 import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
 import { claudeCommand } from "./laptop/claude.js";
 import { opencodeCommand } from "./laptop/opencode.js";
@@ -210,7 +210,7 @@ export interface MainOptions {
   /** Autopilot's active provider and whether it can start (`dl status`); asks the real one (`autopilot auth status`) unless replaced. */
   autopilotAuth?: () => Promise<AutopilotAuth | undefined>;
   /** The free tier account (`dl status`, when Autopilot uses the free tier); reads Autopilot's sign-in and GET /v1/me unless replaced. */
-  freeTierAccount?: () => Promise<FreeTierAccount | undefined>;
+  freeTierAccount?: (options?: { showsProPrompt?: boolean }) => Promise<FreeTierAccount | undefined>;
   /** `dl claude`; the real one unless replaced. */
   claude?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** `dl opencode`; the real one unless replaced. */
@@ -798,8 +798,11 @@ async function localAutopilot(options: MainOptions): Promise<{ setUp?: boolean; 
     const auth = await (options.autopilotAuth ?? (async () => autopilotAuth(await findAutopilot())))();
     if (!auth) return {};
     if (auth.active !== FREE_TIER_PROVIDER || !auth.setUp) return { setUp: auth.setUp };
-    const account = await (options.freeTierAccount ?? (() => freeTierAccount()))().catch(() => undefined);
-    return { setUp: true, ...(account ? { freeTier: freeTierLine(account) } : {}) };
+    const account = await (options.freeTierAccount ?? ((o) => freeTierAccount(o)))({ showsProPrompt: true }).catch(() => undefined);
+    if (!account) return { setUp: true };
+    // dl Pro's prompt, when the service sent one, on the next line under the account (aligned with it).
+    const prompt = freeTierProPrompt(account);
+    return { setUp: true, freeTier: prompt ? `${freeTierLine(account)}\n${" ".repeat(13)}${prompt}` : freeTierLine(account) };
   } catch {
     return {};
   }
