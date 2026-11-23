@@ -9,14 +9,15 @@ import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
 import { palette } from "../ui.js";
 
 /**
- * Another coding agent on the free tier, launched by dl (`dl claude`, `dl opencode`, `dl pi`). The flow is
+ * Another coding agent on the free tier, launched by dl (`dl claude`, `dl opencode`, `dl pi`, `dl t3`). The flow is
  * the same for each; what differs (the binary, how it is told where the free tier is) is the
  * agent's `HarnessLaunch`.
  *
  * 1. Free tier sign-in: Autopilot's (refreshed when it has expired). Not signed in: Autopilot's
  *    sign-in runs first (`autopilot auth directionally-local`), as on dl's first run.
  * 2. The agent must be on PATH: dl never installs it, it prints the official install command.
- * 3. A short-lived harness key from the service (POST /v1/harness-keys {harness}): good for 15
+ * 3. A short-lived harness key from the service (POST /v1/harness-keys {harness}), one per agent
+ *    (`dl t3` runs two: Claude Code and OpenCode, each counted as itself): good for 15
  *    minutes, refreshed every few minutes while the agent runs and revoked when it exits, so free
  *    tokens in it work only while dl runs it. Refreshing extends the same key (the string doesn't
  *    change), so the agent reads it once at start. It goes to the agent in its environment (never
@@ -56,12 +57,19 @@ export interface HarnessLaunch {
   /** Executable names looked up on PATH, in order. */
   binaries: { posix: string[]; win32: string[] };
   /**
+   * More agents this one starts itself (`dl t3`: T3 Code runs Claude Code and OpenCode). Each gets
+   * its own harness key, so its requests are counted as that agent's; `prepare` gets them in `keys`.
+   */
+  alsoHarnesses?: Harness[];
+  /** Checked before sign-in: a message stops dl here, before any key is made. */
+  check?: (args: string[]) => string | undefined;
+  /**
    * The agent's environment and arguments for this run. `removed` names the person's variables
    * left out (dl says so once); `notes` are said once too. An `error` stops before the agent
    * starts (the key is revoked). `sessionId` is the one dl's session events carry; `cleanup`
    * runs once the agent has exited (temporary files).
    */
-  prepare: (input: { env: Env; args: string[]; origin: string; key: string; binary: string; sessionId: string }) => Promise<
+  prepare: (input: { env: Env; args: string[]; origin: string; key: string; keys: Partial<Record<Harness, string>>; binary: string; sessionId: string }) => Promise<
     | { env: Env; args: string[]; removed: string[]; notes?: string[]; cleanup?: () => Promise<void> }
     | { error: string }
   >;
@@ -142,6 +150,12 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
   const now = deps.now ?? Date.now;
   const { command, product } = spec;
 
+  const refused = spec.check?.(args);
+  if (refused) {
+    io.err(`  ${refused}\n`);
+    return 1;
+  }
+
   const binary = await (deps.find ?? ((env: Env) => onPath(platform() === "win32" ? spec.binaries.win32 : spec.binaries.posix, env)))(env);
   if (!binary) {
     io.err(`  ${product} isn't installed (no ${spec.binaries.posix[0]} on PATH). Install it, then run ${command} again:\n\n    ${spec.missing}\n`);
@@ -164,60 +178,56 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
   }
   const { origin, accessToken } = token;
 
-  // The harness key.
-  let minted: Response;
-  try {
-    minted = await call(`${origin}/v1/harness-keys`, {
-      method: "POST",
-      headers: { accept: "application/json", "content-type": "application/json", authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ harness: spec.harness }),
-      redirect: "error",
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-  } catch (error) {
-    io.err(`  Couldn't reach the free tier (${error instanceof Error ? error.message : String(error)}). Try again.\n`);
-    return 1;
+  // The harness keys: the agent's, then one for each agent it starts itself.
+  const minted: MintedKey[] = [];
+  const revokeAll = () => Promise.all(minted.map((one) => one.revoke()));
+  const cleanup = (work: Promise<unknown>) => Promise.race([work, new Promise((resolve) => setTimeout(resolve, CLEANUP_DEADLINE_MS).unref?.())]);
+  for (const harness of [spec.harness, ...(spec.alsoHarnesses ?? []).filter((other) => other !== spec.harness)]) {
+    const one = await mintKey(call, origin, accessToken, harness, command);
+    if ("error" in one) {
+      io.err(`  ${one.error}\n`);
+      await cleanup(revokeAll());
+      return 1;
+    }
+    minted.push(one);
   }
-  const mintedBody = await json(minted);
-  if (minted.status !== 201 || typeof mintedBody?.key !== "string" || typeof mintedBody.id !== "string") {
-    const message = typeof mintedBody?.error?.message === "string" ? mintedBody.error.message : `The free tier refused ${command} (HTTP ${minted.status}).`;
-    io.err(`  ${message}\n`);
-    return 1;
-  }
-  const key: string = mintedBody.key;
-  const keyId: string = mintedBody.id;
-  const asKey = (extra: Record<string, string> = {}) => ({ accept: "application/json", authorization: `Bearer ${key}`, ...extra });
-  const revoke = () => call(`${origin}/v1/harness-keys/${keyId}`, { method: "DELETE", headers: asKey(), redirect: "error", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }).catch(() => undefined);
+  const primary = minted[0]!;
+  const key = primary.key;
+  const keys: Partial<Record<Harness, string>> = Object.fromEntries(minted.map((one) => [one.harness, one.key]));
 
-  const sessionId = `${spec.sessionPrefix}-${randomUUID()}`;
-  const prepared = await spec.prepare({ env, args, origin, key, binary, sessionId });
+  // One session per key (so per agent): `dl claude` has one, `dl t3` one for each agent T3 runs.
+  const sessions = minted.map((one) => ({ ...one, id: minted.length === 1 ? `${spec.sessionPrefix}-${randomUUID()}` : `${spec.sessionPrefix}-${one.harness}-${randomUUID()}`, count: 0 }));
+  const prepared = await spec.prepare({ env, args, origin, key, keys, binary, sessionId: sessions[0]!.id });
   if ("error" in prepared) {
     io.err(`  ${prepared.error}\n`);
-    await Promise.race([revoke(), new Promise((resolve) => setTimeout(resolve, CLEANUP_DEADLINE_MS).unref?.())]);
+    await cleanup(revokeAll());
     return 1;
   }
 
   const started = now();
-  let eventCount = 0;
-  const sendEvent = async (type: "session.start" | "session.end", props: Record<string, unknown> = {}) => {
-    try {
-      await call(`${origin}/v1/events`, {
-        method: "POST",
-        headers: asKey({ "content-type": "application/json" }),
-        body: JSON.stringify({ events: [{ id: `${sessionId}-${++eventCount}`, type, sessionId, at: new Date(now()).toISOString(), props: { harness: spec.harness, os: platform(), ...props } }] }),
-        redirect: "error",
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-    } catch {
-      // Best effort: a lost event never stops the session.
-    }
+  const sendEvents = async (type: "session.start" | "session.end", props: Record<string, unknown> = {}) => {
+    await Promise.all(
+      sessions.map(async (session) => {
+        try {
+          await call(`${origin}/v1/events`, {
+            method: "POST",
+            headers: session.headers({ "content-type": "application/json" }),
+            body: JSON.stringify({ events: [{ id: `${session.id}-${++session.count}`, type, sessionId: session.id, at: new Date(now()).toISOString(), props: { harness: session.harness, os: platform(), ...props } }] }),
+            redirect: "error",
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          });
+        } catch {
+          // Best effort: a lost event never stops the session.
+        }
+      }),
+    );
   };
   // Before the agent's first request, so the dl-only check counts them as dl's.
-  await sendEvent("session.start");
+  await sendEvents("session.start");
 
   if (prepared.removed.length > 0) io.err(`  ${command}: not passing ${prepared.removed.join(", ")} to ${product} for this session (it runs on dl's free tier).\n`);
   for (const note of prepared.notes ?? []) io.err(`  ${command}: ${note}\n`);
-  const nudge = autopilotNudge(mintedBody.otherHarnessShare);
+  const nudge = autopilotNudge(primary.otherHarnessShare);
   if (nudge && (deps.terminal ?? process.stderr.isTTY === true)) {
     io.err(`  ${palette(!env.NO_COLOR && env.TERM !== "dumb").dim(nudge)}\n`);
   }
@@ -225,9 +235,11 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
   const every = deps.setInterval ?? ((fn: () => void, ms: number) => setInterval(fn, ms));
   const stop = deps.clearInterval ?? ((timer: unknown) => clearInterval(timer as NodeJS.Timeout));
   const refresher = every(() => {
-    void call(`${origin}/v1/harness-keys/${keyId}/refresh`, { method: "POST", headers: asKey(), redirect: "error", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }).catch(() => undefined);
+    for (const one of minted) {
+      void call(`${origin}/v1/harness-keys/${one.id}/refresh`, { method: "POST", headers: one.headers(), redirect: "error", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }).catch(() => undefined);
+    }
   }, REFRESH_EVERY_MS);
-  const heartbeat = every(() => void sendEvent("session.start"), SESSION_EVENT_EVERY_MS);
+  const heartbeat = every(() => void sendEvents("session.start"), SESSION_EVENT_EVERY_MS);
   refresher.unref?.();
   heartbeat.unref?.();
 
@@ -256,11 +268,43 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
   await prepared.cleanup?.().catch(() => undefined);
 
   // Session end and the key's end, both best effort and bounded.
-  await Promise.race([
-    Promise.allSettled([sendEvent("session.end", { durationMs: Math.max(0, now() - started), exitReason: outcome.reason }), revoke()]),
-    new Promise((resolve) => setTimeout(resolve, CLEANUP_DEADLINE_MS).unref?.()),
-  ]);
+  await cleanup(Promise.allSettled([sendEvents("session.end", { durationMs: Math.max(0, now() - started), exitReason: outcome.reason }), revokeAll()]));
   return outcome.code;
+}
+
+interface MintedKey {
+  harness: Harness;
+  id: string;
+  key: string;
+  otherHarnessShare: unknown;
+  /** Request headers that authenticate with this key. */
+  headers: (extra?: Record<string, string>) => Record<string, string>;
+  revoke: () => Promise<unknown>;
+}
+
+/** One harness key from the service (POST /v1/harness-keys), or what to tell the person. */
+async function mintKey(call: Fetch, origin: string, accessToken: string, harness: Harness, command: string): Promise<MintedKey | { error: string }> {
+  let response: Response;
+  try {
+    response = await call(`${origin}/v1/harness-keys`, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json", authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ harness }),
+      redirect: "error",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    return { error: `Couldn't reach the free tier (${error instanceof Error ? error.message : String(error)}). Try again.` };
+  }
+  const body = await json(response);
+  if (response.status !== 201 || typeof body?.key !== "string" || typeof body.id !== "string") {
+    return { error: typeof body?.error?.message === "string" ? body.error.message : `The free tier refused ${command} (HTTP ${response.status}).` };
+  }
+  const key: string = body.key;
+  const id: string = body.id;
+  const headers = (extra: Record<string, string> = {}) => ({ accept: "application/json", authorization: `Bearer ${key}`, ...extra });
+  const revoke = () => call(`${origin}/v1/harness-keys/${id}`, { method: "DELETE", headers: headers(), redirect: "error", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }).catch(() => undefined);
+  return { harness, id, key, otherHarnessShare: body.otherHarnessShare, headers, revoke };
 }
 
 const SIGNALS: Partial<Record<NodeJS.Signals, number>> = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15 };

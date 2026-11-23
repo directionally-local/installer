@@ -110,6 +110,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl pi [ARGS]` | Your own Pi on dl's free tokens, DeepSeek V4.1 Flash by default. See [Pi with free tokens: dl pi](#pi-with-free-tokens-dl-pi). |
 | `dl conductor` | [Conductor](https://conductor.build) (and Zed, Cline and other desktop apps) on dl's free tokens: starts `dl proxy` if it isn't running and prints the settings to paste into the app. See [Desktop apps with free tokens: dl proxy and dl conductor](#desktop-apps-with-free-tokens-dl-proxy-and-dl-conductor). |
 | `dl proxy start` / `stop` / `status` | A local proxy on `127.0.0.1:4789` that desktop apps use for the free tier, with a local token as their API key. `dl proxy run` runs it in the terminal; `dl proxy install` / `uninstall` start it at login (macOS LaunchAgent, Linux systemd user service). |
+| `dl t3 [ARGS]` | Your own [T3 Code](https://github.com/pingdotgg/t3code) server (web and phone clients) with its Claude Code and OpenCode agents on dl's free tokens while `dl t3` runs. See [T3 Code with free tokens: dl t3](#t3-code-with-free-tokens-dl-t3). |
 | `dl claude-code hook install` / `remove` | Opt in to a Claude Code hook that, when Claude Code stops on a usage or rate limit, shows `Claude Code hit its limit. Continue in dl: dl --from-claude-code` as a terminal notification and window title. Shows the entry and asks before adding it to `~/.claude/settings.json`, backs the file up first, and merges into it; `remove` takes out only dl's entry. |
 | `dl setup` | Set up or repair where background tasks run. Safe to re-run. `--identity FILE` names the SSH key to use. |
 | `dl new` | The same as bare `dl`: a new session here. Kept as an alias for a release. |
@@ -274,6 +275,38 @@ exit code is dl's.
   loads a small extension (`pi -e`, a temporary file removed when Pi exits) that adds the "dl"
   provider; the key is in `DL_FREE_TIER_KEY`, never in a file or on the command line.
 - **What dl sends:** the same as `dl opencode`; each Pi session's id goes with its requests.
+
+### T3 Code with free tokens: dl t3
+
+`dl t3` starts the [T3 Code](https://github.com/pingdotgg/t3code) server you already have (the
+`t3` command) with its Claude Code and OpenCode agents on the free tier, the same way `dl claude`
+and `dl opencode` set them up. Every argument after `t3` goes to it unchanged, and its exit code is
+dl's: `dl t3` opens the web app in your browser, `dl t3 serve` runs it without a browser (for a
+server or tmux), `dl t3 ./my-project` starts in that folder.
+
+- **T3 Code itself:** dl never installs it. Without `t3` on your PATH it prints the official
+  install command (`curl -fsSL https://t3.codes/install.sh | sh`, or `npm install -g t3`) and
+  stops. Claude Code and OpenCode must be installed too, as T3 Code needs them.
+- **Both agents, each counted as itself:** dl gets two short-lived keys, one for Claude Code and
+  one for OpenCode, refreshed while `dl t3` runs and ended when it stops, so each agent's requests
+  count as that agent's, on the same half share of the weekly allowance as `dl claude` and
+  `dl opencode`. Free tokens stop working in T3 Code when `dl t3` stops.
+- **Picking the model:** for OpenCode, pick a `dl/…` model in T3 Code's model picker
+  (`dl/deepseek/deepseek-v4.1-flash-1017`). For Claude Code, T3 Code still shows Claude models;
+  whichever you pick, the free tier serves it with DeepSeek.
+- **OpenCode is off in new T3 Code installs:** turn it on once in **Settings → Providers**. Leave
+  its **Server URL** empty, so T3 Code starts OpenCode itself with dl's settings.
+- **Your settings stay yours:** no T3 Code, Claude Code or OpenCode file is read or changed. T3
+  Code gets the environment variables `dl claude` and `dl opencode` give those agents, for this
+  run only. Environment variables you set on a provider instance in T3 Code's settings win over
+  dl's for that instance.
+- **The web app and phone, not the desktop app (yet):** only the server `dl t3` starts has free
+  tokens. The T3 Code desktop app opened from the Dock or Start menu, and the background service
+  (`t3 service`, `t3 up`), run without dl, so dl refuses those commands. `dl proxy` (above) is how
+  desktop apps reach the free tier; `dl t3` doesn't set the desktop app up for it yet. If T3 Code says a server is already running (often the
+  desktop app or the service), quit it first, or start `dl t3 --base-dir DIR` for a separate one.
+  Commands that talk to a running server (`t3 thread`, `t3 pair`, `t3 project`) work as usual: run
+  them as `t3 …`.
 
 ### On your own GPUs
 

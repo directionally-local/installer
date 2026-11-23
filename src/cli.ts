@@ -17,6 +17,7 @@ import { claudeCommand } from "./laptop/claude.js";
 import { opencodeCommand } from "./laptop/opencode.js";
 import { piCommand } from "./laptop/pi.js";
 import { conductorCommand, proxyCommand } from "./laptop/proxy.js";
+import { t3Command } from "./laptop/t3.js";
 import { loadRemotes, resolveTarget } from "./laptop/config.js";
 import { dlUpdate } from "./laptop/self-update.js";
 import { PAIRED_NAME } from "./local/layout.js";
@@ -87,6 +88,9 @@ On your laptop:
                           dl proxy and prints the settings to paste into the app
   dl proxy start|stop|status   a local proxy on 127.0.0.1:4789 that desktop apps use for the free
                           tier, with a local token as their API key (dl proxy install: at login)
+  dl t3 [ARGS]            your own T3 Code server (t3; dl t3 serve for no browser) with its Claude
+                          Code and OpenCode on free tokens while dl t3 runs; ARGS go to t3. Needs
+                          t3 installed; the T3 Code desktop app doesn't get free tokens yet
   dl claude-code hook install   when Claude Code hits its usage or rate limit, show how to continue
                           in dl (adds a hook to ~/.claude/settings.json after asking; backs it up)
   dl claude-code hook remove    take that hook out again
@@ -227,6 +231,8 @@ export interface MainOptions {
   opencode?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** `dl pi`; the real one unless replaced. */
   pi?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
+  /** `dl t3`; the real one unless replaced. */
+  t3?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** What a GPU box runs, printed first by `dl status` and plain `dl` (box-status.ts); the real one unless replaced. */
   boxSummary?: () => Promise<string | undefined>;
   /** `dl uninstall` on a server and on a laptop; the real ones unless replaced. */
@@ -252,6 +258,8 @@ export async function main(
   // `dl proxy start|stop|status|run|install|uninstall` and `dl conductor`: desktop apps on the free tier.
   if (argv[0] === "proxy") return await proxyCommand(argv.slice(1), io);
   if (argv[0] === "conductor") return await conductorCommand(argv.slice(1), io);
+  // `dl t3 ARGS`: like `dl opencode`, for T3 Code's server, whose Claude Code and OpenCode get free tokens.
+  if (argv[0] === "t3") return await (options.t3 ?? t3Command)(argv.slice(1), io);
   // Everything after `--` belongs to Autopilot (bare dl on this computer): `dl -- --session ID`.
   const split = splitPassthrough(argv);
   const passthrough = split.passthrough;
