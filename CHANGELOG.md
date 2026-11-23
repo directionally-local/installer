@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.1](https://github.com/directionally-local/installer/compare/v0.45.0...v0.45.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.30.0 ([#340](https://github.com/directionally-local/installer/issues/340)) ([00fed7e](https://github.com/directionally-local/installer/commit/00fed7e0ebe1012c2f807aee2789cc798deee69d))
+
 ## [0.45.0](https://github.com/directionally-local/installer/compare/v0.44.0...v0.45.0) (2026-11-23)
 
 
