@@ -579,7 +579,7 @@ async function personLimits(c: Ctx, config: FreeConfig, githubId: number, now: n
  * `limits` with the token allocator applied (allocator.ts): the start grant, the step reached and
  * this week's grace. Admins, blocked accounts and unknown people are left as they are.
  */
-function allocated(config: FreeConfig, limits: Limits, githubId: number, person: PersonState | undefined, now: number): Limits {
+function allocated(config: FreeConfig, limits: Limits, githubId: number, person: Pick<PersonState, "blocked" | "bonusTokens" | "allocator"> | undefined, now: number): Limits {
   if (!person || person.blocked || config.adminGithubIds.has(githubId)) return limits;
   return allocatedLimits(limits, {
     settings: config,
@@ -3675,13 +3675,14 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     if ("error" in page) return apiError(400, "invalid_request", page.error);
     // The Directory's per-person data in a few whole-table reads, not one call per person.
     const people = await directory(c).listPeople();
-    const [caps, networks, sessions, trialBonus, harnessUsage, uses] = await Promise.all([
+    const [caps, networks, sessions, trialBonus, harnessUsage, uses, allocatorStates] = await Promise.all([
       directory(c).personalCaps(),
       directory(c).networkCounts(),
       directory(c).weekSessions(now),
       directory(c).trialBonuses(policyOf(config)),
       directory(c).weekHarnessUsage(now),
       directory(c).useSummaries(weekStart(now)),
+      directory(c).allocatorStates(),
     ]);
     const checks = peopleChecks(people, config, now);
     // Filter and page before any account call, so a page costs one account call per person on it.
@@ -3696,7 +3697,11 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     // hundreds of Durable Object calls started together drop connections (Cloudflare error 1101).
     const rows = await mapLimited(slice, ADMIN_PEOPLE_CONCURRENCY, async (person) => {
       const trial = onTrial(config, person.github_id, person.admitted_at);
-      const { allowance, serverKeys } = await account(c, person.github_id).adminSummary(now, limitsFor(config, 0, person.level, person.batch_flag === 1, trial, trialBonus.get(person.github_id)));
+      // As the person's own requests get it: the level, then the token allocator (its start grant,
+      // the step reached and this week's grace). Referral bonuses aren't counted here.
+      const levelLimitsNow = limitsFor(config, 0, person.level, person.batch_flag === 1, trial, trialBonus.get(person.github_id));
+      const limits = allocated(config, levelLimitsNow, person.github_id, { blocked: person.status === "blocked", bonusTokens: 0, allocator: allocatorStates.get(person.github_id) ?? null }, now);
+      const { allowance, serverKeys } = await account(c, person.github_id).adminSummary(now, limits);
       return {
         githubId: person.github_id,
         login: person.login,
@@ -4340,6 +4345,7 @@ async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, no
       starterWeeklyTokens: config.starterWeeklyTokens,
       starterWeeklyUsd: config.starterWeeklyUsdCap ?? null,
       starterDeepseekWeeklyUsd: config.starterDeepseekWeeklyUsdCap ?? null,
+      ...(config.allocator === "on" ? { allocatorStartTokens: config.allocatorStartTokens } : {}),
       proWeeklyUsd: config.proWeeklyUsdCap ?? null,
       proDeepseekWeeklyUsd: config.proDeepseekWeeklyUsdCap ?? null,
       proPriceUsdMonthly: config.offers.pro.priceUsdMonthly,

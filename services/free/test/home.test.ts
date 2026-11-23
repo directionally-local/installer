@@ -41,6 +41,20 @@ describe("home: real allowance per level", () => {
     assert.deepEqual(realAllowance(person("full", { grantUsd: 20 }), two), { tier: "full", tokens: 50_000_000, usd: 20, deepseekUsd: 20 });
     assert.deepEqual(realAllowance(person("full", { grantUsd: 5 }), two), { tier: "full", tokens: 50_000_000, usd: 5, deepseekUsd: 8 });
   });
+
+  it("applies the token allocator when it is on: the start grant, then the step reached", () => {
+    // Production's Starter: 1M tokens, $0 GPT-6, $8 DeepSeek; Basic off.
+    const prod: LevelSettings = { ...settings, basicWeeklyTokens: 0, starterWeeklyTokens: 1_000_000, starterWeeklyUsd: 0, starterDeepseekWeeklyUsd: 8, allocatorStartTokens: 1_000_000 };
+    const flagged = person("starter", { batchFlagged: true });
+    // Off: a batch-flagged account has nothing. On: the start grant with Starter's budgets.
+    assert.deepEqual(realAllowance(flagged, { ...prod, allocatorStartTokens: undefined } as LevelSettings), { tier: "no tokens", tokens: 0, usd: 0, deepseekUsd: 0 });
+    assert.deepEqual(realAllowance(flagged, prod), { tier: "small", tokens: 1_000_000, usd: 0, deepseekUsd: 8 });
+    assert.deepEqual(realAllowance(person("starter"), { ...prod, starterWeeklyTokens: 0 }), { tier: "small", tokens: 1_000_000, usd: 0, deepseekUsd: 8 });
+    // Never lower; the 10M step; Full on the Full step.
+    assert.deepEqual(realAllowance(person("basic"), { ...settings, allocatorStartTokens: 1_000_000 }), { tier: "middle", tokens: 10_000_000, usd: 3, deepseekUsd: 3 });
+    assert.deepEqual(realAllowance({ ...person("starter"), allocatorStage: "10m" as const }, { ...settings, allocatorStartTokens: 1_000_000 }), { tier: "middle", tokens: 10_000_000, usd: 3, deepseekUsd: 3 });
+    assert.deepEqual(realAllowance({ ...flagged, allocatorStage: "full" as const }, prod), { tier: "full", tokens: 50_000_000, usd: 20, deepseekUsd: 20 });
+  });
 });
 
 // ─── The page ─────────────────────────────────────────────────────────────
