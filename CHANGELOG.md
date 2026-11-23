@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.45.0](https://github.com/directionally-local/installer/compare/v0.44.0...v0.45.0) (2026-11-23)
+
+
+### Features
+
+* dl proxy and dl conductor, desktop apps on dl's free tier ([#334](https://github.com/directionally-local/installer/issues/334)) ([073810c](https://github.com/directionally-local/installer/commit/073810c6d58b96b72429be37275bfb8cf2493737))
+* **free:** count dl.new link campaigns per day (visits, clicks, sign-ups) ([#337](https://github.com/directionally-local/installer/issues/337)) ([28a2262](https://github.com/directionally-local/installer/commit/28a22629713a3eec300fae909bfc31796f532712))
+* **free:** Kimi K3.1 Pro is a dl Pro perk, with a weekly ration stated upfront ([#338](https://github.com/directionally-local/installer/issues/338)) ([46962c9](https://github.com/directionally-local/installer/commit/46962c9d125fdb7134521802d4a547d1d477e926))
+* **laptop:** dl t3 runs T3 Code's server with Claude Code and OpenCode on free tokens ([#336](https://github.com/directionally-local/installer/issues/336)) ([9cda9be](https://github.com/directionally-local/installer/commit/9cda9be9f9e5de9d2b234a3191149bfee18fbcc0))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.29.0 ([#339](https://github.com/directionally-local/installer/issues/339)) ([deb813a](https://github.com/directionally-local/installer/commit/deb813a8dd1f796da17912ef670a1aad5f4c80e0))
+
 ## [0.44.0](https://github.com/directionally-local/installer/compare/v0.43.0...v0.44.0) (2026-11-23)
 
 
