@@ -308,6 +308,44 @@ describe("POST /admin/emails/broadcast", () => {
     assert.equal(rows(s).filter((row) => row.kind === "broadcast" && row.status === "sent").length, 3);
   });
 
+  it("githubIds: only listed accounts are candidates, still filtered by every other rule", async () => {
+    const { s, admin } = await setup();
+    // 500 gail and 502 iris qualify; 503 blocked, 504 pressed stop, 505 no email, the admin and an unknown id never do.
+    const listed = [502, 500, 503, 504, 505, ADMIN_ID, 999_999, 500];
+    const dry = await broadcast(s, admin, { ...COPY, audience: "all", dryRun: true, githubIds: listed });
+    assert.equal(dry.status, 200);
+    assert.equal(dry.body.count, 2);
+    assert.deepEqual(dry.body.sample.map((person: { githubId: number }) => person.githubId), [500, 502]);
+    // The level and sign-up filters still narrow the list.
+    assert.equal((await broadcast(s, admin, { ...COPY, audience: "starter", dryRun: true, githubIds: listed })).body.count, 0);
+    assert.equal((await broadcast(s, admin, { ...COPY, audience: "all", signedUpFrom: "2026-10-25", dryRun: true, githubIds: listed })).body.count, 1);
+    const before = s.calls.userEmail.length;
+    const sent = await broadcast(s, admin, { ...COPY, audience: "all", dryRun: false, githubIds: listed });
+    assert.deepEqual([sent.body.sent, sent.body.failed, sent.body.remaining], [2, 0, 0]);
+    assert.deepEqual(s.calls.userEmail.slice(before).map((message) => message.to).sort(), ["gail@example.com", "iris@example.com"]);
+    assert.deepEqual(rows(s).filter((row) => row.kind === "broadcast" && row.status === "sent").map((row) => row.github_id).sort(), [500, 502]);
+    // A retry sends nothing twice; hal, never listed, was never emailed.
+    s.clock.now += DAY;
+    const fresh = (await s.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    assert.equal((await broadcast(s, fresh, { ...COPY, audience: "all", dryRun: true, githubIds: listed })).body.count, 0);
+    assert.equal((await broadcast(s, fresh, { ...COPY, audience: "all", dryRun: true })).body.count, 1, "hal is still waiting");
+    // A reworded resend with skipIfSent skips the listed people who got the first one.
+    const reworded = { subject: "a second check-in", text: COPY.text };
+    assert.equal((await broadcast(s, fresh, { ...reworded, audience: "all", dryRun: true, githubIds: [500, 501], skipIfSent: sent.body.id })).body.count, 1);
+  });
+
+  it("githubIds: refuses a list that isn't 1 to 500 positive whole numbers", async () => {
+    const { s, admin } = await setup();
+    const before = s.calls.userEmail.length;
+    for (const githubIds of [[], "500", [500, "501"], [0], [-1], [1.5], [Number.MAX_SAFE_INTEGER + 2], { 0: 500 }, Array.from({ length: 501 }, (_, i) => i + 1)]) {
+      const refused = await broadcast(s, admin, { ...COPY, audience: "all", dryRun: false, githubIds });
+      assert.equal(refused.status, 400, JSON.stringify(githubIds).slice(0, 40));
+    }
+    assert.equal(s.calls.userEmail.length, before);
+    assert.equal((await broadcast(s, admin, { ...COPY, audience: "all", dryRun: true, githubIds: Array.from({ length: 500 }, (_, i) => i + 1) })).status, 200);
+    assert.equal((await broadcast(s, admin, { ...COPY, audience: "all", dryRun: true, githubIds: null })).body.count, 3, "null is no list");
+  });
+
   it("leaves people already emailed today for tomorrow", async () => {
     const { s, admin } = await setup();
     await startBrowserFlow(s.request, { id: 506, login: "max" }); // a welcome today
