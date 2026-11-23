@@ -7,6 +7,7 @@
 import { ALLOCATOR_MODES, type AllocatorMode } from "./allocator.js";
 import { detectionRulesFrom, type DetectionRules, type DetectionRulesStatus, type ThresholdKey } from "./detection-rules.js";
 import { DEFAULT_WEB_SIGNUP_URL } from "./web-signup.js";
+import { COUNTRY_RULES_MODES, countryList, EMBARGOED_COUNTRIES, OPENAI_SUPPORTED_COUNTRIES, type CountryRulesMode } from "./countries.js";
 import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_PLANS, PROVIDER_STATUSES, REGISTRY_DEFAULTS, type ProviderId, type ProviderPlans, type ProviderStatus, type RegistrySettingsConfig } from "./providers.js";
 import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type DataCollection, type Quantization } from "./routing.js";
 
@@ -290,6 +291,15 @@ export interface FreeConfig extends RegistrySettingsConfig {
    */
   gpt6Clients: Gpt6Clients;
   /**
+   * The country rules (countries.ts), COUNTRY_RULES: "enforce" (the default) or "off". Also a
+   * runtime setting, as are the two lists below.
+   */
+  countryRules: CountryRulesMode;
+  /** Where GPT-6 is served (GPT6_COUNTRIES, comma-separated ISO codes; default OpenAI's supported countries). */
+  gpt6Countries: readonly string[];
+  /** Where no free-tier access is given at all, sign-in included (EMBARGOED_COUNTRIES; default CU, IR, KP, SY). */
+  embargoedCountries: readonly string[];
+  /**
    * Automated moderation review of high-risk labels (moderation.ts), MODERATION: "enforce" (the
    * default: a confident "block" verdict blocks the person), "shadow" (decides and emails, never
    * blocks) or "off" (no review: the owner gets today's high-risk email). Also a runtime setting.
@@ -436,6 +446,9 @@ export const DEFAULTS = {
   gpt6GuardTimeoutMs: 4000,
   gpt6TrustedWeeklyUsdCap: 0,
   gpt6Clients: "autopilot" as Gpt6Clients,
+  countryRules: "enforce" as CountryRulesMode,
+  gpt6Countries: OPENAI_SUPPORTED_COUNTRIES,
+  embargoedCountries: EMBARGOED_COUNTRIES,
   moderation: "enforce" as ModerationMode,
   moderationBlockConfidence: 0.85,
   moderationAllowlist: [] as string[],
@@ -634,6 +647,9 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     gpt6GuardTimeoutMs: whole(env.GPT6_GUARD_TIMEOUT_MS, DEFAULTS.gpt6GuardTimeoutMs, "GPT6_GUARD_TIMEOUT_MS"),
     gpt6TrustedWeeklyUsdCap: amount(env.GPT6_TRUSTED_WEEKLY_USD_CAP, DEFAULTS.gpt6TrustedWeeklyUsdCap, "GPT6_TRUSTED_WEEKLY_USD_CAP"),
     gpt6Clients: gpt6Clients(env.GPT6_CLIENTS),
+    countryRules: countryRulesMode(env.COUNTRY_RULES),
+    gpt6Countries: countries(env.GPT6_COUNTRIES, DEFAULTS.gpt6Countries, "GPT6_COUNTRIES"),
+    embargoedCountries: countries(env.EMBARGOED_COUNTRIES, DEFAULTS.embargoedCountries, "EMBARGOED_COUNTRIES"),
     moderation: moderationMode(env.MODERATION),
     moderationBlockConfidence: share(env.MODERATION_BLOCK_CONFIDENCE, DEFAULTS.moderationBlockConfidence, "MODERATION_BLOCK_CONFIDENCE"),
     moderationAllowlist: moderationAllowlist(env.MODERATION_ALLOWLIST),
@@ -954,6 +970,21 @@ function gpt6Clients(value: unknown): Gpt6Clients {
   if (raw === undefined) return DEFAULTS.gpt6Clients;
   if ((GPT6_CLIENTS as readonly string[]).includes(raw)) return raw as Gpt6Clients;
   throw new ConfigError(`GPT6_CLIENTS must be "autopilot" or "all" (got "${raw}").`);
+}
+
+function countryRulesMode(value: unknown): CountryRulesMode {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return DEFAULTS.countryRules;
+  if ((COUNTRY_RULES_MODES as readonly string[]).includes(raw)) return raw as CountryRulesMode;
+  throw new ConfigError(`COUNTRY_RULES must be "enforce" or "off" (got "${raw}").`);
+}
+
+/** Comma-separated ISO country codes; unset keeps the default, "" is none. */
+function countries(value: unknown, fallback: readonly string[], name: string): readonly string[] {
+  if (value === undefined || value === null) return fallback;
+  const list = countryList(String(value).split(",").map((entry) => entry.trim()).filter(Boolean));
+  if (!list) throw new ConfigError(`${name} must be comma-separated two-letter country codes, e.g. "US,GB" (got "${String(value)}").`);
+  return list;
 }
 
 function accessRequestAlerts(value: unknown): AccessRequestAlerts {

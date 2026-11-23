@@ -83,6 +83,7 @@ import { chooseUpstream, providerConfigured } from "./upstream-choice.js";
 import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
+import { EMBARGO_MESSAGE, GPT6_COUNTRY_MESSAGE, GPT6_COUNTRY_REASON, gpt6CountryAllowed, isEmbargoed, requestCountry, type CountryRules } from "./countries.js";
 import { AUTOPILOT_ONLY_MESSAGE, AUTOPILOT_ONLY_REASON, heldFromClient, modelClients, type ModelClient } from "./gpt6-clients.js";
 import { meterStream } from "./sse.js";
 import { accessOf, approxTokens, offeredModels, exchangeCharge, exchangeUsage, mergedUsage, exchangeRules, isRegistryProvider, formatRationTokens, liquidPayload, proOnly, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, resetDay, type ProviderBlock, type ProviderSpend } from "./providers.js";
@@ -361,6 +362,10 @@ interface Ctx {
   ip: string;
   /** What per-IP limits key on: the IPv4 address, or the IPv6 /64 (see network.ts). */
   ipNet: string;
+  /** The request's country from Cloudflare (countries.ts), if any. Never stored. */
+  country?: string;
+  /** This isolate's country rules for the embargo check before any route, read at most once a minute. */
+  countryCache: { value?: CountryRules; at: number };
   base: string;
   /** This isolate's last /v1/status answer (see `status`). */
   statusCache: { value?: FreeStatus; at: number };
@@ -397,6 +402,7 @@ export function createHandler(options: HandlerOptions = {}): {
   const fetcher: Fetch = options.fetch ?? ((input, init) => fetch(input, init));
   const statusCache: Ctx["statusCache"] = { at: 0 };
   const providersCache: Ctx["providersCache"] = { at: 0 };
+  const countryCache: Ctx["countryCache"] = { at: 0 };
   const emailGapMs = options.emailGapMs ?? EMAIL_GAP_MS;
   return {
     /**
@@ -438,7 +444,8 @@ export function createHandler(options: HandlerOptions = {}): {
       const url = new URL(request.url);
       const ip = clientIp(request);
       const background = options.background ?? backgroundOf(execution);
-      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin, statusCache, providersCache, emailGapMs, ...(background ? { background } : {}) };
+      const country = requestCountry(request);
+      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), ...(country ? { country } : {}), base: config.publicUrl ?? url.origin, statusCache, providersCache, countryCache, emailGapMs, ...(background ? { background } : {}) };
       return route(ctx);
     },
   };
@@ -456,6 +463,8 @@ async function route(c: Ctx): Promise<Response> {
   const path = c.url.pathname.replace(/\/+$/, "") || "/";
   const method = c.request.method;
   if (path === "/health") return json({ ok: true, service: "free", version: VERSION });
+  const embargo = await embargoed(c, path);
+  if (embargo) return embargo;
 
   if (method === "POST" && path === "/v1/device/code") return deviceCode(c);
   if (method === "POST" && path === "/v1/device/token") return deviceToken(c);
@@ -504,6 +513,42 @@ async function route(c: Ctx): Promise<Response> {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+const COUNTRY_RULES_TTL_MS = 60_000;
+/** Paths an embargoed country still reaches: Stripe's webhook and the email unsubscribe link. */
+const EMBARGO_EXEMPT = new Set(["/v1/billing/webhook", "/email/stop"]);
+
+/** The country rules in effect (env with the owner's overrides), cached a minute per isolate. */
+async function countryRules(c: Ctx): Promise<CountryRules> {
+  const now = c.now();
+  if (!c.countryCache.value || now - c.countryCache.at >= COUNTRY_RULES_TTL_MS || now < c.countryCache.at) {
+    const config = applyOverrides(c.config, await directory(c).overrides());
+    c.countryCache.value = { countryRules: config.countryRules, gpt6Countries: config.gpt6Countries, embargoedCountries: config.embargoedCountries };
+    c.countryCache.at = now;
+  }
+  return c.countryCache.value;
+}
+
+/**
+ * An embargoed country's refusal for any path but EMBARGO_EXEMPT (countries.ts), sign-in
+ * included: JSON on the API, Anthropic's shape for Claude Code, plain text for pages. Counted as
+ * `country_embargoed` (the country itself isn't kept). Nothing is read when the request has no
+ * country (no Cloudflare in front).
+ */
+async function embargoed(c: Ctx, path: string): Promise<Response | undefined> {
+  if (c.country === undefined || EMBARGO_EXEMPT.has(path)) return undefined;
+  if (!isEmbargoed(await countryRules(c), c.country)) return undefined;
+  const signin = path.startsWith("/device") || path.startsWith("/v1/device/") || path.startsWith("/web/") || path === CALLBACK_PATH;
+  await countRefusal(c, "country_embargoed", undefined, signin ? "signin" : "other");
+  if (path.startsWith("/anthropic/")) return anthropicErrorResponse(403, EMBARGO_MESSAGE, "country_not_supported");
+  if (path.startsWith("/v1/") || path.startsWith("/admin/")) return apiError(403, "country_not_supported", EMBARGO_MESSAGE, { reason: "embargo" });
+  return new Response(EMBARGO_MESSAGE, { status: 403, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
+}
+
+/** Whether GPT-6 may be served to this request's country (countries.ts), by the effective config. */
+function gpt6InCountry(c: Ctx, config: FreeConfig): boolean {
+  return gpt6CountryAllowed(config, c.country);
+}
 
 function clientIp(request: Request): string {
   return request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
@@ -2124,7 +2169,8 @@ async function me(c: Ctx): Promise<Response> {
         },
       ]),
     ),
-    models: offeredModels(config).map((model) => model.id),
+    // GPT-6 left out outside OpenAI's supported countries (countries.ts).
+    models: offeredModels(config).filter((model) => model.family !== "gpt6" || gpt6InCountry(c, config)).map((model) => model.id),
     /**
      * The models only dl Pro gets (providers.ts `plans` "pro"), stated upfront: for each, whether
      * this account may use it, its weekly ration in dollars and about how many tokens, and for
@@ -2472,7 +2518,10 @@ async function models(c: Ctx): Promise<Response> {
   // GPT-6 isn't offered to another agent's harness key while it is Autopilot only (gpt6-clients.ts).
   const harness = identity.via === "harness" ? identity.harness : undefined;
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
-  const listed = (await modelsFor(c, config, identity.githubId, person)).filter((model) => !heldFromClient(model, config.gpt6Clients, harness, isAdmin));
+  // Nor outside OpenAI's supported countries (countries.ts).
+  const listed = (await modelsFor(c, config, identity.githubId, person)).filter(
+    (model) => !heldFromClient(model, config.gpt6Clients, harness, isAdmin) && (model.family !== "gpt6" || gpt6InCountry(c, config)),
+  );
   const weekUsd = listed.some((model) => proOnly(config, model)) ? await directory(c).personProviderWeek(identity.githubId, c.now()) : undefined;
   return json({
     object: "list",
@@ -2975,7 +3024,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     // Only the models this person can use here: DeepSeek, GPT-6 too with a GPT-6 budget and trust.
     const families = harness ? HARNESS_FAMILIES[harness] : FAMILIES;
     const allowed = (await modelsFor(c, gate.config, identity.githubId, gate.person))
-      .filter((model) => families.includes(model.family) && !heldFromClient(model, gate.config.gpt6Clients, harness, isAdmin))
+      .filter((model) => families.includes(model.family) && !heldFromClient(model, gate.config.gpt6Clients, harness, isAdmin) && (model.family !== "gpt6" || gpt6InCountry(c, gate.config)))
       .map((model) => model.id);
     return apiError(400, "model_not_allowed", `The free tier serves ${allowed.join(", ")} only.`, { allowed }, await headers());
   }
@@ -2992,6 +3041,16 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       "provider_limit",
       AUTOPILOT_ONLY_MESSAGE,
       { family: requested.family, provider: requested.provider, reason: AUTOPILOT_ONLY_REASON, resetsAt: null, alternative: DEEPSEEK_MODEL, clients: ["autopilot"] },
+      await headers(),
+    );
+  }
+  // GPT-6 only from OpenAI's supported countries (countries.ts), every client and admins too.
+  if (requested.family === "gpt6" && !gpt6InCountry(c, gate.config)) {
+    return apiError(
+      402,
+      "provider_limit",
+      GPT6_COUNTRY_MESSAGE,
+      { family: requested.family, provider: requested.provider, reason: GPT6_COUNTRY_REASON, resetsAt: null, alternative: DEEPSEEK_MODEL },
       await headers(),
     );
   }
@@ -4218,6 +4277,9 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       const parsed = parseSettingsUpdate(body);
       if ("error" in parsed) return apiError(400, "invalid_request", parsed.error);
       await directory(c).updateOverrides(parsed.changes, actor);
+      // This isolate's country rules read the change at once; others within a minute.
+      c.countryCache.at = 0;
+      c.countryCache.value = undefined;
       return adminConfigView(c);
     }
     if (method === "GET") return adminConfigView(c);
