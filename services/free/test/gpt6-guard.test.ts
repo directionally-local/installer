@@ -283,7 +283,7 @@ describe("pre-send checks on GPT-6 requests", () => {
   });
 
   it("checks OpenCode's GPT-6 requests (harness key, no session events), with OpenCode's wording", async () => {
-    const { service, token, answers } = await world();
+    const { service, token, answers } = await world({ GPT6_CLIENTS: "all" });
     const key = await mintOpenCode(service, token);
     assert.equal((await chat(service, key, OPENCODE)).status, 200);
     for (const sent of sentToCheckers(service)) {
@@ -401,7 +401,7 @@ describe("GPT-6 trust gate", () => {
   });
 
   it("trusts an OpenCode-only user (no events) from the request log: 5 requests in one run over 5 minutes, two weeks", async () => {
-    const { service, token } = await world({ GPT6_TRUSTED_WEEKLY_USD_CAP: "5", PER_PERSON_WEEKLY_USD_CAP: "0", GPT6_PRESEND_GUARD: "off" });
+    const { service, token } = await world({ GPT6_TRUSTED_WEEKLY_USD_CAP: "5", PER_PERSON_WEEKLY_USD_CAP: "0", GPT6_PRESEND_GUARD: "off", GPT6_CLIENTS: "all" });
     const key = await mintOpenCode(service, token);
     // Five quick requests aren't multi-turn use.
     for (let n = 0; n < 5; n++) assert.equal((await chat(service, key, simple("hi", MODEL))).status, 200);

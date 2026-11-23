@@ -182,9 +182,12 @@ describe("dl pi", () => {
   });
 });
 
+/** A model the service may list for a run (GPT-6, were it opened to other agents). */
+const LUNA = { id: "gpt-6-luna", name: "GPT-6 Luna", contextWindow: 1_050_000, maxOutputTokens: 128_000, vision: true };
+
 describe("Pi's provider for a run", () => {
   it("is OpenAI-compatible at the service's /v1, with the listed models, their limits and what they can read", () => {
-    const provider = piProvider({ origin: ORIGIN, models: FREE_TIER_MODELS }) as any;
+    const provider = piProvider({ origin: ORIGIN, models: [LUNA, ...FREE_TIER_MODELS] }) as any;
     assert.equal(provider.baseUrl, `${ORIGIN}/v1`);
     assert.equal(provider.api, "openai-completions");
     assert.equal(provider.apiKey, "$DL_FREE_TIER_KEY");
@@ -212,7 +215,6 @@ describe("Pi's provider for a run", () => {
   });
 
   it("falls back to the first listed model when DeepSeek isn't listed", () => {
-    const [luna] = FREE_TIER_MODELS;
-    assert.deepEqual(piArgs([], "/x.js", [luna!]), ["-e", "/x.js", "--provider", "dl", "--model", "dl/gpt-6-luna"]);
+    assert.deepEqual(piArgs([], "/x.js", [LUNA]), ["-e", "/x.js", "--provider", "dl", "--model", "dl/gpt-6-luna"]);
   });
 });

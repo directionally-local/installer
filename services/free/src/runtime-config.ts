@@ -1,5 +1,5 @@
 import { ALLOCATOR_MODES } from "./allocator.js";
-import { ACCESS_REQUEST_ALERT_MODES, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, PRO_MULTIPLIER_MAX, PRO_MULTIPLIER_MIN, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
+import { ACCESS_REQUEST_ALERT_MODES, GPT6_CLIENTS, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, PRO_MULTIPLIER_MAX, PRO_MULTIPLIER_MIN, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
 import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_PLANS, PROVIDER_STATUSES } from "./providers.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
@@ -175,6 +175,8 @@ export const RUNTIME_SETTINGS = {
   gpt6GuardTimeoutMs: { kind: "count", env: "GPT6_GUARD_TIMEOUT_MS" },
   /** A trusted free-plan person's weekly GPT-6 budget, USD (gpt6-trust.ts); 0 turns the trust gate off. */
   gpt6TrustedWeeklyUsdCap: { kind: "amount", env: "GPT6_TRUSTED_WEEKLY_USD_CAP" },
+  /** Which coding agents get GPT-6: "autopilot" (Autopilot only; other agents dl launches get DeepSeek) or "all". */
+  gpt6Clients: { kind: "gpt6Clients", env: "GPT6_CLIENTS" },
   /** Automated moderation review of high-risk labels (moderation.ts): "enforce", "shadow" (never blocks) or "off" (the plain high-risk email). */
   moderation: { kind: "moderationMode", env: "MODERATION" },
   /** The lowest confidence, 0 to 1, a "block" verdict needs to block in "enforce" mode. */
@@ -265,6 +267,8 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "string" && (ACCESS_REQUEST_ALERT_MODES as readonly string[]).includes(value) ? value : "invalid";
     case "guardMode":
       return typeof value === "string" && (GUARD_MODES as readonly string[]).includes(value) ? value : "invalid";
+    case "gpt6Clients":
+      return typeof value === "string" && (GPT6_CLIENTS as readonly string[]).includes(value) ? value : "invalid";
     case "moderationMode":
       return typeof value === "string" && (MODERATION_MODES as readonly string[]).includes(value) ? value : "invalid";
     case "allocatorMode":
@@ -306,6 +310,7 @@ const RULES: Record<Kind, string> = {
   seconds: `a number of seconds, more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS}`,
   alertMode: '"each", "daily" or "off"',
   guardMode: '"enforce" or "off"',
+  gpt6Clients: '"autopilot" (GPT-6 in Autopilot only) or "all" (every coding agent)',
   moderationMode: '"enforce", "shadow" or "off"',
   allocatorMode: '"on" or "off"',
   people: 'a list of up to 500 GitHub logins or numeric ids, e.g. ["octocat", "12345"], or [] for none',

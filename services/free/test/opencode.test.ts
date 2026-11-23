@@ -5,7 +5,7 @@ import { forHarness, gptLimitMessage } from "../src/messages.js";
 
 /**
  * OpenCode through `dl opencode`: a harness key for "opencode" on the chat completions endpoint
- * Autopilot uses, for every free tier model (GPT-6 and DeepSeek), through the same reservation,
+ * Autopilot uses, for DeepSeek (GPT-6 too only while `gpt6Clients` is "all"; gpt6-clients.test.ts), through the same reservation,
  * caps, share, dl-only check and refusals as Claude Code's, its usage recorded as OpenCode's.
  */
 
@@ -41,8 +41,8 @@ const sessionEvent = (service: Service, key: string) =>
   service.request("POST", "/v1/events", { token: key, body: { events: [{ id: `oc${++eventId}`, type: "session.start", sessionId: "dl-opencode-1", at: new Date(service.clock.now).toISOString(), props: { harness: "claude-code" } }] } });
 
 describe("OpenCode harness keys", () => {
-  it("are minted for \"opencode\" and serve both model families on chat completions, recorded as OpenCode's", async () => {
-    const { service, token } = await world();
+  it("are minted for \"opencode\" and serve both model families on chat completions with gpt6Clients \"all\", recorded as OpenCode's", async () => {
+    const { service, token } = await world({ GPT6_CLIENTS: "all" });
     const minted = await mint(service, token);
     assert.equal(minted.harness, "opencode");
     assert.match(minted.key, /^dlh_100_/);
@@ -64,7 +64,7 @@ describe("OpenCode harness keys", () => {
   });
 
   it("stream like Autopilot's requests", async () => {
-    const { service, token } = await world();
+    const { service, token } = await world({ GPT6_CLIENTS: "all" });
     const { key } = await mint(service, token);
     const response = await chat(service, key, { stream: true });
     assert.equal(response.status, 200);
@@ -78,7 +78,8 @@ describe("OpenCode harness keys", () => {
     const response = await service.request("GET", "/v1/models", { token: key });
     assert.equal(response.status, 200);
     const body = (await response.json()) as { data: Array<{ id: string; context_window: number; max_output_tokens: number; vision: boolean }> };
-    assert.deepEqual(body.data.map((model) => model.id), [LUNA, "gpt-6.1-sol", "gpt-6-astra", MODEL]);
+    // GPT-6 is Autopilot only (gpt6Clients "autopilot", the default).
+    assert.deepEqual(body.data.map((model) => model.id), [MODEL]);
     assert.deepEqual(body.data.at(-1), { id: MODEL, object: "model", owned_by: "luminal", name: "DeepSeek V4.1 Flash 1017", context_window: 1_048_576, max_output_tokens: 65_536, vision: false, access: "free" });
   });
 

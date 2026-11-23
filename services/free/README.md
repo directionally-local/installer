@@ -524,6 +524,9 @@ website's: `logo` is only the path.
 - A provider is listed once it has its key; only its models that are on.
 - `family`: what the model is (`gpt6`, `deepseek`, `kimi`, `glm`), not the budget.
 - `access`: `trusted` (GPT-6), `free`, `opt-in`; `pro` is kept for when Pro gets a provider first.
+- `clients`: the coding agents the model can be used in, of `autopilot`, `claude-code`, `opencode`
+  and `pi`. GPT-6 is `["autopilot"]` while `gpt6Clients` is `autopilot`; DeepSeek is every agent;
+  Claude Code through dl is always served by DeepSeek, so only DeepSeek lists it.
 - `status`: `on`, `out_of_credit`, or `paused` (the kill switch, the provider paused, its weekly
   budget used, no credit-backed way to serve).
 - Speed over the last 24 hours: the median tokens a second (after the first token) and time to
@@ -1147,6 +1150,7 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `harness_limit` | `/anthropic/v1/messages`, `/v1/chat/completions` with an OpenCode key (402) | `harness`, `share`, `resetsAt` (not for the trial), `offers`: that tool's share of the week or trial is used, the account's isn't |
 | `invalid_harness_key` | `/anthropic/v1/messages`, `/v1/chat/completions`, `/v1/models`, `/v1/events`, harness key refresh (401) | none: expired, revoked, or its sign-in ended |
 | `harness_key_limit` | `POST /v1/harness-keys` (409) | `max` |
+| `provider_limit` | chat (402) | `reason`, `provider`, `family`, `resetsAt`, `alternative`; reason `autopilot_only` (GPT-6 from another agent's harness key) also has `clients: ["autopilot"]` |
 | `server_keys_unavailable` | `POST /v1/keys`, and any request with a server key (403) | none |
 | `not_invited` | API, and older sign-ins | none |
 
@@ -1178,7 +1182,8 @@ are deleted once the day is over, so only the number stays. Rows older than 120 
 - **Request reasons** (from the refusal's code, on every chat path): `dl_only`,
   `harness_not_allowed` (also when minting a harness key), `harness_limit`,
   `proxy_not_allowed`, `gpt_limit:cap`, `gpt_limit:security_hold`, `gpt_limit:trust` (the GPT-6
-  trust gate),
+  trust gate), `provider_limit:pro_only`, `provider_limit:person_cap`, `provider_limit:provider`,
+  `provider_limit:autopilot_only` (GPT-6 from another coding agent),
   `allowance_exhausted:full` (Full or Pro), `allowance_exhausted:basic`,
   `allowance_exhausted:starter`, `trial_ended`, `below_bar`, `api_queued`,
   `global_cap:weekly`, `global_cap:total`, `paused`, `credit_exhausted`, `rate_limited`,
@@ -1233,6 +1238,7 @@ with who made it and when.
 | `gpt6PresendGuard` | `GPT6_PRESEND_GUARD` | `enforce`: GPT-6 requests are checked before they are sent (see [GPT-6: pre-send checks and the trust gate](#gpt-6-pre-send-checks-and-the-trust-gate)); `off` |
 | `gpt6GuardTimeoutMs` | `GPT6_GUARD_TIMEOUT_MS` | 4000: ms each pre-send check may take; past it the request isn't sent |
 | `gpt6TrustedWeeklyUsdCap` | `GPT6_TRUSTED_WEEKLY_USD_CAP` | 0: the trust gate is off; above 0, GPT-6 only for trusted people, with this weekly budget on the free plan |
+| `gpt6Clients` | `GPT6_CLIENTS` | `autopilot`: GPT-6 only in Autopilot (see [GPT-6 in Autopilot only](#gpt-6-in-autopilot-only)); `all`: every coding agent dl launches |
 | `moderation` | `MODERATION` | `enforce`: high-risk labels get an automated review that can block (see [automated moderation review](#automated-moderation-review)); `shadow` decides and emails, never blocks; `off` is the plain high-risk email |
 | `moderationBlockConfidence` | `MODERATION_BLOCK_CONFIDENCE` | 0.85: the lowest confidence (0 to 1) a block verdict needs to block |
 | `moderationAllowlist` | `MODERATION_ALLOWLIST` | []: GitHub logins or ids moderation never blocks (comma-separated in env) |
@@ -1338,6 +1344,27 @@ curl -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json'
   https://free.example.com/admin/config
 ```
 
+## GPT-6 in Autopilot only
+
+OpenAI's usage policies ask for its review before a service lets third parties access its models
+directly; an app that uses them to power its own features doesn't need it. Until that review, free
+GPT-6 (`gpt-6-luna`, `gpt-6.1-sol`, `gpt-6-astra`) is served only inside Autopilot, our own app
+(`src/gpt6-clients.ts`), and every other agent gets DeepSeek:
+
+- **Autopilot** is a sign-in token or a server key (the dl-only check keeps those to dl). It
+  gets every model as before.
+- **Other agents** are what dl launches with a harness key: `dl opencode`, `dl pi`, `dl claude`,
+  `dl t3`, and `dl proxy` for Conductor and other desktop apps. Their GPT-6 request gets HTTP 402
+  `{"error": {"code": "provider_limit", "reason": "autopilot_only", "family": "gpt6", "provider": "openai", "resetsAt": null, "alternative": "deepseek/deepseek-v4.1-flash-1017", "clients": ["autopilot"], "message": "GPT-6 is available only in Autopilot (dl) for now; other agents use DeepSeek V4.1 Flash. Run dl to use GPT-6."}}`
+  before anything is reserved or sent, counted as `provider_limit:autopilot_only` under the
+  agent. Their `/v1/models` and the unknown-model refusal's `allowed` leave GPT-6 out. Claude Code
+  through dl is DeepSeek only either way.
+- **Admins** pass, so GPT-6 can still be tested in other agents.
+- **`/v1/me`** answers only sign-in tokens and server keys, so it is unchanged. `/v1/providers`
+  keeps GPT-6 listed (`access: "trusted"`) with `clients: ["autopilot"]`.
+- **`gpt6Clients`** (`GPT6_CLIENTS`, runtime setting): `autopilot` (the default) or `all`, which
+  serves GPT-6 to every agent as before, once OpenAI has approved it.
+
 ## Claude Code and OpenCode through dl claude and dl opencode
 
 `dl claude` runs the person's own Claude Code against this service, and `dl opencode` their own
@@ -1360,9 +1387,8 @@ minted from ends it, as does an admin's revoke-tokens. At most 10 live per accou
 and `/v1/events`; an OpenCode key only on `/v1/chat/completions`, `/v1/models` and `/v1/events`.
 Neither works on `/v1/me` or `/v1/keys`.
 
-**OpenCode** speaks chat completions, so its requests take Autopilot's path unchanged: every free
-tier model (GPT-6 Luna, Sol, Astra and DeepSeek), streaming, the GPT-6 to DeepSeek fallback, and
-every refusal, with the share, the kill switch and the dl-only check below applied as for Claude
+**OpenCode** speaks chat completions, so its requests take Autopilot's path unchanged: DeepSeek
+(GPT-6 too only while `gpt6Clients` is `all`, see below), streaming, and every refusal, with the share, the kill switch and the dl-only check below applied as for Claude
 Code. Refusal messages are reworded for OpenCode (`forHarness`: "run dl and type /upgrade",
 "pick it in /models"). `/v1/models` also says whether each model reads images (`vision`); dl
 configures OpenCode from it.

@@ -228,9 +228,12 @@ describe("dl opencode", () => {
   });
 });
 
+/** A model the service may list for a run (GPT-6, were it opened to other agents). */
+const LUNA = { id: "gpt-6-luna", name: "GPT-6 Luna", contextWindow: 1_050_000, maxOutputTokens: 128_000, vision: true };
+
 describe("OpenCode's config for a run", () => {
-  it("adds an OpenAI-compatible provider \"dl\" at the service's /v1 with every free tier model, DeepSeek V4.1 Flash by default and GPT-6 still listed", () => {
-    const config = opencodeConfig({ origin: ORIGIN, models: FREE_TIER_MODELS });
+  it("adds an OpenAI-compatible provider \"dl\" at the service's /v1 with the models the service lists, DeepSeek V4.1 Flash by default", () => {
+    const config = opencodeConfig({ origin: ORIGIN, models: [LUNA, ...FREE_TIER_MODELS] });
     assert.equal(config.$schema, "https://opencode.ai/config.json");
     assert.equal(config.model, "dl/deepseek/deepseek-v4.1-flash-1017");
     assert.equal(config.small_model, "dl/deepseek/deepseek-v4.1-flash-1017");
@@ -239,20 +242,20 @@ describe("OpenCode's config for a run", () => {
     assert.deepEqual(provider.options, { baseURL: `${ORIGIN}/v1`, apiKey: `{env:${KEY_ENV}}`, includeUsage: true });
     assert.deepEqual(provider.models["gpt-6-luna"], { name: "GPT-6 Luna", tool_call: true, attachment: true, modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 1_050_000, output: 128_000 } });
     assert.deepEqual(provider.models["deepseek/deepseek-v4.1-flash-1017"], { name: "DeepSeek V4.1 Flash 1017", tool_call: true, attachment: false, modalities: { input: ["text"], output: ["text"] }, limit: { context: 1_048_576, output: 65_536 } });
-    assert.deepEqual(Object.keys(provider.models), ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "deepseek/deepseek-v4.1-flash-1017"]);
+    assert.deepEqual(Object.keys(provider.models), ["gpt-6-luna", "deepseek/deepseek-v4.1-flash-1017"]);
   });
 
   it("falls back to the first model when DeepSeek isn't listed", () => {
-    const config = opencodeConfig({ origin: ORIGIN, models: FREE_TIER_MODELS.slice(0, 3) });
+    const config = opencodeConfig({ origin: ORIGIN, models: [LUNA] });
     assert.equal(config.model, "dl/gpt-6-luna");
     assert.equal(config.small_model, "dl/gpt-6-luna");
   });
 
-  it("keeps the built-in list in step with the service's models", async () => {
+  it("keeps the built-in list in step with the service's models other agents get (no GPT-6: Autopilot only)", async () => {
     // Read at run time: the service is outside dl's TypeScript project.
     const service = new URL("../../services/free/src/models.ts", import.meta.url).href;
     const { FREE_MODELS, DEFAULT_MODEL } = (await import(service)) as {
-      FREE_MODELS: Array<{ id: string; name: string; contextWindow: number; maxOutputTokens: number; vision: boolean; provider: string }>;
+      FREE_MODELS: Array<{ id: string; name: string; contextWindow: number; maxOutputTokens: number; vision: boolean; provider: string; family: string }>;
       DEFAULT_MODEL: string;
     };
     // Not a registry provider's (opt-in) models: they serve only while that provider has a key
@@ -260,9 +263,10 @@ describe("OpenCode's config for a run", () => {
     const { isRegistryProvider } = (await import(new URL("../../services/free/src/providers.ts", import.meta.url).href)) as { isRegistryProvider(value: unknown): boolean };
     assert.deepEqual(
       FREE_TIER_MODELS,
-      FREE_MODELS.filter((model) => !isRegistryProvider(model.provider)).map((model) => ({ id: model.id, name: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens, vision: model.vision })),
+      FREE_MODELS.filter((model) => !isRegistryProvider(model.provider) && model.family !== "gpt6").map((model) => ({ id: model.id, name: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens, vision: model.vision })),
     );
     assert.equal(DEFAULT_MODEL, "gpt-6-luna");
+    assert.ok(FREE_TIER_MODELS.every((model) => !model.id.startsWith("gpt-")), "no GPT-6 in dl's built-in list");
   });
 
   it("reads OpenCode's major version, and adds --standalone on 2 or an unknown version only", () => {

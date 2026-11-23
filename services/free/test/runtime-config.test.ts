@@ -103,6 +103,7 @@ describe("runtime settings (units)", () => {
       gpt6PresendGuard: "enforce",
       gpt6GuardTimeoutMs: 4000,
       gpt6TrustedWeeklyUsdCap: 0,
+      gpt6Clients: "autopilot",
       moderation: "enforce",
       moderationBlockConfidence: 0.85,
       moderationAllowlist: [],

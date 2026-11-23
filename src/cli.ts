@@ -77,12 +77,12 @@ On your laptop:
                           sign-in; ARGS go to claude as they are. Needs claude installed; free
                           tokens work in it only while dl claude runs, on a smaller share of the
                           weekly allowance than Autopilot. Your ~/.claude settings aren't touched
-  dl opencode [ARGS]      your own OpenCode on free tokens (DeepSeek V4.1 Flash by default; GPT-6
-                          models in /models), through dl's free tier sign-in; ARGS go to opencode
+  dl opencode [ARGS]      your own OpenCode on free tokens (DeepSeek V4.1 Flash; GPT-6 is in
+                          Autopilot only), through dl's free tier sign-in; ARGS go to opencode
                           as they are. Needs opencode installed; free tokens work in it only while
                           dl opencode runs. Your OpenCode config files aren't touched
-  dl pi [ARGS]            your own Pi on free tokens (DeepSeek V4.1 Flash by default; the others
-                          in /model), through dl's free tier sign-in; ARGS go to pi as they are.
+  dl pi [ARGS]            your own Pi on free tokens (DeepSeek V4.1 Flash; GPT-6 is in Autopilot
+                          only), through dl's free tier sign-in; ARGS go to pi as they are.
                           Needs pi installed (npm i -g @earendil-works/pi-coding-agent); free
                           tokens work in it only while dl pi runs. Nothing under ~/.pi is touched
   dl conductor            Conductor (and Zed, Cline and other desktop apps) on free tokens: starts

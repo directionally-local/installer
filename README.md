@@ -106,7 +106,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl -c`, `dl --continue` | On this computer, `autopilot -c`. On a server, reopen the latest conversation started from this folder there. |
 | `dl --from-claude-code` | Continue this folder's latest Claude Code conversation in a new Autopilot session on this computer (`autopilot --from-claude-code`): it asks first, then sends your last request, the files changed, commands run and Claude's last message as the first message. The transcript is read here and goes only to your model. |
 | `dl claude [ARGS]` | Your own Claude Code on dl's free tokens, served by DeepSeek. See [Claude Code with free tokens: dl claude](#claude-code-with-free-tokens-dl-claude). |
-| `dl opencode [ARGS]` | Your own OpenCode on dl's free tokens: DeepSeek V4.1 Flash, plus GPT-6 Luna, Sol and Astra for accounts that have used dl for a while (otherwise GPT-6 needs your own key). See [OpenCode with free tokens: dl opencode](#opencode-with-free-tokens-dl-opencode). |
+| `dl opencode [ARGS]` | Your own OpenCode on dl's free tokens, served by DeepSeek V4.1 Flash (free GPT-6 is in Autopilot only for now; plain `dl`). See [OpenCode with free tokens: dl opencode](#opencode-with-free-tokens-dl-opencode). |
 | `dl pi [ARGS]` | Your own Pi on dl's free tokens, DeepSeek V4.1 Flash by default. See [Pi with free tokens: dl pi](#pi-with-free-tokens-dl-pi). |
 | `dl conductor` | [Conductor](https://conductor.build) (and Zed, Cline and other desktop apps) on dl's free tokens: starts `dl proxy` if it isn't running and prints the settings to paste into the app. See [Desktop apps with free tokens: dl proxy and dl conductor](#desktop-apps-with-free-tokens-dl-proxy-and-dl-conductor). |
 | `dl proxy start` / `stop` / `status` | A local proxy on `127.0.0.1:4789` that desktop apps use for the free tier, with a local token as their API key. `dl proxy run` runs it in the terminal; `dl proxy install` / `uninstall` start it at login (macOS LaunchAgent, Linux systemd user service). |
@@ -235,9 +235,9 @@ Every argument after `opencode` goes to it unchanged (`dl opencode run "fix the 
   `npm install -g @opencode/cli`) and stops.
 - **The models:** the free tier serves DeepSeek V4.1 Flash, as provider "dl" in OpenCode's
   `/models` (the default, with its context and output limits); session titles use it too.
-  GPT-6 Luna, GPT-6.1 Sol and GPT-6 Astra are listed there too for accounts that have used dl for
-  a while (paying doesn't unlock them); otherwise use them with your own OpenAI or OpenRouter key, as one of your own
-  providers. Your own providers stay in `/models`, on your own keys.
+  Free GPT-6 (Luna, Sol, Astra) is available only in Autopilot for now: run plain `dl` for it. In
+  OpenCode, use GPT-6 with your own OpenAI or OpenRouter key, as one of your own providers. Your
+  own providers stay in `/models`, on your own keys.
   Only listed models can be picked: `dl opencode -m dl/<a model the free tier doesn't serve>` fails
   inside OpenCode ("Model unavailable", or "UnknownError … Unexpected server error" in older
   versions) before any request is sent. OpenCode has no option to pass unlisted models through to a
@@ -267,8 +267,8 @@ exit code is dl's.
 
 - **Pi itself:** dl never installs it. Without `pi` on your PATH it prints
   `npm install -g @earendil-works/pi-coding-agent` and stops.
-- **The models:** provider "dl" in Pi's `/model`, DeepSeek V4.1 Flash by default, plus the other
-  free tier models your account may use. Pass your own `--model`, `--models` or `--provider` and
+- **The models:** provider "dl" in Pi's `/model`, DeepSeek V4.1 Flash (free GPT-6 is in Autopilot
+  only for now). Pass your own `--model`, `--models` or `--provider` and
   dl leaves the choice to you; your own providers stay in `/model`, on your own keys.
 - **Only while dl pi runs, on half the free allowance:** the same 15-minute key, share and rules
   as `dl opencode`.

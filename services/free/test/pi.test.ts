@@ -47,8 +47,8 @@ describe("Pi harness keys", () => {
     assert.equal(minted.otherHarnessShare, 0.5);
   });
 
-  it("serve DeepSeek (and the other models) on chat completions, recorded as Pi's under dl pi's session id", async () => {
-    const { service, token } = await world();
+  it("serve DeepSeek (and GPT-6 with gpt6Clients \"all\") on chat completions, recorded as Pi's under dl pi's session id", async () => {
+    const { service, token } = await world({ GPT6_CLIENTS: "all" });
     const { key } = await mint(service, token);
     const deepseek = await chat(service, key, {}, { "x-session-id": "dl-pi-abc" });
     assert.equal(deepseek.status, 200, await deepseek.clone().text());
@@ -61,7 +61,7 @@ describe("Pi harness keys", () => {
   });
 
   it("stream", async () => {
-    const { service, token } = await world();
+    const { service, token } = await world({ GPT6_CLIENTS: "all" });
     const { key } = await mint(service, token);
     const response = await chat(service, key, { model: LUNA, stream: true, stream_options: { include_usage: true } });
     assert.equal(response.status, 200);
