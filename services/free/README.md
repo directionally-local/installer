@@ -846,6 +846,39 @@ Google Workspace mail and DNS are not touched):
 
 A failed alert is logged and not retried; it never fails the request that triggered it.
 
+## Token allocator
+
+`src/allocator.ts`, stored by `src/allocator-store.ts`. With `allocator` on, every account that
+isn't blocked gets at least `allocatorStartTokens` (1M) a week, including accounts that had no
+free tokens (Starter with 0, or batch-flagged). Allowances above that stay as they are: the
+allocator only raises.
+
+When a free request leaves a Starter or basic account at `allocatorTriggerShare` (80%) of its
+weekly tokens, a decision runs beside the request (at most once per person per allowance step
+per 24 hours): `openai/gpt-oss-safeguard-20b` on OpenRouter (the company key, low reasoning,
+temperature 0, `allocatorTimeoutMs`), under the `allocatorPolicy` of `DETECTION_RULES` (a
+generic default otherwise). It sees counts and stored labels only, never prompts: use
+descriptions (30 days, up to 100), sessions and requests per session from the request log (every
+agent's session id, else idle-split runs) and Autopilot's session events, active days and weeks,
+request pacing, which agents were used, the allowance and its use, GitHub numbers, networks, the
+batch flag and moderation verdicts. It answers `stay`, `10m` or `full`.
+
+Hard rules win: a high-risk label or a moderation block or watch in 30 days can't be raised; farm
+signals (batch flag, a device shared with another account, `network_limit`) stop at 10M; one step
+at a time (start → 10M → the Full level) unless the GitHub account is a year old and used the
+service in two or more weeks; blocked accounts get nothing.
+
+Autopilot, OpenCode (`dl opencode`) and Claude Code (`dl claude`, Anthropic Messages) all go
+through the same chat path, so all of this applies to each.
+
+Never stuck on our system: a request refused for tokens waits up to 3 s for a pending decision.
+If the allocator is down, slow or failed, the person gets `allocatorGraceShare` (20%) of the
+allowance once for the rest of the week.
+
+Decisions and graces are stored in the Directory's `allocator_decisions` (no content) and listed
+by `GET /v1/admin/allocator?days=1..90&limit=1..1000` (newest first, with counts per UTC day). The
+daily digest has one line: "Allocator: X raised to 10M, Y to full, Z stayed, G graces".
+
 ## Refusals
 
 Every refusal is `{"error": {"code", "message", ...}}`. The browser page and `error.message`
@@ -964,6 +997,11 @@ with who made it and when.
 | `moderationAllowlist` | `MODERATION_ALLOWLIST` | []: GitHub logins or ids moderation never blocks (comma-separated in env) |
 | `moderationCooldownMinutes` | `MODERATION_COOLDOWN_MINUTES` | 60: minutes before the same person is reviewed again for the same category |
 | `moderationDailyCap` | `MODERATION_DAILY_CAP` | 300: reviews a UTC day across everyone; past it, the plain high-risk email (0 stops reviews) |
+| `allocator` | `ALLOCATOR` | `on`: the [token allocator](#token-allocator) (start grant, raises with real use); `off` |
+| `allocatorStartTokens` | `ALLOCATOR_START_TOKENS` | 1,000,000: every account's weekly start grant (never lowers a higher allowance; blocked accounts get nothing) |
+| `allocatorTriggerShare` | `ALLOCATOR_TRIGGER_SHARE` | 0.8: the share of the week's allowance that starts a decision |
+| `allocatorTimeoutMs` | `ALLOCATOR_TIMEOUT_MS` | 5000: how long the allocator's answer is waited for |
+| `allocatorGraceShare` | `ALLOCATOR_GRACE_SHARE` | 0.2: the one-time weekly grace when the allocator is down, slow or failed |
 | `starterWeeklyTokens` | `STARTER_WEEKLY_TOKENS` | 50,000,000, as Full (0: no free tokens below Basic) |
 | `starterWeeklyUsdCap` | `STARTER_WEEKLY_USD_CAP` | 2 (GPT-6), as Full |
 | `starterDeepseekWeeklyUsdCap` | `STARTER_DEEPSEEK_WEEKLY_USD_CAP` | 8, as Full |
@@ -1006,6 +1044,7 @@ tests, local development and self-hosting, never the production values.
   "proxyRouters": ["regex"],
   "labellerPolicy": "What the use-description labeller should call high, low and no risk.",
   "moderationPolicy": "What the moderation reviewer should block, pass and watch, and how to weigh the case.",
+  "allocatorPolicy": "What the token allocator should count as real use worth a raise.",
   "thresholds": { "batchSize": 10, "minFollowers": 1 }
 }
 ```
@@ -1017,8 +1056,10 @@ tests, local development and self-hosting, never the production values.
   Keep ids stable: they show in the admin pages.
 - **`proxyRouters`**: case-insensitive patterns for account-pooling routers, matched against the
   session id and the user agent (`proxy_not_allowed`).
-- **`labellerPolicy`**, **`moderationPolicy`**: the policy part of the two model prompts. The
-  rest of each prompt (what the model is given and the JSON it must answer) stays in the code.
+- **`labellerPolicy`**, **`moderationPolicy`**, **`allocatorPolicy`**: the policy part of the
+  three model prompts (the last is the [token allocator](#token-allocator)'s). Deploy a version
+  that knows `allocatorPolicy` before putting it in the secret: older versions refuse unknown
+  fields and would ignore the whole secret. The rest of each prompt (what the model is given and the JSON it must answer) stays in the code.
 - **`thresholds`**: starting values for the farm-detection settings listed above.
 
 Every field is optional, and a field that is present **replaces** its default whole (a secret's

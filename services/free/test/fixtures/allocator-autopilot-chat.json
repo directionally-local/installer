@@ -1,0 +1,16 @@
+{
+  "_note": "Representative shape of an Autopilot (plain dl) chat completions request: x-session-id header, system prompt, tools, a multi-turn coding exchange. Synthetic text, no user content.",
+  "headers": { "x-session-id": "ap-3f1c2a7e-0b9d-4c55-9f0e-1d2b3c4d5e6f", "user-agent": "autopilot-ai/3.20.0" },
+  "body": {
+    "model": "deepseek/deepseek-v4.1-flash-1017",
+    "stream": false,
+    "max_tokens": 300,
+    "messages": [
+      { "role": "system", "content": "You are Autopilot, a coding agent working in the user's repository." },
+      { "role": "user", "content": "The date parser test fails on leap years; find out why and fix it." },
+      { "role": "assistant", "content": null, "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "read_file", "arguments": "{\"path\":\"src/date.ts\"}" } }] },
+      { "role": "tool", "tool_call_id": "call_1", "content": "export function parse(s: string) { /* ... */ }" }
+    ],
+    "tools": [{ "type": "function", "function": { "name": "read_file", "description": "Read a file", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] } } }]
+  }
+}

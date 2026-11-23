@@ -344,6 +344,8 @@ export async function createService(vars: Record<string, string> = {}, options: 
     DOMAIN_SIGNUPS_PER_DAY: "100000",
     // Use descriptions make their own model calls; off unless a test turns them on (use-description.test.ts).
     USE_DESCRIPTIONS: "false",
+    // The token allocator raises allowances and makes its own model calls; off unless a test turns it on (allocator.test.ts).
+    ALLOCATOR: "off",
     ...vars,
     ...namespaces,
   };

@@ -93,6 +93,11 @@ describe("runtime settings (units)", () => {
       moderationAllowlist: [],
       moderationCooldownMinutes: 60,
       moderationDailyCap: 300,
+      allocator: "on",
+      allocatorStartTokens: 1_000_000,
+      allocatorTriggerShare: 0.8,
+      allocatorTimeoutMs: 5000,
+      allocatorGraceShare: 0.2,
     });
   });
 

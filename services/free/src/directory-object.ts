@@ -16,6 +16,8 @@ import { DEEPSEEK_MODEL, familyOf, type Family } from "./models.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, trialBonuses, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
+import { ALLOCATOR_MODEL, type AllocatorFacts, type AllocatorOutcome, type AllocatorState, type FinishInput } from "./allocator.js";
+import { allocatorCounts, allocatorDaily, allocatorDecisions, allocatorFacts, allocatorGrace, allocatorState, allocatorStatus, claimAllocation, ensureAllocatorSchema, finishAllocation, type AllocatorCounts, type AllocatorRow } from "./allocator-store.js";
 import { levelChecks, levelFor, type BasicRule, type GithubSignals, type Level, type LevelReason, type LevelThresholds, type SignalThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 import { USE_CHECKPOINTS, USE_KEEP_DAYS, type UseLabel } from "./use-description.js";
@@ -211,6 +213,8 @@ export interface RequestRecord {
   harness?: string;
   /** The weekly dollar budget it was charged to (the requested model's); unset: the served model's. */
   family?: Family;
+  /** The client's session id, when it sent one (allocator.ts sessionKeyOf): the token allocator's session counts. */
+  sessionKey?: string | null;
 }
 
 /**
@@ -291,6 +295,8 @@ export interface PersonState {
   outsideDl: boolean;
   /** When the person was admitted (people.admitted_at, Unix ms): before the trial cutoff is grandfathered. Null when not in the Directory. */
   admittedAt: number | null;
+  /** The token allocator's step and this week's grace (allocator.ts); null when nothing was decided. */
+  allocator?: AllocatorState | null;
 }
 
 export interface Gate {
@@ -939,6 +945,8 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["spend_weeks", "internal_requests", "INTEGER NOT NULL DEFAULT 0"],
   // Why a moderation review failed (moderation.ts ModerationFailure): a code, never content; NULL when it worked.
   ["moderation_decisions", "error", "TEXT"],
+  // The client's session id (any coding agent that sends one), for the token allocator's session counts.
+  ["requests", "session_key", "TEXT"],
 ];
 
 /** Days of `daily_activity` whose DeepSeek cost is filled in from the request log when the column is added. */
@@ -964,6 +972,7 @@ export class DirectoryObject extends DurableObject {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
+      ensureAllocatorSchema(this.ctx.storage.sql);
       const added = new Set<string>();
       for (const [table, column, definition] of ADDED_COLUMNS) {
         const columns = this.ctx.storage.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray();
@@ -1585,6 +1594,7 @@ export class DirectoryObject extends DurableObject {
             },
       outsideDl: outsideDl(sql, githubId, now),
       admittedAt: person.admitted_at,
+      allocator: allocatorState(sql, githubId),
     };
   }
 
@@ -2468,8 +2478,8 @@ export class DirectoryObject extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         `INSERT INTO requests (github_id, is_admin, at, model, prompt_tokens, completion_tokens, cached_tokens, charged_tokens, cost_usd, status, latency_ms, paid,
-                               upstream, credit_usd, ttfb_ms, ttft_ms, upstream_error, upstream_outcome, via_key, harness)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                               upstream, credit_usd, ttfb_ms, ttft_ms, upstream_error, upstream_outcome, via_key, harness, session_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         record.githubId,
         record.isAdmin ? 1 : 0,
         record.at,
@@ -2490,6 +2500,7 @@ export class DirectoryObject extends DurableObject {
         outcome,
         record.viaKey ? 1 : 0,
         record.harness ?? null,
+        record.sessionKey ?? null,
       );
       const admin = record.isAdmin ? 1 : 0;
       // Three buckets: admins; paid usage (Pro, top-ups); and free usage, the only one the caps count.
@@ -3034,6 +3045,38 @@ export class DirectoryObject extends DurableObject {
     });
   }
 
+  // ─── Token allocator (allocator.ts, allocator-store.ts) ──────────────────
+
+  async claimAllocation(input: { githubId: number; fromTokens: number; now: number }): Promise<number | null> {
+    return this.ctx.storage.transactionSync(() => claimAllocation(this.ctx.storage.sql, { ...input, model: ALLOCATOR_MODEL }));
+  }
+
+  async allocatorStatus(input: { githubId: number; fromTokens: number; now: number }): Promise<{ id: number; outcome: AllocatorOutcome; at: number } | null> {
+    return allocatorStatus(this.ctx.storage.sql, input);
+  }
+
+  async allocatorFacts(input: { githubId: number; now: number }): Promise<AllocatorFacts | undefined> {
+    return allocatorFacts(this.ctx.storage.sql, input);
+  }
+
+  /** A decision's end; its model call's cost goes to the internal spend bucket, like moderation reviews. */
+  async finishAllocation(input: FinishInput): Promise<AllocatorState | null> {
+    return this.ctx.storage.transactionSync(() => {
+      if (input.tokens > 0) this.#recordInternalSpend({ upstream: "openrouter", tokens: input.tokens, cashUsd: input.cashUsd, creditUsd: 0, now: input.now });
+      return finishAllocation(this.ctx.storage.sql, input);
+    });
+  }
+
+  async allocatorGrace(input: { githubId: number; fromTokens: number; graceTokens: number; reason: string; now: number }): Promise<AllocatorState | null> {
+    return this.ctx.storage.transactionSync(() => allocatorGrace(this.ctx.storage.sql, { ...input, model: ALLOCATOR_MODEL }));
+  }
+
+  /** GET /admin/allocator: decisions since `since`, newest first, and counts per day. */
+  async allocatorReport(input: { since: number; limit: number; days: number; now: number }): Promise<{ decisions: AllocatorRow[]; daily: Array<{ date: string } & AllocatorCounts> }> {
+    const sql = this.ctx.storage.sql;
+    return { decisions: allocatorDecisions(sql, input), daily: allocatorDaily(sql, input.now, input.days) };
+  }
+
   /** Moderation decisions since `since`, newest first, optionally one verdict (GET /admin/moderation). */
   async moderationDecisions(input: { since: number; verdict?: ModerationVerdict; limit: number }): Promise<ModerationRow[]> {
     return this.ctx.storage.sql
@@ -3539,6 +3582,8 @@ export class DirectoryObject extends DurableObject {
       .map((row) => ({ login: row.login, how: { via: row.admitted_via === "open" ? "open" : "invite", referral: row.referral === 1 } satisfies SignupHow }));
     const { platforms, failedSteps } = installBreakdown(sql, from / DAY_MS, until / DAY_MS);
     const moderation = this.#moderationDay(from, until);
+    const allocator = allocatorCounts(sql, from, until);
+    const allocated = allocator.raised10m + allocator.raisedFull + allocator.stayed + allocator.errors + allocator.graces > 0;
     return dailyDigestAlert({
       date,
       signups: { count: day.signedUp, people },
@@ -3559,6 +3604,7 @@ export class DirectoryObject extends DurableObject {
       paused: envPaused || this.#paused(),
       ...(policy.accessRequestAlerts === "daily" ? { accessRequests: this.#accessRequestDay(from, until) } : {}),
       ...(moderation ? { moderation } : {}),
+      ...(allocated ? { allocator } : {}),
     });
   }
 

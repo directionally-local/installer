@@ -1,0 +1,15 @@
+{
+  "_note": "Representative shape of a Claude Code (dl claude) Anthropic Messages request: harness key, metadata.user_id carrying the session id. Synthetic text, no user content.",
+  "headers": { "anthropic-version": "2023-06-01", "anthropic-beta": "claude-code-20250219", "user-agent": "claude-cli/2.0.0 (external, cli)" },
+  "body": {
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 300,
+    "stream": false,
+    "system": [{ "type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude." }],
+    "metadata": { "user_id": "user_0000000000000000000000000000000000000000000000000000000000000000_account__session_7c9e6679-7425-40de-944b-e07fc1f90ae7" },
+    "messages": [
+      { "role": "user", "content": [{ "type": "text", "text": "Refactor the retry helper to use exponential backoff and update its tests." }] }
+    ],
+    "tools": [{ "name": "Read", "description": "Read a file", "input_schema": { "type": "object", "properties": { "file_path": { "type": "string" } }, "required": ["file_path"] } }]
+  }
+}

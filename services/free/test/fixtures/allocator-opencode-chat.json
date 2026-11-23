@@ -1,0 +1,14 @@
+{
+  "_note": "Representative shape of an OpenCode (dl opencode) request: OpenAI-compatible chat completions with a harness key and no session id. Synthetic text, no user content.",
+  "headers": { "user-agent": "opencode/1.0 ai-sdk/openai-compatible" },
+  "body": {
+    "model": "deepseek/deepseek-v4.1-flash-1017",
+    "stream": false,
+    "max_tokens": 300,
+    "messages": [
+      { "role": "system", "content": "You are opencode, an interactive CLI tool that helps users with software engineering tasks." },
+      { "role": "user", "content": "Add a --verbose flag to the CLI and print each step when it is set." }
+    ],
+    "tools": [{ "type": "function", "function": { "name": "bash", "description": "Run a shell command", "parameters": { "type": "object", "properties": { "command": { "type": "string" } }, "required": ["command"] } } }]
+  }
+}
