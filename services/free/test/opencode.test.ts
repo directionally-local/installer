@@ -79,7 +79,7 @@ describe("OpenCode harness keys", () => {
     assert.equal(response.status, 200);
     const body = (await response.json()) as { data: Array<{ id: string; context_window: number; max_output_tokens: number; vision: boolean }> };
     assert.deepEqual(body.data.map((model) => model.id), [LUNA, "gpt-6.1-sol", "gpt-6-astra", MODEL]);
-    assert.deepEqual(body.data.at(-1), { id: MODEL, object: "model", owned_by: "luminal", name: "DeepSeek V4.1 Flash 1017", context_window: 1_048_576, max_output_tokens: 65_536, vision: false });
+    assert.deepEqual(body.data.at(-1), { id: MODEL, object: "model", owned_by: "luminal", name: "DeepSeek V4.1 Flash 1017", context_window: 1_048_576, max_output_tokens: 65_536, vision: false, access: "free" });
   });
 
   it("work nowhere else: not on the Anthropic endpoint, /v1/me or the keys", async () => {

@@ -1,4 +1,4 @@
-import type { Upstream } from "./config.js";
+import type { PrimaryUpstream as Upstream } from "./config.js";
 
 /**
  * Which provider serves a request. A model's own provider always serves it (see models.ts);

@@ -1,4 +1,5 @@
 import { parseUsage, type Usage } from "./quota.js";
+import { exchangeCharge } from "./providers.js";
 import { hostOf } from "./routing.js";
 
 /**
@@ -24,6 +25,10 @@ export interface StreamOutcome {
   firstContentAt: number | undefined;
   /** Whether any content reached the client. */
   contentSent: boolean;
+  /** What Liquid Inference charged, from its last chunk's `exchange.charge.total_usd`; undefined elsewhere. */
+  chargeUsd?: number;
+  /** When the stream ended, by `now`. */
+  endedAt?: number;
 }
 
 /** Whether a stream chunk carries content: text, reasoning or a tool call in any choice's delta. */
@@ -50,6 +55,7 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
   let done = false;
   let host: string | undefined;
   let firstContentAt: number | undefined;
+  let chargeUsd: number | undefined;
   let ended = false;
 
   const scan = (final: boolean) => {
@@ -67,6 +73,7 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
         const found = parseUsage(parsed.usage);
         if (found) usage = found;
         host ??= hostOf(parsed);
+        chargeUsd = exchangeCharge(parsed) ?? chargeUsd;
         if (firstContentAt === undefined && hasContent(parsed)) firstContentAt = now();
         if (parsed.error) {
           errored = true;
@@ -81,7 +88,7 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
   const finish = async () => {
     if (ended) return;
     ended = true;
-    await onEnd({ usage, errored, upstreamFailed, host, firstContentAt, contentSent: firstContentAt !== undefined });
+    await onEnd({ usage, errored, upstreamFailed, host, firstContentAt, contentSent: firstContentAt !== undefined, ...(chargeUsd !== undefined ? { chargeUsd } : {}), endedAt: now() });
   };
 
   return new ReadableStream<Uint8Array>({

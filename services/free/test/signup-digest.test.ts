@@ -7,6 +7,7 @@ import { readFreeConfig } from "../src/config.js";
 
 // After the harness: app.js loads cloudflare:workers, which the harness resolves.
 const { DIGEST_CRON } = await import("../src/app.js");
+const { PROBE_CRON } = await import("../src/probes.js");
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -268,7 +269,7 @@ describe("daily digest", () => {
     assert.doesNotMatch(text, /@p20/);
   });
 
-  it("routes only the digest cron, and both wrangler configs schedule it", async () => {
+  it("routes only its own crons (the digest and the speed probes), and both wrangler configs schedule them", async () => {
     const service = await createService({ ALERT_WEBHOOK_URL: "https://alerts.test/hook" });
     await scheduled(service, DIGEST_AT, "*/5 * * * *");
     assert.deepEqual(texts(service), []);
@@ -276,7 +277,7 @@ describe("daily digest", () => {
     assert.equal(texts(service).length, 1);
     for (const file of ["wrangler.jsonc", "wrangler.cloudflare.jsonc"]) {
       const config = JSON.parse(await readFile(new URL(`../${file}`, import.meta.url), "utf8")) as { triggers?: { crons?: string[] } };
-      assert.deepEqual(config.triggers?.crons, [DIGEST_CRON], file);
+      assert.deepEqual(config.triggers?.crons, [DIGEST_CRON, PROBE_CRON], file);
     }
   });
 });

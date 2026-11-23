@@ -57,6 +57,8 @@ export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   // Who an upstream served, first and last day: ids and days only, for the people per upstream.
   upstream_people: ["upstream", "github_id", "first_day", "last_day"],
   upstream_timings: ["at", "upstream", "ttfb_ms", "ttft_ms"],
+  // A registry provider's credit per week (provider-store.ts): dollars only, read by every request's gate.
+  provider_credit_weeks: ["week_start", "provider", "credit_usd", "user_usd", "free_usd", "internal_usd"],
   settings: ["key", "value"],
   queue: ["github_id", "queued_at", "admitted_at", "admitted_how"],
   queue_runs: ["week_start", "ran_at", "admitted", "waiting_before", "avg_usd", "actives", "budget_usd"],
@@ -221,7 +223,7 @@ export interface PaidView {
  * view's last N days). Admins included, except in `users`.
  */
 export interface UpstreamStats {
-  upstream: "openai" | "luminal" | "openrouter";
+  upstream: (typeof UPSTREAM_NAMES)[number];
   window: UpstreamWindowName;
   requests: number;
   /** Distinct people served (admins left out); null where not counted (the Health view). */
@@ -242,7 +244,7 @@ export interface UpstreamStats {
   creditUsd: number;
 }
 
-export const UPSTREAM_NAMES = ["openai", "luminal", "openrouter"] as const;
+export const UPSTREAM_NAMES = ["openai", "luminal", "liquid", "openrouter"] as const;
 
 export type UpstreamWindowName = "today" | "week" | "all_time" | `${number}d`;
 

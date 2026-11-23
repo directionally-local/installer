@@ -1,4 +1,5 @@
-import type { AccessRequestAlerts, FreeConfig, Upstream } from "./config.js";
+import type { AccessRequestAlerts, FreeConfig, PrimaryUpstream } from "./config.js";
+import { REGISTRY_DEFAULTS, type RegistrySettingsConfig } from "./providers.js";
 import { DAY_MS, WEEK_MS, weekEnd } from "./week.js";
 
 /**
@@ -29,7 +30,7 @@ import { DAY_MS, WEEK_MS, weekEnd } from "./week.js";
  */
 
 /** The settings the Directory needs for the queue, referrals and alerts; overrides are applied there. */
-export interface Policy {
+export interface Policy extends Partial<RegistrySettingsConfig> {
   adminIds: number[];
   weeklyTokens: number;
   /** A Full person's GPT-6 budget, and DeepSeek budget: together, the most a new person costs a week. */
@@ -41,7 +42,7 @@ export interface Policy {
   queueReferralPlaces: number;
   referralBonusTokens: number;
   referralBonusCap: number;
-  primaryUpstream: Upstream;
+  primaryUpstream: PrimaryUpstream;
   /** LUMINAL_API_KEY is set; without it every request goes to OpenRouter. */
   luminalConfigured: boolean;
   luminalCreditUsd: number;
@@ -98,6 +99,8 @@ export function policyOf(config: FreeConfig): Policy {
     openaiCreditUsd: config.openaiCreditUsd,
     openaiWeeklyCreditUsd: config.openaiWeeklyCreditUsd,
     accessRequestAlerts: config.accessRequestAlerts,
+    // The registry providers' settings (providers.ts), for their credit alerts and the digest.
+    ...Object.fromEntries(Object.keys(REGISTRY_DEFAULTS).map((key) => [key, config[key as keyof RegistrySettingsConfig]])),
   };
 }
 

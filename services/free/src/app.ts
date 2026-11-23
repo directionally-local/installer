@@ -84,6 +84,8 @@ import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
 import { meterStream } from "./sse.js";
+import { accessOf, offeredModels, exchangeCharge, exchangeRules, isRegistryProvider, liquidPayload, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, registryBlock, type ProviderBlock, type ProviderSpend } from "./providers.js";
+import { PROBE_CRON, probeOnce, probeTargets } from "./probes.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
 import { anthropicError, errorStatus, estimateInputTokens, toAnthropicMessage, toAnthropicStream, toChatRequest } from "./anthropic.js";
 import { DAY_MS, isoDay, weekEnd, weekStart } from "./week.js";
@@ -159,6 +161,8 @@ import type { ModerationLimits } from "./directory-object.js";
 export const VERSION = "0.1.0";
 export const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 export const LUMINAL_URL = "https://flash.luminal.cloud/v1/chat/completions";
+/** Liquid Inference's chat completions (providers.ts). */
+export const LIQUID_URL = `${providerSpec("liquid").baseUrl}/chat/completions`;
 /** OpenAI's Responses API: its chat completions API refuses function tools while GPT-6 reasons. */
 export const OPENAI_URL = "https://api.openai.com/v1/responses";
 /** OpenRouter-only request fields Luminal's OpenAI-compatible API doesn't take. */
@@ -289,6 +293,9 @@ export interface Env {
   OPENROUTER_PRICE_OUTPUT?: string;
   LUMINAL_CREDIT_USD?: string;
   LUMINAL_WEEKLY_CREDIT_USD?: string;
+  /** A secret: Liquid Inference's API key. Never logged. Its settings are LIQUID_* (config.ts registrySettings). */
+  LIQUID_INFERENCE_API_KEY?: string;
+  SPEED_PROBES?: string;
   /** A secret: Resend's API key for emails to users, when USER_EMAIL isn't bound. Never logged. */
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
@@ -356,6 +363,8 @@ interface Ctx {
   base: string;
   /** This isolate's last /v1/status answer (see `status`). */
   statusCache: { value?: FreeStatus; at: number };
+  /** This isolate's last /v1/providers answer (see `providersPublic`). */
+  providersCache: { value?: PublicProviders; at: number };
   /** The pause between emails to users (HandlerOptions.emailGapMs). */
   emailGapMs: number;
   /** HandlerOptions.background. */
@@ -386,6 +395,7 @@ export function createHandler(options: HandlerOptions = {}): {
   const now = options.now ?? (() => Date.now());
   const fetcher: Fetch = options.fetch ?? ((input, init) => fetch(input, init));
   const statusCache: Ctx["statusCache"] = { at: 0 };
+  const providersCache: Ctx["providersCache"] = { at: 0 };
   const emailGapMs = options.emailGapMs ?? EMAIL_GAP_MS;
   return {
     /**
@@ -393,6 +403,14 @@ export function createHandler(options: HandlerOptions = {}): {
      * none, it runs on the first request of the week. Never throws for an unknown cron.
      */
     async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+      if (controller.cron === PROBE_CRON) {
+        try {
+          await runProbes(env, fetcher, now, Number.isFinite(controller.scheduledTime) ? controller.scheduledTime : now());
+        } catch (error) {
+          console.error("speed probes: run failed", error instanceof Error ? error.name : "error");
+        }
+        return;
+      }
       if (controller.cron !== DIGEST_CRON) {
         console.error("scheduled: unknown cron", controller.cron);
         return;
@@ -419,7 +437,7 @@ export function createHandler(options: HandlerOptions = {}): {
       const url = new URL(request.url);
       const ip = clientIp(request);
       const background = options.background ?? backgroundOf(execution);
-      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin, statusCache, emailGapMs, ...(background ? { background } : {}) };
+      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin, statusCache, providersCache, emailGapMs, ...(background ? { background } : {}) };
       return route(ctx);
     },
   };
@@ -444,6 +462,7 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/v1/token/revoke") return revoke(c);
   if (path === "/v1/keys" || path.startsWith("/v1/keys/")) return keys(c, path.slice("/v1/keys".length).replace(/^\//, ""), method);
   if (path === "/v1/status" && (method === "GET" || method === "OPTIONS")) return status(c);
+  if (path === "/v1/providers" && (method === "GET" || method === "OPTIONS")) return providersPublic(c);
   if (method === "GET" && path === "/v1/me") return me(c);
   if (method === "GET" && path === "/v1/models") return models(c);
   if (method === "POST" && path === "/v1/chat/completions") return chatCompletions(c);
@@ -789,6 +808,10 @@ interface Runtime {
   waiting: number;
   /** The caller's queue place, referral numbers and bonus, when `c.callerId` was set. */
   person?: PersonState;
+  /** Every provider's credit used (providers.ts). */
+  providerSpend: ProviderSpend;
+  /** The caller's spend on each registry provider this week, when `c.callerId` was set. */
+  personProviderWeekUsd?: Partial<Record<string, number>>;
 }
 
 /**
@@ -809,6 +832,8 @@ function runtime(c: Ctx): Promise<Runtime> {
       openaiWeekCreditUsd: gate.openaiWeekCreditUsd,
       waiting: gate.waiting,
       ...(gate.person ? { person: gate.person } : {}),
+      providerSpend: gate.providerSpend,
+      ...(gate.personProviderWeekUsd ? { personProviderWeekUsd: gate.personProviderWeekUsd } : {}),
     }));
   return c.runtimeState;
 }
@@ -818,18 +843,41 @@ async function alert(c: Ctx, alerts: readonly Alert[]): Promise<void> {
   await deliver(c, alerts);
 }
 
-/** Whether a provider has a key and credit left. */
-function providerReady(provider: Upstream, config: FreeConfig, gate: { creditUsedUsd: number; openaiCreditUsedUsd: number }): boolean {
+/** What the provider checks read from the request's runtime view. */
+type ProviderGate = { creditUsedUsd: number; openaiCreditUsedUsd: number; providerSpend?: ProviderSpend };
+
+/** Whether a provider has a key and credit left (a registry provider: also on, inside its weekly budget). */
+function providerReady(provider: Upstream, config: FreeConfig, gate: ProviderGate): boolean {
   if (provider === "openai") return config.openaiApiKey !== undefined && gate.openaiCreditUsedUsd < config.openaiCreditUsd;
   if (provider === "luminal") return config.luminalApiKey !== undefined && gate.creditUsedUsd < config.luminalCreditUsd;
+  if (isRegistryProvider(provider)) {
+    const settings = providerSettings(config, provider);
+    const spend = gate.providerSpend ?? { usedUsd: {}, weekUsd: {} };
+    return (
+      providerKey(config, provider) !== undefined &&
+      settings.status === "on" &&
+      (spend.usedUsd[provider] ?? 0) < settings.creditUsd &&
+      (settings.weeklyCreditUsd === undefined || (spend.weekUsd[provider] ?? 0) < settings.weeklyCreditUsd)
+    );
+  }
   return config.openRouterApiKey !== undefined;
 }
 
 /** Whether a provider is out of credit, as opposed to having no key at all. */
-function providerExhausted(provider: Upstream, config: FreeConfig, gate: { creditUsedUsd: number; openaiCreditUsedUsd: number }): boolean {
+function providerExhausted(provider: Upstream, config: FreeConfig, gate: ProviderGate): boolean {
   if (provider === "openai") return config.openaiApiKey !== undefined && gate.openaiCreditUsedUsd >= config.openaiCreditUsd;
   if (provider === "luminal") return config.luminalApiKey !== undefined && gate.creditUsedUsd >= config.luminalCreditUsd;
+  if (isRegistryProvider(provider)) return providerKey(config, provider) !== undefined && (gate.providerSpend?.usedUsd[provider] ?? 0) >= providerSettings(config, provider).creditUsd;
   return false;
+}
+
+/**
+ * Why a registry provider's model can't serve this caller now (providers.ts registryBlock), or
+ * undefined. Admins skip the opt-in cap; nothing else.
+ */
+function blockFor(model: FreeModel, config: FreeConfig, gate: Pick<Runtime, "providerSpend" | "personProviderWeekUsd">, isAdmin: boolean): ProviderBlock | undefined {
+  if (!isRegistryProvider(model.provider)) return undefined;
+  return registryBlock(config, model, gate.providerSpend, isAdmin ? undefined : (gate.personProviderWeekUsd?.[model.provider] ?? 0));
 }
 
 /** A provider's prepaid credit balance, for the pause alert. */
@@ -844,10 +892,14 @@ function providerCredit(provider: Upstream, config: FreeConfig): number {
  */
 function servingModel(
   requested: FreeModel,
-  gate: { creditUsedUsd: number; openaiCreditUsedUsd: number },
+  gate: ProviderGate,
   config: FreeConfig,
 ): { model: FreeModel; provider: Upstream; fallback: boolean } | undefined {
   const primary = config.primaryUpstream;
+  // A registry provider's model is served by that provider only, when it's on: never a fallback.
+  if (isRegistryProvider(requested.provider)) {
+    return providerSettings(config, requested.provider).models.includes(requested.id) && providerReady(requested.provider, config, gate) ? { model: requested, provider: requested.provider, fallback: false } : undefined;
+  }
   // The owner's explicit switch wins when that provider can serve this model.
   if (primary === "openrouter" && requested.provider === "luminal" && config.openRouterApiKey) return { model: requested, provider: "openrouter", fallback: false };
   if (primary === "luminal" && requested.provider === "luminal" && providerReady("luminal", config, gate)) return { model: requested, provider: "luminal", fallback: false };
@@ -862,7 +914,7 @@ function servingModel(
 }
 
 /** Whether a model can serve right now: its provider, or its fallback, or OpenRouter for DeepSeek. */
-function modelAvailable(model: FreeModel, config: FreeConfig, gate: { creditUsedUsd: number; openaiCreditUsedUsd: number }): boolean {
+function modelAvailable(model: FreeModel, config: FreeConfig, gate: ProviderGate): boolean {
   return servingModel(model, gate, config) !== undefined;
 }
 
@@ -1874,11 +1926,121 @@ async function status(c: Ctx): Promise<Response> {
       weekCreditUsd: chooseUpstream(gate.config.primaryUpstream, c.config) === "openai" ? gate.openaiWeekCreditUsd : gate.weekCreditUsd,
       waiting: gate.waiting,
       policy: policyOf(gate.config),
-      models: FREE_MODELS.map((model) => ({ id: model.id, available: modelAvailable(model, gate.config, gate) })),
+      models: offeredModels(gate.config).map((model) => ({ id: model.id, available: modelAvailable(model, gate.config, gate) })),
     });
     c.statusCache.at = now;
   }
   return json(c.statusCache.value, 200, { ...STATUS_CORS, "cache-control": "public, max-age=30" });
+}
+
+// ─── Providers: GET /v1/providers, speed probes ─────────────────────────────
+
+const PROVIDERS_TTL_MS = 60_000;
+/** Where the website keeps the providers' links tagged. */
+const PROVIDER_UTM = "utm_source=dl.new&utm_medium=referral&utm_campaign=providers";
+
+/** GET /v1/providers: the contract dl.new and the clients read. Change it only with them. */
+export interface PublicProviders {
+  updatedAt: string;
+  providers: Array<{
+    id: string;
+    name: string;
+    website: string;
+    url: string;
+    logo: string;
+    models: Array<{
+      id: string;
+      name: string;
+      family: string;
+      contextWindow: number;
+      access: "free" | "trusted" | "opt-in" | "pro";
+      status: "on" | "paused" | "out_of_credit";
+      tokensPerSecond: number | null;
+      ttftMs: number | null;
+      successRate24h: number | null;
+      measuredAt: string | null;
+    }>;
+  }>;
+}
+
+/**
+ * GET /v1/providers, public (no sign-in, CORS *): every provider that has a key, its models that
+ * are on, and their measured speed (provider-store.ts modelMeasures: real traffic when there's
+ * enough of it, else the speed probes). Computed at most once a minute per isolate, cached a
+ * minute by browsers. Never credit amounts, keys, spend or terms: only whether a model serves.
+ */
+async function providersPublic(c: Ctx): Promise<Response> {
+  if (c.request.method === "OPTIONS") return new Response(null, { status: 204, headers: STATUS_CORS });
+  const retry = await limited(c, `providers:ip:${c.ipNet}`, LIMITS.statusIp);
+  if (retry !== undefined) return rateLimited(retry, STATUS_CORS);
+  const now = c.now();
+  if (!c.providersCache.value || now - c.providersCache.at >= PROVIDERS_TTL_MS || now < c.providersCache.at) {
+    const gate = await runtime(c);
+    const measures = await directory(c).providerMeasures(now);
+    c.providersCache.value = publicProviders(gate, measures, now);
+    c.providersCache.at = now;
+  }
+  return json(c.providersCache.value, 200, { ...STATUS_CORS, "cache-control": "public, max-age=60" });
+}
+
+function publicProviders(gate: Runtime, measures: Record<string, { tokensPerSecond: number | null; ttftMs: number | null; successRate24h: number | null; measuredAt: number | null }>, now: number): PublicProviders {
+  const { config } = gate;
+  const providers: PublicProviders["providers"] = [];
+  for (const spec of PROVIDERS) {
+    if (providerKey(config, spec.id) === undefined) continue;
+    const settings = providerSettings(config, spec.id);
+    const models = providerModels(spec.id).filter((model) => settings.models.includes(model.id));
+    if (models.length === 0) continue;
+    providers.push({
+      id: spec.id,
+      name: spec.name,
+      website: spec.website,
+      url: `${spec.website}${spec.website.includes("?") ? "&" : "?"}${PROVIDER_UTM}`,
+      logo: `/logos/${spec.id}.svg`,
+      models: models.map((model) => {
+        const measure = measures[model.id];
+        return {
+          id: model.id,
+          name: model.name,
+          family: model.line,
+          contextWindow: model.contextWindow,
+          access: accessOf(config, model),
+          status: publicStatus(model, gate),
+          tokensPerSecond: measure?.tokensPerSecond ?? null,
+          ttftMs: measure?.ttftMs ?? null,
+          successRate24h: measure?.successRate24h ?? null,
+          measuredAt: measure?.measuredAt != null ? new Date(measure.measuredAt).toISOString() : null,
+        };
+      }),
+    });
+  }
+  return { updatedAt: new Date(now).toISOString(), providers };
+}
+
+/** "on", "out_of_credit", or "paused" for anything else that stops a model serving everyone. */
+function publicStatus(model: FreeModel, gate: Runtime): "on" | "paused" | "out_of_credit" {
+  if (gate.paused) return "paused";
+  const provider = model.provider as Upstream;
+  if (providerExhausted(provider, gate.config, gate)) return "out_of_credit";
+  if (isRegistryProvider(provider)) {
+    const block = registryBlock(gate.config, model, gate.providerSpend);
+    return block === undefined ? "on" : block === "out_of_credit" ? "out_of_credit" : "paused";
+  }
+  return providerReady(provider, gate.config, gate) ? "on" : "paused";
+}
+
+/** The speed probes' cron run (probes.ts): one probe per model that can serve, recorded in the Directory. */
+async function runProbes(env: Env, fetcher: Fetch, now: () => number, at: number): Promise<void> {
+  const envConfig = readFreeConfig(env as unknown as Record<string, unknown>);
+  const directoryStub = env.DIRECTORY.getByName("directory");
+  const gate = await directoryStub.gate(now());
+  const config = applyOverrides(envConfig, gate.overrides);
+  if (!config.speedProbes || config.paused || gate.paused) return;
+  const targets = probeTargets(config, gate.providerSpend, at);
+  // One at a time, so no probe's timing includes another's.
+  const alerts: Alert[] = [];
+  for (const target of targets) alerts.push(...(await directoryStub.recordProbe(await probeOnce(fetcher, config, target, now), policyOf(envConfig))));
+  if (alerts.length > 0) await deliver({ config, env, fetch: fetcher, base: config.publicUrl ?? DEFAULT_PUBLIC_URL, now }, alerts);
 }
 
 /**
@@ -1926,11 +2088,11 @@ async function me(c: Ctx): Promise<Response> {
           remaining: queue ? 0 : allowance.pools[pool].remaining,
           family: familyOfPool(pool),
           resetsAt: new Date(allowance.resetsAt).toISOString(),
-          models: FREE_MODELS.filter((model) => model.pool === pool).map((model) => model.id),
+          models: offeredModels(config).filter((model) => model.pool === pool).map((model) => model.id),
         },
       ]),
     ),
-    models: [...ALLOWED_MODELS],
+    models: offeredModels(config).map((model) => model.id),
     /** The part of the allowance (0 to 1) other agents launched by dl (dl claude, dl opencode) get; Autopilot gets all of it. */
     otherHarnessShare: config.otherHarnessShare,
     plan: allowance.plan,
@@ -2204,14 +2366,25 @@ async function referralLookup(c: Ctx, raw: string): Promise<Response> {
  * paused on the free tier, tools reading this (dl opencode, the unknown-model refusal) offer DeepSeek only.
  */
 async function modelsFor(c: Ctx, config: FreeConfig, githubId: number, person: Runtime["person"]): Promise<readonly FreeModel[]> {
-  if (c.config.adminGithubIds.has(githubId)) return FREE_MODELS;
+  const listed = await modelsByBudget(c, config, githubId, person);
+  // A registry provider's model this person can't use now (paused, out of credit, its weekly
+  // budget or their opt-in cap used) isn't listed: a request for it gets 402 provider_limit.
+  const gate = await runtime(c);
+  const isAdmin = c.config.adminGithubIds.has(githubId);
+  const personProviderWeekUsd = gate.personProviderWeekUsd ?? (isAdmin || !listed.some((model) => isRegistryProvider(model.provider)) ? undefined : await directory(c).personProviderWeek(githubId, c.now()));
+  return listed.filter((model) => blockFor(model, config, { providerSpend: gate.providerSpend, ...(personProviderWeekUsd ? { personProviderWeekUsd } : {}) }, isAdmin) === undefined);
+}
+
+async function modelsByBudget(c: Ctx, config: FreeConfig, githubId: number, person: Runtime["person"]): Promise<readonly FreeModel[]> {
+  const offered = offeredModels(config);
+  if (c.config.adminGithubIds.has(githubId)) return offered;
   // With the trust gate on, GPT-6 is listed only for trusted people, at the trusted budget.
   const trust = await gpt6TrustFor(c, config, githubId);
-  if (trust && !trust.trusted) return FREE_MODELS.filter((model) => model.family !== "gpt6");
+  if (trust && !trust.trusted) return offered.filter((model) => model.family !== "gpt6");
   const ownLimits = allocated(config, limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, githubId, person?.admittedAt), person?.trialBonusTokens), githubId, person, c.now());
   const allowance = await account(c, githubId).allowance(c.now(), trust?.trusted ? withTrustedGpt6Cap(ownLimits, config) : ownLimits);
   const gpt6 = allowance.budgets.gpt6.usdPerWeek;
-  return gpt6 !== null && gpt6 <= 0 ? FREE_MODELS.filter((model) => model.family !== "gpt6") : FREE_MODELS;
+  return gpt6 !== null && gpt6 <= 0 ? offered.filter((model) => model.family !== "gpt6") : offered;
 }
 
 async function models(c: Ctx): Promise<Response> {
@@ -2232,6 +2405,8 @@ async function models(c: Ctx): Promise<Response> {
       context_window: model.contextWindow,
       max_output_tokens: model.maxOutputTokens,
       vision: model.vision,
+      // "free", "trusted" (GPT-6) or "opt-in" (a credit-limited provider, with its own weekly cap).
+      access: accessOf(config, model),
     })),
   });
 }
@@ -2712,7 +2887,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       return apiError(400, "invalid_request", "The body must be one JSON object.", {}, await headers());
     }
   }
-  if (!isAllowedModel(body.model)) {
+  // A registry provider's model before it has a key or while it's off is as unknown as any other.
+  if (!isAllowedModel(body.model) || !offeredModels(gate.config).some((model) => model.id === body.model)) {
     // Only the models this person can use here: DeepSeek, GPT-6 too with a GPT-6 budget and trust.
     const families = harness ? HARNESS_FAMILIES[harness] : FAMILIES;
     const allowed = (await modelsFor(c, gate.config, identity.githubId, gate.person)).filter((model) => families.includes(model.family)).map((model) => model.id);
@@ -2722,6 +2898,15 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // Claude Code gets DeepSeek only; OpenCode, every model.
   if (harness && !HARNESS_FAMILIES[harness].includes(requested.family)) {
     return apiError(400, "model_not_allowed", `Claude Code through dl is served by ${DEEPSEEK_MODEL} only.`, { allowed: [DEEPSEEK_MODEL] }, await headers());
+  }
+  // A registry provider's model (providers.ts) that can't serve this person now: the GPT-6
+  // limit's shape, pointing at DeepSeek. Out of credit, paused, its weekly budget or the
+  // person's opt-in cap; checked before anything is reserved or sent.
+  const block = blockFor(requested, gate.config, gate, isAdmin);
+  if (block) {
+    const spec = providerSpec(requested.provider as "liquid");
+    const resetsAt = block === "weekly_budget" || block === "person_cap" ? new Date(weekEnd(c.now())).toISOString() : null;
+    return apiError(402, "provider_limit", providerLimitMessage(requested, block, spec.name), { family: requested.family, provider: spec.id, reason: block, resetsAt, alternative: DEEPSEEK_MODEL }, await headers());
   }
   // Every level gets every model; basic and Starter on their smaller allowance.
   const effective = requested;
@@ -2950,7 +3135,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     reservationId: string,
     usage: Usage | undefined,
     status: string,
-    options: { chargeNothing?: boolean; host?: string; failure?: HostFailure; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean; outcome?: UpstreamOutcome } = {},
+    options: { chargeNothing?: boolean; host?: string; failure?: HostFailure; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean; outcome?: UpstreamOutcome; creditUsd?: number } = {},
   ) => {
     const { chargeNothing = false, host, failure } = options;
     if (host && failure && cooldownMs > 0) await hosts(c).markHostFailing(host, c.now());
@@ -2959,7 +3144,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     const rawTokens = chargeNothing ? 0 : usage ? usage.promptTokens + usage.completionTokens : undefined;
     const settled = await person.settle({ reservationId, charged, costUsd: cost, ...(rawTokens !== undefined ? { rawTokens } : {}), limits, now: c.now() });
     // Without usage, the credit is charged what the allowance was: the reservation at the fallback price.
-    const creditUsd = chargeNothing || provider === "openrouter" ? 0 : usage ? costAtPrices(usage, creditPrices(model)) : settled.costUsd;
+    // A provider that reports its charge (Liquid's `exchange.charge.total_usd`) is charged that.
+    const creditUsd = chargeNothing || provider === "openrouter" ? 0 : options.creditUsd !== undefined ? options.creditUsd : usage ? costAtPrices(usage, creditPrices(model)) : settled.costUsd;
     const record: RequestRecord = {
       githubId: identity.githubId,
       isAdmin,
@@ -3027,6 +3213,9 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
             }
           : undefined;
       return openaiChat(c, { model, body, stream, maxTokens: res.maxTokens, user, sessionId, started, settle: settleFor, timeoutSeconds: gate.config.openaiFirstByteTimeoutSeconds, reservedAllowance: res.allowance, ...(retry ? { retry } : {}) });
+    }
+    if (provider === "liquid") {
+      return liquidChat(c, { model, config: gate.config, body, stream, maxTokens: res.maxTokens, user, sessionId, started, settle: settleFor, timeoutSeconds: gate.config.liquidFirstByteTimeoutSeconds, reservedAllowance: res.allowance });
     }
     if (provider === "luminal") {
       return luminalChat(c, { model, body, stream, maxTokens: res.maxTokens, user, started, settle: settleFor, timeoutSeconds: gate.config.luminalFirstByteTimeoutSeconds, reservedAllowance: res.allowance });
@@ -3467,7 +3656,7 @@ async function openRouterChat(
 type Settle = (
   usage: Usage | undefined,
   status: string,
-  options?: { chargeNothing?: boolean; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean; outcome?: UpstreamOutcome },
+  options?: { chargeNothing?: boolean; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean; outcome?: UpstreamOutcome; creditUsd?: number },
 ) => Promise<Allowance>;
 
 /**
@@ -3490,7 +3679,7 @@ async function luminalChat(
     reservedAllowance: Allowance;
   },
 ): Promise<Response> {
-  const { body, stream, started, settle } = input;
+  const { body, stream } = input;
   const payload: Record<string, unknown> = { ...body, model: input.model.upstreamModel, max_completion_tokens: input.maxTokens, user: input.user };
   // OpenRouter's `reasoning: {effort}` is `reasoning_effort` in the OpenAI shape.
   const effort = (body.reasoning as { effort?: unknown } | undefined)?.effort;
@@ -3498,21 +3687,59 @@ async function luminalChat(
   for (const field of OPENROUTER_ONLY_FIELDS) delete payload[field];
   if (stream) payload.stream_options = { include_usage: true };
   else delete payload.stream_options;
+  return compatibleChat(c, { upstream: "luminal", url: LUMINAL_URL, key: c.config.luminalApiKey, payload }, input);
+}
+
+/**
+ * One request to Liquid Inference (providers.ts): the client's request as `liquidPayload` shapes
+ * it, with the model's exchange rules. Failures go back as Luminal's do (transient, with
+ * Retry-After); there is no fallback to another model. The credit is charged what the exchange
+ * reports it charged, when it says.
+ */
+async function liquidChat(
+  c: Ctx,
+  input: {
+    model: FreeModel;
+    config: FreeConfig;
+    body: Record<string, unknown>;
+    stream: boolean;
+    maxTokens: number;
+    user: string;
+    sessionId: string | undefined;
+    started: number;
+    settle: Settle;
+    timeoutSeconds: number;
+    reservedAllowance: Allowance;
+  },
+): Promise<Response> {
+  const rules = exchangeRules(input.config, input.model)!;
+  const payload = liquidPayload(input.body, { model: input.model, maxTokens: input.maxTokens, stream: input.stream, user: input.user, sessionId: input.sessionId, rules });
+  return compatibleChat(c, { upstream: "liquid", url: LIQUID_URL, key: c.config.liquidApiKey, payload }, input);
+}
+
+/** One chat completions request to Luminal or Liquid, already in its shape. */
+async function compatibleChat(
+  c: Ctx,
+  target: { upstream: "luminal" | "liquid"; url: string; key: string | undefined; payload: Record<string, unknown> },
+  input: { stream: boolean; started: number; settle: Settle; timeoutSeconds: number; reservedAllowance: Allowance },
+): Promise<Response> {
+  const { stream, started, settle } = input;
+  const { payload } = target;
 
   const transient = async (status: 429 | 503, code: string, message: string, retryAfterHeader: string | null, record: { status: string; outcome: UpstreamOutcome; ttfbMs?: number }) => {
     const allowance = await settle(undefined, record.status, { chargeNothing: true, upstreamError: true, outcome: record.outcome, ...(record.ttfbMs !== undefined ? { ttfbMs: record.ttfbMs } : {}) });
     const retryAfter = Math.max(1, Math.ceil(Number(retryAfterHeader)) || DEFAULT_RETRY_AFTER_S);
-    return apiError(status, code, message, { retryAfter, retryable: true, upstream: "luminal" }, { ...quotaHeaders(allowance), "retry-after": String(retryAfter) });
+    return apiError(status, code, message, { retryAfter, retryable: true, upstream: target.upstream }, { ...quotaHeaders(allowance), "retry-after": String(retryAfter) });
   };
 
   let response: Response | "timeout";
   try {
     response = await fetchWithTimeout(
       c.fetch,
-      LUMINAL_URL,
+      target.url,
       {
         method: "POST",
-        headers: { authorization: `Bearer ${c.config.luminalApiKey}`, "content-type": "application/json" },
+        headers: { authorization: `Bearer ${target.key}`, "content-type": "application/json" },
         body: JSON.stringify(payload),
       },
       input.timeoutSeconds * 1000,
@@ -3538,11 +3765,12 @@ async function luminalChat(
   if (stream && response.body && contentType.includes("text/event-stream")) {
     const metered = meterStream(
       response.body,
-      async ({ usage, errored, upstreamFailed, firstContentAt }) => {
+      async ({ usage, errored, upstreamFailed, firstContentAt, chargeUsd }) => {
         await settle(usage, usage ? (errored ? "stream_error" : "ok") : "no_usage", {
           ttfbMs,
           ...(firstContentAt !== undefined ? { ttftMs: firstContentAt - started } : {}),
           ...(upstreamFailed ? { upstreamError: true } : {}),
+          ...(chargeUsd !== undefined ? { creditUsd: chargeUsd } : {}),
         });
       },
       c.now,
@@ -3556,7 +3784,8 @@ async function luminalChat(
   const text = await response.text();
   const parsed = parseJson(text) as { usage?: unknown; error?: unknown } | undefined;
   const usage = parseUsage(parsed?.usage);
-  const allowance = await settle(usage, usage ? "ok" : "no_usage", { ttfbMs, ttftMs: c.now() - started, ...(parsed?.error ? { upstreamError: true } : {}) });
+  const charge = exchangeCharge(parsed);
+  const allowance = await settle(usage, usage ? "ok" : "no_usage", { ttfbMs, ttftMs: c.now() - started, ...(parsed?.error ? { upstreamError: true } : {}), ...(charge !== undefined ? { creditUsd: charge } : {}) });
   return new Response(text, {
     status: 200,
     headers: { "content-type": contentType || "application/json", "cache-control": "no-store", ...quotaHeaders(allowance) },
@@ -3728,6 +3957,20 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     if (!Number.isInteger(days) || days < 1 || days > 366) return apiError(400, "invalid_request", "Use ?days=1 to 366.");
     const until = Math.floor(now / DAY_MS) * DAY_MS + DAY_MS;
     return json({ days, ...noGithubJson(await directory(c).noGithub({ from: until - days * DAY_MS, until })) });
+  }
+  if (method === "GET" && rest === "providers") {
+    // Each provider's credit (balance, used, left, this week, the probes' share) and the speed
+    // probes over ?hours= (1 to 360, default 24), newest first. Admins only: amounts live here,
+    // never in the public /v1/providers.
+    const raw = c.url.searchParams.get("hours");
+    const hours = raw === null ? 24 : Number(raw);
+    if (!Number.isInteger(hours) || hours < 1 || hours > 360) return apiError(400, "invalid_request", "Use ?hours=1 to 360.");
+    const view = await directory(c).providersAdmin(now, policyOf(c.config), now - hours * 3_600_000);
+    return json({
+      hours,
+      providers: view.providers,
+      probes: view.probes.map((probe) => ({ ...probe, at: new Date(probe.at).toISOString() })),
+    });
   }
   if (method === "GET" && rest === "uses") {
     // Recent use descriptions: ?days= (1 to 90, default 7), ?risk= (none: all, the default; low:

@@ -78,6 +78,18 @@ describe("runtime settings (units)", () => {
       luminalCreditUsd: 2000,
       luminalWeeklyCreditUsd: 250,
       luminalFirstByteTimeoutSeconds: 30,
+      "providerStatus.liquid": "paused",
+      "providerCredit.liquid": 100,
+      "providerWeeklyCredit.liquid": 25,
+      "providerPersonWeeklyUsd.liquid": 0.5,
+      "providerOptIn.liquid": true,
+      "providerProFirst.liquid": true,
+      "providerModels.liquid": ["moonshotai/kimi-k3.1-pro"],
+      "exchangeAllow.kimi-k3.1-pro": ["deeprelay"],
+      "exchangeMaxPrices.kimi-k3.1-pro": [2.1, 0.25, 10.5],
+      "exchangeAllow.glm-5.3": ["blackfuel", "Asari AI"],
+      "exchangeMaxPrices.glm-5.3": [0.15, 0.03, 0.6],
+      speedProbes: true,
       userEmails: true,
       dlOnly: true,
       allowOtherHarnesses: true,
@@ -101,6 +113,11 @@ describe("runtime settings (units)", () => {
       allocatorTriggerShare: 0.8,
       allocatorTimeoutMs: 5000,
       allocatorGraceShare: 0.2,
+      // Aliases: OpenAI's and Luminal's credit settings under the generic provider names.
+      "providerCredit.openai": 5000,
+      "providerWeeklyCredit.openai": 2000,
+      "providerCredit.luminal": 2000,
+      "providerWeeklyCredit.luminal": 250,
     });
   });
 
