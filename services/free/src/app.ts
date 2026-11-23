@@ -983,8 +983,12 @@ async function noGithub(c: Ctx, method: string): Promise<Response> {
     const source = noGithubSource(c.url.searchParams.get("from"));
     if ((await limited(c, `nogithub:ip:${c.ipNet}`, LIMITS.noGithubClickIp)) === undefined) {
       const now = c.now();
-      const click = await directory(c).noGithubClick({ now, source, mode });
-      if (click.email) await alert(c, [noGithubClickAlert(source, now, click)]);
+      // The count and the email are best effort: the page must show even if counting fails
+      // (right after a deploy the Directory can still run the previous code for a while).
+      await bestEffort("no-github: click not counted", async () => {
+        const click = await directory(c).noGithubClick({ now, source, mode });
+        if (click.email) await alert(c, [noGithubClickAlert(source, now, click)]);
+      });
     }
     return shell("No GitHub account?", noGithubBody(source));
   }
@@ -997,11 +1001,22 @@ async function noGithub(c: Ctx, method: string): Promise<Response> {
   const now = c.now();
   // Never the IP: a keyed hash of the network, only to drop the same anonymous answer twice.
   const ipHash = await sha256Hex(`nogithub:${c.config.tokenSigningKey}:${networkOf(c.ip) ?? c.ipNet}`);
-  const lead = await directory(c).noGithubLead({ ...parsed, now, source, ipHash, mode });
-  if (lead.email) await alert(c, [noGithubLeadAlert(source, now, parsed, lead.repeat, lead)]);
+  const lead = await bestEffort("no-github: answer not saved", () => directory(c).noGithubLead({ ...parsed, now, source, ipHash, mode }));
+  if (!lead) return donePage("Try again", "We couldn't save that just now. Please try again in a minute.", 503);
+  if (lead.email) await bestEffort("no-github: answer email failed", () => alert(c, [noGithubLeadAlert(source, now, parsed, lead.repeat, lead)]));
   return parsed.email
     ? donePage("Thanks", "We'll email you when other ways to sign in open. Only about that.")
     : donePage("Thanks", "Thanks for telling us.");
+}
+
+/** Runs `work`, logging (never throwing) a failure: undefined if it threw. */
+async function bestEffort<T>(label: string, work: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await work();
+  } catch (error) {
+    console.error(label, error instanceof Error ? error.message : String(error));
+    return undefined;
+  }
 }
 
 /** A keyed hash of the caller's network (IPv4 address or IPv6 /64), for referral anti-abuse. */
