@@ -9,7 +9,7 @@ import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
 import { palette } from "../ui.js";
 
 /**
- * Another coding agent on the free tier, launched by dl (`dl claude`, `dl opencode`). The flow is
+ * Another coding agent on the free tier, launched by dl (`dl claude`, `dl opencode`, `dl pi`). The flow is
  * the same for each; what differs (the binary, how it is told where the free tier is) is the
  * agent's `HarnessLaunch`.
  *
@@ -32,7 +32,7 @@ import { palette } from "../ui.js";
  */
 
 /** The coding agents dl launches on free tokens: the service's `HARNESSES`. */
-export type Harness = "claude-code" | "opencode";
+export type Harness = "claude-code" | "opencode" | "pi";
 
 type Env = Record<string, string | undefined>;
 type Fetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -58,10 +58,11 @@ export interface HarnessLaunch {
   /**
    * The agent's environment and arguments for this run. `removed` names the person's variables
    * left out (dl says so once); `notes` are said once too. An `error` stops before the agent
-   * starts (the key is revoked).
+   * starts (the key is revoked). `sessionId` is the one dl's session events carry; `cleanup`
+   * runs once the agent has exited (temporary files).
    */
-  prepare: (input: { env: Env; args: string[]; origin: string; key: string; binary: string }) => Promise<
-    | { env: Env; args: string[]; removed: string[]; notes?: string[] }
+  prepare: (input: { env: Env; args: string[]; origin: string; key: string; binary: string; sessionId: string }) => Promise<
+    | { env: Env; args: string[]; removed: string[]; notes?: string[]; cleanup?: () => Promise<void> }
     | { error: string }
   >;
 }
@@ -188,14 +189,14 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
   const asKey = (extra: Record<string, string> = {}) => ({ accept: "application/json", authorization: `Bearer ${key}`, ...extra });
   const revoke = () => call(`${origin}/v1/harness-keys/${keyId}`, { method: "DELETE", headers: asKey(), redirect: "error", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }).catch(() => undefined);
 
-  const prepared = await spec.prepare({ env, args, origin, key, binary });
+  const sessionId = `${spec.sessionPrefix}-${randomUUID()}`;
+  const prepared = await spec.prepare({ env, args, origin, key, binary, sessionId });
   if ("error" in prepared) {
     io.err(`  ${prepared.error}\n`);
     await Promise.race([revoke(), new Promise((resolve) => setTimeout(resolve, CLEANUP_DEADLINE_MS).unref?.())]);
     return 1;
   }
 
-  const sessionId = `${spec.sessionPrefix}-${randomUUID()}`;
   const started = now();
   let eventCount = 0;
   const sendEvent = async (type: "session.start" | "session.end", props: Record<string, unknown> = {}) => {
@@ -252,6 +253,7 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
   for (const off of unsubscribe) off();
   stop(refresher);
   stop(heartbeat);
+  await prepared.cleanup?.().catch(() => undefined);
 
   // Session end and the key's end, both best effort and bounded.
   await Promise.race([

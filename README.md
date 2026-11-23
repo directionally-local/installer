@@ -107,6 +107,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl --from-claude-code` | Continue this folder's latest Claude Code conversation in a new Autopilot session on this computer (`autopilot --from-claude-code`): it asks first, then sends your last request, the files changed, commands run and Claude's last message as the first message. The transcript is read here and goes only to your model. |
 | `dl claude [ARGS]` | Your own Claude Code on dl's free tokens, served by DeepSeek. See [Claude Code with free tokens: dl claude](#claude-code-with-free-tokens-dl-claude). |
 | `dl opencode [ARGS]` | Your own OpenCode on dl's free tokens: DeepSeek V4.1 Flash, plus GPT-6 Luna, Sol and Astra for accounts that have used dl for a while (otherwise GPT-6 needs your own key). See [OpenCode with free tokens: dl opencode](#opencode-with-free-tokens-dl-opencode). |
+| `dl pi [ARGS]` | Your own Pi on dl's free tokens, DeepSeek V4.1 Flash by default. See [Pi with free tokens: dl pi](#pi-with-free-tokens-dl-pi). |
 | `dl conductor` | [Conductor](https://conductor.build) (and Zed, Cline and other desktop apps) on dl's free tokens: starts `dl proxy` if it isn't running and prints the settings to paste into the app. See [Desktop apps with free tokens: dl proxy and dl conductor](#desktop-apps-with-free-tokens-dl-proxy-and-dl-conductor). |
 | `dl proxy start` / `stop` / `status` | A local proxy on `127.0.0.1:4789` that desktop apps use for the free tier, with a local token as their API key. `dl proxy run` runs it in the terminal; `dl proxy install` / `uninstall` start it at login (macOS LaunchAgent, Linux systemd user service). |
 | `dl claude-code hook install` / `remove` | Opt in to a Claude Code hook that, when Claude Code stops on a usage or rate limit, shows `Claude Code hit its limit. Continue in dl: dl --from-claude-code` as a terminal notification and window title. Shows the entry and asks before adding it to `~/.claude/settings.json`, backs the file up first, and merges into it; `remove` takes out only dl's entry. |
@@ -255,6 +256,24 @@ Every argument after `opencode` goes to it unchanged (`dl opencode run "fix the 
   Prompts and code go to the model, never into dl's logs. To prevent abuse, the free tier keeps a
   short automated description of each session and a safety label, made from your latest message
   and kept for 90 days.
+
+### Pi with free tokens: dl pi
+
+`dl pi` starts the [Pi](https://github.com/earendil-works/pi) you already have, on the free tier.
+Every argument after `pi` goes to it unchanged (`dl pi -p "fix the test"`, `dl pi -c`), and its
+exit code is dl's.
+
+- **Pi itself:** dl never installs it. Without `pi` on your PATH it prints
+  `npm install -g @earendil-works/pi-coding-agent` and stops.
+- **The models:** provider "dl" in Pi's `/model`, DeepSeek V4.1 Flash by default, plus the other
+  free tier models your account may use. Pass your own `--model`, `--models` or `--provider` and
+  dl leaves the choice to you; your own providers stay in `/model`, on your own keys.
+- **Only while dl pi runs, on half the free allowance:** the same 15-minute key, share and rules
+  as `dl opencode`.
+- **Your settings stay yours:** nothing under `~/.pi` is read or changed. For this run only, Pi
+  loads a small extension (`pi -e`, a temporary file removed when Pi exits) that adds the "dl"
+  provider; the key is in `DL_FREE_TIER_KEY`, never in a file or on the command line.
+- **What dl sends:** the same as `dl opencode`; each Pi session's id goes with its requests.
 
 ### On your own GPUs
 

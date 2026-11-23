@@ -35,7 +35,7 @@ export function parseServerKey(key: string): { githubId: number; id: string; sec
 
 /**
  * Harness keys: what dl hands another coding agent it launches (`dl claude`: Claude Code,
- * `dl opencode`: OpenCode). `dlh_<githubId>_<id>_<secret>`, minted from a
+ * `dl opencode`: OpenCode, `dl pi`: Pi). `dlh_<githubId>_<id>_<secret>`, minted from a
  * sign-in's access token for one dl session, bound to that sign-in session (signing out ends it),
  * and short-lived: it expires HARNESS_KEY_TTL_MS after it was made or last refreshed. dl refreshes
  * it while the agent runs and revokes it when it exits, so it never outlives dl by much.
@@ -45,7 +45,7 @@ export const HARNESS_KEY_TTL_MS = 15 * 60_000;
 /** Live harness keys per account: one per running `dl claude` or `dl opencode`. */
 export const MAX_HARNESS_KEYS = 10;
 /** The coding agents other than Autopilot dl can launch on free tokens. */
-export const HARNESSES = ["claude-code", "opencode"] as const;
+export const HARNESSES = ["claude-code", "opencode", "pi"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
 export function parseHarnessKey(key: string): { githubId: number; id: string; secret: string } | undefined {
