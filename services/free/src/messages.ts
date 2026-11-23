@@ -153,11 +153,12 @@ export const UPSTREAM_TIMEOUT_MESSAGE = "The free tier's model provider didn't a
 export const HARNESS_WORDS: Readonly<Record<Harness, { product: string; command: string; own: string }>> = {
   "claude-code": { product: "Claude Code", command: "dl claude", own: "your own Anthropic account" },
   opencode: { product: "OpenCode", command: "dl opencode", own: "your own provider key" },
+  pi: { product: "Pi", command: "dl pi", own: "your own provider key" },
 };
 
 /** A harness key that expired, was revoked, or whose sign-in ended (401 invalid_harness_key). */
 export function harnessKeyExpiredMessage(harness?: Harness): string {
-  if (!harness) return "This dl session's free tier key has expired. Quit the tool and run it from dl again (dl claude, dl opencode).";
+  if (!harness) return "This dl session's free tier key has expired. Quit the tool and run it from dl again (dl claude, dl opencode, dl pi).";
   const { product, command } = HARNESS_WORDS[harness];
   return `This ${command} session's free tier key has expired. Quit ${product} and run ${command} again.`;
 }
@@ -203,6 +204,8 @@ export function forHarness(message: string, harness: Harness = "claude-code"): s
       ? reworded
           .replace(/switch with \/model, or get dl Pro\./, "pick it in /models, or get dl Pro: run dl and type /upgrade.")
           .replace(/switch with \/model\./, "pick it in /models.")
+      : harness === "pi"
+      ? reworded.replace(/switch with \/model, or get dl Pro\./, "pick it in /model, or get dl Pro: run dl and type /upgrade.").replace(/switch with \/model\./, "pick it in /model.")
       : reworded.replace(/switch with \/model, or get dl Pro\./, "get dl Pro: run dl and type /upgrade.");
   return models.replace(/use your own key: \/provider\./, `use ${product} with ${own}.`);
 }

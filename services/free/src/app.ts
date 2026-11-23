@@ -748,7 +748,11 @@ async function authenticate(
     if (!options.harness || !parsed) return invalid();
     const only = Array.isArray(options.harness) ? (options.harness as readonly Harness[]) : undefined;
     const owner = await account(c, parsed.githubId).verifyHarnessKey(parsed.id, parsed.secret, c.now());
-    if (!owner) return apiError(401, "invalid_harness_key", harnessKeyExpiredMessage(only?.length === 1 ? only[0] : undefined), {}, { "www-authenticate": 'Bearer error="invalid_token"' });
+    // An expired key's agent isn't known any more: where several may call, dl's `x-dl-harness`
+    // header (sent by dl pi) picks the words, else the first listed agent's.
+    const hinted = c.request.headers.get("x-dl-harness");
+    const named = only?.length === 1 ? only[0] : (only?.find((harness) => harness === hinted) ?? only?.[0]);
+    if (!owner) return apiError(401, "invalid_harness_key", harnessKeyExpiredMessage(named), {}, { "www-authenticate": 'Bearer error="invalid_token"' });
     if (only && !only.includes(owner.harness)) return invalid();
     return { githubId: owner.githubId, login: owner.login, via: "harness", harness: owner.harness, harnessKeyId: parsed.id, ...(owner.sid ? { sid: owner.sid } : {}) };
   }
@@ -2389,7 +2393,7 @@ async function modelsByBudget(c: Ctx, config: FreeConfig, githubId: number, pers
 
 async function models(c: Ctx): Promise<Response> {
   // OpenCode's harness key may list them too (dl opencode reads the list to configure it).
-  const identity = await authenticate(c, { keys: true, harness: ["opencode"] });
+  const identity = await authenticate(c, { keys: true, harness: ["opencode", "pi"] });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
@@ -2433,14 +2437,14 @@ async function events(c: Ctx): Promise<Response> {
  * Harness keys: what `dl claude` hands Claude Code and `dl opencode` hands OpenCode (see
  * HARNESS_KEY in account-object.ts).
  *
- *   POST   /v1/harness-keys {harness: "claude-code" | "opencode"}  → 201 {id, key, harness, expiresAt, ttlSeconds, otherHarnessShare}
+ *   POST   /v1/harness-keys {harness: "claude-code" | "opencode" | "pi"}  → 201 {id, key, harness, expiresAt, ttlSeconds, otherHarnessShare}
  *          (a signed-in access token only: not a server key, not another harness key)
  *   POST   /v1/harness-keys/:id/refresh                → {id, expiresAt}: another HARNESS_KEY_TTL_MS
  *   DELETE /v1/harness-keys/:id                         → {id, revoked: true}
  *
  * Refresh and revoke take the access token or that same harness key, so dl needs the sign-in only
  * to start. A Claude Code key works on /anthropic/v1/messages (and count_tokens), an OpenCode
- * key on /v1/chat/completions and /v1/models; both on /v1/events, and nowhere else. 403 harness_not_allowed while `allowOtherHarnesses` is off; 409 harness_key_limit past
+ * or Pi key on /v1/chat/completions and /v1/models; both on /v1/events, and nowhere else. 403 harness_not_allowed while `allowOtherHarnesses` is off; 409 harness_key_limit past
  * MAX_HARNESS_KEYS running at once.
  */
 async function harnessKeys(c: Ctx, rest: string, method: string): Promise<Response> {
@@ -2803,7 +2807,7 @@ interface TranslatedChat {
  * slash commands are typed in dl.
  */
 async function chatCompletions(c: Ctx): Promise<Response> {
-  const identity = await authenticate(c, { keys: true, harness: ["opencode"] });
+  const identity = await authenticate(c, { keys: true, harness: ["opencode", "pi"] });
   if (identity instanceof Response) {
     identity.headers.set("x-dl-quota-resets-at", new Date(weekEnd(c.now())).toISOString());
     return identity;
@@ -2827,6 +2831,7 @@ async function rewordedForHarness(response: Response, harness: Harness): Promise
 const HARNESS_FAMILIES: Readonly<Record<Harness, readonly Family[]>> = {
   "claude-code": ["deepseek"],
   opencode: FAMILIES,
+  pi: FAMILIES,
 };
 
 async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unknown>; bodyBytes?: number; sessionHint?: string }): Promise<Response> {
@@ -2895,7 +2900,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     return apiError(400, "model_not_allowed", `The free tier serves ${allowed.join(", ")} only.`, { allowed }, await headers());
   }
   const requested = modelById(body.model)!;
-  // Claude Code gets DeepSeek only; OpenCode, every model.
+  // Claude Code gets DeepSeek only; OpenCode and Pi, every model.
   if (harness && !HARNESS_FAMILIES[harness].includes(requested.family)) {
     return apiError(400, "model_not_allowed", `Claude Code through dl is served by ${DEEPSEEK_MODEL} only.`, { allowed: [DEEPSEEK_MODEL] }, await headers());
   }

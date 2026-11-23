@@ -291,8 +291,11 @@ export class HarnessKeys {
 
 type Format = "anthropic" | "openai";
 
+/** The harness keys the proxy mints: Claude Code's for the Anthropic routes, OpenCode's for the OpenAI ones. */
+type ProxyHarness = Extract<Harness, "claude-code" | "opencode">;
+
 interface Route {
-  harness: Harness;
+  harness: ProxyHarness;
   format: Format;
   /** The path on the service. */
   upstream: string;
@@ -369,7 +372,7 @@ export interface ProxyServerOptions extends KeyDeps {
 
 export interface ProxyServer {
   server: Server;
-  keys: Record<Harness, HarnessKeys>;
+  keys: Record<ProxyHarness, HarnessKeys>;
   /** Runs the refresh tick now (tests; the timer calls it every REFRESH_EVERY_MS). */
   tick: () => Promise<void>;
   /** Stops listening, ends open requests, revokes the keys and ends their sessions (bounded). */
@@ -377,7 +380,7 @@ export interface ProxyServer {
 }
 
 export function createProxyServer(options: ProxyServerOptions): ProxyServer {
-  const keys: Record<Harness, HarnessKeys> = {
+  const keys: Record<ProxyHarness, HarnessKeys> = {
     "claude-code": new HarnessKeys("claude-code", options),
     opencode: new HarnessKeys("opencode", options),
   };

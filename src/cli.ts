@@ -15,6 +15,7 @@ import { FREE_TIER_PROVIDER, freeTierAccount, freeTierLine, freeTierProPrompt, t
 import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
 import { claudeCommand } from "./laptop/claude.js";
 import { opencodeCommand } from "./laptop/opencode.js";
+import { piCommand } from "./laptop/pi.js";
 import { conductorCommand, proxyCommand } from "./laptop/proxy.js";
 import { loadRemotes, resolveTarget } from "./laptop/config.js";
 import { dlUpdate } from "./laptop/self-update.js";
@@ -78,6 +79,10 @@ On your laptop:
                           models in /models), through dl's free tier sign-in; ARGS go to opencode
                           as they are. Needs opencode installed; free tokens work in it only while
                           dl opencode runs. Your OpenCode config files aren't touched
+  dl pi [ARGS]            your own Pi on free tokens (DeepSeek V4.1 Flash by default; the others
+                          in /model), through dl's free tier sign-in; ARGS go to pi as they are.
+                          Needs pi installed (npm i -g @earendil-works/pi-coding-agent); free
+                          tokens work in it only while dl pi runs. Nothing under ~/.pi is touched
   dl conductor            Conductor (and Zed, Cline and other desktop apps) on free tokens: starts
                           dl proxy and prints the settings to paste into the app
   dl proxy start|stop|status   a local proxy on 127.0.0.1:4789 that desktop apps use for the free
@@ -220,6 +225,8 @@ export interface MainOptions {
   claude?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** `dl opencode`; the real one unless replaced. */
   opencode?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
+  /** `dl pi`; the real one unless replaced. */
+  pi?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** What a GPU box runs, printed first by `dl status` and plain `dl` (box-status.ts); the real one unless replaced. */
   boxSummary?: () => Promise<string | undefined>;
   /** `dl uninstall` on a server and on a laptop; the real ones unless replaced. */
@@ -240,6 +247,8 @@ export async function main(
   if (argv[0] === "claude") return await (options.claude ?? claudeCommand)(argv.slice(1), io);
   // `dl opencode ARGS`: the same for OpenCode.
   if (argv[0] === "opencode") return await (options.opencode ?? opencodeCommand)(argv.slice(1), io);
+  // `dl pi ARGS`: the same for Pi.
+  if (argv[0] === "pi") return await (options.pi ?? piCommand)(argv.slice(1), io);
   // `dl proxy start|stop|status|run|install|uninstall` and `dl conductor`: desktop apps on the free tier.
   if (argv[0] === "proxy") return await proxyCommand(argv.slice(1), io);
   if (argv[0] === "conductor") return await conductorCommand(argv.slice(1), io);
