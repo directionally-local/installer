@@ -1,0 +1,17 @@
+{
+  "model": "gpt-6-luna",
+  "stream": true,
+  "instructions": "SYSTEM-PROMPT You are a coding agent.",
+  "input": [
+    { "role": "developer", "content": "SYSTEM-PROMPT developer notes" },
+    { "role": "user", "content": [{ "type": "input_text", "text": "OLD-USER set up linting" }] },
+    { "type": "function_call", "call_id": "call_a", "name": "shell", "arguments": "{\"cmd\":\"cat .eslintrc\"}" },
+    { "type": "function_call_output", "call_id": "call_a", "output": "OLD-TOOL {\"extends\":\"eslint:recommended\"}" },
+    { "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "Linting is set up." }] },
+    { "role": "user", "content": "NEW-USER make the build output smaller" },
+    { "type": "reasoning", "id": "rs_1", "summary": [] },
+    { "type": "function_call", "call_id": "call_b", "name": "shell", "arguments": "{\"cmd\":\"du -sh dist\"}" },
+    { "type": "function_call_output", "call_id": "call_b", "output": "NEW-TOOL 12M\tdist" }
+  ],
+  "tools": [{ "type": "function", "name": "shell", "parameters": { "type": "object", "properties": { "cmd": { "type": "string" } } } }]
+}

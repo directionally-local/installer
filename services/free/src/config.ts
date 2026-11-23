@@ -258,6 +258,20 @@ export interface FreeConfig {
    */
   securityOffGpt6: boolean;
   /**
+   * The GPT-6 pre-send checks (presend-guard.ts), GPT6_PRESEND_GUARD: "enforce" (the default: every
+   * non-admin GPT-6 request's new content is checked before it is sent, and anything flagged,
+   * failed or late isn't sent) or "off". Also a runtime setting.
+   */
+  gpt6PresendGuard: GuardMode;
+  /** How long each pre-send check may take, in ms (GPT6_GUARD_TIMEOUT_MS, default 4000); past it, the request isn't sent. */
+  gpt6GuardTimeoutMs: number;
+  /**
+   * The GPT-6 trust gate (gpt6-trust.ts), GPT6_TRUSTED_WEEKLY_USD_CAP: 0 (the default) changes
+   * nothing; above 0, GPT-6 is served only to trusted people, a free-plan one with this weekly
+   * GPT-6 budget (a personal cap an admin set still wins). Also a runtime setting.
+   */
+  gpt6TrustedWeeklyUsdCap: number;
+  /**
    * Automated moderation review of high-risk labels (moderation.ts), MODERATION: "enforce" (the
    * default: a confident "block" verdict blocks the person), "shadow" (decides and emails, never
    * blocks) or "off" (no review: the owner gets today's high-risk email). Also a runtime setting.
@@ -303,6 +317,8 @@ export interface FreeConfig {
 
 export type AccessRequestAlerts = "each" | "daily" | "off";
 export type ModerationMode = "off" | "shadow" | "enforce";
+export type GuardMode = "off" | "enforce";
+export const GUARD_MODES: readonly GuardMode[] = ["off", "enforce"];
 export const MODERATION_MODES: readonly ModerationMode[] = ["off", "shadow", "enforce"];
 
 /** A GitHub login or numeric id, as moderationAllowlist holds it (lowercased). */
@@ -394,6 +410,9 @@ export const DEFAULTS = {
   useDescriptions: true,
   useDescriptionDailyCap: 2000,
   securityOffGpt6: true,
+  gpt6PresendGuard: "enforce" as GuardMode,
+  gpt6GuardTimeoutMs: 4000,
+  gpt6TrustedWeeklyUsdCap: 0,
   moderation: "enforce" as ModerationMode,
   moderationBlockConfidence: 0.85,
   moderationAllowlist: [] as string[],
@@ -587,6 +606,9 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     useDescriptions: flag(env.USE_DESCRIPTIONS, DEFAULTS.useDescriptions, "USE_DESCRIPTIONS"),
     useDescriptionDailyCap: whole(env.USE_DESCRIPTION_DAILY_CAP, DEFAULTS.useDescriptionDailyCap, "USE_DESCRIPTION_DAILY_CAP"),
     securityOffGpt6: flag(env.SECURITY_OFF_GPT6, DEFAULTS.securityOffGpt6, "SECURITY_OFF_GPT6"),
+    gpt6PresendGuard: guardMode(env.GPT6_PRESEND_GUARD),
+    gpt6GuardTimeoutMs: whole(env.GPT6_GUARD_TIMEOUT_MS, DEFAULTS.gpt6GuardTimeoutMs, "GPT6_GUARD_TIMEOUT_MS"),
+    gpt6TrustedWeeklyUsdCap: amount(env.GPT6_TRUSTED_WEEKLY_USD_CAP, DEFAULTS.gpt6TrustedWeeklyUsdCap, "GPT6_TRUSTED_WEEKLY_USD_CAP"),
     moderation: moderationMode(env.MODERATION),
     moderationBlockConfidence: share(env.MODERATION_BLOCK_CONFIDENCE, DEFAULTS.moderationBlockConfidence, "MODERATION_BLOCK_CONFIDENCE"),
     moderationAllowlist: moderationAllowlist(env.MODERATION_ALLOWLIST),
@@ -834,6 +856,13 @@ function alertMode(value: unknown, fallback: AccessRequestAlerts, name: string):
   if (raw === undefined) return fallback;
   if ((ACCESS_REQUEST_ALERT_MODES as readonly string[]).includes(raw)) return raw as AccessRequestAlerts;
   throw new ConfigError(`${name} must be "each", "daily" or "off" (got "${raw}").`);
+}
+
+function guardMode(value: unknown): GuardMode {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return DEFAULTS.gpt6PresendGuard;
+  if ((GUARD_MODES as readonly string[]).includes(raw)) return raw as GuardMode;
+  throw new ConfigError(`GPT6_PRESEND_GUARD must be "off" or "enforce" (got "${raw}").`);
 }
 
 function accessRequestAlerts(value: unknown): AccessRequestAlerts {

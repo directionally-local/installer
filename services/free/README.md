@@ -879,6 +879,56 @@ Decisions and graces are stored in the Directory's `allocator_decisions` (no con
 by `GET /v1/admin/allocator?days=1..90&limit=1..1000` (newest first, with counts per UTC day). The
 daily digest has one line: "Allocator: X raised to 10M, Y to full, Z stayed, G graces".
 
+## GPT-6: pre-send checks and the trust gate
+
+Two more checks stand between a non-admin and GPT-6, after the keyword pre-check (security work
+kept off GPT-6, above). Both sit in the one chat path every agent's request goes through, so
+they apply alike to Autopilot, OpenCode through `dl opencode`, and Claude Code through
+`dl claude` (DeepSeek only today; its Anthropic requests are translated into the same path, so
+the checks can't be skipped if that changes). DeepSeek requests and admins are never affected.
+Both refuse with the GPT-6 limit's refusal (402 `gpt_limit` with `alternative` DeepSeek), which
+every client already turns into "switch to DeepSeek".
+
+**Pre-send checks** (`src/presend-guard.ts`). Before a GPT-6 request is forwarded, its new
+content is checked by two classifiers at once, each with `gpt6GuardTimeoutMs` to answer:
+
+- OpenAI's Moderation API (`omni-moderation-latest`, the OpenAI key): flagged stops it.
+- `openai/gpt-oss-safeguard-20b` on OpenRouter (the OpenRouter key), given the policy in
+  `DETECTION_RULES`'s `guardPolicy` (private; a generic default is in the code). It answers 1
+  (violates) or 0. Its cost goes to internal spend, never a person's allowance.
+
+New content is the latest user message plus every tool result after the last assistant turn,
+read the same way from chat completions messages, Anthropic content blocks (`tool_result`) and
+Responses input items (`function_call_output`); never system, developer or assistant text. It
+is cut to 12,000 characters, long parts read from both ends.
+
+The checks fail closed: a flag, an error, an answer that isn't 1 or 0, or no answer in time, and
+the request is not sent to OpenAI (`reason` `security`). A flag also holds the session and the
+person's UTC day off GPT-6 (the same hold as security work) and is recorded as a high-risk use
+label (model `presend:openai` or `presend:safeguard`), so the moderation reviewer looks at it.
+A failure refuses that request only. The log gets the outcome and a reason code
+(`openai:timeout`, `safeguard:http_502`, ...), never content. `/admin/metrics` has `gpt6Guard`:
+per UTC day, `passed`, `flagged_openai`, `flagged_safeguard` and `error`.
+
+**Trust gate** (`src/gpt6-trust.ts`). Off while `gpt6TrustedWeeklyUsdCap` is 0 (the default).
+Above 0, GPT-6 is served only to trusted people (others get `gpt_limit` with `reason` `trust`,
+and `/v1/models` leaves GPT-6 out for them); a trusted person on the free plan gets that weekly
+GPT-6 budget (a personal cap an admin set still wins; Pro keeps its own). Trusted is any of:
+
+- an admin;
+- someone who has paid: a Pro payment or a top-up, or an active Pro subscription;
+- someone who earned it, all of: level Full and not flagged by the creation-batch check; active
+  (a request or an event) in at least 2 distinct weeks; a real multi-turn session, either at
+  least 5 turns by Autopilot's events or, for agents that send no events, one session id (or one
+  `dl opencode` run's harness key) with at least 5 requests spread over at least 5 minutes; and
+  no high-risk use label and no moderation block or watch in the last 30 days.
+
+A blocked or suspended account is never trusted. The answer is cached per person for an hour;
+a new high-risk label or block/watch verdict ends a cached trust at once. `/admin/people` shows
+`gpt6Trusted` and `gpt6TrustReasons` per person (`admin`, `paid` or `earned`; or each failing
+check: `level`, `batch_flagged`, `weeks`, `multi_turn`, `high_risk_label`, `moderation`,
+`inactive`), and `/admin/metrics` has `gpt6Trusted`, how many non-admins are trusted now.
+
 ## Refusals
 
 Every refusal is `{"error": {"code", "message", ...}}`. The browser page and `error.message`
@@ -895,7 +945,7 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `service_paused` | device code, device token, chat | `reason: "paused"`, `pausedForEveryone: true`, `resetsAt: null` |
 | `global_weekly_budget_reached` | chat (503) | `reason: "weekly_budget"`, `pausedForEveryone: true`, `resetsAt` (ISO time), `Retry-After` header |
 | `global_total_budget_reached` | chat (503) | `reason: "total_budget"`, `pausedForEveryone: true`, `resetsAt: null` |
-| `gpt_limit` | chat (402) | `family: "gpt6"`, `reason`, `resetsAt`, `alternative` (the DeepSeek model id), `offers`: GPT-6's week used up, DeepSeek's not |
+| `gpt_limit` | chat (402) | `family: "gpt6"`, `reason`, `resetsAt`, `alternative` (the DeepSeek model id), `offers`: GPT-6's week used up, DeepSeek's not; also `reason` `security` (security work, or the pre-send checks) and `trust` (the trust gate), without `offers` |
 | `trial_ended` | chat (402) | `trial` (`{tokens, used, remaining, ended}`), `offers`: a trial account used its one-time trial |
 | `quota_exceeded` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `offers`, `referralLink` |
 | `basic_limit`, `starter_limit` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `request`, `offers`, `referralLink` |
@@ -993,6 +1043,9 @@ with who made it and when.
 | `useDescriptions` | `USE_DESCRIPTIONS` | true: a short automated description and safety label per session (see [use descriptions](#what-people-use-the-service-for-use-descriptions)) |
 | `useDescriptionDailyCap` | `USE_DESCRIPTION_DAILY_CAP` | 2000: description calls a UTC day across everyone (0 stops them) |
 | `securityOffGpt6` | `SECURITY_OFF_GPT6` | true: security work is served by DeepSeek only, never GPT-6 (see [security work kept off GPT-6](#what-people-use-the-service-for-use-descriptions)) |
+| `gpt6PresendGuard` | `GPT6_PRESEND_GUARD` | `enforce`: GPT-6 requests are checked before they are sent (see [GPT-6: pre-send checks and the trust gate](#gpt-6-pre-send-checks-and-the-trust-gate)); `off` |
+| `gpt6GuardTimeoutMs` | `GPT6_GUARD_TIMEOUT_MS` | 4000: ms each pre-send check may take; past it the request isn't sent |
+| `gpt6TrustedWeeklyUsdCap` | `GPT6_TRUSTED_WEEKLY_USD_CAP` | 0: the trust gate is off; above 0, GPT-6 only for trusted people, with this weekly budget on the free plan |
 | `moderation` | `MODERATION` | `enforce`: high-risk labels get an automated review that can block (see [automated moderation review](#automated-moderation-review)); `shadow` decides and emails, never blocks; `off` is the plain high-risk email |
 | `moderationBlockConfidence` | `MODERATION_BLOCK_CONFIDENCE` | 0.85: the lowest confidence (0 to 1) a block verdict needs to block |
 | `moderationAllowlist` | `MODERATION_ALLOWLIST` | []: GitHub logins or ids moderation never blocks (comma-separated in env) |
@@ -1046,6 +1099,7 @@ tests, local development and self-hosting, never the production values.
   "labellerPolicy": "What the use-description labeller should call high, low and no risk.",
   "moderationPolicy": "What the moderation reviewer should block, pass and watch, and how to weigh the case.",
   "allocatorPolicy": "What the token allocator should count as real use worth a raise.",
+  "guardPolicy": "What the GPT-6 pre-send safeguard should answer 1 (violates) and 0 for.",
   "thresholds": { "batchSize": 10, "minFollowers": 1 }
 }
 ```
@@ -1061,6 +1115,9 @@ tests, local development and self-hosting, never the production values.
   three model prompts (the last is the [token allocator](#token-allocator)'s). Deploy a version
   that knows `allocatorPolicy` before putting it in the secret: older versions refuse unknown
   fields and would ignore the whole secret. The rest of each prompt (what the model is given and the JSON it must answer) stays in the code.
+- **`guardPolicy`**: the whole system prompt of the GPT-6 pre-send safeguard. It must end by
+  asking for exactly one character, 1 or 0: any other answer fails closed. Like
+  `allocatorPolicy`, deploy a version that knows it before putting it in the secret.
 - **`thresholds`**: starting values for the farm-detection settings listed above.
 
 Every field is optional, and a field that is present **replaces** its default whole (a secret's
@@ -1070,7 +1127,8 @@ reason once (never the content), runs on the defaults, and never crashes or turn
 
 `GET /admin/config` has `detectionRules`: `source` (`secret`, `defaults` when unset, `invalid`
 when ignored, with `error`), counts of `keywords`, `highRiskKeywords`, `proxyRouters` and
-`thresholds`, and whether each policy came from the secret. Never the rules themselves.
+`thresholds`, and whether each policy (`labellerPolicy`, `moderationPolicy`, `allocatorPolicy`, `guardPolicy`)
+came from the secret. Never the rules themselves.
 
 ```sh
 # Set or replace the rules (from a file kept outside any repository)

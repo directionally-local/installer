@@ -171,6 +171,8 @@ export interface Service {
     luminal: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     /** Calls to OpenAI's Responses API (a fake: nothing leaves the process). */
     openai: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
+    /** Calls to OpenAI's Moderation API (a fake: nothing leaves the process). */
+    moderations: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     githubTokens: Array<{ code: string; redirect_uri?: string }>;
     /** Contribution lookups on GitHub's GraphQL API, by login. */
     githubGraphql: string[];
@@ -200,6 +202,8 @@ export interface Service {
   setLuminal(handler: OpenRouterHandler): void;
   /** Answers calls to OpenAI's Responses API (default: a "hi" response, streamed when asked, with Responses usage). */
   setOpenAI(handler: OpenRouterHandler): void;
+  /** Answers calls to OpenAI's Moderation API (default: nothing flagged). */
+  setModerations(handler: OpenRouterHandler): void;
   request(method: string, path: string, options?: { body?: unknown; token?: string; headers?: Record<string, string>; form?: Record<string, string>; ip?: string }): Promise<Response>;
   signIn(user: GitHubUserFixture, options?: { invite?: string; deviceId?: string }): Promise<Tokens>;
   directory(): any;
@@ -346,11 +350,13 @@ export async function createService(vars: Record<string, string> = {}, options: 
     USE_DESCRIPTIONS: "false",
     // The token allocator raises allowances and makes its own model calls; off unless a test turns it on (allocator.test.ts).
     ALLOCATOR: "off",
+    // GPT-6's pre-send checks make their own calls; off unless a test turns them on (gpt6-guard.test.ts).
+    GPT6_PRESEND_GUARD: "off",
     ...vars,
     ...namespaces,
   };
   const clock = { now: NOW };
-  const calls: Service["calls"] = { openRouter: [], luminal: [], openai: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [], resend: [], userEmail: [] };
+  const calls: Service["calls"] = { openRouter: [], luminal: [], openai: [], moderations: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [], resend: [], userEmail: [] };
   let resend = (_body: Record<string, unknown>): Response | Promise<Response> => Response.json({ id: `email-${calls.resend.length}` });
   let stripe = (path: string, _form?: URLSearchParams): Response | Promise<Response> =>
     path === "/v1/checkout/sessions"
@@ -375,6 +381,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
   let openRouter: OpenRouterHandler = () => completion(usage(100, 10));
   let githubProfile = (login: string): Response | Promise<Response> => Response.json({ login, email: null });
   let luminal: OpenRouterHandler = () => completion(luminalUsage(100, 10));
+  let moderations: OpenRouterHandler = () => Response.json({ id: "modr-1", model: "omni-moderation-latest", results: [{ flagged: false, categories: {}, category_scores: {} }] });
   let openai: OpenRouterHandler = (body) => (body.stream ? responsesSse(responsesTextEvents("hi", responsesUsage(100, 10))) : openaiResponse(responsesUsage(100, 10)));
 
   const fetcher = async (input: string, init: RequestInit = {}): Promise<Response> => {
@@ -455,6 +462,11 @@ export async function createService(vars: Record<string, string> = {}, options: 
       calls.openai.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
       return openai(body, init);
     }
+    if (url === "https://api.openai.com/v1/moderations") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      calls.moderations.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
+      return moderations(body, init);
+    }
     if (url === "https://api.resend.com/emails") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       calls.resend.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
@@ -531,6 +543,9 @@ export async function createService(vars: Record<string, string> = {}, options: 
     },
     setOpenAI: (next) => {
       openai = next;
+    },
+    setModerations: (next) => {
+      moderations = next;
     },
     setStripe: (next) => {
       stripe = next as never;

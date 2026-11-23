@@ -1,5 +1,5 @@
 import { ALLOCATOR_MODES } from "./allocator.js";
-import { ACCESS_REQUEST_ALERT_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
+import { ACCESS_REQUEST_ALERT_MODES, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
@@ -137,6 +137,12 @@ export const RUNTIME_SETTINGS = {
   useDescriptionDailyCap: { kind: "count", env: "USE_DESCRIPTION_DAILY_CAP" },
   /** Security work (by its use description or the request's own words) served by DeepSeek only, never GPT-6 (security-route.ts); false turns it off. */
   securityOffGpt6: { kind: "flag", env: "SECURITY_OFF_GPT6" },
+  /** GPT-6 pre-send checks (presend-guard.ts): "enforce" or "off". */
+  gpt6PresendGuard: { kind: "guardMode", env: "GPT6_PRESEND_GUARD" },
+  /** How long each pre-send check may take, in ms; past it the request isn't sent. */
+  gpt6GuardTimeoutMs: { kind: "count", env: "GPT6_GUARD_TIMEOUT_MS" },
+  /** A trusted free-plan person's weekly GPT-6 budget, USD (gpt6-trust.ts); 0 turns the trust gate off. */
+  gpt6TrustedWeeklyUsdCap: { kind: "amount", env: "GPT6_TRUSTED_WEEKLY_USD_CAP" },
   /** Automated moderation review of high-risk labels (moderation.ts): "enforce", "shadow" (never blocks) or "off" (the plain high-risk email). */
   moderation: { kind: "moderationMode", env: "MODERATION" },
   /** The lowest confidence, 0 to 1, a "block" verdict needs to block in "enforce" mode. */
@@ -212,6 +218,8 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= MAX_FIRST_BYTE_TIMEOUT_SECONDS ? value : "invalid";
     case "alertMode":
       return typeof value === "string" && (ACCESS_REQUEST_ALERT_MODES as readonly string[]).includes(value) ? value : "invalid";
+    case "guardMode":
+      return typeof value === "string" && (GUARD_MODES as readonly string[]).includes(value) ? value : "invalid";
     case "moderationMode":
       return typeof value === "string" && (MODERATION_MODES as readonly string[]).includes(value) ? value : "invalid";
     case "allocatorMode":
@@ -241,6 +249,7 @@ const RULES: Record<Kind, string> = {
   amount: `a number of dollars, 0 to ${MAX_USD}`,
   seconds: `a number of seconds, more than 0 and at most ${MAX_FIRST_BYTE_TIMEOUT_SECONDS}`,
   alertMode: '"each", "daily" or "off"',
+  guardMode: '"enforce" or "off"',
   moderationMode: '"enforce", "shadow" or "off"',
   allocatorMode: '"on" or "off"',
   people: 'a list of up to 500 GitHub logins or numeric ids, e.g. ["octocat", "12345"], or [] for none',

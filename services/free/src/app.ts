@@ -108,6 +108,8 @@ import { allowedReturn, isInstallOption, ONE_TIME_CODE, planFor, WEB_SESSION_TTL
 import { grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, parseGrantUsd, parseLogins, type GrantResult } from "./grant.js";
 import { completionText, isUseRisk, parseUseLabel, USE_DESCRIPTIONS_PER_PERSON_PER_DAY, USE_KEEP_DAYS, USE_MAX_TOKENS, USE_REASONING_ROOM, USE_TIMEOUT_SECONDS, useInput, useMessages, type UseInput } from "./use-description.js";
 import { fitToBudget, keywordLabel, precheckTexts, SECURITY_GPT6_MESSAGE, SECURITY_REASON, securityHoldEnds, securitySignal } from "./security-route.js";
+import { GUARD_GPT6_MESSAGE, outcomesOf, runGuard } from "./presend-guard.js";
+import { TRUST_REASON, UNTRUSTED_GPT6_MESSAGE, type Trust } from "./gpt6-trust.js";
 import {
   allowlisted,
   MODERATION_INPUT_CHARS,
@@ -2122,12 +2124,12 @@ async function models(c: Ctx): Promise<Response> {
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
   let listed = FREE_MODELS;
   if (!isAdmin) {
-    const allowance = await account(c, identity.githubId).allowance(
-      c.now(),
-      allocated(config, limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens), identity.githubId, person, c.now()),
-    );
+    // With the GPT-6 trust gate on (gpt6-trust.ts), GPT-6 is listed only for trusted people, at the trusted budget.
+    const trust = await gpt6TrustFor(c, config, identity.githubId);
+    const ownLimits = allocated(config, limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens), identity.githubId, person, c.now());
+    const allowance = await account(c, identity.githubId).allowance(c.now(), trust?.trusted ? withTrustedGpt6Cap(ownLimits, config) : ownLimits);
     const gpt6 = allowance.budgets.gpt6.usdPerWeek;
-    if (gpt6 !== null && gpt6 <= 0) listed = FREE_MODELS.filter((model) => model.family !== "gpt6");
+    if ((gpt6 !== null && gpt6 <= 0) || (trust && !trust.trusted)) listed = FREE_MODELS.filter((model) => model.family !== "gpt6");
   }
   return json({
     object: "list",
@@ -2659,6 +2661,26 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     }
   }
 
+  // GPT-6 for non-admins, after the keyword pre-check: the trust gate (gpt6-trust.ts; on once
+  // gpt6TrustedWeeklyUsdCap is above 0), then the pre-send checks of the request's new content
+  // (presend-guard.ts). Every agent's GPT-6 request comes through here, whatever its API shape.
+  let trustedGpt6 = false;
+  if (requested.family === "gpt6" && !isAdmin) {
+    const trust = await gpt6TrustFor(c, gate.config, identity.githubId);
+    if (trust && !trust.trusted) {
+      return apiError(402, "gpt_limit", UNTRUSTED_GPT6_MESSAGE, { family: "gpt6", resetsAt: new Date(weekEnd(c.now())).toISOString(), reason: TRUST_REASON, alternative: DEEPSEEK_MODEL }, await headers());
+    }
+    if (trust) {
+      trustedGpt6 = true;
+      fullLimits = withTrustedGpt6Cap(fullLimits, gate.config);
+      limits = withTrustedGpt6Cap(limits, gate.config);
+    }
+    if (gate.config.gpt6PresendGuard === "enforce") {
+      const stopped = await presendGuard(c, gate, { githubId: identity.githubId, sessionId: sessionId ?? null, body });
+      if (stopped) return apiError(402, "gpt_limit", GUARD_GPT6_MESSAGE, { family: "gpt6", resetsAt: securityHoldEnds(c.now()), reason: SECURITY_REASON, alternative: DEEPSEEK_MODEL }, await headers());
+    }
+  }
+
   if (gate.paused) return pausedError(await headers());
   // Which model actually serves: the requested one when its provider has a key and credit left,
   // else its fallback (GPT-6 Luna → DeepSeek). Never another model.
@@ -2747,6 +2769,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     if (next && gate.person) {
       gate.person.allocator = next;
       fullLimits = allocated(gate.config, baseLimits, identity.githubId, gate.person, c.now());
+      if (trustedGpt6) fullLimits = withTrustedGpt6Cap(fullLimits, gate.config);
       limits = harness ? { ...fullLimits, harnessShare: gate.config.otherHarnessShare } : fullLimits;
       reservation = await reserveFor(pool, serving);
     }
@@ -2801,6 +2824,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   const cooldownMs = gate.config.openRouterHostCooldownMinutes * 60_000;
   const failingHosts = cooldownMs > 0 && serving.provider === "openrouter" ? await hosts(c).failingHosts(c.now() - cooldownMs) : [];
   const started = c.now();
+  const trustSession = sessionId ?? (identity.harnessKeyId ? `harness:${identity.harnessKeyId}` : undefined);
 
   /**
    * Settles one attempt against the model that served it: the person's allowance at that
@@ -2849,6 +2873,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       // The requested model's budget paid, even when its fallback served.
       family: effective.family,
       ...(sessionKey ? { sessionKey } : {}),
+      // Multi-turn use for GPT-6's trust gate, from any agent: the session id, or the harness key of a dl opencode run.
+      ...(trustSession ? { trustSession } : {}),
     };
     await alert(c, await directory(c).recordRequest(record, policyOf(gate.config), servingContext(c, gate.config)));
     // Most of the week's free tokens used: one email a week, on the settlement that crossed 80%.
@@ -2922,6 +2948,84 @@ const blockUrl = (c: Ctx) => `${c.base}/admin?view=tools#block`;
 function moderationLimits(config: FreeConfig): ModerationLimits | undefined {
   if (config.moderation === "off") return undefined;
   return { cooldownMs: config.moderationCooldownMinutes * 60_000, dailyCap: config.moderationDailyCap, model: DEEPSEEK_MODEL };
+}
+
+/**
+ * GPT-6 trust for a non-admin (gpt6-trust.ts; the caller leaves admins out), or undefined while
+ * the trust gate is off (`gpt6TrustedWeeklyUsdCap` 0).
+ */
+async function gpt6TrustFor(c: Ctx, config: FreeConfig, githubId: number): Promise<Trust | undefined> {
+  if (!(config.gpt6TrustedWeeklyUsdCap > 0)) return undefined;
+  return directory(c).gpt6Trust({ githubId, now: c.now() });
+}
+
+/** A trusted person's limits: the trusted weekly GPT-6 budget for the free plan (a personal cap an admin set still wins; Pro keeps its own). */
+function withTrustedGpt6Cap<T extends Limits>(limits: T, config: FreeConfig): T {
+  return { ...limits, weeklyUsd: config.gpt6TrustedWeeklyUsdCap };
+}
+
+/**
+ * The pre-send checks of a non-admin's GPT-6 request (presend-guard.ts): true when the request
+ * must not be sent (flagged, a checker failed or was late). The outcome is counted; a flag is
+ * stored as a high-risk label (holding the session and day off GPT-6), and its moderation review
+ * or alert runs beside the response. Logs a reason code, never content.
+ */
+async function presendGuard(c: Ctx, gate: Runtime, input: { githubId: number; sessionId: string | null; body: Record<string, unknown> }): Promise<boolean> {
+  const { config } = gate;
+  let result: Awaited<ReturnType<typeof runGuard>>;
+  try {
+    result = await runGuard(c.fetch, {
+      body: input.body,
+      openaiApiKey: config.openaiApiKey,
+      openRouterApiKey: config.openRouterApiKey,
+      policy: config.detection.guardPolicy,
+      timeoutMs: config.gpt6GuardTimeoutMs,
+      user: await safetyIdentifier(input.githubId),
+      dataCollection: config.openRouterDataCollection,
+    });
+  } catch (error) {
+    console.error(`gpt6 presend guard failed: ${error instanceof Error ? error.name : "error"}`);
+    result = { verdict: "error", openai: { verdict: "error", reason: "crash" }, safeguard: { verdict: "error", reason: "crash" }, flaggedBy: [], reason: "crash", spend: { tokens: 0, cashUsd: 0 }, text: "" };
+  }
+  if (result.verdict !== "pass") console.log(`gpt6 presend guard: ${result.verdict} (${result.reason})`);
+  const moderation = moderationLimits(config);
+  const stored = directory(c)
+    .recordGpt6Guard({
+      githubId: input.githubId,
+      sessionId: input.sessionId,
+      outcomes: outcomesOf(result),
+      ...(result.flaggedBy[0] ? { flaggedBy: result.flaggedBy[0] } : {}),
+      spend: result.spend,
+      now: c.now(),
+      blockUrl: blockUrl(c),
+      ...(moderation ? { moderation } : {}),
+    })
+    .catch((error: unknown) => {
+      console.error(`gpt6 presend record failed: ${error instanceof Error ? error.name : "error"}`);
+      return undefined;
+    });
+  if (result.verdict !== "flag") {
+    // A pass or a failure: only counters and cost, beside the request.
+    if (c.background) c.background(stored);
+    else await stored;
+    return result.verdict !== "pass";
+  }
+  // A flag: the hold and the label are stored before the answer; the review or alert runs beside it.
+  const outcome = await stored;
+  if (outcome) {
+    const followUp = (async () => {
+      try {
+        await alert(c, outcome.alerts);
+        // The reviewer sees what the checkers saw, cut to its own size (in flight only).
+        if (outcome.review) await moderate(c, gate, { githubId: input.githubId, ...outcome.review, text: result.text.slice(0, MODERATION_INPUT_CHARS) });
+      } catch (error) {
+        console.error(`gpt6 presend review failed: ${error instanceof Error ? error.name : "error"}`);
+      }
+    })();
+    if (c.background) c.background(followUp);
+    else await followUp;
+  }
+  return true;
 }
 
 /**
@@ -3675,7 +3779,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     if ("error" in page) return apiError(400, "invalid_request", page.error);
     // The Directory's per-person data in a few whole-table reads, not one call per person.
     const people = await directory(c).listPeople();
-    const [caps, networks, sessions, trialBonus, harnessUsage, uses, allocatorStates] = await Promise.all([
+    const [caps, networks, sessions, trialBonus, harnessUsage, uses, allocatorStates, trusts] = await Promise.all([
       directory(c).personalCaps(),
       directory(c).networkCounts(),
       directory(c).weekSessions(now),
@@ -3683,6 +3787,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       directory(c).weekHarnessUsage(now),
       directory(c).useSummaries(weekStart(now)),
       directory(c).allocatorStates(),
+      directory(c).gpt6TrustAll({ now, adminIds: [...c.config.adminGithubIds] }),
     ]);
     const checks = peopleChecks(people, config, now);
     // Filter and page before any account call, so a page costs one account call per person on it.
@@ -3746,6 +3851,9 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
         use: uses.get(person.github_id)?.use ?? null,
         useAt: uses.has(person.github_id) ? new Date(uses.get(person.github_id)!.at).toISOString() : null,
         worstRiskThisWeek: uses.get(person.github_id)?.worstRisk ?? null,
+        // Whether GPT-6's trust gate (gpt6-trust.ts) would serve them now, and why (worked out fresh, not the hour's cache).
+        gpt6Trusted: trusts.get(person.github_id)?.trusted ?? false,
+        gpt6TrustReasons: trusts.get(person.github_id)?.reasons ?? ["unknown"],
       };
     });
     // Without `limit`, everyone (as before) and `nextCursor: null`; with it, pass `nextCursor` back as `cursor`.
@@ -4149,12 +4257,14 @@ async function adminMetrics(c: Ctx): Promise<Response> {
   const from = parse("from") ?? to - 27 * DAY_MS;
   if (Number.isNaN(to) || Number.isNaN(from) || from > to) return apiError(400, "invalid_request", "from and to must be ISO dates with from <= to.");
   if (to - from > 366 * DAY_MS) return apiError(400, "invalid_request", "The range can't be longer than 366 days.");
-  const [metrics, refusals, noGithub] = await Promise.all([
+  const [metrics, refusals, noGithub, guard] = await Promise.all([
     directory(c).metrics({ from, to, now, adminIds: [...c.config.adminGithubIds] }),
     directory(c).refusals(Math.floor(from / DAY_MS), Math.floor(to / DAY_MS)),
     directory(c).noGithubDays({ from: Math.floor(from / DAY_MS) * DAY_MS, until: Math.floor(to / DAY_MS) * DAY_MS + DAY_MS }),
+    // GPT-6's pre-send checks per UTC day, and how many non-admins its trust gate would serve now.
+    directory(c).gpt6GuardMetrics({ from, to: to + DAY_MS, now, adminIds: [...c.config.adminGithubIds] }),
   ]);
-  return json({ ...metrics, refusals: refusalsView(refusals), noGithub, generatedAt: new Date(now).toISOString(), today: isoDay(now) });
+  return json({ ...metrics, refusals: refusalsView(refusals), noGithub, gpt6Guard: guard.days, gpt6Trusted: guard.trustedPeople, generatedAt: new Date(now).toISOString(), today: isoDay(now) });
 }
 
 // ─── Admin dashboard (browser) ──────────────────────────────────────────────

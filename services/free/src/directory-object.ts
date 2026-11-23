@@ -23,6 +23,8 @@ import { levelChecks, levelFor, type BasicRule, type GithubSignals, type Level, 
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 import { USE_CHECKPOINTS, USE_KEEP_DAYS, type UseLabel } from "./use-description.js";
 import { labelKeepsOffGpt6 } from "./security-route.js";
+import { countGuard, everyonesTrust, GPT6_GUARD_SCHEMA, guardDays, noteTrustSession, personTrust, type Trust } from "./gpt6-trust.js";
+import { GUARD_OUTCOMES, type Checker, type GuardOutcome } from "./presend-guard.js";
 import { dayIso, MODERATION_HISTORY_DAYS, MODERATION_HISTORY_ROWS, MODERATION_VERDICTS, type ModerationAction, type ModerationAnswer, type ModerationCase, type ModerationVerdict, type TriggerLabel } from "./moderation.js";
 import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
 import { WELCOME_KINDS, type UserEmailKind } from "./user-emails.js";
@@ -216,6 +218,8 @@ export interface RequestRecord {
   family?: Family;
   /** The client's session id, when it sent one (allocator.ts sessionKeyOf): the token allocator's session counts. */
   sessionKey?: string | null;
+  /** Its session for GPT-6's trust gate (gpt6-trust.ts): the session id, or "harness:<key id>". Not stored on the row. */
+  trustSession?: string;
 }
 
 /**
@@ -974,7 +978,7 @@ export class DirectoryObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
+      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA]) this.ctx.storage.sql.exec(statement);
       ensureAllocatorSchema(this.ctx.storage.sql);
       const added = new Set<string>();
       for (const [table, column, definition] of ADDED_COLUMNS) {
@@ -2479,6 +2483,7 @@ export class DirectoryObject extends DurableObject {
     const alerts: Alert[] = [];
     const outcome: UpstreamOutcome = record.upstreamOutcome ?? (record.upstreamError ? "error" : "ok");
     this.ctx.storage.transactionSync(() => {
+      if (record.trustSession && !record.isAdmin && record.status !== "upstream_error") noteTrustSession(this.ctx.storage.sql, record.githubId, record.trustSession, record.at);
       this.ctx.storage.sql.exec(
         `INSERT INTO requests (github_id, is_admin, at, model, prompt_tokens, completion_tokens, cached_tokens, charged_tokens, cost_usd, status, latency_ms, paid,
                                upstream, credit_usd, ttfb_ms, ttft_ms, upstream_error, upstream_outcome, via_key, harness, session_key)
@@ -3180,6 +3185,64 @@ export class DirectoryObject extends DurableObject {
       );
       return true;
     });
+  }
+
+  // ─── GPT-6's trust gate and pre-send checks (gpt6-trust.ts, presend-guard.ts) ───
+
+  /** One non-admin's GPT-6 trust (cached for an hour). */
+  async gpt6Trust(input: { githubId: number; now: number }): Promise<Trust> {
+    return this.ctx.storage.transactionSync(() => personTrust(this.ctx.storage.sql, input.githubId, input.now));
+  }
+
+  /** Everyone's GPT-6 trust, worked out now (admin views). */
+  async gpt6TrustAll(input: { now: number; adminIds: number[] }): Promise<Map<number, Trust>> {
+    return everyonesTrust(this.ctx.storage.sql, input.now, new Set(input.adminIds));
+  }
+
+  /**
+   * One pre-send check's outcome: its daily counters, the safeguard call's cost in the internal
+   * spend bucket, and for a flag a high-risk use label (model "presend:<checker>"), which holds
+   * the session and the person's day off GPT-6 and claims a moderation review. Never content.
+   */
+  async recordGpt6Guard(input: {
+    githubId: number;
+    sessionId: string | null;
+    outcomes: GuardOutcome[];
+    flaggedBy?: Checker;
+    spend?: { tokens: number; cashUsd: number };
+    now: number;
+    blockUrl: string;
+    moderation?: ModerationLimits;
+  }): Promise<LabelOutcome> {
+    let outcome: LabelOutcome = { alerts: [] };
+    this.ctx.storage.transactionSync(() => {
+      countGuard(this.ctx.storage.sql, input.outcomes, input.now);
+      if (input.spend && (input.spend.tokens > 0 || input.spend.cashUsd > 0)) {
+        this.#recordInternalSpend({ upstream: "openrouter", tokens: input.spend.tokens, cashUsd: input.spend.cashUsd, creditUsd: 0, now: input.now });
+      }
+      if (!input.flaggedBy) return;
+      const model = `presend:${input.flaggedBy}`;
+      outcome = this.#storeUseLabel({
+        githubId: input.githubId,
+        sessionId: input.sessionId,
+        label: { use: `Pre-send check flagged (${input.flaggedBy})`, risk: "high", category: "other" },
+        model,
+        now: input.now,
+        blockUrl: input.blockUrl,
+        source: model,
+        moderation: input.moderation,
+      });
+    });
+    return outcome;
+  }
+
+  /** The pre-send counters per UTC day in [from, to), and how many people are trusted for GPT-6 now. */
+  async gpt6GuardMetrics(input: { from: number; to: number; now: number; adminIds: number[] }): Promise<{ days: Array<Record<string, number | string>>; trustedPeople: number }> {
+    const sql = this.ctx.storage.sql;
+    const trust = everyonesTrust(sql, input.now, new Set(input.adminIds));
+    let trustedPeople = 0;
+    for (const [githubId, answer] of trust) if (answer.trusted && !input.adminIds.includes(githubId)) trustedPeople++;
+    return { days: guardDays(sql, input.from, input.to, GUARD_OUTCOMES), trustedPeople };
   }
 
   /**
