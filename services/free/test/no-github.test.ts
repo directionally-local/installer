@@ -110,7 +110,7 @@ describe("POST /no-github", () => {
     assert.deepEqual(parseNoGithubLead(new URLSearchParams({ email: " me@example.com ", uses: "  GitLab\n " })), { ok: true, email: "me@example.com", uses: "GitLab" });
     assert.deepEqual(parseNoGithubLead(new URLSearchParams({ uses: "Bitbucket" })), { ok: true, email: null, uses: "Bitbucket" });
     assert.deepEqual(parseNoGithubLead(new URLSearchParams({ email: "me@example.com", uses: "" })), { ok: true, email: "me@example.com", uses: null });
-    for (const bad of [{}, { email: "", uses: " " }, { email: "not-an-email" }, { email: "a b@example.com" }, { email: "me@example.com", uses: "x".repeat(101) }, { email: `${"a".repeat(250)}@example.com` }]) {
+    for (const bad of [{} as Record<string, string>, { email: "", uses: " " }, { email: "not-an-email" }, { email: "a b@example.com" }, { email: "me@example.com", uses: "x".repeat(101) }, { email: `${"a".repeat(250)}@example.com` }]) {
       assert.equal(parseNoGithubLead(new URLSearchParams(bad)).ok, false, JSON.stringify(bad));
     }
   });
