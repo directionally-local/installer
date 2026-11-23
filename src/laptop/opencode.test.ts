@@ -252,12 +252,15 @@ describe("OpenCode's config for a run", () => {
     // Read at run time: the service is outside dl's TypeScript project.
     const service = new URL("../../services/free/src/models.ts", import.meta.url).href;
     const { FREE_MODELS, DEFAULT_MODEL } = (await import(service)) as {
-      FREE_MODELS: Array<{ id: string; name: string; contextWindow: number; maxOutputTokens: number; vision: boolean }>;
+      FREE_MODELS: Array<{ id: string; name: string; contextWindow: number; maxOutputTokens: number; vision: boolean; provider: string }>;
       DEFAULT_MODEL: string;
     };
+    // Not a registry provider's (opt-in) models: they serve only while that provider has a key
+    // and is on, so dl offers them only when the service's /v1/models lists them.
+    const { isRegistryProvider } = (await import(new URL("../../services/free/src/providers.ts", import.meta.url).href)) as { isRegistryProvider(value: unknown): boolean };
     assert.deepEqual(
       FREE_TIER_MODELS,
-      FREE_MODELS.map((model) => ({ id: model.id, name: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens, vision: model.vision })),
+      FREE_MODELS.filter((model) => !isRegistryProvider(model.provider)).map((model) => ({ id: model.id, name: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens, vision: model.vision })),
     );
     assert.equal(DEFAULT_MODEL, "gpt-6-luna");
   });
