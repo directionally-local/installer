@@ -40,7 +40,7 @@ async function world(vars: Record<string, string> = {}) {
   return { service, admin, token: tokens.access_token, refreshToken: tokens.refresh_token };
 }
 
-async function mint(service: Service, token: string): Promise<{ id: string; key: string; expiresAt: string; ttlSeconds: number }> {
+async function mint(service: Service, token: string): Promise<{ id: string; key: string; expiresAt: string; ttlSeconds: number; otherHarnessShare: number }> {
   const response = await service.request("POST", "/v1/harness-keys", { token, body: { harness: "claude-code" } });
   assert.equal(response.status, 201, await response.clone().text());
   return (await response.json()) as never;
@@ -72,6 +72,9 @@ describe("harness keys", () => {
     const minted = await mint(service, token);
     assert.match(minted.key, /^dlh_100_[a-z0-9]{12}_[A-Za-z0-9_-]{43}$/);
     assert.equal(minted.ttlSeconds, 900);
+    // The agent's part of the allowance, so dl can say Autopilot gets more.
+    assert.equal(minted.otherHarnessShare, 0.5);
+    assert.equal(((await (await service.request("GET", "/v1/me", { token })).json()) as { otherHarnessShare: number }).otherHarnessShare, 0.5);
     assert.equal(minted.expiresAt, new Date(NOW + 15 * MINUTE).toISOString());
     assert.equal((await service.request("POST", "/v1/harness-keys", { token, body: { harness: "cursor" } })).status, 400);
     // Not from a harness key or a server key.
@@ -266,7 +269,7 @@ describe("Claude Code's share of the allowance", () => {
     assert.equal(refused.status, 402);
     const error = await anthropicError(refused);
     assert.deepEqual([error.type, error.code], ["billing_error", "harness_limit"]);
-    assert.match(error.message, /Claude Code through dl gets 50% of your free allowance, and that part is used up\. It resets at 2026-11-09T00:00:00\.000Z\. Your remaining free usage works in dl \(Autopilot\)/);
+    assert.match(error.message, /Claude Code through dl gets half of your free allowance, and that part is used up\. It resets at 2026-11-09T00:00:00\.000Z\. Your remaining free usage works in Autopilot: type dl\./);
     // Autopilot still has the rest of the week's DeepSeek budget.
     assert.equal((await service.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [{ role: "user", content: "x" }] } })).status, 200);
     // Past the whole budget, the usual refusal, worded for Claude Code.
@@ -292,7 +295,8 @@ describe("Claude Code's share of the allowance", () => {
   it("follows the setting: 1 gives Claude Code the whole allowance", async () => {
     const { service, admin, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
     assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { otherHarnessShare: 1 } })).status, 200);
-    const { key } = await mint(service, token);
+    const { key, otherHarnessShare } = await mint(service, token);
+    assert.equal(otherHarnessShare, 1);
     service.setLuminal(() => completion(luminalUsage(10_000_000, 0)));
     assert.deepEqual([(await messages(service, key)).status, (await messages(service, key)).status, (await messages(service, key)).status], [200, 200, 200]);
   });

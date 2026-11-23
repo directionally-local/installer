@@ -114,7 +114,7 @@ describe("free users' words with proOffered", () => {
     assert.equal(forHarness(gptLimitMessage("free", false), "opencode"), "You've used this week's GPT-6 allowance. DeepSeek V4.1 Flash still has free usage this week: pick it in /models.");
     assert.equal(
       harnessLimitMessage(0.5, "2026-11-09T00:00:00.000Z", "free", "claude-code", false),
-      "Claude Code through dl gets 50% of your free allowance, and that part is used up. It resets at 2026-11-09T00:00:00.000Z. Your remaining free usage works in dl (Autopilot): run dl.",
+      "Claude Code through dl gets half of your free allowance, and that part is used up. It resets at 2026-11-09T00:00:00.000Z. Your remaining free usage works in Autopilot: type dl.",
     );
     assert.equal(starterLine(BAR, 2_000_000, 2, 8, false), "Free: every model, up to $2 of GPT-6 and $8 of DeepSeek a week. It resets every Monday. Want more? Type /request in dl and tell us what you're building, or use your own API key with /provider.");
     for (const kind of TRIAL_EMAILS) {

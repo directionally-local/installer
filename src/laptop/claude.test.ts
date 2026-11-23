@@ -63,6 +63,7 @@ function deps(overrides: Partial<ClaudeDeps> = {}): ClaudeDeps {
       throw new Error("no sign-in expected");
     },
     setInterval: () => ({}),
+    terminal: false,
     clearInterval: () => undefined,
     onSignal: () => () => undefined,
     ...overrides,
@@ -126,6 +127,50 @@ describe("dl claude", () => {
       const code = await claudeCommand([], capture().io, deps({ fetch: fakeService().fetch, spawn: fakeSpawn(exit).spawn }));
       assert.equal(code, expected);
     }
+  });
+
+  it("says once, dimmed, before Claude Code starts in a terminal, that Autopilot gets 2× the free allowance", async () => {
+    const mint = { id: "abcdefabcdef", key: KEY, harness: "claude-code", expiresAt: "x", ttlSeconds: 900, otherHarnessShare: 0.5 };
+    const { io, err } = capture();
+    let errAtSpawn = "";
+    const child = fakeSpawn();
+    const spawn = (command: string, args: string[], options: SpawnOptions) => {
+      errAtSpawn = err();
+      return child.spawn(command, args, options);
+    };
+    assert.equal(await claudeCommand([], io, deps({ fetch: fakeService(201, mint).fetch, spawn, terminal: true })), 0);
+    assert.equal(errAtSpawn, "  \x1b[2mFree tokens: Autopilot gets 2× the allowance of other agents. Just type dl.\x1b[22m\n");
+    assert.equal(err(), errAtSpawn, "one line, before Claude Code starts");
+
+    // NO_COLOR: the same line, plain.
+    const plain = capture();
+    await claudeCommand([], plain.io, deps({ env: { PATH: "/usr/bin", NO_COLOR: "1" }, fetch: fakeService(201, mint).fetch, spawn: fakeSpawn().spawn, terminal: true }));
+    assert.equal(plain.err(), "  Free tokens: Autopilot gets 2× the allowance of other agents. Just type dl.\n");
+  });
+
+  it("words the nudge generically for another share or an older service, and leaves it out at the whole allowance", async () => {
+    const run = async (extra: Record<string, unknown>) => {
+      const { io, err } = capture();
+      const mint = { id: "abcdefabcdef", key: KEY, harness: "claude-code", expiresAt: "x", ttlSeconds: 900, ...extra };
+      await claudeCommand([], io, deps({ env: { PATH: "/usr/bin", NO_COLOR: "1" }, fetch: fakeService(201, mint).fetch, spawn: fakeSpawn().spawn, terminal: true }));
+      return err();
+    };
+    const generic = "  Free tokens: Autopilot gets more of the allowance than other agents. Just type dl.\n";
+    assert.equal(await run({ otherHarnessShare: 0.25 }), generic);
+    assert.equal(await run({}), generic);
+    assert.equal(await run({ otherHarnessShare: 1 }), "");
+  });
+
+  it("shows no nudge when the output isn't a terminal, or when the free tier refuses", async () => {
+    const mint = { id: "abcdefabcdef", key: KEY, harness: "claude-code", expiresAt: "x", ttlSeconds: 900, otherHarnessShare: 0.5 };
+    const piped = capture();
+    assert.equal(await claudeCommand([], piped.io, deps({ fetch: fakeService(201, mint).fetch, spawn: fakeSpawn().spawn, terminal: false })), 0);
+    assert.equal(piped.err(), "");
+
+    const refused = capture();
+    const body = { error: { code: "harness_not_allowed", message: "Free tokens in Claude Code are switched off for now." } };
+    assert.equal(await claudeCommand([], refused.io, deps({ fetch: fakeService(403, body).fetch, spawn: fakeSpawn().spawn, terminal: true })), 1);
+    assert.doesNotMatch(refused.err(), /Autopilot gets/);
   });
 
   it("refreshes the key while Claude Code runs, and forwards SIGTERM to it", async () => {

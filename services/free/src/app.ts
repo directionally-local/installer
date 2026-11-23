@@ -1883,6 +1883,8 @@ async function me(c: Ctx): Promise<Response> {
       ]),
     ),
     models: [...ALLOWED_MODELS],
+    /** The part of the allowance (0 to 1) other agents launched by dl (dl claude, dl opencode) get; Autopilot gets all of it. */
+    otherHarnessShare: config.otherHarnessShare,
     plan: allowance.plan,
     topupTokensLeft: allowance.topupTokensLeft,
     /** Dollar top-ups: usage dollars left and when the soonest-expiring one with usage left ends. */
@@ -2187,7 +2189,7 @@ async function events(c: Ctx): Promise<Response> {
  * Harness keys: what `dl claude` hands Claude Code and `dl opencode` hands OpenCode (see
  * HARNESS_KEY in account-object.ts).
  *
- *   POST   /v1/harness-keys {harness: "claude-code" | "opencode"}  → 201 {id, key, harness, expiresAt, ttlSeconds}
+ *   POST   /v1/harness-keys {harness: "claude-code" | "opencode"}  → 201 {id, key, harness, expiresAt, ttlSeconds, otherHarnessShare}
  *          (a signed-in access token only: not a server key, not another harness key)
  *   POST   /v1/harness-keys/:id/refresh                → {id, expiresAt}: another HARNESS_KEY_TTL_MS
  *   DELETE /v1/harness-keys/:id                         → {id, revoked: true}
@@ -2216,7 +2218,9 @@ async function harnessKeys(c: Ctx, rest: string, method: string): Promise<Respon
     }
     const created = await person.createHarnessKey({ harness: harness as Harness, sid: identity.sid, now: c.now() });
     if (created.ok) {
-      return json({ id: created.id, key: created.key, harness, expiresAt: new Date(created.expiresAt).toISOString(), ttlSeconds: HARNESS_KEY_TTL_MS / 1000 }, 201);
+      // otherHarnessShare: this agent's part of the allowance (Autopilot gets all of it); dl says so at start.
+      const { otherHarnessShare } = (await runtime(c)).config;
+      return json({ id: created.id, key: created.key, harness, expiresAt: new Date(created.expiresAt).toISOString(), ttlSeconds: HARNESS_KEY_TTL_MS / 1000, otherHarnessShare }, 201);
     }
     switch (created.code) {
       case "harness_key_limit":

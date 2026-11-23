@@ -164,12 +164,12 @@ export const HARNESS_NOT_ALLOWED_MESSAGE = harnessNotAllowedMessage("claude-code
  * at dl Pro only while Pro is offered (`proOffered`).
  */
 export function harnessLimitMessage(share: number, resetsAt: string | undefined, plan: "free" | "pro" = "free", harness: Harness = "claude-code", proOffered = true): string {
-  const part = share >= 1 ? "all" : share <= 0 ? "none" : `${Math.round(share * 100)}%`;
+  const part = share >= 1 ? "all" : share <= 0 ? "none" : share === 0.5 ? "half" : `${Math.round(share * 100)}%`;
   const when = resetsAt ? ` It resets at ${resetsAt}.` : "";
   const { product } = HARNESS_WORDS[harness];
   return plan === "pro"
-    ? `${product} through dl gets ${part} of your Pro allowance, and that part is used up.${when} The rest works in dl (Autopilot): run dl.`
-    : `${product} through dl gets ${part} of your free allowance, and that part is used up.${when} Your remaining free usage works in dl (Autopilot): run dl.${proOffered ? " Or get dl Pro: run dl and type /upgrade." : ""}`;
+    ? `${product} through dl gets ${part} of your Pro allowance, and that part is used up.${when} The rest works in Autopilot: type dl.`
+    : `${product} through dl gets ${part} of your free allowance, and that part is used up.${when} Your remaining free usage works in Autopilot: type dl.${proOffered ? " Or get dl Pro: run dl and type /upgrade." : ""}`;
 }
 
 /**

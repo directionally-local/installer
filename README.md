@@ -146,9 +146,12 @@ account. Every argument after `claude` goes to it unchanged (`dl claude -p "fix 
 - **Only while dl claude runs:** dl gets a key that lasts 15 minutes, refreshes it while Claude
   Code runs and ends it when Claude Code exits. It's in Claude Code's environment only, never on a
   command line. Free tokens don't work in Claude Code started any other way.
-- **A smaller share:** Claude Code may use part of your weekly free allowance (half, by default),
-  and of the new-user trial; Autopilot keeps the rest. With dl Pro, Claude Code gets your whole Pro
-  allowance; top-ups work as in Autopilot.
+- **Half the free allowance:** Claude Code gets half of your weekly free allowance (and of the
+  new-user trial), counting everything you used that week; Autopilot (plain `dl`) gets the full
+  amount. In a terminal, `dl claude` says so
+  in one dim line before Claude Code starts. When Claude Code's half is used up, the rest still
+  works in Autopilot: type `dl`. With dl Pro, Claude Code gets your whole Pro allowance; top-ups
+  work as in Autopilot.
 - **Your settings stay yours:** nothing under `~/.claude` is read or changed. For this run only,
   Claude Code gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`,
   `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
@@ -187,8 +190,8 @@ Every argument after `opencode` goes to it unchanged (`dl opencode run "fix the 
   provider, so use one of the `dl/…` models in `/models`, or your own provider for anything else.
 - **Only while dl opencode runs:** the same 15-minute key as `dl claude`, refreshed while OpenCode
   runs and ended when it exits; free tokens don't work in OpenCode started any other way.
-- **The same allowance:** OpenCode shares the allowance other tools get through dl (see `dl claude`
-  above); Autopilot keeps the rest, and dl Pro is exempt.
+- **Half the free allowance:** OpenCode, like Claude Code, gets half of your weekly free allowance
+  (see `dl claude` above); Autopilot (plain `dl`) gets the full amount, and dl Pro is exempt.
 - **Your settings stay yours:** no OpenCode file is read or changed. For this run only, OpenCode
   gets `OPENCODE_CONFIG_CONTENT` (inline config that adds the "dl" provider and makes
   `dl/deepseek/deepseek-v4.1-flash-1017` the model, merged above your global and project config) and the key in

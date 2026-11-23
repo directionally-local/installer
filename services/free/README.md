@@ -201,6 +201,7 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
                   "models": ["deepseek/deepseek-v4.1-flash-1017"] }
   },
   "models": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "deepseek/deepseek-v4.1-flash-1017"],
+  "otherHarnessShare": 0.5,             // dl claude / dl opencode's part of the allowance; Autopilot gets all of it
   "plan": "free",                       // "free" | "pro"
   "topupTokensLeft": 0,                 // unexpired tokens from old token top-ups not yet used
   "topupUsdLeft": 0,                    // unexpired dollar top-up usage not yet spent or held
@@ -1166,7 +1167,7 @@ stored), each for one harness (`claude-code` or `opencode`):
 
 | request | response |
 |---|---|
-| `POST /v1/harness-keys {"harness": "claude-code" \| "opencode"}` (a signed-in access token only) | 201 `{id, key, harness, expiresAt, ttlSeconds: 900}` |
+| `POST /v1/harness-keys {"harness": "claude-code" \| "opencode"}` (a signed-in access token only) | 201 `{id, key, harness, expiresAt, ttlSeconds: 900, otherHarnessShare}` (that tool's part of the allowance, 0 to 1; Autopilot gets all of it) |
 | `POST /v1/harness-keys/:id/refresh` (the access token, or that key) | `{id, expiresAt}`: another 15 minutes |
 | `DELETE /v1/harness-keys/:id` (the access token, or that key) | `{id, revoked: true}` |
 
