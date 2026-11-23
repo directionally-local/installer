@@ -107,6 +107,8 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl --from-claude-code` | Continue this folder's latest Claude Code conversation in a new Autopilot session on this computer (`autopilot --from-claude-code`): it asks first, then sends your last request, the files changed, commands run and Claude's last message as the first message. The transcript is read here and goes only to your model. |
 | `dl claude [ARGS]` | Your own Claude Code on dl's free tokens, served by DeepSeek. See [Claude Code with free tokens: dl claude](#claude-code-with-free-tokens-dl-claude). |
 | `dl opencode [ARGS]` | Your own OpenCode on dl's free tokens: DeepSeek V4.1 Flash, plus GPT-6 Luna, Sol and Astra for accounts that have used dl for a while (otherwise GPT-6 needs your own key). See [OpenCode with free tokens: dl opencode](#opencode-with-free-tokens-dl-opencode). |
+| `dl conductor` | [Conductor](https://conductor.build) (and Zed, Cline and other desktop apps) on dl's free tokens: starts `dl proxy` if it isn't running and prints the settings to paste into the app. See [Desktop apps with free tokens: dl proxy and dl conductor](#desktop-apps-with-free-tokens-dl-proxy-and-dl-conductor). |
+| `dl proxy start` / `stop` / `status` | A local proxy on `127.0.0.1:4789` that desktop apps use for the free tier, with a local token as their API key. `dl proxy run` runs it in the terminal; `dl proxy install` / `uninstall` start it at login (macOS LaunchAgent, Linux systemd user service). |
 | `dl claude-code hook install` / `remove` | Opt in to a Claude Code hook that, when Claude Code stops on a usage or rate limit, shows `Claude Code hit its limit. Continue in dl: dl --from-claude-code` as a terminal notification and window title. Shows the entry and asks before adding it to `~/.claude/settings.json`, backs the file up first, and merges into it; `remove` takes out only dl's entry. |
 | `dl setup` | Set up or repair where background tasks run. Safe to re-run. `--identity FILE` names the SSH key to use. |
 | `dl new` | The same as bare `dl`: a new session here. Kept as an alias for a release. |
@@ -145,7 +147,8 @@ account. Every argument after `claude` goes to it unchanged (`dl claude -p "fix 
 - **The model:** DeepSeek V4.1 Flash for every request, whatever model Claude Code names.
 - **Only while dl claude runs:** dl gets a key that lasts 15 minutes, refreshes it while Claude
   Code runs and ends it when Claude Code exits. It's in Claude Code's environment only, never on a
-  command line. Free tokens don't work in Claude Code started any other way.
+  command line. Free tokens don't work in Claude Code started any other way, except through
+  `dl proxy` (below).
 - **Half the free allowance:** Claude Code gets half of your weekly free allowance (and of the
   new-user trial), counting everything you used that week; Autopilot (plain `dl`) gets the full
   amount. In a terminal, `dl claude` says so
@@ -168,6 +171,54 @@ account. Every argument after `claude` goes to it unchanged (`dl claude -p "fix 
 - **Not supported:** images and PDFs (DeepSeek can't read them; Claude Code is told they were left
   out), Anthropic's server tools such as web search, and prompt caching controls (the provider
   caches on its own).
+
+### Desktop apps with free tokens: dl proxy and dl conductor
+
+Desktop apps that dl doesn't start, such as [Conductor](https://conductor.build) (which runs Claude
+Code in git worktrees), can't get the short-lived key `dl claude` gives Claude Code. `dl proxy`
+covers them: a small server on this computer that holds your free tier sign-in and forwards the
+app's requests to the free tier.
+
+```sh
+dl conductor        # starts dl proxy if needed and prints the settings below, with your token
+```
+
+In Conductor, Settings → Environment:
+
+```
+ANTHROPIC_BASE_URL=http://127.0.0.1:4789
+ANTHROPIC_AUTH_TOKEN=<the local token dl conductor prints>
+```
+
+Take out `ANTHROPIC_API_KEY` if it's set there, and leave the model alone: whatever Claude Code
+asks for, the free tier answers with DeepSeek V4.1 Flash.
+
+- **Other apps:** Zed, Cline in VS Code and other OpenAI-compatible apps on this computer use base
+  URL `http://127.0.0.1:4789/v1`, the local token as API key, and model
+  `deepseek/deepseek-v4.1-flash-1017`. Anthropic-format apps use `http://127.0.0.1:4789`.
+  **Cursor doesn't work:** it sends requests for a custom OpenAI base URL from its own servers,
+  which can't reach your computer.
+- **What it serves:** `POST /v1/messages` and `/v1/messages/count_tokens` (Anthropic format,
+  counted as Claude Code) and `POST /v1/chat/completions` and `GET /v1/models` (OpenAI format,
+  counted as OpenCode). Streams pass through as they come. Like `dl claude` and `dl opencode`,
+  these get half of the weekly free allowance; Autopilot (plain `dl`) gets all of it.
+- **Keys:** for each format, a 15-minute key from the free tier made on first use, refreshed every
+  few minutes while the app uses it, ended after 20 idle minutes and when the proxy stops, with
+  session start and end events as `dl claude` sends. The key never leaves the proxy.
+- **Who can use it:** only this computer, and only programs that know the local token. It listens
+  on 127.0.0.1 only; every request must send the token (a random 256-bit string in
+  `~/.local/state/directionallylocal/proxy/token`, mode 0600) as its API key; requests from
+  browsers (any `Origin` or `Sec-Fetch-Site` header, CORS preflights) are refused, and the `Host`
+  must be `127.0.0.1`, `localhost` or `[::1]` with the proxy's port, so web pages can't reach it,
+  DNS rebinding included. The token isn't your free tier sign-in; delete the file and restart the
+  proxy to get a new one.
+- **Running it:** `dl proxy start` runs it in the background (log in
+  `~/.local/state/directionallylocal/proxy/proxy.log`: method, path, status and time only, never
+  content), `dl proxy stop` stops it, `dl proxy status` says what it has served. `dl proxy run`
+  keeps it in the terminal. `dl proxy install` starts it at login (a LaunchAgent on macOS, a
+  systemd user service on Linux; on a Linux box without a desktop login, also
+  `loginctl enable-linger`); `dl proxy uninstall` removes that. `--port N` (or `DL_PROXY_PORT`)
+  picks another port.
 
 ### OpenCode with free tokens: dl opencode
 

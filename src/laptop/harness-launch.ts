@@ -117,7 +117,7 @@ export async function onPath(names: string[], env: Env = process.env): Promise<s
 }
 
 /** Autopilot's own free tier sign-in, in this terminal. */
-async function autopilotSignIn(io: LaunchIO, command: string, find: () => Promise<AutopilotCommand | undefined> = findAutopilot): Promise<boolean> {
+export async function autopilotSignIn(io: LaunchIO, command: string, find: () => Promise<AutopilotCommand | undefined> = findAutopilot): Promise<boolean> {
   const autopilot = await find();
   if (!autopilot) {
     io.err(`  ${command} needs the free tier sign-in, and Autopilot (which signs in) isn't installed. Reinstall dl: curl -fsSL https://dl.new | sh\n`);
