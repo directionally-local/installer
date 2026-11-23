@@ -101,6 +101,7 @@ import {
 } from "./user-email-send.js";
 import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind } from "./user-emails.js";
 import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
+import { refusalsCsv, refusalsView, requestClient, requestRefusalReason, type RefusalClient, type RefusalReason } from "./refusals.js";
 import { allowedReturn, isInstallOption, ONE_TIME_CODE, planFor, WEB_SESSION_TTL_S, WEB_STATE, webCors, webFunnelCsv, type WebStep } from "./web-signup.js";
 import { grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, parseGrantUsd, parseLogins, type GrantResult } from "./grant.js";
 import { completionText, isUseRisk, parseUseLabel, USE_DESCRIPTIONS_PER_PERSON_PER_DAY, USE_KEEP_DAYS, USE_MAX_TOKENS, USE_REASONING_ROOM, USE_TIMEOUT_SECONDS, useInput, useMessages, type UseInput } from "./use-description.js";
@@ -1228,6 +1229,7 @@ async function deviceAuthorize(c: Ctx): Promise<Response> {
   if (await isPaused(c)) {
     // Tell the waiting terminal too, instead of letting its code run out.
     if (userCode) await auth(c).deny(userCode, c.now(), "service_paused");
+    await countRefusal(c, "signin_paused");
     return donePage("Paused", PAUSED_MESSAGE, 503);
   }
   const ref = normalizeReferralCode(c.url.searchParams.get("ref") ?? undefined);
@@ -1385,16 +1387,27 @@ async function deviceDetails(c: Ctx): Promise<Response> {
   const { config: guard } = await runtime(c);
   const inbox = normalizeEmail(email);
   if (!c.config.adminGithubIds.has(found.githubId)) {
-    if (emailBlocked(inbox, guard.blockedEmails)) return again(EMAIL_BLOCKED_MESSAGE);
-    if (await directory(c).emailInUse(inbox, found.githubId)) return again(EMAIL_IN_USE_MESSAGE);
+    if (emailBlocked(inbox, guard.blockedEmails)) {
+      // Blocked as an address, or only through its domain's `@domain` entry.
+      await countRefusal(c, emailBlocked(inbox, guard.blockedEmails.filter((entry) => !entry.trim().startsWith("@"))) ? "email_blocked" : "email_domain_blocked", found.githubId);
+      return again(EMAIL_BLOCKED_MESSAGE);
+    }
+    if (await directory(c).emailInUse(inbox, found.githubId)) {
+      await countRefusal(c, "email_in_use", found.githubId);
+      return again(EMAIL_IN_USE_MESSAGE);
+    }
     const domain = emailDomain(inbox);
     if (!person && !PUBLIC_EMAIL_DOMAINS.has(domain) && (await directory(c).domainSignupsSince(domain, c.now() - DAY_MS)) >= guard.domainSignupsPerDay) {
+      await countRefusal(c, "email_domain_daily_cap", found.githubId);
       return again(DOMAIN_LIMIT_MESSAGE);
     }
   }
   if (inviteCode) {
     const retry = await limited(c, `invite:ip:${c.ipNet}`, LIMITS.inviteAttemptIp);
-    if (retry !== undefined) return again(`Too many invite attempts. Try again in ${Math.ceil(retry / 60)} minutes, or leave the code empty.`);
+    if (retry !== undefined) {
+      await countRefusal(c, "invite_rate_limited", found.githubId);
+      return again(`Too many invite attempts. Try again in ${Math.ceil(retry / 60)} minutes, or leave the code empty.`);
+    }
   }
   const level: SignInLevel = inviteCode ? { ...details.level, level: "full", levelReason: "invite" } : details.level;
   const response = await admitAndFinish(c, found.deviceRef, found.clientDeviceId, found, inviteCode, undefined, ticket, found.referralCode ?? undefined, level, {
@@ -1570,6 +1583,12 @@ async function admitAndFinish(
     now: c.now(),
   });
   if (result.ok) {
+    // The gates a sign-in got through: an invite, a placement below Full, the waitlist.
+    if (inviteCode !== undefined) await countRefusal(c, "invite_accepted", identity.githubId);
+    if (result.created && !isAdmin && level !== "full" && (levelReason === "account_too_new" || levelReason === "few_repos_and_contributions" || levelReason === "network_limit")) {
+      await countRefusal(c, levelReason, identity.githubId);
+    }
+    if (result.queued) await countRefusal(c, "queued", identity.githubId);
     if (result.created && (result.via === "invite" || result.via === "open")) await c.env.RATE_LIMITER.getByName(signupKey).spend(signupKey, LIMITS.signupIp, 1, c.now());
     await account(c, identity.githubId).activate({ githubId: identity.githubId, login: identity.login, isAdmin, now: c.now() });
     // A pre-grant's personal weekly dollar cap, now that the account exists.
@@ -1595,24 +1614,30 @@ async function admitAndFinish(
   }
   const intro = inviteIntro(inviteReason, config.minGithubAccountAgeDays);
   const refuse = async (code: SignInRefusal, status: "not_invited" | "denied", httpStatus: number) => {
+    await countRefusal(c, code === "too_many_signups" ? "network_signup_limit" : code, identity.githubId);
     await auth(c).decide(deviceRef, status, identity, c.now(), code);
     const { heading, message } = signInRefusal(code, config.minGithubAccountAgeDays);
     return donePage(heading, message, httpStatus);
   };
   switch (result.reason) {
     case "needs_invite": {
+      await countRefusal(c, inviteReason ?? "invite_required", identity.githubId);
+      await countRefusal(c, "invite_page_shown", identity.githubId);
       const issued = await auth(c).decide(deviceRef, "needs_invite", identity, c.now(), inviteReason ?? "invite_required");
       return invitePage(issued.ticket ?? "", identity.login, undefined, intro);
     }
     case "invalid_invite":
+      await countRefusal(c, "invite_code_invalid", identity.githubId);
       if (options.onInvalidInvite) return options.onInvalidInvite();
       return invitePage(ticket ?? "", identity.login, INVALID_INVITE_MESSAGE, intro);
     case "cohort_full":
       return refuse("cohort_full", "not_invited", 403);
     case "device_taken":
+      await countRefusal(c, "device_taken", identity.githubId);
       await auth(c).decide(deviceRef, "denied", identity, c.now(), result.reason);
       return donePage("Can't sign in", DEVICE_TAKEN_MESSAGE, 403);
     case "blocked":
+      await countRefusal(c, "blocked", identity.githubId);
       await auth(c).decide(deviceRef, "denied", identity, c.now(), result.reason);
       return donePage("Account blocked", BLOCKED_MESSAGE, 403);
   }
@@ -1624,9 +1649,15 @@ async function deviceInvite(c: Ctx): Promise<Response> {
   const found = ticket ? await auth(c).ticket(ticket, c.now()) : undefined;
   if (!found) return donePage("Sign-in expired", "This step expired. Start sign-in again in your terminal.", 400);
   const retry = await limited(c, `invite:ip:${c.ipNet}`, LIMITS.inviteAttemptIp);
-  if (retry !== undefined) return invitePage(ticket, found.login, `Too many attempts. Try again in ${Math.ceil(retry / 60)} minutes.`);
+  if (retry !== undefined) {
+    await countRefusal(c, "invite_rate_limited", found.githubId);
+    return invitePage(ticket, found.login, `Too many attempts. Try again in ${Math.ceil(retry / 60)} minutes.`);
+  }
   const signups = await c.env.RATE_LIMITER.getByName(`signup:ip:${c.ipNet}`).check(`signup:ip:${c.ipNet}`, LIMITS.signupIp, 1, c.now());
-  if (!signups.allowed) return invitePage(ticket, found.login, "Too many new accounts from this network today. Try again tomorrow.");
+  if (!signups.allowed) {
+    await countRefusal(c, "network_signup_limit", found.githubId);
+    return invitePage(ticket, found.login, "Too many new accounts from this network today. Try again tomorrow.");
+  }
   const inviteReason = inviteReasonOf(found.reason);
   const inviteCode = (form.get("invite_code") ?? "").trim();
   if (!inviteCode) return invitePage(ticket, found.login, "Enter an invite code.", inviteIntro(inviteReason, (await runtime(c)).config.minGithubAccountAgeDays));
@@ -2091,7 +2122,10 @@ async function harnessKeys(c: Ctx, rest: string, method: string): Promise<Respon
     if (typeof harness !== "string" || !(HARNESSES as readonly string[]).includes(harness)) {
       return apiError(400, "invalid_request", `Send {harness}: one of ${HARNESSES.join(", ")}.`);
     }
-    if (!(await runtime(c)).config.allowOtherHarnesses) return apiError(403, "harness_not_allowed", harnessNotAllowedMessage(harness as Harness));
+    if (!(await runtime(c)).config.allowOtherHarnesses) {
+      await countRefusal(c, "harness_not_allowed", identity.githubId, requestClient(harness as string, "harness_not_allowed"));
+      return apiError(403, "harness_not_allowed", harnessNotAllowedMessage(harness as Harness));
+    }
     const created = await person.createHarnessKey({ harness: harness as Harness, sid: identity.sid, now: c.now() });
     if (created.ok) {
       return json({ id: created.id, key: created.key, harness, expiresAt: new Date(created.expiresAt).toISOString(), ttlSeconds: HARNESS_KEY_TTL_MS / 1000 }, 201);
@@ -2178,7 +2212,7 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
   const model = modelById(DEEPSEEK_MODEL)!;
   const translated = toChatRequest(request, { model: model.id, vision: model.vision });
   if (!translated.ok) return anthropicErrorResponse(400, translated.message, "invalid_request");
-  const answer = await chat(c, { identity, body: translated.body, bodyBytes });
+  const answer = await countedChat(c, identity, await chat(c, { identity, body: translated.body, bodyBytes }));
   if (answer.status !== 200) return toAnthropicErrorResponse(answer);
   const options = { model: translated.model, thinking: translated.thinking, stopSequences: Array.isArray(translated.body.stop) ? (translated.body.stop as string[]) : [] };
   const headers = passHeaders(answer);
@@ -2437,7 +2471,7 @@ async function chatCompletions(c: Ctx): Promise<Response> {
     identity.headers.set("x-dl-quota-resets-at", new Date(weekEnd(c.now())).toISOString());
     return identity;
   }
-  const answer = await chat(c, { identity });
+  const answer = await countedChat(c, identity, await chat(c, { identity }));
   return identity.harness ? rewordedForHarness(answer, identity.harness) : answer;
 }
 
@@ -3980,8 +4014,11 @@ async function adminMetrics(c: Ctx): Promise<Response> {
   const from = parse("from") ?? to - 27 * DAY_MS;
   if (Number.isNaN(to) || Number.isNaN(from) || from > to) return apiError(400, "invalid_request", "from and to must be ISO dates with from <= to.");
   if (to - from > 366 * DAY_MS) return apiError(400, "invalid_request", "The range can't be longer than 366 days.");
-  const metrics = await directory(c).metrics({ from, to, now, adminIds: [...c.config.adminGithubIds] });
-  return json({ ...metrics, generatedAt: new Date(now).toISOString(), today: isoDay(now) });
+  const [metrics, refusals] = await Promise.all([
+    directory(c).metrics({ from, to, now, adminIds: [...c.config.adminGithubIds] }),
+    directory(c).refusals(Math.floor(from / DAY_MS), Math.floor(to / DAY_MS)),
+  ]);
+  return json({ ...metrics, refusals: refusalsView(refusals), generatedAt: new Date(now).toISOString(), today: isoDay(now) });
 }
 
 // ─── Admin dashboard (browser) ──────────────────────────────────────────────
@@ -4124,6 +4161,7 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
   if (!isCsvTable(csv)) return apiError(404, "not_found", `GET ${c.url.pathname} isn't a route.`);
   if (csv === "early-access") return earlyAccessCsv(await directory(c).earlyAccessLeads(), now);
   if (csv === "web-signup") return webFunnelCsvResponse(c);
+  if (csv === "refusals") return refusalsCsvResponse(c);
   // The health CSVs read only health-data.ts's queries.
   if (isHealthCsvTable(csv)) {
     return healthCsv(csv, await directory(c).health({ now, adminIds: [...c.config.adminGithubIds], days: healthWindow(c.url.searchParams.get("days")) }));
@@ -4149,11 +4187,12 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
 
 /** GET /admin: the home page, from the Directory's admin-home reads and the spend counters. */
 async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, now: number, login: string, signOut: boolean): Promise<Response> {
-  const [data, spend, webFunnel, flaggedUses] = await Promise.all([
+  const [data, spend, webFunnel, flaggedUses, refusals] = await Promise.all([
     directory(c).adminHome({ now, adminIds: [...c.config.adminGithubIds], trialCutoff: config.trialCutoff }),
     directory(c).spend(now),
     directory(c).webFunnel(),
     directory(c).useDescriptions({ since: now - 7 * DAY_MS, minRisk: "low", limit: 50 }),
+    directory(c).refusals(Math.floor(now / DAY_MS) - 29),
   ]);
   const view = spendView(c, config, paused, spend);
   return adminHomePage({
@@ -4178,6 +4217,7 @@ async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, no
     signOut,
     webFunnel,
     flaggedUses,
+    refusals,
     now,
   });
 }
@@ -4452,6 +4492,30 @@ async function countWebStep(c: Ctx, step: WebStep): Promise<void> {
   }
 }
 
+/**
+ * Counts one refusal or gate per UTC day and reason (refusals.ts): counts only, and `githubId`
+ * only for the day's distinct-people count (hashed with a daily salt). Never fails the request.
+ */
+async function countRefusal(c: Ctx, reason: RefusalReason, githubId?: number, client: RefusalClient = "signin"): Promise<void> {
+  try {
+    await directory(c).countRefusal(reason, client, c.now(), githubId);
+  } catch (error) {
+    console.error("refusals: count failed", error instanceof Error ? error.name : "error");
+  }
+}
+
+/**
+ * Counts a chat refusal (refusals.ts requestRefusalReason) from the response, which is returned
+ * as it is, under the caller's client: every coding agent path goes through here.
+ */
+async function countedChat(c: Ctx, identity: Caller, response: Response): Promise<Response> {
+  if (response.status < 400 || !(response.headers.get("content-type") ?? "").includes("application/json")) return response;
+  const body = parseJson(await response.clone().text()) as { error?: { code?: unknown; reason?: unknown } } | undefined;
+  const reason = requestRefusalReason(response.status, body?.error);
+  if (reason) await countRefusal(c, reason, identity.githubId, requestClient(identity.via === "harness" ? identity.harness : undefined, reason));
+  return response;
+}
+
 /** POST /v1/telemetry/web {step: "visited"}: the dl.new Worker counts each /start page it serves. */
 async function webTelemetry(c: Ctx): Promise<Response> {
   const day = Math.floor(c.now() / DAY_MS);
@@ -4685,11 +4749,20 @@ async function installCodeExchange(c: Ctx): Promise<Response> {
   if (!person) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
   if (person.status === "blocked") return blockedError();
   if (deviceId && (await directory(c).bindDevice({ ...identity, deviceId, now: c.now() })) === "device_taken") {
+    await countRefusal(c, "device_taken", identity.githubId);
     return apiError(403, "device_taken", DEVICE_TAKEN_MESSAGE, { reason: "device_taken" });
   }
   const session = await auth(c).issueSession(identity, c.now());
   await countWebStep(c, "code_exchanged");
   return json({ ...(await tokenBody(c, identity, session.refreshToken, session.family)), login: identity.login, option: redeemed.option, plan: redeemed.plan });
+}
+
+/** GET /admin/dashboard/refusals.csv: every kept day's refusal counts per reason. */
+async function refusalsCsvResponse(c: Ctx): Promise<Response> {
+  return new Response(refusalsCsv(await directory(c).refusals()), {
+    status: 200,
+    headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="free-refusals-${isoDay(c.now())}.csv"`, "cache-control": "no-store", "x-content-type-options": "nosniff" },
+  });
 }
 
 /** GET /admin/dashboard/web-signup.csv: the web sign-up funnel per day. */

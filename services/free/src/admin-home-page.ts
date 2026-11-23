@@ -5,6 +5,7 @@ import { BRAND_ORIGIN, PRODUCT_NAME } from "./pages.js";
 import { DAY_MS } from "./week.js";
 import { webFunnelCard, type WebFunnelRow } from "./web-signup.js";
 import type { UseRow } from "./directory-object.js";
+import { refusalsCard, type RefusalRow } from "./refusals.js";
 
 /**
  * The admin home (GET /admin): the data the old Kimiflare Cloud admin dashboard showed, in dl's
@@ -29,6 +30,8 @@ export interface AdminHomeInput {
   now?: number;
   /** Use descriptions labelled low or high risk in the last 7 days, newest first (use-description.ts); the card is left out without it. */
   flaggedUses?: UseRow[];
+  /** Refusal counts per day and reason, the last 30 days (refusals.ts); the card is left out without it. */
+  refusals?: RefusalRow[];
 }
 
 /**
@@ -409,6 +412,7 @@ ${input.flaggedUses ? flaggedUseCard(input.flaggedUses) : ""}
 <div class="two">${health}${paid}</div>
 ${trial}
 ${input.webFunnel ? webFunnelCard(input.webFunnel, input.now ?? Date.now()) : ""}
+${input.refusals ? refusalsCard(input.refusals, input.now ?? Date.now()) : ""}
 ${usage}
 ${users}
 ${grants}
