@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MODEL_CATALOG, OPTIMIZED_ENGINE_FAMILIES, recipe } from "./model-catalog.js";
 import { engineFlag, engineStep, modelCommand } from "./model-command.js";
-import { chooseEngine, ENGINE_COPY, gpuSummaryText, looksLikeEmail, offersOptimizedEngine, PILOT_URL, type PilotFetch } from "./model-engine-choice.js";
+import { chooseEngine, ENGINE_COPY, gpuSummaryText, looksLikeEmail, offersOptimizedEngine, optimizedEngineEnabled, PILOT_URL, type PilotFetch } from "./model-engine-choice.js";
 import { firstRunModelUp } from "./model-first-run.js";
 import { PromptCancelled, type Prompter, type SelectOption } from "./prompt.js";
 import { FakeModelSystem } from "./test-support/fake-model-system.js";
@@ -58,6 +58,46 @@ function inbox(fail = false) {
 }
 
 const deepseek = recipe("deepseek-v4.1-flash-fp8");
+
+/** The engine choice is hidden unless this is set. */
+const ON = { DL_OPTIMIZED_ENGINE: "1" };
+
+test("hidden by default: no engine question, no optimized option, --engine optimized refused, vLLM set up", async () => {
+  assert.equal(optimizedEngineEnabled({}), false);
+  assert.equal(optimizedEngineEnabled({ DL_OPTIMIZED_ENGINE: "0" }), false);
+  assert.equal(optimizedEngineEnabled(ON), true);
+  assert.throws(() => engineFlag("optimized"), /^Error: --engine is vllm \(the catalog's open-source engine\), not "optimized"\.$/);
+  assert.equal(engineFlag("vllm"), "open-source");
+  // engineStep on a terminal, for a model the catalog marks: nothing asked, the open-source engine.
+  for (const model of [deepseek, recipe("glm-flash")]) {
+    const s = scripted([]);
+    const options = { system: new FakeModelSystem(), ui: new PlainUi(() => {}), prompter: s.prompter, interactive: true, env: {}, pilotFetch: inbox().fetch, signInEmail: async () => undefined };
+    assert.equal(await engineStep(options, model, B300 as never), "continue");
+    assert.equal(s.asked.length, 0);
+    await assert.rejects(engineStep({ ...options, engine: "optimized" }, model, B300 as never), /--engine is vllm \(the catalog's open-source engine\), not "optimized"/);
+  }
+  // dl model up glm-flash on a terminal: no engine question, nothing posted, no 55% words. It goes
+  // straight on to the setup, which stops at the fit check (the fake 48 GB card is too small to start it).
+  const system = new FakeModelSystem();
+  const { prompter, asked } = scripted(["", ""]);
+  const { fetch, posts } = inbox();
+  const lines: string[] = [];
+  await assert.rejects(modelCommand("up", ["glm-flash"], { system, ui: new PlainUi((line) => lines.push(line)), prompter, interactive: true, env: {}, pilotFetch: fetch,
+    signInEmail: async () => undefined, statePath: "/tmp/m.json", configPath: "/tmp/c.json", logDir: "/tmp/logs" }), /glm-flash gpu-memory-utilization 0\.9 reserves/);
+  assert.ok(!asked.some((item) => /How should this GPU serve/.test(item.question)), "no engine question");
+  assert.ok(!asked.some((item) => item.kind === "select" && item.options.some((option) => option.value === "optimized")), "no optimized option");
+  assert.equal(posts.length, 0);
+  assert.doesNotMatch(lines.join(""), /55%|cheaper|[Oo]ptimized engine/);
+  // The GPU first run: the picker, then straight to dl model up with the model, on vLLM.
+  const first = scripted(["glm-flash"]);
+  const ups: string[][] = [];
+  assert.deepEqual(await firstRunModelUp({ system: new FakeModelSystem(), ui: Object.assign(new PlainUi(() => {}), { interactive: true }) as Ui, prompter: first.prompter,
+    statePath: "/tmp/m.json", configPath: "/tmp/c.json", env: {}, pilotFetch: fetch, signInEmail: async () => undefined,
+    modelUp: async (_action, args) => { ups.push(args); return 0; } }), { ok: true, model: "zai-org/GLM-4.7-Flash" });
+  assert.equal(first.asked.length, 1);
+  assert.match((first.asked[0] as { question: string }).question, /Pick a model/);
+  assert.deepEqual(ups, [["glm-flash"]]);
+});
 
 test("catalog: DeepSeek and GLM entries are marked for the optimized engine from one list; Qwen isn't", () => {
   assert.deepEqual(OPTIMIZED_ENGINE_FAMILIES, ["deepseek", "glm", "gpt-oss"]);
@@ -173,13 +213,13 @@ test("--engine and when the question is asked at all", async () => {
   assert.equal(engineFlag(undefined), undefined);
   assert.equal(engineFlag("vllm"), "open-source");
   assert.equal(engineFlag("SGLang"), "open-source");
-  assert.equal(engineFlag("optimized"), "optimized");
-  assert.throws(() => engineFlag("fast"), /--engine is vllm .* or optimized/);
+  assert.equal(engineFlag("optimized", true), "optimized");
+  assert.throws(() => engineFlag("fast", true), /--engine is vllm .* or optimized/);
   const base = (o: { interactive?: boolean; engine?: string; env?: NodeJS.ProcessEnv; dryRun?: boolean; answers?: string[] } = {}) => {
     const system = new FakeModelSystem();
     if (o.dryRun) (system as { dryRun: boolean }).dryRun = true;
     const s = scripted(o.answers ?? []);
-    return { s, options: { system, ui: new PlainUi(() => {}), prompter: s.prompter, interactive: o.interactive ?? true, env: o.env ?? {}, pilotFetch: inbox().fetch, signInEmail: async () => undefined, ...(o.engine ? { engine: o.engine } : {}) } };
+    return { s, options: { system, ui: new PlainUi(() => {}), prompter: s.prompter, interactive: o.interactive ?? true, env: { ...ON, ...o.env }, pilotFetch: inbox().fetch, signInEmail: async () => undefined, ...(o.engine ? { engine: o.engine } : {}) } };
   };
   // A model the optimized engine doesn't serve: no question.
   let run = base();
@@ -208,7 +248,7 @@ test("dl model up: a supported model asks before anything starts; No stops with 
   const { prompter, asked } = scripted(["", "maya@acme.ai", "Acme AI", "", "no"]);
   const { fetch, posts } = inbox();
   const lines: string[] = [];
-  const code = await modelCommand("up", ["glm-flash"], { system, ui: new PlainUi((line) => lines.push(line)), prompter, interactive: true, env: {}, pilotFetch: fetch,
+  const code = await modelCommand("up", ["glm-flash"], { system, ui: new PlainUi((line) => lines.push(line)), prompter, interactive: true, env: ON, pilotFetch: fetch,
     signInEmail: async () => undefined, statePath: "/tmp/m.json", configPath: "/tmp/c.json", logDir: "/tmp/logs" });
   assert.equal(code, 0);
   assert.match((asked[0] as { question: string }).question, /How should this GPU serve glm-flash\?/);
@@ -224,7 +264,7 @@ test("GPU first run: the same step after the picker; No ends the setup as cancel
   const ui = Object.assign(new PlainUi(() => {}), { interactive: true }) as Ui;
   const { fetch, posts } = inbox();
   const ups: string[][] = [];
-  const result = await firstRunModelUp({ system: new FakeModelSystem(), ui, prompter, statePath: "/tmp/m.json", configPath: "/tmp/c.json", env: {}, pilotFetch: fetch,
+  const result = await firstRunModelUp({ system: new FakeModelSystem(), ui, prompter, statePath: "/tmp/m.json", configPath: "/tmp/c.json", env: ON, pilotFetch: fetch,
     signInEmail: async () => undefined, modelUp: async (_action, args) => { ups.push(args); return 0; } });
   assert.deepEqual(result, { ok: false, errorType: "cancelled", message: "Cancelled.", model: "glm-flash" });
   assert.equal(left.length, 0);
@@ -235,13 +275,13 @@ test("GPU first run: the same step after the picker; No ends the setup as cancel
   // Picking the open-source engine runs dl model up as before.
   const open = scripted(["glm-flash", "open-source"]);
   const ups2: string[][] = [];
-  assert.deepEqual(await firstRunModelUp({ system: new FakeModelSystem(), ui, prompter: open.prompter, statePath: "/tmp/m.json", configPath: "/tmp/c.json", env: {},
+  assert.deepEqual(await firstRunModelUp({ system: new FakeModelSystem(), ui, prompter: open.prompter, statePath: "/tmp/m.json", configPath: "/tmp/c.json", env: ON,
     modelUp: async (_action, args) => { ups2.push(args); return 0; } }), { ok: true, model: "zai-org/GLM-4.7-Flash" });
   assert.deepEqual(ups2, [["glm-flash"]]);
   // A retry of the same model (Autopilot's Retry) isn't asked again.
   const retry = scripted([]);
   const ups3: string[][] = [];
-  assert.deepEqual(await firstRunModelUp({ system: new FakeModelSystem(), ui, prompter: retry.prompter, statePath: "/tmp/m.json", configPath: "/tmp/c.json", env: {}, model: "glm-flash",
+  assert.deepEqual(await firstRunModelUp({ system: new FakeModelSystem(), ui, prompter: retry.prompter, statePath: "/tmp/m.json", configPath: "/tmp/c.json", env: ON, model: "glm-flash",
     modelUp: async (_action, args) => { ups3.push(args); return 0; } }), { ok: true, model: "zai-org/GLM-4.7-Flash" });
   assert.equal(retry.asked.length, 0);
   assert.deepEqual(ups3, [["glm-flash"]]);
