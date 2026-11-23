@@ -15,6 +15,7 @@ import { FREE_TIER_PROVIDER, freeTierAccount, freeTierLine, freeTierProPrompt, t
 import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
 import { claudeCommand } from "./laptop/claude.js";
 import { opencodeCommand } from "./laptop/opencode.js";
+import { conductorCommand, proxyCommand } from "./laptop/proxy.js";
 import { loadRemotes, resolveTarget } from "./laptop/config.js";
 import { dlUpdate } from "./laptop/self-update.js";
 import { PAIRED_NAME } from "./local/layout.js";
@@ -77,6 +78,10 @@ On your laptop:
                           models in /models), through dl's free tier sign-in; ARGS go to opencode
                           as they are. Needs opencode installed; free tokens work in it only while
                           dl opencode runs. Your OpenCode config files aren't touched
+  dl conductor            Conductor (and Zed, Cline and other desktop apps) on free tokens: starts
+                          dl proxy and prints the settings to paste into the app
+  dl proxy start|stop|status   a local proxy on 127.0.0.1:4789 that desktop apps use for the free
+                          tier, with a local token as their API key (dl proxy install: at login)
   dl claude-code hook install   when Claude Code hits its usage or rate limit, show how to continue
                           in dl (adds a hook to ~/.claude/settings.json after asking; backs it up)
   dl claude-code hook remove    take that hook out again
@@ -235,6 +240,9 @@ export async function main(
   if (argv[0] === "claude") return await (options.claude ?? claudeCommand)(argv.slice(1), io);
   // `dl opencode ARGS`: the same for OpenCode.
   if (argv[0] === "opencode") return await (options.opencode ?? opencodeCommand)(argv.slice(1), io);
+  // `dl proxy start|stop|status|run|install|uninstall` and `dl conductor`: desktop apps on the free tier.
+  if (argv[0] === "proxy") return await proxyCommand(argv.slice(1), io);
+  if (argv[0] === "conductor") return await conductorCommand(argv.slice(1), io);
   // Everything after `--` belongs to Autopilot (bare dl on this computer): `dl -- --session ID`.
   const split = splitPassthrough(argv);
   const passthrough = split.passthrough;
