@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.44.0](https://github.com/directionally-local/installer/compare/v0.43.0...v0.44.0) (2026-11-23)
+
+
+### Features
+
+* **free:** dl claude / dl opencode say Autopilot gets 2x the free allowance ([#328](https://github.com/directionally-local/installer/issues/328)) ([5496424](https://github.com/directionally-local/installer/commit/54964242925deb021f6bb9eb514d03ada692b744))
+* **model:** default to vLLM; hide the experimental engine option for now ([#319](https://github.com/directionally-local/installer/issues/319)) ([316e227](https://github.com/directionally-local/installer/commit/316e2274b4f2a40e913a8bbfe7496c0fdfa2f737))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.28.2 ([#329](https://github.com/directionally-local/installer/issues/329)) ([1bf8e05](https://github.com/directionally-local/installer/commit/1bf8e05c9980c6a7af550664e0ea6edd9f2dd180))
+* **free:** dl status shows DeepSeek's allowance; precise model and GPT-6 refusals; Claude Code session ids ([#327](https://github.com/directionally-local/installer/issues/327)) ([68ffe4f](https://github.com/directionally-local/installer/commit/68ffe4f83d9cf90751c55026f6873abfc7d52271))
+
 ## [0.43.0](https://github.com/directionally-local/installer/compare/v0.42.0...v0.43.0) (2026-11-20)
 
 
