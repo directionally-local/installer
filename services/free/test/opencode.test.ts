@@ -133,7 +133,7 @@ describe("OpenCode's share and refusals", () => {
     assert.equal(refused.status, 402);
     const error = await apiError(refused);
     assert.equal(error.code, "harness_limit");
-    assert.match(error.message, /^OpenCode through dl gets 50% of your free allowance, and that part is used up\. It resets at 2026-11-09T00:00:00\.000Z\. Your remaining free usage works in dl \(Autopilot\): run dl\. Or get dl Pro: run dl and type \/upgrade\.$/);
+    assert.match(error.message, /^OpenCode through dl gets half of your free allowance, and that part is used up\. It resets at 2026-11-09T00:00:00\.000Z\. Your remaining free usage works in Autopilot: type dl\. Or get dl Pro: run dl and type \/upgrade\.$/);
     assert.equal((await service.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [{ role: "user", content: "x" }] } })).status, 200);
   });
 

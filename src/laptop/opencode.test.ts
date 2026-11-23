@@ -69,6 +69,7 @@ function deps(overrides: Partial<OpencodeDeps> = {}): OpencodeDeps {
       throw new Error("no sign-in expected");
     },
     setInterval: () => ({}),
+    terminal: false,
     clearInterval: () => undefined,
     onSignal: () => () => undefined,
     ...overrides,
@@ -112,6 +113,16 @@ describe("dl opencode", () => {
     assert.deepEqual(configOf(run!.options), opencodeConfig({ origin: ORIGIN, models: FREE_TIER_MODELS }));
     assert.ok(!run!.args.some((arg) => arg.includes(KEY)), "the key is never on the command line");
     assert.ok(!env.OPENCODE_CONFIG_CONTENT!.includes(KEY), "nor in the config: OpenCode reads it from the environment");
+  });
+
+  it("says once, dimmed, in a terminal that Autopilot gets 2× the free allowance; nothing when piped", async () => {
+    const mintBody = { id: "abcdefabcdef", key: KEY, harness: "opencode", expiresAt: "x", ttlSeconds: 900, otherHarnessShare: 0.5 };
+    const shown = capture();
+    assert.equal(await opencodeCommand([], shown.io, deps({ fetch: fakeService({ mintBody }).fetch, spawn: fakeSpawn().spawn, terminal: true })), 0);
+    assert.equal(shown.err(), "  \x1b[2mFree tokens: Autopilot gets 2× the allowance of other agents. Just type dl.\x1b[22m\n");
+    const piped = capture();
+    assert.equal(await opencodeCommand([], piped.io, deps({ fetch: fakeService({ mintBody }).fetch, spawn: fakeSpawn().spawn })), 0);
+    assert.equal(piped.err(), "");
   });
 
   it("passes OpenCode's exit code through, and 128+n for a signal", async () => {

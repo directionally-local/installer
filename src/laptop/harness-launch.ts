@@ -6,6 +6,7 @@ import { platform } from "node:os";
 import { delimiter, join } from "node:path";
 import { findAutopilot, type AutopilotCommand } from "./autopilot.js";
 import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
+import { palette } from "../ui.js";
 
 /**
  * Another coding agent on the free tier, launched by dl (`dl claude`, `dl opencode`). The flow is
@@ -23,7 +24,9 @@ import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
  * 4. Session events, as Autopilot sends them (POST /v1/events): session.start before the agent
  *    starts (so the dl-only check covers its requests), again every few hours for long sessions,
  *    and session.end when it exits. Counts only.
- * 5. The agent runs with the person's arguments and the terminal passed through, with the
+ * 5. In a terminal, one dim line says Autopilot gets more of the free allowance (the service's
+ *    `otherHarnessShare`, from the harness key's response).
+ * 6. The agent runs with the person's arguments and the terminal passed through, with the
  *    environment its `prepare` returns; its exit code is dl's. Its own config files are never
  *    read or written.
  */
@@ -78,6 +81,20 @@ export interface LaunchDeps {
   /** Signals dl forwards to the agent; process.on unless replaced. */
   onSignal?: (signal: NodeJS.Signals, handler: () => void) => () => void;
   now?: () => number;
+  /** Whether dl's output is a terminal (the Autopilot nudge shows only there); stderr's unless replaced. */
+  terminal?: boolean;
+}
+
+/**
+ * The one line `dl claude` and `dl opencode` show before the agent starts: other agents get
+ * `share` of the free allowance (the service's `otherHarnessShare`), Autopilot all of it. "2×"
+ * only when the share is exactly half; nothing when the share is the whole allowance.
+ */
+export function autopilotNudge(share: unknown): string | undefined {
+  if (typeof share === "number" && share >= 1) return undefined;
+  return share === 0.5
+    ? "Free tokens: Autopilot gets 2× the allowance of other agents. Just type dl."
+    : "Free tokens: Autopilot gets more of the allowance than other agents. Just type dl.";
 }
 
 /** Refresh the harness key this often (it lasts 15 minutes). */
@@ -199,6 +216,10 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
 
   if (prepared.removed.length > 0) io.err(`  ${command}: not passing ${prepared.removed.join(", ")} to ${product} for this session (it runs on dl's free tier).\n`);
   for (const note of prepared.notes ?? []) io.err(`  ${command}: ${note}\n`);
+  const nudge = autopilotNudge(mintedBody.otherHarnessShare);
+  if (nudge && (deps.terminal ?? process.stderr.isTTY === true)) {
+    io.err(`  ${palette(!env.NO_COLOR && env.TERM !== "dumb").dim(nudge)}\n`);
+  }
 
   const every = deps.setInterval ?? ((fn: () => void, ms: number) => setInterval(fn, ms));
   const stop = deps.clearInterval ?? ((timer: unknown) => clearInterval(timer as NodeJS.Timeout));
