@@ -58,6 +58,7 @@ export const THRESHOLD_KEYS = [
   "minFollowers",
   "batchWindowDays",
   "batchSize",
+  "batchDensityFactor",
   "basicMinAccountAgeDays",
   "domainSignupsPerDay",
 ] as const;

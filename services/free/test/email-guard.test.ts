@@ -46,8 +46,8 @@ describe("one free account per inbox", () => {
     assert.match((await signUp(service, 114, "x@another.example")).page, /can.{0,6}t be used for the free tier/);
   });
 
-  it("caps new accounts per company domain a day, but not public providers", async () => {
-    const service = await open({ DOMAIN_SIGNUPS_PER_DAY: "2" });
+  it("caps new accounts per company domain a day with domainLimitRefuse, but not public providers", async () => {
+    const service = await open({ DOMAIN_SIGNUPS_PER_DAY: "2", DOMAIN_LIMIT_REFUSE: "true" });
     assert.match((await signUp(service, 121, "a@catchall.example")).page, /signed in/);
     assert.match((await signUp(service, 122, "b@catchall.example")).page, /signed in/);
     const third = await signUp(service, 123, "c@catchall.example");

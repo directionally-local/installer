@@ -64,9 +64,16 @@ export interface SignalThresholds {
   batchWindowDays: number;
   /**
    * Accounts already signed up in that window that make a batch; 0 turns the check off. Only
-   * accounts younger than the public bar's age are flagged.
+   * accounts younger than the public bar's age are flagged. The floor of the threshold: with
+   * `batchDensityFactor` it grows with sign-up volume (see `batchThreshold`).
    */
   batchSize: number;
+  /**
+   * How many times the usual number of peers a window must hold to be a batch: the threshold is
+   * the larger of `batchSize` and this times the peers a window holds on average across every
+   * young account signed up (`batchThreshold`). 0 (or missing) keeps the fixed `batchSize`.
+   */
+  batchDensityFactor?: number;
 }
 
 /** Which checks an account passes, for the decision and for the admin pages. */
@@ -81,12 +88,19 @@ export interface LevelChecks {
   humanSignals: number;
   /** Accounts already signed up whose GitHub account was created in the same window. */
   batchPeers: number;
+  /** The peers that make a batch right now (`batchThreshold`); 0 when the check is off. */
+  batchThreshold: number;
   creationBatch: boolean;
   full: boolean;
 }
 
 /** Why an account is at its level. */
-export type LevelReason = "qualifies" | "account_too_new" | "few_repos_and_contributions" | "network_limit" | "invite" | "admin";
+export type LevelReason = "qualifies" | "account_too_new" | "few_repos_and_contributions" | "network_limit" | "domain_limit" | "invite" | "admin";
+
+/** Sign-up limits that place an account at Starter instead of refusing it (network, email domain). */
+export function isSignupLimitReason(reason: string | null | undefined): reason is "network_limit" | "domain_limit" {
+  return reason === "network_limit" || reason === "domain_limit";
+}
 
 /** Whether the signals clear the public bar (the one the person is told about). */
 export function meetsPublicBar(signals: GithubSignals, thresholds: LevelThresholds): boolean {
@@ -95,8 +109,29 @@ export function meetsPublicBar(signals: GithubSignals, thresholds: LevelThreshol
 }
 
 /**
+ * The creation-batch threshold, scaled with sign-up volume. A farm is a spike: many accounts
+ * created within a few days of each other, against the background of everyone else. The
+ * background is the average number of peers a window of `2 × batchWindowDays + 1` days holds
+ * when the `youngAccounts` already signed up (accounts younger than the public bar's age) are
+ * spread over that age (`youngSpanDays`). A window needs `batchDensityFactor` times that
+ * average, and never fewer than `batchSize`. So a quiet week keeps the fixed `batchSize`, and a
+ * launch day with thousands of young sign-ups raises the bar instead of flagging most of them,
+ * while a farm (dozens or hundreds created on the same days) still stands far above it.
+ * 0 when the check is off (`batchSize` 0).
+ */
+export function batchThreshold(rules: Pick<SignalThresholds, "batchSize" | "batchWindowDays" | "batchDensityFactor">, youngAccounts: number, youngSpanDays: number): number {
+  if (rules.batchSize <= 0) return 0;
+  const factor = rules.batchDensityFactor ?? 0;
+  if (factor <= 0 || youngSpanDays <= 0 || youngAccounts <= 0) return rules.batchSize;
+  const average = (youngAccounts * (2 * rules.batchWindowDays + 1)) / youngSpanDays;
+  return Math.max(rules.batchSize, Math.ceil(factor * average));
+}
+
+/**
  * Every check, from the signals, the public bar, the additional thresholds, the time and how
- * many accounts already signed up were created in the same window (`batchPeers`).
+ * many accounts already signed up were created in the same window (`batchPeers`), and how many
+ * young accounts are signed up in all (`youngAccounts`, for `batchThreshold`; missing: the
+ * fixed `batchSize`).
  *
  * Full = the public bar, not in a creation batch, and enough additional signals (one fewer than
  * `humanSignalsNeeded`). The additional signals only ever keep an account out: without the
@@ -107,7 +142,7 @@ export function meetsPublicBar(signals: GithubSignals, thresholds: LevelThreshol
  * out of a batch (a farm follows itself); an established account created on a busy day isn't
  * flagged.
  */
-export function levelChecks(signals: GithubSignals, bar: LevelThresholds, rules: SignalThresholds, context: { now: number; batchPeers: number }): LevelChecks {
+export function levelChecks(signals: GithubSignals, bar: LevelThresholds, rules: SignalThresholds, context: { now: number; batchPeers: number; youngAccounts?: number }): LevelChecks {
   const atLeast = (value: number | null | undefined, min: number) => typeof value === "number" && value >= min;
   const publicBar = meetsPublicBar(signals, bar);
   const activeWeeks = atLeast(signals.activeWeeks, rules.minActiveWeeks);
@@ -117,9 +152,10 @@ export function levelChecks(signals: GithubSignals, bar: LevelThresholds, rules:
   const social = atLeast(signals.social, rules.minSocial);
   const followers = atLeast(signals.followers, rules.minFollowers);
   const humanSignals = [activeWeeks, outsideContributions, oldRepo, social, followers].filter(Boolean).length;
-  const creationBatch = rules.batchSize > 0 && context.batchPeers >= rules.batchSize && signals.accountAgeDays < bar.minAccountAgeDays;
+  const threshold = batchThreshold(rules, context.youngAccounts ?? 0, bar.minAccountAgeDays);
+  const creationBatch = threshold > 0 && context.batchPeers >= threshold && signals.accountAgeDays < bar.minAccountAgeDays;
   const full = !creationBatch && publicBar && humanSignals >= rules.humanSignalsNeeded - 1;
-  return { publicBar, activeWeeks, outsideContributions, oldRepo, social, followers, humanSignals, batchPeers: context.batchPeers, creationBatch, full };
+  return { publicBar, activeWeeks, outsideContributions, oldRepo, social, followers, humanSignals, batchPeers: context.batchPeers, batchThreshold: threshold, creationBatch, full };
 }
 
 /**

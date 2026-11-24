@@ -70,6 +70,7 @@ describe("additional account signals", () => {
       followers: true,
       humanSignals: 4,
       batchPeers: 0,
+      batchThreshold: 10,
       creationBatch: false,
       full: false,
     });

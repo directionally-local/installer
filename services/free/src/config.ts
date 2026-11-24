@@ -83,6 +83,12 @@ export interface FreeConfig extends RegistrySettingsConfig {
   batchWindowDays: number;
   /** Signed-up accounts in that window that make a batch, for accounts younger than the public bar's age; 0 turns it off (BATCH_SIZE). */
   batchSize: number;
+  /**
+   * Scales the batch threshold with sign-up volume: a creation window needs this many times the
+   * average window's peers (and never fewer than `batchSize`); 0 keeps the fixed `batchSize`
+   * (BATCH_DENSITY_FACTOR; admission.ts batchThreshold).
+   */
+  batchDensityFactor: number;
   /** A Starter account's weekly tokens (STARTER_WEEKLY_TOKENS), of every model. 0: no free tokens. */
   starterWeeklyTokens: number;
   /** A Starter account's weekly dollar cap (STARTER_WEEKLY_USD_CAP); undefined: tokens only. */
@@ -103,6 +109,11 @@ export interface FreeConfig extends RegistrySettingsConfig {
   blockedEmails: string[];
   /** New accounts a day from one company or custom email domain; public providers are exempt (DOMAIN_SIGNUPS_PER_DAY). */
   domainSignupsPerDay: number;
+  /**
+   * Past `domainSignupsPerDay`, refuse the sign-up (the old rule) instead of placing a new account
+   * below Full at Starter, like the network limit does (DOMAIN_LIMIT_REFUSE; default off).
+   */
+  domainLimitRefuse: boolean;
   /**
    * Open admission: GitHub accounts at least `minGithubAccountAgeDays` old get in without an
    * invite code (still within `maxActiveUsers`). Off by default: invite-only for everyone.
@@ -416,6 +427,7 @@ export const DEFAULTS = {
   minFollowers: 1,
   batchWindowDays: 2,
   batchSize: 10,
+  batchDensityFactor: 3,
   // Publicly there is only Free and Pro: by default basic and Starter get exactly Full's weekly
   // tokens and dollar budgets (the settings can still differ later).
   starterWeeklyTokens: 50_000_000,
@@ -428,6 +440,7 @@ export const DEFAULTS = {
   networkSignupsPerDay: 3,
   blockedEmails: [],
   domainSignupsPerDay: 10,
+  domainLimitRefuse: false,
   openAdmission: false,
   requireGithubActivity: true,
   dlOnly: true,
@@ -554,6 +567,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     minFollowers: threshold("minFollowers", "MIN_FOLLOWERS"),
     batchWindowDays: threshold("batchWindowDays", "BATCH_WINDOW_DAYS"),
     batchSize: threshold("batchSize", "BATCH_SIZE"),
+    batchDensityFactor: threshold("batchDensityFactor", "BATCH_DENSITY_FACTOR"),
     starterWeeklyTokens: whole(env.STARTER_WEEKLY_TOKENS, DEFAULTS.starterWeeklyTokens, "STARTER_WEEKLY_TOKENS"),
     starterWeeklyUsdCap: usd(env.STARTER_WEEKLY_USD_CAP, DEFAULTS.starterWeeklyUsdCap, "STARTER_WEEKLY_USD_CAP"),
     starterDeepseekWeeklyUsdCap: usd(env.STARTER_DEEPSEEK_WEEKLY_USD_CAP, DEFAULTS.starterDeepseekWeeklyUsdCap, "STARTER_DEEPSEEK_WEEKLY_USD_CAP"),
@@ -564,6 +578,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     networkSignupsPerDay: whole(env.NETWORK_SIGNUPS_PER_DAY, DEFAULTS.networkSignupsPerDay, "NETWORK_SIGNUPS_PER_DAY"),
     blockedEmails: env.BLOCKED_EMAILS === undefined ? [...DEFAULTS.blockedEmails] : String(env.BLOCKED_EMAILS).split(",").map((v) => v.trim()).filter(Boolean),
     domainSignupsPerDay: threshold("domainSignupsPerDay", "DOMAIN_SIGNUPS_PER_DAY"),
+    domainLimitRefuse: flag(env.DOMAIN_LIMIT_REFUSE, DEFAULTS.domainLimitRefuse, "DOMAIN_LIMIT_REFUSE"),
     openAdmission: flag(env.OPEN_ADMISSION, DEFAULTS.openAdmission, "OPEN_ADMISSION"),
     requireGithubActivity: flag(env.REQUIRE_GITHUB_ACTIVITY, DEFAULTS.requireGithubActivity, "REQUIRE_GITHUB_ACTIVITY"),
     countCachedTokens: flag(env.COUNT_CACHED_TOKENS, DEFAULTS.countCachedTokens, "COUNT_CACHED_TOKENS"),

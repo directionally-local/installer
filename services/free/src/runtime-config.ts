@@ -60,6 +60,8 @@ export const RUNTIME_SETTINGS = {
   batchWindowDays: { kind: "count", env: "BATCH_WINDOW_DAYS" },
   /** Signed-up accounts in that window that make a batch (with 0 followers: Starter); 0 turns it off. */
   batchSize: { kind: "count", env: "BATCH_SIZE" },
+  /** The batch threshold grows to this many times the average window's peers (never below batchSize); 0: fixed batchSize. */
+  batchDensityFactor: { kind: "count", env: "BATCH_DENSITY_FACTOR" },
   /** A Starter account's weekly tokens, every model; 0 for none. Batch-flagged accounts get none either way. */
   starterWeeklyTokens: { kind: "tokens", env: "STARTER_WEEKLY_TOKENS" },
   /** A Starter account's weekly GPT-6 budget, USD. */
@@ -82,6 +84,8 @@ export const RUNTIME_SETTINGS = {
   blockedEmails: { kind: "emails", env: "BLOCKED_EMAILS" },
   /** New accounts a day from one company or custom email domain. */
   domainSignupsPerDay: { kind: "count", env: "DOMAIN_SIGNUPS_PER_DAY" },
+  /** Past domainSignupsPerDay, refuse the sign-up instead of placing a new account below Full at Starter. */
+  domainLimitRefuse: { kind: "flag", env: "DOMAIN_LIMIT_REFUSE" },
   /** New accounts need a public repo or a contribution in the last year to skip the invite. */
   requireGithubActivity: { kind: "flag", env: "REQUIRE_GITHUB_ACTIVITY" },
   /** Cached prompt tokens' weight against the token allowance, 0 to 1. */

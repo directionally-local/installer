@@ -250,9 +250,9 @@ export function inputSummary(facts: AllocatorFacts): Record<string, number> {
   };
 }
 
-/** Farm signals: the creation-batch flag, a device shared with another account, or the per-network sign-up limit. */
+/** Farm signals: the creation-batch flag, a device shared with another account, or the per-network or per-domain sign-up limit. */
 export function farmSignals(facts: AllocatorFacts): boolean {
-  return facts.batchFlagged || facts.sharedDevice || facts.levelReason === "network_limit";
+  return facts.batchFlagged || facts.sharedDevice || facts.levelReason === "network_limit" || facts.levelReason === "domain_limit";
 }
 
 /**
