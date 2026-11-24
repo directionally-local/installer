@@ -284,10 +284,10 @@ export function creditPausedAlert(usedUsd: number, balanceUsd: number, provider 
  * A registry provider's credit (providers.ts) at 80%: the one warning it gets, once per balance.
  * At 100% its models leave /v1/models on their own; the daily digest shows what's left.
  */
-export function providerCreditAlert(provider: { id: string; name: string; fallsBack?: boolean }, usedUsd: number, balanceUsd: number): Alert {
-  const atFull = provider.fallsBack
-    ? "At 100% DeepSeek serves requests for its models instead."
-    : "At 100% its models are hidden and requests for them get 402 provider_limit with DeepSeek as the alternative.";
+export function providerCreditAlert(provider: { id: string; name: string; fallsBack?: boolean; atFull?: string }, usedUsd: number, balanceUsd: number): Alert {
+  const atFull =
+    provider.atFull ??
+    (provider.fallsBack ? "At 100% DeepSeek serves requests for its models instead." : "At 100% its models are hidden and requests for them get 402 provider_limit with DeepSeek as the alternative.");
   return {
     subject: `dl free tier: ${percentOf(usedUsd / balanceUsd)} of the ${dollars(balanceUsd)} ${provider.name} credit used`,
     text: `dl free tier: ${dollars(usedUsd)} of the ${dollars(balanceUsd)} ${provider.name} credit used (${percentOf(usedUsd / balanceUsd)}). ${atFull} After a top-up, raise providerCredit.${provider.id} (POST /admin/config).`,

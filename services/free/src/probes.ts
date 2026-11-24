@@ -14,10 +14,10 @@
 
 import type { Fetch } from "../../shared/src/github.js";
 import type { FreeConfig } from "./config.js";
-import { creditPrices, type FreeModel } from "./models.js";
+import { creditPrices, onUpstream, type FreeModel } from "./models.js";
 import { toChatStream, toResponsesRequest } from "./openai-responses.js";
 import type { ProbeRecord } from "./provider-store.js";
-import { exchangeRules, liquidPayload, openRelayPayload, providerKey, providerModels, providerSettings, PROVIDERS, registryBlock, type ProviderSpec, type ProviderSpend } from "./providers.js";
+import { exchangeRules, isRegistryProvider, liquidPayload, openRelayPayload, providerKey, providerModels, providerSettings, PROVIDERS, upstreamBlock, type ProviderSpec, type ProviderSpend } from "./providers.js";
 import { costAtPrices } from "./quota.js";
 import { meterStream, type StreamOutcome } from "./sse.js";
 
@@ -35,6 +35,7 @@ export const PROBE_USER = "dl-speed-probe";
 
 export interface ProbeTarget {
   provider: ProviderSpec;
+  /** The model as this provider serves it (models.ts onUpstream): its wire id and rules there. */
   model: FreeModel;
 }
 
@@ -49,11 +50,12 @@ export function probeTargets(config: FreeConfig, spend: ProviderSpend, at: numbe
     if (providerKey(config, provider.id) === undefined) continue;
     const settings = providerSettings(config, provider.id);
     if (settings.status !== "on" || (spend.usedUsd[provider.id] ?? 0) >= settings.creditUsd) continue;
+    // Every upstream of a model is probed on its own (GLM 5.3 Flash on Liquid and on Open Relay).
     for (const model of providerModels(provider.id)) {
       if (!settings.models.includes(model.id)) continue;
-      if (provider.kind === "registry" && registryBlock(config, model, spend) !== undefined) continue;
+      if (isRegistryProvider(provider.id) && upstreamBlock(config, model, provider.id, spend) !== undefined) continue;
       if (model.prices.output >= PRICEY_OUTPUT_USD && run % 6 !== 0) continue;
-      out.push({ provider, model });
+      out.push({ provider, model: onUpstream(model, provider.id) });
     }
   }
   return out;

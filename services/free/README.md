@@ -63,7 +63,8 @@ and sign in to GitHub there. The terminal polls every 5 seconds.
 
 Every provider is one typed entry: `id`, `name`, `website`, `baseUrl`, `apiStyle`
 (`openai-chat` or `openai-responses`), `keyEnv` (the secret holding its key) and `kind`. Its
-models are the `FREE_MODELS` entries with that `provider` (`src/models.ts`).
+models are the `FREE_MODELS` entries with that `provider` (`src/models.ts`), and those that
+name it in `backups` (a model with more than one upstream; see "GLM 5.3 Flash" below).
 
 - **Legacy providers, unchanged.** OpenAI and Luminal keep their settings (`openaiCreditUsd`,
   `luminalCreditUsd` and the weekly ones; `providerCredit.openai`, `providerWeeklyCredit.luminal`
@@ -77,15 +78,17 @@ models are the `FREE_MODELS` entries with that `provider` (`src/models.ts`).
   | `providerCredit.<id>` | 100 | 200 | prepaid credit, USD; at or past it the provider is out of credit |
   | `providerWeeklyCredit.<id>` | 25 | 25 | the most everyone but admins may spend a week; `"none"` for no budget |
   | `providerOptIn.<id>` | `true` | `false` | served only to people who pick its models, never a default or fallback |
-  | `providerPersonWeeklyUsd.<id>` | 0.25 | 0.5 | one person's weekly spend on it at most: Liquid's while it's opt-in or Pro-only (then it is Pro's weekly ration), Open Relay's always (its spec has `capsEveryone`) |
+  | `providerPersonWeeklyUsd.<id>` | 0.25 | 0.5 | one person's weekly spend on its models at most: Liquid's while it's opt-in or Pro-only (then it is Pro's weekly Kimi ration), Open Relay's always (its spec has `capsEveryone`). Not GLM 5.3 Flash: its cap is its own (below) |
   | `providerPlans.<id>` | `"pro"` | `"all"` | `"pro"`: dl Pro subscribers (and admins, for testing) only; `"all"`: every plan |
-  | `providerModels.<id>` | `["moonshotai/kimi-k3.1-pro"]` | `["z-ai/glm-5.3-flash"]` | the models that are on |
+  | `providerModels.<id>` | `["moonshotai/kimi-k3.1-pro", "z-ai/glm-5.3-flash"]` | `["z-ai/glm-5.3-flash"]` | the models that are on there (for GLM 5.3 Flash, each upstream separately) |
 
   Each also reads from env (`LIQUID_STATUS`, `LIQUID_CREDIT_USD`, `LIQUID_WEEKLY_CREDIT_USD`,
   `LIQUID_OPT_IN`, `LIQUID_PERSON_WEEKLY_USD`, `LIQUID_PLANS`, `LIQUID_MODELS`; `OPENRELAY_*`
   for Open Relay).
-- **Kimi is a dl Pro perk** while `providerPlans.liquid` is `"pro"` (the default). A free
-  account's request for a Liquid model gets 402 `provider_limit` reason `pro_only`, with
+- **Kimi is a dl Pro perk** while `providerPlans.liquid` is `"pro"` (the default). The rule is
+  per model (`modelPlans`): `providerPlans.<id>` applies to the provider's models that have no
+  `plans` of their own, and GLM 5.3 Flash has `plans: "all"`, so it stays free for everyone on
+  Liquid. A free account's request for Kimi gets 402 `provider_limit` reason `pro_only`, with
   `upgradeUrl` (dl.new/account; null while Pro isn't offered), `plans: "pro"` and
   `approxTokensPerWeek`:
   "Kimi K3.1 Pro is a dl Pro perk: about 140K tokens a week, then DeepSeek. Upgrade: https://dl.new/account".
@@ -93,8 +96,8 @@ models are the `FREE_MODELS` entries with that `provider` (`src/models.ts`).
   person a day, like every other Pro prompt). Pro gets `providerPersonWeeklyUsd.liquid` a week;
   past it, reason `person_cap` with `resetsAt`: "You've used this week's Kimi K3.1 Pro with dl
   Pro (about 140K tokens a week). It resets on Monday 30 Nov, 00:00 UTC; DeepSeek keeps working:
-  /model." Admins pass both. Free accounts don't get Liquid models in `/v1/models`; `/v1/providers`
-  marks them `access: "pro"`; `/v1/me` states them upfront in `proModels` (`available`,
+  /model." Admins pass both. Free accounts don't get Kimi in `/v1/models`; `/v1/providers`
+  marks it `access: "pro"`; `/v1/me` states them upfront in `proModels` (`available`,
   `usdPerWeek`, `approxTokensPerWeek`, for Pro `ration` `{usdPerWeek, usedUsd, remainingUsd,
   approxTokensPerWeek, approxTokensLeft, resetsAt}`, and a `text` line), and Pro's `/v1/models`
   entry carries the same `ration`. "About N tokens" is the dollars at the model's credit prices
@@ -106,7 +109,11 @@ models are the `FREE_MODELS` entries with that `provider` (`src/models.ts`).
   usage a week. GPT-6 stays separate and trusted-only. An opt-in provider's cap is on top of it.
 - **Spend per provider.** A registry provider's credit is kept in `provider_credit_weeks` (all
   of it, what people but admins used, the free part, and the probes'), and per person in
-  `provider_person_weeks` (ids and dollars only). OpenAI's and Luminal's stay in `spend_weeks`.
+  `provider_person_weeks` (ids and dollars only; a model with its own cap under `model:<id>`,
+  across its upstreams, and not under its providers). Each model's part of each upstream's week
+  is in `share_weeks` (`"<provider>:<model id>"`, dollars only), for `modelWeeklyCredit`.
+  OpenAI's and Luminal's stay in `spend_weeks`. Every attempt is accounted to the upstream that
+  made it (`requests.upstream`, its credit): a failed one is charged nothing.
 - **When it can't serve** (paused, out of credit, its weekly budget used, or the person's opt-in
   cap reached) its models leave `/v1/models` and a request for one gets the `gpt_limit` shape
   with its own code: HTTP 402
@@ -152,19 +159,59 @@ fee_usd` when above 0 (live, both were still 0 at the end of a stream: they sett
 and the exchange's `usage` (its `reasoning_tokens` added to `completion_tokens`): live, a Kimi
 stream's standard usage said 0 output tokens although text came back. Probes also keep the seller
 (`provider_slug`) and the exchange's own `timing.ttft_ms` and `timing.tokens_per_second`. Failures go back as transient errors with `Retry-After`, like
-Luminal's; there is no fallback to another model.
+Luminal's, for Kimi; GLM 5.3 Flash goes on to Open Relay (below). "No offer met the
+requirements" comes back as HTTP 400 with `error.code` `no_eligible_offer` (seen live on
+2026-11-24) and counts as such a failure (status `upstream_no_offer`).
+
+### GLM 5.3 Flash: Liquid first, Open Relay as the backup
+
+GLM 5.3 Flash (`z-ai/glm-5.3-flash`) has two upstreams, tried in order (`src/models.ts`
+`backups`, `upstreamsOf`): Liquid Inference (`glm-5.3-flash`), then Open Relay
+(`openrelay/glm-5.3-flash`). It was the fastest and cheapest model of the 24 Nov 2026 bake-off on
+Liquid (about 275 tokens a second, 0.45 s to the first token, ~$0.0006 a coding task), while Open
+Relay rate-limited our key hard.
+
+- **Which upstream.** The first one that can serve (`registryRoute`: a key, on there in
+  `providerModels.<id>`, its credit, its weekly budget, and GLM's own share of it). On a failure
+  before any bytes reach the client (429, 5xx, a first-byte timeout or network error, Liquid's
+  `no_eligible_offer`, or the provider refusing our key) the next one is tried with a fresh
+  reservation, then DeepSeek (its `fallback`, with `x-dl-fallback`). A 400 about the request
+  itself goes back as it is. A stream that has started stays where it is.
+- **Liquid's rules.** Sellers `exchangeAllow.glm-5.3-flash` (`["munitoai", "tensorx"]`: the two
+  that served it in the bake-off with `privacy.retention: "none"`, checked again live;
+  `LIQUID_ALLOW_GLM_5_3_FLASH`) and ceilings `exchangeMaxPrices.glm-5.3-flash` (`[0.2, 0.05,
+  0.5]`, admitting both: munitoai lists $0.02765 / $0.005743 / $0.09571 and wins on price,
+  tensorx $0.20 / $0.05 / $0.50; `LIQUID_MAX_PRICES_GLM_5_3_FLASH`). The exchange also adds about
+  $0.01 a million tokens of fee (seen live); its reported charge is what Liquid's credit pays.
+- **Free for everyone.** `plans: "all"` on the model: `providerPlans.liquid` "pro" and Liquid's
+  opt-in don't apply to it (`access: "free"`).
+- **Caps.** One person: `modelPersonWeeklyUsd.glm-5.3-flash` ($0.50 a week, about 15M tokens at
+  the ration mix and Open Relay's list price; `GLM_5_3_FLASH_PERSON_WEEKLY_USD`), Liquid and Open
+  Relay together. Everyone: Liquid's `providerWeeklyCredit.liquid` ($25) is shared with Kimi and
+  split by `modelWeeklyCredit.liquid.glm-5.3-flash` ($10; `LIQUID_WEEKLY_CREDIT_GLM_5_3_FLASH`)
+  and `modelWeeklyCredit.liquid.kimi-k3.1-pro` ($15; `LIQUID_WEEKLY_CREDIT_KIMI_K3_1_PRO`), so
+  neither starves the other; past GLM's share Open Relay serves it (its own $25 a week). Past the
+  person cap or both upstreams' budgets, DeepSeek (Autopilot: 402 `provider_limit`; other agents:
+  served DeepSeek with `x-dl-notice`).
+- **What it shows.** `/v1/providers` lists it once, under the first upstream it's configured on
+  (Liquid), with `backups: [{provider, name, website, status, tokensPerSecond, ttftMs,
+  successRate24h, measuredAt}]` (Open Relay); each upstream is probed and measured on its own.
+  `/v1/models` `owned_by` and `/v1/me` `cappedModels[].provider` name that first upstream. `GET
+  /v1/admin/providers` lists, per registry provider, `models` with `role` (`primary` or
+  `backup`), whether it's on there, this week's spend and `weeklyShareUsd`.
+
+To turn it on after a deploy: check `providerModels.liquid` includes `z-ai/glm-5.3-flash` (it does
+by default; an override from before this change may not), and `providerStatus.liquid` is `"on"`.
 
 ### Open Relay
 
-[Open Relay](https://openrelay.inc/) (OpenRelay Inc.) serves GLM 5.3 Flash
-(`openrelay/glm-5.3-flash`, 256K context) free for everyone: `providerPlans.openrelay` `"all"`,
-not opt-in, `access: "free"` in `/v1/providers`, and in the one open-models budget (so Pro's 4x
-covers it like DeepSeek). Each person gets `providerPersonWeeklyUsd.openrelay` ($0.50, about 15M
-tokens a week at the ration mix; about 9M if nothing is a cache read) and everyone together
-`providerWeeklyCredit.openrelay` ($25 a week, so the $200 credit lasts about 8 weeks); past
-either, DeepSeek serves (above). `/v1/me` states the cap in `cappedModels` (`usdPerWeek`,
-`approxTokensPerWeek`, `ration` for this week, `fallback`, a `text` line), and `/v1/models`
-entries carry the same `ration`.
+[Open Relay](https://openrelay.inc/) (OpenRelay Inc.) is GLM 5.3 Flash's backup upstream
+(`openrelay/glm-5.3-flash`, 256K context; above), free for everyone: `providerPlans.openrelay`
+`"all"`, not opt-in, and in the one open-models budget (so Pro's 4x covers it like DeepSeek).
+Everyone together gets `providerWeeklyCredit.openrelay` ($25 a week, so the $200 credit lasts
+about 8 weeks); a person is held to GLM 5.3 Flash's own cap across both upstreams. `/v1/me`
+states the cap in `cappedModels` (`usdPerWeek`, `approxTokensPerWeek`, `ration` for this week,
+`fallback`, a `text` line), and `/v1/models` entries carry the same `ration`.
 
 Requests go to `https://inference.openrelay.inc/v1/chat/completions` with `Authorization: Bearer
 or_…` (`OPENRELAY_API_KEY`) and only the standard fields (`messages`, `tools`, `tool_choice`,
@@ -175,9 +222,9 @@ empty-choices chunk carrying `usage` (reasoning tokens inside `completion_tokens
 `openrelay: {cost_nano_usd, priced_at}`; non-streamed answers carry the same block and the
 `OpenRelay-Cost-Nano-USD` header; tool calls stream as standard `tool_calls` deltas. The credit
 is charged the reported cost when above 0, else the usage at the list price ($0.045 input,
-$0.009 cached, $0.18 output per million). 429, 502 and 503 go back as transient errors with
-`Retry-After`; a 402 or 403 from Open Relay (its balance or the key's spend cap) as
-`upstream_error`.
+$0.009 cached, $0.18 output per million). 429, 502 and 503 go on to DeepSeek (GLM 5.3 Flash's
+fallback) when it can serve, else back as transient errors with `Retry-After`; a 402 or 403 from
+Open Relay (its balance or the key's spend cap) goes on to DeepSeek too.
 
 To turn it on after a deploy: `wrangler secret put OPENRELAY_API_KEY`, check
 `GET /v1/admin/providers`, then `POST /admin/config {"providerStatus.openrelay": "on"}`.

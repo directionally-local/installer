@@ -2,8 +2,8 @@
  * The models the free tier serves, and the weekly allowance each one draws from.
  *
  * The providers (providers.ts), each on its own prepaid credit: OpenAI (the default), Luminal,
- * which serves DeepSeek, Liquid Inference, which serves Kimi (and GLM, off for now), and Open
- * Relay, which serves GLM 5.3 Flash. A model's
+ * which serves DeepSeek, Liquid Inference, which serves Kimi, GLM 5.3 Flash (and GLM 5.3, off for
+ * now), and Open Relay, GLM 5.3 Flash's backup upstream. A model's
  * `family` is the weekly dollar budget it spends: every GPT-6 model shares the GPT-6 budget, and
  * the open models (DeepSeek, Kimi, GLM) share the "deepseek" one, much larger (DeepSeek costs a
  * fraction as much per token). A model's `pool` is its weekly token allowance inside that: Luna, Sol and
@@ -94,6 +94,34 @@ export interface FreeModel {
   exchange?: ExchangeDefaults;
   /** Off until the provider's `providerModels.<id>` setting lists it (default: on). */
   enabledByDefault?: boolean;
+  /**
+   * More upstreams for the same model, tried in order after its own provider (`provider`,
+   * `upstreamModel`, `exchange`, `creditPrices`): when the one before can't serve (its limits)
+   * or fails before anything reaches the client (429, 5xx, a timeout, no eligible offer). Each is
+   * on while its provider's `providerModels.<id>` lists the model. See `upstreamsOf`.
+   */
+  backups?: readonly ModelUpstream[];
+  /**
+   * Who may use it, whatever its providers' `providerPlans.<id>` and opt-in say: "all" keeps a
+   * model free for everyone on a provider whose other models are Pro-only (GLM 5.3 Flash on
+   * Liquid, where Kimi is a Pro perk). Unset: its provider's plans and opt-in decide.
+   */
+  plans?: "all" | "pro";
+  /**
+   * Its per-person weekly cap is its own (`modelPersonWeeklyUsd.<key>`, providers.ts), counted
+   * across all its upstreams, instead of its providers' `providerPersonWeeklyUsd.<id>`; and its
+   * spend doesn't count toward those.
+   */
+  ownCaps?: boolean;
+}
+
+/** One upstream of a model: who serves it, under what id, with what marketplace rules and credit prices. */
+export interface ModelUpstream {
+  provider: Provider;
+  upstreamModel: string;
+  exchange?: ExchangeDefaults;
+  /** What this upstream's credit is charged when it doesn't report a cost; the model's `prices` when unset. */
+  creditPrices?: Prices;
 }
 
 export const FREE_MODELS: readonly FreeModel[] = [
@@ -163,9 +191,9 @@ export const FREE_MODELS: readonly FreeModel[] = [
   // Liquid Inference (an exchange: each request goes to the cheapest seller that passes the
   // request's rules). Ids, limits and prices from https://liquidinference.ai/models/<id> and the
   // public offers (https://router.inference.ai.exchange/v1/exchange/offers) on 2026-11-23.
-  // Both draw the open-models budget, and both are dl Pro only by default
+  // Kimi and GLM 5.3 draw the open-models budget, and both are dl Pro only by default
   // (`providerPlans.liquid`), with a small weekly ration a person (providers.ts), because the
-  // Liquid credit is small.
+  // Liquid credit is small. GLM 5.3 Flash (below) is on Liquid too, free for everyone.
   {
     id: "moonshotai/kimi-k3.1-pro",
     name: "Kimi K3.1 Pro",
@@ -219,31 +247,74 @@ export const FREE_MODELS: readonly FreeModel[] = [
     // Defined, off: Kimi is the Liquid model the free tier starts with.
     enabledByDefault: false,
   },
-  // Open Relay (OpenRelay Inc., https://openrelay.inc/): OpenAI-compatible, a pool of provider
-  // nodes. Id, context and modalities from its GET /v1/models; prices from
-  // https://openrelay.inc/inference-pricing on 2026-11-24. Free for everyone (`providerPlans.openrelay`
-  // "all") inside a weekly cap a person; past it, or past Open Relay's weekly budget, DeepSeek serves.
+  // GLM 5.3 Flash, free for everyone: two upstreams, tried in order (`upstreamsOf`). Liquid
+  // Inference first (fastest and cheapest in the 24 Nov bake-off: about 275 tokens a second,
+  // 0.45 s to the first token, ~$0.0006 a coding task), then Open Relay (OpenRelay Inc.,
+  // https://openrelay.inc/) when Liquid is at a limit or fails before anything reaches the client.
+  // Past both, DeepSeek (its `fallback`). Its access and per-person cap are its own (`plans`,
+  // `ownCaps`), not Liquid's Pro-only settings or Open Relay's cap.
   {
     id: "z-ai/glm-5.3-flash",
     name: "GLM 5.3 Flash",
-    provider: "openrelay",
-    upstreamModel: "openrelay/glm-5.3-flash",
+    provider: "liquid",
+    upstreamModel: "glm-5.3-flash",
     pool: "deepseek",
     family: "deepseek",
-    // The list price, for the allowance and the credit alike: the credit is charged what Open
-    // Relay reports (`openrelay.cost_nano_usd`) when it says, these only when it doesn't.
+    // Open Relay's list price, for the person's allowance whichever upstream serves (Liquid's
+    // cheapest seller is below it).
     prices: { input: 0.045, cached: 0.009, output: 0.18 },
-    // 256K (Open Relay's models page); its output cap isn't published.
+    // Liquid's credit is charged what the exchange reports; these, the ceilings plus about
+    // $0.01 a million tokens of exchange fee (seen live), only when it doesn't.
+    creditPrices: { input: 0.21, cached: 0.06, output: 0.51 },
+    // 256K: Open Relay's (its models page). Liquid's offers take 1M in and up to 131K out, but a
+    // conversation has to fit the backup too.
     contextWindow: 262_144,
     maxOutputTokens: 32_768,
-    // GET /v1/models lists text and image input; not tried with an image yet.
+    // Both list image input; not tried with an image yet.
     vision: false,
-    // Reasons before it answers (`reasoning_content`); billed as output.
+    // Reasons before it answers; billed as output.
     reasoning: true,
     fallback: "deepseek/deepseek-v4.1-flash-1017",
     line: "glm",
+    exchange: {
+      // The sellers that served it in the 24 Nov bake-off with `privacy.retention: "none"`, both
+      // checked again by a live request on 2026-11-24: munitoai (the cheapest, $0.02765 /
+      // $0.005743 / $0.09571, region "global") and tensorx ($0.20 / $0.05 / $0.50, region "eu").
+      allow: ["munitoai", "tensorx"],
+      // Admits both; the exchange picks the cheapest (munitoai) and keeps a session there.
+      maxPrices: { input: 0.2, cached: 0.05, output: 0.5 },
+    },
+    backups: [
+      // Open Relay: the list price is its credit price; it reports its cost (`openrelay.cost_nano_usd`).
+      { provider: "openrelay", upstreamModel: "openrelay/glm-5.3-flash" },
+    ],
+    plans: "all",
+    ownCaps: true,
   },
 ];
+
+/** A model's upstreams in the order they're tried: its own provider, then its `backups`. */
+export function upstreamsOf(model: FreeModel): ModelUpstream[] {
+  const own: ModelUpstream = { provider: model.provider, upstreamModel: model.upstreamModel, ...(model.exchange ? { exchange: model.exchange } : {}), ...(model.creditPrices ? { creditPrices: model.creditPrices } : {}) };
+  return [own, ...(model.backups ?? [])];
+}
+
+/**
+ * The model as one of its upstreams serves it: that provider, wire id, marketplace rules and
+ * credit prices; the id, name, prices and budget stay the model's. The model itself for its own provider.
+ */
+export function onUpstream(model: FreeModel, provider: Provider): FreeModel {
+  if (provider === model.provider) return model;
+  const upstream = model.backups?.find((entry) => entry.provider === provider);
+  if (!upstream) return model;
+  const { exchange: _exchange, creditPrices: _credit, ...rest } = model;
+  return { ...rest, provider: upstream.provider, upstreamModel: upstream.upstreamModel, ...(upstream.exchange ? { exchange: upstream.exchange } : {}), ...(upstream.creditPrices ? { creditPrices: upstream.creditPrices } : {}) };
+}
+
+/** Whether `provider` is one of the model's upstreams. */
+export function servedBy(model: FreeModel, provider: string): boolean {
+  return model.provider === provider || (model.backups ?? []).some((entry) => entry.provider === provider);
+}
 
 /** The model a request gets when it doesn't name one, and the one the pickers lead with. */
 export const DEFAULT_MODEL = "gpt-6-luna";

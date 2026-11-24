@@ -12,11 +12,18 @@
  * weekly budget used, or a person's opt-in cap reached) its models leave /v1/models and a
  * request for one gets a 402 `provider_limit` naming DeepSeek as the alternative.
  *
+ * A model can have more than one upstream (models.ts `backups`: GLM 5.3 Flash on Liquid, then
+ * Open Relay). `registryRoute` says which of them can serve it now, in order; the model is
+ * blocked only when none can. Such a model's access and per-person cap are its own (models.ts
+ * `plans`, `ownCaps`; `modelPersonWeeklyUsd.<key>`), and each upstream can hold it to a weekly
+ * share of its credit (`modelWeeklyCredit.<provider>.<key>`), so the models on one provider
+ * can't starve each other.
+ *
  * Nothing here is secret: the keys are only named (`keyEnv`), never read.
  */
 
 import type { FreeConfig, Prices } from "./config.js";
-import { DEEPSEEK_MODEL, FREE_MODELS, type FreeModel } from "./models.js";
+import { DEEPSEEK_MODEL, FREE_MODELS, servedBy, upstreamsOf, type FreeModel } from "./models.js";
 
 export type ProviderId = "openai" | "luminal" | "liquid" | "openrelay";
 export const PROVIDER_IDS: readonly ProviderId[] = ["openai", "luminal", "liquid", "openrelay"];
@@ -91,9 +98,14 @@ export function isRegistryProvider(value: unknown): value is RegistryProviderId 
   return isProviderId(value) && providerSpec(value).kind === "registry";
 }
 
-/** A provider's models, in FREE_MODELS order. */
+/** A provider's models (its own and the ones it is a backup upstream of), in FREE_MODELS order. */
 export function providerModels(id: ProviderId): FreeModel[] {
-  return FREE_MODELS.filter((model) => model.provider === id);
+  return FREE_MODELS.filter((model) => servedBy(model, id));
+}
+
+/** The short key a model's own settings use: its id after the last "/" ("glm-5.3-flash"). */
+export function modelKey(model: FreeModel): string {
+  return model.id.slice(model.id.lastIndexOf("/") + 1);
 }
 
 /** What the generic settings say about one provider, whatever their names. */
@@ -132,6 +144,13 @@ export type RegistrySettingsConfig = {
   "exchangeMaxPrices.kimi-k3.1-pro": readonly number[];
   "exchangeAllow.glm-5.3": readonly string[];
   "exchangeMaxPrices.glm-5.3": readonly number[];
+  "exchangeAllow.glm-5.3-flash": readonly string[];
+  "exchangeMaxPrices.glm-5.3-flash": readonly number[];
+  /** The most of Liquid's weekly credit one model may use (everyone but admins), USD; undefined: no share of its own. */
+  "modelWeeklyCredit.liquid.kimi-k3.1-pro": number | undefined;
+  "modelWeeklyCredit.liquid.glm-5.3-flash": number | undefined;
+  /** GLM 5.3 Flash's per-person weekly cap, USD, across its upstreams (models.ts `ownCaps`); undefined: none. */
+  "modelPersonWeeklyUsd.glm-5.3-flash": number | undefined;
   "providerStatus.openrelay": ProviderStatus;
   "providerCredit.openrelay": number;
   "providerWeeklyCredit.openrelay": number | undefined;
@@ -143,10 +162,14 @@ export type RegistrySettingsConfig = {
 
 /**
  * The defaults. Liquid: paused until the owner turns it on, $100 of credit, $25 a week, dl Pro
- * only, opt-in, with a $0.25 weekly ration a person (about 140K tokens of Kimi K3.1 Pro).
+ * only, opt-in, with a $0.25 weekly ration a person (about 140K tokens of Kimi K3.1 Pro). Its $25
+ * a week is split so neither model starves the other: Kimi at most $15, GLM 5.3 Flash at most $10
+ * (about 300M tokens at the ration mix and munitoai's prices; it costs ~$0.0006 a coding task).
+ * GLM 5.3 Flash is free for every plan (models.ts `plans`), whatever `providerPlans.liquid` says.
  * Open Relay: paused until the owner turns it on, $200 of credit, $25 a week (about 8 weeks),
- * every plan, not opt-in, $0.50 a person a week (about 15M tokens of GLM 5.3 Flash at the ration
- * mix; about 9M if nothing is a cache read). Past either cap, DeepSeek serves.
+ * every plan, not opt-in. GLM 5.3 Flash: $0.50 a person a week across both upstreams (about 15M
+ * tokens at the ration mix; about 9M if nothing is a cache read). Past it, or past both
+ * upstreams' budgets, DeepSeek serves.
  */
 export const REGISTRY_DEFAULTS: RegistrySettingsConfig = {
   "providerStatus.liquid": "paused",
@@ -162,6 +185,11 @@ export const REGISTRY_DEFAULTS: RegistrySettingsConfig = {
   "exchangeMaxPrices.kimi-k3.1-pro": pricesList(exchangeDefaults("kimi-k3.1-pro").maxPrices),
   "exchangeAllow.glm-5.3": exchangeDefaults("glm-5.3").allow,
   "exchangeMaxPrices.glm-5.3": pricesList(exchangeDefaults("glm-5.3").maxPrices),
+  "exchangeAllow.glm-5.3-flash": exchangeDefaults("glm-5.3-flash").allow,
+  "exchangeMaxPrices.glm-5.3-flash": pricesList(exchangeDefaults("glm-5.3-flash").maxPrices),
+  "modelWeeklyCredit.liquid.kimi-k3.1-pro": 15,
+  "modelWeeklyCredit.liquid.glm-5.3-flash": 10,
+  "modelPersonWeeklyUsd.glm-5.3-flash": 0.5,
   "providerStatus.openrelay": "paused",
   "providerCredit.openrelay": 200,
   "providerWeeklyCredit.openrelay": 25,
@@ -174,9 +202,9 @@ export const REGISTRY_DEFAULTS: RegistrySettingsConfig = {
 };
 
 function exchangeDefaults(upstreamModel: string): { allow: readonly string[]; maxPrices: Prices } {
-  const model = FREE_MODELS.find((entry) => entry.upstreamModel === upstreamModel && entry.exchange);
-  if (!model?.exchange) throw new Error(`no exchange defaults for ${upstreamModel}`);
-  return model.exchange;
+  const upstream = FREE_MODELS.flatMap(upstreamsOf).find((entry) => entry.upstreamModel === upstreamModel && entry.exchange);
+  if (!upstream?.exchange) throw new Error(`no exchange defaults for ${upstreamModel}`);
+  return upstream.exchange;
 }
 
 function pricesList(prices: Prices): number[] {
@@ -224,6 +252,51 @@ export type ProviderKeys = Pick<FreeConfig, "openaiApiKey" | "luminalApiKey" | "
 export interface ProviderSpend {
   usedUsd: Partial<Record<ProviderId, number>>;
   weekUsd: Partial<Record<ProviderId, number>>;
+  /** This week's spend by everyone but admins per model and upstream, keyed `modelSpendKey`. */
+  modelWeekUsd?: Partial<Record<string, number>>;
+}
+
+/** The key of one model's spend on one upstream in `ProviderSpend.modelWeekUsd`: "liquid:z-ai/glm-5.3-flash". */
+export function modelSpendKey(provider: string, modelId: string): string {
+  return `${provider}:${modelId}`;
+}
+
+/** The most of `provider`'s weekly credit `model` may use (`modelWeeklyCredit.<provider>.<key>`), or undefined. */
+export function modelWeeklyCap(config: Partial<RegistrySettingsConfig>, model: FreeModel, provider: ProviderId): number | undefined {
+  const value = (config as Record<string, unknown>)[`modelWeeklyCredit.${provider}.${modelKey(model)}`];
+  return typeof value === "number" ? value : undefined;
+}
+
+/**
+ * Who may use a model: its own `plans` (GLM 5.3 Flash: "all"), else its provider's
+ * `providerPlans.<id>` (Kimi on Liquid: "pro"). The Pro-only rule is per model, never per provider.
+ */
+export function modelPlans(config: ProviderConfig, model: FreeModel): ProviderPlans {
+  if (model.plans) return model.plans;
+  return isRegistryProvider(model.provider) ? providerSettings(config, model.provider).plans : "all";
+}
+
+/**
+ * A person's weekly cap on a model, USD, or undefined for none: a model with `ownCaps` its own
+ * (`modelPersonWeeklyUsd.<key>`, every plan, across its upstreams), else its provider's while
+ * that caps it (personCapped).
+ */
+export function personCapUsd(config: ProviderConfig, model: FreeModel): number | undefined {
+  if (model.ownCaps) {
+    const value = (config as Record<string, unknown>)[`modelPersonWeeklyUsd.${modelKey(model)}`];
+    return typeof value === "number" ? value : undefined;
+  }
+  if (!isRegistryProvider(model.provider)) return undefined;
+  const settings = providerSettings(config, model.provider);
+  return personCapped(model.provider, settings) ? settings.personWeeklyUsd : undefined;
+}
+
+/**
+ * Where a person's weekly spend on a model is counted (Directory `personProviderWeek` keys): a
+ * model with `ownCaps` under "model:<id>", across its upstreams; any other under its provider.
+ */
+export function personSpendKey(model: FreeModel): string {
+  return model.ownCaps ? `model:${model.id}` : model.provider;
 }
 
 /**
@@ -242,16 +315,57 @@ export function registryBlock(
   personWeekUsd?: number,
   plan?: "free" | "pro",
 ): ProviderBlock | undefined {
-  if (!isRegistryProvider(model.provider)) return undefined;
-  const id = model.provider;
-  const settings = providerSettings(config, id);
-  if (providerKey(config, id) === undefined) return "no_key";
+  return registryRoute(config, model, spend, personWeekUsd, plan).block;
+}
+
+/**
+ * Why one upstream of a registry model can't serve it now, or undefined: no key, the provider or
+ * the model paused there, its credit used up, its weekly budget used, or the model's own weekly
+ * share of it (`modelWeeklyCredit.<provider>.<key>`) used. Nothing about the person.
+ */
+export function upstreamBlock(config: ProviderConfig & ProviderKeys, model: FreeModel, provider: RegistryProviderId, spend: ProviderSpend): ProviderBlock | undefined {
+  const settings = providerSettings(config, provider);
+  if (providerKey(config, provider) === undefined) return "no_key";
   if (settings.status !== "on" || !settings.models.includes(model.id)) return "paused";
-  if ((spend.usedUsd[id] ?? 0) >= settings.creditUsd) return "out_of_credit";
-  if (settings.weeklyCreditUsd !== undefined && (spend.weekUsd[id] ?? 0) >= settings.weeklyCreditUsd) return "weekly_budget";
-  if (plan === "free" && settings.plans === "pro") return "pro_only";
-  if (personWeekUsd !== undefined && personCapped(id, settings) && personWeekUsd >= settings.personWeeklyUsd!) return "person_cap";
+  if ((spend.usedUsd[provider] ?? 0) >= settings.creditUsd) return "out_of_credit";
+  if (settings.weeklyCreditUsd !== undefined && (spend.weekUsd[provider] ?? 0) >= settings.weeklyCreditUsd) return "weekly_budget";
+  const share = modelWeeklyCap(config, model, provider);
+  if (share !== undefined && (spend.modelWeekUsd?.[modelSpendKey(provider, model.id)] ?? 0) >= share) return "weekly_budget";
   return undefined;
+}
+
+/** What `registryRoute` says about a model. */
+export interface RegistryRoute {
+  /** The upstreams that can serve it now, in the order to try them. */
+  upstreams: RegistryProviderId[];
+  /** Why it can't serve this caller, or undefined. */
+  block?: ProviderBlock;
+  /** The upstream the block is about (the model's own provider for a block about the person). */
+  blockProvider?: RegistryProviderId;
+}
+
+/**
+ * Which of a registry model's upstreams can serve it now, and why it can't when none can (or
+ * the person can't use it). In order: every upstream's own block (upstreamBlock), then a free
+ * account asking for a Pro-only model (`plan` "free"; modelPlans), then the person's weekly cap
+ * (`personWeekUsd`, the spend personSpendKey counts; admins pass undefined for both). When no
+ * upstream can serve, the block is the first upstream's that a fallback may follow
+ * (FALLBACK_BLOCKS: its credit or budget), else the first one with a key, else "no_key".
+ */
+export function registryRoute(config: ProviderConfig & ProviderKeys, model: FreeModel, spend: ProviderSpend, personWeekUsd?: number, plan?: "free" | "pro"): RegistryRoute {
+  if (!isRegistryProvider(model.provider)) return { upstreams: [] };
+  const blocks = upstreamsOf(model)
+    .filter((upstream): upstream is typeof upstream & { provider: RegistryProviderId } => isRegistryProvider(upstream.provider))
+    .map((upstream) => ({ provider: upstream.provider, block: upstreamBlock(config, model, upstream.provider, spend) }));
+  const upstreams = blocks.filter((entry) => entry.block === undefined).map((entry) => entry.provider);
+  if (upstreams.length === 0) {
+    const chosen = blocks.find((entry) => FALLBACK_BLOCKS.includes(entry.block!)) ?? blocks.find((entry) => entry.block !== "no_key") ?? blocks[0]!;
+    return { upstreams, block: chosen.block!, blockProvider: chosen.provider };
+  }
+  if (plan === "free" && modelPlans(config, model) === "pro") return { upstreams, block: "pro_only", blockProvider: model.provider };
+  const cap = personCapUsd(config, model);
+  if (personWeekUsd !== undefined && cap !== undefined && personWeekUsd >= cap) return { upstreams, block: "person_cap", blockProvider: upstreams[0]! };
+  return { upstreams };
 }
 
 /**
@@ -263,15 +377,15 @@ export function personCapped(id: RegistryProviderId, settings: ProviderSettings)
 }
 
 /**
- * The blocks after which a model with a `fallback` (GLM 5.3 Flash on Open Relay) is served by
- * that fallback instead of refused: its provider's credit or weekly budget, or the person's cap.
- * Never a pause or a missing key (the model isn't offered then), nor a Pro-only refusal.
+ * The blocks after which a model with a `fallback` (GLM 5.3 Flash) is served by that fallback
+ * instead of refused: its upstreams' credit or weekly budgets, or the person's cap. Never a
+ * pause or a missing key (the model isn't offered then), nor a Pro-only refusal.
  */
 export const FALLBACK_BLOCKS: readonly ProviderBlock[] = ["out_of_credit", "weekly_budget", "person_cap"];
 
-/** Whether a provider's models are for dl Pro only (`provider<Plans>.<id>` "pro"). */
+/** Whether a model is for dl Pro only: its own `plans`, else its provider's `providerPlans.<id>` (modelPlans). */
 export function proOnly(config: ProviderConfig, model: FreeModel): boolean {
-  return isRegistryProvider(model.provider) && providerSettings(config, model.provider).plans === "pro";
+  return isRegistryProvider(model.provider) && modelPlans(config, model) === "pro";
 }
 
 /**
@@ -280,9 +394,14 @@ export function proOnly(config: ProviderConfig, model: FreeModel): boolean {
  */
 export const RATION_MIX = { cached: 0.6, input: 0.32, output: 0.08 } as const;
 
-/** About how many tokens `usd` buys of `model` at its credit prices and RATION_MIX, to two significant digits. */
+/**
+ * About how many tokens `usd` buys of `model` at its credit prices and RATION_MIX, to two
+ * significant digits. A model with its own caps (`ownCaps`: GLM 5.3 Flash, served by upstreams
+ * at different prices) at its allowance prices instead: its credit prices are the dearest
+ * upstream's ceilings, a worst case, not what it usually costs.
+ */
 export function approxTokens(model: FreeModel, usd: number): number {
-  const prices = model.creditPrices ?? model.prices;
+  const prices = model.ownCaps ? model.prices : (model.creditPrices ?? model.prices);
   const perMillion = RATION_MIX.cached * prices.cached + RATION_MIX.input * prices.input + RATION_MIX.output * prices.output;
   if (!(usd > 0) || !(perMillion > 0)) return 0;
   const tokens = (usd / perMillion) * 1_000_000;
@@ -302,9 +421,8 @@ export interface Ration {
 /** The ration of `model` for someone who spent `usedUsd` of the provider this week; undefined with no per-person cap. */
 export function rationOf(config: ProviderConfig, model: FreeModel, usedUsd: number): Ration | undefined {
   if (!isRegistryProvider(model.provider)) return undefined;
-  const settings = providerSettings(config, model.provider);
-  const cap = settings.personWeeklyUsd;
-  if (cap === undefined || !personCapped(model.provider, settings)) return undefined;
+  const cap = personCapUsd(config, model);
+  if (cap === undefined) return undefined;
   const used = Math.min(cap, Math.max(0, usedUsd));
   const remaining = Math.max(0, cap - used);
   return { usdPerWeek: cap, usedUsd: round6(used), remainingUsd: round6(remaining), approxTokensPerWeek: approxTokens(model, cap), approxTokensLeft: approxTokens(model, remaining) };
@@ -316,11 +434,26 @@ function round6(value: number): number {
 
 /**
  * The models the service offers at all: every model of OpenAI and Luminal, and a registry
- * provider's models once it has a key and the model is on. Before then a registry model is
- * invisible: not in /v1/status, /v1/me or /v1/models, as if it weren't defined.
+ * model once one of its upstreams has a key and the model is on there. Before then a registry
+ * model is invisible: not in /v1/status, /v1/me or /v1/models, as if it weren't defined.
  */
 export function offeredModels(config: ProviderConfig & ProviderKeys): FreeModel[] {
-  return FREE_MODELS.filter((model) => !isRegistryProvider(model.provider) || (providerKey(config, model.provider) !== undefined && providerSettings(config, model.provider).models.includes(model.id)));
+  return FREE_MODELS.filter((model) => !isRegistryProvider(model.provider) || listedUpstream(config, model) !== undefined);
+}
+
+/**
+ * The upstreams a registry model is configured on (a key, and on in `providerModels.<id>`), in
+ * order, whatever their credit: the first is where /v1/providers lists it, the rest its backups.
+ */
+export function configuredUpstreams(config: ProviderConfig & ProviderKeys, model: FreeModel): RegistryProviderId[] {
+  return upstreamsOf(model)
+    .map((upstream) => upstream.provider)
+    .filter((provider): provider is RegistryProviderId => isRegistryProvider(provider) && providerKey(config, provider) !== undefined && providerSettings(config, provider).models.includes(model.id));
+}
+
+/** The upstream a registry model is listed under (the first configured one), or undefined when none is. */
+export function listedUpstream(config: ProviderConfig & ProviderKeys, model: FreeModel): RegistryProviderId | undefined {
+  return configuredUpstreams(config, model)[0];
 }
 
 /** What /v1/providers says about a model's access. */
@@ -329,6 +462,8 @@ export type Access = "free" | "trusted" | "opt-in" | "pro";
 export function accessOf(config: ProviderConfig, model: FreeModel): Access {
   if (model.family === "gpt6") return "trusted";
   if (!isRegistryProvider(model.provider)) return "free";
+  // A model's own plans (GLM 5.3 Flash) override its provider's plans and opt-in.
+  if (model.plans) return model.plans === "pro" ? "pro" : "free";
   const settings = providerSettings(config, model.provider);
   return settings.plans === "pro" ? "pro" : settings.optIn ? "opt-in" : "free";
 }

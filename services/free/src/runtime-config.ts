@@ -148,13 +148,26 @@ export const RUNTIME_SETTINGS = {
   "exchangeAllow.glm-5.3": { kind: "sellers", env: "LIQUID_ALLOW_GLM_5_3" },
   /** GLM 5.3's price ceilings on Liquid, [input, cache read, output] USD per million tokens. */
   "exchangeMaxPrices.glm-5.3": { kind: "prices", env: "LIQUID_MAX_PRICES_GLM_5_3" },
-  /** Open Relay "on" or "paused" (the default: GLM 5.3 Flash serves nobody until the owner turns it on). */
+  /** Sellers that may serve GLM 5.3 Flash on Liquid (default munitoai and tensorx, both zero-retention). */
+  "exchangeAllow.glm-5.3-flash": { kind: "sellers", env: "LIQUID_ALLOW_GLM_5_3_FLASH" },
+  /** GLM 5.3 Flash's price ceilings on Liquid, [input, cache read, output] USD per million tokens. */
+  "exchangeMaxPrices.glm-5.3-flash": { kind: "prices", env: "LIQUID_MAX_PRICES_GLM_5_3_FLASH" },
+  /**
+   * The most of Liquid's weekly credit Kimi K3.1 Pro may use (everyone but admins), USD; past it
+   * Kimi is at its weekly budget while GLM 5.3 Flash still has its share. "none": no share of its own.
+   */
+  "modelWeeklyCredit.liquid.kimi-k3.1-pro": { kind: "usd", env: "LIQUID_WEEKLY_CREDIT_KIMI_K3_1_PRO" },
+  /** The most of Liquid's weekly credit GLM 5.3 Flash may use, USD; past it Open Relay serves GLM 5.3 Flash. "none": no share of its own. */
+  "modelWeeklyCredit.liquid.glm-5.3-flash": { kind: "usd", env: "LIQUID_WEEKLY_CREDIT_GLM_5_3_FLASH" },
+  /** One person's weekly GLM 5.3 Flash spend at most, USD, on every plan, Liquid and Open Relay together; past it DeepSeek serves them until Monday. "none" for no cap. */
+  "modelPersonWeeklyUsd.glm-5.3-flash": { kind: "usd", env: "GLM_5_3_FLASH_PERSON_WEEKLY_USD" },
+  /** Open Relay "on" or "paused" (the default: it isn't GLM 5.3 Flash's backup until the owner turns it on). */
   "providerStatus.openrelay": { kind: "providerStatus", env: "OPENRELAY_STATUS" },
   /** Prepaid Open Relay credit, USD (the key's own spend cap is the hard stop). At 80% one alert; at 100% DeepSeek serves instead. */
   "providerCredit.openrelay": { kind: "amount", env: "OPENRELAY_CREDIT_USD" },
   /** The most Open Relay credit everyone but admins may use a week, USD; past it DeepSeek serves until Monday. "none" for no weekly budget. */
   "providerWeeklyCredit.openrelay": { kind: "usd", env: "OPENRELAY_WEEKLY_CREDIT_USD" },
-  /** One person's weekly Open Relay spend at most, USD, on every plan; past it DeepSeek serves them until Monday. "none" for no cap. */
+  /** One person's weekly Open Relay spend at most, USD, on every plan, on its models without a cap of their own (GLM 5.3 Flash has modelPersonWeeklyUsd.glm-5.3-flash). "none" for no cap. */
   "providerPersonWeeklyUsd.openrelay": { kind: "usd", env: "OPENRELAY_PERSON_WEEKLY_USD" },
   /** Open Relay opt-in (default false: GLM 5.3 Flash is listed for everyone). */
   "providerOptIn.openrelay": { kind: "flag", env: "OPENRELAY_OPT_IN" },

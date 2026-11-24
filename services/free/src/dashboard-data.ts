@@ -59,6 +59,8 @@ export const DASHBOARD_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   upstream_timings: ["at", "upstream", "ttfb_ms", "ttft_ms"],
   // A registry provider's credit per week (provider-store.ts): dollars only, read by every request's gate.
   provider_credit_weeks: ["week_start", "provider", "credit_usd", "user_usd", "free_usd", "internal_usd"],
+  // One model's share of an upstream's weekly credit ("<provider>:<model id>", provider-store.ts): dollars only, read by every request's gate.
+  share_weeks: ["week_start", "share", "credit_usd", "user_usd"],
   settings: ["key", "value"],
   queue: ["github_id", "queued_at", "admitted_at", "admitted_how"],
   queue_runs: ["week_start", "ran_at", "admitted", "waiting_before", "avg_usd", "actives", "budget_usd"],
