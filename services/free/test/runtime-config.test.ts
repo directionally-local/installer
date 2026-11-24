@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { readFreeConfig } from "../src/config.js";
 import { applyOverrides, parseSettingsUpdate, readOverrides, settingsView } from "../src/runtime-config.js";
 import { ADMIN_ID, completion, createInvite, createService, errorCode, MODEL, usage, type Service } from "./harness.js";
-import { OPENAI_SUPPORTED_COUNTRIES } from "../src/countries.js";
 
 const BASE_ENV = { OPENROUTER_API_KEY: "k", GITHUB_CLIENT_ID: "c", GITHUB_CLIENT_SECRET: "s", TOKEN_SIGNING_KEY: "x".repeat(32) };
 
@@ -117,9 +116,6 @@ describe("runtime settings (units)", () => {
       gpt6GuardTimeoutMs: 4000,
       gpt6TrustedWeeklyUsdCap: 0,
       gpt6Clients: "autopilot",
-      countryRules: "enforce",
-      gpt6Countries: [...OPENAI_SUPPORTED_COUNTRIES],
-      embargoedCountries: ["CU", "IR", "KP", "SY"],
       moderation: "enforce",
       moderationBlockConfidence: 0.85,
       moderationAllowlist: [],
@@ -150,6 +146,18 @@ describe("runtime settings (units)", () => {
       { openAdmission: true },
     );
   });
+
+  it("ignores stored overrides for removed settings (the country rules)", () => {
+    assert.deepEqual(
+      readOverrides([
+        { key: "override:countryRules", value: '"off"' },
+        { key: "override:gpt6Countries", value: '["US"]' },
+        { key: "override:embargoedCountries", value: '["CU"]' },
+        { key: "override:weeklyTokens", value: "1000" },
+      ]),
+      { weeklyTokens: 1000 },
+    );
+  });
 });
 
 async function setup(vars: Record<string, string> = {}): Promise<{ service: Service; admin: string; token: string }> {
@@ -177,6 +185,21 @@ describe("admin config", () => {
     assert.deepEqual(view.effective, view.env);
     assert.deepEqual(view.overrides, {});
     assert.deepEqual(view.log, []);
+  });
+
+  it("keeps working with a stale override of a removed setting in storage", async () => {
+    const { service, admin, token } = await setup();
+    // As the live store held it when the country rules were removed.
+    service.directory().ctx.storage.sql.exec("INSERT INTO settings (key, value) VALUES (?, ?)", "override:countryRules", '"off"');
+    const view = (await (await service.request("GET", "/admin/config", { token: admin })).json()) as Record<string, any>;
+    assert.deepEqual(view.overrides, {});
+    assert.equal("countryRules" in view.effective, false);
+    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { weeklyTokens: 1000 } })).status, 200);
+    assert.equal((await allowance(service, token)).tokensPerWeek, 1000);
+    service.setOpenRouter(() => completion(usage(100, 10)));
+    assert.equal((await chat(service, token)).status, 200);
+    // It can't be set again.
+    assert.equal(await errorCode(await service.request("POST", "/admin/config", { token: admin, body: { countryRules: "off" } })), "invalid_request");
   });
 
   it("changes the weekly token allowance and both per-person dollar budgets without a release", async () => {

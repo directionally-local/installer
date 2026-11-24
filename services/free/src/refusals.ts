@@ -38,7 +38,6 @@ export const REFUSAL_REASONS = {
   email_in_use: "Sign-in: email used by another account (one per inbox)",
   email_domain_daily_cap: "Sign-in: email domain daily cap",
   signin_paused: "Sign-in: free tier paused",
-  country_embargoed: "Any access: embargoed country (sign-in, API, pages)",
   // ── Requests (chat, Anthropic Messages, Responses) ──
   dl_only: "Request: free tokens outside dl",
   harness_not_allowed: "Request: other coding agents off",
@@ -63,7 +62,6 @@ export const REFUSAL_REASONS = {
   "provider_limit:person_cap": "Request: provider's weekly per-person cap or Pro ration used up",
   "provider_limit:provider": "Request: provider paused, out of credit or its weekly budget used",
   "provider_limit:autopilot_only": "Request: GPT-6 from another coding agent (Autopilot only)",
-  "provider_limit:country": "Request: GPT-6 outside OpenAI's supported countries (Tor and unknown included)",
   api_not_invited: "Request: not on the free tier",
   api_blocked: "Request: account blocked",
   api_suspended: "Request: account suspended",
@@ -140,9 +138,7 @@ export function requestRefusalReason(
           ? "provider_limit:person_cap"
           : error.reason === "autopilot_only"
             ? "provider_limit:autopilot_only"
-            : error.reason === "country"
-              ? "provider_limit:country"
-              : "provider_limit:provider";
+            : "provider_limit:provider";
     case "quota_exceeded":
       return "allowance_exhausted:full";
     case "basic_limit":

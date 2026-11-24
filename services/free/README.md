@@ -1234,8 +1234,7 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `harness_limit` | `/anthropic/v1/messages`, `/v1/chat/completions` with an OpenCode key (402) | `harness`, `share`, `resetsAt` (not for the trial), `offers`: that tool's share of the week or trial is used, the account's isn't |
 | `invalid_harness_key` | `/anthropic/v1/messages`, `/v1/chat/completions`, `/v1/models`, `/v1/events`, harness key refresh (401) | none: expired, revoked, or its sign-in ended |
 | `harness_key_limit` | `POST /v1/harness-keys` (409) | `max` |
-| `provider_limit` | chat (402) | `reason`, `provider`, `family`, `resetsAt`, `alternative`; reason `autopilot_only` (GPT-6 from another agent's harness key) also has `clients: ["autopilot"]`; reason `country` is GPT-6 outside OpenAI's supported countries |
-| `country_not_supported` | every route but `/health`, the Stripe webhook and `/email/stop` (403) | `reason: "embargo"`; pages get the message as plain text |
+| `provider_limit` | chat (402) | `reason`, `provider`, `family`, `resetsAt`, `alternative`; reason `autopilot_only` (GPT-6 from another agent's harness key) also has `clients: ["autopilot"]` |
 | `server_keys_unavailable` | `POST /v1/keys`, and any request with a server key (403) | none |
 | `not_invited` | API, and older sign-ins | none |
 
@@ -1268,9 +1267,7 @@ are deleted once the day is over, so only the number stays. Rows older than 120 
   `harness_not_allowed` (also when minting a harness key), `harness_limit`,
   `proxy_not_allowed`, `gpt_limit:cap`, `gpt_limit:security_hold`, `gpt_limit:trust` (the GPT-6
   trust gate), `provider_limit:pro_only`, `provider_limit:person_cap`, `provider_limit:provider`,
-  `provider_limit:autopilot_only` (GPT-6 from another coding agent), `provider_limit:country`
-  (GPT-6 outside OpenAI's supported countries), `country_embargoed` (any request from an embargoed
-  country, under `signin` for the sign-in pages and `other` for the rest),
+  `provider_limit:autopilot_only` (GPT-6 from another coding agent),
   `allowance_exhausted:full` (Full or Pro), `allowance_exhausted:basic`,
   `allowance_exhausted:starter`, `trial_ended`, `below_bar`, `api_queued`,
   `global_cap:weekly`, `global_cap:total`, `paused`, `credit_exhausted`, `rate_limited`,
@@ -1325,9 +1322,6 @@ with who made it and when.
 | `gpt6PresendGuard` | `GPT6_PRESEND_GUARD` | `enforce`: GPT-6 requests are checked before they are sent (see [GPT-6: pre-send checks and the trust gate](#gpt-6-pre-send-checks-and-the-trust-gate)); `off` |
 | `gpt6GuardTimeoutMs` | `GPT6_GUARD_TIMEOUT_MS` | 4000: ms each pre-send check may take; past it the request isn't sent |
 | `gpt6TrustedWeeklyUsdCap` | `GPT6_TRUSTED_WEEKLY_USD_CAP` | 0: the trust gate is off; above 0, GPT-6 only for trusted people, with this weekly budget on the free plan |
-| `countryRules` | `COUNTRY_RULES` | `enforce`: the [country rules](#countries); `off` |
-| `gpt6Countries` | `GPT6_COUNTRIES` | OpenAI's supported countries (208 ISO codes, as of 2026-11-23): where GPT-6 is served |
-| `embargoedCountries` | `EMBARGOED_COUNTRIES` | `CU`, `IR`, `KP`, `SY`: no free-tier access at all, sign-in included |
 | `gpt6Clients` | `GPT6_CLIENTS` | `autopilot`: GPT-6 only in Autopilot (see [GPT-6 in Autopilot only](#gpt-6-in-autopilot-only)); `all`: every coding agent dl launches |
 | `moderation` | `MODERATION` | `enforce`: high-risk labels get an automated review that can block (see [automated moderation review](#automated-moderation-review)); `shadow` decides and emails, never blocks; `off` is the plain high-risk email |
 | `moderationBlockConfidence` | `MODERATION_BLOCK_CONFIDENCE` | 0.85: the lowest confidence (0 to 1) a block verdict needs to block |
@@ -1454,31 +1448,6 @@ GPT-6 (`gpt-6-luna`, `gpt-6.1-sol`, `gpt-6-astra`) is served only inside Autopil
   keeps GPT-6 listed (`access: "trusted"`) with `clients: ["autopilot"]`.
 - **`gpt6Clients`** (`GPT6_CLIENTS`, runtime setting): `autopilot` (the default) or `all`, which
   serves GPT-6 to every agent as before, once OpenAI has approved it.
-
-## Countries
-
-`src/countries.ts`, from the country Cloudflare gives each request (`request.cf.country`, else
-the `CF-IPCountry` header, trusted like `CF-Connecting-IP`). The country is read per request and
-never stored or logged; only the refusal counts say a rule was met.
-
-- **GPT-6 only from OpenAI's supported countries** (`gpt6Countries`, by default the list at
-  https://developers.openai.com/api/docs/supported-countries as read on 2026-11-23). Elsewhere a
-  GPT-6 request, from any client and admins too, gets 402
-  `{"error": {"code": "provider_limit", "reason": "country", "family": "gpt6", "provider": "openai", "resetsAt": null, "alternative": "deepseek/deepseek-v4.1-flash-1017", "message": "GPT-6 isn't available in your country; DeepSeek V4.1 Flash is."}}`,
-  and `/v1/models`, `/v1/me` `models` and the unknown-model refusal leave GPT-6 out.
-- **No free-tier access from US-embargoed countries** (`embargoedCountries`: Cuba, Iran, North
-  Korea, Syria): every route but `/health`, Stripe's webhook and `/email/stop`, sign-in included,
-  gets 403 `country_not_supported` ("dl's free tier isn't available in your country or region.";
-  plain text on pages, Anthropic's error shape on `/anthropic`). The Crimea, Donetsk and Luhansk
-  regions can't be told apart: Cloudflare gives the country only (UA, which OpenAI lists "with
-  certain exceptions").
-- **Unknown countries:** Tor (`T1`) and Cloudflare's unplaced addresses (`XX`) don't get GPT-6, as
-  neither shows a supported country; they aren't embargoed. A request with no country at all (no
-  Cloudflare in front: local tests, a self-hosted run without it) isn't held to either rule.
-- **Settings:** `countryRules` (`COUNTRY_RULES`, `enforce` or `off`), and both lists as runtime
-  settings (`GPT6_COUNTRIES`, `EMBARGOED_COUNTRIES`: comma-separated ISO codes in env), so the
-  lists can be updated without a release. The embargo check reads the settings at most once a
-  minute per isolate.
 
 ## Claude Code and OpenCode through dl claude and dl opencode
 
