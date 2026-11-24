@@ -1680,6 +1680,46 @@ is set. The global USD caps count free spend on every provider (see [what the ca
 dollar allowance counts every request: OpenRouter's reported cost, or a Luminal request's tokens
 at the OpenRouter prices we were billed (see below).
 
+### Failed and cut-off requests
+
+A request reserves its prompt estimate (about 2 bytes a token, on purpose an overestimate) plus
+its output cap before it is forwarded. When the provider reports usage, that usage replaces the
+reservation. When it reports none, the reservation is **never** charged. Instead:
+
+| What happened | Charged to the person | Recorded against the provider's credit |
+| --- | --- | --- |
+| Failed before any response (429, 5xx, timeout, network error, refused key); the next upstream tries | nothing | nothing |
+| Stream failed or sent an error before any output | nothing | nothing |
+| Client cancelled before any output arrived | nothing | the realistic prompt below, no output (OpenAI bills input on a cancelled stream; Luminal and Liquid don't say; Open Relay: nothing) |
+| Non-streamed answer that is an error body without usage | nothing | nothing |
+| Stream that sent output, then was cut off (client abort, reset, no last chunk) | a realistic prompt at the person's cached share, plus the output streamed, at the model's prices | the same estimate at the provider's prices (Open Relay: nothing; Liquid: its reported charge when it sent one) |
+| Reservation the request never settled (the alarm sweeps it after 30 minutes) | nothing | the realistic prompt, no output |
+
+- **Realistic prompt**: the request body at 4 bytes a token (`REALISTIC_BYTES_PER_TOKEN`), half
+  the reservation's estimate.
+- **Cached share**: the person's own share of cached prompt tokens over everything providers
+  reported for them (`account.prompt_seen`, `cached_seen`), once at least 50,000 prompt tokens
+  were; until then, uncached. The tokens charged use `cachedTokenWeight` as usual.
+- **Output streamed**: counted as the stream passes through, never kept: the content chunks
+  (text, reasoning, tool calls) or the characters at 3 a token, whichever says more. So a client
+  can't avoid the charge by aborting after a long answer. The stream reads from the upstream
+  only as the client reads, so only output handed on is counted.
+- **Prices**: always the model's own list prices. The $1 per million tokens fallback
+  (`FALLBACK_USD_PER_MILLION_TOKENS`) is only for a model with no known prices.
+- A failed attempt followed by a backup (an upstream's `backups`, or a model's fallback) is
+  charged nothing; the backup is charged its own usage, once.
+
+Example, a typical DeepSeek agent turn (~400 KB request, ~100k prompt tokens, 96% cached) cut
+off after 400 output tokens: before, the whole reservation (~265k tokens, ~$0.27 at $1/M); now
+about 6,300 tokens and $0.0008, what the same turn costs with usage. Cancelled before output: before
+the same ~$0.27, now nothing.
+
+`GET /admin/metrics` has, per day in `daily`, `noUsageRequests`, `noUsagePeople`,
+`noUsageChargedTokens` and `noUsageCostUsd`: requests settled without usage (status `no_usage`
+or `abandoned`, admins aside) and what they were charged. They come from the raw request log,
+so only its last `rawLogKeepDays` days have them; days from before this change show what the
+old rule charged.
+
 ## Upstreams: Luminal and OpenRouter
 
 Chat requests go to one upstream, the runtime setting `primaryUpstream`:

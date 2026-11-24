@@ -26,8 +26,25 @@ export const BYTES_PER_TOKEN_ESTIMATE = 2;
  * counting the whole cap would stop people well short of their dollar allowance.
  */
 export const ESTIMATE_OUTPUT_TOKENS = 8_192;
-/** Charged when the provider reports no cost (USD per million tokens, deliberately high). */
+/**
+ * USD per million tokens for a model with no known prices (deliberately high). A known model is
+ * always priced at its own list prices, even when the provider reported nothing.
+ */
 export const FALLBACK_USD_PER_MILLION_TOKENS = 1;
+
+/**
+ * Bytes of request body per prompt token when estimating what a request really used (a request
+ * that ended without the provider reporting usage). JSON bodies of agent requests average about
+ * 4 bytes per token; BYTES_PER_TOKEN_ESTIMATE's 2 is a deliberate overestimate for reserving.
+ */
+export const REALISTIC_BYTES_PER_TOKEN = 4;
+/**
+ * Characters of streamed text per output token, counting a stream that was cut off. Tokenizers
+ * average 3–4 characters per token on code and English; 3 errs towards charging a little more.
+ */
+export const CHARS_PER_OUTPUT_TOKEN = 3;
+/** Prompt tokens a person must have had reported before their own cached share is used for an estimate. */
+export const MIN_PROMPT_TOKENS_FOR_CACHED_SHARE = 50_000;
 
 export function isAllowedModel(model: unknown): model is string {
   return isFreeModelId(model);
@@ -130,4 +147,35 @@ export function costAtPrices(usage: Usage, prices: TokenPrices): number {
 export function estimateCostUsd(promptEstimate: number, maxTokens: number, prices: TokenPrices): number {
   const output = Math.min(Math.max(0, maxTokens), ESTIMATE_OUTPUT_TOKENS);
   return (Math.max(0, promptEstimate) * prices.input + output * prices.output) / 1_000_000;
+}
+
+/** The reservation's prompt estimate (BYTES_PER_TOKEN_ESTIMATE) rescaled to a realistic one (REALISTIC_BYTES_PER_TOKEN). */
+export function realisticPromptTokens(promptEstimate: number): number {
+  return Math.ceil((Math.max(0, promptEstimate) * BYTES_PER_TOKEN_ESTIMATE) / REALISTIC_BYTES_PER_TOKEN);
+}
+
+/**
+ * Output tokens a stream carried, from what passed through: the content chunks (most providers
+ * send about one token each) or the streamed characters, whichever says more.
+ */
+export function streamedOutputTokens(chars: number, chunks: number): number {
+  return Math.max(Math.max(0, chunks), Math.ceil(Math.max(0, chars) / CHARS_PER_OUTPUT_TOKEN));
+}
+
+/**
+ * A request's usage when the provider reported none: a realistic prompt from the reservation's
+ * estimate, `cachedShare` of it cached (the person's own share so far; 0 when unknown), and the
+ * output tokens that were actually streamed. No output means nothing is estimated: a request
+ * that failed or was cancelled before any output is charged nothing.
+ */
+export function estimatedUsage(promptEstimate: number, outputTokens: number, cachedShare: number): Usage | undefined {
+  if (!(outputTokens > 0)) return undefined;
+  const promptTokens = realisticPromptTokens(promptEstimate);
+  const share = Math.min(1, Math.max(0, Number.isFinite(cachedShare) ? cachedShare : 0));
+  return { promptTokens, completionTokens: Math.ceil(outputTokens), cachedTokens: Math.floor(promptTokens * share), costUsd: undefined };
+}
+
+/** What `usage` costs at `prices`, or at the fallback price for a model with none. */
+export function costAtPricesOrFallback(usage: Usage, prices: TokenPrices | undefined): number {
+  return prices ? costAtPrices(usage, prices) : ((usage.promptTokens + usage.completionTokens) * FALLBACK_USD_PER_MILLION_TOKENS) / 1_000_000;
 }

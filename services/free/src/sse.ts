@@ -1,4 +1,4 @@
-import { parseUsage, type Usage } from "./quota.js";
+import { parseUsage, streamedOutputTokens, type Usage } from "./quota.js";
 import { exchangeFacts, exchangeUsage, mergedUsage, reportedCharge } from "./providers.js";
 import { hostOf } from "./routing.js";
 
@@ -25,6 +25,12 @@ export interface StreamOutcome {
   firstContentAt: number | undefined;
   /** Whether any content reached the client. */
   contentSent: boolean;
+  /**
+   * Output tokens the stream carried (text, reasoning and tool calls), counted from what passed
+   * through (quota.ts streamedOutputTokens): what a stream that ends without usage is charged
+   * for its output. 0 when no content passed.
+   */
+  outputTokens: number;
   /** What the provider reported it charged: Liquid's last chunk's `exchange.charge`, Open Relay's `openrelay.cost_nano_usd` (providers.ts reportedCharge); undefined elsewhere. */
   chargeUsd?: number;
   /** Liquid's seller and its own timing of the job (providers.ts exchangeFacts); undefined elsewhere. */
@@ -45,6 +51,30 @@ export function hasContent(parsed: unknown): boolean {
   });
 }
 
+/**
+ * Characters of output in a chunk's deltas or a completion's messages: text, reasoning, and tool
+ * calls' names and arguments. Only the count leaves this function.
+ */
+export function outputChars(parsed: unknown): number {
+  const choices = (parsed as { choices?: unknown } | null)?.choices;
+  if (!Array.isArray(choices)) return 0;
+  let total = 0;
+  for (const choice of choices) {
+    const part = (choice as { delta?: unknown; message?: unknown } | null);
+    const fields = (part?.delta ?? part?.message) as Record<string, unknown> | undefined;
+    if (!fields || typeof fields !== "object") continue;
+    for (const key of ["content", "reasoning", "reasoning_content"]) if (typeof fields[key] === "string") total += (fields[key] as string).length;
+    if (Array.isArray(fields.tool_calls)) {
+      for (const call of fields.tool_calls) {
+        const fn = (call as { function?: { name?: unknown; arguments?: unknown } } | null)?.function;
+        if (typeof fn?.name === "string") total += fn.name.length;
+        if (typeof fn?.arguments === "string") total += fn.arguments.length;
+      }
+    }
+  }
+  return total;
+}
+
 const MAX_LINE_BUFFER = 4 * 1024 * 1024;
 
 export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: StreamOutcome) => Promise<void>, now: () => number = () => Date.now()): ReadableStream<Uint8Array> {
@@ -57,6 +87,8 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
   let done = false;
   let host: string | undefined;
   let firstContentAt: number | undefined;
+  let chars = 0;
+  let chunks = 0;
   let chargeUsd: number | undefined;
   let metered: ReturnType<typeof exchangeUsage>;
   let facts: ReturnType<typeof exchangeFacts>;
@@ -80,7 +112,11 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
         chargeUsd = reportedCharge(parsed) ?? chargeUsd;
         metered = exchangeUsage(parsed) ?? metered;
         facts = exchangeFacts(parsed) ?? facts;
-        if (firstContentAt === undefined && hasContent(parsed)) firstContentAt = now();
+        if (hasContent(parsed)) {
+          firstContentAt ??= now();
+          chunks += 1;
+          chars += outputChars(parsed);
+        }
         if (parsed.error) {
           errored = true;
           upstreamFailed = true;
@@ -95,7 +131,7 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
     if (ended) return;
     ended = true;
     // Liquid's own metering raises the standard usage where it says more (providers.ts mergedUsage).
-    await onEnd({ usage: mergedUsage(usage, metered), errored, upstreamFailed, host, firstContentAt, contentSent: firstContentAt !== undefined, ...(chargeUsd !== undefined ? { chargeUsd } : {}), ...(facts ? { exchange: facts } : {}), endedAt: now() });
+    await onEnd({ usage: mergedUsage(usage, metered), errored, upstreamFailed, host, firstContentAt, contentSent: firstContentAt !== undefined, outputTokens: firstContentAt === undefined ? 0 : streamedOutputTokens(chars, chunks), ...(chargeUsd !== undefined ? { chargeUsd } : {}), ...(facts ? { exchange: facts } : {}), endedAt: now() });
   };
 
   return new ReadableStream<Uint8Array>({
@@ -127,5 +163,7 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
       await finish();
       await reader.cancel(reason).catch(() => undefined);
     },
-  });
+    // Read from upstream only as the client reads, so what is counted as streamed is what was
+    // handed on, not a chunk read ahead that the client never took.
+  }, { highWaterMark: 0 });
 }

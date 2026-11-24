@@ -79,7 +79,7 @@ describe("the weekly dollar cap with requests in flight", () => {
     assert.equal((await reserve(service, account, BASIC)).ok, false);
   });
 
-  it("holds an abandoned reservation's estimate until the alarm sweeps it, then charges only the prompt", async () => {
+  it("holds an abandoned reservation's estimate until the alarm sweeps it, then charges nothing", async () => {
     const { service, account } = await person();
     assert.equal((await burst(service, account, BASIC, 10)).filter((r) => r.ok).length, 10);
     service.clock.now += 31 * 60_000;
@@ -87,12 +87,11 @@ describe("the weekly dollar cap with requests in flight", () => {
     assert.equal((await reserve(service, account, BASIC)).ok, false);
     assert.equal(await account.sweep(service.clock.now), 10);
     const after = await account.allowance(service.clock.now, BASIC, "sol");
-    // Each was charged its prompt estimate at the input price: 100k × $2/M = $0.20.
-    assert.equal(after.spentUsdThisWeek, 2);
+    // Nothing reached the person, so nothing was charged (before: each its prompt estimate, $0.20).
+    assert.equal(after.spentUsdThisWeek, 0);
     const results = await burst(service, account, BASIC, 5);
-    // $2 settled leaves room for three $0.28 estimates.
-    assert.equal(results.filter((r) => r.ok).length, admits(1, estimate(SOL)));
-    assert.equal(results.filter((r) => r.ok).length, 3);
+    // The whole $3 is free again: all five $0.28 estimates fit.
+    assert.equal(results.filter((r) => r.ok).length, 5);
   });
 
   it("stops sequential use at the cap, the last request going through while any of it is left", async () => {

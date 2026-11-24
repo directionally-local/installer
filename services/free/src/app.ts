@@ -54,7 +54,7 @@ import {
   type SignInRefusal,
 } from "./messages.js";
 import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, shell, signedInDonePage, tooNewIntro } from "./pages.js";
-import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, MIN_OUTPUT_TOKENS, parseUsage, type Usage } from "./quota.js";
+import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, MIN_OUTPUT_TOKENS, parseUsage, streamedOutputTokens, type Usage } from "./quota.js";
 import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FAMILIES, FREE_MODELS, POOLS, creditPrices, fallbackOf, familyOfPool, modelById, onUpstream, type Family, type FreeModel, type Pool } from "./models.js";
 import { emailBlocked, emailDomain, normalizeEmail, plausibleEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
 import { normalizeEventCode, parseEventCodeInput, type EventCodeRow } from "./event-codes.js";
@@ -86,7 +86,7 @@ import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
 import { AUTOPILOT_ONLY_MESSAGE, AUTOPILOT_ONLY_REASON, heldFromClient, modelClients, type ModelClient } from "./gpt6-clients.js";
-import { meterStream } from "./sse.js";
+import { meterStream, outputChars } from "./sse.js";
 import type { RegistryProviderId, RegistryRoute } from "./providers.js";
 import { accessOf, approxTokens, configuredUpstreams, offeredModels, exchangeUsage, mergedUsage, exchangeRules, FALLBACK_BLOCKS, isRegistryProvider, formatRationTokens, listedUpstream, liquidPayload, modelPlans, openRelayPayload, personCapUsd, personSpendKey, proOnly, providerFallbackNotice, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, registryRoute, reportedCharge, resetDay, upstreamBlock, type ProviderBlock, type ProviderSpend } from "./providers.js";
 import { PROBE_CRON, probeOnce, probeTargets } from "./probes.js";
@@ -3489,25 +3489,47 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     reservationId: string,
     usage: Usage | undefined,
     status: string,
-    options: { chargeNothing?: boolean; host?: string; failure?: HostFailure; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean; outcome?: UpstreamOutcome; creditUsd?: number } = {},
+    options: { chargeNothing?: boolean; host?: string; failure?: HostFailure; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean; outcome?: UpstreamOutcome; creditUsd?: number; outputTokens?: number } = {},
   ) => {
     const { chargeNothing = false, host, failure } = options;
     if (host && failure && cooldownMs > 0) await hosts(c).markHostFailing(host, c.now());
     const charged = chargeNothing ? 0 : usage ? chargedTokens(usage, gate.config.cachedTokenWeight) : undefined;
     const cost = chargeNothing ? 0 : usage ? (provider === "openrouter" ? costOf(usage, 0) : costAtPrices(usage, model.prices)) : undefined;
     const rawTokens = chargeNothing ? 0 : usage ? usage.promptTokens + usage.completionTokens : undefined;
-    const settled = await person.settle({ reservationId, charged, costUsd: cost, ...(rawTokens !== undefined ? { rawTokens } : {}), limits, now: c.now() });
-    // Without usage, the credit is charged what the allowance was: the reservation at the fallback price.
+    // Without usage the person is charged an estimate (AccountObject.settle): nothing when no
+    // output was streamed, else a realistic prompt plus the output streamed, at the model's prices.
+    const noUsage = charged === undefined ? { outputTokens: options.outputTokens ?? 0, prices: model.prices, cachedTokenWeight: gate.config.cachedTokenWeight } : undefined;
+    const settled = await person.settle({ reservationId, charged, costUsd: cost, ...(rawTokens !== undefined ? { rawTokens } : {}), ...(usage && !chargeNothing ? { usage } : {}), ...(noUsage ? { noUsage } : {}), limits, now: c.now() });
+    const estimated = settled.estimate?.usage;
     // A provider that reports its charge (Liquid's `exchange.charge.total_usd`) is charged that.
-    const creditUsd = chargeNothing || provider === "openrouter" ? 0 : options.creditUsd !== undefined ? options.creditUsd : usage ? costAtPrices(usage, creditPrices(model)) : settled.costUsd;
+    // Without usage, the credit gets our best estimate of what the provider billed, apart from
+    // the person's charge: the estimate charged when output was streamed; the prompt alone when
+    // the client went away before any output (the upstream read it; OpenAI bills input on a
+    // cancelled stream); nothing when the upstream itself failed first, or on Open Relay, which
+    // doesn't bill a request it didn't finish.
+    const creditUsd =
+      chargeNothing || provider === "openrouter"
+        ? 0
+        : options.creditUsd !== undefined
+          ? options.creditUsd
+          : usage
+            ? costAtPrices(usage, creditPrices(model))
+            : provider === "openrelay"
+              ? 0
+              : estimated
+                ? costAtPrices(estimated, creditPrices(model))
+                : !options.upstreamError && settled.estimate
+                  ? costAtPrices(settled.estimate.prompt, creditPrices(model))
+                  : 0;
+    const counted = usage ?? estimated;
     const record: RequestRecord = {
       githubId: identity.githubId,
       isAdmin,
       at: started,
       model: model.id,
-      promptTokens: usage?.promptTokens ?? 0,
-      completionTokens: usage?.completionTokens ?? 0,
-      cachedTokens: usage?.cachedTokens ?? 0,
+      promptTokens: counted?.promptTokens ?? 0,
+      completionTokens: counted?.completionTokens ?? 0,
+      cachedTokens: counted?.cachedTokens ?? 0,
       chargedTokens: settled.charged,
       costUsd: settled.costUsd,
       ...(settled.paid ? { paid: true } : {}),
@@ -3998,9 +4020,10 @@ async function openRouterChat(
   if (stream && response.body && contentType.includes("text/event-stream")) {
     const metered = meterStream(
       response.body,
-      async ({ usage, errored, upstreamFailed, host, firstContentAt }) => {
+      async ({ usage, errored, upstreamFailed, host, firstContentAt, outputTokens }) => {
         await settle(usage, usage ? (errored ? "stream_error" : "ok") : "no_usage", {
           ttfbMs,
+          outputTokens,
           ...(firstContentAt !== undefined ? { ttftMs: firstContentAt - started } : {}),
           ...(upstreamFailed ? { upstreamError: true } : {}),
           ...(host ? { host } : {}),
@@ -4023,6 +4046,7 @@ async function openRouterChat(
   const allowance = await settle(usage, usage ? "ok" : "no_usage", {
     ttfbMs,
     ttftMs: c.now() - started,
+    outputTokens: usage ? 0 : streamedOutputTokens(outputChars(parsed), 0),
     ...(failure ? { upstreamError: true } : {}),
     ...(host ? { host } : {}),
     ...(failure ? { failure } : {}),
@@ -4036,7 +4060,7 @@ async function openRouterChat(
 type Settle = (
   usage: Usage | undefined,
   status: string,
-  options?: { chargeNothing?: boolean; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean; outcome?: UpstreamOutcome; creditUsd?: number },
+  options?: { chargeNothing?: boolean; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean; outcome?: UpstreamOutcome; creditUsd?: number; outputTokens?: number },
 ) => Promise<Allowance>;
 
 /** One more place to send a request that failed before any bytes: the model as `provider` serves it, and whether it is another model (the fallback). */
@@ -4107,7 +4131,7 @@ async function liquidChat(
  * Failures go back as Luminal's do (429, 502 and 503 are transient, with Retry-After), or with
  * `retry` (GLM 5.3 Flash: DeepSeek) go there; past a limit the fallback is decided before this (see chat). The credit is charged the cost Open Relay
  * reports (`openrelay.cost_nano_usd`), else the usage at the model's prices; a stream cut off
- * before its last chunk isn't billed by Open Relay but is charged its usage-less reservation here.
+ * before its last chunk isn't billed by Open Relay; the person is charged the output it streamed (see settle).
  */
 async function openRelayChat(
   c: Ctx,
@@ -4188,9 +4212,10 @@ async function compatibleChat(
   if (stream && response.body && contentType.includes("text/event-stream")) {
     const metered = meterStream(
       response.body,
-      async ({ usage, errored, upstreamFailed, firstContentAt, chargeUsd }) => {
+      async ({ usage, errored, upstreamFailed, firstContentAt, chargeUsd, outputTokens }) => {
         await settle(usage, usage ? (errored ? "stream_error" : "ok") : "no_usage", {
           ttfbMs,
+          outputTokens,
           ...(firstContentAt !== undefined ? { ttftMs: firstContentAt - started } : {}),
           ...(upstreamFailed ? { upstreamError: true } : {}),
           ...(chargeUsd !== undefined ? { creditUsd: chargeUsd } : {}),
@@ -4208,7 +4233,7 @@ async function compatibleChat(
   const parsed = parseJson(text) as { usage?: unknown; error?: unknown } | undefined;
   const usage = mergedUsage(parseUsage(parsed?.usage), exchangeUsage(parsed));
   const charge = reportedCharge(parsed, response.headers.get("openrelay-cost-nano-usd"));
-  const allowance = await settle(usage, usage ? "ok" : "no_usage", { ttfbMs, ttftMs: c.now() - started, ...(parsed?.error ? { upstreamError: true } : {}), ...(charge !== undefined ? { creditUsd: charge } : {}) });
+  const allowance = await settle(usage, usage ? "ok" : "no_usage", { ttfbMs, ttftMs: c.now() - started, outputTokens: usage ? 0 : streamedOutputTokens(outputChars(parsed), 0), ...(parsed?.error ? { upstreamError: true } : {}), ...(charge !== undefined ? { creditUsd: charge } : {}) });
   return new Response(text, {
     status: 200,
     headers: { "content-type": contentType || "application/json", "cache-control": "no-store", ...quotaHeaders(allowance) },
@@ -4290,9 +4315,10 @@ async function openaiChat(
   if (stream && response.body && contentType.includes("text/event-stream")) {
     const metered = meterStream(
       toChatStream(response.body),
-      async ({ usage, errored, upstreamFailed, firstContentAt }) => {
+      async ({ usage, errored, upstreamFailed, firstContentAt, outputTokens }) => {
         await settle(usage, usage ? (errored ? "stream_error" : "ok") : "no_usage", {
           ttfbMs,
+          outputTokens,
           ...(firstContentAt !== undefined ? { ttftMs: firstContentAt - started } : {}),
           ...(upstreamFailed ? { upstreamError: true } : {}),
         });
@@ -4312,7 +4338,7 @@ async function openaiChat(
   const text = translated ? JSON.stringify(toChatCompletion(upstream)) : upstreamText;
   const parsed = parseJson(text) as { usage?: unknown; error?: unknown } | undefined;
   const usage = parseUsage(parsed?.usage);
-  const allowance = await settle(usage, usage ? "ok" : "no_usage", { ttfbMs, ttftMs: c.now() - started, ...(parsed?.error ? { upstreamError: true } : {}) });
+  const allowance = await settle(usage, usage ? "ok" : "no_usage", { ttfbMs, ttftMs: c.now() - started, outputTokens: usage ? 0 : streamedOutputTokens(outputChars(parsed), 0), ...(parsed?.error ? { upstreamError: true } : {}) });
   return new Response(text, {
     status: 200,
     headers: { "content-type": translated ? "application/json" : contentType || "application/json", "cache-control": "no-store", ...quotaHeaders(allowance) },

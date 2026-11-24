@@ -156,7 +156,7 @@ describe("chat completions", () => {
     assert.equal((await me(service, token)).usedThisWeek, 100 + 50 + 16);
   });
 
-  it("charges the whole reservation when a stream reports no usage", async () => {
+  it("charges a stream without usage a realistic prompt and the output it streamed, not the reservation", async () => {
     const { service, token } = await member();
     service.setOpenRouter(() => sse([JSON.stringify({ choices: [{ delta: { content: "hi" } }] })]));
     const response = await chat(service, token, { stream: true, max_tokens: 1000 });
@@ -164,7 +164,8 @@ describe("chat completions", () => {
     const forwarded = service.calls.openRouter[0]!.body;
     const bodyBytes = new TextEncoder().encode(JSON.stringify({ model: MODEL, messages: [{ role: "user", content: "hello" }], stream: true, max_tokens: 1000 })).length;
     assert.equal(forwarded.max_tokens, 1000);
-    assert.equal((await me(service, token)).usedThisWeek, Math.ceil(bodyBytes / 2) + 1000);
+    // The prompt at ~4 bytes a token (not the reservation's 2), plus the one token streamed.
+    assert.equal((await me(service, token)).usedThisWeek, Math.ceil(Math.ceil(bodyBytes / 2) / 2) + 1);
   });
 
   it("settles a stream the client abandons", async () => {
@@ -173,7 +174,7 @@ describe("chat completions", () => {
     const response = await chat(service, token, { stream: true, max_tokens: 300 });
     await response.body!.cancel();
     const allowance = await me(service, token);
-    assert.ok(allowance.usedThisWeek > 300, "charged the reservation");
+    assert.equal(allowance.usedThisWeek, 0, "nothing reached the client, so nothing is charged");
     const held = await service.account(100).allowance(service.clock.now, { weeklyTokens: 50_000_000, weeklyUsd: undefined }, "deepseek");
     assert.equal(held.pools.deepseek.reserved, 0, "nothing left reserved");
   });
@@ -293,14 +294,14 @@ describe("chat completions", () => {
     assert.equal((await me(service, token)).usedThisWeek, 0);
   });
 
-  it("charges reservations whose request never came back for their prompt, not the whole reservation", async () => {
+  it("charges reservations whose request never came back nothing", async () => {
     const { service, token } = await member();
     const person = service.account(100);
     const reserved = await person.reserve({ pool: "deepseek", model: MODEL, promptEstimate: 100, requestedMaxTokens: 400, limits: { weeklyTokens: 50_000_000, weeklyUsd: 5 }, now: service.clock.now });
     assert.equal(reserved.ok, true);
     assert.equal(await person.sweep(service.clock.now + 31 * 60_000), 1);
-    // The prompt estimate (100), not the reservation (100 + 400 of output never delivered).
-    assert.equal((await me(service, token)).usedThisWeek, 100);
+    // Nothing reached the person (before: the prompt estimate, 100; earlier still the whole reservation).
+    assert.equal((await me(service, token)).usedThisWeek, 0);
     const spend = await service.directory().spend(service.clock.now);
     assert.equal(spend.requests, 1);
     assert.equal(spend.spentUsd, 0, "an abandoned request is never OpenRouter cash");

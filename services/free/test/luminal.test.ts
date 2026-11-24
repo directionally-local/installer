@@ -49,14 +49,16 @@ function rows(service: Service): Array<Record<string, any>> {
 
 const alertTexts = (service: Service) => service.calls.webhooks.map((hook) => String(hook.body.text));
 
-/** A stream with `content` chunks, then an error part way (no [DONE]). */
+/** A stream with `content` chunks, delivered, then an error part way (no [DONE]). */
 function brokenStream(content: string[]): Response {
   const encoder = new TextEncoder();
+  const left = [...content];
   return new Response(
     new ReadableStream<Uint8Array>({
-      start(controller) {
-        for (const text of content) controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] })}\n\n`));
-        controller.error(new Error("connection reset"));
+      pull(controller) {
+        const text = left.shift();
+        if (text === undefined) controller.error(new Error("connection reset"));
+        else controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] })}\n\n`));
       },
     }),
     { status: 200, headers: { "content-type": "text/event-stream" } },
@@ -188,7 +190,7 @@ describe("Luminal errors (no automatic fallback)", () => {
     assert.equal(service.calls.openRouter.length, 0);
     const row = rows(service).at(-1)!;
     assert.deepEqual([row.upstream, row.status, row.upstream_error], ["luminal", "no_usage", 1]);
-    assert.ok(row.credit_usd > 0, "without usage, the credit is charged the reservation at the fallback price");
+    assert.ok(row.credit_usd > 0, "without usage, the credit is charged the estimate of what was streamed");
   });
 
   it("fails a stream before any content the same way: the client retries", async () => {
