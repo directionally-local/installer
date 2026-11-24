@@ -1077,6 +1077,8 @@ const DEEPSEEK_BACKFILL_DAYS = 14;
 
 /** Timings older than this are dropped: the dashboard shows today and this week. */
 const TIMINGS_MAX_AGE_MS = 15 * DAY_MS;
+/** weekly_reset goes to people with a request in this many days. */
+export const WEEKLY_RESET_ACTIVE_DAYS = 28;
 
 /** Set in `settings` once `daily_activity` has been built from the existing log. */
 const ROLLUP_READY = "rollup:daily_activity";
@@ -1924,7 +1926,7 @@ export class DirectoryObject extends DurableObject {
    * being sent, one already sent or being sent today, or (with `retry` only) a failed attempt
    * that may be tried once more. Atomic, so two runs can't both claim it.
    */
-  async claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean }): Promise<UserEmailClaim | undefined> {
+  async claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean; dailyLimit?: number }): Promise<UserEmailClaim | undefined> {
     const sql = this.ctx.storage.sql;
     const day = Math.floor(input.now / DAY_MS);
     return this.ctx.storage.transactionSync((): UserEmailClaim | undefined => {
@@ -1946,6 +1948,8 @@ export class DirectoryObject extends DurableObject {
       // At most one a day, except the answer to an access request the person asked for.
       const today = sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND day = ? AND status IN ('pending', 'sent') LIMIT 1", input.githubId, day).toArray();
       if (today.length > 0 && input.kind !== "access_granted") return undefined;
+      // `dailyLimit` (the weekly_reset run): at most this many emails to users claimed today, every kind.
+      if (input.dailyLimit !== undefined && this.#userEmailsToday(day) >= input.dailyLimit) return undefined;
       sql.exec(
         `INSERT INTO user_emails (github_id, kind, period, status, attempts, day, claimed_at) VALUES (?, ?, ?, 'pending', 1, ?, ?)
          ON CONFLICT (github_id, kind, period) DO UPDATE SET status = 'pending', attempts = attempts + 1, day = excluded.day, claimed_at = excluded.claimed_at`,
@@ -1989,7 +1993,8 @@ export class DirectoryObject extends DurableObject {
     const retries = sql
       .exec<{ github_id: number; kind: UserEmailKind; period: string }>(
         // Broadcasts are retried only by the owner calling the endpoint again.
-        "SELECT github_id, kind, period FROM user_emails WHERE status = 'failed' AND attempts < 2 AND kind != 'broadcast' AND (kind != 'week_80' OR period = ?) ORDER BY claimed_at",
+        // The weekly ones (week_80, weekly_reset) only within their own week.
+        "SELECT github_id, kind, period FROM user_emails WHERE status = 'failed' AND attempts < 2 AND kind != 'broadcast' AND (kind NOT IN ('week_80', 'weekly_reset') OR period = ?) ORDER BY claimed_at",
         week,
       )
       .toArray()
@@ -2025,6 +2030,87 @@ export class DirectoryObject extends DurableObject {
         .toArray(),
     );
     return { retries, didntStart, goneQuiet };
+  }
+
+  /** Emails to users claimed on UTC day `day`, every kind and outcome: what the daily limit counts. */
+  #userEmailsToday(day: number): number {
+    return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM user_emails WHERE day = ?", day).toArray()[0]?.n ?? 0;
+  }
+
+  /** The same, for the weekly_reset run's budget (`now`'s UTC day). */
+  async userEmailsClaimedToday(now: number): Promise<number> {
+    return this.#userEmailsToday(Math.floor(now / DAY_MS));
+  }
+
+  /**
+   * Who may get this week's weekly_reset (user-email-send.ts), github id above `after`, in id
+   * order, at most `limit`: active (never blocked), with an email and stop not pressed, not an
+   * admin (unless `includeAdmins`), not waiting in the queue, a request in the last 28 days, and
+   * no weekly_reset row for this week yet (a failed one is the daily run's retry). Each comes with
+   * the state their limits are worked out from, as their own requests get it; the allowance
+   * itself (no tokens, the trial, Pro) is checked by the caller against their Account object.
+   * `last`: the last id this page looked at (admins included), null when there were none.
+   */
+  async weeklyResetCandidates(input: { now: number; after: number; limit: number; policy: Policy; adminIds: number[]; includeAdmins: boolean }): Promise<{ people: Array<{ githubId: number; login: string; person: PersonState }>; last: number | null }> {
+    const sql = this.ctx.storage.sql;
+    const week = String(weekStart(input.now));
+    const rows = sql
+      .exec<{ github_id: number; login: string; admitted_via: string }>(
+        `SELECT p.github_id, p.login, p.admitted_via FROM people p
+         JOIN person_totals t ON t.github_id = p.github_id
+         LEFT JOIN queue q ON q.github_id = p.github_id
+         WHERE p.github_id > ? AND p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0
+           AND NOT (q.github_id IS NOT NULL AND q.admitted_at IS NULL)
+           AND t.last_at > ?
+           AND NOT EXISTS (SELECT 1 FROM user_emails e WHERE e.github_id = p.github_id AND e.kind = 'weekly_reset' AND e.period = ?)
+         ORDER BY p.github_id LIMIT ?`,
+        input.after,
+        input.now - WEEKLY_RESET_ACTIVE_DAYS * DAY_MS,
+        week,
+        input.limit,
+      )
+      .toArray();
+    const people = rows
+      .filter((row) => input.includeAdmins || (row.admitted_via !== "admin" && !input.adminIds.includes(row.github_id)))
+      .map((row) => ({ githubId: row.github_id, login: row.login, person: this.#personState(row.github_id, input.now, input.policy) }));
+    return { people, last: rows.at(-1)?.github_id ?? null };
+  }
+
+  /**
+   * How far this week's weekly_reset run got: `day` (UTC day number) it last ran, the last github
+   * id it went through that day, and whether that day's pass reached the end. Each new day starts
+   * over from the first id, so people the one-a-day cap held back get theirs the next day.
+   */
+  async weeklyResetProgress(): Promise<{ day: number; after: number; done: boolean } | null> {
+    const raw = this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM settings WHERE key = 'weekly_reset_progress'").toArray()[0]?.value;
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as { day?: unknown; after?: unknown; done?: unknown };
+      return typeof parsed.day === "number" && typeof parsed.after === "number" ? { day: parsed.day, after: parsed.after, done: parsed.done === true } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async setWeeklyResetProgress(progress: { day: number; after: number; done: boolean }): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO settings (key, value) VALUES ('weekly_reset_progress', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+      JSON.stringify({ day: progress.day, after: progress.after, done: progress.done }),
+    );
+  }
+
+  /** weekly_reset per week (its Monday, Unix ms) from `from` to `to`: sent and failed, counts only. */
+  async weeklyResetCounts(from: number, to: number): Promise<Array<{ week: number; sent: number; failed: number }>> {
+    return this.ctx.storage.sql
+      .exec<{ period: string; sent: number; failed: number }>(
+        `SELECT period, SUM(status = 'sent') AS sent, SUM(status = 'failed') AS failed FROM user_emails
+         WHERE kind = 'weekly_reset' AND CAST(period AS INTEGER) >= ? AND CAST(period AS INTEGER) <= ?
+         GROUP BY period ORDER BY CAST(period AS INTEGER)`,
+        weekStart(from),
+        to,
+      )
+      .toArray()
+      .map((row) => ({ week: Number(row.period), sent: row.sent ?? 0, failed: row.failed ?? 0 }));
   }
 
   /**

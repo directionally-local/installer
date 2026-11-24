@@ -62,14 +62,20 @@ describe("emails to users: the copy", () => {
   it("is lowercase, has no em or en dash, never names the person, and ends with the stop link", () => {
     for (const [kind, copy] of Object.entries(USER_EMAILS)) {
       for (const text of [copy.subject, copy.body, FOOTER].map((part) => part.replace("{unsubscribeUrl}", ""))) {
-        // Links keep their case (an invite code is case-sensitive); the words around them don't.
-        const words = text.replace(/https?:\/\/\S+/g, "");
+        // Links keep their case (an invite code is case-sensitive), and so does the install
+        // command's curl flags; the words around them don't.
+        const words = text.replace(/https?:\/\/\S+/g, "").replace("curl -fsSL", "");
         assert.equal(words, words.toLowerCase(), `${kind} isn't all lowercase`);
-        assert.doesNotMatch(text, /[—–]/, `${kind} has an em or en dash`);
-        assert.doesNotMatch(text, /\{login\}/, `${kind} uses the login`);
+        assert.doesNotMatch(text, /[—–`]/, `${kind} has an em or en dash, or a backtick (plain text)`);
+        // Only weekly_reset's invite link carries the login, inside the URL.
+        assert.doesNotMatch(text.replace("https://dl.new/r/{login}", ""), /\{login\}/, `${kind} uses the login`);
       }
       assert.match(copy.body, /^hey,\n/, `${kind} starts with "hey,"`);
-      const rendered = renderUserEmail(kind as keyof typeof USER_EMAILS, { resets: "monday 10 nov", unsubscribeUrl: "https://free.directionallylocal.com/email/stop?u=1&t=x" });
+      const rendered = renderUserEmail(kind as keyof typeof USER_EMAILS, {
+        resets: "monday 10 nov",
+        unsubscribeUrl: "https://free.directionallylocal.com/email/stop?u=1&t=x",
+        weeklyReset: { tokens: 10_000_000, fullTokens: 50_000_000, login: "alice" },
+      });
       assert.match(rendered.body, /\n\ndon't want these\? https:\/\/free\.directionallylocal\.com\/email\/stop\?u=1&t=x\n$/);
       assert.doesNotMatch(rendered.body, /\{\w+\}/, `${kind} has a placeholder left`);
     }

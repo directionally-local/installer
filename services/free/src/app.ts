@@ -108,11 +108,15 @@ import {
   verifyStopToken,
   trialMostlyUsed,
   weekMostlyUsed,
+  WEEKLY_RESET_FIRST_WEEK,
+  weeklyResetTokens,
+  weeklyResetWindow,
   type UserEmailBinding,
   type UserEmailStore,
   type UserEmailTransport,
+  type WeeklyResetSkip,
 } from "./user-email-send.js";
-import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind } from "./user-emails.js";
+import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
 import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, onlyListed, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
 import { refusalsCsv, refusalsView, requestClient, requestRefusalReason, type RefusalClient, type RefusalReason } from "./refusals.js";
 import { allowedReturn, CAMPAIGN_CLIENT_STEPS, campaignFromParams, campaignTotals, isInstallOption, ONE_TIME_CODE, parseCampaign, planFor, WEB_SESSION_TTL_S, WEB_STATE, webCors, webFunnelCsv, type Campaign, type CampaignStep, type WebStep } from "./web-signup.js";
@@ -439,6 +443,14 @@ export function createHandler(options: HandlerOptions = {}): {
         } catch (error) {
           console.error("raw log pruning: run failed", error instanceof Error ? error.name : "error");
         }
+        // Mondays from 01:30 UTC through Tuesday, it carries on the weekly_reset email where the
+        // daily run stopped (nothing on other days, without touching the Directory).
+        try {
+          const at = now();
+          if (weeklyResetWindow(at, "tick")) await scheduledWeeklyReset(env, readFreeConfig(env as unknown as Record<string, unknown>), fetcher, at, emailGapMs, "tick");
+        } catch (error) {
+          console.error("user emails (weekly_reset): run failed", error instanceof Error ? error.name : "error");
+        }
         return;
       }
       if (controller.cron !== DIGEST_CRON) {
@@ -454,6 +466,12 @@ export function createHandler(options: HandlerOptions = {}): {
         await scheduledUserEmails(env, config, fetcher, now(), emailGapMs);
       } catch (error) {
         console.error("user emails (daily): run failed", error instanceof Error ? error.name : "error");
+      }
+      // After the daily emails, so they go first within the day's limit.
+      try {
+        await scheduledWeeklyReset(env, config, fetcher, now(), emailGapMs, "daily");
+      } catch (error) {
+        console.error("user emails (weekly_reset): run failed", error instanceof Error ? error.name : "error");
       }
     },
     async fetch(request: Request, env: Env, execution?: BackgroundContext): Promise<Response> {
@@ -1300,6 +1318,147 @@ async function scheduledUserEmails(env: Env, envConfig: FreeConfig, fetcher: Fet
 
 /** At most this many emails to users per daily run; the rest wait a day. */
 const MAX_DAILY_USER_EMAILS = 300;
+
+/** weekly_reset: sends per run at most (the day's total stays within MAX_DAILY_USER_EMAILS). */
+const WEEKLY_RESET_BATCH = 100;
+/** weekly_reset: candidates per Directory call. */
+const WEEKLY_RESET_PAGE = 100;
+
+/**
+ * One weekly_reset candidate's own weekly tokens, as `dl status` shows them (their limits as their
+ * own requests get them, and their Account object's allowance), or why they don't get it.
+ */
+async function weeklyResetFor(env: Env, config: FreeConfig, candidate: { githubId: number; person: PersonState }, now: number): Promise<number | WeeklyResetSkip> {
+  const { githubId, person } = candidate;
+  if (person.blocked) return "not_active";
+  const trial = onTrial(config, githubId, person.admittedAt);
+  const limits = allocated(config, limitsFor(config, person.bonusTokens, person.level, person.batchFlagged, trial, person.trialBonusTokens), githubId, person, now);
+  const allowance = await env.ACCOUNT.getByName(`gh:${githubId}`).allowance(now, limits);
+  return weeklyResetTokens(allowance, trial);
+}
+
+/** weekly_reset's {tokens}, {grows} and {login} for one person: the invite link's code is their referral code (their login). */
+function weeklyResetValues(config: FreeConfig, candidate: { login: string; person: PersonState }, tokens: number): WeeklyResetValues {
+  return { tokens, fullTokens: config.weeklyTokens, login: candidate.person.referral?.code ?? candidate.login.toLowerCase() };
+}
+
+/**
+ * The Monday "tokens reset" email, weekly_reset. Runs from the daily run on Monday (after its
+ * other emails) and from the 10-minute ticks after it, Monday and Tuesday (weeklyResetWindow).
+ * Each run sends at most WEEKLY_RESET_BATCH, and only while fewer than MAX_DAILY_USER_EMAILS
+ * emails to users were claimed that UTC day; it goes through people in github id order and keeps
+ * its place in the Directory, so the next run carries on. A day whose pass reached the end is
+ * done; Tuesday starts over for anyone Monday's one-a-day cap held back. The user_emails row
+ * (kind weekly_reset, period the week's Monday) keeps it to once a week per person. Needs the
+ * `userEmails` and `weeklyResetEmail` settings on.
+ */
+async function scheduledWeeklyReset(env: Env, envConfig: FreeConfig, fetcher: Fetch, now: number, gapMs: number, via: "daily" | "tick"): Promise<void> {
+  if (!weeklyResetWindow(now, via)) return;
+  const transport = userEmailVia({ env, config: envConfig, fetch: fetcher });
+  if (!transport) return;
+  const store = env.DIRECTORY.getByName("directory");
+  const config = applyOverrides(envConfig, await store.overrides());
+  if (!userEmailsOn(config, transport) || !config.weeklyResetEmail) return;
+  const day = Math.floor(now / DAY_MS);
+  const saved = await store.weeklyResetProgress();
+  if (saved && saved.day === day && saved.done) return;
+  let after = saved && saved.day === day ? saved.after : 0;
+  let room = Math.min(WEEKLY_RESET_BATCH, MAX_DAILY_USER_EMAILS - (await store.userEmailsClaimedToday(now)));
+  if (room <= 0) return;
+  const key = await signingKey(config);
+  const policy = policyOf(config);
+  const period = String(weekStart(now));
+  const outcomes: Array<"sent" | "failed" | "skipped"> = [];
+  let done = false;
+  while (room > 0) {
+    const page = await store.weeklyResetCandidates({ now, after, limit: WEEKLY_RESET_PAGE, policy, adminIds: [...config.adminGithubIds], includeAdmins: config.userEmailsToAdmins });
+    if (page.last === null) {
+      done = true;
+      break;
+    }
+    for (const candidate of page.people) {
+      if (room <= 0) break;
+      const tokens = await weeklyResetFor(env, config, candidate, now);
+      if (typeof tokens === "number") {
+        const outcome = await deliverUserEmail({
+          store: store as unknown as UserEmailStore,
+          transport,
+          config,
+          signingKey: key,
+          base: config.publicUrl ?? EMAIL_STOP_BASE,
+          kind: "weekly_reset",
+          githubId: candidate.githubId,
+          period,
+          now,
+          weeklyReset: weeklyResetValues(config, candidate, tokens),
+          dailyLimit: MAX_DAILY_USER_EMAILS,
+        });
+        outcomes.push(outcome);
+        if (outcome !== "skipped") {
+          room--;
+          if (gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
+        }
+      }
+      after = candidate.githubId;
+    }
+    // Past admins at the end of the page too, unless the run stopped inside it.
+    if (room > 0) after = page.last;
+    await store.setWeeklyResetProgress({ day, after, done: false });
+  }
+  await store.setWeeklyResetProgress({ day, after, done });
+  logUserEmails("weekly_reset", outcomes);
+}
+
+/**
+ * GET /admin/emails/weekly-reset: a dry run of this week's weekly_reset. Sends nothing and
+ * records nothing: who would still get it this week (`count`, of them `belowFull`), who is
+ * skipped and why, what already went this week, and 3 rendered samples (with the calling admin's
+ * own stop link). Works while the settings are off.
+ */
+async function adminWeeklyResetPreview(c: Ctx, config: FreeConfig, adminId: number): Promise<Response> {
+  const now = c.now();
+  const week = weekStart(now);
+  const policy = policyOf(config);
+  const unsubscribeUrl = await stopUrl(config.publicUrl ?? EMAIL_STOP_BASE, await signingKey(config), adminId);
+  const skipped: Record<WeeklyResetSkip, number> = { trial: 0, pro: 0, no_allowance: 0, not_active: 0 };
+  const samples: Array<{ githubId: number; login: string; tokens: number; belowFull: boolean; subject: string; body: string }> = [];
+  let count = 0;
+  let belowFull = 0;
+  let after = 0;
+  for (;;) {
+    const page = await directory(c).weeklyResetCandidates({ now, after, limit: WEEKLY_RESET_PAGE, policy, adminIds: [...c.config.adminGithubIds], includeAdmins: config.userEmailsToAdmins });
+    if (page.last === null) break;
+    for (const candidate of page.people) {
+      const tokens = await weeklyResetFor(c.env, config, candidate, now);
+      if (typeof tokens !== "number") {
+        skipped[tokens]++;
+        continue;
+      }
+      count++;
+      const below = tokens < config.weeklyTokens;
+      if (below) belowFull++;
+      if (samples.length < 3) {
+        const email = renderUserEmail("weekly_reset", { resets: resetsText(weekEnd(now)), unsubscribeUrl, weeklyReset: weeklyResetValues(config, candidate, tokens) });
+        samples.push({ githubId: candidate.githubId, login: candidate.login, tokens, belowFull: below, subject: email.subject, body: email.body });
+      }
+    }
+    after = page.last;
+  }
+  const thisWeek = (await directory(c).weeklyResetCounts(week, week))[0] ?? { sent: 0, failed: 0 };
+  return json({
+    week: isoDay(week),
+    firstWeek: isoDay(WEEKLY_RESET_FIRST_WEEK),
+    on: config.weeklyResetEmail,
+    emailsOn: config.userEmails,
+    provider: userEmailVia(c)?.provider ?? null,
+    fullTokens: config.weeklyTokens,
+    count,
+    belowFull,
+    skipped,
+    alreadyThisWeek: { sent: thisWeek.sent, failed: thisWeek.failed },
+    samples,
+  });
+}
 
 /**
  * GET /email/stop?u=<github id>&t=<hmac>: a page with one button. POST (the button, or a mail
@@ -4580,6 +4739,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     return "code" in result ? failed(result) : json(result);
   }
   if (method === "POST" && rest === "emails/test") return adminTestEmail(c, identity.githubId);
+  if (method === "GET" && rest === "emails/weekly-reset") return adminWeeklyResetPreview(c, config, identity.githubId);
   if (method === "POST" && rest === "emails/broadcast") return adminBroadcast(c, config);
   if (method === "POST" && rest === "grant") {
     const body = (await readJson(c)) ?? {};
@@ -4898,7 +5058,12 @@ async function sendTestEmail(c: Ctx, adminId: number, body: Record<string, unkno
   const unsubscribeUrl = await stopUrl(c.config.publicUrl ?? EMAIL_STOP_BASE, await signingKey(c.config), adminId);
   const email = copy?.ok
     ? { subject: copy.subject, body: broadcastBody(copy.text, unsubscribeUrl) }
-    : renderUserEmail(kind, { resets: resetsText(weekEnd(c.now())), unsubscribeUrl });
+    : renderUserEmail(kind, {
+        resets: resetsText(weekEnd(c.now())),
+        unsubscribeUrl,
+        // weekly_reset as a Full person sees it, with the admin's own invite link.
+        ...(kind === "weekly_reset" ? { weeklyReset: { tokens: c.config.weeklyTokens, fullTokens: c.config.weeklyTokens, login: ((await directory(c).getPerson(adminId))?.login ?? "dl").toLowerCase() } } : {}),
+      });
   const outcome = await sendPlainEmail(transport, c.config, { to, subject: email.subject, text: email.body, unsubscribeUrl, idempotencyKey: `dl-test-email-${crypto.randomUUID()}` });
   if (!outcome.ok) return { status: 502, code: "email_failed", message: `The provider refused it, code ${outcome.code ?? "error"}.`, extra: { provider: transport.provider, code: outcome.code ?? "error" } };
   return { sent: true, provider: transport.provider, kind: copy ? "broadcast" : kind, to, messageId: outcome.messageId ?? null };
@@ -5180,7 +5345,7 @@ async function adminMetrics(c: Ctx): Promise<Response> {
   const from = parse("from") ?? to - 27 * DAY_MS;
   if (Number.isNaN(to) || Number.isNaN(from) || from > to) return apiError(400, "invalid_request", "from and to must be ISO dates with from <= to.");
   if (to - from > 366 * DAY_MS) return apiError(400, "invalid_request", "The range can't be longer than 366 days.");
-  const [metrics, refusals, noGithub, guard, pro, campaigns] = await Promise.all([
+  const [metrics, refusals, noGithub, guard, pro, campaigns, weeklyReset] = await Promise.all([
     directory(c).metrics({ from, to, now, adminIds: [...c.config.adminGithubIds], rawLogKeepDays: c.config.rawLogKeepDays }),
     directory(c).refusals(Math.floor(from / DAY_MS), Math.floor(to / DAY_MS)),
     directory(c).noGithubDays({ from: Math.floor(from / DAY_MS) * DAY_MS, until: Math.floor(to / DAY_MS) * DAY_MS + DAY_MS }),
@@ -5190,6 +5355,8 @@ async function adminMetrics(c: Ctx): Promise<Response> {
     directory(c).proFunnel({ from: Math.floor(from / DAY_MS) * DAY_MS, until: Math.floor(to / DAY_MS) * DAY_MS + DAY_MS, adminIds: [...c.config.adminGithubIds] }),
     // dl.new's link campaigns per UTC day (web-signup.ts): tags and counts only.
     directory(c).campaignRows(Math.floor(from / DAY_MS), Math.floor(to / DAY_MS)),
+    // The Monday "tokens reset" email per week (its Monday): sent and failed.
+    directory(c).weeklyResetCounts(from, to),
   ]);
   return json({
     ...metrics,
@@ -5202,6 +5369,7 @@ async function adminMetrics(c: Ctx): Promise<Response> {
       days: campaigns.map((row) => ({ date: isoDay(row.day * DAY_MS), source: row.source, medium: row.medium, campaign: row.campaign, ref: row.ref, step: row.step, n: row.n })),
       totals: campaignTotals(campaigns),
     },
+    weeklyResetEmails: weeklyReset.map((row) => ({ week: isoDay(row.week), sent: row.sent, failed: row.failed })),
     generatedAt: new Date(now).toISOString(),
     today: isoDay(now),
   });

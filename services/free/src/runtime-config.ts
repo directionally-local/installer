@@ -182,6 +182,8 @@ export const RUNTIME_SETTINGS = {
   speedProbes: { kind: "flag", env: "SPEED_PROBES" },
   /** Emails to users (user-emails.ts) on or off; they also need the USER_EMAIL binding or RESEND_API_KEY. */
   userEmails: { kind: "flag", env: "USER_EMAILS" },
+  /** The Monday "tokens reset" email (weekly_reset) on or off; userEmails off stops it too. */
+  weeklyResetEmail: { kind: "flag", env: "WEEKLY_RESET_EMAIL" },
   /** Free tokens inside dl only: chat requests without session events are refused (app.ts). */
   dlOnly: { kind: "flag", env: "DL_ONLY" },
   /** Free tokens in other coding agents launched by dl (`dl claude`); false refuses them (harness_not_allowed). */

@@ -251,6 +251,11 @@ export interface FreeConfig extends RegistrySettingsConfig {
   /** Send them to admins too (USER_EMAILS_TO_ADMINS), for testing. Off by default. */
   userEmailsToAdmins: boolean;
   /**
+   * The Monday "tokens reset" email (weekly_reset, user-email-send.ts) on or off
+   * (WEEKLY_RESET_EMAIL, default on); also a runtime setting. `userEmails` off stops it too.
+   */
+  weeklyResetEmail: boolean;
+  /**
    * Free tokens work inside dl (Autopilot) only (DL_ONLY, default on); also a runtime setting.
    * A free-plan account that sends chat requests but no session events is refused (app.ts).
    */
@@ -689,6 +694,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     emailReplyTo: emailAddress(env.EMAIL_REPLY_TO, "EMAIL_REPLY_TO") ?? DEFAULTS.emailReplyTo,
     userEmails: flag(env.USER_EMAILS, true, "USER_EMAILS"),
     userEmailsToAdmins: flag(env.USER_EMAILS_TO_ADMINS, false, "USER_EMAILS_TO_ADMINS"),
+    weeklyResetEmail: flag(env.WEEKLY_RESET_EMAIL, true, "WEEKLY_RESET_EMAIL"),
     dlOnly: flag(env.DL_ONLY, DEFAULTS.dlOnly, "DL_ONLY"),
     allowOtherHarnesses: flag(env.ALLOW_OTHER_HARNESSES, DEFAULTS.allowOtherHarnesses, "ALLOW_OTHER_HARNESSES"),
     otherHarnessShare: share(env.OTHER_HARNESS_SHARE, DEFAULTS.otherHarnessShare, "OTHER_HARNESS_SHARE"),
