@@ -1377,6 +1377,7 @@ with who made it and when.
 | `luminalWeeklyCreditUsd` | `LUMINAL_WEEKLY_CREDIT_USD` | 250; `none` for no weekly credit budget |
 | `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
 | `userEmails` | `USER_EMAILS` | true (sends only with the `USER_EMAIL` binding or `RESEND_API_KEY`) |
+| `weeklyResetEmail` | `WEEKLY_RESET_EMAIL` | true: the Monday "tokens reset" email (`weekly_reset`); false stops it alone (`userEmails` off stops it too) |
 | `dlOnly` | `DL_ONLY` | true (a dl sign-in token works inside dl only; tool keys are never refused by it; see below) |
 | `toolKeys` | `TOOL_KEYS` | true: accounts in good standing may make API keys for other tools; false refuses new and existing ones (`tool_keys_off`, the keys are kept) |
 | `toolKeysMax` | `TOOL_KEYS_MAX` | 3: tool keys per account (server keys are counted apart) |
@@ -1615,6 +1616,7 @@ when each goes out is in `src/user-email-send.ts`. The provider:
 | most of the week used | the request whose settlement takes the week past 80% of a pool's tokens or of the weekly dollar cap; once a week (not on the trial) |
 | most of the trial used | `trial_80`: a trial account's settlement past 80% of its trial tokens; once |
 | gone quiet | daily run: requests on 2 or more days, none in the last 7 |
+| tokens reset | `weekly_reset`, "{tokens} tokens, reset.": every Monday from 30 Nov 2026, see below |
 
 Only to people with an email who haven't pressed stop; never to admins (unless
 `USER_EMAILS_TO_ADMINS=true`, for testing); at most one email per person per UTC day (an
@@ -1639,15 +1641,41 @@ same URL. GET shows a page with one button; POST (the button, or a mail app's on
 | `EMAIL_REPLY_TO` | `contact@directionallylocal.com` |
 | `USER_EMAILS` (also the runtime setting `userEmails`) | true |
 | `USER_EMAILS_TO_ADMINS` | false |
+| `WEEKLY_RESET_EMAIL` (also the runtime setting `weeklyResetEmail`) | true |
 
 With Resend, `directionallylocal.com` must be verified in Resend (its SPF and DKIM DNS
 records). To stop every email without a deploy: `POST /admin/config {"userEmails": false}`.
 
+### Tokens reset (Mondays)
+
+`weekly_reset` goes once a week, after the allowance resets (weeks start Monday 00:00 UTC), to
+people who are active (not blocked or suspended), not admins, have an email and haven't pressed
+stop, aren't waiting in the queue, made a request in the last 28 days, and have weekly free
+tokens: not on the one-time trial, not on Pro, and a weekly allowance above 0. `{tokens}` is the
+person's own weekly allowance as `dl status` shows it, said short and rounded down (`1M`,
+`1.2M`, `10M`, `50M`); below the Full allowance (`WEEKLY_TOKENS`) it adds "it grows as you use
+dl, up to {full} a week." The invite link is the person's own (`https://dl.new/r/<code>`).
+
+It starts at the daily run on Monday (01:00 UTC, after its other emails) and carries on in the
+10-minute ticks from 01:30, through Tuesday: each run sends at most 100, and only while fewer
+than 300 emails to users were claimed that UTC day, every kind together. The one-a-day cap
+applies, so someone who got another email on Monday gets this one on Tuesday. Never on other
+days, never twice a week (the `user_emails` row, period the week's Monday); a failed one is
+retried once by the next daily run, within the week. `GET /v1/admin/metrics` has
+`weeklyResetEmails: [{week, sent, failed}]` for its range.
+
+`GET /admin/emails/weekly-reset` (admins) is a dry run for this week: it sends and records
+nothing, and answers `{week, firstWeek, on, emailsOn, provider, fullTokens, count, belowFull,
+skipped: {trial, pro, no_allowance, not_active}, alreadyThisWeek: {sent, failed}, samples}`,
+where `count` is who would still get it this week and `samples` are 3 rendered emails (login,
+tokens, subject and body, with the calling admin's own stop link).
+
 ### Test email (admins)
 
-`POST /admin/emails/test {"kind": "welcome" | "didnt_start" | "week_80" | "gone_quiet", "to": "<address>"}`
+`POST /admin/emails/test {"kind": "welcome" | "didnt_start" | "week_80" | "gone_quiet" | "weekly_reset", "to": "<address>"}`
 sends one email of that kind to `to`, exactly as a person would get it (copy, sender, Reply-To,
-headers, provider), with the calling admin's own stop link. It records nothing for anyone and
+headers, provider), with the calling admin's own stop link (`weekly_reset` as a Full person
+sees it, with the admin's own invite link). It records nothing for anyone and
 works while `userEmails` is off. Answers `{sent, provider, messageId}`, or 502 with the
 provider's error code (for example `E_SENDER_NOT_VERIFIED`).
 

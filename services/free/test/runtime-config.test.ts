@@ -105,6 +105,7 @@ describe("runtime settings (units)", () => {
       "providerModels.openrelay": ["z-ai/glm-5.3-flash"],
       speedProbes: true,
       userEmails: true,
+      weeklyResetEmail: true,
       dlOnly: true,
       allowOtherHarnesses: true,
       otherHarnessShare: 0.5,

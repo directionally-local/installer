@@ -1,7 +1,7 @@
 import { base64urlDecode, base64urlEncode } from "../../shared/src/auth.js";
 import type { FreeConfig } from "./config.js";
-import { renderUserEmail, resetsText, type UserEmailKind } from "./user-emails.js";
-import { weekEnd } from "./week.js";
+import { renderUserEmail, resetsText, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
+import { DAY_MS, weekEnd, weekStart } from "./week.js";
 
 /**
  * Emails to the people on the free tier (the copy is in user-emails.ts). Two providers, picked
@@ -14,6 +14,10 @@ import { weekEnd } from "./week.js";
  *   week_80      when a request's settlement takes the week's usage to 80% of a pool's tokens
  *                or of the weekly dollar cap (once per week)
  *   gone_quiet   daily cron: requests on 2 or more days, none in the last 7 days
+ *   weekly_reset Mondays from 01:00 UTC (the daily run, then the 10-minute ticks, through
+ *                Tuesday when the daily limit leaves some for the next day): "{tokens} tokens,
+ *                reset." to active free-allowance people who used dl in the last 28 days
+ *                (weeklyResetTokens; app.ts scheduledWeeklyReset), once per week
  *
  * Only to people with an email who haven't pressed stop, never to admins (unless
  * USER_EMAILS_TO_ADMINS, for testing), at most one a day per person, each kind once per person
@@ -47,7 +51,7 @@ export type BroadcastClaim = Omit<UserEmailClaim, "kind"> & { kind: "broadcast" 
 
 /** The Directory's side (directory-object.ts). */
 export interface UserEmailStore {
-  claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean }): Promise<UserEmailClaim | undefined>;
+  claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean; dailyLimit?: number }): Promise<UserEmailClaim | undefined>;
   finishUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; ok: boolean; now: number }): Promise<void>;
 }
 
@@ -221,6 +225,10 @@ export async function deliverUserEmail(input: {
   period: string;
   now: number;
   retry?: boolean;
+  /** weekly_reset's values (its {tokens}, {grows} and {login}). */
+  weeklyReset?: WeeklyResetValues;
+  /** Claim only while fewer than this many emails to users were claimed today (every kind). */
+  dailyLimit?: number;
 }): Promise<"sent" | "failed" | "skipped"> {
   const { config, transport } = input;
   if (!transport || !userEmailsOn(config, transport)) return "skipped";
@@ -234,13 +242,14 @@ export async function deliverUserEmail(input: {
       adminIds: [...config.adminGithubIds],
       includeAdmins: config.userEmailsToAdmins,
       ...(input.retry ? { retry: true } : {}),
+      ...(input.dailyLimit !== undefined ? { dailyLimit: input.dailyLimit } : {}),
     });
   } catch {
     return "failed";
   }
   if (!claim) return "skipped";
   const unsubscribeUrl = await stopUrl(input.base, input.signingKey, claim.githubId);
-  const email = renderUserEmail(claim.kind, { resets: resetsText(weekEnd(input.now)), unsubscribeUrl, proOffered: config.proOffered });
+  const email = renderUserEmail(claim.kind, { resets: resetsText(weekEnd(input.now)), unsubscribeUrl, proOffered: config.proOffered, ...(input.weeklyReset ? { weeklyReset: input.weeklyReset } : {}) });
   const { ok } = await sendPlainEmail(transport, config, {
     to: claim.email,
     subject: email.subject,
@@ -283,4 +292,43 @@ export function weekMostlyUsed(allowance: {
   if (allowance.plan !== "free") return false;
   if (allowance.usdPerWeek !== null && allowance.usdPerWeek > 0 && allowance.spentUsdThisWeek >= allowance.usdPerWeek * WEEK_EMAIL_SHARE) return true;
   return Object.values(allowance.pools).some((pool) => pool.tokensPerWeek !== null && pool.tokensPerWeek > 0 && pool.usedThisWeek >= pool.tokensPerWeek * WEEK_EMAIL_SHARE);
+}
+
+// ─── weekly_reset ────────────────────────────────────────────────────────────
+
+/** The first week weekly_reset goes out: Monday 30 Nov 2026. Nothing before it. */
+export const WEEKLY_RESET_FIRST_WEEK = Date.UTC(2026, 10, 30);
+/** The run starts at the daily run (01:00 UTC Monday); the 10-minute ticks join from 01:30. */
+const WEEKLY_RESET_TICK_FROM_MS = 90 * 60_000;
+/** It runs Monday and Tuesday (UTC) only: what Monday's daily limit left goes on Tuesday. */
+const WEEKLY_RESET_DAYS = 2;
+
+/** Why someone otherwise eligible doesn't get weekly_reset. */
+export type WeeklyResetSkip = "trial" | "pro" | "no_allowance" | "not_active";
+
+/**
+ * The weekly tokens weekly_reset tells this person about: their own allowance's `tokensPerWeek`,
+ * as `dl status` shows it. A skip instead when the account isn't active, is on the one-time
+ * trial, on Pro (not free tokens), or has no weekly free tokens.
+ */
+export function weeklyResetTokens(
+  allowance: { plan: string; status: string | null; tokensPerWeek: number | null; trial: unknown },
+  onTrial: boolean,
+): number | WeeklyResetSkip {
+  if (allowance.status !== null && allowance.status !== "active") return "not_active";
+  if (onTrial || allowance.trial !== null) return "trial";
+  if (allowance.plan !== "free") return "pro";
+  if (allowance.tokensPerWeek === null || allowance.tokensPerWeek <= 0) return "no_allowance";
+  return allowance.tokensPerWeek;
+}
+
+/**
+ * Whether a scheduled run at `now` may send weekly_reset: Monday from 01:00 UTC (the daily run;
+ * the 10-minute ticks from 01:30) through the end of Tuesday, from WEEKLY_RESET_FIRST_WEEK on.
+ */
+export function weeklyResetWindow(now: number, via: "daily" | "tick"): boolean {
+  const monday = weekStart(now);
+  if (monday < WEEKLY_RESET_FIRST_WEEK) return false;
+  const since = now - monday;
+  return since >= (via === "daily" ? 60 * 60_000 : WEEKLY_RESET_TICK_FROM_MS) && since < WEEKLY_RESET_DAYS * DAY_MS;
 }

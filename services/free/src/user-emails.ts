@@ -3,9 +3,14 @@
  * easy to edit. Keep it lowercase everywhere (subjects too), and use no em or en dashes and no
  * other dashes as punctuation: a test checks this file.
  *
- * Never use the person's login or any name: every greeting is just "hey,". Placeholders:
- * {resets} is the day the week resets, like "monday 10 nov". Every email gets FOOTER after a
- * blank line, with {unsubscribeUrl}.
+ * Never use the person's login or any name: every greeting is just "hey,". The one exception is
+ * weekly_reset's invite link, https://dl.new/r/{login}, which carries the person's invite code (their
+ * GitHub login, as the referral link has it) inside the URL. Placeholders: {resets} is the day the
+ * week resets, like "monday 10 nov"; weekly_reset's {tokens} is the person's own weekly allowance
+ * and {grows} the below-Full paragraph (WEEKLY_RESET_GROWS, or nothing). Every email gets FOOTER
+ * after a blank line, with {unsubscribeUrl}.
+ *
+ * The emails are plain text, so commands are written as they are typed, without backticks.
  *
  * When each one goes out is in user-email-send.ts.
  */
@@ -21,7 +26,8 @@ export type UserEmailKind =
   | "didnt_start"
   | "week_80"
   | "trial_80"
-  | "gone_quiet";
+  | "gone_quiet"
+  | "weekly_reset";
 
 /** The welcome kinds: held back while the person waits in line for free tokens. */
 export const WELCOME_KINDS: readonly UserEmailKind[] = ["welcome", "welcome_basic", "welcome_starter", "welcome_starter_small", "welcome_trial"];
@@ -190,7 +196,53 @@ what made you stop? one line is plenty, just hit reply.
 
 sina`,
   },
+
+  // 5. Every Monday after the weekly allowance resets (user-email-send.ts weeklyResetEligible):
+  // active free-allowance people who used dl in the last 28 days. {tokens} is their own weekly
+  // allowance; {grows} adds WEEKLY_RESET_GROWS for anyone below the Full allowance.
+  weekly_reset: {
+    subject: "{tokens} tokens, reset.",
+    body: `hey,
+
+new week: you have {tokens} free tokens again.
+
+{grows}to jump back in, open your terminal and type dl
+- continue your last session: dl -c
+- on windows: open ubuntu (wsl), not powershell, then type dl
+- not installed anymore? curl -fsSL https://dl.new | sh
+
+two small asks:
+- star dl on github: https://github.com/directionally-local/autopilot
+- send dl to one friend who codes: https://dl.new/r/{login}
+
+sina`,
+  },
 };
+
+/** weekly_reset's own paragraph for people below the Full allowance; {full} is Full's weekly tokens. */
+export const WEEKLY_RESET_GROWS = "it grows as you use dl, up to {full} a week.";
+
+/**
+ * A token count as the weekly_reset email says it: 1000000 is "1M", 1200000 "1.2M", 50000000
+ * "50M", 500000 "500K". Rounded down to one decimal, so it never shows more than the person has.
+ */
+export function shortTokens(tokens: number): string {
+  const whole = Math.max(0, Math.floor(tokens));
+  for (const [size, unit] of [[1e9, "B"], [1e6, "M"], [1e3, "K"]] as const) {
+    if (whole >= size) {
+      const tenths = Math.floor((whole * 10) / size);
+      return `${tenths % 10 === 0 ? tenths / 10 : (tenths / 10).toFixed(1)}${unit}`;
+    }
+  }
+  return String(whole);
+}
+
+/** weekly_reset's own values: the person's weekly tokens, Full's, and their invite code. */
+export interface WeeklyResetValues {
+  tokens: number;
+  fullTokens: number;
+  login: string;
+}
 
 /** Under every email, after a blank line. */
 export const FOOTER = "don't want these? {unsubscribeUrl}";
@@ -207,10 +259,25 @@ export function resetsText(at: number): string {
 /** "dl pro or a top up" in the trial emails, as said while Pro isn't offered (`proOffered` off). */
 const PRO_OR_TOPUP = /dl pro or a top up/g;
 
-/** One email, placeholders filled in, footer added. `proOffered` false leaves dl pro out of it (top ups stay). */
-export function renderUserEmail(kind: UserEmailKind, values: { resets: string; unsubscribeUrl: string; proOffered?: boolean }): UserEmailCopy {
+/**
+ * One email, placeholders filled in, footer added. `proOffered` false leaves dl pro out of it (top
+ * ups stay). `weeklyReset` fills weekly_reset's {tokens}, {grows} and {login}.
+ */
+export function renderUserEmail(kind: UserEmailKind, values: { resets: string; unsubscribeUrl: string; proOffered?: boolean; weeklyReset?: WeeklyResetValues }): UserEmailCopy {
+  const reset = values.weeklyReset;
+  const named: Record<string, string> = {
+    resets: values.resets,
+    unsubscribeUrl: values.unsubscribeUrl,
+    ...(reset
+      ? {
+          tokens: shortTokens(reset.tokens),
+          grows: reset.tokens < reset.fullTokens ? `${WEEKLY_RESET_GROWS.replace("{full}", shortTokens(reset.fullTokens))}\n\n` : "",
+          login: reset.login,
+        }
+      : {}),
+  };
   const fill = (text: string) => {
-    const filled = text.replace(/\{(resets|unsubscribeUrl)\}/g, (_, name: "resets" | "unsubscribeUrl") => values[name]);
+    const filled = text.replace(/\{(resets|unsubscribeUrl|tokens|grows|login)\}/g, (match, name: string) => named[name] ?? match);
     return values.proOffered === false ? filled.replace(PRO_OR_TOPUP, "a top up") : filled;
   };
   const copy = USER_EMAILS[kind];
