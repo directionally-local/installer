@@ -69,20 +69,21 @@ models are the `FREE_MODELS` entries with that `provider` (`src/models.ts`).
   `luminalCreditUsd` and the weekly ones; `providerCredit.openai`, `providerWeeklyCredit.luminal`
   and so on are aliases that change the same values) and their behaviour when credit runs out
   (OpenAI falls back to DeepSeek; Luminal answers 503 `upstream_credit_exhausted`).
-- **Registry providers** (Liquid Inference so far) have the generic runtime settings, per provider:
+- **Registry providers** (Liquid Inference and Open Relay) have the generic runtime settings, per provider:
 
-  | setting | Liquid default | |
-  |---|---|---|
-  | `providerStatus.<id>` | `"paused"` | `"on"` or `"paused"`; Liquid serves nothing until it's turned on |
-  | `providerCredit.<id>` | 100 | prepaid credit, USD; at or past it the provider is out of credit |
-  | `providerWeeklyCredit.<id>` | 25 | the most everyone but admins may spend a week; `"none"` for no budget |
-  | `providerOptIn.<id>` | `true` | served only to people who pick its models, never a default or fallback |
-  | `providerPersonWeeklyUsd.<id>` | 0.25 | one person's weekly spend on it at most, while it's opt-in or Pro-only (then it is Pro's weekly ration) |
-  | `providerPlans.<id>` | `"pro"` | `"pro"`: dl Pro subscribers (and admins, for testing) only; `"all"`: every plan, held to the per-person cap |
-  | `providerModels.<id>` | `["moonshotai/kimi-k3.1-pro"]` | the models that are on |
+  | setting | Liquid default | Open Relay default | |
+  |---|---|---|---|
+  | `providerStatus.<id>` | `"paused"` | `"paused"` | `"on"` or `"paused"`; a provider serves nothing until it's turned on |
+  | `providerCredit.<id>` | 100 | 200 | prepaid credit, USD; at or past it the provider is out of credit |
+  | `providerWeeklyCredit.<id>` | 25 | 25 | the most everyone but admins may spend a week; `"none"` for no budget |
+  | `providerOptIn.<id>` | `true` | `false` | served only to people who pick its models, never a default or fallback |
+  | `providerPersonWeeklyUsd.<id>` | 0.25 | 0.5 | one person's weekly spend on it at most: Liquid's while it's opt-in or Pro-only (then it is Pro's weekly ration), Open Relay's always (its spec has `capsEveryone`) |
+  | `providerPlans.<id>` | `"pro"` | `"all"` | `"pro"`: dl Pro subscribers (and admins, for testing) only; `"all"`: every plan |
+  | `providerModels.<id>` | `["moonshotai/kimi-k3.1-pro"]` | `["z-ai/glm-5.3-flash"]` | the models that are on |
 
   Each also reads from env (`LIQUID_STATUS`, `LIQUID_CREDIT_USD`, `LIQUID_WEEKLY_CREDIT_USD`,
-  `LIQUID_OPT_IN`, `LIQUID_PERSON_WEEKLY_USD`, `LIQUID_PLANS`, `LIQUID_MODELS`).
+  `LIQUID_OPT_IN`, `LIQUID_PERSON_WEEKLY_USD`, `LIQUID_PLANS`, `LIQUID_MODELS`; `OPENRELAY_*`
+  for Open Relay).
 - **Kimi is a dl Pro perk** while `providerPlans.liquid` is `"pro"` (the default). A free
   account's request for a Liquid model gets 402 `provider_limit` reason `pro_only`, with
   `upgradeUrl` (dl.new/account; null while Pro isn't offered), `plans: "pro"` and
@@ -112,6 +113,14 @@ models are the `FREE_MODELS` entries with that `provider` (`src/models.ts`).
   `{"error": {"code": "provider_limit", "reason": "paused"|"out_of_credit"|"weekly_budget"|"pro_only"|"person_cap", "provider": "liquid", "family": "deepseek", "resetsAt": <ISO or null>, "alternative": "deepseek/deepseek-v4.1-flash-1017"}}`.
   Without its key, or with a model off, the model is unknown (`model_not_allowed`), as if it
   weren't defined. `/v1/models` carries each model's `access`: `free`, `trusted` or `opt-in`.
+  With plans `"all"`, the `person_cap` and `weekly_budget` messages say when it resets.
+- **A model with a `fallback`** (GLM 5.3 Flash → DeepSeek V4.1 Flash) past its provider's credit
+  or weekly budget, or the person's cap: Autopilot still gets the 402 above (it switches to the
+  `alternative` and resends the turn itself, with its own line); another coding agent launched by
+  dl (`dl opencode`, `dl pi`, `dl proxy`), which can't, is served the fallback instead, with
+  `x-dl-fallback: <fallback id>` and `x-dl-notice: <one line>` ("You've used this week's free GLM
+  5.3 Flash (about 15M tokens a week); DeepSeek V4.1 Flash 1017 serves until it resets on Monday
+  30 Nov, 00:00 UTC."). Never for a pause or a missing key.
 - **Alerts.** At 80% of a registry provider's credit, one alert (email and webhook), once per
   balance; the daily digest has a line with its credit left and this week's spend.
 
@@ -145,6 +154,34 @@ stream's standard usage said 0 output tokens although text came back. Probes als
 (`provider_slug`) and the exchange's own `timing.ttft_ms` and `timing.tokens_per_second`. Failures go back as transient errors with `Retry-After`, like
 Luminal's; there is no fallback to another model.
 
+### Open Relay
+
+[Open Relay](https://openrelay.inc/) (OpenRelay Inc.) serves GLM 5.3 Flash
+(`openrelay/glm-5.3-flash`, 256K context) free for everyone: `providerPlans.openrelay` `"all"`,
+not opt-in, `access: "free"` in `/v1/providers`, and in the one open-models budget (so Pro's 4x
+covers it like DeepSeek). Each person gets `providerPersonWeeklyUsd.openrelay` ($0.50, about 15M
+tokens a week at the ration mix; about 9M if nothing is a cache read) and everyone together
+`providerWeeklyCredit.openrelay` ($25 a week, so the $200 credit lasts about 8 weeks); past
+either, DeepSeek serves (above). `/v1/me` states the cap in `cappedModels` (`usdPerWeek`,
+`approxTokensPerWeek`, `ration` for this week, `fallback`, a `text` line), and `/v1/models`
+entries carry the same `ration`.
+
+Requests go to `https://inference.openrelay.inc/v1/chat/completions` with `Authorization: Bearer
+or_…` (`OPENRELAY_API_KEY`) and only the standard fields (`messages`, `tools`, `tool_choice`,
+`parallel_tool_calls`, `response_format`, sampling fields, `reasoning_effort`; OpenRouter's
+`reasoning.effort` becomes `reasoning_effort`), `max_tokens` from the reservation, the person's
+hashed id as `user`, and usage on streams. Checked live on 2026-11-24: streams end with an
+empty-choices chunk carrying `usage` (reasoning tokens inside `completion_tokens`) and
+`openrelay: {cost_nano_usd, priced_at}`; non-streamed answers carry the same block and the
+`OpenRelay-Cost-Nano-USD` header; tool calls stream as standard `tool_calls` deltas. The credit
+is charged the reported cost when above 0, else the usage at the list price ($0.045 input,
+$0.009 cached, $0.18 output per million). 429, 502 and 503 go back as transient errors with
+`Retry-After`; a 402 or 403 from Open Relay (its balance or the key's spend cap) as
+`upstream_error`.
+
+To turn it on after a deploy: `wrangler secret put OPENRELAY_API_KEY`, check
+`GET /v1/admin/providers`, then `POST /admin/config {"providerStatus.openrelay": "on"}`.
+
 ### Adding a provider
 
 1. Add its entry to `PROVIDERS` in `src/providers.ts` (`kind: "registry"`) and its id to
@@ -154,8 +191,8 @@ Luminal's; there is no fallback to another model.
    provider's docs in a comment.
 3. Add its `provider<Setting>.<id>` settings to `RegistrySettingsConfig` and `REGISTRY_DEFAULTS`
    (`providers.ts`), `RUNTIME_SETTINGS` (`runtime-config.ts`) and `registrySettings` (`config.ts`).
-4. Its request shape: an `openai-chat` provider like Luminal or Liquid goes through
-   `compatibleChat` in `app.ts`.
+4. Its request shape: an `openai-chat` provider like Luminal, Liquid or Open Relay goes through
+   `compatibleChat` in `app.ts`, and its reported cost (if any) into `reportedCharge`.
 5. Upload its key: `wrangler secret put LIQUID_INFERENCE_API_KEY` (for Liquid; its `keyEnv` for
    another). Then deploy, check `GET /v1/admin/providers`, and turn it on with
    `POST /admin/config {"providerStatus.<id>": "on"}`.

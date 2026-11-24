@@ -197,7 +197,7 @@ describe("admin health CSVs", () => {
     );
     assert.deepEqual(
       (await csv(service, cookie, "health-upstreams")).map((row) => row.upstream),
-      ["openai", "luminal", "liquid", "openrouter"],
+      ["openai", "luminal", "liquid", "openrelay", "openrouter"],
     );
 
     assert.deepEqual(

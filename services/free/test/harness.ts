@@ -171,6 +171,8 @@ export interface Service {
     luminal: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     /** Calls to Liquid Inference's chat completions (a fake: nothing leaves the process). */
     liquid: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
+    /** Calls to Open Relay's chat completions (a fake: nothing leaves the process). */
+    openrelay: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     /** Calls to OpenAI's Responses API (a fake: nothing leaves the process). */
     openai: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     /** Calls to OpenAI's Moderation API (a fake: nothing leaves the process). */
@@ -204,6 +206,8 @@ export interface Service {
   setLuminal(handler: OpenRouterHandler): void;
   /** Answers calls to Liquid Inference (default: a Kimi completion with usage and an `exchange` block, streamed when asked). */
   setLiquid(handler: OpenRouterHandler): void;
+  /** Answers calls to Open Relay (default: a GLM 5.3 Flash completion with usage and `openrelay.cost_nano_usd`, streamed when asked). */
+  setOpenRelay(handler: OpenRouterHandler): void;
   /** Answers calls to OpenAI's Responses API (default: a "hi" response, streamed when asked, with Responses usage). */
   setOpenAI(handler: OpenRouterHandler): void;
   /** Answers calls to OpenAI's Moderation API (default: nothing flagged). */
@@ -341,6 +345,31 @@ export function liquidStream(usageObject: Record<string, unknown> | undefined, e
   return sse(chunks.map((chunk) => JSON.stringify(chunk)));
 }
 
+/**
+ * Open Relay's usage and cost, in the shape seen live on 2026-11-24: reasoning tokens inside
+ * `completion_tokens`, `prompt_tokens_details` null, and `openrelay.cost_nano_usd` beside it.
+ */
+export function openRelayUsage(prompt: number, completionTokens: number, reasoning = 0): Record<string, unknown> {
+  return { prompt_tokens: prompt, completion_tokens: completionTokens, total_tokens: prompt + completionTokens, completion_tokens_details: { reasoning_tokens: reasoning }, prompt_tokens_details: null };
+}
+
+/** A non-streaming Open Relay completion; `costNanoUsd` undefined leaves the cost out. */
+export function openRelayCompletion(usageObject: Record<string, unknown> | undefined, costNanoUsd: number | undefined = 23_355): Response {
+  const body = { id: "or_1", object: "chat.completion", model: "openrelay/glm-5.3-flash", choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "hi", reasoning_content: "Greeting." } }], ...(usageObject ? { usage: usageObject } : {}), ...(costNanoUsd !== undefined ? { openrelay: { cost_nano_usd: costNanoUsd, priced_at: "online" } } : {}) };
+  return Response.json(body, { headers: costNanoUsd !== undefined ? { "OpenRelay-Cost-Nano-USD": String(costNanoUsd) } : {} });
+}
+
+/** An Open Relay stream: reasoning, then text, then an empty-choices chunk with usage and `openrelay`. */
+export function openRelayStream(usageObject: Record<string, unknown> | undefined, costNanoUsd: number | undefined = 23_355): Response {
+  const chunks = [
+    { choices: [{ index: 0, delta: { role: "assistant", content: "", reasoning_content: "Counting." }, finish_reason: null }] },
+    { choices: [{ index: 0, delta: { content: "1, 2, 3", reasoning_content: null }, finish_reason: null }] },
+    { choices: [{ index: 0, delta: { reasoning_content: null }, finish_reason: "stop" }] },
+    { choices: [], ...(usageObject ? { usage: usageObject } : {}), ...(costNanoUsd !== undefined ? { openrelay: { cost_nano_usd: costNanoUsd, priced_at: "online" } } : {}) },
+  ];
+  return sse(chunks.map((chunk) => JSON.stringify(chunk)));
+}
+
 export function completion(usageObject: Record<string, unknown> | undefined): Response {
   return new Response(
     JSON.stringify({ id: "gen-1", object: "chat.completion", model: MODEL, choices: [{ index: 0, message: { role: "assistant", content: "hi" } }], ...(usageObject ? { usage: usageObject } : {}) }),
@@ -398,7 +427,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
     ...namespaces,
   };
   const clock = { now: NOW };
-  const calls: Service["calls"] = { openRouter: [], luminal: [], liquid: [], openai: [], moderations: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [], resend: [], userEmail: [] };
+  const calls: Service["calls"] = { openRouter: [], luminal: [], liquid: [], openrelay: [], openai: [], moderations: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [], resend: [], userEmail: [] };
   let resend = (_body: Record<string, unknown>): Response | Promise<Response> => Response.json({ id: `email-${calls.resend.length}` });
   let stripe = (path: string, _form?: URLSearchParams): Response | Promise<Response> =>
     path === "/v1/checkout/sessions"
@@ -424,6 +453,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
   let githubProfile = (login: string): Response | Promise<Response> => Response.json({ login, email: null });
   let luminal: OpenRouterHandler = () => completion(luminalUsage(100, 10));
   let liquid: OpenRouterHandler = (body) => (body.stream ? liquidStream(luminalUsage(100, 10)) : liquidCompletion(luminalUsage(100, 10)));
+  let openrelay: OpenRouterHandler = (body) => (body.stream ? openRelayStream(openRelayUsage(100, 10)) : openRelayCompletion(openRelayUsage(100, 10)));
   let moderations: OpenRouterHandler = () => Response.json({ id: "modr-1", model: "omni-moderation-latest", results: [{ flagged: false, categories: {}, category_scores: {} }] });
   let openai: OpenRouterHandler = (body) => (body.stream ? responsesSse(responsesTextEvents("hi", responsesUsage(100, 10))) : openaiResponse(responsesUsage(100, 10)));
 
@@ -504,6 +534,11 @@ export async function createService(vars: Record<string, string> = {}, options: 
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       calls.liquid.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
       return liquid(body, init);
+    }
+    if (url === "https://inference.openrelay.inc/v1/chat/completions") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      calls.openrelay.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
+      return openrelay(body, init);
     }
     if (url === "https://api.openai.com/v1/responses") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -591,6 +626,9 @@ export async function createService(vars: Record<string, string> = {}, options: 
     },
     setLiquid: (next) => {
       liquid = next;
+    },
+    setOpenRelay: (next) => {
+      openrelay = next;
     },
     setOpenAI: (next) => {
       openai = next;

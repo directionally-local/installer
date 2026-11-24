@@ -244,7 +244,7 @@ export interface UpstreamStats {
   creditUsd: number;
 }
 
-export const UPSTREAM_NAMES = ["openai", "luminal", "liquid", "openrouter"] as const;
+export const UPSTREAM_NAMES = ["openai", "luminal", "liquid", "openrelay", "openrouter"] as const;
 
 export type UpstreamWindowName = "today" | "week" | "all_time" | `${number}d`;
 

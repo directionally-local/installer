@@ -86,7 +86,8 @@ import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-con
 import { EMBARGO_MESSAGE, GPT6_COUNTRY_MESSAGE, GPT6_COUNTRY_REASON, gpt6CountryAllowed, isEmbargoed, requestCountry, type CountryRules } from "./countries.js";
 import { AUTOPILOT_ONLY_MESSAGE, AUTOPILOT_ONLY_REASON, heldFromClient, modelClients, type ModelClient } from "./gpt6-clients.js";
 import { meterStream } from "./sse.js";
-import { accessOf, approxTokens, offeredModels, exchangeCharge, exchangeUsage, mergedUsage, exchangeRules, isRegistryProvider, formatRationTokens, liquidPayload, proOnly, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, resetDay, type ProviderBlock, type ProviderSpend } from "./providers.js";
+import type { RegistryProviderId } from "./providers.js";
+import { accessOf, approxTokens, offeredModels, exchangeUsage, mergedUsage, exchangeRules, FALLBACK_BLOCKS, isRegistryProvider, formatRationTokens, liquidPayload, openRelayPayload, personCapped, proOnly, providerFallbackNotice, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, reportedCharge, resetDay, type ProviderBlock, type ProviderSpend } from "./providers.js";
 import { PROBE_CRON, probeOnce, probeTargets } from "./probes.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
 import { anthropicError, errorStatus, estimateInputTokens, toAnthropicMessage, toAnthropicStream, toChatRequest } from "./anthropic.js";
@@ -165,6 +166,8 @@ export const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 export const LUMINAL_URL = "https://flash.luminal.cloud/v1/chat/completions";
 /** Liquid Inference's chat completions (providers.ts). */
 export const LIQUID_URL = `${providerSpec("liquid").baseUrl}/chat/completions`;
+/** Open Relay's chat completions (providers.ts). */
+export const OPENRELAY_URL = `${providerSpec("openrelay").baseUrl}/chat/completions`;
 /** OpenAI's Responses API: its chat completions API refuses function tools while GPT-6 reasons. */
 export const OPENAI_URL = "https://api.openai.com/v1/responses";
 /** OpenRouter-only request fields Luminal's OpenAI-compatible API doesn't take. */
@@ -297,6 +300,8 @@ export interface Env {
   LUMINAL_WEEKLY_CREDIT_USD?: string;
   /** A secret: Liquid Inference's API key. Never logged. Its settings are LIQUID_* (config.ts registrySettings). */
   LIQUID_INFERENCE_API_KEY?: string;
+  /** A secret: Open Relay's API key (`or_…`). Never logged. Its settings are OPENRELAY_* (config.ts registrySettings). */
+  OPENRELAY_API_KEY?: string;
   SPEED_PROBES?: string;
   /** A secret: Resend's API key for emails to users, when USER_EMAIL isn't bound. Never logged. */
   RESEND_API_KEY?: string;
@@ -940,13 +945,18 @@ async function planForProviders(c: Ctx, config: FreeConfig, githubId: number, mo
 }
 
 /**
- * A Pro-only model's weekly ration for one person, as /v1/me and /v1/models show it, or null
- * (not Pro-only, or no per-person cap). `resetsAt` is the week's end.
+ * A capped model's weekly ration for one person, as /v1/me and /v1/models show it, or null (no
+ * per-person cap: not Pro-only, opt-in or a provider that caps everyone). `resetsAt` is the week's end.
  */
 function rationView(config: FreeConfig, model: FreeModel, weekUsd: Partial<Record<string, number>> | undefined, now: number) {
-  if (!proOnly(config, model)) return null;
+  if (!capped(config, model)) return null;
   const ration = rationOf(config, model, weekUsd?.[model.provider] ?? 0);
   return ration ? { ...ration, resetsAt: new Date(weekEnd(now)).toISOString() } : null;
+}
+
+/** Whether a person's weekly use of a model is capped (providers.ts personCapped): Pro's ration, opt-in, or Open Relay's cap. */
+function capped(config: FreeConfig, model: FreeModel): boolean {
+  return isRegistryProvider(model.provider) && personCapped(model.provider, providerSettings(config, model.provider));
 }
 
 /** A provider's prepaid credit balance, for the pause alert. */
@@ -2177,6 +2187,12 @@ async function me(c: Ctx): Promise<Response> {
      * Pro what is left and when it resets. `text` is one line to show as it is.
      */
     proModels: await proModelsView(c, config, identity.githubId, allowance.plan),
+    /**
+     * The free models with a weekly cap a person on every plan (GLM 5.3 Flash on Open Relay):
+     * the cap in dollars and about how many tokens, what is left and when it resets, the model that
+     * serves past it, and one line to show as it is.
+     */
+    cappedModels: await cappedModelsView(c, config, identity.githubId),
     /** The part of the allowance (0 to 1) other agents launched by dl (dl claude, dl opencode) get; Autopilot gets all of it. */
     otherHarnessShare: config.otherHarnessShare,
     plan: allowance.plan,
@@ -2225,7 +2241,7 @@ async function proModelsView(c: Ctx, config: FreeConfig, githubId: number, plan:
   const available = plan === "pro" || isAdmin;
   const weekUsd = available && !isAdmin ? await directory(c).personProviderWeek(githubId, c.now()) : undefined;
   return models.map((model) => {
-    const cap = providerSettings(config, model.provider as "liquid").personWeeklyUsd;
+    const cap = providerSettings(config, model.provider as RegistryProviderId).personWeeklyUsd;
     const approxTokensPerWeek = cap === undefined ? null : approxTokens(model, cap);
     // Admins aren't held to it, so they get no ration.
     const ration = available && !isAdmin ? rationView(config, model, weekUsd, c.now()) : null;
@@ -2239,6 +2255,37 @@ async function proModelsView(c: Ctx, config: FreeConfig, githubId: number, plan:
       approxTokensPerWeek,
       ration,
       text: proModelText(model, available, approxTokensPerWeek, ration),
+    };
+  });
+}
+
+/** /v1/me `cappedModels`: every offered model with a per-person weekly cap that isn't Pro-only. */
+async function cappedModelsView(c: Ctx, config: FreeConfig, githubId: number) {
+  const models = offeredModels(config).filter((model) => capped(config, model) && !proOnly(config, model));
+  if (models.length === 0) return [];
+  const isAdmin = c.config.adminGithubIds.has(githubId);
+  const weekUsd = isAdmin ? undefined : await directory(c).personProviderWeek(githubId, c.now());
+  return models.map((model) => {
+    const cap = providerSettings(config, model.provider as RegistryProviderId).personWeeklyUsd!;
+    const approxTokensPerWeek = approxTokens(model, cap);
+    const ration = isAdmin ? null : rationView(config, model, weekUsd, c.now());
+    const fallback = model.fallback ? modelById(model.fallback) : undefined;
+    const after = fallback ? `then ${fallback.name}` : "then other free models";
+    const text = !ration
+      ? `${model.name}: free, about ${formatRationTokens(approxTokensPerWeek)} tokens a week, ${after}.`
+      : ration.remainingUsd <= 0
+        ? `${model.name}: this week's free tokens are used up; ${fallback?.name ?? "other free models"} serves until it resets on ${resetDay(ration.resetsAt)}.`
+        : `${model.name}: about ${formatRationTokens(ration.approxTokensLeft)} of ${formatRationTokens(ration.approxTokensPerWeek)} free tokens left this week (resets ${resetDay(ration.resetsAt)}), ${after}.`;
+    return {
+      id: model.id,
+      name: model.name,
+      provider: model.provider,
+      access: accessOf(config, model),
+      usdPerWeek: cap,
+      approxTokensPerWeek,
+      ration,
+      fallback: fallback?.id ?? null,
+      text,
     };
   });
 }
@@ -2522,7 +2569,7 @@ async function models(c: Ctx): Promise<Response> {
   const listed = (await modelsFor(c, config, identity.githubId, person)).filter(
     (model) => !heldFromClient(model, config.gpt6Clients, harness, isAdmin) && (model.family !== "gpt6" || gpt6InCountry(c, config)),
   );
-  const weekUsd = listed.some((model) => proOnly(config, model)) ? await directory(c).personProviderWeek(identity.githubId, c.now()) : undefined;
+  const weekUsd = listed.some((model) => capped(config, model)) ? await directory(c).personProviderWeek(identity.githubId, c.now()) : undefined;
   return json({
     object: "list",
     data: listed.map((model) => ({
@@ -2536,8 +2583,9 @@ async function models(c: Ctx): Promise<Response> {
       // "free", "trusted" (GPT-6), "opt-in" (a credit-limited provider, with its own weekly cap)
       // or "pro" (dl Pro only; listed for Pro and admins, never for a free account).
       access: accessOf(config, model),
-      // A Pro-only model's weekly ration for this person, else absent (see /v1/me `proModels`).
-      ...(proOnly(config, model) ? { ration: rationView(config, model, weekUsd, c.now()) } : {}),
+      // A capped model's weekly ration for this person (Pro-only, or GLM 5.3 Flash's cap), else
+      // absent (see /v1/me `proModels` and `cappedModels`).
+      ...(capped(config, model) ? { ration: rationView(config, model, weekUsd, c.now()) } : {}),
     })),
   });
 }
@@ -3059,10 +3107,27 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // person's opt-in cap; checked before anything is reserved or sent.
   // A Pro-only provider (`provider<Plans>.<id>` "pro") refuses a free account (reason pro_only)
   // with the Upgrade link, and holds Pro to its weekly ration (person_cap, with the reset day).
+  // A model with a fallback (GLM 5.3 Flash → DeepSeek) past its provider's credit or weekly
+  // budget, or the person's cap: Autopilot gets the 402 below and switches itself (with its own
+  // line); another agent launched by dl can't, so its fallback serves the request instead, with
+  // `x-dl-fallback` and the reason in `x-dl-notice`.
   const providerPlan = await planForProviders(c, gate.config, identity.githubId, [requested]);
   const block = blockFor(requested, gate.config, gate, isAdmin, providerPlan);
+  let effective = requested;
+  let fallbackNotice: string | undefined;
   if (block) {
-    const spec = providerSpec(requested.provider as "liquid");
+    const spec = providerSpec(requested.provider as RegistryProviderId);
+    const settings = providerSettings(gate.config, spec.id);
+    const resetsAt = block === "weekly_budget" || block === "person_cap" ? new Date(weekEnd(c.now())).toISOString() : null;
+    const backup = requested.fallback ? modelById(requested.fallback) : undefined;
+    if (harness && backup && FALLBACK_BLOCKS.includes(block) && modelAvailable(backup, gate.config, gate)) {
+      effective = backup;
+      const approx = settings.personWeeklyUsd !== undefined ? approxTokens(requested, settings.personWeeklyUsd) : undefined;
+      fallbackNotice = providerFallbackNotice(requested, block, spec.name, backup.name, { resetsAt, ...(approx !== undefined ? { approxTokensPerWeek: approx } : {}) });
+    }
+  }
+  if (block && effective === requested) {
+    const spec = providerSpec(requested.provider as RegistryProviderId);
     const settings = providerSettings(gate.config, spec.id);
     const resetsAt = block === "weekly_budget" || block === "person_cap" ? new Date(weekEnd(c.now())).toISOString() : null;
     const pro = settings.plans === "pro" && (block === "pro_only" || block === "person_cap");
@@ -3088,7 +3153,6 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     );
   }
   // Every level gets every model; basic and Starter on their smaller allowance.
-  const effective = requested;
   const sessionId = c.request.headers.get("x-session-id") ?? (typeof body.session_id === "string" ? body.session_id : undefined);
   // Any agent's session id, for the token allocator's session counts (allocator.ts).
   const sessionKey = sessionKeyOf(c.request.headers, body, input.sessionHint);
@@ -3393,6 +3457,9 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
           : undefined;
       return openaiChat(c, { model, body, stream, maxTokens: res.maxTokens, user, sessionId, started, settle: settleFor, timeoutSeconds: gate.config.openaiFirstByteTimeoutSeconds, reservedAllowance: res.allowance, ...(retry ? { retry } : {}) });
     }
+    if (provider === "openrelay") {
+      return openRelayChat(c, { model, body, stream, maxTokens: res.maxTokens, user, started, settle: settleFor, timeoutSeconds: gate.config.openrelayFirstByteTimeoutSeconds, reservedAllowance: res.allowance });
+    }
     if (provider === "liquid") {
       return liquidChat(c, { model, config: gate.config, body, stream, maxTokens: res.maxTokens, user, sessionId, started, settle: settleFor, timeoutSeconds: gate.config.liquidFirstByteTimeoutSeconds, reservedAllowance: res.allowance });
     }
@@ -3409,10 +3476,13 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     if (c.background) c.background(task);
   }
   const response = await attempt(serving.model, serving.provider, reservation);
-  if (!serving.fallback) return response;
-  // The requested model's provider couldn't serve it, so its fallback did: say which.
+  const fellBackTo = serving.fallback ? serving.model.id : effective !== requested ? effective.id : undefined;
+  if (!fellBackTo) return response;
+  // The requested model's provider couldn't serve it, so its fallback did: say which, and why
+  // when it was a limit (a header value: printable ASCII only).
   const outHeaders = new Headers(response.headers);
-  outHeaders.set("x-dl-fallback", serving.model.id);
+  outHeaders.set("x-dl-fallback", fellBackTo);
+  if (fallbackNotice) outHeaders.set("x-dl-notice", fallbackNotice.replace(/[^\x20-\x7e]/g, ""));
   return new Response(response.body, { status: response.status, headers: outHeaders });
 
 }
@@ -3896,10 +3966,35 @@ async function liquidChat(
   return compatibleChat(c, { upstream: "liquid", url: LIQUID_URL, key: c.config.liquidApiKey, payload }, input);
 }
 
-/** One chat completions request to Luminal or Liquid, already in its shape. */
+/**
+ * One request to Open Relay (providers.ts): the client's request as `openRelayPayload` shapes it.
+ * Failures go back as Luminal's do (429, 502 and 503 are transient, with Retry-After); past a
+ * limit the fallback is decided before this (see chat). The credit is charged the cost Open Relay
+ * reports (`openrelay.cost_nano_usd`), else the usage at the model's prices; a stream cut off
+ * before its last chunk isn't billed by Open Relay but is charged its usage-less reservation here.
+ */
+async function openRelayChat(
+  c: Ctx,
+  input: {
+    model: FreeModel;
+    body: Record<string, unknown>;
+    stream: boolean;
+    maxTokens: number;
+    user: string;
+    started: number;
+    settle: Settle;
+    timeoutSeconds: number;
+    reservedAllowance: Allowance;
+  },
+): Promise<Response> {
+  const payload = openRelayPayload(input.body, { model: input.model, maxTokens: input.maxTokens, stream: input.stream, user: input.user });
+  return compatibleChat(c, { upstream: "openrelay", url: OPENRELAY_URL, key: c.config.openrelayApiKey, payload }, input);
+}
+
+/** One chat completions request to Luminal, Liquid or Open Relay, already in its shape. */
 async function compatibleChat(
   c: Ctx,
-  target: { upstream: "luminal" | "liquid"; url: string; key: string | undefined; payload: Record<string, unknown> },
+  target: { upstream: "luminal" | "liquid" | "openrelay"; url: string; key: string | undefined; payload: Record<string, unknown> },
   input: { stream: boolean; started: number; settle: Settle; timeoutSeconds: number; reservedAllowance: Allowance },
 ): Promise<Response> {
   const { stream, started, settle } = input;
@@ -3963,7 +4058,7 @@ async function compatibleChat(
   const text = await response.text();
   const parsed = parseJson(text) as { usage?: unknown; error?: unknown } | undefined;
   const usage = mergedUsage(parseUsage(parsed?.usage), exchangeUsage(parsed));
-  const charge = exchangeCharge(parsed);
+  const charge = reportedCharge(parsed, response.headers.get("openrelay-cost-nano-usd"));
   const allowance = await settle(usage, usage ? "ok" : "no_usage", { ttfbMs, ttftMs: c.now() - started, ...(parsed?.error ? { upstreamError: true } : {}), ...(charge !== undefined ? { creditUsd: charge } : {}) });
   return new Response(text, {
     status: 200,

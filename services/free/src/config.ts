@@ -208,6 +208,13 @@ export interface FreeConfig extends RegistrySettingsConfig {
   liquidApiKey: string | undefined;
   /** Seconds to wait for Liquid's response headers before a transient 503 (LIQUID_FIRST_BYTE_TIMEOUT_SECONDS). */
   liquidFirstByteTimeoutSeconds: number;
+  /**
+   * Open Relay's API key (OPENRELAY_API_KEY, a secret, `or_…`). Never logged. Its other settings
+   * are the registry ones (`providerCredit.openrelay` and the like, providers.ts).
+   */
+  openrelayApiKey: string | undefined;
+  /** Seconds to wait for Open Relay's response headers before a transient 503 (OPENRELAY_FIRST_BYTE_TIMEOUT_SECONDS). */
+  openrelayFirstByteTimeoutSeconds: number;
   /** The speed probes (SPEED_PROBES, default on; also a runtime setting): one tiny request per model every 10 minutes (probes.ts). */
   speedProbes: boolean;
   /** The kill switch from `env`; the admin endpoint has its own, and either one pauses. */
@@ -624,6 +631,8 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     luminalWeeklyCreditUsd: usd(env.LUMINAL_WEEKLY_CREDIT_USD, DEFAULTS.luminalWeeklyCreditUsd, "LUMINAL_WEEKLY_CREDIT_USD"),
     liquidApiKey: text(env.LIQUID_INFERENCE_API_KEY),
     liquidFirstByteTimeoutSeconds: timeoutSeconds(env.LIQUID_FIRST_BYTE_TIMEOUT_SECONDS, 30, "LIQUID_FIRST_BYTE_TIMEOUT_SECONDS"),
+    openrelayApiKey: text(env.OPENRELAY_API_KEY),
+    openrelayFirstByteTimeoutSeconds: timeoutSeconds(env.OPENRELAY_FIRST_BYTE_TIMEOUT_SECONDS, 30, "OPENRELAY_FIRST_BYTE_TIMEOUT_SECONDS"),
     speedProbes: flag(env.SPEED_PROBES, true, "SPEED_PROBES"),
     ...registrySettings(env),
     paused: flag(env.PAUSED, false, "PAUSED"),
@@ -707,6 +716,13 @@ function registrySettings(env: Record<string, unknown>): RegistrySettingsConfig 
     "exchangeMaxPrices.kimi-k3.1-pro": priceList("LIQUID_MAX_PRICES_KIMI_K3_1_PRO", d["exchangeMaxPrices.kimi-k3.1-pro"]),
     "exchangeAllow.glm-5.3": list("LIQUID_ALLOW_GLM_5_3", d["exchangeAllow.glm-5.3"], isSellerList, sellers),
     "exchangeMaxPrices.glm-5.3": priceList("LIQUID_MAX_PRICES_GLM_5_3", d["exchangeMaxPrices.glm-5.3"]),
+    "providerStatus.openrelay": status("OPENRELAY_STATUS", d["providerStatus.openrelay"]),
+    "providerCredit.openrelay": amount(env.OPENRELAY_CREDIT_USD, d["providerCredit.openrelay"], "OPENRELAY_CREDIT_USD"),
+    "providerWeeklyCredit.openrelay": usd(env.OPENRELAY_WEEKLY_CREDIT_USD, d["providerWeeklyCredit.openrelay"]!, "OPENRELAY_WEEKLY_CREDIT_USD"),
+    "providerPersonWeeklyUsd.openrelay": usd(env.OPENRELAY_PERSON_WEEKLY_USD, d["providerPersonWeeklyUsd.openrelay"]!, "OPENRELAY_PERSON_WEEKLY_USD"),
+    "providerOptIn.openrelay": flag(env.OPENRELAY_OPT_IN, d["providerOptIn.openrelay"], "OPENRELAY_OPT_IN"),
+    "providerPlans.openrelay": plans("OPENRELAY_PLANS", d["providerPlans.openrelay"]),
+    "providerModels.openrelay": list("OPENRELAY_MODELS", d["providerModels.openrelay"], isRegistryModelList, "a comma-separated list of Open Relay model ids"),
   };
 }
 
