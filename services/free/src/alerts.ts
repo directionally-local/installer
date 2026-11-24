@@ -153,11 +153,12 @@ export function paymentAlert(input: { login: string | undefined; kind: "pro" | "
 }
 
 /** A new access request (/request in dl): who, and how many wait. Never what they wrote. */
-export function accessRequestAlert(login: string, pending: number): Alert {
+export function accessRequestAlert(login: string, pending: number, lastOfDay?: number): Alert {
+  const last = lastOfDay === undefined ? "" : ` That's ${lastOfDay} today, the most emailed in a UTC day (accessRequestEmailsPerDay): the rest of today's are counted in tomorrow's daily digest.`;
   return {
     subject: `dl free tier: new access request from @${login}`,
-    text: `dl free tier: new access request from @${login} (${pending} pending). Answer it on the admin Tools tab.`,
-    footer: 'Sent for every new access request. Set accessRequestAlerts to "daily" for one line in the daily digest instead, or "off".',
+    text: `dl free tier: new access request from @${login} (${pending} pending). Answer it on the admin Tools tab.${last}`,
+    footer: 'Sent for every new access request, up to accessRequestEmailsPerDay a UTC day; past that they are counted in the daily digest. Set accessRequestAlerts to "daily" for one line in the daily digest instead, or "off".',
   };
 }
 

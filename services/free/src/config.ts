@@ -332,6 +332,23 @@ export interface FreeConfig extends RegistrySettingsConfig {
    */
   noGithubAlerts: AccessRequestAlerts;
   /**
+   * With accessRequestAlerts "each", the most access-request emails a UTC day
+   * (ACCESS_REQUEST_EMAILS_PER_DAY, default 20); past it the day's requests are counted in the
+   * daily digest instead, so a burst can't bury the budget alerts. Also a runtime setting.
+   */
+  accessRequestEmailsPerDay: number;
+  /**
+   * Runway alerts (runway.ts, RUNWAY_ALERTS, default on): an email when this week's pace runs
+   * past the global weekly cap, a provider's credit runs out within `runwayAlertDays` at the
+   * last day's burn, or the global total cap is within `runwayTotalCapShare` of its end. Each
+   * at most once a UTC day. Also runtime settings.
+   */
+  runwayAlerts: boolean;
+  /** Days of credit left (at the last 24 hours' burn) below which a provider is reported (RUNWAY_ALERT_DAYS, default 7); 0 turns it off. */
+  runwayAlertDays: number;
+  /** The share of the global total cap left at which it is reported (RUNWAY_TOTAL_CAP_SHARE, 0 to 1, default 0.1); 0 turns it off. */
+  runwayTotalCapShare: number;
+  /**
    * The anti-abuse rules (detection-rules.ts): the DETECTION_RULES secret's over the public
    * defaults. Its thresholds are already folded into the settings above.
    */
@@ -436,6 +453,10 @@ export const DEFAULTS = {
   proOffered: true,
   accessRequestAlerts: "each" as AccessRequestAlerts,
   noGithubAlerts: "each" as AccessRequestAlerts,
+  accessRequestEmailsPerDay: 20,
+  runwayAlerts: true,
+  runwayAlertDays: 7,
+  runwayTotalCapShare: 0.1,
   useDescriptions: true,
   useDescriptionDailyCap: 2000,
   securityOffGpt6: true,
@@ -636,6 +657,10 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     proOffered: flag(env.PRO_OFFERED, DEFAULTS.proOffered, "PRO_OFFERED"),
     accessRequestAlerts: accessRequestAlerts(env.ACCESS_REQUEST_ALERTS),
     noGithubAlerts: alertMode(env.NO_GITHUB_ALERTS, DEFAULTS.noGithubAlerts, "NO_GITHUB_ALERTS"),
+    accessRequestEmailsPerDay: whole(env.ACCESS_REQUEST_EMAILS_PER_DAY, DEFAULTS.accessRequestEmailsPerDay, "ACCESS_REQUEST_EMAILS_PER_DAY"),
+    runwayAlerts: flag(env.RUNWAY_ALERTS, DEFAULTS.runwayAlerts, "RUNWAY_ALERTS"),
+    runwayAlertDays: whole(env.RUNWAY_ALERT_DAYS, DEFAULTS.runwayAlertDays, "RUNWAY_ALERT_DAYS"),
+    runwayTotalCapShare: share(env.RUNWAY_TOTAL_CAP_SHARE, DEFAULTS.runwayTotalCapShare, "RUNWAY_TOTAL_CAP_SHARE"),
     useDescriptions: flag(env.USE_DESCRIPTIONS, DEFAULTS.useDescriptions, "USE_DESCRIPTIONS"),
     useDescriptionDailyCap: whole(env.USE_DESCRIPTION_DAILY_CAP, DEFAULTS.useDescriptionDailyCap, "USE_DESCRIPTION_DAILY_CAP"),
     securityOffGpt6: flag(env.SECURITY_OFF_GPT6, DEFAULTS.securityOffGpt6, "SECURITY_OFF_GPT6"),

@@ -190,6 +190,14 @@ export const RUNTIME_SETTINGS = {
   accessRequestAlerts: { kind: "alertMode", env: "ACCESS_REQUEST_ALERTS" },
   /** The owner's email about "Don't have GitHub?" clicks and answers: "each", "daily" (in the daily digest) or "off". */
   noGithubAlerts: { kind: "alertMode", env: "NO_GITHUB_ALERTS" },
+  /** With accessRequestAlerts "each": access-request emails a UTC day at most; the rest are counted in the daily digest. */
+  accessRequestEmailsPerDay: { kind: "count", env: "ACCESS_REQUEST_EMAILS_PER_DAY" },
+  /** Runway alerts (runway.ts): weekly pace past the global weekly cap, provider credit running out, global total cap nearly used. */
+  runwayAlerts: { kind: "flag", env: "RUNWAY_ALERTS" },
+  /** A provider is reported when its credit lasts fewer than this many days at the last 24 hours' burn; 0 turns that check off. */
+  runwayAlertDays: { kind: "count", env: "RUNWAY_ALERT_DAYS" },
+  /** The global total cap is reported when this share of it, or less, is left (0 to 1); 0 turns that check off. */
+  runwayTotalCapShare: { kind: "weight", env: "RUNWAY_TOTAL_CAP_SHARE" },
   /** A short automated description and safety label per session (use-description.ts); false turns it off. */
   useDescriptions: { kind: "flag", env: "USE_DESCRIPTIONS" },
   /** Description calls a UTC day across everyone; 0 stops them. */
