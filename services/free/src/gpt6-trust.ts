@@ -151,20 +151,9 @@ export function trustFacts(sql: Sql, now: number, githubIds?: readonly number[])
     sql.exec<{ github_id: number; weeks: number }>(`SELECT github_id, COUNT(DISTINCT ${WEEK_INDEX("day")}) AS weeks FROM daily_activity WHERE (requests > 0 OR events > 0)${filter("github_id")} GROUP BY github_id`).toArray(),
     (facts, row: { weeks: number }) => (facts.activeWeeks = row.weeks),
   );
-  // Autopilot's events: turn.end per session, or a session.end's turn count.
-  each(
-    sql
-      .exec<{ github_id: number }>(
-        `SELECT DISTINCT github_id FROM (
-           SELECT github_id FROM events WHERE type = 'turn.end' AND session_id IS NOT NULL${filter("github_id")}
-           GROUP BY github_id, session_id HAVING COUNT(*) >= ${TRUST_MIN_TURNS}
-           UNION
-           SELECT github_id FROM events WHERE type = 'session.end' AND CAST(json_extract(props, '$.turns') AS INTEGER) >= ${TRUST_MIN_TURNS}${filter("github_id")}
-         )`,
-      )
-      .toArray(),
-    (facts) => (facts.multiTurn = true),
-  );
+  // Autopilot's events: TRUST_MIN_TURNS turn.end in one session, or a session.end's turn count, ever
+  // (kept in `person_events` by the Directory's recordEvents, so it outlives the raw events).
+  each(sql.exec<{ github_id: number }>(`SELECT github_id FROM person_events WHERE multi_turn = 1${filter("github_id")}`).toArray(), (facts) => (facts.multiTurn = true));
   // Any agent: a session with enough requests spread over enough time.
   each(
     sql.exec<{ github_id: number }>(`SELECT DISTINCT github_id FROM trust_sessions WHERE requests >= ${TRUST_MIN_TURNS} AND last_at - first_at >= ${TRUST_MIN_SPREAD_MS}${filter("github_id")}`).toArray(),

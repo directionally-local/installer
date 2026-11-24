@@ -117,6 +117,7 @@ describe("runtime settings (units)", () => {
       runwayTotalCapShare: 0.1,
       useDescriptions: true,
       useDescriptionDailyCap: 2000,
+      rawLogKeepDays: 35,
       securityOffGpt6: true,
       gpt6PresendGuard: "enforce",
       gpt6GuardTimeoutMs: 4000,

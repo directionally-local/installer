@@ -21,23 +21,31 @@ export const DL_ONLY_WINDOW_MS = DAY_MS;
 /** Free sign-in-token chat requests: the ones the dl-only checks count. */
 const counted = (prefix = "") => `${prefix}is_admin = 0 AND ${prefix}paid = 0 AND ${prefix}via_key = 0`;
 
+/** The same test on one request row: whether the dl-only checks count it. */
+export function countedRequest(row: { is_admin: number; paid: number; via_key: number }): boolean {
+  return row.is_admin === 0 && row.paid === 0 && row.via_key === 0;
+}
+
 /**
  * True when `githubId` is using free tokens outside dl (see above). Indexed reads that stop
- * early: the latest session event (newest first, stops at the first), then at most
- * DL_ONLY_MIN_REQUESTS request rows that it doesn't cover.
+ * early: when the latest session event arrived (`person_events`, kept past the raw log's
+ * pruning), then at most DL_ONLY_MIN_REQUESTS request rows that it doesn't cover, plus the
+ * uncovered requests already pruned from the log (`dl_only_carry`).
  */
 export function outsideDl(store: Sql, githubId: number, now: number): boolean {
-  const last =
-    store
-      .exec<{ received_at: number }>("SELECT received_at FROM events WHERE github_id = ? AND session_id IS NOT NULL ORDER BY received_at DESC LIMIT 1", githubId)
-      .toArray()[0]?.received_at ?? null;
+  const facts = store
+    .exec<{ session_received_at: number | null; dl_only_carry: number }>("SELECT session_received_at, dl_only_carry FROM person_events WHERE github_id = ?", githubId)
+    .toArray()[0];
+  const last = facts?.session_received_at ?? null;
   const coveredUntil = last === null ? -1 : last + DL_ONLY_WINDOW_MS;
   if (coveredUntil >= now) return false;
+  const carried = facts?.dl_only_carry ?? 0;
+  if (carried >= DL_ONLY_MIN_REQUESTS) return true;
   const uncovered =
     store
-      .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM requests WHERE github_id = ? AND at > ? AND ${counted()} LIMIT ?)`, githubId, coveredUntil, DL_ONLY_MIN_REQUESTS)
+      .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM requests WHERE github_id = ? AND at > ? AND ${counted()} LIMIT ?)`, githubId, coveredUntil, DL_ONLY_MIN_REQUESTS - carried)
       .toArray()[0]?.n ?? 0;
-  return uncovered >= DL_ONLY_MIN_REQUESTS;
+  return carried + uncovered >= DL_ONLY_MIN_REQUESTS;
 }
 
 export const PROXY_ROUTER_MESSAGE = "The free tier can't be used behind account-pooling routers such as 9router. Use it directly from dl, or bring your own key.";

@@ -1384,6 +1384,7 @@ with who made it and when.
 | `noGithubAlerts` | `NO_GITHUB_ALERTS` | `each` (an email per "Don't have GitHub?" click and answer, at most 50 a UTC day, the rest in the daily digest); `daily` (one line in the daily digest); `off` |
 | `useDescriptions` | `USE_DESCRIPTIONS` | true: a short automated description and safety label per session (see [use descriptions](#what-people-use-the-service-for-use-descriptions)) |
 | `useDescriptionDailyCap` | `USE_DESCRIPTION_DAILY_CAP` | 2000: description calls a UTC day across everyone (0 stops them) |
+| `rawLogKeepDays` | `RAW_LOG_KEEP_DAYS` | 35: whole UTC days of the raw request log and session events kept (see [raw log retention](#raw-log-retention)); 0 keeps everything; otherwise 31 to 3650 |
 | `securityOffGpt6` | `SECURITY_OFF_GPT6` | true: security work is served by DeepSeek only, never GPT-6 (see [security work kept off GPT-6](#what-people-use-the-service-for-use-descriptions)) |
 | `gpt6PresendGuard` | `GPT6_PRESEND_GUARD` | `enforce`: GPT-6 requests are checked before they are sent (see [GPT-6: pre-send checks and the trust gate](#gpt-6-pre-send-checks-and-the-trust-gate)); `off` |
 | `gpt6GuardTimeoutMs` | `GPT6_GUARD_TIMEOUT_MS` | 4000: ms each pre-send check may take; past it the request isn't sent |
@@ -1955,6 +1956,36 @@ latest kept. The address is never logged. Admins see the leads in the Tools tab'
 access" card (email, vendor, GPU, VRAM, date, newest first, escaped; a box with every address to
 copy), download them at `GET /admin/dashboard/early-access.csv`, and delete one person's leads on
 request from the same card. The dl.new privacy policy says this.
+
+## Raw log retention
+
+The Directory keeps every request (`requests`: counts, cost, timings) and every session event
+(`events`) in its one SQLite database, which has a 10 GB cap. Only the last `rawLogKeepDays` whole
+UTC days (35 by default) are kept. Every 10 minutes (the speed probes' cron) older rows are deleted
+in steps of at most 2000 rows of each table, up to 10 steps, each its own short call.
+
+Nothing that reads further back reads the raw log. Rollups kept with every request and event
+(and built once from the existing log the first time this code runs) hold what outlives it:
+
+- `person_daily`: per UTC day and person, admins included, requests, tokens, cost and errors.
+  `GET /admin/metrics` reads its daily series, totals, top people and weekly active from here, and
+  `GET /admin/people/:id` its weekly usage.
+- `daily_activity`: also each day's error events.
+- `person_events` and `person_event_types`: per person, all time, sessions, sessions started,
+  turns, duration, the latest event, event counts by type (the funnel's first session end and
+  first PR), GPT-6 trust's multi-turn use, and the dl-only check's inputs: when the latest session
+  event arrived, and how many pruned free requests no session event covered.
+- `latency_daily`: a day's p50 and p95 latency, worked out from the whole day just before its first
+  row is pruned.
+
+So every all-time number on the admin pages, the dl-only check and GPT-6 trust stay the same after
+pruning. What reads the raw log directly only looks back 30 days at most (the Health view, the
+token allocator, the digest, model speeds); `rawLogKeepDays` can't be set lower than 31. The one
+thing that shrinks is the list of a person's 20 latest events in `GET /admin/people/:id`.
+
+`GET /admin/metrics` has `storage`: `databaseBytes` (the database's size, where the runtime
+reports it), `rows` (row counts of the biggest tables), `oldestRequestAt`, `oldestEventAt`,
+`rawLogKeepDays` and `pruned` (`{requests, events, lastAt}`, rows deleted so far).
 
 ## Admin dashboard
 

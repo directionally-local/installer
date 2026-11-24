@@ -312,6 +312,7 @@ export interface Env {
   USER_EMAILS?: string;
   USER_EMAILS_TO_ADMINS?: string;
   DL_ONLY?: string;
+  RAW_LOG_KEEP_DAYS?: string;
   ALLOW_OTHER_HARNESSES?: string;
   OTHER_HARNESS_SHARE?: string;
   /** Cloudflare's send_email binding for alert email; optional (absent off Cloudflare). */
@@ -424,6 +425,12 @@ export function createHandler(options: HandlerOptions = {}): {
           await runRunway(env, fetcher, now);
         } catch (error) {
           console.error("runway alerts: run failed", error instanceof Error ? error.name : "error");
+        }
+        // The same 10-minute tick prunes the raw log in small steps.
+        try {
+          await pruneRawLogs(env, now);
+        } catch (error) {
+          console.error("raw log pruning: run failed", error instanceof Error ? error.name : "error");
         }
         return;
       }
@@ -2208,6 +2215,23 @@ async function runRunway(env: Env, fetcher: Fetch, now: () => number): Promise<v
 }
 
 /** The speed probes' cron run (probes.ts): one probe per model that can serve, recorded in the Directory. */
+/** Pruning steps (DirectoryObject.pruneRawLogs, PRUNE_BATCH_ROWS rows of each raw table) at most per 10-minute tick. */
+export const PRUNE_STEPS_PER_RUN = 10;
+
+/**
+ * Drops raw request log and session events older than `rawLogKeepDays`, a bounded step at a time,
+ * each its own short call so requests run in between. At most PRUNE_STEPS_PER_RUN steps a tick:
+ * a backlog clears over several ticks.
+ */
+async function pruneRawLogs(env: Env, now: () => number): Promise<void> {
+  const config = readFreeConfig(env as unknown as Record<string, unknown>);
+  const directoryStub = env.DIRECTORY.getByName("directory");
+  for (let step = 0; step < PRUNE_STEPS_PER_RUN; step++) {
+    const result = await directoryStub.pruneRawLogs(now(), config.rawLogKeepDays);
+    if (!result.more) return;
+  }
+}
+
 async function runProbes(env: Env, fetcher: Fetch, now: () => number, at: number): Promise<void> {
   const envConfig = readFreeConfig(env as unknown as Record<string, unknown>);
   const directoryStub = env.DIRECTORY.getByName("directory");
@@ -5037,7 +5061,7 @@ async function adminMetrics(c: Ctx): Promise<Response> {
   if (Number.isNaN(to) || Number.isNaN(from) || from > to) return apiError(400, "invalid_request", "from and to must be ISO dates with from <= to.");
   if (to - from > 366 * DAY_MS) return apiError(400, "invalid_request", "The range can't be longer than 366 days.");
   const [metrics, refusals, noGithub, guard, pro, campaigns] = await Promise.all([
-    directory(c).metrics({ from, to, now, adminIds: [...c.config.adminGithubIds] }),
+    directory(c).metrics({ from, to, now, adminIds: [...c.config.adminGithubIds], rawLogKeepDays: c.config.rawLogKeepDays }),
     directory(c).refusals(Math.floor(from / DAY_MS), Math.floor(to / DAY_MS)),
     directory(c).noGithubDays({ from: Math.floor(from / DAY_MS) * DAY_MS, until: Math.floor(to / DAY_MS) * DAY_MS + DAY_MS }),
     // GPT-6's pre-send checks per UTC day, and how many non-admins its trust gate would serve now.

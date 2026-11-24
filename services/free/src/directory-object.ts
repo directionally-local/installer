@@ -7,7 +7,7 @@ import { endEventCode, EVENT_CODE_SCHEMA, insertEventCode, listEventCodes, looku
 import type { DownloadCount, InstallCount } from "./telemetry.js";
 import { CAMPAIGN_KEYS_PER_DAY, CAMPAIGN_OTHER, type Campaign, type CampaignRow, type CampaignStep, type WebFunnelRow, type WebStep } from "./web-signup.js";
 import { REFUSALS_KEEP_DAYS, type RefusalRow } from "./refusals.js";
-import { outsideDl } from "./abuse.js";
+import { countedRequest, DL_ONLY_MIN_REQUESTS, DL_ONLY_WINDOW_MS, outsideDl } from "./abuse.js";
 import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, signupFunnel, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
 import type { CleanEvent, GpuCount } from "./events.js";
 import { healthData, type HealthData, type HealthWindow } from "./health-data.js";
@@ -27,7 +27,7 @@ import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
 import { USE_CHECKPOINTS, USE_KEEP_DAYS, type UseLabel } from "./use-description.js";
 import { labelKeepsOffGpt6 } from "./security-route.js";
 import { activePro, countProStep, PRO_FUNNEL_SCHEMA, proDigestLine, proFunnelDays, type ProFunnelDay, type ProFunnelStep } from "./pro-funnel.js";
-import { countGuard, everyonesTrust, GPT6_GUARD_SCHEMA, guardDays, noteTrustSession, personTrust, type Trust } from "./gpt6-trust.js";
+import { countGuard, everyonesTrust, GPT6_GUARD_SCHEMA, guardDays, noteTrustSession, personTrust, TRUST_MIN_TURNS, type Trust } from "./gpt6-trust.js";
 import { GUARD_OUTCOMES, type Checker, type GuardOutcome } from "./presend-guard.js";
 import { dayIso, MODERATION_HISTORY_DAYS, MODERATION_HISTORY_ROWS, MODERATION_VERDICTS, type ModerationAction, type ModerationAnswer, type ModerationCase, type ModerationVerdict, type TriggerLabel } from "./moderation.js";
 import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
@@ -437,9 +437,13 @@ export interface EarlyAccessLead {
   email: string;
 }
 
-const ACTIVITY = `(SELECT github_id, at FROM requests UNION ALL SELECT github_id, at FROM events)`;
-/** Monday 00:00 UTC of `at`, in SQL: 1970-01-01 was a Thursday. */
-const WEEK_OF = (column: string) => `(((${column}) / ${DAY_MS}) - ((((${column}) / ${DAY_MS}) + 3) % 7)) * ${DAY_MS}`;
+/**
+ * Who was active on which UTC day, all time: a request (admins' included) or a session event. From
+ * the rollups, which outlive the raw log's pruning.
+ */
+const ACTIVE_DAYS = `(SELECT day, github_id FROM person_daily UNION SELECT day, github_id FROM daily_activity WHERE events > 0)`;
+/** Monday 00:00 UTC (Unix ms) of a UTC day number, in SQL: 1970-01-01 was a Thursday. */
+const WEEK_OF_DAY = (column: string) => `((${column}) - (((${column}) + 3) % 7)) * ${DAY_MS}`;
 
 const SCHEMA = [
   // "Don't have GitHub?" clicks and answers (no-github.ts).
@@ -939,6 +943,52 @@ const SCHEMA = [
      day  INTEGER PRIMARY KEY,
      salt TEXT NOT NULL
    )`,
+  // Rollups of the raw log (`requests`, `events`), which keeps only RAW_LOG_KEEP_DAYS days
+  // (pruneRawLogs): everything that reads further back reads these. Kept with each record and
+  // built once from the log (#backfillRawRollups). Counts only.
+  // Per UTC day, person and admin flag, admins included: the request log's sums.
+  `CREATE TABLE IF NOT EXISTS person_daily (
+     day               INTEGER NOT NULL,
+     github_id         INTEGER NOT NULL,
+     is_admin          INTEGER NOT NULL,
+     requests          INTEGER NOT NULL,
+     prompt_tokens     INTEGER NOT NULL,
+     cached_tokens     INTEGER NOT NULL,
+     completion_tokens INTEGER NOT NULL,
+     charged_tokens    INTEGER NOT NULL,
+     cost_usd          REAL NOT NULL,
+     errors            INTEGER NOT NULL,
+     PRIMARY KEY (day, github_id, is_admin)
+   ) WITHOUT ROWID`,
+  `CREATE INDEX IF NOT EXISTS person_daily_person ON person_daily (github_id, day)`,
+  // Per person, all time: what their session events add up to. `session_received_at` is when the
+  // latest event with a session id arrived, and `dl_only_carry` the pruned free requests that no
+  // session event covered (capped at DL_ONLY_MIN_REQUESTS): the dl-only check's two inputs
+  // besides the recent log (abuse.ts outsideDl). `multi_turn` is GPT-6 trust's (gpt6-trust.ts).
+  `CREATE TABLE IF NOT EXISTS person_events (
+     github_id           INTEGER PRIMARY KEY,
+     sessions            INTEGER NOT NULL,
+     sessions_started    INTEGER NOT NULL,
+     duration_ms         INTEGER NOT NULL,
+     turns               INTEGER NOT NULL,
+     last_at             INTEGER,
+     multi_turn          INTEGER NOT NULL,
+     session_received_at INTEGER,
+     dl_only_carry       INTEGER NOT NULL
+   )`,
+  // Per person and event type, all time: how many.
+  `CREATE TABLE IF NOT EXISTS person_event_types (
+     github_id INTEGER NOT NULL,
+     type      TEXT NOT NULL,
+     n         INTEGER NOT NULL,
+     PRIMARY KEY (github_id, type)
+   ) WITHOUT ROWID`,
+  // A day's request latency percentiles, worked out from the whole day just before pruning starts on it.
+  `CREATE TABLE IF NOT EXISTS latency_daily (
+     day INTEGER PRIMARY KEY,
+     p50 INTEGER,
+     p95 INTEGER
+   )`,
 ];
 
 /** Columns added after their table first shipped: added in place on start. */
@@ -1017,7 +1067,8 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   // The client's session id (any coding agent that sends one), for the token allocator's session counts.
   ["requests", "session_key", "TEXT"],
   // Which coding agent a use description came from (UseClient); NULL for rows stored before it was kept.
-  ["use_descriptions", "client", "TEXT"],
+  ["use_descriptions", "client", "TEXT"],  // Error events per person per day (the metrics' errorEvents), so they outlive the raw events.
+  ["daily_activity", "error_events", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 /** Days of `daily_activity` whose DeepSeek cost is filled in from the request log when the column is added. */
@@ -1034,6 +1085,10 @@ const UPSTREAM_ROLLUP_READY = "rollup:upstream_tokens_people";
 const PERSON_TOTALS_READY = "rollup:person_totals";
 /** Set in `settings` once `grant_history` has been seeded from the grants table. */
 const GRANT_HISTORY_READY = "rollup:grant_history";
+/** Set in `settings` once the raw log's rollups (`person_daily`, `person_events`, `person_event_types`, `daily_activity.error_events`) have been built. */
+const RAW_ROLLUPS_READY = "rollup:raw_log";
+/** Rows of each raw table one `pruneRawLogs` call deletes at most: a short write, so requests queue behind it briefly. */
+export const PRUNE_BATCH_ROWS = 2000;
 
 /** What the sign-up GitHub activity check's contribution lookup found (app.ts). */
 export type GithubCheckOutcome = "contributions" | "none" | "error";
@@ -1065,6 +1120,49 @@ export class DirectoryObject extends DurableObject {
       if (rebuilt || added.has("daily_activity.prompt_tokens")) this.#backfillDailyTokens();
       this.#backfillPersonTotals();
       this.#seedGrantHistory();
+      this.#backfillRawRollups();
+    });
+  }
+
+  /**
+   * Builds the raw log's rollups from `requests` and `events` once, before any pruning: from then
+   * on `recordRequest` and `recordEvents` keep them, and every reader that looks back further than
+   * the raw log is kept reads them, so the numbers are the same before and after pruning.
+   */
+  #backfillRawRollups(): void {
+    const sql = this.ctx.storage.sql;
+    if (sql.exec("SELECT 1 FROM settings WHERE key = ?", RAW_ROLLUPS_READY).toArray().length > 0) return;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("DELETE FROM person_daily");
+      sql.exec(
+        `INSERT INTO person_daily (day, github_id, is_admin, requests, prompt_tokens, cached_tokens, completion_tokens, charged_tokens, cost_usd, errors)
+         SELECT at / ${DAY_MS}, github_id, is_admin, COUNT(*), SUM(prompt_tokens), SUM(cached_tokens), SUM(completion_tokens), SUM(charged_tokens), SUM(cost_usd), SUM(status != 'ok')
+         FROM requests WHERE true GROUP BY 1, 2, 3`,
+      );
+      sql.exec(
+        `UPDATE daily_activity SET error_events = t.n
+         FROM (SELECT at / ${DAY_MS} AS day, github_id, COUNT(*) AS n FROM events WHERE type = 'error' GROUP BY 1, 2) AS t
+         WHERE daily_activity.day = t.day AND daily_activity.github_id = t.github_id`,
+      );
+      sql.exec("DELETE FROM person_event_types");
+      sql.exec("INSERT INTO person_event_types (github_id, type, n) SELECT github_id, type, COUNT(*) FROM events WHERE true GROUP BY 1, 2");
+      sql.exec("DELETE FROM person_events");
+      sql.exec(
+        `INSERT INTO person_events (github_id, sessions, sessions_started, duration_ms, turns, last_at, multi_turn, session_received_at, dl_only_carry)
+         SELECT github_id, COUNT(DISTINCT session_id), COUNT(DISTINCT CASE WHEN type = 'session.start' THEN session_id END),
+                SUM(CASE WHEN type = 'session.end' THEN COALESCE(json_extract(props, '$.durationMs'), 0) ELSE 0 END),
+                SUM(CASE WHEN type = 'session.end' THEN COALESCE(json_extract(props, '$.turns'), 0) ELSE 0 END),
+                MAX(at), 0, MAX(CASE WHEN session_id IS NOT NULL THEN received_at END), 0
+         FROM events WHERE true GROUP BY github_id`,
+      );
+      // GPT-6 trust's multi-turn use, as gpt6-trust.ts read it from the log.
+      sql.exec(
+        `UPDATE person_events SET multi_turn = 1 WHERE github_id IN (
+           SELECT github_id FROM events WHERE type = 'turn.end' AND session_id IS NOT NULL GROUP BY github_id, session_id HAVING COUNT(*) >= ${TRUST_MIN_TURNS}
+           UNION
+           SELECT github_id FROM events WHERE type = 'session.end' AND CAST(json_extract(props, '$.turns') AS INTEGER) >= ${TRUST_MIN_TURNS})`,
+      );
+      sql.exec("INSERT INTO settings (key, value) VALUES (?, '1')", RAW_ROLLUPS_READY);
     });
   }
 
@@ -1215,12 +1313,13 @@ export class DirectoryObject extends DurableObject {
       completionTokens?: number;
       harnessRequests?: number;
       harnessTokens?: number;
+      errorEvents?: number;
     },
   ): void {
     this.ctx.storage.sql.exec(
-      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd, paid_cost_usd, credit_usd, sessions, deepseek_cost_usd, prompt_tokens, completion_tokens, harness_requests, harness_tokens)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (day, github_id) DO UPDATE SET
+      `INSERT INTO daily_activity (day, github_id, requests, events, charged_tokens, cost_usd, paid_cost_usd, credit_usd, sessions, deepseek_cost_usd, prompt_tokens, completion_tokens, harness_requests, harness_tokens, error_events)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (day, github_id) DO UPDATE SET error_events = error_events + excluded.error_events,
          requests = requests + excluded.requests, events = events + excluded.events, sessions = sessions + excluded.sessions,
          charged_tokens = charged_tokens + excluded.charged_tokens, cost_usd = cost_usd + excluded.cost_usd,
          paid_cost_usd = paid_cost_usd + excluded.paid_cost_usd, credit_usd = credit_usd + excluded.credit_usd,
@@ -1241,6 +1340,7 @@ export class DirectoryObject extends DurableObject {
       change.completionTokens ?? 0,
       change.harnessRequests ?? 0,
       change.harnessTokens ?? 0,
+      change.errorEvents ?? 0,
     );
   }
 
@@ -1901,7 +2001,7 @@ export class DirectoryObject extends DurableObject {
            WHERE p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0
              AND NOT (q.github_id IS NOT NULL AND q.admitted_at IS NULL)
              AND COALESCE(q.admitted_at, p.admitted_at) > ? AND COALESCE(q.admitted_at, p.admitted_at) <= ?
-             AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.github_id = p.github_id)
+             AND NOT EXISTS (SELECT 1 FROM person_totals r WHERE r.github_id = p.github_id)
              AND p.level IN ('full', 'basic')
            ORDER BY p.github_id`,
           now - 72 * 3_600_000,
@@ -1913,8 +2013,9 @@ export class DirectoryObject extends DurableObject {
       sql
         .exec<{ github_id: number }>(
           `SELECT p.github_id FROM people p
-           JOIN (SELECT github_id, COUNT(DISTINCT at / ${DAY_MS}) AS days, MAX(at) AS last FROM requests GROUP BY github_id) r ON r.github_id = p.github_id
-           WHERE p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0 AND r.days >= 2 AND r.last < ?
+           JOIN person_totals t ON t.github_id = p.github_id
+           JOIN (SELECT github_id, COUNT(DISTINCT day) AS days FROM person_daily GROUP BY github_id) r ON r.github_id = p.github_id
+           WHERE p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0 AND r.days >= 2 AND t.last_at < ?
              AND NOT EXISTS (SELECT 1 FROM user_emails e WHERE e.github_id = p.github_id AND e.kind = 'gone_quiet' AND e.claimed_at > ?)
            ORDER BY p.github_id`,
           now - 7 * DAY_MS,
@@ -2762,6 +2863,22 @@ export class DirectoryObject extends DurableObject {
           ...(record.harness ? { harnessRequests: 1, harnessTokens: record.chargedTokens } : {}),
         });
       }
+      this.ctx.storage.sql.exec(
+        `INSERT INTO person_daily (day, github_id, is_admin, requests, prompt_tokens, cached_tokens, completion_tokens, charged_tokens, cost_usd, errors)
+         VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (day, github_id, is_admin) DO UPDATE SET requests = requests + 1, prompt_tokens = prompt_tokens + excluded.prompt_tokens,
+           cached_tokens = cached_tokens + excluded.cached_tokens, completion_tokens = completion_tokens + excluded.completion_tokens,
+           charged_tokens = charged_tokens + excluded.charged_tokens, cost_usd = cost_usd + excluded.cost_usd, errors = errors + excluded.errors`,
+        Math.floor(record.at / DAY_MS),
+        record.githubId,
+        admin,
+        record.promptTokens,
+        record.cachedTokens,
+        record.completionTokens,
+        record.chargedTokens,
+        record.costUsd,
+        record.status !== "ok" ? 1 : 0,
+      );
       this.ctx.storage.sql.exec(
         `INSERT INTO person_totals (github_id, prompt_tokens, completion_tokens, cost_usd, requests, last_at) VALUES (?, ?, ?, ?, 1, ?)
          ON CONFLICT (github_id) DO UPDATE SET prompt_tokens = prompt_tokens + excluded.prompt_tokens, completion_tokens = completion_tokens + excluded.completion_tokens,
@@ -3651,15 +3768,33 @@ export class DirectoryObject extends DurableObject {
     return queueStartedAlert(spend.capWeekUsd, policy.globalWeeklyUsdCap);
   }
 
-  /** Stores cleaned events; ids already stored for this person are ignored. Returns how many were new. */
+  /**
+   * Stores cleaned events; ids already stored for this person are ignored. Returns how many were
+   * new. Each new one also goes into the rollups that outlive the raw events (`daily_activity`,
+   * `person_events`, `person_event_types`).
+   */
   async recordEvents(githubId: number, events: CleanEvent[], now: number): Promise<number> {
     let accepted = 0;
+    const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
+      const types = new Map<string, number>();
+      let sessions = 0;
+      let started = 0;
+      let durationMs = 0;
+      let turns = 0;
+      let lastAt: number | null = null;
+      let sessionEvent = false;
+      let multiTurn = sql.exec<{ multi_turn: number }>("SELECT multi_turn FROM person_events WHERE github_id = ?", githubId).toArray()[0]?.multi_turn === 1;
+      const seen = (sessionId: string, type?: string) =>
+        (type === undefined
+          ? sql.exec("SELECT 1 FROM events WHERE github_id = ? AND session_id = ? LIMIT 1", githubId, sessionId)
+          : sql.exec("SELECT 1 FROM events WHERE github_id = ? AND session_id = ? AND type = ? LIMIT 1", githubId, sessionId, type)
+        ).toArray().length > 0;
       for (const event of events) {
         // A session id this person hasn't sent before is a new dl session.
-        const newSession =
-          event.sessionId !== null && this.ctx.storage.sql.exec("SELECT 1 FROM events WHERE github_id = ? AND session_id = ? LIMIT 1", githubId, event.sessionId).toArray().length === 0;
-        const inserted = this.ctx.storage.sql
+        const newSession = event.sessionId !== null && !seen(event.sessionId);
+        const newStart = event.type === "session.start" && event.sessionId !== null && !newSession && !seen(event.sessionId, "session.start");
+        const inserted = sql
           .exec(
             `INSERT INTO events (github_id, id, type, session_id, at, props, received_at) VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(github_id, id) DO NOTHING RETURNING id`,
@@ -3672,11 +3807,148 @@ export class DirectoryObject extends DurableObject {
             now,
           )
           .toArray();
-        accepted += inserted.length;
-        if (inserted.length > 0) this.#addActivity(githubId, event.at, { requests: 0, events: 1, chargedTokens: 0, costUsd: 0, sessions: newSession ? 1 : 0 });
+        if (inserted.length === 0) continue;
+        accepted++;
+        this.#addActivity(githubId, event.at, { requests: 0, events: 1, chargedTokens: 0, costUsd: 0, sessions: newSession ? 1 : 0, errorEvents: event.type === "error" ? 1 : 0 });
+        types.set(event.type, (types.get(event.type) ?? 0) + 1);
+        if (newSession) sessions++;
+        if (event.type === "session.start" && event.sessionId !== null && (newSession || newStart)) started++;
+        const props = event.props as { durationMs?: number; turns?: number };
+        if (event.type === "session.end") {
+          durationMs += props.durationMs ?? 0;
+          turns += props.turns ?? 0;
+        }
+        lastAt = lastAt === null ? event.at : Math.max(lastAt, event.at);
+        if (event.sessionId !== null) sessionEvent = true;
+        // GPT-6 trust's multi-turn use (gpt6-trust.ts): a session with TRUST_MIN_TURNS turn.end events, or a session.end saying as many.
+        if (!multiTurn && event.type === "turn.end" && event.sessionId !== null) {
+          multiTurn = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM events WHERE github_id = ? AND session_id = ? AND type = 'turn.end'", githubId, event.sessionId).one().n >= TRUST_MIN_TURNS;
+        }
+        if (!multiTurn && event.type === "session.end") multiTurn = (props.turns ?? 0) >= TRUST_MIN_TURNS;
+      }
+      if (accepted === 0) return;
+      // A new session event covers the requests before it, pruned ones included (abuse.ts outsideDl).
+      sql.exec(
+        `INSERT INTO person_events (github_id, sessions, sessions_started, duration_ms, turns, last_at, multi_turn, session_received_at, dl_only_carry)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+         ON CONFLICT (github_id) DO UPDATE SET sessions = sessions + excluded.sessions, sessions_started = sessions_started + excluded.sessions_started,
+           duration_ms = duration_ms + excluded.duration_ms, turns = turns + excluded.turns, last_at = MAX(COALESCE(last_at, excluded.last_at), excluded.last_at),
+           multi_turn = MAX(multi_turn, excluded.multi_turn),
+           session_received_at = CASE WHEN excluded.session_received_at IS NULL THEN session_received_at ELSE MAX(COALESCE(session_received_at, 0), excluded.session_received_at) END,
+           dl_only_carry = CASE WHEN excluded.session_received_at IS NULL THEN dl_only_carry ELSE 0 END`,
+        githubId,
+        sessions,
+        started,
+        durationMs,
+        turns,
+        lastAt,
+        multiTurn ? 1 : 0,
+        sessionEvent ? now : null,
+      );
+      for (const [type, n] of types) {
+        sql.exec("INSERT INTO person_event_types (github_id, type, n) VALUES (?, ?, ?) ON CONFLICT (github_id, type) DO UPDATE SET n = n + excluded.n", githubId, type, n);
       }
     });
     return accepted;
+  }
+
+  /** RAW_LOG_KEEP_DAYS with the admin override applied. */
+  #keepDays(envKeepDays: number): number {
+    return applyOverrides({ rawLogKeepDays: envKeepDays }, this.#overrides()).rawLogKeepDays;
+  }
+
+  /**
+   * One bounded step of the raw log's retention: deletes at most PRUNE_BATCH_ROWS of the oldest
+   * `requests` and of the oldest `events` from before the kept whole UTC days (`rawLogKeepDays`,
+   * 0 keeps everything). Nothing is lost that a reader needs: every all-time number reads the
+   * rollups `recordRequest` and `recordEvents` keep. Just before the first row of a UTC day goes,
+   * that day's latency percentiles are kept (`latency_daily`), and pruned free requests no session
+   * event covered are carried for the dl-only check (abuse.ts outsideDl). `more`: call again.
+   */
+  async pruneRawLogs(now: number, envKeepDays: number): Promise<{ keepDays: number; requests: number; events: number; more: boolean }> {
+    const keepDays = this.#keepDays(envKeepDays);
+    if (keepDays <= 0) return { keepDays: 0, requests: 0, events: 0, more: false };
+    const cutoff = (Math.floor(now / DAY_MS) - keepDays) * DAY_MS;
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      const rows = sql
+        .exec<{ id: number; github_id: number; at: number; is_admin: number; paid: number; via_key: number }>(
+          "SELECT id, github_id, at, is_admin, paid, via_key FROM requests WHERE at < ? ORDER BY at LIMIT ?",
+          cutoff,
+          PRUNE_BATCH_ROWS,
+        )
+        .toArray();
+      for (const day of new Set(rows.map((row) => Math.floor(row.at / DAY_MS)))) {
+        if (sql.exec("SELECT 1 FROM latency_daily WHERE day = ?", day).toArray().length > 0) continue;
+        const sorted = sql
+          .exec<{ latency_ms: number }>("SELECT latency_ms FROM requests WHERE at >= ? AND at < ? AND latency_ms IS NOT NULL ORDER BY latency_ms", day * DAY_MS, (day + 1) * DAY_MS)
+          .toArray()
+          .map((row) => row.latency_ms);
+        sql.exec("INSERT INTO latency_daily (day, p50, p95) VALUES (?, ?, ?)", day, percentile(sorted, 50), percentile(sorted, 95));
+      }
+      const uncovered = new Map<number, number[]>();
+      for (const row of rows) {
+        if (!countedRequest(row)) continue;
+        const list = uncovered.get(row.github_id) ?? [];
+        list.push(row.at);
+        uncovered.set(row.github_id, list);
+      }
+      for (const [githubId, times] of uncovered) {
+        const facts = sql.exec<{ session_received_at: number | null }>("SELECT session_received_at FROM person_events WHERE github_id = ?", githubId).toArray()[0];
+        const last = facts?.session_received_at ?? null;
+        const coveredUntil = last === null ? -1 : last + DL_ONLY_WINDOW_MS;
+        const n = times.filter((at) => at > coveredUntil).length;
+        if (n === 0) continue;
+        sql.exec(
+          `INSERT INTO person_events (github_id, sessions, sessions_started, duration_ms, turns, last_at, multi_turn, session_received_at, dl_only_carry)
+           VALUES (?, 0, 0, 0, 0, NULL, 0, NULL, MIN(?, ?))
+           ON CONFLICT (github_id) DO UPDATE SET dl_only_carry = MIN(dl_only_carry + excluded.dl_only_carry, ${DL_ONLY_MIN_REQUESTS})`,
+          githubId,
+          n,
+          DL_ONLY_MIN_REQUESTS,
+        );
+      }
+      if (rows.length > 0) sql.exec("DELETE FROM requests WHERE id IN (SELECT value FROM json_each(?))", JSON.stringify(rows.map((row) => row.id)));
+      const events = sql.exec("DELETE FROM events WHERE rowid IN (SELECT rowid FROM events WHERE at < ? ORDER BY at LIMIT ?) RETURNING 1", cutoff, PRUNE_BATCH_ROWS).toArray().length;
+      if (rows.length > 0 || events > 0) {
+        const before = this.#pruned();
+        sql.exec(
+          "INSERT INTO settings (key, value) VALUES ('raw_log:pruned', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+          JSON.stringify({ at: now, requests: before.requests + rows.length, events: before.events + events }),
+        );
+      }
+      return { keepDays, requests: rows.length, events, more: rows.length === PRUNE_BATCH_ROWS || events === PRUNE_BATCH_ROWS };
+    });
+  }
+
+  /** Raw log rows pruned so far, and when the last were. */
+  #pruned(): { at: number | null; requests: number; events: number } {
+    const raw = this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM settings WHERE key = 'raw_log:pruned'").toArray()[0]?.value;
+    if (!raw) return { at: null, requests: 0, events: 0 };
+    const parsed = JSON.parse(raw) as { at?: number; requests?: number; events?: number };
+    return { at: parsed.at ?? null, requests: parsed.requests ?? 0, events: parsed.events ?? 0 };
+  }
+
+  /**
+   * The Directory's storage for GET /admin/metrics: the database's size in bytes (null where the
+   * runtime doesn't say), the rows in its biggest tables, the raw log's oldest rows and retention.
+   */
+  #storage(envKeepDays: number | undefined): Record<string, unknown> {
+    const sql = this.ctx.storage.sql;
+    const rows = Object.fromEntries(STORAGE_TABLES.map((table) => [table, sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).one().n]));
+    const oldest = (table: string) => {
+      const at = sql.exec<{ at: number | null }>(`SELECT MIN(at) AS at FROM ${table}`).one().at;
+      return at === null ? null : new Date(at).toISOString();
+    };
+    const pruned = this.#pruned();
+    return {
+      databaseBytes: databaseSize(sql),
+      rawLogKeepDays: envKeepDays === undefined ? null : this.#keepDays(envKeepDays),
+      oldestRequestAt: oldest("requests"),
+      oldestEventAt: oldest("events"),
+      pruned: { requests: pruned.requests, events: pruned.events, lastAt: pruned.at === null ? null : new Date(pruned.at).toISOString() },
+      rows,
+    };
   }
 
   /**
@@ -4098,29 +4370,35 @@ export class DirectoryObject extends DurableObject {
     return { count: row?.n ?? 0, usd: (row?.cents ?? 0) / 100 };
   }
 
-  /** Admin analytics over whole UTC days `from`..`to` (inclusive), computed from the stored records. */
-  async metrics(input: { from: number; to: number; now: number; top?: number; adminIds?: number[] }): Promise<Record<string, unknown>> {
+  /**
+   * Admin analytics over whole UTC days `from`..`to` (inclusive), computed from the stored records:
+   * the rollups for everything but latency, so pruning the raw log changes no number. Latency comes
+   * from the raw log, or for a day already being pruned, the percentiles kept for it.
+   */
+  async metrics(input: { from: number; to: number; now: number; top?: number; adminIds?: number[]; rawLogKeepDays?: number }): Promise<Record<string, unknown>> {
     const sql = this.ctx.storage.sql;
     const from = Math.floor(input.from / DAY_MS) * DAY_MS;
     const until = Math.floor(input.to / DAY_MS) * DAY_MS + DAY_MS;
+    const fromDay = from / DAY_MS;
+    const untilDay = until / DAY_MS;
     const top = input.top ?? 10;
 
     type DayRow = { day: number; requests: number; tokens_in: number; cached: number; tokens_out: number; cost: number; errors: number };
     const perDay = new Map<number, DayRow>();
     for (const row of sql
       .exec<DayRow>(
-        `SELECT at / ${DAY_MS} AS day, COUNT(*) AS requests, SUM(prompt_tokens) AS tokens_in, SUM(cached_tokens) AS cached,
-                SUM(completion_tokens) AS tokens_out, SUM(cost_usd) AS cost, SUM(status != 'ok') AS errors
-         FROM requests WHERE at >= ? AND at < ? GROUP BY day`,
-        from,
-        until,
+        `SELECT day, SUM(requests) AS requests, SUM(prompt_tokens) AS tokens_in, SUM(cached_tokens) AS cached,
+                SUM(completion_tokens) AS tokens_out, SUM(cost_usd) AS cost, SUM(errors) AS errors
+         FROM person_daily WHERE day >= ? AND day < ? GROUP BY day`,
+        fromDay,
+        untilDay,
       )
       .toArray()) perDay.set(row.day, row);
 
     const activeByDay = countMap(sql.exec<{ k: number; n: number }>(
-      `SELECT at / ${DAY_MS} AS k, COUNT(DISTINCT github_id) AS n FROM ${ACTIVITY} WHERE at >= ? AND at < ? GROUP BY k`,
-      from,
-      until,
+      `SELECT day AS k, COUNT(*) AS n FROM ${ACTIVE_DAYS} WHERE day >= ? AND day < ? GROUP BY k`,
+      fromDay,
+      untilDay,
     ).toArray());
     const signupsByDay = countMap(sql.exec<{ k: number; n: number }>(
       `SELECT admitted_at / ${DAY_MS} AS k, COUNT(*) AS n FROM people WHERE admitted_at >= ? AND admitted_at < ? GROUP BY k`,
@@ -4128,9 +4406,9 @@ export class DirectoryObject extends DurableObject {
       until,
     ).toArray());
     const errorEventsByDay = countMap(sql.exec<{ k: number; n: number }>(
-      `SELECT at / ${DAY_MS} AS k, COUNT(*) AS n FROM events WHERE type = 'error' AND at >= ? AND at < ? GROUP BY k`,
-      from,
-      until,
+      `SELECT day AS k, SUM(error_events) AS n FROM daily_activity WHERE day >= ? AND day < ? AND error_events > 0 GROUP BY k`,
+      fromDay,
+      untilDay,
     ).toArray());
     // Security work kept off GPT-6 (security-route.ts): sessions held and GPT-6 requests refused.
     const securityByDay = new Map<number, { sessions: number; refusals: number }>();
@@ -4153,6 +4431,10 @@ export class DirectoryObject extends DurableObject {
       list.push(row.latency_ms);
       latencies.set(row.day, list);
     }
+    // Days pruning has started on: their percentiles from the whole day, kept just before.
+    const keptLatency = new Map(
+      sql.exec<{ day: number; p50: number | null; p95: number | null }>("SELECT day, p50, p95 FROM latency_daily WHERE day >= ? AND day < ?", fromDay, untilDay).toArray().map((row) => [row.day, row]),
+    );
 
     const daily = [];
     for (let day = from; day < until; day += DAY_MS) {
@@ -4171,17 +4453,17 @@ export class DirectoryObject extends DurableObject {
         costUsd: round(row?.cost ?? 0),
         errors: row?.errors ?? 0,
         errorEvents: errorEventsByDay.get(key) ?? 0,
-        latencyP50Ms: percentile(sorted, 50),
-        latencyP95Ms: percentile(sorted, 95),
+        latencyP50Ms: keptLatency.has(key) ? keptLatency.get(key)!.p50 : percentile(sorted, 50),
+        latencyP95Ms: keptLatency.has(key) ? keptLatency.get(key)!.p95 : percentile(sorted, 95),
         securitySessionsOffGpt6: securityByDay.get(key)?.sessions ?? 0,
         securityRefusalsOffGpt6: securityByDay.get(key)?.refusals ?? 0,
       });
     }
 
     const weeklyActiveMap = countMap(sql.exec<{ k: number; n: number }>(
-      `SELECT ${WEEK_OF("at")} AS k, COUNT(DISTINCT github_id) AS n FROM ${ACTIVITY} WHERE at >= ? AND at < ? GROUP BY k`,
-      weekStart(from),
-      until,
+      `SELECT ${WEEK_OF_DAY("day")} AS k, COUNT(DISTINCT github_id) AS n FROM ${ACTIVE_DAYS} WHERE day >= ? AND day < ? GROUP BY k`,
+      weekStart(from) / DAY_MS,
+      untilDay,
     ).toArray());
     const weeklyActive = [];
     for (let week = weekStart(from); week < until; week += WEEK_MS) {
@@ -4190,7 +4472,7 @@ export class DirectoryObject extends DurableObject {
 
     // Activity weeks per person, all time: retention and the funnel both need it.
     const weeksByPerson = new Map<number, Set<number>>();
-    for (const row of sql.exec<{ github_id: number; week: number }>(`SELECT DISTINCT github_id, ${WEEK_OF("at")} AS week FROM ${ACTIVITY}`).toArray()) {
+    for (const row of sql.exec<{ github_id: number; week: number }>(`SELECT DISTINCT github_id, ${WEEK_OF_DAY("day")} AS week FROM ${ACTIVE_DAYS}`).toArray()) {
       const set = weeksByPerson.get(row.github_id) ?? new Set<number>();
       set.add(row.week);
       weeksByPerson.set(row.github_id, set);
@@ -4227,9 +4509,10 @@ export class DirectoryObject extends DurableObject {
     const retentionNotBlocked = retentionOf(new Map([...cohorts.entries()].map(([week, members]) => [week, members.filter((id) => !blockedIds.has(id))])));
 
     const has = (query: string) => new Set(sql.exec<{ github_id: number }>(query).toArray().map((row) => row.github_id));
-    const requested = has("SELECT DISTINCT github_id FROM requests");
-    const ended = has("SELECT DISTINCT github_id FROM events WHERE type = 'session.end'");
-    const opened = has("SELECT DISTINCT github_id FROM events WHERE type = 'pr.opened'");
+    // All time, from the rollups: anyone with a request, a session.end, a pr.opened.
+    const requested = has("SELECT github_id FROM person_totals");
+    const ended = has("SELECT github_id FROM person_event_types WHERE type = 'session.end'");
+    const opened = has("SELECT github_id FROM person_event_types WHERE type = 'pr.opened'");
     const funnelOf = (ids: number[]) => ({
       signedIn: ids.length,
       firstRequest: ids.filter((id) => requested.has(id)).length,
@@ -4245,12 +4528,12 @@ export class DirectoryObject extends DurableObject {
     const byPerson = (order: "tokens" | "cost", limit: number) =>
       sql
         .exec<TopRow>(
-          `SELECT r.github_id, p.login, MAX(r.is_admin) AS is_admin, SUM(r.prompt_tokens + r.completion_tokens) AS tokens,
-                  SUM(r.prompt_tokens) AS tokens_in, SUM(r.cached_tokens) AS cached, SUM(r.cost_usd) AS cost, COUNT(*) AS requests
-           FROM requests r LEFT JOIN people p ON p.github_id = r.github_id
-           WHERE r.at >= ? AND r.at < ? GROUP BY r.github_id ORDER BY ${order} DESC, r.github_id LIMIT ?`,
-          from,
-          until,
+          `SELECT d.github_id, p.login, MAX(d.is_admin) AS is_admin, SUM(d.prompt_tokens + d.completion_tokens) AS tokens,
+                  SUM(d.prompt_tokens) AS tokens_in, SUM(d.cached_tokens) AS cached, SUM(d.cost_usd) AS cost, SUM(d.requests) AS requests
+           FROM person_daily d LEFT JOIN people p ON p.github_id = d.github_id
+           WHERE d.day >= ? AND d.day < ? GROUP BY d.github_id ORDER BY ${order} DESC, d.github_id LIMIT ?`,
+          fromDay,
+          untilDay,
           limit,
         )
         .toArray()
@@ -4267,11 +4550,11 @@ export class DirectoryObject extends DurableObject {
         }));
     const totals = sql
       .exec<{ requests: number; tokens_in: number | null; cached: number | null; tokens_out: number | null; cost: number | null; admin_cost: number | null }>(
-        `SELECT COUNT(*) AS requests, SUM(prompt_tokens) AS tokens_in, SUM(cached_tokens) AS cached, SUM(completion_tokens) AS tokens_out,
+        `SELECT COALESCE(SUM(requests), 0) AS requests, SUM(prompt_tokens) AS tokens_in, SUM(cached_tokens) AS cached, SUM(completion_tokens) AS tokens_out,
                 SUM(CASE WHEN is_admin = 0 THEN cost_usd ELSE 0 END) AS cost, SUM(CASE WHEN is_admin = 1 THEN cost_usd ELSE 0 END) AS admin_cost
-         FROM requests WHERE at >= ? AND at < ?`,
-        from,
-        until,
+         FROM person_daily WHERE day >= ? AND day < ?`,
+        fromDay,
+        untilDay,
       )
       .toArray()[0];
 
@@ -4331,6 +4614,8 @@ export class DirectoryObject extends DurableObject {
         cachedShare,
         costUsd,
       })),
+      // The Directory's own storage: size, big tables' rows, and the raw log's retention.
+      storage: this.#storage(input.rawLogKeepDays),
     };
   }
 
@@ -4344,11 +4629,11 @@ export class DirectoryObject extends DurableObject {
     const byWeek = new Map<number, WeekRow>();
     for (const row of sql
       .exec<WeekRow>(
-        `SELECT ${WEEK_OF("at")} AS week, COUNT(*) AS requests, SUM(prompt_tokens) AS tokens_in, SUM(cached_tokens) AS cached,
-                SUM(completion_tokens) AS tokens_out, SUM(charged_tokens) AS charged, SUM(cost_usd) AS cost, SUM(status != 'ok') AS errors
-         FROM requests WHERE github_id = ? AND at >= ? GROUP BY week`,
+        `SELECT ${WEEK_OF_DAY("day")} AS week, SUM(requests) AS requests, SUM(prompt_tokens) AS tokens_in, SUM(cached_tokens) AS cached,
+                SUM(completion_tokens) AS tokens_out, SUM(charged_tokens) AS charged, SUM(cost_usd) AS cost, SUM(errors) AS errors
+         FROM person_daily WHERE github_id = ? AND day >= ? GROUP BY week`,
         githubId,
-        since,
+        since / DAY_MS,
       )
       .toArray()) byWeek.set(row.week, row);
     const weekly = [];
@@ -4367,24 +4652,16 @@ export class DirectoryObject extends DurableObject {
       });
     }
 
+    // All time, from the rollups (the raw events keep only the last rawLogKeepDays days).
     const byType = Object.fromEntries(
-      sql.exec<{ type: string; n: number }>("SELECT type, COUNT(*) AS n FROM events WHERE github_id = ? GROUP BY type", githubId).toArray().map((row) => [row.type, row.n]),
+      sql.exec<{ type: string; n: number }>("SELECT type, n FROM person_event_types WHERE github_id = ?", githubId).toArray().map((row) => [row.type, row.n]),
     );
-    const sessions = sql
-      .exec<{ started: number; total: number; last_at: number | null }>(
-        `SELECT COUNT(DISTINCT CASE WHEN type = 'session.start' THEN session_id END) AS started,
-                COUNT(DISTINCT session_id) AS total, MAX(at) AS last_at
-         FROM events WHERE github_id = ?`,
+    const totals = sql
+      .exec<{ sessions: number; sessions_started: number; duration_ms: number; turns: number; last_at: number | null }>(
+        "SELECT sessions, sessions_started, duration_ms, turns, last_at FROM person_events WHERE github_id = ?",
         githubId,
       )
       .toArray()[0];
-    let durationMs = 0;
-    let turns = 0;
-    for (const row of sql.exec<{ props: string }>("SELECT props FROM events WHERE github_id = ? AND type = 'session.end'", githubId).toArray()) {
-      const props = JSON.parse(row.props) as { durationMs?: number; turns?: number };
-      durationMs += props.durationMs ?? 0;
-      turns += props.turns ?? 0;
-    }
     const recent = sql
       .exec<{ id: string; type: string; session_id: string | null; at: number; props: string }>(
         "SELECT id, type, session_id, at, props FROM events WHERE github_id = ? ORDER BY at DESC LIMIT 20",
@@ -4401,16 +4678,41 @@ export class DirectoryObject extends DurableObject {
       admittedVia: person.admitted_via,
       weekly,
       sessions: {
-        count: sessions?.total ?? 0,
-        started: sessions?.started ?? 0,
+        count: totals?.sessions ?? 0,
+        started: totals?.sessions_started ?? 0,
         ended: byType["session.end"] ?? 0,
-        totalDurationMs: durationMs,
-        totalTurns: turns,
-        lastEventAt: sessions?.last_at ? new Date(sessions.last_at).toISOString() : null,
+        totalDurationMs: totals?.duration_ms ?? 0,
+        totalTurns: totals?.turns ?? 0,
+        lastEventAt: totals?.last_at ? new Date(totals.last_at).toISOString() : null,
       },
       events: { byType, recent },
     };
   }
+}
+
+/** The tables GET /admin/metrics counts rows of: the raw log, its rollups and the other big ones. */
+const STORAGE_TABLES = [
+  "requests",
+  "events",
+  "daily_activity",
+  "person_daily",
+  "person_events",
+  "person_event_types",
+  "person_totals",
+  "people",
+  "upstream_timings",
+  "host_failures",
+  "use_descriptions",
+  "use_sessions",
+  "trust_sessions",
+  "moderation_decisions",
+  "config_log",
+] as const;
+
+/** The database's size in bytes: `databaseSize` where the runtime has it (Cloudflare), else null. */
+function databaseSize(sql: unknown): number | null {
+  const size = (sql as { databaseSize?: unknown }).databaseSize;
+  return typeof size === "number" && Number.isFinite(size) ? size : null;
 }
 
 function countMap(rows: Array<{ k: number; n: number }>): Map<number, number> {

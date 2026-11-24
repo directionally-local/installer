@@ -35,6 +35,13 @@ type Row = Record<string, unknown>;
 class FakeSql {
   constructor(private readonly db: DatabaseSync) {}
 
+  /** Like Cloudflare's: the database's size in bytes. */
+  get databaseSize(): number {
+    const pages = this.db.prepare("PRAGMA page_count").get() as { page_count: number };
+    const size = this.db.prepare("PRAGMA page_size").get() as { page_size: number };
+    return pages.page_count * size.page_size;
+  }
+
   exec<T = Row>(query: string, ...bindings: unknown[]) {
     const rows = this.db.prepare(query).all(...(bindings.map((value) => (value === undefined ? null : value)) as never[])) as T[];
     return {
