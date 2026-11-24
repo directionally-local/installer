@@ -281,6 +281,12 @@ export interface FreeConfig extends RegistrySettingsConfig {
   /** Description calls a UTC day across everyone (USE_DESCRIPTION_DAILY_CAP, default 2000); also a runtime setting. */
   useDescriptionDailyCap: number;
   /**
+   * Whole UTC days of the raw request log and session events the Directory keeps (RAW_LOG_KEEP_DAYS,
+   * default 35; 0 keeps everything); older rows are pruned in small batches every 10 minutes. Every
+   * all-time number reads rollups, so pruning changes none of them. Also a runtime setting.
+   */
+  rawLogKeepDays: number;
+  /**
    * Security work is served by DeepSeek only, never GPT-6 (security-route.ts):
    * SECURITY_OFF_GPT6, default on; also a runtime setting.
    */
@@ -472,6 +478,7 @@ export const DEFAULTS = {
   runwayTotalCapShare: 0.1,
   useDescriptions: true,
   useDescriptionDailyCap: 2000,
+  rawLogKeepDays: 35,
   securityOffGpt6: true,
   gpt6PresendGuard: "enforce" as GuardMode,
   gpt6GuardTimeoutMs: 4000,
@@ -678,6 +685,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     runwayTotalCapShare: share(env.RUNWAY_TOTAL_CAP_SHARE, DEFAULTS.runwayTotalCapShare, "RUNWAY_TOTAL_CAP_SHARE"),
     useDescriptions: flag(env.USE_DESCRIPTIONS, DEFAULTS.useDescriptions, "USE_DESCRIPTIONS"),
     useDescriptionDailyCap: whole(env.USE_DESCRIPTION_DAILY_CAP, DEFAULTS.useDescriptionDailyCap, "USE_DESCRIPTION_DAILY_CAP"),
+    rawLogKeepDays: keepDays(env.RAW_LOG_KEEP_DAYS),
     securityOffGpt6: flag(env.SECURITY_OFF_GPT6, DEFAULTS.securityOffGpt6, "SECURITY_OFF_GPT6"),
     gpt6PresendGuard: guardMode(env.GPT6_PRESEND_GUARD),
     gpt6GuardTimeoutMs: whole(env.GPT6_GUARD_TIMEOUT_MS, DEFAULTS.gpt6GuardTimeoutMs, "GPT6_GUARD_TIMEOUT_MS"),
@@ -780,6 +788,24 @@ function required(env: Record<string, unknown>, name: string): string {
   const value = text(env[name]);
   if (!value) throw new ConfigError(`${name} is required.`);
   return value;
+}
+
+/**
+ * The fewest and most days of raw log RAW_LOG_KEEP_DAYS may keep (0 keeps everything): the longest
+ * window read from the raw log is 30 days (the Health view, the allocator's history), plus a day.
+ */
+export const RAW_LOG_MIN_KEEP_DAYS = 31;
+export const RAW_LOG_MAX_KEEP_DAYS = 3650;
+
+/** 0 (keep everything) or RAW_LOG_MIN_KEEP_DAYS to RAW_LOG_MAX_KEEP_DAYS. */
+export function isKeepDays(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && (value === 0 || (value >= RAW_LOG_MIN_KEEP_DAYS && value <= RAW_LOG_MAX_KEEP_DAYS));
+}
+
+function keepDays(value: unknown): number {
+  const days = whole(value, DEFAULTS.rawLogKeepDays, "RAW_LOG_KEEP_DAYS");
+  if (!isKeepDays(days)) throw new ConfigError(`RAW_LOG_KEEP_DAYS must be 0 (keep everything) or ${RAW_LOG_MIN_KEEP_DAYS} to ${RAW_LOG_MAX_KEEP_DAYS} (got "${days}").`);
+  return days;
 }
 
 function whole(value: unknown, fallback: number, name: string): number {
