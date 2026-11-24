@@ -15,7 +15,7 @@ import { providerCreditAlert, flaggedUseAlert, moderationAlert, milestoneCrossed
 import type { Upstream } from "./config.js";
 import { addProviderCharge, insertProbe, modelMeasures, personProviderWeek, probeHistory, PROVIDER_SCHEMA, providerSpend, providerWeeks, type ModelMeasure, type ProbeRecord } from "./provider-store.js";
 import { isRegistryProvider, PROVIDERS, providerSettings, REGISTRY_CREDIT_ALERT_SHARE, type ProviderConfig, type ProviderId, type ProviderSpend } from "./providers.js";
-import { DEEPSEEK_MODEL, familyOf, type Family } from "./models.js";
+import { DEEPSEEK_MODEL, familyOf, FREE_MODELS, type Family } from "./models.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, trialBonuses, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
@@ -2854,7 +2854,9 @@ export class DirectoryObject extends DurableObject {
     if (used < balance * REGISTRY_CREDIT_ALERT_SHARE) return [];
     if (!this.#markAlert(`provider-credit:${provider}:${balance}:80`, now)) return [];
     const spec = PROVIDERS.find((entry) => entry.id === provider)!;
-    return [providerCreditAlert(spec, used, balance)];
+    // A provider whose models have a fallback (Open Relay's GLM 5.3 Flash → DeepSeek) hands over at 100% rather than refusing.
+    const fallsBack = FREE_MODELS.some((model) => model.provider === provider && model.fallback !== undefined);
+    return [providerCreditAlert({ ...spec, fallsBack }, used, balance)];
   }
 
   /** A registry provider's credit balance from the policy (with overrides), when the policy carries it. */

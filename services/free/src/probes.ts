@@ -17,7 +17,7 @@ import type { FreeConfig } from "./config.js";
 import { creditPrices, type FreeModel } from "./models.js";
 import { toChatStream, toResponsesRequest } from "./openai-responses.js";
 import type { ProbeRecord } from "./provider-store.js";
-import { exchangeRules, liquidPayload, providerKey, providerModels, providerSettings, PROVIDERS, registryBlock, type ProviderSpec, type ProviderSpend } from "./providers.js";
+import { exchangeRules, liquidPayload, openRelayPayload, providerKey, providerModels, providerSettings, PROVIDERS, registryBlock, type ProviderSpec, type ProviderSpend } from "./providers.js";
 import { costAtPrices } from "./quota.js";
 import { meterStream, type StreamOutcome } from "./sse.js";
 
@@ -71,6 +71,7 @@ export function probeRequest(config: FreeConfig, target: ProbeTarget): { url: st
   }
   const rules = exchangeRules(config, model);
   if (rules) return { url: `${provider.baseUrl}/chat/completions`, body: liquidPayload({ messages }, { model, maxTokens: PROBE_MAX_TOKENS, stream: true, user: PROBE_USER, rules }) };
+  if (provider.id === "openrelay") return { url: `${provider.baseUrl}/chat/completions`, body: openRelayPayload({ messages }, { model, maxTokens: PROBE_MAX_TOKENS, stream: true, user: PROBE_USER }) };
   return {
     url: `${provider.baseUrl}/chat/completions`,
     body: { model: model.upstreamModel, messages, max_completion_tokens: PROBE_MAX_TOKENS, stream: true, stream_options: { include_usage: true }, user: PROBE_USER },

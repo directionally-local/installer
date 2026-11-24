@@ -75,6 +75,7 @@ describe("provider registry: OpenAI and Luminal unchanged", () => {
         ["openai", "legacy", "OPENAI_API_KEY"],
         ["luminal", "legacy", "LUMINAL_API_KEY"],
         ["liquid", "registry", "LIQUID_INFERENCE_API_KEY"],
+        ["openrelay", "registry", "OPENRELAY_API_KEY"],
       ],
     );
   });
@@ -409,7 +410,7 @@ describe("Kimi is a dl Pro perk (providerPlans.liquid \"pro\", the default)", ()
     assert.equal((await chat(service, token, KIMI)).status, 200);
     const capped = await errorOf(await chat(service, token, KIMI));
     assert.equal(capped.reason, "person_cap");
-    assert.equal(capped.message, `You've used this week's free Kimi K3.1 Pro. Use ${MODEL} instead: /model.`);
+    assert.match(capped.message, /^You've used this week's free Kimi K3\.1 Pro \(about [\d.]+K tokens a week\)\. It resets on Monday \d+ \w+, 00:00 UTC\. Use deepseek\/deepseek-v4\.1-flash-1017 instead: \/model\.$/);
     assert.equal(capped.plans, undefined);
   });
 
@@ -729,7 +730,7 @@ describe("admin providers", () => {
     );
     assert.deepEqual(
       view.providers.map((provider) => provider.id),
-      ["openai", "luminal", "liquid"],
+      ["openai", "luminal", "liquid", "openrelay"],
     );
   });
 });

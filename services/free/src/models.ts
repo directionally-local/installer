@@ -2,7 +2,8 @@
  * The models the free tier serves, and the weekly allowance each one draws from.
  *
  * The providers (providers.ts), each on its own prepaid credit: OpenAI (the default), Luminal,
- * which serves DeepSeek, and Liquid Inference, which serves Kimi (and GLM, off for now). A model's
+ * which serves DeepSeek, Liquid Inference, which serves Kimi (and GLM, off for now), and Open
+ * Relay, which serves GLM 5.3 Flash. A model's
  * `family` is the weekly dollar budget it spends: every GPT-6 model shares the GPT-6 budget, and
  * the open models (DeepSeek, Kimi, GLM) share the "deepseek" one, much larger (DeepSeek costs a
  * fraction as much per token). A model's `pool` is its weekly token allowance inside that: Luna, Sol and
@@ -19,7 +20,7 @@
 import type { Prices } from "./config.js";
 
 /** Who serves a model (see providers.ts). OpenRouter stays for the old setting; the free tier doesn't use it. */
-export type Provider = "openai" | "luminal" | "liquid" | "openrouter";
+export type Provider = "openai" | "luminal" | "liquid" | "openrelay" | "openrouter";
 
 /**
  * A model's line, as /v1/providers shows it: what the model is, whoever serves it. Not a
@@ -81,7 +82,11 @@ export interface FreeModel {
   maxOutputTokens: number;
   vision: boolean;
   reasoning: boolean;
-  /** The model to retry on when this one's provider fails or its credit runs out. */
+  /**
+   * The model to retry on when this one's provider fails or its credit runs out. On a registry
+   * provider (GLM 5.3 Flash), the model that serves once its provider's budget or the person's
+   * cap is used up (providers.ts FALLBACK_BLOCKS).
+   */
   fallback?: string;
   /** What the model is (see ModelLine); the budget is `family`. */
   line: ModelLine;
@@ -213,6 +218,30 @@ export const FREE_MODELS: readonly FreeModel[] = [
     },
     // Defined, off: Kimi is the Liquid model the free tier starts with.
     enabledByDefault: false,
+  },
+  // Open Relay (OpenRelay Inc., https://openrelay.inc/): OpenAI-compatible, a pool of provider
+  // nodes. Id, context and modalities from its GET /v1/models; prices from
+  // https://openrelay.inc/inference-pricing on 2026-11-24. Free for everyone (`providerPlans.openrelay`
+  // "all") inside a weekly cap a person; past it, or past Open Relay's weekly budget, DeepSeek serves.
+  {
+    id: "z-ai/glm-5.3-flash",
+    name: "GLM 5.3 Flash",
+    provider: "openrelay",
+    upstreamModel: "openrelay/glm-5.3-flash",
+    pool: "deepseek",
+    family: "deepseek",
+    // The list price, for the allowance and the credit alike: the credit is charged what Open
+    // Relay reports (`openrelay.cost_nano_usd`) when it says, these only when it doesn't.
+    prices: { input: 0.045, cached: 0.009, output: 0.18 },
+    // 256K (Open Relay's models page); its output cap isn't published.
+    contextWindow: 262_144,
+    maxOutputTokens: 32_768,
+    // GET /v1/models lists text and image input; not tried with an image yet.
+    vision: false,
+    // Reasons before it answers (`reasoning_content`); billed as output.
+    reasoning: true,
+    fallback: "deepseek/deepseek-v4.1-flash-1017",
+    line: "glm",
   },
 ];
 

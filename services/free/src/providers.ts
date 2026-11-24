@@ -18,8 +18,8 @@
 import type { FreeConfig, Prices } from "./config.js";
 import { DEEPSEEK_MODEL, FREE_MODELS, type FreeModel } from "./models.js";
 
-export type ProviderId = "openai" | "luminal" | "liquid";
-export const PROVIDER_IDS: readonly ProviderId[] = ["openai", "luminal", "liquid"];
+export type ProviderId = "openai" | "luminal" | "liquid" | "openrelay";
+export const PROVIDER_IDS: readonly ProviderId[] = ["openai", "luminal", "liquid", "openrelay"];
 
 /** How the service talks to it: OpenAI's Responses API, or chat completions. */
 export type ApiStyle = "openai-chat" | "openai-responses";
@@ -42,6 +42,12 @@ export interface ProviderSpec {
   keyEnv: string;
   /** "legacy": its own setting names and credit behaviour (see above); "registry": the generic ones. */
   kind: "legacy" | "registry";
+  /**
+   * Registry only: the per-person weekly cap (`providerPersonWeeklyUsd.<id>`) holds everyone,
+   * whatever the plans and opt-in say. Without it the cap holds only while the provider is opt-in
+   * or Pro-only (Liquid).
+   */
+  capsEveryone?: boolean;
 }
 
 export const PROVIDERS: readonly ProviderSpec[] = [
@@ -57,10 +63,21 @@ export const PROVIDERS: readonly ProviderSpec[] = [
     keyEnv: "LIQUID_INFERENCE_API_KEY",
     kind: "registry",
   },
+  {
+    id: "openrelay",
+    name: "Open Relay",
+    website: "https://openrelay.inc/",
+    // OpenAI-compatible chat completions (https://docs.openrelay.inc/docs/inference/openai-sdks).
+    baseUrl: "https://inference.openrelay.inc/v1",
+    apiStyle: "openai-chat",
+    keyEnv: "OPENRELAY_API_KEY",
+    kind: "registry",
+    capsEveryone: true,
+  },
 ];
 
 /** The registry-style providers: the ones with `provider<Setting>.<id>` settings. */
-export type RegistryProviderId = "liquid";
+export type RegistryProviderId = "liquid" | "openrelay";
 
 export function providerSpec(id: ProviderId): ProviderSpec {
   return PROVIDERS.find((provider) => provider.id === id)!;
@@ -115,11 +132,21 @@ export type RegistrySettingsConfig = {
   "exchangeMaxPrices.kimi-k3.1-pro": readonly number[];
   "exchangeAllow.glm-5.3": readonly string[];
   "exchangeMaxPrices.glm-5.3": readonly number[];
+  "providerStatus.openrelay": ProviderStatus;
+  "providerCredit.openrelay": number;
+  "providerWeeklyCredit.openrelay": number | undefined;
+  "providerPersonWeeklyUsd.openrelay": number | undefined;
+  "providerOptIn.openrelay": boolean;
+  "providerPlans.openrelay": ProviderPlans;
+  "providerModels.openrelay": readonly string[];
 };
 
 /**
- * The defaults: Liquid paused until the owner turns it on, $100 of credit, $25 a week, dl Pro
+ * The defaults. Liquid: paused until the owner turns it on, $100 of credit, $25 a week, dl Pro
  * only, opt-in, with a $0.25 weekly ration a person (about 140K tokens of Kimi K3.1 Pro).
+ * Open Relay: paused until the owner turns it on, $200 of credit, $25 a week (about 8 weeks),
+ * every plan, not opt-in, $0.50 a person a week (about 15M tokens of GLM 5.3 Flash at the ration
+ * mix; about 9M if nothing is a cache read). Past either cap, DeepSeek serves.
  */
 export const REGISTRY_DEFAULTS: RegistrySettingsConfig = {
   "providerStatus.liquid": "paused",
@@ -135,6 +162,15 @@ export const REGISTRY_DEFAULTS: RegistrySettingsConfig = {
   "exchangeMaxPrices.kimi-k3.1-pro": pricesList(exchangeDefaults("kimi-k3.1-pro").maxPrices),
   "exchangeAllow.glm-5.3": exchangeDefaults("glm-5.3").allow,
   "exchangeMaxPrices.glm-5.3": pricesList(exchangeDefaults("glm-5.3").maxPrices),
+  "providerStatus.openrelay": "paused",
+  "providerCredit.openrelay": 200,
+  "providerWeeklyCredit.openrelay": 25,
+  "providerPersonWeeklyUsd.openrelay": 0.5,
+  "providerOptIn.openrelay": false,
+  "providerPlans.openrelay": "all",
+  "providerModels.openrelay": providerModels("openrelay")
+    .filter((model) => model.enabledByDefault !== false)
+    .map((model) => model.id),
 };
 
 function exchangeDefaults(upstreamModel: string): { allow: readonly string[]; maxPrices: Prices } {
@@ -155,13 +191,13 @@ export function providerSettings(config: ProviderConfig, id: ProviderId): Provid
   if (id === "openai") return { status: "on", creditUsd: config.openaiCreditUsd, weeklyCreditUsd: config.openaiWeeklyCreditUsd, optIn: false, personWeeklyUsd: undefined, plans: "all", models: all("openai") };
   if (id === "luminal") return { status: "on", creditUsd: config.luminalCreditUsd, weeklyCreditUsd: config.luminalWeeklyCreditUsd, optIn: false, personWeeklyUsd: undefined, plans: "all", models: all("luminal") };
   return {
-    status: config["providerStatus.liquid"],
-    creditUsd: config["providerCredit.liquid"],
-    weeklyCreditUsd: config["providerWeeklyCredit.liquid"],
-    optIn: config["providerOptIn.liquid"],
-    personWeeklyUsd: config["providerPersonWeeklyUsd.liquid"],
-    plans: config["providerPlans.liquid"],
-    models: config["providerModels.liquid"],
+    status: config[`providerStatus.${id}`],
+    creditUsd: config[`providerCredit.${id}`],
+    weeklyCreditUsd: config[`providerWeeklyCredit.${id}`],
+    optIn: config[`providerOptIn.${id}`],
+    personWeeklyUsd: config[`providerPersonWeeklyUsd.${id}`],
+    plans: config[`providerPlans.${id}`],
+    models: config[`providerModels.${id}`],
   };
 }
 
@@ -177,9 +213,12 @@ export function exchangeRules(config: RegistrySettingsConfig, model: FreeModel):
 }
 
 /** Whether a provider has its API key. */
-export function providerKey(config: Pick<FreeConfig, "openaiApiKey" | "luminalApiKey" | "liquidApiKey">, id: ProviderId): string | undefined {
-  return id === "openai" ? config.openaiApiKey : id === "luminal" ? config.luminalApiKey : config.liquidApiKey;
+export function providerKey(config: ProviderKeys, id: ProviderId): string | undefined {
+  return id === "openai" ? config.openaiApiKey : id === "luminal" ? config.luminalApiKey : id === "liquid" ? config.liquidApiKey : config.openrelayApiKey;
 }
+
+/** The config fields that hold the providers' keys. */
+export type ProviderKeys = Pick<FreeConfig, "openaiApiKey" | "luminalApiKey" | "liquidApiKey" | "openrelayApiKey">;
 
 /** Credit numbers for every provider: used since the start (everyone, probes included), and this week by everyone but admins. */
 export interface ProviderSpend {
@@ -197,7 +236,7 @@ export interface ProviderSpend {
 export type ProviderBlock = "no_key" | "paused" | "out_of_credit" | "weekly_budget" | "pro_only" | "person_cap";
 
 export function registryBlock(
-  config: ProviderConfig & Pick<FreeConfig, "openaiApiKey" | "luminalApiKey" | "liquidApiKey">,
+  config: ProviderConfig & ProviderKeys,
   model: FreeModel,
   spend: ProviderSpend,
   personWeekUsd?: number,
@@ -211,14 +250,24 @@ export function registryBlock(
   if ((spend.usedUsd[id] ?? 0) >= settings.creditUsd) return "out_of_credit";
   if (settings.weeklyCreditUsd !== undefined && (spend.weekUsd[id] ?? 0) >= settings.weeklyCreditUsd) return "weekly_budget";
   if (plan === "free" && settings.plans === "pro") return "pro_only";
-  if (personWeekUsd !== undefined && personCapped(settings) && personWeekUsd >= settings.personWeeklyUsd!) return "person_cap";
+  if (personWeekUsd !== undefined && personCapped(id, settings) && personWeekUsd >= settings.personWeeklyUsd!) return "person_cap";
   return undefined;
 }
 
-/** Whether a person's weekly spend on the provider is capped: opt-in, or Pro-only (Pro's ration). */
-function personCapped(settings: ProviderSettings): boolean {
-  return (settings.optIn || settings.plans === "pro") && settings.personWeeklyUsd !== undefined;
+/**
+ * Whether a person's weekly spend on the provider is capped: always for a provider that caps
+ * everyone (Open Relay), else while it is opt-in or Pro-only (Pro's ration).
+ */
+export function personCapped(id: RegistryProviderId, settings: ProviderSettings): boolean {
+  return (providerSpec(id).capsEveryone === true || settings.optIn || settings.plans === "pro") && settings.personWeeklyUsd !== undefined;
 }
+
+/**
+ * The blocks after which a model with a `fallback` (GLM 5.3 Flash on Open Relay) is served by
+ * that fallback instead of refused: its provider's credit or weekly budget, or the person's cap.
+ * Never a pause or a missing key (the model isn't offered then), nor a Pro-only refusal.
+ */
+export const FALLBACK_BLOCKS: readonly ProviderBlock[] = ["out_of_credit", "weekly_budget", "person_cap"];
 
 /** Whether a provider's models are for dl Pro only (`provider<Plans>.<id>` "pro"). */
 export function proOnly(config: ProviderConfig, model: FreeModel): boolean {
@@ -253,8 +302,9 @@ export interface Ration {
 /** The ration of `model` for someone who spent `usedUsd` of the provider this week; undefined with no per-person cap. */
 export function rationOf(config: ProviderConfig, model: FreeModel, usedUsd: number): Ration | undefined {
   if (!isRegistryProvider(model.provider)) return undefined;
-  const cap = providerSettings(config, model.provider).personWeeklyUsd;
-  if (cap === undefined) return undefined;
+  const settings = providerSettings(config, model.provider);
+  const cap = settings.personWeeklyUsd;
+  if (cap === undefined || !personCapped(model.provider, settings)) return undefined;
   const used = Math.min(cap, Math.max(0, usedUsd));
   const remaining = Math.max(0, cap - used);
   return { usdPerWeek: cap, usedUsd: round6(used), remainingUsd: round6(remaining), approxTokensPerWeek: approxTokens(model, cap), approxTokensLeft: approxTokens(model, remaining) };
@@ -269,7 +319,7 @@ function round6(value: number): number {
  * provider's models once it has a key and the model is on. Before then a registry model is
  * invisible: not in /v1/status, /v1/me or /v1/models, as if it weren't defined.
  */
-export function offeredModels(config: ProviderConfig & Pick<FreeConfig, "openaiApiKey" | "luminalApiKey" | "liquidApiKey">): FreeModel[] {
+export function offeredModels(config: ProviderConfig & ProviderKeys): FreeModel[] {
   return FREE_MODELS.filter((model) => !isRegistryProvider(model.provider) || (providerKey(config, model.provider) !== undefined && providerSettings(config, model.provider).models.includes(model.id)));
 }
 
@@ -327,20 +377,42 @@ export function providerLimitMessage(model: FreeModel, block: ProviderBlock, pro
       return `${model.name} on ${providerName} is paused for free tokens right now. ${use}`;
     case "out_of_credit":
       return `${model.name} on ${providerName} is out of free credit for now. ${use}`;
-    case "weekly_budget":
-      return `${model.name} on ${providerName} has used its free budget for this week. ${use}`;
+    case "weekly_budget": {
+      const resets = pro.resetsAt ? ` It resets on ${resetDay(pro.resetsAt)}.` : "";
+      return `${model.name} on ${providerName} has used its free budget for this week.${resets} ${use}`;
+    }
     case "pro_only": {
       const ration = rationPhrase(pro.approxTokensPerWeek);
       if (!pro.upgradeUrl) return `${model.name} is for dl Pro subscribers only. ${use}`;
       return ration ? `${model.name} is a dl Pro perk: ${ration}, then ${deepseek}. Upgrade: ${pro.upgradeUrl}` : `${model.name} is a dl Pro perk. Upgrade: ${pro.upgradeUrl}`;
     }
     case "person_cap": {
-      if (plans !== "pro") return `You've used this week's free ${model.name}. ${use}`;
+      if (plans !== "pro") {
+        const ration = rationPhrase(pro.approxTokensPerWeek);
+        const resets = pro.resetsAt ? ` It resets on ${resetDay(pro.resetsAt)}.` : "";
+        return `You've used this week's free ${model.name}${ration ? ` (${ration})` : ""}.${resets} ${use}`;
+      }
       const ration = rationPhrase(pro.approxTokensPerWeek);
       const resets = pro.resetsAt ? ` It resets on ${resetDay(pro.resetsAt)}` : " It resets next week";
       return `You've used this week's ${model.name} with dl Pro${ration ? ` (${ration})` : ""}.${resets}; ${deepseek} keeps working: /model.`;
     }
   }
+}
+
+/**
+ * The one line a request served by a model's fallback carries (header `x-dl-notice`), when the
+ * requested model's provider was at a limit (FALLBACK_BLOCKS): what ran out, which model served
+ * instead, and when the requested one is back. `resetsAt` (ISO) is the week's end, for the weekly
+ * blocks; out of credit has no reset day.
+ */
+export function providerFallbackNotice(model: FreeModel, block: ProviderBlock, providerName: string, fallbackName: string, input: { resetsAt?: string | null; approxTokensPerWeek?: number } = {}): string {
+  const until = input.resetsAt ? ` until it resets on ${resetDay(input.resetsAt)}` : " for now";
+  if (block === "person_cap") {
+    const ration = rationPhrase(input.approxTokensPerWeek);
+    return `You've used this week's free ${model.name}${ration ? ` (${ration})` : ""}; ${fallbackName} serves${until}.`;
+  }
+  if (block === "weekly_budget") return `${model.name} on ${providerName} has used its free budget for this week; ${fallbackName} serves${until}.`;
+  return `${model.name} on ${providerName} is out of free credit; ${fallbackName} serves for now.`;
 }
 
 /** The 80% credit warning for a registry provider: sent once per balance. */
@@ -491,4 +563,53 @@ export function mergedUsage<T extends { promptTokens: number; completionTokens: 
     completionTokens: Math.max(standard.completionTokens, exchange.completionTokens),
     cachedTokens: Math.max(standard.cachedTokens, exchange.cachedTokens),
   };
+}
+
+// ─── Open Relay requests ─────────────────────────────────────────────────────
+
+/**
+ * The fields of a client's chat request passed to Open Relay. Its gateway ignores parameters it
+ * doesn't support rather than refusing them (https://docs.openrelay.inc/docs/inference/chat-completions),
+ * but only the standard ones go: nothing OpenRouter-specific, and no client `user` or `metadata`.
+ */
+export const OPENRELAY_FIELDS = ["messages", "tools", "tool_choice", "parallel_tool_calls", "response_format", "temperature", "top_p", "stop", "seed", "frequency_penalty", "presence_penalty", "reasoning_effort"] as const;
+
+/**
+ * A chat completions body for Open Relay: the client's fields above, Open Relay's model id, the
+ * reservation's output limit as `max_tokens`, usage on streams (the gateway adds it anyway), and
+ * the person's hashed id as `user` (never the GitHub id). OpenRouter's `reasoning: {effort}`
+ * becomes `reasoning_effort`.
+ */
+export function openRelayPayload(body: Record<string, unknown>, input: { model: FreeModel; maxTokens: number; stream: boolean; user?: string }): Record<string, unknown> {
+  const payload: Record<string, unknown> = { model: input.model.upstreamModel };
+  for (const field of OPENRELAY_FIELDS) if (body[field] !== undefined) payload[field] = body[field];
+  const effort = (body.reasoning as { effort?: unknown } | null | undefined)?.effort;
+  if (typeof effort === "string" && payload.reasoning_effort === undefined) payload.reasoning_effort = effort;
+  payload.max_tokens = input.maxTokens;
+  payload.stream = input.stream;
+  if (input.stream) payload.stream_options = { include_usage: true };
+  if (input.user) payload.user = input.user;
+  return payload;
+}
+
+/** Nano-USD a dollar: Open Relay reports cost in billionths of a dollar. */
+const NANO_PER_USD = 1_000_000_000;
+
+/**
+ * What Open Relay charged for a request, USD: `openrelay.cost_nano_usd` on a response body and on
+ * a stream's last chunk (seen live 2026-11-24, with `priced_at: "online"`), or the
+ * `OpenRelay-Cost-Nano-USD` header (non-streamed responses). Undefined when neither says, or
+ * says 0 (the caller then charges the usage at the model's prices).
+ */
+export function openRelayCharge(parsed: unknown, header?: string | null): number | undefined {
+  const block = (parsed as { openrelay?: unknown } | null)?.openrelay;
+  const raw = block && typeof block === "object" && !Array.isArray(block) ? (block as Record<string, unknown>).cost_nano_usd : undefined;
+  const fromBody = typeof raw === "string" ? Number(raw) : raw;
+  const nano = typeof fromBody === "number" && Number.isFinite(fromBody) ? fromBody : header ? Number(header) : NaN;
+  return Number.isFinite(nano) && nano > 0 ? nano / NANO_PER_USD : undefined;
+}
+
+/** What a provider reported it charged for a request: Liquid's `exchange.charge`, or Open Relay's cost. */
+export function reportedCharge(parsed: unknown, header?: string | null): number | undefined {
+  return exchangeCharge(parsed) ?? openRelayCharge(parsed, header);
 }

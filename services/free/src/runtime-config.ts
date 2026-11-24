@@ -148,6 +148,20 @@ export const RUNTIME_SETTINGS = {
   "exchangeAllow.glm-5.3": { kind: "sellers", env: "LIQUID_ALLOW_GLM_5_3" },
   /** GLM 5.3's price ceilings on Liquid, [input, cache read, output] USD per million tokens. */
   "exchangeMaxPrices.glm-5.3": { kind: "prices", env: "LIQUID_MAX_PRICES_GLM_5_3" },
+  /** Open Relay "on" or "paused" (the default: GLM 5.3 Flash serves nobody until the owner turns it on). */
+  "providerStatus.openrelay": { kind: "providerStatus", env: "OPENRELAY_STATUS" },
+  /** Prepaid Open Relay credit, USD (the key's own spend cap is the hard stop). At 80% one alert; at 100% DeepSeek serves instead. */
+  "providerCredit.openrelay": { kind: "amount", env: "OPENRELAY_CREDIT_USD" },
+  /** The most Open Relay credit everyone but admins may use a week, USD; past it DeepSeek serves until Monday. "none" for no weekly budget. */
+  "providerWeeklyCredit.openrelay": { kind: "usd", env: "OPENRELAY_WEEKLY_CREDIT_USD" },
+  /** One person's weekly Open Relay spend at most, USD, on every plan; past it DeepSeek serves them until Monday. "none" for no cap. */
+  "providerPersonWeeklyUsd.openrelay": { kind: "usd", env: "OPENRELAY_PERSON_WEEKLY_USD" },
+  /** Open Relay opt-in (default false: GLM 5.3 Flash is listed for everyone). */
+  "providerOptIn.openrelay": { kind: "flag", env: "OPENRELAY_OPT_IN" },
+  /** Who gets Open Relay's models: "all" (the default) or "pro". */
+  "providerPlans.openrelay": { kind: "providerPlans", env: "OPENRELAY_PLANS" },
+  /** The Open Relay models that are on, by id; [] for none. */
+  "providerModels.openrelay": { kind: "models", env: "OPENRELAY_MODELS" },
   /** The speed probes (probes.ts): one tiny request per model every 10 minutes; false stops them. */
   speedProbes: { kind: "flag", env: "SPEED_PROBES" },
   /** Emails to users (user-emails.ts) on or off; they also need the USER_EMAIL binding or RESEND_API_KEY. */

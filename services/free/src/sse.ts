@@ -1,5 +1,5 @@
 import { parseUsage, type Usage } from "./quota.js";
-import { exchangeCharge, exchangeFacts, exchangeUsage, mergedUsage } from "./providers.js";
+import { exchangeFacts, exchangeUsage, mergedUsage, reportedCharge } from "./providers.js";
 import { hostOf } from "./routing.js";
 
 /**
@@ -25,7 +25,7 @@ export interface StreamOutcome {
   firstContentAt: number | undefined;
   /** Whether any content reached the client. */
   contentSent: boolean;
-  /** What Liquid Inference charged, from its last chunk's `exchange.charge` (providers.ts exchangeCharge); undefined elsewhere. */
+  /** What the provider reported it charged: Liquid's last chunk's `exchange.charge`, Open Relay's `openrelay.cost_nano_usd` (providers.ts reportedCharge); undefined elsewhere. */
   chargeUsd?: number;
   /** Liquid's seller and its own timing of the job (providers.ts exchangeFacts); undefined elsewhere. */
   exchange?: { seller?: string; ttftMs?: number; tokensPerSecond?: number };
@@ -77,7 +77,7 @@ export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: S
         const found = parseUsage(parsed.usage);
         if (found) usage = found;
         host ??= hostOf(parsed);
-        chargeUsd = exchangeCharge(parsed) ?? chargeUsd;
+        chargeUsd = reportedCharge(parsed) ?? chargeUsd;
         metered = exchangeUsage(parsed) ?? metered;
         facts = exchangeFacts(parsed) ?? facts;
         if (firstContentAt === undefined && hasContent(parsed)) firstContentAt = now();
