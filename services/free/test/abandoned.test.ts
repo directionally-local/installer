@@ -8,7 +8,7 @@ import { ADMIN_ID, createService } from "./harness.js";
  * hang-up is modelled by an upstream that never answers (the handler never gets past it).
  */
 describe("a reservation the request never settled", () => {
-  it("is recorded on the provider that served it, not as OpenRouter cash, and charges no more than the prompt", async () => {
+  it("is recorded on the provider that served it, not as OpenRouter cash, and charges the person nothing", async () => {
     const service = await createService({ OPEN_ADMISSION: "true", PRIMARY_UPSTREAM: "luminal", LUMINAL_API_KEY: "lum-test" });
     const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
     const person = await service.signIn({ id: 100, login: "alice" });
@@ -32,6 +32,6 @@ describe("a reservation the request never settled", () => {
     assert.ok((spend.creditUsedUsd as number) > 0, "the prompt counts against Luminal's credit, the provider that was serving it");
     assert.ok(alice);
     const deepseek = (await service.account(100).allowance(service.clock.now, { weeklyTokens: 50_000_000, weeklyUsd: undefined }, "deepseek")).pools.deepseek;
-    assert.ok(deepseek.usedThisWeek > 0 && deepseek.usedThisWeek < 1000, `charged ${deepseek.usedThisWeek} tokens for a two-word prompt`);
+    assert.equal(deepseek.usedThisWeek, 0, "nothing reached the person, so nothing is charged");
   });
 });

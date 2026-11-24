@@ -216,6 +216,10 @@ describe("metrics", () => {
         latencyP95Ms: 300,
         securitySessionsOffGpt6: 0,
         securityRefusalsOffGpt6: 0,
+        noUsageRequests: 0,
+        noUsagePeople: 0,
+        noUsageChargedTokens: 0,
+        noUsageCostUsd: 0,
       },
     );
     assert.equal(metrics.daily[1].errors, 1);

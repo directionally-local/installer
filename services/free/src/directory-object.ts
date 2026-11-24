@@ -4419,6 +4419,18 @@ export class DirectoryObject extends DurableObject {
         until / DAY_MS,
       )
       .toArray()) securityByDay.set(row.day, { sessions: row.sessions, refusals: row.refusals });
+    // Requests that ended without the provider reporting usage (and reservations the alarm swept),
+    // admins aside: how many, how many people, and the tokens and dollars they were charged. From
+    // the raw log, so only the last rawLogKeepDays days have them.
+    const noUsageByDay = new Map<number, { requests: number; people: number; charged: number; cost: number }>();
+    for (const row of sql
+      .exec<{ day: number; requests: number; people: number; charged: number; cost: number }>(
+        `SELECT at / ${DAY_MS} AS day, COUNT(*) AS requests, COUNT(DISTINCT github_id) AS people, SUM(charged_tokens) AS charged, SUM(cost_usd) AS cost
+         FROM requests WHERE at >= ? AND at < ? AND is_admin = 0 AND status IN ('no_usage', 'abandoned') GROUP BY day`,
+        from,
+        until,
+      )
+      .toArray()) noUsageByDay.set(row.day, row);
     const latencies = new Map<number, number[]>();
     for (const row of sql
       .exec<{ day: number; latency_ms: number }>(
@@ -4457,6 +4469,10 @@ export class DirectoryObject extends DurableObject {
         latencyP95Ms: keptLatency.has(key) ? keptLatency.get(key)!.p95 : percentile(sorted, 95),
         securitySessionsOffGpt6: securityByDay.get(key)?.sessions ?? 0,
         securityRefusalsOffGpt6: securityByDay.get(key)?.refusals ?? 0,
+        noUsageRequests: noUsageByDay.get(key)?.requests ?? 0,
+        noUsagePeople: noUsageByDay.get(key)?.people ?? 0,
+        noUsageChargedTokens: noUsageByDay.get(key)?.charged ?? 0,
+        noUsageCostUsd: round(noUsageByDay.get(key)?.cost ?? 0),
       });
     }
 

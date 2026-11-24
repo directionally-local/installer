@@ -4,7 +4,22 @@ import type { DirectoryObject } from "./directory-object.js";
 import { DEFAULT_MODEL, FAMILIES, POOLS, POOL_TOKENS, creditPrices, familyOfPool, modelById, type Family, type Pool } from "./models.js";
 import type { Upstream } from "./config.js";
 import type { Level } from "./admission.js";
-import { DEEPSEEK_MAX_OUTPUT_TOKENS, FALLBACK_USD_PER_MILLION_TOKENS, MAX_OUTPUT_TOKENS, MIN_OUTPUT_TOKENS, costAtPrices, costOf, estimateCostUsd, planReservation } from "./quota.js";
+import {
+  DEEPSEEK_MAX_OUTPUT_TOKENS,
+  FALLBACK_USD_PER_MILLION_TOKENS,
+  MAX_OUTPUT_TOKENS,
+  MIN_OUTPUT_TOKENS,
+  MIN_PROMPT_TOKENS_FOR_CACHED_SHARE,
+  chargedTokens,
+  costAtPrices,
+  costAtPricesOrFallback,
+  estimateCostUsd,
+  estimatedUsage,
+  planReservation,
+  realisticPromptTokens,
+  type TokenPrices,
+  type Usage,
+} from "./quota.js";
 import { weekEnd, weekStart } from "./week.js";
 
 /**
@@ -12,8 +27,16 @@ import { weekEnd, weekStart } from "./week.js";
  * reserve and settle, so two concurrent requests can't both spend the last tokens. The week
  * rolls over lazily on the first call after Monday 00:00 UTC; no timer is needed for that.
  * The alarm only settles reservations whose request never came back (a crash or a dropped
- * connection), charging them in full.
+ * connection), charging the person nothing (see sweep).
  */
+
+/** A request that ended without usage (AccountObject.settle): what it was charged as, if anything, and its realistic prompt alone. */
+export interface NoUsageEstimate {
+  /** The estimate charged; undefined when no output was streamed (nothing charged). */
+  usage: Usage | undefined;
+  /** The realistic prompt with the person's cached share and no output: the provider credit's estimate for a request cancelled before output. */
+  prompt: Usage;
+}
 
 export const RESERVATION_TTL_MS = 30 * 60_000;
 /** Pro stays on this long past the paid period's end, so a renewal webhook that runs late doesn't cut anyone off. */
@@ -361,6 +384,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
       // The trial's count: free tokens (unpaid weekly usage) for the account's lifetime. It starts
       // at 0 for accounts from before it; only trial accounts (admitted at or after the cutoff) are held to it.
       if (!accountColumns.includes("trial_used")) this.ctx.storage.sql.exec("ALTER TABLE account ADD COLUMN trial_used INTEGER NOT NULL DEFAULT 0");
+      // Prompt and cached tokens the providers reported for this person, all time: their cached
+      // share, which a request that ended without usage is estimated with. 0 for accounts from before.
+      if (!accountColumns.includes("prompt_seen")) this.ctx.storage.sql.exec("ALTER TABLE account ADD COLUMN prompt_seen INTEGER NOT NULL DEFAULT 0");
+      if (!accountColumns.includes("cached_seen")) this.ctx.storage.sql.exec("ALTER TABLE account ADD COLUMN cached_seen INTEGER NOT NULL DEFAULT 0");
     });
   }
 
@@ -476,8 +503,11 @@ export class AccountObject extends DurableObject<AccountEnv> {
 
   /**
    * Replaces a reservation with what was really used. `charged` undefined means the provider
-   * reported nothing, so the whole reservation is charged. A reservation the alarm already
-   * settled is not charged twice.
+   * reported no usage: the request is charged an estimate (`noUsage`), never the reservation.
+   * With no output streamed (cancelled, or failed before any output), that is nothing; with
+   * output, a realistic prompt at the person's own cached share plus the output streamed, at the
+   * model's list prices (quota.ts estimatedUsage). A reservation the alarm already settled is not
+   * charged twice.
    */
   async settle(input: {
     reservationId: string;
@@ -485,22 +515,69 @@ export class AccountObject extends DurableObject<AccountEnv> {
     costUsd: number | undefined;
     /** Tokens processed (prompt with cached, plus completion); undefined: `charged`. */
     rawTokens?: number;
+    /** The usage the provider reported, when it did: kept for the person's cached share. */
+    usage?: Usage;
+    /** With `charged` undefined: what was streamed, the serving model's prices (undefined: none known) and the cached-token weight. */
+    noUsage?: { outputTokens: number; prices: TokenPrices | undefined; cachedTokenWeight: number };
     limits: Limits;
     now: number;
-  }): Promise<{ charged: number; costUsd: number; paid: boolean; allowance: Allowance }> {
+  }): Promise<{ charged: number; costUsd: number; paid: boolean; allowance: Allowance; estimate?: NoUsageEstimate }> {
     const reservation = this.ctx.storage.sql
-      .exec<{ amount: number; source: Source; paid: number; pool: Pool }>("SELECT amount, source, paid, pool FROM reservations WHERE id = ?", input.reservationId)
+      .exec<{ amount: number; source: Source; paid: number; pool: Pool; model: string | null; prompt_estimate: number | null }>(
+        "SELECT amount, source, paid, pool, model, prompt_estimate FROM reservations WHERE id = ?",
+        input.reservationId,
+      )
       .toArray()[0];
     const row = this.#current(input.now);
     if (!reservation || !row) return { charged: 0, costUsd: 0, paid: false, allowance: this.#allowance(row, input.now, input.limits) };
-    const charged = input.charged ?? reservation.amount;
-    const costUsd = input.costUsd ?? costOf(undefined, charged);
+    let charged = input.charged;
+    let costUsd = input.costUsd;
+    let rawTokens = input.rawTokens;
+    let estimate: NoUsageEstimate | undefined;
+    if (charged === undefined) {
+      const prices = input.noUsage ? input.noUsage.prices : modelById(reservation.model ?? "")?.prices;
+      estimate = this.#estimate(row, reservation.prompt_estimate ?? 0, input.noUsage?.outputTokens ?? 0);
+      charged = estimate.usage ? chargedTokens(estimate.usage, input.noUsage?.cachedTokenWeight ?? 0) : 0;
+      costUsd = estimate.usage ? costAtPricesOrFallback(estimate.usage, prices) : 0;
+      rawTokens = estimate.usage ? estimate.usage.promptTokens + estimate.usage.completionTokens : 0;
+    }
+    const finalCharged = charged;
+    const finalCost = costUsd ?? 0;
+    const finalRaw = rawTokens ?? finalCharged;
     this.ctx.storage.transactionSync(() => {
-      this.#charge(row.github_id, input.reservationId, reservation.source, reservation.pool, charged, costUsd, input.now);
-      this.#addTokens(reservation.pool, input.rawTokens ?? charged, input.now);
-      if (reservation.source === "weekly" && reservation.paid !== 1) this.#addTrial(row.github_id, input.rawTokens ?? charged);
+      this.#charge(row.github_id, input.reservationId, reservation.source, reservation.pool, finalCharged, finalCost, input.now);
+      this.#addTokens(reservation.pool, finalRaw, input.now);
+      if (reservation.source === "weekly" && reservation.paid !== 1) this.#addTrial(row.github_id, finalRaw);
+      if (input.usage && input.usage.promptTokens > 0) {
+        this.ctx.storage.sql.exec(
+          "UPDATE account SET prompt_seen = prompt_seen + ?, cached_seen = cached_seen + ? WHERE github_id = ?",
+          input.usage.promptTokens,
+          Math.min(input.usage.cachedTokens, input.usage.promptTokens),
+          row.github_id,
+        );
+      }
     });
-    return { charged, costUsd, paid: reservation.paid === 1, allowance: this.#allowance(this.#current(input.now), input.now, input.limits, reservation.pool) };
+    return {
+      charged: finalCharged,
+      costUsd: finalCost,
+      paid: reservation.paid === 1,
+      allowance: this.#allowance(this.#current(input.now), input.now, input.limits, reservation.pool),
+      ...(estimate ? { estimate } : {}),
+    };
+  }
+
+  /** The person's cached share of prompt tokens so far; 0 until enough has been reported to tell. */
+  #cachedShare(githubId: number): number {
+    const seen = this.ctx.storage.sql.exec<{ prompt_seen: number; cached_seen: number }>("SELECT prompt_seen, cached_seen FROM account WHERE github_id = ?", githubId).toArray()[0];
+    if (!seen || seen.prompt_seen < MIN_PROMPT_TOKENS_FOR_CACHED_SHARE) return 0;
+    return Math.min(1, seen.cached_seen / seen.prompt_seen);
+  }
+
+  /** A request without usage: the estimate charged (undefined with no output), and the realistic prompt alone, for the provider's credit. */
+  #estimate(row: { github_id: number }, promptEstimate: number, outputTokens: number): NoUsageEstimate {
+    const share = this.#cachedShare(row.github_id);
+    const promptTokens = realisticPromptTokens(promptEstimate);
+    return { usage: estimatedUsage(promptEstimate, outputTokens, share), prompt: { promptTokens, completionTokens: 0, cachedTokens: Math.floor(promptTokens * share), costUsd: undefined } };
   }
 
   /** Replaces a reservation with its charge: to the week's counters, or to top-ups, earliest expiry first. */
@@ -877,9 +954,9 @@ export class AccountObject extends DurableObject<AccountEnv> {
   /**
    * Settles reservations that outlived any request, and logs them as abandoned. That happens
    * when the caller hangs up before the upstream answers: Workers stops the handler there, so
-   * it never settles. The upstream most likely read the prompt, so the charge is the prompt's
-   * estimated size at the serving model's prices, never the whole reservation (which counts
-   * the output the person never got). The record names the provider that was serving it.
+   * it never settles. Nothing reached the person, so they are charged nothing; the upstream
+   * most likely read the prompt, so the provider's credit is recorded a realistic estimate of it.
+   * The record names the provider that was serving it.
    */
   async alarm(): Promise<void> {
     await this.sweep(Date.now());
@@ -895,19 +972,16 @@ export class AccountObject extends DurableObject<AccountEnv> {
       .toArray();
     for (const reservation of stale) {
       const model = modelById(reservation.model ?? DEFAULT_MODEL);
-      const charged = Math.min(reservation.amount, reservation.prompt_estimate ?? reservation.amount);
-      const usage = { promptTokens: charged, completionTokens: 0, cachedTokens: 0, costUsd: undefined };
-      const costUsd = model ? costAtPrices(usage, model.prices) : costOf(undefined, charged);
+      // Nothing reached the person, so nothing is charged to them. The upstream most likely read
+      // the prompt, so the provider's credit is recorded a realistic prompt at its prices (Open
+      // Relay doesn't bill a request it didn't finish).
+      const prompt = row ? this.#estimate(row, reservation.prompt_estimate ?? 0, 0).prompt : undefined;
       // Reservations made before the provider was kept were all served on Luminal or OpenAI
       // (OpenRouter served nothing by then): never record them as OpenRouter cash.
       const provider: Upstream = reservation.provider ?? (model?.provider === "openai" ? "openai" : "luminal");
-      const creditUsd = provider !== "openrouter" && model ? costAtPrices(usage, creditPrices(model)) : 0;
+      const creditUsd = provider !== "openrouter" && provider !== "openrelay" && model && prompt ? costAtPrices(prompt, creditPrices(model)) : 0;
       this.ctx.storage.transactionSync(() => {
-        if (row) {
-          this.#charge(row.github_id, reservation.id, reservation.source, reservation.pool, charged, costUsd, now);
-          this.#addTokens(reservation.pool, charged, now);
-          if (reservation.source === "weekly" && reservation.paid !== 1) this.#addTrial(row.github_id, charged);
-        }
+        if (row) this.#charge(row.github_id, reservation.id, reservation.source, reservation.pool, 0, 0, now);
         else this.ctx.storage.sql.exec("DELETE FROM reservations WHERE id = ?", reservation.id);
       });
       if (row && this.env.DIRECTORY) {
@@ -916,11 +990,11 @@ export class AccountObject extends DurableObject<AccountEnv> {
           isAdmin: row.is_admin === 1,
           at: reservation.created_at,
           model: model?.id ?? DEFAULT_MODEL,
-          promptTokens: charged,
+          promptTokens: 0,
           completionTokens: 0,
           cachedTokens: 0,
-          chargedTokens: charged,
-          costUsd,
+          chargedTokens: 0,
+          costUsd: 0,
           status: "abandoned",
           latencyMs: null,
           upstream: provider,
