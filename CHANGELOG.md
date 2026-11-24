@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.46.0](https://github.com/directionally-local/installer/compare/v0.45.1...v0.46.0) (2026-11-24)
+
+
+### Features
+
+* **free:** API keys for any tool (dl api-key) ([#352](https://github.com/directionally-local/installer/issues/352)) ([a128f13](https://github.com/directionally-local/installer/commit/a128f137888481d62751d61d638b7e209b618c1e))
+* **free:** country rules for GPT-6 and embargoed countries ([#345](https://github.com/directionally-local/installer/issues/345)) ([23aabb9](https://github.com/directionally-local/installer/commit/23aabb921f7c6ee543f1901184dcb4ecc1e37ef7))
+* **free:** GLM 5.3 Flash on Liquid Inference first, Open Relay as backup ([#347](https://github.com/directionally-local/installer/issues/347)) ([bca46df](https://github.com/directionally-local/installer/commit/bca46df15463d1228dca650920f7c6b8d6e954db))
+* **free:** global caps count every provider, runway alerts, access-request email cap ([#349](https://github.com/directionally-local/installer/issues/349)) ([22a503f](https://github.com/directionally-local/installer/commit/22a503f86abe87a98b4b531e0ea6983acbd17d42))
+* **free:** Monday "tokens reset" email (weekly_reset) ([#354](https://github.com/directionally-local/installer/issues/354)) ([6c50192](https://github.com/directionally-local/installer/commit/6c50192e5fc5d17c6726e7a97199a71f3f5d020f))
+* **free:** Open Relay as a registry provider, GLM 5.3 Flash free for everyone ([#346](https://github.com/directionally-local/installer/issues/346)) ([66baeed](https://github.com/directionally-local/installer/commit/66baeedf6eedc6ec77aa15edb6956c05f16ced64))
+* **free:** remove country rules ([#348](https://github.com/directionally-local/installer/issues/348)) ([48fc43a](https://github.com/directionally-local/installer/commit/48fc43a2d161e5cf4c8a8480b2341914f1ee055b))
+* **free:** serve GPT-6 in Autopilot only; other agents get DeepSeek ([#342](https://github.com/directionally-local/installer/issues/342)) ([e3bb947](https://github.com/directionally-local/installer/commit/e3bb947c363518ff62ba5181400debee7a386d10))
+* **free:** sign-up rules that scale with a busy launch, plus event codes ([#350](https://github.com/directionally-local/installer/issues/350)) ([373e2b0](https://github.com/directionally-local/installer/commit/373e2b08297dbbd8d9e9c36311a7e3f6e233eec6))
+* **free:** storage size in metrics, rollups and raw log retention ([#351](https://github.com/directionally-local/installer/issues/351)) ([fd6107d](https://github.com/directionally-local/installer/commit/fd6107d03b3df156f987ba4b251cfc5add00b496))
+
+
+### Bug Fixes
+
+* **free:** charge failed and cut-off requests a realistic estimate, not the reservation ([#353](https://github.com/directionally-local/installer/issues/353)) ([5e2e224](https://github.com/directionally-local/installer/commit/5e2e2240659f53cf5f450f18fba21a7765aeaef6))
+
 ## [0.45.1](https://github.com/directionally-local/installer/compare/v0.45.0...v0.45.1) (2026-11-23)
 
 
