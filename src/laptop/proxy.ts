@@ -976,7 +976,8 @@ ${nudge ? `  ${color.dim(nudge)}\n` : ""}
       model     ${PROXY_MODEL}
     Apps that speak Anthropic's API: base URL ${url}, API key the token above.
     Cursor won't work: it sends requests for a custom OpenAI base URL from its own
-    servers, which can't reach 127.0.0.1 on your computer.
+    servers, which can't reach 127.0.0.1 on your computer. Use dl api-key for Cursor:
+    an API key for any tool, with nothing running here.
     Browsers and web pages can't use the proxy, by design.
 
 `;

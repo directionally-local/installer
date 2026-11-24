@@ -76,14 +76,16 @@ export type RefusalReason = keyof typeof REFUSAL_REASONS;
  * Who met the refusal. Requests: `claude-code`, `opencode` and `pi` from the harness key (`dl claude`
  * on /anthropic/v1/messages, `dl opencode` and `dl pi` on /v1/chat/completions); `autopilot` for a sign-in
  * token or server key (only dl issues them), GPT-6 requests served through OpenAI's Responses
- * API included; `other` when the request shape says it isn't dl (dl_only: the token is used
- * from another tool; proxy_not_allowed: an account-pooling router). Sign-in rows are `signin`.
+ * API included; `tool` for an API key for any tool (tool-keys.ts); `other` when the request
+ * shape says it isn't dl (dl_only: the token is used from another tool; proxy_not_allowed: an
+ * account-pooling router). Sign-in rows are `signin`.
  */
 export const REFUSAL_CLIENTS = [
   "autopilot",
   "opencode",
   "claude-code",
   "pi",
+  "tool",
   "other",
   "signin",
 ] as const;
@@ -94,7 +96,7 @@ export function requestClient(
   harness: string | undefined,
   reason: RefusalReason,
 ): RefusalClient {
-  if (harness === "claude-code" || harness === "opencode" || harness === "pi") return harness;
+  if (harness === "claude-code" || harness === "opencode" || harness === "pi" || harness === "tool") return harness;
   if (
     harness !== undefined ||
     reason === "dl_only" ||
@@ -256,7 +258,7 @@ export function refusalsCard(rows: readonly RefusalRow[], now: number): string {
     ? `<table><thead><tr><th>Reason</th><th>Client</th><th class="num">Today</th><th class="num">Last 7 days</th><th class="num">Last 30 days</th></tr></thead><tbody>${body}</tbody></table>`
     : `<p class="empty">No refusals in the last 30 days.</p>`;
   return `<section class="card" id="refusals"><h2>Refusals</h2>
-<p class="empty">Every sign-in refusal and request gate, per UTC day and client (autopilot, opencode, claude-code, pi, other; signin for the browser sign-in). Counts only, no personal data. <a href="/admin/dashboard/refusals.csv">CSV</a></p>
+<p class="empty">Every sign-in refusal and request gate, per UTC day and client (autopilot, opencode, claude-code, pi, tool:&lt;name&gt; for an API key in another tool, other; signin for the browser sign-in). Counts only, no personal data. <a href="/admin/dashboard/refusals.csv">CSV</a></p>
 ${table}
 </section>`;
 }

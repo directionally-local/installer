@@ -180,6 +180,7 @@ describe("cli", () => {
     assert.match(out, /dl provider +the provider and GitHub token on each place \(dl keys is the same\)/);
     assert.match(out, /--autopilot-version <x\.y\.z> +default: the version this dl ships with \(\d+\.\d+\.\d+\)/);
     assert.match(out, /dl use \[NAME\] +where tasks and bare dl go without --server/);
+    assert.match(out, /dl api-key \[NAME\] +use free tokens in any other tool \(Cursor, Cline/);
     assert.match(out, /dl  \(on this computer\)  plain autopilot in this folder/);
     assert.match(out, /dl -c, --continue +this computer: autopilot -c; a server: reopen the latest session/);
     assert.match(out, /-m\/--model MODEL/);

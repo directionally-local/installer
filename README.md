@@ -108,6 +108,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl claude [ARGS]` | Your own Claude Code on dl's free tokens, served by DeepSeek. See [Claude Code with free tokens: dl claude](#claude-code-with-free-tokens-dl-claude). |
 | `dl opencode [ARGS]` | Your own OpenCode on dl's free tokens, served by DeepSeek V4.1 Flash (free GPT-6 is in Autopilot only for now; plain `dl`). See [OpenCode with free tokens: dl opencode](#opencode-with-free-tokens-dl-opencode). |
 | `dl pi [ARGS]` | Your own Pi on dl's free tokens, DeepSeek V4.1 Flash by default. See [Pi with free tokens: dl pi](#pi-with-free-tokens-dl-pi). |
+| `dl api-key [NAME]` | Use dl's free tokens in any other tool (Cursor, Cline, Roo, Kilo, Continue, Zed, Aider, OpenCode…): makes an API key and prints it once with the base URLs. `dl api-key list`, `dl api-key revoke ID`. See [Use dl's free tokens in other tools](#use-dls-free-tokens-in-other-tools-dl-api-key). |
 | `dl conductor` | [Conductor](https://conductor.build) (and Zed, Cline and other desktop apps) on dl's free tokens: starts `dl proxy` if it isn't running and prints the settings to paste into the app. See [Desktop apps with free tokens: dl proxy and dl conductor](#desktop-apps-with-free-tokens-dl-proxy-and-dl-conductor). |
 | `dl proxy start` / `stop` / `status` | A local proxy on `127.0.0.1:4789` that desktop apps use for the free tier, with a local token as their API key. `dl proxy run` runs it in the terminal; `dl proxy install` / `uninstall` start it at login (macOS LaunchAgent, Linux systemd user service). |
 | `dl t3 [ARGS]` | Your own [T3 Code](https://github.com/pingdotgg/t3code) server (web and phone clients) with its Claude Code and OpenCode agents on dl's free tokens while `dl t3` runs. See [T3 Code with free tokens: dl t3](#t3-code-with-free-tokens-dl-t3). |
@@ -199,8 +200,9 @@ asks for, the free tier answers with DeepSeek V4.1 Flash.
 - **Other apps:** Zed, Cline in VS Code and other OpenAI-compatible apps on this computer use base
   URL `http://127.0.0.1:4789/v1`, the local token as API key, and model
   `deepseek/deepseek-v4.1-flash-1017`. Anthropic-format apps use `http://127.0.0.1:4789`.
-  **Cursor doesn't work:** it sends requests for a custom OpenAI base URL from its own servers,
-  which can't reach your computer.
+  **Cursor doesn't work through the proxy:** it sends requests for a custom OpenAI base URL from
+  its own servers, which can't reach your computer. Use [`dl api-key`](#use-dls-free-tokens-in-other-tools-dl-api-key)
+  for Cursor (or any app): an API key that needs nothing running on your computer.
 - **What it serves:** `POST /v1/messages` and `/v1/messages/count_tokens` (Anthropic format,
   counted as Claude Code) and `POST /v1/chat/completions` and `GET /v1/models` (OpenAI format,
   counted as OpenCode). Streams pass through as they come. Like `dl claude` and `dl opencode`,
@@ -222,6 +224,40 @@ asks for, the free tier answers with DeepSeek V4.1 Flash.
   systemd user service on Linux; on a Linux box without a desktop login, also
   `loginctl enable-linger`); `dl proxy uninstall` removes that. `--port N` (or `DL_PROXY_PORT`)
   picks another port.
+
+### Use dl's free tokens in other tools: dl api-key
+
+If dl's sign-up gave you free tokens, you can use them in any tool that speaks OpenAI's or
+Anthropic's API (Cursor, Cline, Roo Code, Kilo Code, Continue, Zed, Aider, OpenCode…), with no dl
+running and from the same weekly allowance.
+
+```sh
+dl api-key cursor   # makes an API key named "cursor" and prints it once, with the settings below
+```
+
+| your tool speaks | base URL | API key | model |
+|---|---|---|---|
+| OpenAI's API | `https://free.directionallylocal.com/v1` | the `dlk_…` key | `deepseek/deepseek-v4.1-flash-1017` |
+| Anthropic's API | `https://free.directionallylocal.com/anthropic` | the `dlk_…` key | any: DeepSeek answers |
+
+Try it in one line:
+
+```sh
+curl https://free.directionallylocal.com/v1/chat/completions -H "Authorization: Bearer $DL_API_KEY" \
+  -H "content-type: application/json" -d '{"model":"deepseek/deepseek-v4.1-flash-1017","messages":[{"role":"user","content":"hi"}]}'
+```
+
+- **Models:** DeepSeek V4.1 Flash, and the free tier's other models except GPT-6
+  (`GET /v1/models` lists them). GPT-6 stays in Autopilot: run plain `dl` for it.
+- **Allowance:** the same weekly free allowance as dl, on the share other tools get (half, the
+  same as `dl claude` and `dl opencode`); Autopilot keeps the rest.
+- **Managing keys:** `dl api-key list` shows your keys (never their secrets), `dl api-key revoke
+  ID` deletes one and it stops working at once. At most 3. Unlike `dl proxy`, nothing has to run
+  on your computer, so Cursor works too.
+- **Who can make one:** anyone whose account has free tokens; not for blocked accounts. The usual
+  rules hold: no account-pooling routers, and the same automated abuse checks as in dl.
+- **Your dl sign-in stays dl's:** the sign-in token Autopilot keeps works inside dl only; other
+  tools get an API key instead.
 
 ### OpenCode with free tokens: dl opencode
 

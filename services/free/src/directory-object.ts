@@ -369,7 +369,8 @@ export interface QueueRun {
 
 /** One use description as the admin sees it. */
 /** The coding agent a use description came from: Autopilot (sign-in token or server key), or one dl launched. */
-export type UseClient = "autopilot" | "opencode" | "claude-code" | "pi";
+/** "tool": an API key for any tool (tool-keys.ts). */
+export type UseClient = "autopilot" | "opencode" | "claude-code" | "pi" | "tool";
 
 export interface UseRow {
   githubId: number;
@@ -385,7 +386,7 @@ export interface UseRow {
 }
 
 function useClientOf(value: string | null): UseClient | null {
-  return value === "autopilot" || value === "opencode" || value === "claude-code" || value === "pi" ? value : null;
+  return value === "autopilot" || value === "opencode" || value === "claude-code" || value === "pi" || value === "tool" ? value : null;
 }
 
 export interface SpendSummary {
@@ -2600,6 +2601,21 @@ export class DirectoryObject extends DurableObject {
   }
 
   /** One person's spend on each registry provider this week (the opt-in caps). */
+  /**
+   * Requests made with API keys for other tools (tool-keys.ts) since `since`, per tool: the
+   * request rows' client is `tool:<name>`. Admins left out.
+   */
+  async toolUsage(since: number): Promise<Array<{ tool: string; requests: number; people: number; chargedTokens: number }>> {
+    return this.ctx.storage.sql
+      .exec<{ tool: string; requests: number; people: number; charged_tokens: number }>(
+        `SELECT SUBSTR(harness, 6) AS tool, COUNT(*) AS requests, COUNT(DISTINCT github_id) AS people, COALESCE(SUM(charged_tokens), 0) AS charged_tokens
+           FROM requests WHERE at >= ? AND is_admin = 0 AND harness LIKE 'tool:%' GROUP BY harness ORDER BY requests DESC`,
+        since,
+      )
+      .toArray()
+      .map((row) => ({ tool: row.tool, requests: row.requests, people: row.people, chargedTokens: row.charged_tokens }));
+  }
+
   async personProviderWeek(githubId: number, now: number): Promise<Partial<Record<string, number>>> {
     return personProviderWeek(this.ctx.storage.sql, githubId, now);
   }

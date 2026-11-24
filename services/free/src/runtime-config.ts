@@ -188,6 +188,12 @@ export const RUNTIME_SETTINGS = {
   allowOtherHarnesses: { kind: "flag", env: "ALLOW_OTHER_HARNESSES" },
   /** The share of the weekly free allowance (and the trial) other coding agents may use, 0 to 1 (Pro is exempt). */
   otherHarnessShare: { kind: "weight", env: "OTHER_HARNESS_SHARE" },
+  /** API keys for any tool (`dl api-key`, POST /v1/keys {kind: "tool"}); false refuses new and existing ones (tool_keys_off). */
+  toolKeys: { kind: "flag", env: "TOOL_KEYS" },
+  /** Tool keys per account; 0 allows none. */
+  toolKeysMax: { kind: "count", env: "TOOL_KEYS_MAX" },
+  /** Chat requests a minute one tool key may make (the per-person limit still applies). */
+  toolKeyRequestsPerMinute: { kind: "count", env: "TOOL_KEY_REQUESTS_PER_MINUTE" },
   /** dl Pro offered to new subscribers; false hides it (offers, refusals, checkout) while existing subscribers keep it. */
   proOffered: { kind: "flag", env: "PRO_OFFERED" },
   /** The owner's email about access requests: "each" (one per request), "daily" (in the daily digest) or "off". */
