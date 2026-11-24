@@ -109,7 +109,7 @@ describe("server keys", () => {
     const listed = await service.request("GET", "/v1/keys", { token: alice.access_token });
     const text = await listed.text();
     assert.ok(!text.includes(keySecret(body.key)), "the secret is never listed");
-    assert.deepEqual(JSON.parse(text), { keys: [{ id: body.id, name: "hetzner-1", createdAt: "2026-11-04T12:00:00.000Z", lastUsedAt: "2026-11-04T12:00:05.000Z" }], max: 5 });
+    assert.deepEqual(JSON.parse(text), { keys: [{ id: body.id, name: "hetzner-1", kind: "server", createdAt: "2026-11-04T12:00:00.000Z", lastUsedAt: "2026-11-04T12:00:05.000Z" }], max: 5, maxToolKeys: 3, toolKeys: true });
 
     const people = await (await service.request("GET", "/admin/people", { token: admin })).text();
     assert.ok(!people.includes("dlk_"));
@@ -233,7 +233,7 @@ describe("who may have server keys", () => {
     const refused = await createKey(service, alice.access_token);
     assert.equal(refused.status, 403);
     assert.deepEqual(await refused.json(), { error: { code: "server_keys_unavailable", message: UNAVAILABLE } });
-    assert.deepEqual(await (await service.request("GET", "/v1/keys", { token: alice.access_token })).json(), { keys: [], max: 5 });
+    assert.deepEqual(await (await service.request("GET", "/v1/keys", { token: alice.access_token })).json(), { keys: [], max: 5, maxToolKeys: 3, toolKeys: true });
   });
 
   it("lets admins, and people whose level an admin set, create keys", async () => {
@@ -293,7 +293,7 @@ describe("who may have server keys", () => {
     const { service, alice } = await ungranted();
     const { id } = await oldKey(service);
     assert.equal((await service.request("DELETE", `/v1/keys/${id}`, { token: alice.access_token })).status, 200);
-    assert.deepEqual(await (await service.request("GET", "/v1/keys", { token: alice.access_token })).json(), { keys: [], max: 5 });
+    assert.deepEqual(await (await service.request("GET", "/v1/keys", { token: alice.access_token })).json(), { keys: [], max: 5, maxToolKeys: 3, toolKeys: true });
   });
 
   it("keeps blocked and suspended accounts refused as before, granted or not", async () => {

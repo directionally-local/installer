@@ -1297,6 +1297,9 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `harness_key_limit` | `POST /v1/harness-keys` (409) | `max` |
 | `provider_limit` | chat (402) | `reason`, `provider`, `family`, `resetsAt`, `alternative`; reason `autopilot_only` (GPT-6 from another agent's harness key) also has `clients: ["autopilot"]` |
 | `server_keys_unavailable` | `POST /v1/keys`, and any request with a server key (403) | none |
+| `tool_keys_unavailable` | `POST /v1/keys {kind: "tool"}` (403) | none: the account has no free tokens (below the bar), or isn't active |
+| `tool_keys_off` | `POST /v1/keys {kind: "tool"}`, and any request with a tool key (403) | none: `toolKeys` is off |
+| `tool_key_not_allowed` | a tool key on a route other than chat, models, `/v1/me` and the Anthropic endpoint (403) | none |
 | `not_invited` | API, and older sign-ins | none |
 
 The two global budget codes mean "free tokens are paused for everyone, and your own key still
@@ -1315,6 +1318,8 @@ are deleted once the day is over, so only the number stays. Rows older than 120 
 - **Clients**: `autopilot` (a sign-in token or server key: plain dl, GPT-6 requests served
   through OpenAI's Responses API included), `opencode` (`dl opencode`'s harness key on
   `/v1/chat/completions`), `claude-code` (`dl claude`'s harness key on `/anthropic/v1/messages`),
+  `tool:<name>` (a tool key, named from the tool's User-Agent: `tool:cursor`, `tool:cline`…; see
+  [Use dl's free tokens in other tools](#use-dls-free-tokens-in-other-tools-tool-keys)),
   `other` (`dl_only` and `proxy_not_allowed`: the request isn't from dl), and `signin` for the
   browser sign-in.
 - **Sign-in reasons**: `invite_page_shown`, `invite_accepted`, `invite_code_invalid`,
@@ -1372,7 +1377,10 @@ with who made it and when.
 | `luminalWeeklyCreditUsd` | `LUMINAL_WEEKLY_CREDIT_USD` | 250; `none` for no weekly credit budget |
 | `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
 | `userEmails` | `USER_EMAILS` | true (sends only with the `USER_EMAIL` binding or `RESEND_API_KEY`) |
-| `dlOnly` | `DL_ONLY` | true (free tokens inside dl only; see below) |
+| `dlOnly` | `DL_ONLY` | true (a dl sign-in token works inside dl only; tool keys are never refused by it; see below) |
+| `toolKeys` | `TOOL_KEYS` | true: accounts in good standing may make API keys for other tools; false refuses new and existing ones (`tool_keys_off`, the keys are kept) |
+| `toolKeysMax` | `TOOL_KEYS_MAX` | 3: tool keys per account (server keys are counted apart) |
+| `toolKeyRequestsPerMinute` | `TOOL_KEY_REQUESTS_PER_MINUTE` | 30: chat requests a minute per tool key, under the person's 60 |
 | `allowOtherHarnesses` | `ALLOW_OTHER_HARNESSES` | true: Claude Code through `dl claude` and OpenCode through `dl opencode` may use free tokens; false refuses both (`harness_not_allowed`) |
 | `otherHarnessShare` | `OTHER_HARNESS_SHARE` | 0.5: the share (0 to 1) of the free weekly allowance and of the trial Claude Code and OpenCode may use; Pro is exempt (see below) |
 | `proOffered` | `PRO_OFFERED` | true: dl Pro is offered. false hides it from everyone new: `offers` has no `pro` (the `topup` stays), free users' refusals, sign-in lines and trial emails stop naming Pro, and a new Pro checkout gets 403 `pro_not_offered`. Existing subscribers keep Pro, their Pro wording and the billing portal |
@@ -1875,14 +1883,14 @@ and each failure adds a row to `host_failures` (time, host, `http_5xx` | `error_
   refresh fails, and its access tokens stop working at once. The person's other sessions keep
   working. An unknown refresh token still gets a 200.
 - **Admin, revoke everything for one person:** `POST /admin/people/:id/revoke-tokens`. This ends
-  every session and deletes every server key. The person can sign in again.
+  every session and deletes every key, server and tool. The person can sign in again.
 - **Server keys:** long-lived, named and revocable keys for a server that runs agents
   unattended. All three endpoints need a signed-in access token; a server key can't call them.
 
   | request | response |
   |---|---|
-  | `POST /v1/keys {"name": "build-box"}` | 201 `{id, name, key, createdAt, lastUsedAt}`. `key` is shown only here. |
-  | `GET /v1/keys` | `{keys: [{id, name, createdAt, lastUsedAt}], max: 5}` |
+  | `POST /v1/keys {"name": "build-box"}` | 201 `{id, name, kind: "server", key, createdAt, lastUsedAt}`. `key` is shown only here. |
+  | `GET /v1/keys` | `{keys: [{id, name, kind, createdAt, lastUsedAt}], max: 5, maxToolKeys, toolKeys}`: server and tool keys |
   | `DELETE /v1/keys/:id` | `{id, revoked: true}`, or 404 `key_not_found` |
 
   - **Where a key works:** `Authorization: Bearer dlk_…` on `/v1/chat/completions`,
@@ -1900,7 +1908,48 @@ and each failure adds a row to `host_failures` (time, host, `http_5xx` | `error_
     key, so `/request` can be typed on the server itself. A Full account without keys may send a
     request (no 409 `already_full`); granting it gives the account keys. A blocked or suspended account's key gets `blocked` or `suspended` as before.
   - **Errors:** a wrong or revoked key gets 401 `invalid_key`. Signing out leaves keys working.
-  - **Admin view:** `/admin/people` shows how many keys each person has, never the keys.
+  - **Admin view:** `/admin/people` shows how many keys each person has (`serverKeys`,
+    `toolKeys`), never the keys.
+
+## Use dl's free tokens in other tools (tool keys)
+
+An account the sign-up checks gave free tokens to may use them in any OpenAI- or
+Anthropic-compatible tool (Cursor, Cline, Roo Code, Kilo Code, Continue, Zed, Aider, OpenCode…),
+with no dl running, from the same weekly allowance. The person makes an API key with
+`dl api-key` (or `POST /v1/keys {"name": "cursor", "kind": "tool"}` with a signed-in access
+token) and pastes it into the tool:
+
+| tool speaks | base URL | API key | model |
+|---|---|---|---|
+| OpenAI's API | `https://free.directionallylocal.com/v1` | the `dlk_…` key | `deepseek/deepseek-v4.1-flash-1017` (`GET /v1/models` lists the others) |
+| Anthropic's API | `https://free.directionallylocal.com/anthropic` | the key, as `x-api-key` or Bearer | any: DeepSeek answers |
+
+- **The key:** a `dlk_` key like a server key, stored the same way (only the secret's SHA-256),
+  with `kind: "tool"`. Revoke with `DELETE /v1/keys/:id` (`dl api-key revoke ID`); it stops
+  working at once. At most `toolKeysMax` (3) per account, apart from server keys. A tool key
+  can't make, list or revoke keys.
+- **Who may make one:** admins, Pro, and any active account that isn't below the bar with no
+  free tokens (what `below_bar` refuses in chat); no grant needed. Otherwise 403
+  `tool_keys_unavailable`. A blocked or suspended account's keys get `blocked` or `suspended`.
+- **Where it works:** `/v1/chat/completions`, `/v1/models`, `/v1/me` and
+  `/anthropic/v1/messages` (+ `count_tokens`). Elsewhere (`/v1/events`, `/v1/access-request`,
+  billing, feedback) 403 `tool_key_not_allowed`: a tool key can't send dl's session events.
+- **How it is served:** like another coding agent dl launches (`dl opencode`): the same
+  reservation, caps, trial, queue, allocator, moderation and use descriptions, on the share of
+  the week other agents get (`otherHarnessShare`; past it 402 `harness_limit` in words for a
+  tool); GPT-6 is refused (402 `provider_limit`, reason `autopilot_only`) and not listed while
+  `gpt6Clients` is `autopilot`; a model past its provider's budget falls back to DeepSeek rather
+  than being refused. Account-pooling routers are refused (`proxy_not_allowed`). Never refused as
+  `dl_only`, and its requests don't count toward the person's `dl_only` grace.
+- **Rate limit:** `toolKeyRequestsPerMinute` (30) chat requests a minute per key, under the
+  person's 60 a minute across everything.
+- **Which tools:** each request row keeps `tool:<name>` as its client, the name read from the
+  User-Agent, `X-Title` and `HTTP-Referer` headers (cursor, cline, roo, kilo, continue, zed,
+  aider, opencode, the SDKs…, else `other`); refusals are counted under the same name.
+  `GET /admin/tool-usage?days=7` (1 to 30) gives requests, people and charged tokens per tool
+  from the request log. Names and counts only.
+- **Kill switch:** `POST /admin/config {"toolKeys": false}`: no new tool keys, and every request
+  with one gets 403 `tool_keys_off`; the keys are kept, so turning it back on restores them.
 
 A per-person grant (`POST /admin/people/:id/grant`) still wins over the weekly defaults: `usdPerWeek`
 and `spentUsdThisWeek` are GPT-6's; `deepseekSpentUsdThisWeek` sets DeepSeek's spend.
@@ -2117,14 +2166,14 @@ the admin log; an upstream without its key can't be chosen.
 - **Free tokens inside dl only (`dlOnly`, on by default):** Autopilot always sends session
   events (`POST /v1/events`) while the free tier is its provider, so a sign-in token used from
   another tool sends requests and no events. A chat request from a free-plan account is
-  refused with 403 `dl_only` ("Free tokens work inside dl only. Run dl to keep using them, or
-  use your own API key in any tool.") when no session event (one with a session id) arrived in
+  refused with 403 `dl_only` ("Your dl sign-in works inside dl only. To use free tokens in another
+  tool, make an API key for it: run dl api-key. Or use your own API key in that tool.") when no session event (one with a session id) arrived in
   the last 24 hours and the account has made at least 20 free chat requests with a sign-in token
   that no session event covers: a session event covers the 24 hours after it, so these are the
   requests made more than 24 hours after the latest one (all of them, for an account that never
   sent one). Autopilot batches events for a few seconds, so a new session's first requests come
   before its first event: the threshold leaves room for that, once, not every day. Not counted and never refused: admins, requests with a
-  server key (`dlk_`, dl's server mode) and paid usage (Pro and top-ups; a refused free account
+  `dlk_` key (a server key, dl's server mode, or a [tool key](#use-dls-free-tokens-in-other-tools-tool-keys), which is how free tokens are used in other tools) and paid usage (Pro and top-ups; a refused free account
   with a top-up is served from it). The check reads the caller's events and request log in the
   Directory read every chat request already makes; the only new write is a `via_key` flag on the
   request row it already inserts. Switch it off with `POST /admin/config {"dlOnly": false}`.

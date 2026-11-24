@@ -43,11 +43,25 @@ export const RESERVATION_TTL_MS = 30 * 60_000;
 export const PRO_GRACE_MS = 3 * 86_400_000;
 /** Server keys per account. */
 export const MAX_SERVER_KEYS = 5;
+/**
+ * What a `dlk_` key is for. "server": dl's server mode (Autopilot on a server; by grant, see
+ * app.ts serverKeysAllowed). "tool": an API key the person pastes into any OpenAI- or
+ * Anthropic-compatible tool (Cursor, Cline, Zed, Aider…), for any account in good standing;
+ * served like another coding agent (GPT-6 stays in Autopilot, the other agents' share applies).
+ * Both live in `server_keys` and look the same; the kind is stored, never read from the key.
+ */
+export const KEY_KINDS = ["server", "tool"] as const;
+export type KeyKind = (typeof KEY_KINDS)[number];
 /** `last_used_at` is written at most this often per key. */
 const KEY_TOUCH_MS = 60_000;
 
 /** `dlk_<githubId>_<id>_<secret>`: the GitHub id routes to this object; only the secret's hash is stored. */
 const SERVER_KEY = /^dlk_([1-9][0-9]{0,15})_([a-z0-9]{12})_([A-Za-z0-9_-]{43})$/;
+
+/** A stored kind; anything unknown reads as a tool key, the narrower of the two. */
+function keyKind(value: string): KeyKind {
+  return value === "server" ? "server" : "tool";
+}
 
 export function parseServerKey(key: string): { githubId: number; id: string; secret: string } | undefined {
   const match = SERVER_KEY.exec(key);
@@ -85,6 +99,7 @@ export type CreateHarnessKeyResult =
 export interface ServerKeyView {
   id: string;
   name: string;
+  kind: KeyKind;
   /** Unix ms. */
   createdAt: number;
   /** Unix ms, to the minute; null when never used. */
@@ -93,7 +108,7 @@ export interface ServerKeyView {
 
 export type CreateKeyResult =
   | { ok: true; key: string; view: ServerKeyView }
-  | { ok: false; code: "not_invited" | "suspended" | "blocked" | "key_limit_reached" | "key_name_taken" };
+  | { ok: false; code: "not_invited" | "suspended" | "blocked" | "key_limit_reached" | "key_name_taken"; max?: number };
 
 export interface AccountEnv {
   DIRECTORY?: DurableObjectNamespace<DirectoryObject>;
@@ -383,6 +398,9 @@ export class AccountObject extends DurableObject<AccountEnv> {
       if (!accountColumns.includes("cost_used_deepseek")) this.ctx.storage.sql.exec("ALTER TABLE account ADD COLUMN cost_used_deepseek REAL NOT NULL DEFAULT 0");
       // The trial's count: free tokens (unpaid weekly usage) for the account's lifetime. It starts
       // at 0 for accounts from before it; only trial accounts (admitted at or after the cutoff) are held to it.
+      // Key kinds (KEY_KINDS): every key made before them was a server key.
+      const keyColumns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('server_keys')").toArray().map((column) => column.name);
+      if (!keyColumns.includes("kind")) this.ctx.storage.sql.exec("ALTER TABLE server_keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'server'");
       if (!accountColumns.includes("trial_used")) this.ctx.storage.sql.exec("ALTER TABLE account ADD COLUMN trial_used INTEGER NOT NULL DEFAULT 0");
       // Prompt and cached tokens the providers reported for this person, all time: their cached
       // share, which a request that ended without usage is estimated with. 0 for accounts from before.
@@ -846,36 +864,41 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return iat > notBefore;
   }
 
-  /** Creates a named server key. The secret is returned here once; only its hash is kept. */
-  async createKey(input: { name: string; now: number }): Promise<CreateKeyResult> {
+  /**
+   * Creates a named key of one kind (a server key unless said). The secret is returned here once;
+   * only its hash is kept. `max`: that kind's keys per account (MAX_SERVER_KEYS for server keys).
+   */
+  async createKey(input: { name: string; now: number; kind?: KeyKind; max?: number }): Promise<CreateKeyResult> {
     const row = this.#row();
     if (!row) return { ok: false, code: "not_invited" };
     if (row.status === "blocked") return { ok: false, code: "blocked" };
     if (row.status === "suspended") return { ok: false, code: "suspended" };
+    const kind = input.kind ?? "server";
+    const max = input.max ?? MAX_SERVER_KEYS;
     const sql = this.ctx.storage.sql;
-    const count = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM server_keys").toArray()[0]?.n ?? 0;
-    if (count >= MAX_SERVER_KEYS) return { ok: false, code: "key_limit_reached" };
+    if ((await this.keyCount(kind)) >= max) return { ok: false, code: "key_limit_reached", max };
     if (sql.exec("SELECT 1 FROM server_keys WHERE name = ?", input.name).toArray().length > 0) return { ok: false, code: "key_name_taken" };
     const id = [...crypto.getRandomValues(new Uint8Array(6))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
     const secret = randomToken();
-    sql.exec("INSERT INTO server_keys (id, name, key_hash, created_at) VALUES (?, ?, ?, ?)", id, input.name, await sha256Hex(secret), input.now);
-    return { ok: true, key: `dlk_${row.github_id}_${id}_${secret}`, view: { id, name: input.name, createdAt: input.now, lastUsedAt: null } };
+    sql.exec("INSERT INTO server_keys (id, name, key_hash, created_at, kind) VALUES (?, ?, ?, ?, ?)", id, input.name, await sha256Hex(secret), input.now, kind);
+    return { ok: true, key: `dlk_${row.github_id}_${id}_${secret}`, view: { id, name: input.name, kind, createdAt: input.now, lastUsedAt: null } };
   }
 
   async listKeys(): Promise<ServerKeyView[]> {
     return this.ctx.storage.sql
-      .exec<{ id: string; name: string; created_at: number; last_used_at: number | null }>("SELECT id, name, created_at, last_used_at FROM server_keys ORDER BY created_at, id")
+      .exec<{ id: string; name: string; kind: string; created_at: number; last_used_at: number | null }>("SELECT id, name, kind, created_at, last_used_at FROM server_keys ORDER BY created_at, id")
       .toArray()
-      .map((key) => ({ id: key.id, name: key.name, createdAt: key.created_at, lastUsedAt: key.last_used_at }));
+      .map((key) => ({ id: key.id, name: key.name, kind: keyKind(key.kind), createdAt: key.created_at, lastUsedAt: key.last_used_at }));
   }
 
-  /** The allowance and the server key count in one call, for the admin people list (one RPC per person, not two). */
-  async adminSummary(now: number, limits: Limits): Promise<{ allowance: Allowance; serverKeys: number }> {
-    return { allowance: this.#allowance(this.#current(now), now, limits), serverKeys: await this.keyCount() };
+  /** The allowance and the key counts in one call, for the admin people list (one RPC per person, not two). */
+  async adminSummary(now: number, limits: Limits): Promise<{ allowance: Allowance; serverKeys: number; toolKeys: number }> {
+    return { allowance: this.#allowance(this.#current(now), now, limits), serverKeys: await this.keyCount("server"), toolKeys: await this.keyCount("tool") };
   }
 
-  async keyCount(): Promise<number> {
-    return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM server_keys").toArray()[0]?.n ?? 0;
+  /** How many keys of one kind (server keys unless said) the account has. */
+  async keyCount(kind: KeyKind = "server"): Promise<number> {
+    return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM server_keys WHERE kind = ?", kind).toArray()[0]?.n ?? 0;
   }
 
   /** Deletes one key; false when there is no such key. */
@@ -885,9 +908,9 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return found;
   }
 
-  /** Deletes every server key (and every harness key); returns how many server keys there were. */
+  /** Deletes every key, server and tool (and every harness key); returns how many there were. */
   async revokeAllKeys(): Promise<number> {
-    const count = await this.keyCount();
+    const count = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM server_keys").toArray()[0]?.n ?? 0;
     this.ctx.storage.sql.exec("DELETE FROM server_keys");
     this.ctx.storage.sql.exec("DELETE FROM harness_keys");
     return count;
@@ -942,13 +965,13 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return { githubId: row.github_id, login: row.login, harness: key.harness as Harness, ...(key.sid !== null ? { sid: key.sid } : {}) };
   }
 
-  /** The account behind a server key, or undefined when the key is unknown or revoked. */
-  async verifyKey(id: string, secret: string, now: number): Promise<{ githubId: number; login: string } | undefined> {
+  /** The account behind a key and the key's kind, or undefined when the key is unknown or revoked. */
+  async verifyKey(id: string, secret: string, now: number): Promise<{ githubId: number; login: string; kind: KeyKind } | undefined> {
     const row = this.#row();
-    const key = this.ctx.storage.sql.exec<{ key_hash: string; last_used_at: number | null }>("SELECT key_hash, last_used_at FROM server_keys WHERE id = ?", id).toArray()[0];
+    const key = this.ctx.storage.sql.exec<{ key_hash: string; kind: string; last_used_at: number | null }>("SELECT key_hash, kind, last_used_at FROM server_keys WHERE id = ?", id).toArray()[0];
     if (!row || !key || !timingSafeEqual(await sha256Hex(secret), key.key_hash)) return undefined;
     if (key.last_used_at === null || now - key.last_used_at >= KEY_TOUCH_MS) this.ctx.storage.sql.exec("UPDATE server_keys SET last_used_at = ? WHERE id = ?", now, id);
-    return { githubId: row.github_id, login: row.login };
+    return { githubId: row.github_id, login: row.login, kind: keyKind(key.kind) };
   }
 
   /**

@@ -5,7 +5,8 @@ import { githubAuthorizeUrl, githubPrimaryEmail, githubPublicProfile, githubSign
 import { githubSignals } from "../../shared/src/github-signals.js";
 import { hmacKey, signJwt, verifyJwt } from "../../shared/src/jwt.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
-import { HARNESSES, HARNESS_KEY_TTL_MS, MAX_HARNESS_KEYS, MAX_SERVER_KEYS, parseHarnessKey, parseServerKey, type AccountObject, type Harness, type Allowance, type Limits, type Plan, type ServerKeyView } from "./account-object.js";
+import { HARNESSES, HARNESS_KEY_TTL_MS, MAX_HARNESS_KEYS, MAX_SERVER_KEYS, parseHarnessKey, parseServerKey, type AccountObject, type Harness, type KeyKind, type Allowance, type Limits, type Plan, type ServerKeyView } from "./account-object.js";
+import { TOOL_KEYS_OFF_MESSAGE, TOOL_KEYS_UNAVAILABLE_MESSAGE, TOOL_KEY_NOT_HERE_MESSAGE, forTool, toolClient, toolLimitMessage } from "./tool-keys.js";
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
@@ -161,6 +162,12 @@ import type { ModerationLimits } from "./directory-object.js";
  * /v1/models, /v1/me and /v1/events and charges the same account as its owner's sign-in.
  * Only the secret's SHA-256 is stored. At most 5 keys per account (409 key_limit_reached);
  * names are unique per account (409 key_name_taken). A bad or revoked key is 401 invalid_key.
+ *
+ * Tool keys (tool-keys.ts): `POST /v1/keys {name, kind: "tool"}` makes the same kind of key for
+ * any OpenAI- or Anthropic-compatible tool, for any account in good standing (no grant needed),
+ * at most `toolKeysMax` of them. It works on /v1/chat/completions, /v1/models, /v1/me and
+ * /anthropic/v1/messages (not /v1/events), is served like another coding agent, and is never
+ * refused as dl_only. GET /v1/keys lists both kinds, each with its `kind`.
  */
 
 export const VERSION = "0.1.0";
@@ -758,6 +765,9 @@ interface Caller extends Identity {
   /** With a harness key: which coding agent, and the key's id. */
   harness?: Harness;
   harnessKeyId?: string;
+  /** With a `dlk_` key: its kind and id ("tool": a key for any tool, see tool-keys.ts). */
+  keyKind?: KeyKind;
+  keyId?: string;
   /** The sign-in session, for access tokens issued since sessions were tracked. */
   sid?: string;
 }
@@ -765,13 +775,14 @@ interface Caller extends Identity {
 /**
  * The person behind a valid access token, or a 401. With `keys`, a server key is accepted
  * too, from an account allowed keys (`serverKeysAllowed`); with `ungrantedKeys` as well, from
- * any account (only /request, so a server with an old key can ask for a grant). With `harness`,
+ * any account (only /request, so a server with an old key can ask for a grant). With `toolKeys`,
+ * a tool key too (tool-keys.ts), while the `toolKeys` setting is on. With `harness`,
  * a harness key: any (true), or only one minted for one of the listed agents. An access token
  * from a revoked session is refused like an expired one.
  */
 async function authenticate(
   c: Ctx,
-  options: { keys?: boolean; ungrantedKeys?: boolean; harness?: boolean | readonly Harness[]; apiKeyHeader?: boolean } = {},
+  options: { keys?: boolean; ungrantedKeys?: boolean; toolKeys?: boolean; harness?: boolean | readonly Harness[]; apiKeyHeader?: boolean } = {},
 ): Promise<Caller | Response> {
   // Anthropic clients may send the key as `x-api-key` instead (apiKeyHeader: the Anthropic endpoint).
   const apiKey = options.apiKeyHeader ? c.request.headers.get("x-api-key")?.trim() : undefined;
@@ -800,14 +811,23 @@ async function authenticate(
       apiError(401, "invalid_key", "This server key is invalid or was revoked. Create a new one from a signed-in machine.", {}, { "www-authenticate": 'Bearer error="invalid_token"' });
     const parsed = parseServerKey(bearer);
     if (!options.keys || !parsed) return options.keys ? invalidKey() : invalid();
-    const owner = await account(c, parsed.githubId).verifyKey(parsed.id, parsed.secret, c.now());
-    if (!owner) return invalidKey();
-    if (options.ungrantedKeys) return { ...owner, via: "key" };
+    const found = await account(c, parsed.githubId).verifyKey(parsed.id, parsed.secret, c.now());
+    if (!found) return invalidKey();
+    const { kind, ...owner } = found;
+    // A tool key (tool-keys.ts) works only where `toolKeys` allows it, while the setting is on,
+    // and needs no grant: who may make one is checked when it is made, and every request still
+    // meets the blocks and refusals below it.
+    if (kind === "tool") {
+      if (!options.toolKeys) return apiError(403, "tool_key_not_allowed", TOOL_KEY_NOT_HERE_MESSAGE);
+      if (!applyOverrides(c.config, await directory(c).overrides()).toolKeys) return apiError(403, "tool_keys_off", TOOL_KEYS_OFF_MESSAGE);
+      return { ...owner, via: "key", keyKind: "tool", keyId: parsed.id };
+    }
+    if (options.ungrantedKeys) return { ...owner, via: "key", keyKind: "server", keyId: parsed.id };
     // A key kept from before keys needed a grant stops working until an admin grants them (it
     // isn't deleted). Blocked and suspended accounts are left to the refusals they get today.
     const stored = await directory(c).getPerson(owner.githubId);
     if ((!stored || stored.status === "active") && !(await serverKeysAllowed(c, owner.githubId, stored))) return serverKeysUnavailable();
-    return { ...owner, via: "key" };
+    return { ...owner, via: "key", keyKind: "server", keyId: parsed.id };
   }
   const claims = await verifyJwt(bearer, await signingKey(c.config), Math.floor(c.now() / 1000));
   if (!claims || claims.typ !== "access" || claims.iss !== ISSUER || typeof claims.login !== "string") return invalid();
@@ -1413,6 +1433,7 @@ function keyView(key: ServerKeyView) {
   return {
     id: key.id,
     name: key.name,
+    kind: key.kind,
     createdAt: new Date(key.createdAt).toISOString(),
     lastUsedAt: key.lastUsedAt === null ? null : new Date(key.lastUsedAt).toISOString(),
   };
@@ -1433,8 +1454,27 @@ function serverKeysUnavailable(): Response {
 }
 
 /**
+ * Whether an account may make a tool key (tool-keys.ts): in good standing, the people the sign-up
+ * checks gave free tokens to. Admins and Pro always; else not blocked (an active account; the
+ * account object refuses suspended and blocked ones too) and not below the bar with no free
+ * tokens, the way `chat` reads it.
+ */
+async function toolKeysAllowed(c: Ctx, githubId: number, stored: PersonRow | undefined): Promise<boolean> {
+  if (c.config.adminGithubIds.has(githubId)) return true;
+  if (!stored || stored.status !== "active") return false;
+  if ((await account(c, githubId).plan(c.now())) === "pro") return true;
+  const gate = await runtime(c);
+  if (!gate.person || gate.person.blocked) return false;
+  const level = servedLevel(gate.person.level ?? "full", gate.config);
+  const trial = onTrial(gate.config, githubId, gate.person.admittedAt);
+  const limits = allocated(gate.config, limitsFor(gate.config, gate.person.bonusTokens, level, gate.person.batchFlagged === true, trial, gate.person.trialBonusTokens), githubId, gate.person, c.now());
+  return !(limits.level === "starter" && (limits.levelTokens ?? 0) <= 0);
+}
+
+/**
  * POST/GET /v1/keys and DELETE /v1/keys/:id. Managing keys takes a signed-in access token, not a
- * key. Anyone may list and revoke their keys; creating one needs `serverKeysAllowed`.
+ * key. Anyone may list and revoke their keys; creating a server key needs `serverKeysAllowed`,
+ * a tool key (`{kind: "tool"}`) `toolKeysAllowed` and the `toolKeys` setting on.
  */
 async function keys(c: Ctx, rest: string, method: string): Promise<Response> {
   const identity = await authenticate(c);
@@ -1442,21 +1482,38 @@ async function keys(c: Ctx, rest: string, method: string): Promise<Response> {
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
   const person = account(c, identity.githubId);
+  // Before any runtime(c): it is read once per request, with the caller's state (toolKeysAllowed).
+  c.callerId = identity.githubId;
 
-  if (rest === "" && method === "GET") return json({ keys: (await person.listKeys()).map(keyView), max: MAX_SERVER_KEYS });
+  if (rest === "" && method === "GET") {
+    const { config } = await runtime(c);
+    return json({ keys: (await person.listKeys()).map(keyView), max: MAX_SERVER_KEYS, maxToolKeys: config.toolKeysMax, toolKeys: config.toolKeys });
+  }
   if (rest === "" && method === "POST") {
     const body = await readJson(c);
     const name = typeof body?.name === "string" ? body.name.trim() : "";
+    const kind = body?.kind === undefined ? "server" : body.kind;
+    if (kind !== "server" && kind !== "tool") return apiError(400, "invalid_request", 'Send {name, kind?}: kind is "server" (the default) or "tool".');
     if (!KEY_NAME.test(name)) return apiError(400, "invalid_request", "Send {name}: 1 to 64 printable characters, e.g. the server's hostname.");
     const stored = await directory(c).getPerson(identity.githubId);
-    if (stored?.status === "active" && !(await serverKeysAllowed(c, identity.githubId, stored))) return serverKeysUnavailable();
-    const created = await person.createKey({ name, now: c.now() });
+    let max = MAX_SERVER_KEYS;
+    if (kind === "tool") {
+      const { config } = await runtime(c);
+      if (!config.toolKeys) return apiError(403, "tool_keys_off", TOOL_KEYS_OFF_MESSAGE);
+      if (stored?.status === "active" && !(await toolKeysAllowed(c, identity.githubId, stored))) return apiError(403, "tool_keys_unavailable", TOOL_KEYS_UNAVAILABLE_MESSAGE);
+      max = config.toolKeysMax;
+    } else if (stored?.status === "active" && !(await serverKeysAllowed(c, identity.githubId, stored))) {
+      return serverKeysUnavailable();
+    }
+    const created = await person.createKey({ name, now: c.now(), kind, max });
     if (created.ok) return json({ ...keyView(created.view), key: created.key }, 201);
     switch (created.code) {
       case "key_limit_reached":
-        return apiError(409, "key_limit_reached", `This account already has ${MAX_SERVER_KEYS} server keys. Revoke one first.`, { max: MAX_SERVER_KEYS });
+        return kind === "tool"
+          ? apiError(409, "key_limit_reached", `This account already has ${max} API keys for other tools. Revoke one first (dl api-key revoke ID).`, { max })
+          : apiError(409, "key_limit_reached", `This account already has ${MAX_SERVER_KEYS} server keys. Revoke one first.`, { max: MAX_SERVER_KEYS });
       case "key_name_taken":
-        return apiError(409, "key_name_taken", "This account already has a server key with that name.");
+        return apiError(409, "key_name_taken", "This account already has a key with that name.");
       case "suspended":
         return apiError(403, "suspended", "This account is suspended from the free tier.");
       case "blocked":
@@ -1466,7 +1523,7 @@ async function keys(c: Ctx, rest: string, method: string): Promise<Response> {
     }
   }
   if (/^[a-z0-9]{12}$/.test(rest) && method === "DELETE") {
-    if (!(await person.revokeKey(rest))) return apiError(404, "key_not_found", "No server key with that id on this account.");
+    if (!(await person.revokeKey(rest))) return apiError(404, "key_not_found", "No key with that id on this account.");
     return json({ id: rest, revoked: true });
   }
   return apiError(404, "not_found", `${method} /v1/keys/${rest} isn't a route.`);
@@ -2251,7 +2308,7 @@ async function runProbes(env: Env, fetcher: Fetch, now: () => number, at: number
  * `referral` and `offers`. See the README for the exact shapes.
  */
 async function me(c: Ctx): Promise<Response> {
-  const identity = await authenticate(c, { keys: true });
+  const identity = await authenticate(c, { keys: true, toolKeys: true });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
@@ -2672,13 +2729,13 @@ async function modelsByBudget(c: Ctx, config: FreeConfig, githubId: number, pers
 
 async function models(c: Ctx): Promise<Response> {
   // OpenCode's harness key may list them too (dl opencode reads the list to configure it).
-  const identity = await authenticate(c, { keys: true, harness: ["opencode", "pi"] });
+  const identity = await authenticate(c, { keys: true, toolKeys: true, harness: ["opencode", "pi"] });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
   const { config, person } = await runtime(c);
-  // GPT-6 isn't offered to another agent's harness key while it is Autopilot only (gpt6-clients.ts).
-  const harness = identity.via === "harness" ? identity.harness : undefined;
+  // GPT-6 isn't offered to another agent's harness key, or a tool key, while it is Autopilot only (gpt6-clients.ts).
+  const harness = otherAgent(identity);
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
   const listed = (await modelsFor(c, config, identity.githubId, person)).filter((model) => !heldFromClient(model, config.gpt6Clients, harness, isAdmin));
   const weekUsd = listed.some((model) => capped(config, model)) ? await directory(c).personProviderWeek(identity.githubId, c.now()) : undefined;
@@ -2798,12 +2855,12 @@ function anthropicErrorResponse(status: number, message: string, code?: string, 
   return json(anthropicError(status, message, code, extra), status, headers);
 }
 
-/** Our `{error: {code, message, ...}}` answer from `chat` (or `authenticate`) → Anthropic's error shape, our message reworded for Claude Code. */
-async function toAnthropicErrorResponse(response: Response): Promise<Response> {
+/** Our `{error: {code, message, ...}}` answer from `chat` (or `authenticate`) → Anthropic's error shape, our message reworded for Claude Code (or, `tool`, for a tool key). */
+async function toAnthropicErrorResponse(response: Response, tool = false): Promise<Response> {
   const body = parseJson(await response.text()) as { error?: Record<string, unknown> } | undefined;
   const error = body?.error ?? {};
   const code = typeof error.code === "string" ? error.code : undefined;
-  const message = typeof error.message === "string" ? forHarness(error.message) : "The free tier refused the request.";
+  const message = typeof error.message === "string" ? (tool ? forTool(error.message) : forHarness(error.message)) : "The free tier refused the request.";
   const status = errorStatus(response.status, error.retryable === true);
   const extra: Record<string, unknown> = {};
   for (const key of ["resetsAt", "retryAfter", "trial", "share"]) if (error[key] !== undefined) extra[key] = error[key];
@@ -2813,8 +2870,8 @@ async function toAnthropicErrorResponse(response: Response): Promise<Response> {
 /**
  * The Anthropic Messages endpoint for Claude Code through `dl claude` (see anthropic.ts):
  * `POST /anthropic/v1/messages` (Claude Code adds `?beta=true`) and
- * `POST /anthropic/v1/messages/count_tokens`. Auth is a harness key, as `x-api-key` or
- * `Authorization: Bearer`. Every request is served by DeepSeek, whatever model it names, and
+ * `POST /anthropic/v1/messages/count_tokens`. Auth is a harness key, or a tool key (any
+ * Anthropic-style tool, tool-keys.ts), as `x-api-key` or `Authorization: Bearer`. Every request is served by DeepSeek, whatever model it names, and
  * goes through `chat` like any other: the same reservation, caps, trial, Pro, queue, dl-only
  * check and refusals, with the allowance scaled by `otherHarnessShare`.
  */
@@ -2822,9 +2879,10 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
   if (method !== "POST" || (path !== "/v1/messages" && path !== "/v1/messages/count_tokens")) {
     return anthropicErrorResponse(404, `${method} /anthropic${path} isn't a route: the free tier serves POST /anthropic/v1/messages.`, "not_found");
   }
-  const identity = await authenticate(c, { harness: ["claude-code"], apiKeyHeader: true });
+  const identity = await authenticate(c, { harness: ["claude-code"], apiKeyHeader: true, keys: true, toolKeys: true });
   if (identity instanceof Response) return toAnthropicErrorResponse(identity);
-  if (identity.via !== "harness") return anthropicErrorResponse(401, "Use the key dl claude sets: run dl claude.", "invalid_token");
+  const tool = identity.keyKind === "tool";
+  if (identity.via !== "harness" && !tool) return anthropicErrorResponse(401, "Use the key dl claude sets (run dl claude), or an API key from dl api-key.", "invalid_token");
   const raw = await c.request.text();
   const bodyBytes = new TextEncoder().encode(raw).length;
   if (bodyBytes > MAX_BODY_BYTES) return anthropicErrorResponse(413, "The request body is larger than 8 MB.", "request_too_large");
@@ -2833,7 +2891,7 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
   const request = input as Record<string, unknown>;
   if (path === "/v1/messages/count_tokens") {
     const guarded = await apiGuard(c, identity);
-    if (guarded) return toAnthropicErrorResponse(guarded);
+    if (guarded) return toAnthropicErrorResponse(guarded, tool);
     return json({ input_tokens: estimateInputTokens(request) });
   }
   const model = modelById(DEEPSEEK_MODEL)!;
@@ -2841,7 +2899,7 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
   if (!translated.ok) return anthropicErrorResponse(400, translated.message, "invalid_request");
   const hint = anthropicSessionHint(request);
   const answer = await countedChat(c, identity, await chat(c, { identity, body: translated.body, bodyBytes, ...(hint ? { sessionHint: hint } : {}) }));
-  if (answer.status !== 200) return toAnthropicErrorResponse(answer);
+  if (answer.status !== 200) return toAnthropicErrorResponse(answer, tool);
   const options = { model: translated.model, thinking: translated.thinking, stopSequences: Array.isArray(translated.body.stop) ? (translated.body.stop as string[]) : [] };
   const headers = passHeaders(answer);
   const contentType = answer.headers.get("content-type") ?? "";
@@ -3099,24 +3157,37 @@ interface TranslatedChat {
  * slash commands are typed in dl.
  */
 async function chatCompletions(c: Ctx): Promise<Response> {
-  const identity = await authenticate(c, { keys: true, harness: ["opencode", "pi"] });
+  const identity = await authenticate(c, { keys: true, toolKeys: true, harness: ["opencode", "pi"] });
   if (identity instanceof Response) {
     identity.headers.set("x-dl-quota-resets-at", new Date(weekEnd(c.now())).toISOString());
     return identity;
   }
   const answer = await countedChat(c, identity, await chat(c, { identity }));
-  return identity.harness ? rewordedForHarness(answer, identity.harness) : answer;
+  return identity.harness ? rewordedForHarness(answer, identity.harness) : identity.keyKind === "tool" ? reworded(answer, forTool) : answer;
+}
+
+/**
+ * The agent a caller counts as for GPT-6 and the other agents' share: a harness key's, "tool" for
+ * a tool key (tool-keys.ts), undefined for Autopilot (a sign-in token or a server key).
+ */
+function otherAgent(identity: Caller): string | undefined {
+  return identity.via === "harness" ? identity.harness : identity.keyKind === "tool" ? "tool" : undefined;
 }
 
 /** Our `{error: {code, message, ...}}` refusal with its message reworded for `harness`; anything else as it is. */
-async function rewordedForHarness(response: Response, harness: Harness): Promise<Response> {
+function rewordedForHarness(response: Response, harness: Harness): Promise<Response> {
+  return reworded(response, (message) => forHarness(message, harness));
+}
+
+/** Our `{error: {code, message, ...}}` refusal with its message passed through `reword`; anything else as it is. */
+async function reworded(response: Response, reword: (message: string) => string): Promise<Response> {
   if (response.status < 400 || !(response.headers.get("content-type") ?? "").includes("application/json")) return response;
   const text = await response.text();
   const body = parseJson(text) as { error?: Record<string, unknown> } | undefined;
   const headers = new Headers(response.headers);
   headers.delete("content-length");
   if (!body?.error || typeof body.error.message !== "string") return new Response(text, { status: response.status, headers });
-  return new Response(JSON.stringify({ ...body, error: { ...body.error, message: forHarness(body.error.message, harness) } }), { status: response.status, headers });
+  return new Response(JSON.stringify({ ...body, error: { ...body.error, message: reword(body.error.message) } }), { status: response.status, headers });
 }
 
 /** Which weekly budgets each other agent may spend: Claude Code through dl is DeepSeek only. */
@@ -3139,6 +3210,11 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // the allowance (`otherHarnessShare`, applied to the limits below). Admins too: it's a switch.
   const harness = identity.via === "harness" ? identity.harness : undefined;
   if (harness && !gate.config.allowOtherHarnesses) return apiError(403, "harness_not_allowed", harnessNotAllowedMessage(harness));
+  // A tool key (tool-keys.ts): any tool, served like another coding agent (`agent` "tool"): GPT-6
+  // held back while it is Autopilot only, the other agents' share, a fallback model served
+  // rather than refused; its own rate limit below.
+  const tool = identity.keyKind === "tool";
+  const agent = harness ?? (tool ? "tool" : undefined);
   // A Starter or basic account is re-checked once a week from its public profile, and promoted
   // if it now qualifies. The one move down: a basic account the creation-batch check now flags
   // goes to Starter with no free tokens (directory-object.ts recheckLevel).
@@ -3153,13 +3229,17 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   const baseLimits = limitsFor(gate.config, gate.person?.bonusTokens, level, batchFlagged, trial, gate.person?.trialBonusTokens);
   // The token allocator (allocator.ts): the start grant, the step reached and this week's grace.
   let fullLimits = allocated(gate.config, baseLimits, identity.githubId, gate.person, c.now());
-  let limits: Limits = harness ? { ...fullLimits, harnessShare: gate.config.otherHarnessShare } : fullLimits;
+  let limits: Limits = agent ? { ...fullLimits, harnessShare: gate.config.otherHarnessShare } : fullLimits;
   const allocatorOn = gate.config.allocator === "on" && !isAdmin && !trial && gate.person !== undefined && !gate.person.blocked;
   const link = linkFor(gate.config, gate.person);
   const headers = async () => quotaHeaders(await person.allowance(c.now(), limits));
 
   const guarded = await apiGuard(c, identity, headers);
   if (guarded) return guarded;
+  if (tool && identity.keyId) {
+    const retry = await limited(c, `api:key:${identity.githubId}:${identity.keyId}`, perMinute(Math.max(1, gate.config.toolKeyRequestsPerMinute)));
+    if (retry !== undefined) return rateLimited(retry, await headers());
+  }
   // Below the bar with no free tokens: say who free tokens are for and how to ask anyway. The
   // refusal is counted per day for the sign-up funnel (ids and days only).
   if (!isAdmin && fullLimits.level === "starter" && (fullLimits.levelTokens ?? 0) <= 0) {
@@ -3189,7 +3269,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     // Only the models this person can use here: DeepSeek, GPT-6 too with a GPT-6 budget and trust.
     const families = harness ? HARNESS_FAMILIES[harness] : FAMILIES;
     const allowed = (await modelsFor(c, gate.config, identity.githubId, gate.person))
-      .filter((model) => families.includes(model.family) && !heldFromClient(model, gate.config.gpt6Clients, harness, isAdmin))
+      .filter((model) => families.includes(model.family) && !heldFromClient(model, gate.config.gpt6Clients, agent, isAdmin))
       .map((model) => model.id);
     return apiError(400, "model_not_allowed", `The free tier serves ${allowed.join(", ")} only.`, { allowed }, await headers());
   }
@@ -3200,7 +3280,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   }
   // GPT-6 in Autopilot only (gpt6Clients "autopilot", gpt6-clients.ts): another agent's harness
   // key gets the provider limit's shape pointing at DeepSeek. Admins pass, for testing.
-  if (heldFromClient(requested, gate.config.gpt6Clients, harness, isAdmin)) {
+  if (heldFromClient(requested, gate.config.gpt6Clients, agent, isAdmin)) {
     return apiError(
       402,
       "provider_limit",
@@ -3230,7 +3310,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     const cap = personCapUsd(gate.config, requested);
     const resetsAt = block === "weekly_budget" || block === "person_cap" ? new Date(weekEnd(c.now())).toISOString() : null;
     const backup = requested.fallback ? modelById(requested.fallback) : undefined;
-    if (harness && backup && FALLBACK_BLOCKS.includes(block) && modelAvailable(backup, gate.config, gate)) {
+    if (agent && backup && FALLBACK_BLOCKS.includes(block) && modelAvailable(backup, gate.config, gate)) {
       effective = backup;
       const approx = cap !== undefined ? approxTokens(requested, cap) : undefined;
       fallbackNotice = providerFallbackNotice(requested, block, spec.name, backup.name, { resetsAt, ...(approx !== undefined ? { approxTokensPerWeek: approx } : {}) });
@@ -3270,8 +3350,10 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // The session use descriptions and keyword labels are kept under: the client's session id, else
   // the allocator's key (Claude Code's x-claude-code-session-id or metadata.user_id session).
   const labelSession = sessionId ?? sessionKey;
-  // Which coding agent asked: a dl-launched one by its harness key, else Autopilot.
-  const client: UseClient = harness ?? "autopilot";
+  // Which coding agent asked: a dl-launched one by its harness key, any tool by a tool key, else Autopilot.
+  const client: UseClient = harness ?? (tool ? "tool" : "autopilot");
+  // What the request row keeps as its client: the harness, or `tool:<name>` from the tool's User-Agent.
+  const recordedClient = harness ?? (tool ? toolClient(c.request.headers) : undefined);
 
   // Account-pooling routers (resale or sharing of free accounts) are refused outright: the free
   // tier is for one person's own coding, not an upstream for a proxy.
@@ -3394,7 +3476,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     allocatorOn &&
     limitedLevel(fullLimits) &&
     // Another agent's smaller share (otherHarnessShare) used up while the whole allowance isn't: that refusal stands.
-    (!harness || gate.config.otherHarnessShare >= 1 || ((await person.allowance(c.now(), fullLimits, pool)).remaining ?? Infinity) < promptEstimate + MIN_OUTPUT_TOKENS)
+    (!agent || gate.config.otherHarnessShare >= 1 || ((await person.allowance(c.now(), fullLimits, pool)).remaining ?? Infinity) < promptEstimate + MIN_OUTPUT_TOKENS)
   ) {
     const state = gate.person?.allocator ?? null;
     const step = stepOf(fullLimits, state, weekStart(c.now()));
@@ -3410,7 +3492,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       gate.person.allocator = next;
       fullLimits = allocated(gate.config, baseLimits, identity.githubId, gate.person, c.now());
       if (trustedGpt6) fullLimits = withTrustedGpt6Cap(fullLimits, gate.config);
-      limits = harness ? { ...fullLimits, harnessShare: gate.config.otherHarnessShare } : fullLimits;
+      limits = agent ? { ...fullLimits, harnessShare: gate.config.otherHarnessShare } : fullLimits;
       reservation = await reserveFor(pool, serving);
     }
   }
@@ -3418,12 +3500,13 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     const quota = quotaHeaders(reservation.allowance);
     // Another coding agent's share is used up while the whole allowance isn't: say so, and that
     // Autopilot can still use the rest.
-    if (harness && (reservation.code === "quota_exceeded" || reservation.code === "trial_ended") && !(freeBlock && reservation.allowance.plan === "free")) {
+    if (agent && (reservation.code === "quota_exceeded" || reservation.code === "trial_ended") && !(freeBlock && reservation.allowance.plan === "free")) {
       const whole = await person.allowance(c.now(), fullLimits, pool);
       const wholeLeft = whole.remaining === null || whole.remaining > 0;
       if (wholeLeft && !(whole.plan === "free" && whole.trial?.ended)) {
         const resetsAt = reservation.code === "trial_ended" ? undefined : new Date(reservation.allowance.resetsAt).toISOString();
-        return apiError(402, "harness_limit", harnessLimitMessage(gate.config.otherHarnessShare, resetsAt, reservation.allowance.plan, harness, gate.config.proOffered), { harness, share: gate.config.otherHarnessShare, ...(resetsAt ? { resetsAt } : {}), offers: offers(gate.config) }, quota);
+        const message = harness ? harnessLimitMessage(gate.config.otherHarnessShare, resetsAt, reservation.allowance.plan, harness, gate.config.proOffered) : toolLimitMessage(gate.config.otherHarnessShare, resetsAt, reservation.allowance.plan);
+        return apiError(402, "harness_limit", message, { harness: agent, share: gate.config.otherHarnessShare, ...(resetsAt ? { resetsAt } : {}), offers: offers(gate.config) }, quota);
       }
     }
     if (reservation.code === "quota_exceeded") {
@@ -3544,7 +3627,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       ...(options.upstreamError ? { upstreamError: true } : {}),
       ...(options.outcome ? { upstreamOutcome: options.outcome } : {}),
       ...(identity.via === "key" ? { viaKey: true } : {}),
-      ...(harness ? { harness } : {}),
+      ...(recordedClient ? { harness: recordedClient } : {}),
       // The requested model's budget paid, even when its fallback served.
       family: effective.family,
       ...(sessionKey ? { sessionKey } : {}),
@@ -4427,6 +4510,15 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       probes: view.probes.map((probe) => ({ ...probe, at: new Date(probe.at).toISOString() })),
     });
   }
+  if (method === "GET" && rest === "tool-usage") {
+    // Which tools people use dl API keys in (tool-keys.ts): per tool, over ?days= (1 to 30,
+    // default 7), requests, people and charged tokens, from the request log (so within its
+    // retention). Names only, from the User-Agent; counts, no content.
+    const raw = c.url.searchParams.get("days");
+    const days = raw === null ? 7 : Number(raw);
+    if (!Number.isInteger(days) || days < 1 || days > 30) return apiError(400, "invalid_request", "Use ?days=1 to 30.");
+    return json({ days, tools: await directory(c).toolUsage(now - days * DAY_MS) });
+  }
   if (method === "GET" && rest === "uses") {
     // Recent use descriptions: ?days= (1 to 90, default 7), ?risk= (none: all, the default; low:
     // low and high; high), ?githubId=, ?limit= (1 to 1000, default 200). Newest first.
@@ -4634,7 +4726,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       // the step reached and this week's grace). Referral bonuses aren't counted here.
       const levelLimitsNow = limitsFor(config, 0, person.level, person.batch_flag === 1, trial, trialBonus.get(person.github_id));
       const limits = allocated(config, levelLimitsNow, person.github_id, { blocked: person.status === "blocked", bonusTokens: 0, allocator: allocatorStates.get(person.github_id) ?? null }, now);
-      const { allowance, serverKeys } = await account(c, person.github_id).adminSummary(now, limits);
+      const { allowance, serverKeys, toolKeys } = await account(c, person.github_id).adminSummary(now, limits);
       return {
         githubId: person.github_id,
         login: person.login,
@@ -4670,6 +4762,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
         // An admin's own weekly caps for this person (a grant, or POST /admin/people/:id/grant); null: the level's.
         personalCap: caps.get(person.github_id) ?? null,
         serverKeys,
+        toolKeys,
         // Distinct dl sessions (from Autopilot's session events) since Monday 00:00 UTC.
         dlSessionsThisWeek: sessions.get(person.github_id) ?? 0,
         // Requests and charged tokens from other tools through dl (`dl claude`, `dl opencode`) since Monday 00:00 UTC.
@@ -4705,7 +4798,8 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
         trial: trialView(allowance),
         allowance: allowanceView(allowance),
         personalCap,
-        serverKeys: await account(c, githubId).keyCount(),
+        serverKeys: await account(c, githubId).keyCount("server"),
+        toolKeys: await account(c, githubId).keyCount("tool"),
       });
     }
     if (action === "revoke-tokens" && method === "POST") {
@@ -5041,7 +5135,7 @@ async function setBlocked(c: Ctx, githubId: number, blocked: boolean, actor: { g
   return status;
 }
 
-/** Ends every sign-in session of a person and deletes every server key (they can sign in again unless blocked). */
+/** Ends every sign-in session of a person and deletes every key, server and tool (they can sign in again unless blocked). */
 async function revokeTokens(c: Ctx, githubId: number, now: number): Promise<{ sessions: number; serverKeys: number }> {
   const sessions = await auth(c).revokeAllFor(githubId);
   await account(c, githubId).revokeSessions({ sids: sessions, until: now + REVOKED_SESSION_TTL_MS, notBefore: Math.floor(now / 1000), now });
@@ -5614,7 +5708,7 @@ async function countCampaignStep(c: Ctx, campaign: Campaign, step: CampaignStep)
  * Counts one refusal or gate per UTC day and reason (refusals.ts): counts only, and `githubId`
  * only for the day's distinct-people count (hashed with a daily salt). Never fails the request.
  */
-async function countRefusal(c: Ctx, reason: RefusalReason, githubId?: number, client: RefusalClient = "signin"): Promise<void> {
+async function countRefusal(c: Ctx, reason: RefusalReason, githubId?: number, client: RefusalClient | `tool:${string}` = "signin"): Promise<void> {
   try {
     await directory(c).countRefusal(reason, client, c.now(), githubId);
   } catch (error) {
@@ -5630,7 +5724,8 @@ async function countedChat(c: Ctx, identity: Caller, response: Response): Promis
   if (response.status < 400 || !(response.headers.get("content-type") ?? "").includes("application/json")) return response;
   const body = parseJson(await response.clone().text()) as { error?: { code?: unknown; reason?: unknown } } | undefined;
   const reason = requestRefusalReason(response.status, body?.error);
-  if (reason) await countRefusal(c, reason, identity.githubId, requestClient(identity.via === "harness" ? identity.harness : undefined, reason));
+  // A tool key's refusals count under the tool that met them (`tool:<name>`, tool-keys.ts).
+  if (reason) await countRefusal(c, reason, identity.githubId, identity.keyKind === "tool" ? toolClient(c.request.headers) : requestClient(otherAgent(identity), reason));
   return response;
 }
 

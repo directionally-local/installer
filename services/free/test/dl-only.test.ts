@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADMIN_ID, allowServerKeys, createInvite, createService, MODEL, type Service } from "./harness.js";
 
-const DL_ONLY = "Free tokens work inside dl only. Run dl to keep using them, or use your own API key in any tool.";
+const DL_ONLY = "Your dl sign-in works inside dl only. To use free tokens in another tool, make an API key for it: run dl api-key. Or use your own API key in that tool.";
 const HOUR = 3600_000;
 
 async function member(vars: Record<string, string> = {}): Promise<{ service: Service; token: string; refreshToken: string; adminToken: string }> {

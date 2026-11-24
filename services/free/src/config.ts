@@ -267,6 +267,19 @@ export interface FreeConfig extends RegistrySettingsConfig {
    */
   otherHarnessShare: number;
   /**
+   * API keys for any tool (TOOL_KEYS, default on); also a runtime setting. A tool key is a `dlk_`
+   * key of kind "tool" (`dl api-key`, POST /v1/keys {kind: "tool"}) that an account in good
+   * standing (not blocked or suspended, with free tokens) pastes into any OpenAI- or
+   * Anthropic-compatible tool. Its requests are never refused as dl_only; GPT-6 stays in
+   * Autopilot, `otherHarnessShare` applies, and every other guard does too. Off: no new tool
+   * keys (403 tool_keys_off) and existing ones are refused the same way (not deleted).
+   */
+  toolKeys: boolean;
+  /** Tool keys per account (TOOL_KEYS_MAX, default 3); also a runtime setting. 0 allows none. */
+  toolKeysMax: number;
+  /** Chat requests a minute one tool key may make (TOOL_KEY_REQUESTS_PER_MINUTE, default 30), under the per-person limit; also a runtime setting. */
+  toolKeyRequestsPerMinute: number;
+  /**
    * Whether dl Pro is offered to anyone new (PRO_OFFERED, default on); also a runtime setting.
    * Off: `offers` leaves Pro out (the top-up stays), free users' refusals stop naming Pro, and a
    * new Pro checkout is refused (403 pro_not_offered). Existing subscribers keep their plan, their
@@ -469,6 +482,9 @@ export const DEFAULTS = {
   dlOnly: true,
   allowOtherHarnesses: true,
   otherHarnessShare: 0.5,
+  toolKeys: true,
+  toolKeysMax: 3,
+  toolKeyRequestsPerMinute: 30,
   proOffered: true,
   accessRequestAlerts: "each" as AccessRequestAlerts,
   noGithubAlerts: "each" as AccessRequestAlerts,
@@ -676,6 +692,9 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     dlOnly: flag(env.DL_ONLY, DEFAULTS.dlOnly, "DL_ONLY"),
     allowOtherHarnesses: flag(env.ALLOW_OTHER_HARNESSES, DEFAULTS.allowOtherHarnesses, "ALLOW_OTHER_HARNESSES"),
     otherHarnessShare: share(env.OTHER_HARNESS_SHARE, DEFAULTS.otherHarnessShare, "OTHER_HARNESS_SHARE"),
+    toolKeys: flag(env.TOOL_KEYS, DEFAULTS.toolKeys, "TOOL_KEYS"),
+    toolKeysMax: whole(env.TOOL_KEYS_MAX, DEFAULTS.toolKeysMax, "TOOL_KEYS_MAX"),
+    toolKeyRequestsPerMinute: whole(env.TOOL_KEY_REQUESTS_PER_MINUTE, DEFAULTS.toolKeyRequestsPerMinute, "TOOL_KEY_REQUESTS_PER_MINUTE"),
     proOffered: flag(env.PRO_OFFERED, DEFAULTS.proOffered, "PRO_OFFERED"),
     accessRequestAlerts: accessRequestAlerts(env.ACCESS_REQUEST_ALERTS),
     noGithubAlerts: alertMode(env.NO_GITHUB_ALERTS, DEFAULTS.noGithubAlerts, "NO_GITHUB_ALERTS"),
