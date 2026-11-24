@@ -29,6 +29,9 @@ export const REFUSAL_REASONS = {
     "Sign-in: few repos and contributions (placed below Full)",
   network_limit: "Sign-in: network daily limit (placed at Starter)",
   network_signup_limit: "Sign-in: network daily limit (invite step refused)",
+  domain_limit: "Sign-in: email domain daily limit (placed at Starter)",
+  event_code_used: "Sign-in: event code used (network, domain and batch rules lifted)",
+  event_code_invalid: "Sign-in: event code invalid, used up or expired",
   cohort_full: "Sign-in: cohort full (maxActiveUsers)",
   queued: "Sign-in: placed on the waitlist",
   device_taken: "Sign-in: device holds another account",
@@ -36,7 +39,7 @@ export const REFUSAL_REASONS = {
   email_blocked: "Sign-in: email address blocked",
   email_domain_blocked: "Sign-in: email domain blocked",
   email_in_use: "Sign-in: email used by another account (one per inbox)",
-  email_domain_daily_cap: "Sign-in: email domain daily cap",
+  email_domain_daily_cap: "Sign-in: email domain daily cap (refused, domainLimitRefuse)",
   signin_paused: "Sign-in: free tier paused",
   // ── Requests (chat, Anthropic Messages, Responses) ──
   dl_only: "Request: free tokens outside dl",

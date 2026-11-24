@@ -194,8 +194,9 @@ export interface DetailsStarter {
 
 /**
  * The sign-in step after GitHub: a contact email (prefilled from GitHub's primary verified
- * address), an opt-in for product updates, and, for a Starter account, an optional invite code
- * that unlocks Full. One form, one button.
+ * address), an opt-in for product updates, and, for a basic or Starter account, an optional
+ * invite code (unlocks Full) or event code (a class's or hackathon's shared code, event-codes.ts).
+ * One form, one button.
  */
 export function detailsPage(
   ticket: string,
@@ -205,8 +206,8 @@ export function detailsPage(
   const starter = options.starter
     ? `
   <p class="fine" style="text-align:left">${escapeHtml(options.starter.line)}</p>
-  <label class="field"><span>Invite code (optional): unlocks the full free tier</span>
-    <input name="invite_code" aria-label="Invite code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="DL-XXXX-XXXX">
+  <label class="field"><span>Invite or event code (optional)</span>
+    <input name="invite_code" aria-label="Invite or event code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="DL-XXXX-XXXX or EV-XXXX-XXXX">
   </label>`
     : "";
   return shell(

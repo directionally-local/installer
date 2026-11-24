@@ -298,9 +298,14 @@ unprofitable without turning away real developers.
   sign-up farm can fake them together (accounts following and contributing to each other). The
   creation-batch check flags an account younger than the public bar's age when many accounts
   already signed up were created around the same day, whether or not it follows or is followed
-  by anyone; an established account created on a busy day is never flagged. Their thresholds are
+  by anyone; an established account created on a busy day is never flagged. "Many" scales with
+  sign-up volume: a window needs `batchDensityFactor` (3) times the peers an average window holds
+  across every young account signed up, and never fewer than `batchSize` (`src/admission.ts`
+  `batchThreshold`; `batchDensityFactor` 0 keeps the fixed `batchSize`). So a launch day with
+  thousands of young sign-ups raises the bar instead of flagging most of them, while a farm
+  (many accounts made on the same days) still stands far above it. Their thresholds are
   runtime settings (`humanSignalsNeeded`, `minActiveWeeks`, `minRepoAgeDays`, `minSocial`,
-  `minFollowers`, `batchWindowDays`, `batchSize`; see `src/admission.ts` `levelChecks`) whose
+  `minFollowers`, `batchWindowDays`, `batchSize`, `batchDensityFactor`; see `src/admission.ts` `levelChecks`) whose
   real values are private: they start from the [`DETECTION_RULES`](#detection-rules-detection_rules-private)
   secret's `thresholds` (the defaults in the code are generic) and the admin settings override them. Nothing a person is shown names them: an account
   that misses them gets the same message as one below the public bar. `GET /admin/people` and
@@ -336,7 +341,24 @@ unprofitable without turning away real developers.
   touches blocked accounts, admin-set levels or redeemed invites. Answers
   `{checked, raised, flagged, starter}`.
 - **Network cap**: at most `NETWORK_SIGNUPS_PER_DAY` (3) new sign-ins per network per day.
-  Beyond that the account still gets in, as Starter.
+  Beyond that the account still gets in, as Starter (reason `network_limit`).
+- **Email domain cap**: at most `domainSignupsPerDay` new accounts a day from one company or
+  custom email domain (public providers like Gmail are exempt). Beyond that a new account below
+  Full still gets in, as Starter (reason `domain_limit`); one that clears the bar on its own
+  stays Full. `domainLimitRefuse` (off) refuses instead, as before. Both limits count as farm
+  signals for the token allocator, and both accounts are re-checked an hour after sign-in.
+  `blockedEmails` still refuses.
+- **Event codes** (`src/event-codes.ts`): an admin makes a multi-use code (`EV-XXXX-XXXX`) for a
+  class, workshop or hackathon, with a maximum number of uses (1 to 1000) and an expiry (1 to 60
+  days), on the Tools tab or with `POST /admin/event-codes {maxUses, days?, note?, full?}`
+  (answers the code once; only its hash is kept). People type it in the sign-up's code field
+  (the same field as invite codes). A new sign-up with an open code skips the per-network limit
+  (and isn't counted against it), the per-domain limit and the creation-batch check, now and at
+  later re-checks; every other rule still applies. It gets the level its own GitHub signals
+  give, like any new account (the allocator starts it as usual), or Full when the code was made
+  with `full: true`. `GET /admin/event-codes` lists every code with its uses, status (`open`,
+  `used_up`, `expired`, `ended`) and who used it; `POST /admin/event-codes/:id/end` ends one now.
+  Only wrong codes count against a network's code attempts, so a whole room can use one code.
 - **Existing users** are re-checked lazily on their next request; nobody is cut off mid-session.
 - **Admin**: `GET /admin/people` shows each person's level, signals and network count, and
   takes `?level=starter` and `?shared=1`. It pages with `?limit=` (1 to 500) and `?cursor=` (the
@@ -1297,7 +1319,8 @@ are deleted once the day is over, so only the number stays. Rows older than 120 
   browser sign-in.
 - **Sign-in reasons**: `invite_page_shown`, `invite_accepted`, `invite_code_invalid`,
   `invite_rate_limited`, `invite_required`, `account_too_new`, `no_github_activity`,
-  `few_repos_and_contributions` and `network_limit` (a new account placed below Full, and why),
+  `few_repos_and_contributions`, `network_limit` and `domain_limit` (a new account placed below Full, and why),
+  `event_code_used`, `event_code_invalid`,
   `network_signup_limit`, `cohort_full`, `queued` (placed on the waitlist), `device_taken`,
   `blocked`, `email_blocked`, `email_domain_blocked`, `email_in_use`, `email_domain_daily_cap`,
   `signin_paused`. They are counted on the browser side only, so a terminal polling the same
@@ -1396,8 +1419,8 @@ Env only: `REFERRAL_LINK_BASE` (`https://dl.new/r/`), the offers above, `ALERT_E
 secrets `OPENAI_API_KEY`, `LUMINAL_API_KEY`, `RESEND_API_KEY` and `DETECTION_RULES` (below).
 
 The farm-detection settings (`humanSignalsNeeded`, `minActiveWeeks`, `minRepoAgeDays`,
-`minSocial`, `minFollowers`, `batchWindowDays`, `batchSize`, `basicMinAccountAgeDays`,
-`domainSignupsPerDay`) start from the `DETECTION_RULES` secret's `thresholds` when it sets them:
+`minSocial`, `minFollowers`, `batchWindowDays`, `batchSize`, `batchDensityFactor`,
+`basicMinAccountAgeDays`, `domainSignupsPerDay`) start from the `DETECTION_RULES` secret's `thresholds` when it sets them:
 their env var still wins over it, and an admin override over both. The defaults in
 `src/config.ts` are generic starting values, not production's.
 

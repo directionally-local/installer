@@ -8,6 +8,7 @@ import { noGithubCard, noGithubCsvRows, type NoGithubReport } from "./no-github.
 import { hasCapitals, type BroadcastAudience } from "./broadcast.js";
 import { GRANT_LABELS, grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, type GrantResult } from "./grant.js";
 import { GPU_VENDOR_NAMES, type HealthData } from "./health-data.js";
+import { EVENT_CODE_MAX_DAYS, EVENT_CODE_MAX_USES, type EventCodeRow, type EventCodeStatus } from "./event-codes.js";
 
 /**
  * The admin pages besides the home (admin-home-page.ts): sign-in, the Tools page and a CSV of
@@ -427,6 +428,10 @@ export interface ToolsState {
   routing: Pick<SpendView, "primaryUpstream" | "openaiConfigured" | "luminalConfigured" | "openRouterConfigured">;
   /** The block form: the login typed and what the last block or unblock did. */
   block: { login: string; notice?: { error: boolean; text: string } };
+  /** Event codes (event-codes.ts), newest first, with their uses. */
+  eventCodes: EventCodeRow[];
+  /** What the last event-code button did; `code` is a just-made code, shown this once. */
+  eventCodeNotice?: { error: boolean; text: string; code?: string };
   /** The email being written. */
   compose: {
     subject: string;
@@ -640,6 +645,59 @@ ${csrf ? "" : `<p class="hint">Sign in at /admin in a browser to answer them.</p
 </section>`;
 }
 
+const EVENT_STATUS: Record<EventCodeStatus, { label: string; tone: string }> = {
+  open: { label: "Open", tone: "ok" },
+  used_up: { label: "Used up", tone: "no" },
+  expired: { label: "Expired", tone: "mid" },
+  ended: { label: "Ended", tone: "mid" },
+};
+
+/**
+ * "Event codes": one code a whole class or hackathon signs up with, up to a number of uses and
+ * until it expires. It lifts the per-network, per-domain and creation-batch rules for those
+ * sign-ups. The code is shown once, when made; the list shows each code's uses and who.
+ */
+function eventCodesCard(state: ToolsState): string {
+  const { csrf, eventCodes } = state;
+  const notice = state.eventCodeNotice
+    ? `<p class="msg${state.eventCodeNotice.error ? " err" : ""}" role="${state.eventCodeNotice.error ? "alert" : "status"}">${escapeHtml(state.eventCodeNotice.text)}${
+        state.eventCodeNotice.code ? ` <code>${escapeHtml(state.eventCodeNotice.code)}</code>` : ""
+      }</p>`
+    : "";
+  const items = eventCodes.map((code) => {
+    const status = EVENT_STATUS[code.status];
+    const facts = [`${count(code.uses)} of ${count(code.maxUses)} used`, code.status === "ended" ? `ended ${when(code.endedAt)}` : `${code.status === "expired" ? "expired" : "expires"} ${when(code.expiresAt)}`, code.full ? "gives Full" : "their own level"];
+    const who = code.people.length > 0 ? `<p class="hint">${code.people.map((person) => `@${escapeHtml(person.login)}`).join(", ")}</p>` : "";
+    const end =
+      csrf && code.status === "open"
+        ? `<form method="post" action="/admin/dashboard/tools#event-codes"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="event-code"><input type="hidden" name="id" value="${code.id}"><div class="row"><button class="btn" type="submit" name="action" value="end">End now</button></div></form>`
+        : "";
+    return `<li class="req">
+<div class="req-head"><strong>${escapeHtml(code.note ?? `Code ${code.id}`)}</strong><span class="chip ${status.tone}">${status.label}</span></div>
+<p class="hint">${facts.map(escapeHtml).join(" · ")}</p>
+${who}
+${end}
+</li>`;
+  });
+  return `<section class="card" id="event-codes" aria-label="Event codes">
+<h2>Event codes</h2>
+<p class="lede">One code a class, workshop or hackathon signs up with, typed in the sign-up's code field. Its sign-ups skip the per-network and per-email-domain limits and the creation-batch check; every other rule still applies. By default each gets the level its own GitHub account gives, like any new account; "Full" gives Full like an invite. The code is shown once, when you make it.</p>
+${
+  csrf
+    ? `<form method="post" action="/admin/dashboard/tools#event-codes">
+<input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="tool" value="event-code"><input type="hidden" name="action" value="create">
+<label class="field"><span>Event</span><input type="text" name="note" maxlength="200" placeholder="e.g. NUS CS3203 lab, 2 Dec" autocomplete="off"></label>
+<div class="row"><label class="usd-in"><span>Uses</span><input type="number" name="max_uses" min="1" max="${EVENT_CODE_MAX_USES}" step="1" inputmode="numeric" value="50" required></label><label class="usd-in"><span>Open for</span><input type="number" name="days" min="1" max="${EVENT_CODE_MAX_DAYS}" step="1" inputmode="numeric" value="7" required> days</label></div>
+<fieldset><legend>Level</legend><div class="seg"><label><input type="radio" name="full" value="0" checked><span>Their own</span></label><label><input type="radio" name="full" value="1"><span>Full</span></label></div></fieldset>
+<div class="row"><button class="btn primary" type="submit">Make a code</button></div>
+</form>`
+    : `<p class="hint">Sign in at /admin in a browser to make codes.</p>`
+}
+${notice}
+${eventCodes.length === 0 ? `<p class="hint">No event codes yet.</p>` : `<ul class="reqs">${items.join("\n")}</ul>`}
+</section>`;
+}
+
 /** "Block or unblock": by GitHub username; a blocked account gets no free tokens and can't sign in. */
 function blockCard(state: ToolsState): string {
   const { csrf, block } = state;
@@ -831,7 +889,7 @@ export function toolsPage(state: ToolsState): Response {
 ${adminNav("tools")}
 ${state.signOut ? `<form method="post" action="/admin/signout"><button type="submit" class="out">Sign out</button></form>` : ""}
 </div></header>`;
-  const cards = [requestsCard(state), grantCard(state), blockCard(state), routingCard(state), recheckCard(state), emailCard(state), leadsCard(state), ...(state.noGithub ? [noGithubCard(state.noGithub)] : [])];
+  const cards = [requestsCard(state), grantCard(state), eventCodesCard(state), blockCard(state), routingCard(state), recheckCard(state), emailCard(state), leadsCard(state), ...(state.noGithub ? [noGithubCard(state.noGithub)] : [])];
   return shell(`Tools · ${PRODUCT_NAME}`, `${header}\n<main class="tools">\n${cards.join("\n")}\n</main>`, 200, {}, "", TOOLS_STYLE);
 }
 

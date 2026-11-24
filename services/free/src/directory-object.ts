@@ -3,6 +3,7 @@ import { NO_GITHUB_SCHEMA, noGithubDays, noGithubDigestLine, noGithubReport, rec
 import { normalizeEmail } from "./email-guard.js";
 import { sha256Hex } from "../../shared/src/auth.js";
 import { newInviteCode, normalizeInviteCode } from "./codes.js";
+import { endEventCode, EVENT_CODE_SCHEMA, insertEventCode, listEventCodes, lookupEventCode, newEventCode, signedUpWithEventCode, useEventCode, type EventCodeInput, type EventCodeRow } from "./event-codes.js";
 import type { DownloadCount, InstallCount } from "./telemetry.js";
 import { CAMPAIGN_KEYS_PER_DAY, CAMPAIGN_OTHER, type Campaign, type CampaignRow, type CampaignStep, type WebFunnelRow, type WebStep } from "./web-signup.js";
 import { REFUSALS_KEEP_DAYS, type RefusalRow } from "./refusals.js";
@@ -60,7 +61,7 @@ export type AdmitResult =
       /** Set once, ever: this was the first person admitted who isn't an admin. */
       firstSignup?: Alert;
     }
-  | { ok: false; reason: "needs_invite" | "invalid_invite" | "cohort_full" | "device_taken" | "blocked" };
+  | { ok: false; reason: "needs_invite" | "invalid_invite" | "invalid_event_code" | "cohort_full" | "device_taken" | "blocked" };
 
 /** One logged change to a runtime setting or the kill switch. */
 export interface ConfigChange {
@@ -132,7 +133,7 @@ export interface PersonRow {
   admitted_via: string;
   /** "full", "basic" or "starter" (see admission.ts). */
   level: Level;
-  /** Why the level is what it is: qualifies, account_too_new, few_repos_and_contributions, network_limit, invite, admin. */
+  /** Why the level is what it is: qualifies, account_too_new, few_repos_and_contributions, network_limit, domain_limit, invite, admin. */
   level_reason: LevelReason | null;
   /** The GitHub signals last read, as numbers only. Null until the first read. */
   account_age_days: number | null;
@@ -1041,7 +1042,7 @@ export class DirectoryObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA]) this.ctx.storage.sql.exec(statement);
+      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA, ...EVENT_CODE_SCHEMA]) this.ctx.storage.sql.exec(statement);
       ensureAllocatorSchema(this.ctx.storage.sql);
       const added = new Set<string>();
       for (const [table, column, definition] of ADDED_COLUMNS) {
@@ -1284,6 +1285,11 @@ export class DirectoryObject extends DurableObject {
     batchFlagged?: boolean;
     /** Starter has a weekly allowance right now (STARTER_WEEKLY_TOKENS above 0): for `signup_tokens`. */
     starterTokens?: boolean;
+    /**
+     * An event code (event-codes.ts) a new open sign-up gave: one use is counted with the sign-up,
+     * atomically; a code used up, expired or ended since it was checked refuses the sign-up.
+     */
+    eventCodeId?: number;
     now: number;
   }): Promise<AdmitResult> {
     const inviteHash = input.inviteCode ? await sha256Hex(normalizeInviteCode(input.inviteCode)) : undefined;
@@ -1401,6 +1407,9 @@ export class DirectoryObject extends DurableObject {
         if (active >= input.maxActive) return { ok: false, reason: "cohort_full" };
       }
       if (input.openAdmission && !input.accountTooNew) {
+        if (input.eventCodeId !== undefined && !useEventCode(sql, { id: input.eventCodeId, githubId: input.githubId, login: input.login, now: input.now })) {
+          return { ok: false, reason: "invalid_event_code" };
+        }
         sql.exec(
           "INSERT INTO people (github_id, login, status, admitted_at, admitted_via, level, level_reason, account_age_days, public_repos, followers, contributions, restricted_contributions, signals_at) VALUES (?, ?, 'active', ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)",
           input.githubId,
@@ -1684,6 +1693,31 @@ export class DirectoryObject extends DurableObject {
       out.push({ id: row.id, code });
     }
     return out;
+  }
+
+  /** A new event code (event-codes.ts): the code itself is returned once and only its hash kept. */
+  async createEventCode(input: EventCodeInput & { createdBy: number; now: number }): Promise<{ id: number; code: string; expiresAt: number }> {
+    const code = newEventCode();
+    const id = insertEventCode(this.ctx.storage.sql, { ...input, codeHash: await sha256Hex(code) });
+    return { id, code, expiresAt: input.now + input.days * DAY_MS };
+  }
+
+  /** The event code with this hash (of the normalized code) while it can be used, else why not. */
+  async eventCodeFor(codeHash: string, now: number): Promise<ReturnType<typeof lookupEventCode>> {
+    return lookupEventCode(this.ctx.storage.sql, codeHash, now);
+  }
+
+  async listEventCodes(now: number): Promise<EventCodeRow[]> {
+    return listEventCodes(this.ctx.storage.sql, now);
+  }
+
+  async endEventCode(id: number, now: number): Promise<boolean> {
+    return endEventCode(this.ctx.storage.sql, id, now);
+  }
+
+  /** GitHub ids that signed up with an event code (the creation-batch check leaves them out). */
+  async eventCodeSignups(): Promise<Set<number>> {
+    return new Set(this.ctx.storage.sql.exec<{ github_id: number }>("SELECT DISTINCT github_id FROM event_code_uses").toArray().map((row) => row.github_id));
   }
 
   /** Invites without their codes (only hashes are stored). */
@@ -2018,7 +2052,12 @@ export class DirectoryObject extends DurableObject {
       );
       if (signals.createdDay !== undefined && signals.createdDay !== null) sql.exec("UPDATE people SET github_created_day = ? WHERE github_id = ?", signals.createdDay, githubId);
       if (row.level === "full" || row.level_reason === "admin" || row.level_reason === "invite") return row.level;
-      const checks = levelChecks(signals, thresholds, rules, { now, batchPeers: this.#batchPeers(signals.createdDay, rules.batchWindowDays, githubId) });
+      // Someone who signed up with an event code is never in a creation batch: a class's accounts are often made the same week.
+      const checks = levelChecks(signals, thresholds, rules, {
+        now,
+        batchPeers: signedUpWithEventCode(sql, githubId) ? 0 : this.#batchPeers(signals.createdDay, rules.batchWindowDays, githubId),
+        youngAccounts: this.#youngAccounts(Math.floor(now / DAY_MS) - thresholds.minAccountAgeDays),
+      });
       const next = levelFor(checks, signals, basic);
       if (row.level === "starter") sql.exec("UPDATE people SET batch_flag = ? WHERE github_id = ?", checks.creationBatch ? 1 : 0, githubId);
       if (row.level === "basic" && checks.creationBatch && !checks.full) {
@@ -2040,6 +2079,18 @@ export class DirectoryObject extends DurableObject {
    */
   async creationBatchPeers(day: number | null | undefined, windowDays: number, githubId: number): Promise<number> {
     return this.#batchPeers(day, windowDays, githubId);
+  }
+
+  /**
+   * People already signed up whose GitHub account was created on or after `sinceDay` (the young
+   * accounts the creation-batch threshold scales with, admission.ts batchThreshold).
+   */
+  async youngAccounts(sinceDay: number): Promise<number> {
+    return this.#youngAccounts(sinceDay);
+  }
+
+  #youngAccounts(sinceDay: number): number {
+    return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM people WHERE github_created_day >= ?", sinceDay).toArray()[0]?.n ?? 0;
   }
 
   #batchPeers(day: number | null | undefined, windowDays: number, githubId: number): number {

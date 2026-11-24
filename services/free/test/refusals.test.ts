@@ -193,6 +193,7 @@ describe("refusal counts: sign-in", () => {
       OPEN_ADMISSION: "true",
       BLOCKED_EMAILS: "farm@example.net, @catchall.example",
       DOMAIN_SIGNUPS_PER_DAY: "1",
+      DOMAIN_LIMIT_REFUSE: "true",
     });
     await service.signIn({ id: ADMIN_ID, login: "owner" });
     const signUp = async (id: number, email: string) => {

@@ -57,6 +57,7 @@ import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVIT
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, MIN_OUTPUT_TOKENS, parseUsage, type Usage } from "./quota.js";
 import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FAMILIES, FREE_MODELS, POOLS, creditPrices, fallbackOf, familyOfPool, modelById, onUpstream, type Family, type FreeModel, type Pool } from "./models.js";
 import { emailBlocked, emailDomain, normalizeEmail, plausibleEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
+import { normalizeEventCode, parseEventCodeInput, type EventCodeRow } from "./event-codes.js";
 import {
   ACCESS_REQUEST_PATH,
   basicLine,
@@ -64,6 +65,7 @@ import {
   belowBarLine,
   CREDITS_REQUEST_EMAIL,
   dayOf,
+  isSignupLimitReason,
   levelChecks,
   levelFor,
   levelReason,
@@ -648,6 +650,17 @@ async function allocatorRun(c: Ctx, config: FreeConfig, githubId: number): Promi
   };
 }
 
+/** An event code as the admin API shows it: times as ISO strings, who used it. */
+function eventCodeView(row: EventCodeRow): Record<string, unknown> {
+  return {
+    ...row,
+    expiresAt: new Date(row.expiresAt).toISOString(),
+    createdAt: new Date(row.createdAt).toISOString(),
+    endedAt: row.endedAt === null ? null : new Date(row.endedAt).toISOString(),
+    people: row.people.map((person) => ({ ...person, at: new Date(person.at).toISOString() })),
+  };
+}
+
 /** The level thresholds, from the effective config. */
 function levelThresholds(config: FreeConfig): LevelThresholds {
   return { minAccountAgeDays: config.fullMinAccountAgeDays, minPublicRepos: config.fullMinPublicRepos, minContributions: config.fullMinContributions };
@@ -663,6 +676,7 @@ function signalThresholds(config: FreeConfig): SignalThresholds {
     minFollowers: config.minFollowers,
     batchWindowDays: config.batchWindowDays,
     batchSize: config.batchSize,
+    batchDensityFactor: config.batchDensityFactor,
   };
 }
 
@@ -686,18 +700,22 @@ function storedSignals(person: LevelSignalRow): GithubSignals {
  * Every person's stored signals and the checks they pass today, for the admin people API and
  * the dashboard: why someone is Starter. Admin-only.
  */
-function peopleChecks(people: LevelSignalRow[], config: FreeConfig, now: number): Map<number, LevelChecks> {
+function peopleChecks(people: LevelSignalRow[], config: FreeConfig, now: number, eventSignups: ReadonlySet<number> = new Set()): Map<number, LevelChecks> {
   const rules = signalThresholds(config);
   const peers = batchCounter(
     people.map((person) => person.github_created_day ?? null),
     rules.batchWindowDays,
   );
+  const bar = levelThresholds(config);
+  const youngSince = dayOf(now) - bar.minAccountAgeDays;
+  const youngAccounts = people.filter((person) => person.github_created_day !== null && person.github_created_day !== undefined && person.github_created_day >= youngSince).length;
   const out = new Map<number, LevelChecks>();
   for (const person of people) {
     // The count includes the person's own row; the check counts the others.
     const day = person.github_created_day ?? null;
-    const batchPeers = Math.max(0, peers(day) - (day === null ? 0 : 1));
-    out.set(person.github_id, levelChecks(storedSignals(person), levelThresholds(config), rules, { now, batchPeers }));
+    // Someone who signed up with an event code is never in a creation batch.
+    const batchPeers = eventSignups.has(person.github_id) ? 0 : Math.max(0, peers(day) - (day === null ? 0 : 1));
+    out.set(person.github_id, levelChecks(storedSignals(person), bar, rules, { now, batchPeers, youngAccounts }));
   }
   return out;
 }
@@ -1602,10 +1620,26 @@ function welcomeKind(level: Level, batchFlagged: boolean, config: FreeConfig, tr
 const EMAIL_BLOCKED_MESSAGE = "This email can't be used for the free tier. Use your own API key instead, or write to contact@directionallylocal.com.";
 const EMAIL_IN_USE_MESSAGE = "This email is already used by another dl account. Each person gets one free account.";
 const DOMAIN_LIMIT_MESSAGE = "Too many new free accounts from this email domain today. Try again tomorrow, or write to contact@directionallylocal.com.";
+const EVENT_CODE_INVALID_MESSAGE = "That event code isn't valid, is used up or has expired. Check it with your organizer, or leave it empty to continue.";
+const EVENT_CODE_EXISTING_MESSAGE = "Event codes are for new accounts, and this one is already signed up. Leave the code empty to continue.";
+
+/**
+ * The level a sign-up with an event code gets: what its own signals give with the creation-batch
+ * check left out (a class's GitHub accounts are often made the same week), or Full when the
+ * code was made to give Full.
+ */
+function eventCodeLevel(c: Ctx, config: FreeConfig, signIn: SignInLevel, full: boolean): SignInLevel {
+  if (full) return { ...signIn, level: "full", levelReason: "invite", batchFlagged: false };
+  if (!signIn.signals || signIn.levelReason === "admin") return { ...signIn, batchFlagged: false };
+  const thresholds = levelThresholds(config);
+  const checks = levelChecks(signIn.signals, thresholds, signalThresholds(config), { now: c.now(), batchPeers: 0 });
+  return { signals: signIn.signals, level: levelFor(checks, signIn.signals, basicRule(config)), levelReason: levelReason(signIn.signals, thresholds, checks), batchFlagged: false };
+}
 
 /**
  * POST /device/details: the step after GitHub. Saves the contact email and the updates choice,
- * and redeems an invite code when a Starter account gives one, then finishes sign-in.
+ * and redeems an invite code or an event code when a basic or Starter account gives one, then
+ * finishes sign-in.
  */
 async function deviceDetails(c: Ctx): Promise<Response> {
   const form = await readForm(c);
@@ -1617,12 +1651,37 @@ async function deviceDetails(c: Ctx): Promise<Response> {
   const starter = effectiveLevel(person, details.level) !== "full" ? await levelDetails(c, person, details.level) : undefined;
   const email = (form.get("email") ?? "").trim();
   const updates = form.get("updates") === "1";
-  const inviteCode = starter ? (form.get("invite_code") ?? "").trim() || undefined : undefined;
+  const typed = starter ? (form.get("invite_code") ?? "").trim() || undefined : undefined;
+  // One field takes both kinds of code: `EV-…` is an event code, anything else an invite code.
+  const eventCode = typed !== undefined ? normalizeEventCode(typed) : undefined;
+  const inviteCode = eventCode === undefined ? typed : undefined;
   const again = (error: string) => detailsPage(ticket, found.login, { email, updates, ...(starter ? { starter } : {}), error });
   if (!plausibleEmail(email)) return again("Enter an email address we can reach you at.");
-  // One free account per inbox, no blocked inboxes or domains, and a daily cap per company domain.
   const { config: guard } = await runtime(c);
+  // An event code: checked before the email rules, since it lifts the per-domain limit.
+  let event: { id: number; full: boolean } | undefined;
+  if (eventCode !== undefined) {
+    if (person) return again(EVENT_CODE_EXISTING_MESSAGE);
+    // Only wrong codes count against the network: a whole class enters the same code from one network.
+    const attemptKey = `event:ip:${c.ipNet}`;
+    const attempts = await c.env.RATE_LIMITER.getByName(attemptKey).check(attemptKey, LIMITS.inviteAttemptIp, 1, c.now());
+    if (!attempts.allowed) {
+      await countRefusal(c, "invite_rate_limited", found.githubId);
+      return again(`Too many wrong codes. Try again in ${Math.ceil((attempts.retryAfterSeconds ?? 3600) / 60)} minutes, or leave the code empty.`);
+    }
+    const lookup = await directory(c).eventCodeFor(await sha256Hex(eventCode), c.now());
+    if (!lookup.ok) {
+      await c.env.RATE_LIMITER.getByName(attemptKey).spend(attemptKey, LIMITS.inviteAttemptIp, 1, c.now());
+      await countRefusal(c, "event_code_invalid", found.githubId);
+      return again(EVENT_CODE_INVALID_MESSAGE);
+    }
+    event = { id: lookup.id, full: lookup.full };
+  }
+  // One free account per inbox, no blocked inboxes or domains, and a daily limit per company
+  // domain: past it a new account below Full gets in at Starter (or is refused, with
+  // domainLimitRefuse). An event code lifts the domain limit, nothing else here.
   const inbox = normalizeEmail(email);
+  let domainLimited = false;
   if (!c.config.adminGithubIds.has(found.githubId)) {
     if (emailBlocked(inbox, guard.blockedEmails)) {
       // Blocked as an address, or only through its domain's `@domain` entry.
@@ -1634,9 +1693,12 @@ async function deviceDetails(c: Ctx): Promise<Response> {
       return again(EMAIL_IN_USE_MESSAGE);
     }
     const domain = emailDomain(inbox);
-    if (!person && !PUBLIC_EMAIL_DOMAINS.has(domain) && (await directory(c).domainSignupsSince(domain, c.now() - DAY_MS)) >= guard.domainSignupsPerDay) {
-      await countRefusal(c, "email_domain_daily_cap", found.githubId);
-      return again(DOMAIN_LIMIT_MESSAGE);
+    if (!person && !event && !PUBLIC_EMAIL_DOMAINS.has(domain) && (await directory(c).domainSignupsSince(domain, c.now() - DAY_MS)) >= guard.domainSignupsPerDay) {
+      if (guard.domainLimitRefuse) {
+        await countRefusal(c, "email_domain_daily_cap", found.githubId);
+        return again(DOMAIN_LIMIT_MESSAGE);
+      }
+      domainLimited = true;
     }
   }
   if (inviteCode) {
@@ -1646,9 +1708,12 @@ async function deviceDetails(c: Ctx): Promise<Response> {
       return again(`Too many invite attempts. Try again in ${Math.ceil(retry / 60)} minutes, or leave the code empty.`);
     }
   }
-  const level: SignInLevel = inviteCode ? { ...details.level, level: "full", levelReason: "invite" } : details.level;
+  // Like the network limit: an account that qualifies for Full on its own signals stays Full.
+  const signedIn: SignInLevel = domainLimited && details.level.level !== "full" ? { ...details.level, level: "starter", levelReason: "domain_limit" } : details.level;
+  const level: SignInLevel = inviteCode ? { ...details.level, level: "full", levelReason: "invite" } : event ? eventCodeLevel(c, guard, details.level, event.full) : signedIn;
   const response = await admitAndFinish(c, found.deviceRef, found.clientDeviceId, found, inviteCode, undefined, ticket, found.referralCode ?? undefined, level, {
     onInvalidInvite: () => again("That invite code isn't valid or was already used. Check it, or leave it empty to continue."),
+    ...(event ? { eventCodeId: event.id, onInvalidEventCode: () => again(EVENT_CODE_INVALID_MESSAGE) } : {}),
   });
   // Saved for anyone admitted (new or returning); a refusal leaves nothing to save it on.
   const saved = await directory(c).setEmail(found.githubId, email, updates, c.now());
@@ -1704,9 +1769,9 @@ async function recheckStarter(c: Ctx, identity: Identity, config: FreeConfig): P
   const person = await directory(c).getPerson(identity.githubId);
   if (!person || (person.level !== "starter" && person.level !== "basic") || person.level_reason === "admin" || person.level_reason === "invite") return undefined;
   const week = weekStart(c.now());
-  // A network-limited account is re-checked soon after sign-in (it may already qualify on its
-  // own signals), then on the weekly cadence.
-  const since = person.level_reason === "network_limit" ? c.now() - 60 * 60_000 : week;
+  // An account placed at Starter by the network or email-domain limit is re-checked soon after
+  // sign-in (it may already qualify on its own signals), then on the weekly cadence.
+  const since = isSignupLimitReason(person.level_reason) ? c.now() - 60 * 60_000 : week;
   if (person.signals_at !== null && person.signals_at >= since) return undefined;
   const profile = await githubPublicProfile(identity.login, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS, githubApp(c.config));
   if (!profile) return undefined;
@@ -1766,8 +1831,11 @@ async function readSignals(c: Ctx, user: { id: number; createdAt: number | undef
   const signals: GithubSignals = { accountAgeDays, publicRepos, followers, contributions, restrictedContributions, createdDay, ...extra };
   if (outcome === "error") return { signals, level: "full", levelReason: "qualifies" };
   const rules = signalThresholds(config);
-  const batchPeers = await directory(c).creationBatchPeers(createdDay, rules.batchWindowDays, user.id);
-  const checks = levelChecks(signals, thresholds, rules, { now: c.now(), batchPeers });
+  const [batchPeers, youngAccounts] = await Promise.all([
+    directory(c).creationBatchPeers(createdDay, rules.batchWindowDays, user.id),
+    directory(c).youngAccounts(dayOf(c.now()) - thresholds.minAccountAgeDays),
+  ]);
+  const checks = levelChecks(signals, thresholds, rules, { now: c.now(), batchPeers, youngAccounts });
   return { signals, level: levelFor(checks, signals, basicRule(config)), levelReason: levelReason(signals, thresholds, checks), batchFlagged: !checks.full && checks.creationBatch };
 }
 
@@ -1787,14 +1855,16 @@ async function admitAndFinish(
   ticket?: string,
   referralCode?: string,
   signIn?: SignInLevel,
-  options: { onInvalidInvite?: () => Response } = {},
+  options: { onInvalidInvite?: () => Response; eventCodeId?: number; onInvalidEventCode?: () => Response } = {},
 ): Promise<Response> {
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
   const { config } = await runtime(c);
   const signupKey = `signup:ip:${c.ipNet}`;
   const openEligible = config.openAdmission && inviteCode === undefined;
+  // An event code's group signs up from one network: the network limit neither applies nor counts them.
+  const withEvent = options.eventCodeId !== undefined;
   const signupLimit = { capacity: config.networkSignupsPerDay, perHour: config.networkSignupsPerDay / 24 };
-  const signupsLeft = openEligible ? (await c.env.RATE_LIMITER.getByName(signupKey).check(signupKey, signupLimit, 1, c.now())).allowed : true;
+  const signupsLeft = openEligible && !withEvent ? (await c.env.RATE_LIMITER.getByName(signupKey).check(signupKey, signupLimit, 1, c.now())).allowed : true;
   // Beyond the network's daily sign-ups, a non-qualifying account still gets in, as Starter.
   // An account that already qualifies for Full on its own signals stays Full: a shared office,
   // campus or conference network must not downgrade real developers.
@@ -1817,16 +1887,18 @@ async function admitAndFinish(
     policy: policyOf(config),
     ...(signIn ? { signals: signIn.signals, level, levelReason, batchFlagged: signIn.batchFlagged === true && level !== "full" } : {}),
     starterTokens: config.starterWeeklyTokens > 0,
+    ...(withEvent && openEligible ? { eventCodeId: options.eventCodeId } : {}),
     now: c.now(),
   });
   if (result.ok) {
     // The gates a sign-in got through: an invite, a placement below Full, the waitlist.
     if (inviteCode !== undefined) await countRefusal(c, "invite_accepted", identity.githubId);
-    if (result.created && !isAdmin && level !== "full" && (levelReason === "account_too_new" || levelReason === "few_repos_and_contributions" || levelReason === "network_limit")) {
+    if (withEvent && result.created && result.via === "open") await countRefusal(c, "event_code_used", identity.githubId);
+    if (result.created && !isAdmin && level !== "full" && (levelReason === "account_too_new" || levelReason === "few_repos_and_contributions" || isSignupLimitReason(levelReason))) {
       await countRefusal(c, levelReason, identity.githubId);
     }
     if (result.queued) await countRefusal(c, "queued", identity.githubId);
-    if (result.created && (result.via === "invite" || result.via === "open")) await c.env.RATE_LIMITER.getByName(signupKey).spend(signupKey, LIMITS.signupIp, 1, c.now());
+    if (result.created && !withEvent && (result.via === "invite" || result.via === "open")) await c.env.RATE_LIMITER.getByName(signupKey).spend(signupKey, LIMITS.signupIp, 1, c.now());
     await account(c, identity.githubId).activate({ githubId: identity.githubId, login: identity.login, isAdmin, now: c.now() });
     // A pre-grant's personal weekly dollar cap, now that the account exists.
     if (result.grantUsdPerWeek !== undefined) await raiseGrantCap(c, identity.githubId, result.grantUsdPerWeek);
@@ -1868,6 +1940,10 @@ async function admitAndFinish(
       const issued = await auth(c).decide(deviceRef, "needs_invite", identity, c.now(), inviteReason ?? "invite_required");
       return invitePage(issued.ticket ?? "", identity.login, undefined, intro);
     }
+    case "invalid_event_code":
+      await countRefusal(c, "event_code_invalid", identity.githubId);
+      if (options.onInvalidEventCode) return options.onInvalidEventCode();
+      return donePage("Code no longer valid", EVENT_CODE_INVALID_MESSAGE, 400);
     case "invalid_invite":
       await countRefusal(c, "invite_code_invalid", identity.githubId);
       if (options.onInvalidInvite) return options.onInvalidInvite();
@@ -4455,6 +4531,20 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       return json({ invites: await directory(c).createInvites({ count, note, createdBy: identity.githubId, now }) }, 201);
     }
   }
+  if (rest === "event-codes") {
+    if (method === "GET") return json({ eventCodes: (await directory(c).listEventCodes(now)).map(eventCodeView) });
+    if (method === "POST") {
+      const input = parseEventCodeInput((await readJson(c)) ?? {});
+      if ("error" in input) return apiError(400, "invalid_request", input.error);
+      const made = await directory(c).createEventCode({ ...input, createdBy: identity.githubId, now });
+      return json({ id: made.id, code: made.code, maxUses: input.maxUses, full: input.full, note: input.note, expiresAt: new Date(made.expiresAt).toISOString() }, 201);
+    }
+  }
+  const endEvent = /^event-codes\/(\d+)\/end$/.exec(rest);
+  if (endEvent && method === "POST") {
+    if (!(await directory(c).endEventCode(Number(endEvent[1]), now))) return apiError(404, "not_found", "No such event code, or it already ended.");
+    return json({ ended: true });
+  }
   if (method === "POST" && rest === "reset-week") {
     const body = (await readJson(c)) ?? {};
     if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") return apiError(400, "invalid_request", "Send {dryRun: true} to count first, or {} to reset.");
@@ -4477,7 +4567,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       directory(c).allocatorStates(),
       directory(c).gpt6TrustAll({ now, adminIds: [...c.config.adminGithubIds] }),
     ]);
-    const checks = peopleChecks(people, config, now);
+    const checks = peopleChecks(people, config, now, await directory(c).eventCodeSignups());
     // Filter and page before any account call, so a page costs one account call per person on it.
     const ordered = people
       .filter((person) => (levelFilter === null || person.level === levelFilter) && (!sharedOnly || (networks.get(person.github_id) ?? 0) > 1))
@@ -4840,7 +4930,7 @@ export interface RecheckOutcome {
 async function recheckBelowBar(c: Ctx, config: FreeConfig, actor: { githubId: number; login: string; now: number }, includeAdminStarters = false): Promise<RecheckOutcome> {
   const now = c.now();
   const people = await directory(c).recheckSignals();
-  const checks = peopleChecks(people, config, now);
+  const checks = peopleChecks(people, config, now, await directory(c).eventCodeSignups());
   const rule = basicRule(config);
   const today = Math.floor(now / DAY_MS);
   const raise: number[] = [];
@@ -5231,7 +5321,7 @@ function emptyEmailForm(): ToolsState["compose"] {
 }
 
 /** What a Tools form post adds to the page: the forms' contents and what the action did. */
-type ToolsPosted = Pick<ToolsState, "grant" | "compose"> & Partial<Pick<ToolsState, "requestNotice" | "recheck" | "leadNotice" | "block">>;
+type ToolsPosted = Pick<ToolsState, "grant" | "compose"> & Partial<Pick<ToolsState, "requestNotice" | "recheck" | "leadNotice" | "block" | "eventCodeNotice">>;
 
 /** Everything the Tools tab shows besides what was just posted. */
 async function toolsState(
@@ -5242,12 +5332,13 @@ async function toolsState(
   csrf: string | undefined,
   posted: ToolsPosted,
 ): Promise<ToolsState> {
-  const [cohorts, me, requests, leads, noGithub] = await Promise.all([
+  const [cohorts, me, requests, leads, noGithub, eventCodes] = await Promise.all([
     directory(c).broadcastCohorts({ days: COHORT_PICKER_DAYS, adminIds: [...c.config.adminGithubIds], includeAdmins: config.userEmailsToAdmins }),
     directory(c).getPerson(identity.githubId),
     directory(c).pendingAccessRequests(c.now()),
     directory(c).earlyAccessLeads(),
     directory(c).noGithub({ from: Math.floor(c.now() / DAY_MS) * DAY_MS - 13 * DAY_MS, until: Math.floor(c.now() / DAY_MS) * DAY_MS + DAY_MS }),
+    directory(c).listEventCodes(c.now()),
   ]);
   return {
     login: identity.login,
@@ -5268,6 +5359,7 @@ async function toolsState(
       openRouterConfigured: c.config.openRouterApiKey !== undefined,
     },
     block: { login: "" },
+    eventCodes,
     ...posted,
   };
 }
@@ -5318,6 +5410,17 @@ async function adminWebTools(c: Ctx): Promise<Response> {
     const status = await setBlocked(c, person.githubId, action === "block", actor);
     if (!status) return answer({ error: true, text: `No free tier account has the username ${login}.` });
     return state({ grant: { text: "" }, compose: emptyEmailForm(), block: { login: "", notice: { error: false, text: `${person.login} is ${status === "blocked" ? "blocked" : "unblocked"}.` } } });
+  }
+  if (form.get("tool") === "event-code") {
+    const answer = (eventCodeNotice: NonNullable<ToolsState["eventCodeNotice"]>) => state({ grant: { text: "" }, compose: emptyEmailForm(), eventCodeNotice });
+    if (form.get("action") === "end") {
+      const ended = await directory(c).endEventCode(Number(form.get("id")), c.now());
+      return answer(ended ? { error: false, text: "Ended: the code no longer works." } : { error: true, text: "No such open event code." });
+    }
+    const input = parseEventCodeInput({ note: form.get("note") ?? undefined, maxUses: form.get("max_uses") ?? undefined, days: form.get("days") ?? undefined, full: form.get("full") ?? undefined });
+    if ("error" in input) return answer({ error: true, text: input.error.replace("maxUses", "Uses").replace("days", "Open for") });
+    const made = await directory(c).createEventCode({ ...input, createdBy: session.githubId, now: c.now() });
+    return answer({ error: false, text: `Made. Share this code; it is shown only now (${input.maxUses} uses, ${input.days} days${input.full ? ", Full" : ""}):`, code: made.code });
   }
   if (form.get("tool") === "recheck") {
     return state({ grant: { text: "" }, compose: emptyEmailForm(), recheck: await recheckBelowBar(c, config, actor) });
