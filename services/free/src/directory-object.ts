@@ -31,6 +31,7 @@ import { GUARD_OUTCOMES, type Checker, type GuardOutcome } from "./presend-guard
 import { dayIso, MODERATION_HISTORY_DAYS, MODERATION_HISTORY_ROWS, MODERATION_VERDICTS, type ModerationAction, type ModerationAnswer, type ModerationCase, type ModerationVerdict, type TriggerLabel } from "./moderation.js";
 import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
 import { WELCOME_KINDS, type UserEmailKind } from "./user-emails.js";
+import { runwayAlert, runwayFindings } from "./runway.js";
 import type { BroadcastAudience } from "./broadcast.js";
 
 /**
@@ -309,7 +310,7 @@ export interface PersonState {
 
 export interface Gate {
   paused: boolean;
-  /** Cash (OpenRouter) spend by everyone but admins: what the global caps count. */
+  /** Free spend by everyone but admins on every provider (SpendSummary.capWeekUsd, capTotalUsd): what the global caps count. */
   weekUsd: number;
   totalUsd: number;
   /** Luminal credit used by everyone, admins and paid usage included, since the start. */
@@ -393,7 +394,7 @@ export interface SpendSummary {
   paidRequests: number;
   weekStart: number;
   resetsAt: number;
-  /** Everyone but admins: what the global caps count. */
+  /** OpenRouter cash by everyone but admins (free usage). Part of what the global caps count: see `capWeekUsd`. */
   spentUsd: number;
   tokens: number;
   requests: number;
@@ -401,8 +402,15 @@ export interface SpendSummary {
   adminSpentUsd: number;
   adminTokens: number;
   adminRequests: number;
-  /** Everyone but admins, since the service started. */
+  /** OpenRouter cash by everyone but admins, since the service started. */
   totalSpentUsd: number;
+  /**
+   * What the global caps count: free usage (everyone but admins, paid usage and the service's
+   * own calls left out) on every provider, this week and since the start. OpenRouter cash plus
+   * OpenAI, Luminal and every registry provider's credit.
+   */
+  capWeekUsd: number;
+  capTotalUsd: number;
   adminTotalSpentUsd: number;
   /** Luminal credit: used by everyone since the start, everyone this week, and free usage this week. */
   creditUsedUsd: number;
@@ -1323,7 +1331,7 @@ export class DirectoryObject extends DurableObject {
         if (created && via === "open" && input.policy) {
           const waiting = this.#waitingCount();
           const spend = this.#spendSync(input.now);
-          if (shouldQueue({ weekUsd: spend.spentUsd, weekCreditUsd: spend.freeCreditWeekUsd, queueLength: waiting, policy: input.policy })) {
+          if (shouldQueue({ weekUsd: spend.capWeekUsd, weekCreditUsd: spend.freeCreditWeekUsd, queueLength: waiting, policy: input.policy })) {
             sql.exec("INSERT OR IGNORE INTO queue (github_id, queued_at) VALUES (?, ?)", input.githubId, input.now);
             queued = true;
             queueStarted = waiting === 0;
@@ -1545,7 +1553,7 @@ export class DirectoryObject extends DurableObject {
     const spend = this.#spendSync(now);
     // With Luminal serving, the queue protects the credit (see queue.ts).
     if (creditMode(policy)) return creditForecast({ lastWeekCreditUsd: last?.credit ?? 0, lastWeekActives: last?.actives ?? 0, policy, creditUsedUsd: spend.creditUsedUsd });
-    return forecast({ lastWeekUsd: last?.usd ?? 0, lastWeekActives: last?.actives ?? 0, policy, totalSpentUsd: spend.totalSpentUsd });
+    return forecast({ lastWeekUsd: last?.usd ?? 0, lastWeekActives: last?.actives ?? 0, policy, totalSpentUsd: spend.capTotalUsd });
   }
 
   /** Monday's admission, once per week, on the first call of the week (see queue.ts). */
@@ -2180,7 +2188,8 @@ export class DirectoryObject extends DurableObject {
    * Stores a new request, atomically: refused while one is pending, and past `perDay` requests
    * in the last 24 hours. `pendingCount` is what the owner's alert says.
    */
-  async submitAccessRequest(input: { githubId: number; login: string; building: string; link: string | null; now: number; perDay: number }): Promise<{ ok: true; pendingCount: number } | { ok: false; reason: "already_pending" | "rate_limited"; retryAfterSeconds?: number }> {
+  /** `todayCount`: access requests from everyone this UTC day, this one included (for the owner's daily email limit). */
+  async submitAccessRequest(input: { githubId: number; login: string; building: string; link: string | null; now: number; perDay: number }): Promise<{ ok: true; pendingCount: number; todayCount: number } | { ok: false; reason: "already_pending" | "rate_limited"; retryAfterSeconds?: number }> {
     return this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
       if (sql.exec("SELECT 1 FROM access_requests WHERE github_id = ? AND status = 'pending'", input.githubId).toArray().length > 0) return { ok: false, reason: "already_pending" };
@@ -2191,7 +2200,9 @@ export class DirectoryObject extends DurableObject {
       }
       sql.exec("INSERT INTO access_requests (github_id, login, at, building, link, status) VALUES (?, ?, ?, ?, ?, 'pending')", input.githubId, input.login, input.now, input.building, input.link);
       const pendingCount = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM access_requests WHERE status = 'pending'").toArray()[0]?.n ?? 0;
-      return { ok: true, pendingCount };
+      const dayStart = Math.floor(input.now / DAY_MS) * DAY_MS;
+      const todayCount = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM access_requests WHERE at >= ?", dayStart).toArray()[0]?.n ?? 0;
+      return { ok: true, pendingCount, todayCount };
     });
   }
 
@@ -2381,8 +2392,8 @@ export class DirectoryObject extends DurableObject {
     const spend = this.#spendSync(now);
     return {
       paused: this.#paused(),
-      weekUsd: spend.spentUsd,
-      totalUsd: spend.totalSpentUsd,
+      weekUsd: spend.capWeekUsd,
+      totalUsd: spend.capTotalUsd,
       creditUsedUsd: spend.creditUsedUsd,
       weekCreditUsd: spend.freeCreditWeekUsd,
       openaiCreditUsedUsd: spend.openaiCreditUsedUsd,
@@ -2516,11 +2527,18 @@ export class DirectoryObject extends DurableObject {
     };
     const row = this.ctx.storage.sql.exec<Row>("SELECT * FROM spend_weeks WHERE week_start = ?", start).toArray()[0];
     const total = this.ctx.storage.sql
-      .exec<{ usd: number | null; admin_usd: number | null; credit_usd: number | null; openai_credit_usd: number | null }>(
-        "SELECT SUM(usd) AS usd, SUM(admin_usd) AS admin_usd, SUM(credit_usd) AS credit_usd, SUM(openai_credit_usd) AS openai_credit_usd FROM spend_weeks",
+      .exec<{ usd: number | null; admin_usd: number | null; credit_usd: number | null; openai_credit_usd: number | null; free_usd: number | null }>(
+        "SELECT SUM(usd) AS usd, SUM(admin_usd) AS admin_usd, SUM(credit_usd) AS credit_usd, SUM(openai_credit_usd) AS openai_credit_usd, SUM(usd + free_credit_usd + openai_free_credit_usd) AS free_usd FROM spend_weeks",
       )
       .toArray()[0];
+    // Registry providers' free usage (provider-store.ts), this week and in total.
+    const registry = this.ctx.storage.sql
+      .exec<{ week: number | null; total: number | null }>("SELECT SUM(CASE WHEN week_start = ? THEN free_usd ELSE 0 END) AS week, SUM(free_usd) AS total FROM provider_credit_weeks", start)
+      .toArray()[0];
+    const weekFree = (row?.usd ?? 0) + (row?.free_credit_usd ?? 0) + (row?.openai_free_credit_usd ?? 0) + (registry?.week ?? 0);
     return {
+      capWeekUsd: round(weekFree),
+      capTotalUsd: round((total?.free_usd ?? 0) + (registry?.total ?? 0)),
       weekStart: start,
       resetsAt: weekEnd(now),
       spentUsd: round(row?.usd ?? 0),
@@ -2811,8 +2829,8 @@ export class DirectoryObject extends DurableObject {
       for (const threshold of hit.mark) this.#markAlert(`${prefix}${threshold}`, now);
       out.push(message(spent, cap, hit.threshold));
     };
-    check(`spend:week:${spend.weekStart}:`, spend.spentUsd, policy.globalWeeklyUsdCap, weeklySpendAlert);
-    check("spend:total:", spend.totalSpentUsd, policy.globalTotalUsdCap, totalSpendAlert);
+    check(`spend:week:${spend.weekStart}:`, spend.capWeekUsd, policy.globalWeeklyUsdCap, weeklySpendAlert);
+    check("spend:total:", spend.capTotalUsd, policy.globalTotalUsdCap, totalSpendAlert);
     return out;
   }
 
@@ -3517,6 +3535,59 @@ export class DirectoryObject extends DurableObject {
     return luminalRecoveredAlert({ window, quietRequests: quiet.requests, openedAt: opened, now }, serving);
   }
 
+  /**
+   * Runway alerts (runway.ts), for the 10-minute cron: the conditions that hold now and haven't
+   * been emailed today, in one alert, each marked sent for the UTC day. Undefined when there is
+   * nothing new, or `runwayAlerts` is off.
+   */
+  async runwayAlerts(now: number, envPolicy: Policy): Promise<Alert | undefined> {
+    const policy = this.#policy(envPolicy);
+    if (policy.runwayAlerts !== true) return undefined;
+    const sql = this.ctx.storage.sql;
+    const spend = this.#spendSync(now);
+    const since = now - DAY_MS;
+    // Free spend in the last 24 hours, as the caps count it: OpenRouter cash, every other upstream's credit.
+    const day = sql
+      .exec<{ usd: number | null }>(
+        "SELECT SUM(CASE WHEN upstream = 'openrouter' THEN cost_usd ELSE credit_usd END) AS usd FROM requests WHERE at > ? AND is_admin = 0 AND paid = 0",
+        since,
+      )
+      .toArray()[0];
+    // Each provider's credit burn in the last 24 hours: every request and speed probe.
+    const burn = new Map<string, number>();
+    for (const row of sql.exec<{ upstream: string; usd: number | null }>("SELECT upstream, SUM(credit_usd) AS usd FROM requests WHERE at > ? GROUP BY upstream", since).toArray()) {
+      burn.set(row.upstream, row.usd ?? 0);
+    }
+    for (const row of sql.exec<{ provider: string; usd: number | null }>("SELECT provider, SUM(cost_usd) AS usd FROM provider_probes WHERE at > ? GROUP BY provider", since).toArray()) {
+      burn.set(row.provider, (burn.get(row.provider) ?? 0) + (row.usd ?? 0));
+    }
+    const used = providerSpend(sql, now, spend).usedUsd;
+    const findings = runwayFindings({
+      now,
+      weekStart: spend.weekStart,
+      weekEnd: spend.resetsAt,
+      weekUsd: spend.capWeekUsd,
+      dayUsd: day?.usd ?? 0,
+      totalUsd: spend.capTotalUsd,
+      weeklyCapUsd: policy.globalWeeklyUsdCap,
+      totalCapUsd: policy.globalTotalUsdCap,
+      providers: PROVIDERS.map((spec) => ({
+        id: spec.id,
+        name: spec.name,
+        balanceUsd: providerSettings(policy as unknown as ProviderConfig, spec.id).creditUsd ?? 0,
+        usedUsd: used[spec.id] ?? 0,
+        dayUsd: burn.get(spec.id) ?? 0,
+      })),
+      alertDays: policy.runwayAlertDays ?? 0,
+      totalCapShare: policy.runwayTotalCapShare ?? 0,
+    });
+    const today = isoDay(now);
+    // Older days' marks aren't needed again.
+    sql.exec("DELETE FROM alerts_sent WHERE key LIKE 'runway:%' AND at < ?", now - 7 * DAY_MS);
+    const fresh = findings.filter((finding) => this.#markAlert(`runway:${finding.key}:${today}`, now));
+    return fresh.length > 0 ? runwayAlert(fresh) : undefined;
+  }
+
   /** The queue-started alert for an admission that queued the first person. */
   async queueStartedAlert(now: number, envPolicy: Policy): Promise<Alert> {
     const policy = this.#policy(envPolicy);
@@ -3526,7 +3597,7 @@ export class DirectoryObject extends DurableObject {
     if (creditMode(policy) && budget.weeklyUsd !== undefined && weekCredit >= policy.queueThreshold * budget.weeklyUsd) {
       return queueStartedAlert(weekCredit, budget.weeklyUsd, "credit");
     }
-    return queueStartedAlert(spend.spentUsd, policy.globalWeeklyUsdCap);
+    return queueStartedAlert(spend.capWeekUsd, policy.globalWeeklyUsdCap);
   }
 
   /** Stores cleaned events; ids already stored for this person are ignored. Returns how many were new. */
@@ -3918,10 +3989,18 @@ export class DirectoryObject extends DurableObject {
         .map((provider) => ({ name: provider.name, status: provider.status, balanceUsd: provider.balanceUsd, leftUsd: provider.leftUsd, weekUsd: provider.userWeekUsd, weeklyUsd: provider.weeklyBudgetUsd ?? undefined })),
       queueWaiting: data.queue.waiting,
       paused: envPaused || this.#paused(),
-      ...(policy.accessRequestAlerts === "daily" ? { accessRequests: this.#accessRequestDay(from, until) } : {}),
+      ...(this.#accessRequestsInDigest(policy, from, until) ? { accessRequests: this.#accessRequestDay(from, until) } : {}),
       ...(moderation ? { moderation } : {}),
       ...(allocated ? { allocator } : {}),
     }), noGithubLine);
+  }
+
+  /** Whether the digest carries the day's access requests: "daily", or "each" with more that day than were emailed (accessRequestEmailsPerDay). */
+  #accessRequestsInDigest(policy: Policy, from: number, until: number): boolean {
+    if (policy.accessRequestAlerts === "daily") return true;
+    if (policy.accessRequestAlerts !== "each" || policy.accessRequestEmailsPerDay === undefined) return false;
+    const total = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM access_requests WHERE at >= ? AND at < ?", from, until).toArray()[0]?.n ?? 0;
+    return total > policy.accessRequestEmailsPerDay;
   }
 
   /** Access requests made in [from, until): how many, the first logins, and how many wait now. Never what they wrote. */

@@ -305,20 +305,31 @@ describe("Luminal credit", () => {
   });
 });
 
-describe("cash caps and the queue with Luminal", () => {
-  it("counts only OpenRouter cost against the global caps", async () => {
-    const { service, token, adminToken } = await member({ GLOBAL_WEEKLY_USD_CAP: "0.2", GLOBAL_TOTAL_USD_CAP: "0.5" });
+describe("global caps and the queue with Luminal", () => {
+  it("counts free Luminal credit and OpenRouter cash against the global caps, admins left out", async () => {
+    const { service, token, adminToken } = await member({ GLOBAL_WEEKLY_USD_CAP: "0.3", GLOBAL_TOTAL_USD_CAP: "0.5" });
     service.setLuminal(() => completion(luminalUsage(BIG.prompt, BIG.completion, BIG.cached)));
-    for (let index = 0; index < 3; index++) assert.equal((await chat(service, token)).status, 200, "credit spend never reaches the cash caps");
-
-    await service.request("POST", "/admin/config", { token: adminToken, body: { primaryUpstream: "openrouter" } });
-    service.setOpenRouter(() => completion(usage(10, 10, 0, 0.25)));
-    assert.equal((await chat(service, token)).status, 200);
+    // An admin's credit spend never counts.
+    for (let index = 0; index < 3; index++) assert.equal((await chat(service, adminToken)).status, 200);
+    assert.equal((await chat(service, token)).status, 200); // ~0.17 of Luminal credit
+    assert.equal((await chat(service, token)).status, 200); // ~0.34: past the weekly cap
     const refused = await chat(service, token);
     assert.equal(refused.status, 503);
     assert.equal((await errorOf(refused)).code, "global_weekly_budget_reached");
-    const spend = (await (await service.request("GET", "/admin/spend", { token: adminToken })).json()) as Record<string, any>;
+    let spend = (await (await service.request("GET", "/admin/spend", { token: adminToken })).json()) as Record<string, any>;
+    assert.ok(Math.abs(spend.capWeekUsd - 2 * BIG_CREDIT) < 1e-6, String(spend.capWeekUsd));
+    assert.equal(spend.spentUsd, 0, "spentUsd stays OpenRouter cash");
+
+    // OpenRouter cash adds to the same caps: the all-time one is passed with it.
+    assert.equal((await service.request("POST", "/admin/config", { token: adminToken, body: { primaryUpstream: "openrouter", globalWeeklyUsdCap: "none" } })).status, 200);
+    service.setOpenRouter(() => completion(usage(10, 10, 0, 0.25)));
+    assert.equal((await chat(service, token)).status, 200);
+    const stopped = await chat(service, token);
+    assert.equal(stopped.status, 503);
+    assert.equal((await errorOf(stopped)).code, "global_total_budget_reached");
+    spend = (await (await service.request("GET", "/admin/spend", { token: adminToken })).json()) as Record<string, any>;
     assert.equal(spend.spentUsd, 0.25);
+    assert.ok(Math.abs(spend.capTotalUsd - (2 * BIG_CREDIT + 0.25)) < 1e-6, String(spend.capTotalUsd));
   });
 
   it("charges the per-person DeepSeek dollar allowance at OpenRouter prices on Luminal", async () => {

@@ -465,4 +465,37 @@ describe("accessRequestAlerts", () => {
     assert.match(digest, /@asker200, @asker201/);
     assert.doesNotMatch(digest, /CSV exports/);
   });
+
+  it("emails at most accessRequestEmailsPerDay a UTC day with each; the rest are in the daily digest", async () => {
+    assert.equal(readFreeConfig({ ...BAR, GITHUB_CLIENT_ID: "x", GITHUB_CLIENT_SECRET: "y", TOKEN_SIGNING_KEY: "k".repeat(40) } as never).accessRequestEmailsPerDay, 20);
+    const service = await createService({ ...BAR, ACCESS_REQUEST_EMAILS_PER_DAY: "2" });
+    for (const id of [200, 201, 202, 203]) await ask(service, id);
+    const sent = alerts(service);
+    assert.equal(sent.length, 2, "a burst can't flood the owner's inbox");
+    assert.doesNotMatch(sent[0]!, /the most emailed in a UTC day/);
+    assert.match(sent[1]!, /That's 2 today, the most emailed in a UTC day/);
+    // A new UTC day starts the count again.
+    service.clock.now = Date.parse("2026-11-05T00:30:00Z");
+    await ask(service, 204);
+    assert.equal(alerts(service).length, 3);
+    const { DIGEST_CRON } = await import("../src/app.js");
+    const at = Date.parse("2026-11-05T01:00:00Z");
+    service.clock.now = at;
+    await (service.handler as unknown as { scheduled(controller: { cron: string; scheduledTime: number }, env: never): Promise<void> }).scheduled({ cron: DIGEST_CRON, scheduledTime: at }, service.env as never);
+    const digest = service.calls.webhooks.map((call) => JSON.stringify(call.body)).find((text) => text.includes("dl free tier: daily"));
+    assert.ok(digest);
+    assert.match(digest, /Access requests: 4 new/);
+  });
+
+  it("leaves the daily digest without them when none were held back", async () => {
+    const service = await createService({ ...BAR, ACCESS_REQUEST_EMAILS_PER_DAY: "2" });
+    await ask(service, 200);
+    const { DIGEST_CRON } = await import("../src/app.js");
+    const at = Date.parse("2026-11-05T01:00:00Z");
+    service.clock.now = at;
+    await (service.handler as unknown as { scheduled(controller: { cron: string; scheduledTime: number }, env: never): Promise<void> }).scheduled({ cron: DIGEST_CRON, scheduledTime: at }, service.env as never);
+    const digest = service.calls.webhooks.map((call) => JSON.stringify(call.body)).find((text) => text.includes("dl free tier: daily"));
+    assert.ok(digest);
+    assert.doesNotMatch(digest, /Access requests:/);
+  });
 });

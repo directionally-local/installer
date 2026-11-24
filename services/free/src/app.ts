@@ -406,8 +406,9 @@ export function createHandler(options: HandlerOptions = {}): {
   const emailGapMs = options.emailGapMs ?? EMAIL_GAP_MS;
   return {
     /**
-     * Cron triggers. The only one is the daily digest (DIGEST_CRON); the weekly queue needs
-     * none, it runs on the first request of the week. Never throws for an unknown cron.
+     * Cron triggers: the daily digest (DIGEST_CRON), and every 10 minutes (PROBE_CRON) the speed
+     * probes and the runway check. The weekly queue needs none, it runs on the first request of
+     * the week. Never throws for an unknown cron.
      */
     async scheduled(controller: ScheduledController, env: Env): Promise<void> {
       if (controller.cron === PROBE_CRON) {
@@ -415,6 +416,12 @@ export function createHandler(options: HandlerOptions = {}): {
           await runProbes(env, fetcher, now, Number.isFinite(controller.scheduledTime) ? controller.scheduledTime : now());
         } catch (error) {
           console.error("speed probes: run failed", error instanceof Error ? error.name : "error");
+        }
+        // The same 10-minute trigger checks the runway (runway.ts), probes on or off.
+        try {
+          await runRunway(env, fetcher, now);
+        } catch (error) {
+          console.error("runway alerts: run failed", error instanceof Error ? error.name : "error");
         }
         return;
       }
@@ -2117,6 +2124,13 @@ function publicStatus(model: FreeModel, gate: Runtime): "on" | "paused" | "out_o
   return providerReady(provider, gate.config, gate) ? "on" : "paused";
 }
 
+/** The runway check (runway.ts), on the 10-minute cron: at most one email, of the conditions new today. */
+async function runRunway(env: Env, fetcher: Fetch, now: () => number): Promise<void> {
+  const config = readFreeConfig(env as unknown as Record<string, unknown>);
+  const found = await env.DIRECTORY.getByName("directory").runwayAlerts(now(), policyOf(config));
+  if (found) await deliver({ config, env, fetch: fetcher, base: config.publicUrl ?? DEFAULT_PUBLIC_URL, now }, [found]);
+}
+
 /** The speed probes' cron run (probes.ts): one probe per model that can serve, recorded in the Directory. */
 async function runProbes(env: Env, fetcher: Fetch, now: () => number, at: number): Promise<void> {
   const envConfig = readFreeConfig(env as unknown as Record<string, unknown>);
@@ -2816,8 +2830,13 @@ async function accessRequest(c: Ctx, method: string): Promise<Response> {
     return rateLimited(result.retryAfterSeconds ?? 3600);
   }
   // The owner hears who asked and how many wait: never what they wrote. "daily" leaves it to the
-  // daily digest, "off" to the admin Tools page.
-  if ((await runtime(c)).config.accessRequestAlerts === "each") await alert(c, [accessRequestAlert(identity.login, result.pendingCount)]);
+  // daily digest, "off" to the admin Tools page. With "each", at most accessRequestEmailsPerDay
+  // a UTC day: past that the day's requests are in the daily digest, so a burst can't bury the
+  // budget and pause alerts.
+  const { config: live } = await runtime(c);
+  if (live.accessRequestAlerts === "each" && result.todayCount <= live.accessRequestEmailsPerDay) {
+    await alert(c, [accessRequestAlert(identity.login, result.pendingCount, result.todayCount === live.accessRequestEmailsPerDay ? live.accessRequestEmailsPerDay : undefined)]);
+  }
   return json({ status: "pending" }, 201);
 }
 

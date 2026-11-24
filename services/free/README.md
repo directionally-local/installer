@@ -766,10 +766,11 @@ new open sign-up still gets an account (identity, referral link, own-key use, pa
 queued for free tokens, in order. People already in keep their allowance for the week. Invited
 people and admins are never queued: an invite is the owner's own choice.
 
-**With Luminal serving** (`primaryUpstream` is `luminal` and `LUMINAL_API_KEY` is set), the cash
-caps stay near zero, so the queue watches Luminal credit instead: a new open sign-up waits once
+**With Luminal serving** (`primaryUpstream` is `luminal` and `LUMINAL_API_KEY` is set), the queue
+also watches Luminal credit: a new open sign-up waits once
 **this week's free Luminal credit spend reaches `QUEUE_THRESHOLD` (0.8) of
-`LUMINAL_WEEKLY_CREDIT_USD` ($250)**. The cash test above still applies as well. Monday's
+`LUMINAL_WEEKLY_CREDIT_USD` ($250)**. The weekly cap test above (free spend on every provider)
+still applies as well. Monday's
 admission uses the same arithmetic over credit: the average is last week's free credit spend per
 active, and the budget is `QUEUE_THRESHOLD × LUMINAL_WEEKLY_CREDIT_USD`, at most the credit left
 (`LUMINAL_CREDIT_USD` minus credit used). Free means non-admin and not Pro or a top-up.
@@ -834,7 +835,9 @@ one. So do the kill switch (pause and resume), the queue starting (its first que
 an OpenRouter host failing more than 20% of at least 20 requests over the last hour (once, until
 it recovers). With Luminal: credit used crossing **50%, 80% and 100%** of `luminalCreditUsd`
 (once each per balance, so raising the balance re-arms them), the pause when the credit is used up
-(once per balance), and Luminal slowing people down (below). Messages:
+(once per balance), and Luminal slowing people down (below). The global caps count free spend on
+every provider: OpenRouter cash and OpenAI, Luminal and registry credit (admins and paid usage
+left out). Messages:
 
 ```
 dl free tier: $200 of the $250 weekly cap used (80%). Resets Mon 00:00 UTC.
@@ -848,6 +851,42 @@ dl free tier: a session by @<login> (GitHub id <id>) was labelled high risk. (wi
 dl free tier: auto-blocked @<login> (0.92)   (subject; automated moderation blocked them: verdict, reason, signals, the label, how to unblock)
 dl free tier: review @<login>: watch (0.60)   (subject; a review that didn't block; once per person per UTC day)
 ```
+
+### Runway alerts
+
+The threshold alerts above say when money has gone; the runway alerts (`src/runway.ts`) say
+before it does. The 10-minute cron (the speed probes' trigger) checks three things and emails the
+owner through the same channels as every alert:
+
+- **Weekly pace:** this week's free spend (what the global caps count), at the faster of the
+  week's average (over at least a day) and the last 24 hours, passes `globalWeeklyUsdCap` before
+  Monday 00:00 UTC.
+- **Provider credit:** a provider's credit left (OpenAI, Luminal and each registry provider with a
+  balance) lasts fewer than `runwayAlertDays` days (default 7) at the last 24 hours' burn: all its
+  usage, admins, paid usage and probes included, since all of it uses the credit.
+- **Total cap:** `globalTotalUsdCap` has `runwayTotalCapShare` (default 0.1, so 10%) or less left.
+
+Each condition, each provider apart, is emailed at most once a UTC day while it holds; conditions
+that start in the same run share one email. `runwayAlerts` false turns them all off;
+`runwayAlertDays` 0 or `runwayTotalCapShare` 0 turns that one check off.
+
+```
+dl free tier: runway: weekly cap on pace to be reached (+1 more)   (subject)
+- Weekly cap: $210 of $500 spent this week; at $90 a day it is reached around Fri 13:20 UTC, before the week resets Mon 00:00 UTC (projected $615). Free tokens pause for everyone there.
+- Liquid Inference credit: $12 of $100 left; at the last 24 hours' $6 it runs out in about 2 days (around Sat 09:00 UTC). Top it up or raise providerCredit.liquid once it is.
+```
+
+### Alert email and user email budgets
+
+Owner alerts (and feedback) go through the `ALERT_EMAIL` binding to `ALERT_EMAIL_TO`, a verified
+Email Routing destination address. Cloudflare doesn't count sends to verified destination
+addresses toward the account's Email Service daily sending limit or monthly quota, on any plan
+(https://developers.cloudflare.com/email-service/platform/limits/), so emails to users
+(`USER_EMAIL` binding, which does count, failing with `E_DAILY_LIMIT_EXCEEDED` past it; or Resend)
+can't use up the owner's alerts. Keep `ALERT_EMAIL_TO` a verified destination address for that to
+hold. What could still bury a budget alert is volume in the owner's inbox: access-request emails
+stop at `accessRequestEmailsPerDay` (default 20) a UTC day and "Don't have GitHub?" emails at 50,
+the rest counted in the next daily digest.
 
 ## What people use the service for (use descriptions)
 
@@ -1314,7 +1353,11 @@ with who made it and when.
 | `allowOtherHarnesses` | `ALLOW_OTHER_HARNESSES` | true: Claude Code through `dl claude` and OpenCode through `dl opencode` may use free tokens; false refuses both (`harness_not_allowed`) |
 | `otherHarnessShare` | `OTHER_HARNESS_SHARE` | 0.5: the share (0 to 1) of the free weekly allowance and of the trial Claude Code and OpenCode may use; Pro is exempt (see below) |
 | `proOffered` | `PRO_OFFERED` | true: dl Pro is offered. false hides it from everyone new: `offers` has no `pro` (the `topup` stays), free users' refusals, sign-in lines and trial emails stop naming Pro, and a new Pro checkout gets 403 `pro_not_offered`. Existing subscribers keep Pro, their Pro wording and the billing portal |
-| `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request); `daily` (one line in the daily digest); `off` |
+| `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request, at most `accessRequestEmailsPerDay` a UTC day, the rest in the daily digest); `daily` (one line in the daily digest); `off` |
+| `accessRequestEmailsPerDay` | `ACCESS_REQUEST_EMAILS_PER_DAY` | 20: with `each`, access-request emails a UTC day at most |
+| `runwayAlerts` | `RUNWAY_ALERTS` | true: the [runway alerts](#runway-alerts) |
+| `runwayAlertDays` | `RUNWAY_ALERT_DAYS` | 7: a provider is reported when its credit lasts fewer days than this at the last 24 hours' burn (0 off) |
+| `runwayTotalCapShare` | `RUNWAY_TOTAL_CAP_SHARE` | 0.1: the global total cap is reported with this share of it or less left (0 to 1; 0 off) |
 | `noGithubAlerts` | `NO_GITHUB_ALERTS` | `each` (an email per "Don't have GitHub?" click and answer, at most 50 a UTC day, the rest in the daily digest); `daily` (one line in the daily digest); `off` |
 | `useDescriptions` | `USE_DESCRIPTIONS` | true: a short automated description and safety label per session (see [use descriptions](#what-people-use-the-service-for-use-descriptions)) |
 | `useDescriptionDailyCap` | `USE_DESCRIPTION_DAILY_CAP` | 2000: description calls a UTC day across everyone (0 stops them) |
@@ -1609,7 +1652,7 @@ charged = uncached prompt tokens + completion tokens + ceil(cached prompt tokens
 The default weight of 0.02 is OpenRouter's cache-read price divided by its input price for
 `deepseek/deepseek-v4.1-flash-1017`: $0.006/M over $0.30/M, as listed on 2026-11-03.
 `COUNT_CACHED_TOKENS=false` still works and means a weight of 0, unless `CACHED_TOKEN_WEIGHT`
-is set. The global USD caps count only real cash: the cost OpenRouter reports. The per-person
+is set. The global USD caps count free spend on every provider (see [what the caps count](#upstreams-luminal-and-openrouter)). The per-person
 dollar allowance counts every request: OpenRouter's reported cost, or a Luminal request's tokens
 at the OpenRouter prices we were billed (see below).
 
@@ -1668,9 +1711,13 @@ the owner can do that by hand.
 
 **What the caps count.**
 
-- **Global caps (cash only).** The weekly ($250) and all-time ($1,000) caps count only what
-  OpenRouter billed. Luminal credit is prepaid, so it isn't counted there; with Luminal serving
-  they stay near zero. The queue watches the weekly credit budget instead (see the queue).
+- **Global caps (every provider).** `globalWeeklyUsdCap` and `globalTotalUsdCap` count free
+  usage (everyone but admins; paid usage and the service's own calls, such as speed probes and
+  use descriptions, left out) on every provider: OpenRouter's billed cash plus the credit used on
+  OpenAI, Luminal and each registry provider (Liquid Inference, Open Relay). `/admin/spend` shows
+  the two numbers they compare against as `capWeekUsd` and `capTotalUsd`; `spentUsd` and
+  `totalSpentUsd` stay OpenRouter cash. In credit mode the queue also watches the weekly credit
+  budget (see the queue).
 - **Per-person allowance (every request).** The 50M tokens are charged the same on both
   upstreams. The $5 a week is charged a Luminal request's cost **at the OpenRouter prices we
   were actually billed** (`OPENROUTER_PRICE_INPUT` 0.035, `OPENROUTER_PRICE_CACHED` 0.006,

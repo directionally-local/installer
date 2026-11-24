@@ -19,11 +19,12 @@ import { DAY_MS, WEEK_MS, weekEnd } from "./week.js";
  *              at least 0 and at most the queue's length. No weekly cap: everyone.
  *
  * When Luminal serves requests (`creditMode`: `primaryUpstream` is "luminal" and LUMINAL_API_KEY
- * is set), the cash caps stay near zero, so the queue watches Luminal credit instead: a new
+ * is set), the queue also watches Luminal credit: a new
  * sign-up waits once this week's free credit spend reaches `queueThreshold` of
  * `luminalWeeklyCreditUsd`, and Monday's admission fills the same share of that weekly credit
  * budget (no more than the credit left), with last week's free credit spend per active as the
- * average. The cash test still applies too, so OpenRouter spend can also start the queue.
+ * average. The weekly cap test still applies too (free spend on every provider, as the global
+ * caps count it).
  *
  * Order: oldest first, and each referred friend who became weekly active moves a person up
  * `queueReferralPlaces` places (25): sort by (place in line − 25 × friends, then place in line).
@@ -53,6 +54,12 @@ export interface Policy extends Partial<RegistrySettingsConfig> {
   openaiWeeklyCreditUsd: number | undefined;
   /** The owner's access-request emails: "daily" puts them in the daily digest. Optional for older callers: "each". */
   accessRequestAlerts?: AccessRequestAlerts;
+  /** With "each", emails a UTC day at most; the rest go in the daily digest. Optional for older callers: no limit. */
+  accessRequestEmailsPerDay?: number;
+  /** Runway alerts (runway.ts). Optional for older callers: off. */
+  runwayAlerts?: boolean;
+  runwayAlertDays?: number;
+  runwayTotalCapShare?: number;
 }
 
 /** Whether a prepaid-credit provider serves requests, so the queue and alerts watch its credit. */
@@ -99,6 +106,10 @@ export function policyOf(config: FreeConfig): Policy {
     openaiCreditUsd: config.openaiCreditUsd,
     openaiWeeklyCreditUsd: config.openaiWeeklyCreditUsd,
     accessRequestAlerts: config.accessRequestAlerts,
+    accessRequestEmailsPerDay: config.accessRequestEmailsPerDay,
+    runwayAlerts: config.runwayAlerts,
+    runwayAlertDays: config.runwayAlertDays,
+    runwayTotalCapShare: config.runwayTotalCapShare,
     // The registry providers' settings (providers.ts), for their credit alerts and the digest.
     ...Object.fromEntries(Object.keys(REGISTRY_DEFAULTS).map((key) => [key, config[key as keyof RegistrySettingsConfig]])),
   };
