@@ -5,7 +5,13 @@
  *                           everyone, probes), the part everyone but admins used (what the
  *                           weekly budget counts), the free part, and the probes' part
  *   provider_person_weeks   per registry provider, person and week: their spend, for the
- *                           opt-in cap (ids and dollars only; older weeks are pruned)
+ *                           opt-in cap (ids and dollars only; older weeks are pruned); a model
+ *                           with its own cap (models.ts `ownCaps`) is counted under
+ *                           "model:<id>" instead, across its upstreams
+ *   share_weeks             per budget share and week: all credit used and the part everyone but
+ *                           admins used. A share is one model's part of one upstream's credit,
+ *                           "<provider>:<model id>" (what `modelWeeklyCredit.<p>.<key>` counts);
+ *                           dollars only, read by every request's gate
  *   provider_probes         one row per speed probe (probes.ts): the model, whether it worked,
  *                           time to first token, tokens a second and its cost, and on Liquid
  *                           the seller that served it and the exchange's own timing; 15 days kept
@@ -15,8 +21,8 @@
  */
 
 import type { Sql } from "./dashboard-data.js";
-import { FREE_MODELS } from "./models.js";
-import { isRegistryProvider, PROVIDER_IDS, type ProviderId, type ProviderSpend } from "./providers.js";
+import { FREE_MODELS, modelById, upstreamsOf } from "./models.js";
+import { isRegistryProvider, modelSpendKey, personSpendKey, PROVIDER_IDS, type ProviderId, type ProviderSpend } from "./providers.js";
 import { DAY_MS, WEEK_MS, weekStart } from "./week.js";
 
 export const PROVIDER_SCHEMA = [
@@ -35,6 +41,13 @@ export const PROVIDER_SCHEMA = [
      github_id  INTEGER NOT NULL,
      usd        REAL NOT NULL DEFAULT 0,
      PRIMARY KEY (week_start, provider, github_id)
+   )`,
+  `CREATE TABLE IF NOT EXISTS share_weeks (
+     week_start INTEGER NOT NULL,
+     share      TEXT NOT NULL,
+     credit_usd REAL NOT NULL DEFAULT 0,
+     user_usd   REAL NOT NULL DEFAULT 0,
+     PRIMARY KEY (week_start, share)
    )`,
   `CREATE TABLE IF NOT EXISTS provider_probes (
      id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,6 +80,8 @@ export interface ProviderCharge {
   isAdmin?: boolean;
   paid?: boolean;
   internal?: boolean;
+  /** The model it was for (a request's or a probe's): its spend on this upstream, and with `ownCaps` the person's under "model:<id>". */
+  model?: string;
 }
 
 /** Adds a charge to a registry provider's week (and the person's, for a request); a no-op for OpenAI and Luminal. */
@@ -87,12 +102,23 @@ export function addProviderCharge(sql: Sql, charge: ProviderCharge): void {
     free ? charge.usd : 0,
     charge.internal ? charge.usd : 0,
   );
+  const model = charge.model !== undefined ? modelById(charge.model) : undefined;
+  if (model) {
+    sql.exec(
+      `INSERT INTO share_weeks (week_start, share, credit_usd, user_usd) VALUES (?, ?, ?, ?)
+       ON CONFLICT (week_start, share) DO UPDATE SET credit_usd = credit_usd + excluded.credit_usd, user_usd = user_usd + excluded.user_usd`,
+      week,
+      modelSpendKey(charge.provider, model.id),
+      charge.usd,
+      user ? charge.usd : 0,
+    );
+  }
   if (user) {
     sql.exec(
       `INSERT INTO provider_person_weeks (week_start, provider, github_id, usd) VALUES (?, ?, ?, ?)
        ON CONFLICT (week_start, provider, github_id) DO UPDATE SET usd = usd + excluded.usd`,
       week,
-      charge.provider,
+      model ? personSpendKey(model) : charge.provider,
       charge.githubId!,
       charge.usd,
     );
@@ -127,11 +153,33 @@ export function providerSpend(sql: Sql, now: number, legacy: LegacySpend): Provi
   return { usedUsd, weekUsd };
 }
 
-/** One person's spend on each registry provider this week. */
-export function personProviderWeek(sql: Sql, githubId: number, now: number): Partial<Record<ProviderId, number>> {
-  const out: Partial<Record<ProviderId, number>> = {};
+/** This week's spend by everyone but admins per model and upstream (`ProviderSpend.modelWeekUsd`), for the per-model weekly shares. */
+export function modelWeekSpend(sql: Sql, now: number): Partial<Record<string, number>> {
+  const out: Partial<Record<string, number>> = {};
+  for (const row of sql.exec<{ share: string; usd: number }>("SELECT share, user_usd AS usd FROM share_weeks WHERE week_start = ?", weekStart(now)).toArray()) {
+    out[row.share] = round(row.usd);
+  }
+  return out;
+}
+
+/**
+ * One person's spend this week on each registry provider, and under "model:<id>" on each model
+ * with its own cap (models.ts `ownCaps`), whichever upstream served it (providers.ts personSpendKey).
+ */
+export function personProviderWeek(sql: Sql, githubId: number, now: number): Partial<Record<string, number>> {
+  const out: Partial<Record<string, number>> = {};
   for (const row of sql.exec<{ provider: string; usd: number }>("SELECT provider, usd FROM provider_person_weeks WHERE week_start = ? AND github_id = ?", weekStart(now), githubId).toArray()) {
-    if (isRegistryProvider(row.provider)) out[row.provider] = round(row.usd);
+    if (isRegistryProvider(row.provider) || row.provider.startsWith("model:")) out[row.provider] = round(row.usd);
+  }
+  return out;
+}
+
+/** This week's spend on each model a registry provider serves: all of it, and everyone's but admins'. */
+export function modelWeeks(sql: Sql, provider: ProviderId, now: number): Map<string, { weekUsd: number; userWeekUsd: number }> {
+  const out = new Map<string, { weekUsd: number; userWeekUsd: number }>();
+  const prefix = modelSpendKey(provider, "");
+  for (const row of sql.exec<{ share: string; credit: number; user: number }>("SELECT share, credit_usd AS credit, user_usd AS user FROM share_weeks WHERE week_start = ?", weekStart(now)).toArray()) {
+    if (row.share.startsWith(prefix)) out.set(row.share.slice(prefix.length), { weekUsd: round(row.credit), userWeekUsd: round(row.user) });
   }
   return out;
 }
@@ -236,46 +284,62 @@ export function modelMeasures(sql: Sql, now: number): Map<string, ModelMeasure> 
   const since = now - DAY_MS;
   const out = new Map<string, ModelMeasure>();
   for (const model of FREE_MODELS) {
-    if (!(PROVIDER_IDS as readonly string[]).includes(model.provider)) continue;
-    const traffic = sql
-      .exec<{ at: number; ttft_ms: number | null; latency_ms: number | null; completion_tokens: number; upstream_error: number }>(
-        `SELECT at, ttft_ms, latency_ms, completion_tokens, upstream_error FROM requests
-         WHERE model = ? AND at >= ? AND upstream = ? AND status != 'abandoned' ORDER BY at DESC LIMIT ${TRAFFIC_SAMPLE}`,
-        model.id,
-        since,
-        model.provider,
-      )
-      .toArray();
-    if (traffic.length >= TRAFFIC_MIN_REQUESTS) {
-      const speeds = traffic
-        .filter((row) => row.upstream_error === 0 && row.ttft_ms !== null && row.latency_ms !== null && row.latency_ms > row.ttft_ms && row.completion_tokens >= SPEED_MIN_TOKENS)
-        .map((row) => (row.completion_tokens * 1000) / (row.latency_ms! - row.ttft_ms!));
-      const ttfts = traffic.filter((row) => row.upstream_error === 0 && row.ttft_ms !== null).map((row) => row.ttft_ms!);
-      out.set(model.id, {
-        tokensPerSecond: roundTo(median(speeds), 1),
-        ttftMs: roundTo(median(ttfts), 0),
-        successRate24h: roundTo(traffic.filter((row) => row.upstream_error === 0).length / traffic.length, 4),
-        measuredAt: traffic[0]!.at,
-      });
-      continue;
+    for (const { provider } of upstreamsOf(model)) {
+      if (!(PROVIDER_IDS as readonly string[]).includes(provider)) continue;
+      const measure = upstreamMeasure(sql, model.id, provider, since);
+      if (measure) out.set(measureKey(model.id, provider, model.provider), measure);
     }
-    const probes = sql
-      .exec<{ at: number; ok: number; ttft_ms: number | null; tokens_per_second: number | null }>(
-        "SELECT at, ok, ttft_ms, tokens_per_second FROM provider_probes WHERE model = ? AND at >= ? ORDER BY at DESC",
-        model.id,
-        since,
-      )
-      .toArray();
-    if (probes.length === 0) continue;
-    const good = probes.filter((row) => row.ok === 1);
-    out.set(model.id, {
-      tokensPerSecond: roundTo(median(good.map((row) => row.tokens_per_second).filter((value): value is number => value !== null)), 1),
-      ttftMs: roundTo(median(good.map((row) => row.ttft_ms).filter((value): value is number => value !== null)), 0),
-      successRate24h: roundTo(good.length / probes.length, 4),
-      measuredAt: probes[0]!.at,
-    });
   }
   return out;
+}
+
+/**
+ * The key of one upstream's measure in `modelMeasures`: the model id for its own provider, and
+ * "<id>@<provider>" for a backup upstream (GLM 5.3 Flash on Open Relay: "z-ai/glm-5.3-flash@openrelay").
+ */
+export function measureKey(modelId: string, provider: string, ownProvider: string): string {
+  return provider === ownProvider ? modelId : `${modelId}@${provider}`;
+}
+
+/** One upstream's measure of one model: its real traffic when there is enough, else its probes; undefined with neither. */
+function upstreamMeasure(sql: Sql, modelId: string, provider: string, since: number): ModelMeasure | undefined {
+  const traffic = sql
+    .exec<{ at: number; ttft_ms: number | null; latency_ms: number | null; completion_tokens: number; upstream_error: number }>(
+      `SELECT at, ttft_ms, latency_ms, completion_tokens, upstream_error FROM requests
+       WHERE model = ? AND at >= ? AND upstream = ? AND status != 'abandoned' ORDER BY at DESC LIMIT ${TRAFFIC_SAMPLE}`,
+      modelId,
+      since,
+      provider,
+    )
+    .toArray();
+  if (traffic.length >= TRAFFIC_MIN_REQUESTS) {
+    const speeds = traffic
+      .filter((row) => row.upstream_error === 0 && row.ttft_ms !== null && row.latency_ms !== null && row.latency_ms > row.ttft_ms && row.completion_tokens >= SPEED_MIN_TOKENS)
+      .map((row) => (row.completion_tokens * 1000) / (row.latency_ms! - row.ttft_ms!));
+    const ttfts = traffic.filter((row) => row.upstream_error === 0 && row.ttft_ms !== null).map((row) => row.ttft_ms!);
+    return {
+      tokensPerSecond: roundTo(median(speeds), 1),
+      ttftMs: roundTo(median(ttfts), 0),
+      successRate24h: roundTo(traffic.filter((row) => row.upstream_error === 0).length / traffic.length, 4),
+      measuredAt: traffic[0]!.at,
+    };
+  }
+  const probes = sql
+    .exec<{ at: number; ok: number; ttft_ms: number | null; tokens_per_second: number | null }>(
+      "SELECT at, ok, ttft_ms, tokens_per_second FROM provider_probes WHERE model = ? AND provider = ? AND at >= ? ORDER BY at DESC",
+      modelId,
+      provider,
+      since,
+    )
+    .toArray();
+  if (probes.length === 0) return undefined;
+  const good = probes.filter((row) => row.ok === 1);
+  return {
+    tokensPerSecond: roundTo(median(good.map((row) => row.tokens_per_second).filter((value): value is number => value !== null)), 1),
+    ttftMs: roundTo(median(good.map((row) => row.ttft_ms).filter((value): value is number => value !== null)), 0),
+    successRate24h: roundTo(good.length / probes.length, 4),
+    measuredAt: probes[0]!.at,
+  };
 }
 
 export function median(values: readonly number[]): number | null {

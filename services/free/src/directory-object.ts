@@ -13,9 +13,9 @@ import { healthData, type HealthData, type HealthWindow } from "./health-data.js
 import { adminHomeData, type AdminHomeData } from "./admin-home-data.js";
 import { providerCreditAlert, flaggedUseAlert, moderationAlert, milestoneCrossed, paymentAlert, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
-import { addProviderCharge, insertProbe, modelMeasures, personProviderWeek, probeHistory, PROVIDER_SCHEMA, providerSpend, providerWeeks, type ModelMeasure, type ProbeRecord } from "./provider-store.js";
-import { isRegistryProvider, PROVIDERS, providerSettings, REGISTRY_CREDIT_ALERT_SHARE, type ProviderConfig, type ProviderId, type ProviderSpend } from "./providers.js";
-import { DEEPSEEK_MODEL, familyOf, FREE_MODELS, type Family } from "./models.js";
+import { addProviderCharge, insertProbe, modelMeasures, modelWeekSpend, modelWeeks, personProviderWeek, probeHistory, PROVIDER_SCHEMA, providerSpend, providerWeeks, type ModelMeasure, type ProbeRecord } from "./provider-store.js";
+import { isRegistryProvider, modelWeeklyCap, PROVIDERS, providerModels, providerSettings, REGISTRY_CREDIT_ALERT_SHARE, type ProviderConfig, type ProviderId, type ProviderSpend } from "./providers.js";
+import { DEEPSEEK_MODEL, familyOf, FREE_MODELS, upstreamsOf, type Family } from "./models.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, trialBonuses, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
@@ -325,8 +325,8 @@ export interface Gate {
   person?: PersonState;
   /** Every provider's credit used, since the start and this week (providers.ts). */
   providerSpend: ProviderSpend;
-  /** The caller's spend on each registry provider this week, for the opt-in cap (with `githubId`). */
-  personProviderWeekUsd?: Partial<Record<ProviderId, number>>;
+  /** The caller's spend on each registry provider this week, and on each model with its own cap ("model:<id>"), for the per-person caps (with `githubId`). */
+  personProviderWeekUsd?: Partial<Record<string, number>>;
 }
 
 /** A registry provider's credit for GET /admin/providers: never shown publicly. */
@@ -346,6 +346,12 @@ export interface ProviderAdminView {
   freeWeekUsd: number | null;
   probeWeekUsd: number | null;
   probeTotalUsd: number | null;
+  /**
+   * Registry only: the models it serves, as their own upstream ("primary") or as a backup
+   * (GLM 5.3 Flash on Open Relay), whether they're on there, this week's spend on each (everyone,
+   * and everyone but admins) and the model's weekly share of this provider (`modelWeeklyCredit`).
+   */
+  models?: Array<{ id: string; name: string; role: "primary" | "backup"; on: boolean; weekUsd: number; userWeekUsd: number; weeklyShareUsd: number | null }>;
 }
 
 /** One Monday's admission from the queue. */
@@ -2384,7 +2390,7 @@ export class DirectoryObject extends DurableObject {
       waiting: this.#waitingCount(),
       overrides,
       ...(policy && githubId !== undefined ? { person: this.#personState(githubId, now, policy) } : {}),
-      providerSpend: providerSpend(this.ctx.storage.sql, now, spend),
+      providerSpend: { ...providerSpend(this.ctx.storage.sql, now, spend), modelWeekUsd: modelWeekSpend(this.ctx.storage.sql, now) },
       ...(githubId !== undefined ? { personProviderWeekUsd: personProviderWeek(this.ctx.storage.sql, githubId, now) } : {}),
     };
   }
@@ -2425,13 +2431,13 @@ export class DirectoryObject extends DurableObject {
     const policy = envPolicy ? this.#policy(envPolicy) : undefined;
     return this.ctx.storage.transactionSync(() => {
       insertProbe(this.ctx.storage.sql, probe);
-      if (probe.costUsd > 0) this.#recordInternalSpend({ upstream: probe.provider, tokens: probe.completionTokens ?? 0, cashUsd: 0, creditUsd: probe.costUsd, now: probe.at });
+      if (probe.costUsd > 0) this.#recordInternalSpend({ upstream: probe.provider, tokens: probe.completionTokens ?? 0, cashUsd: 0, creditUsd: probe.costUsd, now: probe.at, model: probe.model });
       return policy && probe.costUsd > 0 && isRegistryProvider(probe.provider) ? this.#registryCreditAlerts(probe.at, policy, probe.provider) : [];
     });
   }
 
   /** One person's spend on each registry provider this week (the opt-in caps). */
-  async personProviderWeek(githubId: number, now: number): Promise<Partial<Record<ProviderId, number>>> {
+  async personProviderWeek(githubId: number, now: number): Promise<Partial<Record<string, number>>> {
     return personProviderWeek(this.ctx.storage.sql, githubId, now);
   }
 
@@ -2455,6 +2461,7 @@ export class DirectoryObject extends DurableObject {
       const weekly = registry ? settings?.weeklyCreditUsd : spec.id === "openai" ? policy.openaiWeeklyCreditUsd : policy.luminalWeeklyCreditUsd;
       const usedUsd = used.usedUsd[spec.id] ?? 0;
       const weeks = registry ? providerWeeks(this.ctx.storage.sql, spec.id, now) : undefined;
+      const byModel = registry ? modelWeeks(this.ctx.storage.sql, spec.id, now) : undefined;
       return {
         id: spec.id,
         name: spec.name,
@@ -2469,6 +2476,19 @@ export class DirectoryObject extends DurableObject {
         freeWeekUsd: weeks ? weeks.freeWeekUsd : null,
         probeWeekUsd: weeks ? weeks.probeWeekUsd : null,
         probeTotalUsd: weeks ? weeks.probeTotalUsd : null,
+        ...(registry && settings && byModel
+          ? {
+              models: providerModels(spec.id).map((model) => ({
+                id: model.id,
+                name: model.name,
+                role: model.provider === spec.id ? ("primary" as const) : ("backup" as const),
+                on: settings.models.includes(model.id),
+                weekUsd: byModel.get(model.id)?.weekUsd ?? 0,
+                userWeekUsd: byModel.get(model.id)?.userWeekUsd ?? 0,
+                weeklyShareUsd: modelWeeklyCap(policy as unknown as ProviderConfig, model, spec.id) ?? null,
+              })),
+            }
+          : {}),
       };
     });
   }
@@ -2632,7 +2652,7 @@ export class DirectoryObject extends DurableObject {
       const openaiCredit = upstream === "openai" ? (record.creditUsd ?? 0) : 0;
       // A registry provider's credit (providers.ts) is kept in its own table, by week and person.
       const registryCredit = isRegistryProvider(upstream) ? (record.creditUsd ?? 0) : 0;
-      if (registryCredit > 0) addProviderCharge(this.ctx.storage.sql, { provider: upstream as ProviderId, at: record.at, usd: registryCredit, githubId: record.githubId, isAdmin: record.isAdmin, paid: record.paid === true });
+      if (registryCredit > 0) addProviderCharge(this.ctx.storage.sql, { provider: upstream as ProviderId, at: record.at, usd: registryCredit, githubId: record.githubId, isAdmin: record.isAdmin, paid: record.paid === true, model: record.model });
       this.ctx.storage.sql.exec(
         `INSERT INTO spend_weeks (week_start, usd, tokens, requests, admin_usd, admin_tokens, admin_requests, paid_usd, paid_tokens, paid_requests, credit_usd, free_credit_usd, openai_credit_usd, openai_free_credit_usd)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2854,8 +2874,23 @@ export class DirectoryObject extends DurableObject {
     if (used < balance * REGISTRY_CREDIT_ALERT_SHARE) return [];
     if (!this.#markAlert(`provider-credit:${provider}:${balance}:80`, now)) return [];
     const spec = PROVIDERS.find((entry) => entry.id === provider)!;
-    // A provider whose models have a fallback (Open Relay's GLM 5.3 Flash → DeepSeek) hands over at 100% rather than refusing.
-    const fallsBack = FREE_MODELS.some((model) => model.provider === provider && model.fallback !== undefined);
+    // What happens at 100%, per model that is on here: a model with another upstream moves there
+    // (GLM 5.3 Flash: Liquid ↔ Open Relay), then to its fallback; one with only a fallback hands
+    // over to it; any other is hidden (402 provider_limit).
+    const on = providerModels(provider).filter((model) => (isRegistryProvider(provider) ? providerSettings(policy as unknown as ProviderConfig, provider).models.includes(model.id) : true));
+    const elsewhere = (model: (typeof on)[number]) => upstreamsOf(model).filter((upstream) => upstream.provider !== provider).map((upstream) => PROVIDERS.find((entry) => entry.id === upstream.provider)?.name ?? upstream.provider);
+    if (on.some((model) => elsewhere(model).length > 0)) {
+      const lines = on.map((model) => {
+        const others = elsewhere(model);
+        const fallback = model.fallback ? FREE_MODELS.find((entry) => entry.id === model.fallback)?.name : undefined;
+        if (others.length > 0) return `${model.name} moves to ${others.join(" or ")}${fallback ? `, then ${fallback}` : ""}`;
+        if (fallback) return `${model.name} falls back to ${fallback}`;
+        return `${model.name} is hidden and requests for it get 402 provider_limit with DeepSeek as the alternative`;
+      });
+      return [providerCreditAlert({ ...spec, atFull: `At 100%: ${lines.join("; ")}.` }, used, balance)];
+    }
+    // A provider whose models have a fallback (GLM 5.3 Flash → DeepSeek) hands over at 100% rather than refusing.
+    const fallsBack = on.some((model) => model.fallback !== undefined);
     return [providerCreditAlert({ ...spec, fallsBack }, used, balance)];
   }
 
@@ -2973,8 +3008,8 @@ export class DirectoryObject extends DurableObject {
    * An internal model call's cost (use descriptions, moderation reviews): the internal spend
    * bucket and the provider's credit it used, never a person's allowance or the free caps.
    */
-  #recordInternalSpend(input: { upstream: Upstream; tokens: number; cashUsd: number; creditUsd: number; now: number }): void {
-    if (isRegistryProvider(input.upstream)) addProviderCharge(this.ctx.storage.sql, { provider: input.upstream, at: input.now, usd: input.creditUsd, internal: true });
+  #recordInternalSpend(input: { upstream: Upstream; tokens: number; cashUsd: number; creditUsd: number; now: number; model?: string }): void {
+    if (isRegistryProvider(input.upstream)) addProviderCharge(this.ctx.storage.sql, { provider: input.upstream, at: input.now, usd: input.creditUsd, internal: true, ...(input.model ? { model: input.model } : {}) });
     const luminal = input.upstream === "luminal" ? input.creditUsd : 0;
     const openai = input.upstream === "openai" ? input.creditUsd : 0;
     this.ctx.storage.sql.exec(

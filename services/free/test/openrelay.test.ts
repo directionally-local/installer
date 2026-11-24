@@ -3,13 +3,14 @@ import assert from "node:assert/strict";
 import type { DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, createService, luminalUsage, MODEL, openRelayCompletion, openRelayStream, openRelayUsage, sse, type Service } from "./harness.js";
 import { readFreeConfig } from "../src/config.js";
-import { modelById } from "../src/models.js";
+import { modelById, upstreamsOf } from "../src/models.js";
 import { PROBE_CRON, PROBE_MAX_TOKENS, PROBE_PROMPT } from "../src/probes.js";
 import { approxTokens, openRelayCharge, providerSettings, registryBlock } from "../src/providers.js";
 import { signatureHeader } from "../src/stripe.js";
 
 /**
- * Open Relay (providers.ts), the registry provider that serves GLM 5.3 Flash free for everyone:
+ * Open Relay (providers.ts), GLM 5.3 Flash's backup upstream (after Liquid Inference; see
+ * glm-upstreams.test.ts). Here Liquid has no key, so Open Relay is GLM 5.3 Flash's only upstream:
  * paused by default, its shape on the wire, its reported cost charged to its credit, the
  * per-person weekly cap on every plan, DeepSeek past a limit (Autopilot switches itself on the
  * 402; another agent launched by dl is served DeepSeek), and what /v1/models, /v1/me,
@@ -63,11 +64,15 @@ async function opencodeKey(service: Service, token: string): Promise<string> {
 }
 
 describe("Open Relay: settings and defaults", () => {
-  it("is paused, $200 of credit, $25 a week, every plan, not opt-in, $0.50 a person a week, GLM 5.3 Flash on", () => {
+  it("is paused, $200 of credit, $25 a week, every plan, not opt-in, GLM 5.3 Flash on as its backup upstream", () => {
     const config = readFreeConfig({ ...BASE_ENV });
     assert.deepEqual(providerSettings(config, "openrelay"), { status: "paused", creditUsd: 200, weeklyCreditUsd: 25, optIn: false, personWeeklyUsd: 0.5, plans: "all", models: [GLM_FLASH] });
     const glm = modelById(GLM_FLASH)!;
-    assert.deepEqual({ provider: glm.provider, upstream: glm.upstreamModel, family: glm.family, pool: glm.pool, line: glm.line, context: glm.contextWindow, fallback: glm.fallback }, { provider: "openrelay", upstream: "openrelay/glm-5.3-flash", family: "deepseek", pool: "deepseek", line: "glm", context: 262_144, fallback: MODEL });
+    assert.deepEqual({ family: glm.family, pool: glm.pool, line: glm.line, context: glm.contextWindow, fallback: glm.fallback }, { family: "deepseek", pool: "deepseek", line: "glm", context: 262_144, fallback: MODEL });
+    // Liquid first, then Open Relay.
+    assert.deepEqual(upstreamsOf(glm).map((upstream) => [upstream.provider, upstream.upstreamModel]), [["liquid", "glm-5.3-flash"], ["openrelay", "openrelay/glm-5.3-flash"]]);
+    // $0.50 a person a week, its own cap across both upstreams.
+    assert.equal(config["modelPersonWeeklyUsd.glm-5.3-flash"], 0.5);
     // About 15M tokens a week at the ration mix (mostly cache reads).
     assert.equal(approxTokens(glm, 0.5), 15_000_000);
   });
@@ -82,6 +87,8 @@ describe("Open Relay: settings and defaults", () => {
     const config = readFreeConfig({ ...BASE_ENV, ...ON });
     const glm = modelById(GLM_FLASH)!;
     const spend = { usedUsd: {}, weekUsd: {} };
+    // The cap is GLM 5.3 Flash's own (modelPersonWeeklyUsd.glm-5.3-flash), whatever Open Relay's says.
+    assert.equal(registryBlock({ ...config, "providerPersonWeeklyUsd.openrelay": 0.01 }, glm, spend, 0.49, "free"), undefined);
     assert.equal(registryBlock(config, glm, spend, 0.49, "free"), undefined);
     assert.equal(registryBlock(config, glm, spend, 0.5, "free"), "person_cap");
     assert.equal(registryBlock(config, glm, spend, 0.5, "pro"), "person_cap");
@@ -151,8 +158,22 @@ describe("Open Relay: routing", () => {
     assert.ok(Math.abs(credits[2]! - 0.045) < 1e-9);
   });
 
-  it("passes 429, 502 and 503 back as transient, retryable, with no other model", async () => {
+  it("on 429, 502 and 503 retries on DeepSeek, its fallback, before anything reaches the client", async () => {
     const { service, token } = await member(ON);
+    for (const status of [429, 502, 503]) {
+      service.setOpenRelay(() => Response.json({ error: { type: "rate_limit_error" } }, { status, headers: { "retry-after": "7" } }));
+      const response = await chat(service, token, GLM_FLASH);
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("x-dl-fallback"), MODEL);
+    }
+    assert.equal(service.calls.luminal.length, 3);
+    const rows = db(service).prepare("SELECT model, upstream, status, credit_usd FROM requests ORDER BY id").all() as Array<Record<string, any>>;
+    assert.deepEqual(rows.map((row) => [row.model, row.upstream, row.status]).slice(0, 2), [[GLM_FLASH, "openrelay", "upstream_busy"], [MODEL, "luminal", "ok"]]);
+    assert.equal(rows[0]!.credit_usd, 0);
+  });
+
+  it("passes 429, 502 and 503 back as transient when DeepSeek can't serve either", async () => {
+    const { service, token } = await member({ ...ON, LUMINAL_API_KEY: "", OPENROUTER_API_KEY: "" });
     for (const status of [429, 502, 503]) {
       service.setOpenRelay(() => Response.json({ error: { type: "rate_limit_error" } }, { status, headers: { "retry-after": "7" } }));
       const response = await chat(service, token, GLM_FLASH);
@@ -200,7 +221,7 @@ describe("Open Relay: what the endpoints say", () => {
 
 describe("Open Relay: past a limit, DeepSeek", () => {
   it("person cap: Autopilot gets 402 with the reset day and DeepSeek as the alternative; the cap leaves /v1/models", async () => {
-    const { service, token, admin } = await member({ ...ON, OPENRELAY_PERSON_WEEKLY_USD: "0.00002" });
+    const { service, token, admin } = await member({ ...ON, GLM_5_3_FLASH_PERSON_WEEKLY_USD: "0.00002" });
     assert.equal((await chat(service, token, GLM_FLASH)).status, 200);
     const capped = await chat(service, token, GLM_FLASH);
     assert.equal(capped.status, 402);
@@ -223,7 +244,7 @@ describe("Open Relay: past a limit, DeepSeek", () => {
   });
 
   it("person cap: another agent launched by dl is served DeepSeek, with x-dl-fallback and a line saying when GLM is back", async () => {
-    const { service, token } = await member({ ...ON, OPENRELAY_PERSON_WEEKLY_USD: "0.00002" });
+    const { service, token } = await member({ ...ON, GLM_5_3_FLASH_PERSON_WEEKLY_USD: "0.00002" });
     const key = await opencodeKey(service, token);
     assert.equal((await chat(service, key, GLM_FLASH)).status, 200);
     const served = await chat(service, key, GLM_FLASH);
@@ -237,7 +258,7 @@ describe("Open Relay: past a limit, DeepSeek", () => {
   });
 
   it("weekly budget: everyone falls back until Monday; admins' spend is left out of it", async () => {
-    const { service, token, admin } = await member({ ...ON, OPENRELAY_WEEKLY_CREDIT_USD: "0.00004", OPENRELAY_PERSON_WEEKLY_USD: "none" });
+    const { service, token, admin } = await member({ ...ON, OPENRELAY_WEEKLY_CREDIT_USD: "0.00004", GLM_5_3_FLASH_PERSON_WEEKLY_USD: "none" });
     assert.equal((await chat(service, admin, GLM_FLASH)).status, 200);
     assert.equal((await chat(service, token, GLM_FLASH)).status, 200);
     assert.equal((await chat(service, token, GLM_FLASH)).status, 200);
@@ -253,12 +274,12 @@ describe("Open Relay: past a limit, DeepSeek", () => {
     assert.equal(pub.providers.find((provider) => provider.id === "openrelay")!.models[0].status, "paused");
   });
 
-  it("out of credit: the 80% alert says DeepSeek takes over, and at 100% it does", async () => {
-    const { service, token } = await member({ ...ON, OPENRELAY_CREDIT_USD: "0.00004", OPENRELAY_PERSON_WEEKLY_USD: "none" });
+  it("out of credit: the 80% alert says where GLM goes, and at 100% (no Liquid here) DeepSeek serves", async () => {
+    const { service, token } = await member({ ...ON, OPENRELAY_CREDIT_USD: "0.00004", GLM_5_3_FLASH_PERSON_WEEKLY_USD: "none" });
     assert.equal((await chat(service, token, GLM_FLASH)).status, 200);
     assert.equal((await chat(service, token, GLM_FLASH)).status, 200);
     const texts = service.calls.webhooks.map((hook) => String(hook.body.text));
-    assert.ok(texts.some((text) => text.includes("Open Relay credit used") && text.includes("At 100% DeepSeek serves requests for its models instead.") && text.includes("providerCredit.openrelay")), texts.join("\n"));
+    assert.ok(texts.some((text) => text.includes("Open Relay credit used") && text.includes("At 100%: GLM 5.3 Flash moves to Liquid Inference, then DeepSeek V4.1 Flash 1017.") && text.includes("providerCredit.openrelay")), texts.join("\n"));
     const refused = await errorOf(await chat(service, token, GLM_FLASH));
     assert.deepEqual({ reason: refused.reason, resetsAt: refused.resetsAt, alternative: refused.alternative }, { reason: "out_of_credit", resetsAt: null, alternative: MODEL });
     const key = await opencodeKey(service, token);
@@ -292,7 +313,7 @@ describe("Open Relay: dl Pro", () => {
 
   it("spends the one open-models budget, so Pro's 4x covers GLM 5.3 Flash like DeepSeek", async () => {
     // A $0.50 free open-models week, so Pro's is $2; each GLM request here costs $0.60 of it.
-    const { service, token } = await member({ ...BILLING, ...ON, DEEPSEEK_WEEKLY_USD_CAP: "0.5", OPENRELAY_PERSON_WEEKLY_USD: "none" });
+    const { service, token } = await member({ ...BILLING, ...ON, DEEPSEEK_WEEKLY_USD_CAP: "0.5", GLM_5_3_FLASH_PERSON_WEEKLY_USD: "none" });
     await makePro(service, 100);
     service.setOpenRelay(() => openRelayCompletion(openRelayUsage(0, 3_333_334), 1000));
     const budget = async () => (await me(service, token)).budgets.deepseek as { spentUsd: number; usdPerWeek: number };

@@ -18,6 +18,7 @@ import { signatureHeader } from "../src/stripe.js";
 
 const KIMI = "moonshotai/kimi-k3.1-pro";
 const GLM = "z-ai/glm-5.3";
+const GLM_FLASH = "z-ai/glm-5.3-flash";
 const LIQUID_KEY = "sk-architect-test-secret";
 const HOOK = "https://alerts.test/hook";
 /** Liquid with a key and on, for every plan (the Pro-only default has its own tests below). */
@@ -124,14 +125,14 @@ describe("provider registry: OpenAI and Luminal unchanged", () => {
     assert.equal((await errorOf(refused)).code, "model_not_allowed");
   });
 
-  it("puts Kimi and GLM in the open-models budget, GLM off by default", () => {
-    for (const id of [KIMI, GLM]) {
+  it("puts Kimi and GLM in the open-models budget, GLM 5.3 off by default, GLM 5.3 Flash on", () => {
+    for (const id of [KIMI, GLM, GLM_FLASH]) {
       const model = modelById(id)!;
       assert.equal(model.provider, "liquid");
       assert.equal(model.family, "deepseek", `${id} spends the open-models budget`);
       assert.equal(model.pool, "deepseek");
     }
-    assert.deepEqual(providerSettings(readFreeConfig(BASE_ENV), "liquid").models, [KIMI]);
+    assert.deepEqual(providerSettings(readFreeConfig(BASE_ENV), "liquid").models, [KIMI, GLM_FLASH]);
     assert.deepEqual(new Set(FREE_MODELS.map((model) => model.family)), new Set(["gpt6", "deepseek"]), "no new budget");
   });
 });
@@ -561,9 +562,8 @@ describe("speed probes", () => {
     const at = Date.parse("2026-11-04T13:00:00.000Z");
     service.clock.now = at;
     await scheduled(service, PROBE_CRON, at);
-    assert.equal(service.calls.liquid.length, 1);
+    assert.deepEqual(service.calls.liquid.map((call) => call.body.model), ["kimi-k3.1-pro", "glm-5.3-flash"]);
     const probe = service.calls.liquid[0]!.body;
-    assert.equal(probe.model, "kimi-k3.1-pro");
     assert.equal(probe.max_tokens, PROBE_MAX_TOKENS);
     assert.equal(probe.stream, true);
     assert.deepEqual(probe.messages, [{ role: "user", content: PROBE_PROMPT }]);
@@ -581,9 +581,9 @@ describe("speed probes", () => {
     assert.equal((db(service).prepare("SELECT COUNT(*) AS n FROM requests").get() as { n: number }).n, 0);
     const view = (await (await service.request("GET", "/v1/admin/providers", { token: admin })).json()) as { providers: Array<Record<string, any>>; probes: Array<Record<string, any>> };
     const liquid = view.providers.find((provider) => provider.id === "liquid")!;
-    assert.equal(liquid.usedUsd, 0.001);
-    assert.equal(liquid.probeWeekUsd, 0.001);
-    assert.equal(liquid.leftUsd, 99.999);
+    assert.equal(liquid.usedUsd, 0.002);
+    assert.equal(liquid.probeWeekUsd, 0.002);
+    assert.equal(liquid.leftUsd, 99.998);
     assert.equal(view.probes.length, rows.length);
     // The public endpoint shows the probe's numbers while there's no real traffic.
     const pub = (await (await service.request("GET", "/v1/providers", { ip: ip() })).json()) as { providers: Array<{ id: string; models: Array<Record<string, any>> }> };
@@ -655,6 +655,20 @@ describe("GET /v1/providers", () => {
           family: "kimi",
           contextWindow: 1_048_576,
           access: "opt-in",
+          clients: ["autopilot", "opencode", "pi"],
+          status: "on",
+          tokensPerSecond: null,
+          ttftMs: null,
+          successRate24h: null,
+          measuredAt: null,
+        },
+        {
+          // Free for everyone on Liquid, whose other model is Pro-only; no backup without Open Relay's key.
+          id: GLM_FLASH,
+          name: "GLM 5.3 Flash",
+          family: "glm",
+          contextWindow: 262_144,
+          access: "free",
           clients: ["autopilot", "opencode", "pi"],
           status: "on",
           tokensPerSecond: null,

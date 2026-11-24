@@ -55,7 +55,7 @@ import {
 } from "./messages.js";
 import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, shell, signedInDonePage, tooNewIntro } from "./pages.js";
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, MIN_OUTPUT_TOKENS, parseUsage, type Usage } from "./quota.js";
-import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FAMILIES, FREE_MODELS, POOLS, creditPrices, fallbackOf, familyOfPool, modelById, type Family, type FreeModel, type Pool } from "./models.js";
+import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FAMILIES, FREE_MODELS, POOLS, creditPrices, fallbackOf, familyOfPool, modelById, onUpstream, type Family, type FreeModel, type Pool } from "./models.js";
 import { emailBlocked, emailDomain, normalizeEmail, plausibleEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
 import {
   ACCESS_REQUEST_PATH,
@@ -86,9 +86,10 @@ import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-con
 import { EMBARGO_MESSAGE, GPT6_COUNTRY_MESSAGE, GPT6_COUNTRY_REASON, gpt6CountryAllowed, isEmbargoed, requestCountry, type CountryRules } from "./countries.js";
 import { AUTOPILOT_ONLY_MESSAGE, AUTOPILOT_ONLY_REASON, heldFromClient, modelClients, type ModelClient } from "./gpt6-clients.js";
 import { meterStream } from "./sse.js";
-import type { RegistryProviderId } from "./providers.js";
-import { accessOf, approxTokens, offeredModels, exchangeUsage, mergedUsage, exchangeRules, FALLBACK_BLOCKS, isRegistryProvider, formatRationTokens, liquidPayload, openRelayPayload, personCapped, proOnly, providerFallbackNotice, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, reportedCharge, resetDay, type ProviderBlock, type ProviderSpend } from "./providers.js";
+import type { RegistryProviderId, RegistryRoute } from "./providers.js";
+import { accessOf, approxTokens, configuredUpstreams, offeredModels, exchangeUsage, mergedUsage, exchangeRules, FALLBACK_BLOCKS, isRegistryProvider, formatRationTokens, listedUpstream, liquidPayload, modelPlans, openRelayPayload, personCapUsd, personSpendKey, proOnly, providerFallbackNotice, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, registryRoute, reportedCharge, resetDay, upstreamBlock, type ProviderBlock, type ProviderSpend } from "./providers.js";
 import { PROBE_CRON, probeOnce, probeTargets } from "./probes.js";
+import { measureKey } from "./provider-store.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
 import { anthropicError, errorStatus, estimateInputTokens, toAnthropicMessage, toAnthropicStream, toChatRequest } from "./anthropic.js";
 import { DAY_MS, isoDay, weekEnd, weekStart } from "./week.js";
@@ -931,8 +932,17 @@ function providerExhausted(provider: Upstream, config: FreeConfig, gate: Provide
  * undefined. Admins skip the opt-in cap; nothing else.
  */
 function blockFor(model: FreeModel, config: FreeConfig, gate: Pick<Runtime, "providerSpend" | "personProviderWeekUsd">, isAdmin: boolean, plan?: Plan): ProviderBlock | undefined {
-  if (!isRegistryProvider(model.provider)) return undefined;
-  return registryBlock(config, model, gate.providerSpend, isAdmin ? undefined : (gate.personProviderWeekUsd?.[model.provider] ?? 0), isAdmin ? undefined : plan);
+  return routeFor(model, config, gate, isAdmin, plan).block;
+}
+
+/**
+ * A registry model's upstreams that can serve this caller now, in order, and the block when none
+ * can or the caller can't use it (providers.ts registryRoute). The person's spend is the one their
+ * cap counts (personSpendKey: the model's own across upstreams, or the provider's).
+ */
+function routeFor(model: FreeModel, config: FreeConfig, gate: Pick<Runtime, "providerSpend" | "personProviderWeekUsd">, isAdmin: boolean, plan?: Plan): RegistryRoute {
+  if (!isRegistryProvider(model.provider)) return { upstreams: [] };
+  return registryRoute(config, model, gate.providerSpend, isAdmin ? undefined : (gate.personProviderWeekUsd?.[personSpendKey(model)] ?? 0), isAdmin ? undefined : plan);
 }
 
 /**
@@ -950,13 +960,13 @@ async function planForProviders(c: Ctx, config: FreeConfig, githubId: number, mo
  */
 function rationView(config: FreeConfig, model: FreeModel, weekUsd: Partial<Record<string, number>> | undefined, now: number) {
   if (!capped(config, model)) return null;
-  const ration = rationOf(config, model, weekUsd?.[model.provider] ?? 0);
+  const ration = rationOf(config, model, weekUsd?.[personSpendKey(model)] ?? 0);
   return ration ? { ...ration, resetsAt: new Date(weekEnd(now)).toISOString() } : null;
 }
 
-/** Whether a person's weekly use of a model is capped (providers.ts personCapped): Pro's ration, opt-in, or Open Relay's cap. */
+/** Whether a person's weekly use of a model is capped (providers.ts personCapUsd): Pro's ration, opt-in, or the model's own cap (GLM 5.3 Flash). */
 function capped(config: FreeConfig, model: FreeModel): boolean {
-  return isRegistryProvider(model.provider) && personCapped(model.provider, providerSettings(config, model.provider));
+  return isRegistryProvider(model.provider) && personCapUsd(config, model) !== undefined;
 }
 
 /** A provider's prepaid credit balance, for the pause alert. */
@@ -968,16 +978,19 @@ function providerCredit(provider: Upstream, config: FreeConfig): number {
  * The model and provider that serve: the requested model on its own provider when that has a
  * key and credit, else its fallback (any OpenAI model → DeepSeek on Luminal). DeepSeek can also
  * be served by OpenRouter, the old upstream, when Luminal has no key. Undefined when nothing can.
+ * A registry model is served by the first of its upstreams that can (GLM 5.3 Flash: Liquid, then
+ * Open Relay), `model` being it as that upstream serves it (models.ts onUpstream); `backups` are
+ * the others that can, in order, for a failure before anything reaches the client.
  */
 function servingModel(
   requested: FreeModel,
   gate: ProviderGate,
   config: FreeConfig,
-): { model: FreeModel; provider: Upstream; fallback: boolean } | undefined {
+): { model: FreeModel; provider: Upstream; fallback: boolean; backups?: RegistryProviderId[] } | undefined {
   const primary = config.primaryUpstream;
-  // A registry provider's model is served by that provider only, when it's on: never a fallback.
   if (isRegistryProvider(requested.provider)) {
-    return providerSettings(config, requested.provider).models.includes(requested.id) && providerReady(requested.provider, config, gate) ? { model: requested, provider: requested.provider, fallback: false } : undefined;
+    const [first, ...backups] = registryRoute(config, requested, gate.providerSpend ?? { usedUsd: {}, weekUsd: {} }).upstreams;
+    return first ? { model: onUpstream(requested, first), provider: first, fallback: false, backups } : undefined;
   }
   // The owner's explicit switch wins when that provider can serve this model.
   if (primary === "openrouter" && requested.provider === "luminal" && config.openRouterApiKey) return { model: requested, provider: "openrouter", fallback: false };
@@ -2045,6 +2058,21 @@ export interface PublicProviders {
       ttftMs: number | null;
       successRate24h: number | null;
       measuredAt: string | null;
+      /**
+       * The other upstreams that serve this model when this one can't (GLM 5.3 Flash under Liquid
+       * Inference: Open Relay), in the order they're tried, each with its own status and measured
+       * speed; absent for a model with one upstream. A model is listed once, under its first.
+       */
+      backups?: Array<{
+        provider: string;
+        name: string;
+        website: string;
+        status: "on" | "paused" | "out_of_credit";
+        tokensPerSecond: number | null;
+        ttftMs: number | null;
+        successRate24h: number | null;
+        measuredAt: string | null;
+      }>;
     }>;
   }>;
 }
@@ -2075,7 +2103,8 @@ function publicProviders(gate: Runtime, measures: Record<string, { tokensPerSeco
   for (const spec of PROVIDERS) {
     if (providerKey(config, spec.id) === undefined) continue;
     const settings = providerSettings(config, spec.id);
-    const models = providerModels(spec.id).filter((model) => settings.models.includes(model.id));
+    // A registry model is listed under the first upstream it's configured on (listedUpstream).
+    const models = providerModels(spec.id).filter((model) => (isRegistryProvider(model.provider) ? listedUpstream(config, model) === spec.id : settings.models.includes(model.id)));
     if (models.length === 0) continue;
     providers.push({
       id: spec.id,
@@ -2084,7 +2113,8 @@ function publicProviders(gate: Runtime, measures: Record<string, { tokensPerSeco
       url: `${spec.website}${spec.website.includes("?") ? "&" : "?"}${PROVIDER_UTM}`,
       logo: `/logos/${spec.id}.svg`,
       models: models.map((model) => {
-        const measure = measures[model.id];
+        const measure = measures[measureKey(model.id, spec.id, model.provider)];
+        const backups = isRegistryProvider(model.provider) ? configuredUpstreams(config, model).filter((provider) => provider !== spec.id) : [];
         return {
           id: model.id,
           name: model.name,
@@ -2097,6 +2127,21 @@ function publicProviders(gate: Runtime, measures: Record<string, { tokensPerSeco
           ttftMs: measure?.ttftMs ?? null,
           successRate24h: measure?.successRate24h ?? null,
           measuredAt: measure?.measuredAt != null ? new Date(measure.measuredAt).toISOString() : null,
+          ...(backups.length > 0 ? { backups: backups.map((provider) => {
+            const backup = providerSpec(provider);
+            const measured = measures[measureKey(model.id, provider, model.provider)];
+            const block = gate.paused ? "paused" : upstreamBlock(config, model, provider, gate.providerSpend);
+            return {
+              provider,
+              name: backup.name,
+              website: backup.website,
+              status: block === undefined ? ("on" as const) : block === "out_of_credit" ? ("out_of_credit" as const) : ("paused" as const),
+              tokensPerSecond: measured?.tokensPerSecond ?? null,
+              ttftMs: measured?.ttftMs ?? null,
+              successRate24h: measured?.successRate24h ?? null,
+              measuredAt: measured?.measuredAt != null ? new Date(measured.measuredAt).toISOString() : null,
+            };
+          }) } : {}),
         };
       }),
     });
@@ -2108,11 +2153,12 @@ function publicProviders(gate: Runtime, measures: Record<string, { tokensPerSeco
 function publicStatus(model: FreeModel, gate: Runtime): "on" | "paused" | "out_of_credit" {
   if (gate.paused) return "paused";
   const provider = model.provider as Upstream;
-  if (providerExhausted(provider, gate.config, gate)) return "out_of_credit";
+  // A registry model is on while any of its upstreams can serve it (registryRoute).
   if (isRegistryProvider(provider)) {
     const block = registryBlock(gate.config, model, gate.providerSpend);
     return block === undefined ? "on" : block === "out_of_credit" ? "out_of_credit" : "paused";
   }
+  if (providerExhausted(provider, gate.config, gate)) return "out_of_credit";
   return providerReady(provider, gate.config, gate) ? "on" : "paused";
 }
 
@@ -2241,7 +2287,7 @@ async function proModelsView(c: Ctx, config: FreeConfig, githubId: number, plan:
   const available = plan === "pro" || isAdmin;
   const weekUsd = available && !isAdmin ? await directory(c).personProviderWeek(githubId, c.now()) : undefined;
   return models.map((model) => {
-    const cap = providerSettings(config, model.provider as RegistryProviderId).personWeeklyUsd;
+    const cap = personCapUsd(config, model);
     const approxTokensPerWeek = cap === undefined ? null : approxTokens(model, cap);
     // Admins aren't held to it, so they get no ration.
     const ration = available && !isAdmin ? rationView(config, model, weekUsd, c.now()) : null;
@@ -2266,7 +2312,7 @@ async function cappedModelsView(c: Ctx, config: FreeConfig, githubId: number) {
   const isAdmin = c.config.adminGithubIds.has(githubId);
   const weekUsd = isAdmin ? undefined : await directory(c).personProviderWeek(githubId, c.now());
   return models.map((model) => {
-    const cap = providerSettings(config, model.provider as RegistryProviderId).personWeeklyUsd!;
+    const cap = personCapUsd(config, model)!;
     const approxTokensPerWeek = approxTokens(model, cap);
     const ration = isAdmin ? null : rationView(config, model, weekUsd, c.now());
     const fallback = model.fallback ? modelById(model.fallback) : undefined;
@@ -2279,7 +2325,8 @@ async function cappedModelsView(c: Ctx, config: FreeConfig, githubId: number) {
     return {
       id: model.id,
       name: model.name,
-      provider: model.provider,
+      // The upstream it's listed under (GLM 5.3 Flash: Liquid while it's configured, else Open Relay).
+      provider: listedUpstream(config, model) ?? model.provider,
       access: accessOf(config, model),
       usdPerWeek: cap,
       approxTokensPerWeek,
@@ -2575,7 +2622,7 @@ async function models(c: Ctx): Promise<Response> {
     data: listed.map((model) => ({
       id: model.id,
       object: "model",
-      owned_by: model.provider,
+      owned_by: isRegistryProvider(model.provider) ? (listedUpstream(config, model) ?? model.provider) : model.provider,
       name: model.name,
       context_window: model.contextWindow,
       max_output_tokens: model.maxOutputTokens,
@@ -3111,29 +3158,33 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // budget, or the person's cap: Autopilot gets the 402 below and switches itself (with its own
   // line); another agent launched by dl can't, so its fallback serves the request instead, with
   // `x-dl-fallback` and the reason in `x-dl-notice`.
+  // GLM 5.3 Flash has two upstreams (Liquid, then Open Relay): it's blocked only when neither can
+  // serve; the block names the upstream it is about. Its Pro-only rule and person cap are its own.
   const providerPlan = await planForProviders(c, gate.config, identity.githubId, [requested]);
-  const block = blockFor(requested, gate.config, gate, isAdmin, providerPlan);
+  const route = routeFor(requested, gate.config, gate, isAdmin, providerPlan);
+  const block = route.block;
   let effective = requested;
   let fallbackNotice: string | undefined;
   if (block) {
-    const spec = providerSpec(requested.provider as RegistryProviderId);
-    const settings = providerSettings(gate.config, spec.id);
+    const spec = providerSpec(route.blockProvider ?? (requested.provider as RegistryProviderId));
+    const cap = personCapUsd(gate.config, requested);
     const resetsAt = block === "weekly_budget" || block === "person_cap" ? new Date(weekEnd(c.now())).toISOString() : null;
     const backup = requested.fallback ? modelById(requested.fallback) : undefined;
     if (harness && backup && FALLBACK_BLOCKS.includes(block) && modelAvailable(backup, gate.config, gate)) {
       effective = backup;
-      const approx = settings.personWeeklyUsd !== undefined ? approxTokens(requested, settings.personWeeklyUsd) : undefined;
+      const approx = cap !== undefined ? approxTokens(requested, cap) : undefined;
       fallbackNotice = providerFallbackNotice(requested, block, spec.name, backup.name, { resetsAt, ...(approx !== undefined ? { approxTokensPerWeek: approx } : {}) });
     }
   }
   if (block && effective === requested) {
-    const spec = providerSpec(requested.provider as RegistryProviderId);
-    const settings = providerSettings(gate.config, spec.id);
+    const spec = providerSpec(route.blockProvider ?? (requested.provider as RegistryProviderId));
+    const plans = modelPlans(gate.config, requested);
+    const cap = personCapUsd(gate.config, requested);
     const resetsAt = block === "weekly_budget" || block === "person_cap" ? new Date(weekEnd(c.now())).toISOString() : null;
-    const pro = settings.plans === "pro" && (block === "pro_only" || block === "person_cap");
+    const pro = plans === "pro" && (block === "pro_only" || block === "person_cap");
     const upgrade = block === "pro_only" && gate.config.proOffered ? upgradeUrl(c) : null;
-    const approxTokensPerWeek = settings.personWeeklyUsd !== undefined ? approxTokens(requested, settings.personWeeklyUsd) : undefined;
-    const message = providerLimitMessage(requested, block, spec.name, settings.plans, { ...(approxTokensPerWeek !== undefined ? { approxTokensPerWeek } : {}), upgradeUrl: upgrade, resetsAt });
+    const approxTokensPerWeek = cap !== undefined ? approxTokens(requested, cap) : undefined;
+    const message = providerLimitMessage(requested, block, spec.name, plans, { ...(approxTokensPerWeek !== undefined ? { approxTokensPerWeek } : {}), upgradeUrl: upgrade, resetsAt });
     // The Pro-only refusal is a Pro prompt: counted as seen in Pro's funnel (once a person a day).
     if (upgrade) await countPro(c, "seen", identity.githubId);
     return apiError(
@@ -3438,30 +3489,48 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     return settled.allowance;
   };
 
-  /** One attempt on `model`, with a fresh reservation. OpenAI retries on its fallback when it can. */
-  const attempt = (model: FreeModel, provider: Upstream, res: Extract<typeof reservation, { ok: true }>): Promise<Response> => {
+  /**
+   * What to try next when an attempt fails before anything reaches the client (429, 5xx, a
+   * timeout, Liquid's "no eligible offer"): a registry model's other upstreams that can serve, in
+   * order (GLM 5.3 Flash: Open Relay after Liquid), then the model's fallback (DeepSeek) when its
+   * provider is ready. OpenAI's models have only the fallback.
+   */
+  const nextSteps = (model: FreeModel, backups: readonly RegistryProviderId[]): Step[] => {
+    const requestedModel = modelById(model.id)!;
+    const steps: Step[] = backups.map((provider) => ({ model: onUpstream(requestedModel, provider), provider, fallback: false }));
+    const backup = fallbackOf(model.id);
+    if (backup && providerReady(backup.provider, gate.config, gate)) steps.push({ model: backup, provider: backup.provider, fallback: true });
+    return steps;
+  };
+
+  /** A retry on the first of `steps`, with a fresh reservation, and the rest after it; undefined with none. */
+  const retryOn = (steps: readonly Step[]): (() => Promise<Response>) | undefined => {
+    const [next, ...rest] = steps;
+    if (!next) return undefined;
+    return async (): Promise<Response> => {
+      const again = await reserveFor(pool, next);
+      if (!again.ok) return apiError(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, { retryable: true }, quotaHeaders(again.allowance));
+      const response = await attempt(next.model, next.provider, again, rest);
+      if (!next.fallback) return response;
+      // Tell the client which model actually answered, so it can say so.
+      const headers = new Headers(response.headers);
+      if (!headers.has("x-dl-fallback")) headers.set("x-dl-fallback", next.model.id);
+      return new Response(response.body, { status: response.status, headers });
+    };
+  };
+
+  /** One attempt on `model`, with a fresh reservation; on a failure before any bytes, `then` in order (nextSteps). */
+  const attempt = (model: FreeModel, provider: Upstream, res: Extract<typeof reservation, { ok: true }>, then: readonly Step[] = []): Promise<Response> => {
     const settleFor: Settle = (usage, status, options) => settle(model, provider, res.reservationId, usage, status, options);
+    const retry = retryOn(then);
     if (provider === "openai") {
-      const backup = fallbackOf(model.id);
-      const retry =
-        backup && providerReady(backup.provider, gate.config, gate)
-          ? async (): Promise<Response> => {
-              const again = await reserveFor(pool, { model: backup, provider: backup.provider });
-              if (!again.ok) return apiError(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, { retryable: true }, quotaHeaders(again.allowance));
-              const response = await attempt(backup, backup.provider, again);
-              // Tell the client which model actually answered, so it can say so.
-              const headers = new Headers(response.headers);
-              headers.set("x-dl-fallback", backup.id);
-              return new Response(response.body, { status: response.status, headers });
-            }
-          : undefined;
       return openaiChat(c, { model, body, stream, maxTokens: res.maxTokens, user, sessionId, started, settle: settleFor, timeoutSeconds: gate.config.openaiFirstByteTimeoutSeconds, reservedAllowance: res.allowance, ...(retry ? { retry } : {}) });
     }
     if (provider === "openrelay") {
-      return openRelayChat(c, { model, body, stream, maxTokens: res.maxTokens, user, started, settle: settleFor, timeoutSeconds: gate.config.openrelayFirstByteTimeoutSeconds, reservedAllowance: res.allowance });
+      return openRelayChat(c, { model, body, stream, maxTokens: res.maxTokens, user, started, settle: settleFor, timeoutSeconds: gate.config.openrelayFirstByteTimeoutSeconds, reservedAllowance: res.allowance, ...(retry ? { retry } : {}) });
     }
     if (provider === "liquid") {
-      return liquidChat(c, { model, config: gate.config, body, stream, maxTokens: res.maxTokens, user, sessionId, started, settle: settleFor, timeoutSeconds: gate.config.liquidFirstByteTimeoutSeconds, reservedAllowance: res.allowance });
+      return liquidChat(c, { model, config: gate.config, body, stream, maxTokens: res.maxTokens, user, sessionId, started, settle: settleFor, timeoutSeconds: gate.config.liquidFirstByteTimeoutSeconds, reservedAllowance: res.allowance, ...(retry ? { retry } : {}) });
     }
     if (provider === "luminal") {
       return luminalChat(c, { model, body, stream, maxTokens: res.maxTokens, user, started, settle: settleFor, timeoutSeconds: gate.config.luminalFirstByteTimeoutSeconds, reservedAllowance: res.allowance });
@@ -3475,7 +3544,9 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     const task = describeUse(c, gate, { githubId: identity.githubId, sessionId: labelSession, client, input: useInput(body), user });
     if (c.background) c.background(task);
   }
-  const response = await attempt(serving.model, serving.provider, reservation);
+  // OpenAI's models and registry models retry on what nextSteps gives; Luminal and OpenRouter don't.
+  const retries = serving.provider === "openai" || isRegistryProvider(serving.provider) ? nextSteps(serving.model, serving.backups ?? []) : [];
+  const response = await attempt(serving.model, serving.provider, reservation, retries);
   const fellBackTo = serving.fallback ? serving.model.id : effective !== requested ? effective.id : undefined;
   if (!fellBackTo) return response;
   // The requested model's provider couldn't serve it, so its fallback did: say which, and why
@@ -3908,6 +3979,9 @@ type Settle = (
   options?: { chargeNothing?: boolean; ttfbMs?: number; ttftMs?: number; upstreamError?: boolean; outcome?: UpstreamOutcome; creditUsd?: number },
 ) => Promise<Allowance>;
 
+/** One more place to send a request that failed before any bytes: the model as `provider` serves it, and whether it is another model (the fallback). */
+type Step = { model: FreeModel; provider: Upstream; fallback: boolean };
+
 /**
  * One request to Luminal. There is no switch to OpenRouter on failure: a 429, a 5xx, no
  * response before the first-byte timeout, or a network error goes back to the client as a
@@ -3942,8 +4016,9 @@ async function luminalChat(
 /**
  * One request to Liquid Inference (providers.ts): the client's request as `liquidPayload` shapes
  * it, with the model's exchange rules. Failures go back as Luminal's do (transient, with
- * Retry-After); there is no fallback to another model. The credit is charged what the exchange
- * reports it charged, when it says.
+ * Retry-After), or with `retry` (a model with another upstream: GLM 5.3 Flash → Open Relay) go
+ * there; "no eligible offer" (400 `no_eligible_offer`) counts as such a failure. The credit is
+ * charged what the exchange reports it charged, when it says.
  */
 async function liquidChat(
   c: Ctx,
@@ -3959,6 +4034,7 @@ async function liquidChat(
     settle: Settle;
     timeoutSeconds: number;
     reservedAllowance: Allowance;
+    retry?: () => Promise<Response>;
   },
 ): Promise<Response> {
   const rules = exchangeRules(input.config, input.model)!;
@@ -3968,8 +4044,8 @@ async function liquidChat(
 
 /**
  * One request to Open Relay (providers.ts): the client's request as `openRelayPayload` shapes it.
- * Failures go back as Luminal's do (429, 502 and 503 are transient, with Retry-After); past a
- * limit the fallback is decided before this (see chat). The credit is charged the cost Open Relay
+ * Failures go back as Luminal's do (429, 502 and 503 are transient, with Retry-After), or with
+ * `retry` (GLM 5.3 Flash: DeepSeek) go there; past a limit the fallback is decided before this (see chat). The credit is charged the cost Open Relay
  * reports (`openrelay.cost_nano_usd`), else the usage at the model's prices; a stream cut off
  * before its last chunk isn't billed by Open Relay but is charged its usage-less reservation here.
  */
@@ -3985,23 +4061,30 @@ async function openRelayChat(
     settle: Settle;
     timeoutSeconds: number;
     reservedAllowance: Allowance;
+    retry?: () => Promise<Response>;
   },
 ): Promise<Response> {
   const payload = openRelayPayload(input.body, { model: input.model, maxTokens: input.maxTokens, stream: input.stream, user: input.user });
   return compatibleChat(c, { upstream: "openrelay", url: OPENRELAY_URL, key: c.config.openrelayApiKey, payload }, input);
 }
 
-/** One chat completions request to Luminal, Liquid or Open Relay, already in its shape. */
+/**
+ * One chat completions request to Luminal, Liquid or Open Relay, already in its shape. With
+ * `retry`, a failure before anything reaches the client (429, 5xx, a timeout or network error,
+ * Liquid's "no eligible offer", or the provider refusing the service's key) is settled as
+ * nothing charged and handed to it instead of going back.
+ */
 async function compatibleChat(
   c: Ctx,
   target: { upstream: "luminal" | "liquid" | "openrelay"; url: string; key: string | undefined; payload: Record<string, unknown> },
-  input: { stream: boolean; started: number; settle: Settle; timeoutSeconds: number; reservedAllowance: Allowance },
+  input: { stream: boolean; started: number; settle: Settle; timeoutSeconds: number; reservedAllowance: Allowance; retry?: () => Promise<Response> },
 ): Promise<Response> {
   const { stream, started, settle } = input;
   const { payload } = target;
 
   const transient = async (status: 429 | 503, code: string, message: string, retryAfterHeader: string | null, record: { status: string; outcome: UpstreamOutcome; ttfbMs?: number }) => {
     const allowance = await settle(undefined, record.status, { chargeNothing: true, upstreamError: true, outcome: record.outcome, ...(record.ttfbMs !== undefined ? { ttfbMs: record.ttfbMs } : {}) });
+    if (input.retry) return input.retry();
     const retryAfter = Math.max(1, Math.ceil(Number(retryAfterHeader)) || DEFAULT_RETRY_AFTER_S);
     return apiError(status, code, message, { retryAfter, retryable: true, upstream: target.upstream }, { ...quotaHeaders(allowance), "retry-after": String(retryAfter) });
   };
@@ -4029,8 +4112,14 @@ async function compatibleChat(
     const retryAfter = response.headers.get("retry-after");
     if (response.status === 429) return transient(429, "upstream_busy", UPSTREAM_BUSY_MESSAGE, retryAfter, { status: "upstream_busy", outcome: "rate_limited", ttfbMs });
     if (response.status >= 500) return transient(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, retryAfter, { status: "upstream_error", outcome: "error", ttfbMs });
+    // Liquid: no seller's offer passes the rules right now (live: 400, code `no_eligible_offer`).
+    if (target.upstream === "liquid" && noEligibleOffer(text)) return transient(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, retryAfter, { status: "upstream_no_offer", outcome: "error", ttfbMs });
     // A 4xx: the request itself (400), or the service's key or account (401, 402, 403).
     const ours = response.status === 401 || response.status === 402 || response.status === 403;
+    if (ours && input.retry) {
+      await settle(undefined, "upstream_error", { chargeNothing: true, ttfbMs, upstreamError: true });
+      return input.retry();
+    }
     const allowance = await settle(undefined, "upstream_error", { chargeNothing: true, ttfbMs, ...(ours ? { upstreamError: true } : {}) });
     return apiError(ours ? 502 : 400, "upstream_error", ours ? "The model provider refused the service's key. Try again later." : upstreamMessage(text), { upstreamStatus: response.status }, quotaHeaders(allowance));
   }
@@ -4064,6 +4153,12 @@ async function compatibleChat(
     status: 200,
     headers: { "content-type": contentType || "application/json", "cache-control": "no-store", ...quotaHeaders(allowance) },
   });
+}
+
+/** Whether a Liquid error body says no offer met the request's rules (`error.code` "no_eligible_offer"). */
+export function noEligibleOffer(text: string): boolean {
+  const parsed = parseJson(text) as { error?: { code?: unknown } } | undefined;
+  return parsed?.error?.code === "no_eligible_offer";
 }
 
 /**
