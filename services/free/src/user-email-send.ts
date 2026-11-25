@@ -1,7 +1,7 @@
 import { base64urlDecode, base64urlEncode } from "../../shared/src/auth.js";
 import type { FreeConfig } from "./config.js";
 import { renderUserEmail, resetsText, type PlanResetValues, type PlanWarningValues, type PlanWelcomeValues, type TrialEmailValues, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
-import { emailBudgetOf, type EmailBudget } from "./email-budget.js";
+import { classOfKind, emailBudgetOf, type EmailBudget, type EmailClass } from "./email-budget.js";
 import { DAY_MS, weekEnd, weekStart } from "./week.js";
 
 /**
@@ -9,6 +9,11 @@ import { DAY_MS, weekEnd, weekStart } from "./week.js";
  * by `userEmailTransport`: Cloudflare Email Service through the optional `send_email` binding
  * USER_EMAIL when it exists, else Resend's HTTP API with RESEND_API_KEY. With neither, nothing
  * is sent and nothing fails; the runtime setting `userEmails` turns them all off without a deploy.
+ * With both, `userEmailRoutes` splits them by class: codes and transactional mail stay on the
+ * binding, bulk mail (lifecycle kinds and broadcasts) goes through Resend while the runtime
+ * setting `broadcastEmailProvider` is "resend" (the default), counted against its own
+ * `resendBulkDailyMax` and never the binding's budget. A failed Resend send is never retried
+ * through the binding.
  *
  *   welcome      right after a new sign-up gives their email on the details step (app.ts)
  *   welcome_paid dl.new: right after a payment is claimed onto an account (paid-web.ts)
@@ -57,7 +62,7 @@ export type BroadcastClaim = Omit<UserEmailClaim, "kind"> & { kind: "broadcast" 
 
 /** The Directory's side (directory-object.ts). */
 export interface UserEmailStore {
-  claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean; dailyLimit?: number; budget?: EmailBudget }): Promise<UserEmailClaim | undefined>;
+  claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean; dailyLimit?: number; budget?: EmailBudget; budgetClass?: EmailClass }): Promise<UserEmailClaim | undefined>;
   finishUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; ok: boolean; now: number }): Promise<void>;
 }
 
@@ -86,6 +91,33 @@ export function userEmailTransport(binding: UserEmailBinding | undefined, config
   if (binding && typeof binding.send === "function") return { provider: "cloudflare", binding };
   if (config.resendApiKey !== undefined) return { provider: "resend", apiKey: config.resendApiKey, fetch: fetcher };
   return undefined;
+}
+
+/**
+ * The provider per class of email. `transactional` carries codes and transactional mail (and
+ * everything when there is one provider); `bulk` carries lifecycle mail and broadcasts, and
+ * `bulkClass` is the budget class bulk mail takes: "resend_bulk" when it goes through Resend
+ * beside the binding, else "bulk" (the binding's own budget, or Resend alone as before).
+ */
+export interface UserEmailRoutes {
+  transactional: UserEmailTransport | undefined;
+  bulk: UserEmailTransport | undefined;
+  bulkClass: "bulk" | "resend_bulk";
+}
+
+/** Bulk mail goes through Resend when the key is set beside the binding and `broadcastEmailProvider` is "resend". */
+export function userEmailRoutes(binding: UserEmailBinding | undefined, config: Pick<FreeConfig, "resendApiKey" | "broadcastEmailProvider">, fetcher: Fetch): UserEmailRoutes {
+  const transactional = userEmailTransport(binding, config, fetcher);
+  if (transactional?.provider === "cloudflare" && config.resendApiKey !== undefined && config.broadcastEmailProvider === "resend") {
+    return { transactional, bulk: { provider: "resend", apiKey: config.resendApiKey, fetch: fetcher }, bulkClass: "resend_bulk" };
+  }
+  return { transactional, bulk: transactional, bulkClass: "bulk" };
+}
+
+/** The transport and budget class for one email of `kind` ("broadcast" is bulk). */
+export function userEmailRoute(routes: UserEmailRoutes | undefined, kind: UserEmailKind | "broadcast"): { transport: UserEmailTransport | undefined; budgetClass: EmailClass } {
+  if (classOfKind(kind) === "transactional") return { transport: routes?.transactional, budgetClass: "transactional" };
+  return { transport: routes?.bulk, budgetClass: routes?.bulkClass ?? "bulk" };
 }
 
 /** Whether user emails go out at all: a provider, and the setting on. */
@@ -152,8 +184,13 @@ async function post(fetcher: Fetch, init: RequestInit): Promise<SendOutcome> {
   try {
     const response = await fetcher(RESEND_URL, { ...init, signal: controller.signal });
     await response.body?.cancel();
-    return response.ok ? { ok: true } : { ok: false, code: `http_${response.status}` };
-  } catch {
+    if (response.ok) return { ok: true };
+    // The status only: never the key, the address or the response body.
+    console.error(`resend send failed: http_${response.status}`);
+    return { ok: false, code: `http_${response.status}` };
+  } catch (error) {
+    const name = error instanceof Error && /^[A-Za-z0-9_]{1,64}$/.test(error.name) ? error.name : "error";
+    console.error(`resend send failed: ${name}`);
     return { ok: false, code: "network" };
   } finally {
     clearTimeout(timer);
@@ -223,7 +260,8 @@ export async function sendPlainEmail(
  */
 export async function deliverUserEmail(input: {
   store: UserEmailStore;
-  transport: UserEmailTransport | undefined;
+  /** The providers (userEmailRoutes): the kind's class picks one. */
+  routes: UserEmailRoutes | undefined;
   config: FreeConfig;
   signingKey: CryptoKey;
   base: string;
@@ -245,7 +283,8 @@ export async function deliverUserEmail(input: {
   /** Claim only while fewer than this many emails to users were claimed today (every kind). */
   dailyLimit?: number;
 }): Promise<"sent" | "failed" | "skipped"> {
-  const { config, transport } = input;
+  const { config } = input;
+  const { transport, budgetClass } = userEmailRoute(input.routes, input.kind);
   if (!transport || !userEmailsOn(config, transport)) return "skipped";
   let claim: UserEmailClaim | undefined;
   try {
@@ -259,6 +298,7 @@ export async function deliverUserEmail(input: {
       ...(input.retry ? { retry: true } : {}),
       ...(input.dailyLimit !== undefined ? { dailyLimit: input.dailyLimit } : {}),
       budget: emailBudgetOf(config),
+      budgetClass,
     });
   } catch {
     return "failed";

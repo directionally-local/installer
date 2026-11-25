@@ -4,7 +4,7 @@ import { ADMIN_ID, createService, NOW, startBrowserFlow, type Service } from "./
 import { policyOf } from "../src/queue.js";
 import { readFreeConfig } from "../src/config.js";
 import { broadcastCopyProblem, hasCapitals } from "../src/broadcast.js";
-import { bindingSender, userEmailTransport } from "../src/user-email-send.js";
+import { bindingSender, userEmailRoute, userEmailRoutes, userEmailTransport } from "../src/user-email-send.js";
 
 // After the harness: app.js loads cloudflare:workers, which the harness resolves.
 const { DIGEST_CRON } = await import("../src/app.js");
@@ -67,8 +67,8 @@ describe("emails to users through Cloudflare Email Service", () => {
     assert.equal(bindingSender("<sina@directionallylocal.com>"), "sina@directionallylocal.com");
   });
 
-  it("sends the welcome through the binding, not Resend, with the same copy, sender, reply-to and headers", async () => {
-    const s = await createService({ OPEN_ADMISSION: "true", RESEND_API_KEY: "re_test_key" }, { userEmail: true });
+  it("sends the welcome through the binding, not Resend, with the same copy, sender, reply-to and headers (broadcastEmailProvider cloudflare)", async () => {
+    const s = await createService({ OPEN_ADMISSION: "true", RESEND_API_KEY: "re_test_key", BROADCAST_EMAIL_PROVIDER: "cloudflare" }, { userEmail: true });
     const flow = await startBrowserFlow(s.request, { id: 200, login: "alice", email: "alice@work.example" });
     assert.match(flow.page, /signed in/);
     assert.equal(s.calls.resend.length, 0, "the binding wins over Resend");
@@ -194,8 +194,8 @@ describe("POST /admin/emails/broadcast", () => {
   const COPY = { subject: "a quick check-in", text: "hey,\n\nhow is dl going? reply to sina@directionallylocal.com or see https://dl.new/Docs.\n\nsina" };
 
   /** People signed up on different days and levels; the admin signed in. */
-  async function setup(): Promise<{ s: Service; admin: string }> {
-    const s = await createService({ OPEN_ADMISSION: "true" }, { userEmail: true });
+  async function setup(vars: Record<string, string> = {}): Promise<{ s: Service; admin: string }> {
+    const s = await createService({ OPEN_ADMISSION: "true", ...vars }, { userEmail: true });
     await s.signIn({ id: ADMIN_ID, login: "owner" });
     const actor = { githubId: ADMIN_ID, login: "owner", now: NOW };
     await admit(s, 500, "gail", Date.parse("2026-10-20T10:00:00Z")); // full
@@ -396,5 +396,125 @@ describe("POST /admin/emails/broadcast", () => {
     assert.equal((await s.request("POST", "/admin/config", { token: admin, body: { userEmails: false } })).status, 200);
     assert.equal((await broadcast(s, admin, { ...COPY, audience: "all", dryRun: false })).status, 409);
     assert.equal((await broadcast(s, admin, { ...COPY, audience: "all", dryRun: true })).status, 200);
+  });
+  describe("through Resend beside the binding (broadcastEmailProvider)", () => {
+    const RESEND = { RESEND_API_KEY: "re_test_key" };
+
+    function budgetRows(s: Service): Record<string, number> {
+      const all = [...s.namespaces.DIRECTORY!.instances.get("directory")!.state.db.prepare("SELECT class, n FROM email_budget_daily").all()] as Array<{ class: string; n: number }>;
+      return Object.fromEntries(all.map((row) => [row.class, row.n]));
+    }
+
+    it("sends broadcasts through Resend with the same stop link and List-Unsubscribe headers, counted apart from the binding's budget", async () => {
+      // The binding's bulk share is 0: a broadcast through Resend doesn't need it.
+      const { s, admin } = await setup({ ...RESEND, USER_EMAILS_DAILY_MAX: "0" });
+      const before = s.calls.userEmail.length;
+      const dry = await broadcast(s, admin, { ...COPY, audience: "all", dryRun: true });
+      assert.equal(dry.body.provider, "resend");
+      const result = await broadcast(s, admin, { ...COPY, audience: "all", dryRun: false });
+      assert.equal(result.status, 200);
+      assert.deepEqual([result.body.provider, result.body.sent, result.body.failed, result.body.remaining, result.body.stoppedBy], ["resend", 3, 0, 0, null]);
+      assert.equal(s.calls.userEmail.length, before, "nothing through the binding");
+      assert.deepEqual(s.calls.resend.map((call) => (call.body.to as string[])[0]), ["gail@example.com", "hal@example.com", "iris@example.com"]);
+      for (const call of s.calls.resend) {
+        assert.equal(call.headers.authorization, "Bearer re_test_key");
+        assert.match(call.headers["idempotency-key"]!, new RegExp(`^dl-broadcast-${result.body.id}-50[0-2]$`));
+        assert.equal(call.body.from, "sina <sina@directionallylocal.com>");
+        assert.equal(call.body.reply_to, "contact@directionallylocal.com");
+        assert.equal(call.body.subject, COPY.subject);
+        const headers = call.body.headers as Record<string, string>;
+        const link = /^<(.+)>$/.exec(headers["List-Unsubscribe"]!)![1]!;
+        assert.match(link, /\/email\/stop\?u=50[0-2]&t=/);
+        assert.equal(headers["List-Unsubscribe-Post"], "List-Unsubscribe=One-Click");
+        assert.equal(call.body.text, `${COPY.text}\n\ndon't want these? ${link}\n`);
+      }
+      assert.deepEqual(budgetRows(s), { resend_bulk: 3 }, "the binding's bulk and transactional counts are untouched");
+    });
+
+    it("stops at resendBulkDailyMax and carries on the next day", async () => {
+      const { s, admin } = await setup({ ...RESEND, RESEND_BULK_DAILY_MAX: "2" });
+      const first = await broadcast(s, admin, { ...COPY, audience: "all", dryRun: false });
+      assert.deepEqual([first.body.sent, first.body.remaining, first.body.stoppedBy], [2, 1, "daily_budget"]);
+      assert.equal(s.calls.resend.length, 2);
+      assert.equal((await broadcast(s, admin, { ...COPY, audience: "all", dryRun: false })).body.sent, 0, "no room left today");
+      // The setting changes at runtime like the others.
+      assert.equal((await s.request("POST", "/admin/config", { token: admin, body: { resendBulkDailyMax: 3 } })).status, 200);
+      const raised = await broadcast(s, admin, { ...COPY, audience: "all", dryRun: false });
+      assert.deepEqual([raised.body.sent, raised.body.remaining], [1, 0]);
+      assert.equal(budgetRows(s).resend_bulk, 3);
+      assert.equal(s.calls.userEmail.length, 0);
+    });
+
+    it("counts a refused Resend send as failed, never falls back to the binding, and stops at Resend's 429", async () => {
+      const { s, admin } = await setup(RESEND);
+      const errors: string[] = [];
+      const original = console.error;
+      console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+      try {
+        s.setResend((body) => ((body.to as string[])[0] === "gail@example.com" ? new Response("{}", { status: 403 }) : (body.to as string[])[0] === "hal@example.com" ? new Response("{}", { status: 429 }) : Response.json({ id: "ok" })));
+        const first = await broadcast(s, admin, { ...COPY, audience: "all", dryRun: false });
+        assert.deepEqual([first.body.provider, first.body.sent, first.body.failed, first.body.stoppedBy, first.body.remaining], ["resend", 0, 2, "http_429", 3]);
+      } finally {
+        console.error = original;
+      }
+      assert.equal(s.calls.userEmail.length, 0, "no fallback to the binding for bulk mail");
+      assert.ok(errors.some((line) => line.includes("resend send failed: http_403")));
+      assert.ok(errors.every((line) => !line.includes("re_test_key") && !line.includes("@example.com")), "never the key or an address");
+      assert.deepEqual(
+        rows(s).filter((row) => row.kind === "broadcast").map((row) => row.status),
+        ["failed", "failed"],
+      );
+      s.setResend(() => Response.json({ id: "ok" }));
+      const second = await broadcast(s, admin, { ...COPY, audience: "all", dryRun: false });
+      assert.deepEqual([second.body.sent, second.body.failed, second.body.remaining], [3, 0, 0]);
+    });
+
+    it("goes back to the binding with broadcastEmailProvider cloudflare (POST /admin/config), against the binding's bulk share", async () => {
+      const { s, admin } = await setup(RESEND);
+      assert.equal((await s.request("POST", "/admin/config", { token: admin, body: { broadcastEmailProvider: "mailgun" } })).status, 400);
+      assert.equal((await s.request("POST", "/admin/config", { token: admin, body: { broadcastEmailProvider: "cloudflare" } })).status, 200);
+      const result = await broadcast(s, admin, { ...COPY, audience: "all", dryRun: false });
+      assert.deepEqual([result.body.provider, result.body.sent], ["cloudflare", 3]);
+      assert.equal(s.calls.resend.length, 0);
+      assert.equal(s.calls.userEmail.length, 3);
+      assert.deepEqual(budgetRows(s), { bulk: 3 });
+    });
+
+    it("sends lifecycle mail through Resend and transactional mail through the binding", async () => {
+      const { s, admin } = await setup(RESEND);
+      // The welcome (lifecycle, bulk) through Resend.
+      await startBrowserFlow(s.request, { id: 520, login: "nia", email: "nia@example.com" });
+      assert.deepEqual(s.calls.resend.map((call) => (call.body.to as string[])[0]), ["nia@example.com"]);
+      assert.match((s.calls.resend[0]!.body.headers as Record<string, string>)["List-Unsubscribe"]!, /\/email\/stop\?u=520&t=/);
+      assert.equal(s.calls.userEmail.length, 0);
+      assert.equal(budgetRows(s).resend_bulk, 1);
+      // The admin's test email takes the provider the real one would: typed copy as a broadcast, a kind by its class.
+      const typed = await s.request("POST", "/admin/emails/test", { token: admin, body: { subject: "hi", text: "hey", to: "me@example.org" } });
+      assert.equal(((await typed.json()) as { provider: string }).provider, "resend");
+      const granted = await s.request("POST", "/admin/emails/test", { token: admin, body: { kind: "access_granted", to: "me@example.org" } });
+      assert.equal(((await granted.json()) as { provider: string }).provider, "cloudflare");
+      assert.equal(s.calls.userEmail.at(-1)!.to, "me@example.org");
+    });
+
+    it("routes per class: bulk to Resend only beside the binding with the setting on", () => {
+      const binding = { send: async () => ({ messageId: "x" }) };
+      const fetcher = async () => new Response();
+      const both = userEmailRoutes(binding, { resendApiKey: "re_key", broadcastEmailProvider: "resend" }, fetcher);
+      assert.deepEqual([both.transactional?.provider, both.bulk?.provider, both.bulkClass], ["cloudflare", "resend", "resend_bulk"]);
+      assert.deepEqual([userEmailRoute(both, "broadcast").transport?.provider, userEmailRoute(both, "broadcast").budgetClass], ["resend", "resend_bulk"]);
+      for (const kind of ["welcome", "weekly_reset", "plan_reset", "gone_quiet"] as const) assert.equal(userEmailRoute(both, kind).transport?.provider, "resend", kind);
+      for (const kind of ["welcome_paid", "plan_80", "access_granted", "trial_converted"] as const) {
+        assert.deepEqual([userEmailRoute(both, kind).transport?.provider, userEmailRoute(both, kind).budgetClass], ["cloudflare", "transactional"], kind);
+      }
+      const off = userEmailRoutes(binding, { resendApiKey: "re_key", broadcastEmailProvider: "cloudflare" }, fetcher);
+      assert.deepEqual([off.bulk?.provider, off.bulkClass], ["cloudflare", "bulk"]);
+      const noKey = userEmailRoutes(binding, { resendApiKey: undefined, broadcastEmailProvider: "resend" }, fetcher);
+      assert.deepEqual([noKey.bulk?.provider, noKey.bulkClass], ["cloudflare", "bulk"]);
+      // Resend alone (no binding): everything through it, on the one budget, as before.
+      const resendOnly = userEmailRoutes(undefined, { resendApiKey: "re_key", broadcastEmailProvider: "resend" }, fetcher);
+      assert.deepEqual([resendOnly.transactional?.provider, resendOnly.bulk?.provider, resendOnly.bulkClass], ["resend", "resend", "bulk"]);
+      const none = userEmailRoutes(undefined, { resendApiKey: undefined, broadcastEmailProvider: "resend" }, fetcher);
+      assert.deepEqual([none.transactional, none.bulk], [undefined, undefined]);
+    });
   });
 });

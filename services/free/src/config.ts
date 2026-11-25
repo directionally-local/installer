@@ -15,7 +15,7 @@ import { GPT6_BONUS_DEFAULTS, type Gpt6BonusSettingsConfig } from "./gpt6-bonus.
 import { FREE_ENDS_AT } from "./plan-limits.js";
 import { PROMO_DEFAULTS, REFUND_WINDOW_HOURS, type PromoSettingsConfig } from "./plan-prices.js";
 import { MAX_TRIAL_DAYS, TRIAL_DEFAULTS, type TrialSettingsConfig } from "./trials.js";
-import { EMAIL_BUDGET_DEFAULTS, type EmailBudgetSettingsConfig } from "./email-budget.js";
+import { BROADCAST_EMAIL_PROVIDERS, EMAIL_BUDGET_DEFAULTS, type BroadcastEmailProvider, type EmailBudgetSettingsConfig } from "./email-budget.js";
 
 export class ConfigError extends Error {}
 
@@ -279,10 +279,20 @@ export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, 
    */
   webApiUrl: string;
   /**
-   * Resend's API key (RESEND_API_KEY, a secret) for emails to users, used only when the USER_EMAIL
-   * binding (Cloudflare Email Service) is absent. With neither, none are sent. Never logged.
+   * Resend's API key (RESEND_API_KEY, a secret) for emails to users: every email when the
+   * USER_EMAIL binding (Cloudflare Email Service) is absent, and bulk mail (broadcasts, lifecycle)
+   * beside the binding while `broadcastEmailProvider` is "resend". With neither, none are sent.
+   * Never logged.
    */
   resendApiKey: string | undefined;
+  /**
+   * Where bulk mail goes when both the USER_EMAIL binding and RESEND_API_KEY exist
+   * (BROADCAST_EMAIL_PROVIDER, default "resend"; also a runtime setting): "resend" sends
+   * broadcasts and lifecycle mail through Resend, against `resendBulkDailyMax` and not the
+   * binding's budget; "cloudflare" keeps them on the binding. Codes and transactional mail always
+   * use the binding (user-email-send.ts userEmailRoutes).
+   */
+  broadcastEmailProvider: BroadcastEmailProvider;
   /** The sender of emails to users (EMAIL_FROM), name and address. */
   emailFrom: string;
   /** Where replies to them go (EMAIL_REPLY_TO). */
@@ -736,6 +746,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     userEmailsDailyMax: whole(env.USER_EMAILS_DAILY_MAX, EMAIL_BUDGET_DEFAULTS.userEmailsDailyMax, "USER_EMAILS_DAILY_MAX"),
     userEmailsTransactionalReserve: whole(env.USER_EMAILS_TRANSACTIONAL_RESERVE, EMAIL_BUDGET_DEFAULTS.userEmailsTransactionalReserve, "USER_EMAILS_TRANSACTIONAL_RESERVE"),
     emailCodesDailyMax: whole(env.EMAIL_CODES_DAILY_MAX, EMAIL_BUDGET_DEFAULTS.emailCodesDailyMax, "EMAIL_CODES_DAILY_MAX"),
+    resendBulkDailyMax: whole(env.RESEND_BULK_DAILY_MAX, EMAIL_BUDGET_DEFAULTS.resendBulkDailyMax, "RESEND_BULK_DAILY_MAX"),
     paidPlans: flag(env.PAID_PLANS, false, "PAID_PLANS"),
     refundWindowHours: whole(env.REFUND_WINDOW_HOURS, REFUND_WINDOW_HOURS, "REFUND_WINDOW_HOURS"),
     checkoutTermsConsent: flag(env.CHECKOUT_TERMS_CONSENT, true, "CHECKOUT_TERMS_CONSENT"),
@@ -760,6 +771,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     webSignupUrl: webSignupUrl(env.WEB_SIGNUP_URL),
     webApiUrl: webSignupUrl(env.WEB_API_URL, "WEB_API_URL", DEFAULT_WEB_API_URL),
     resendApiKey: text(env.RESEND_API_KEY),
+    broadcastEmailProvider: broadcastEmailProvider(env.BROADCAST_EMAIL_PROVIDER),
     emailFrom: sender(env.EMAIL_FROM) ?? DEFAULTS.emailFrom,
     emailReplyTo: emailAddress(env.EMAIL_REPLY_TO, "EMAIL_REPLY_TO") ?? DEFAULTS.emailReplyTo,
     userEmails: flag(env.USER_EMAILS, true, "USER_EMAILS"),
@@ -1182,6 +1194,13 @@ function moderationMode(value: unknown): ModerationMode {
   if (raw === undefined) return DEFAULTS.moderation;
   if ((MODERATION_MODES as readonly string[]).includes(raw)) return raw as ModerationMode;
   throw new ConfigError(`MODERATION must be "off", "shadow" or "enforce" (got "${raw}").`);
+}
+
+function broadcastEmailProvider(value: unknown): BroadcastEmailProvider {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return "resend";
+  if ((BROADCAST_EMAIL_PROVIDERS as readonly string[]).includes(raw)) return raw as BroadcastEmailProvider;
+  throw new ConfigError(`BROADCAST_EMAIL_PROVIDER must be "resend" or "cloudflare" (got "${raw}").`);
 }
 
 function allocatorMode(value: unknown): AllocatorMode {

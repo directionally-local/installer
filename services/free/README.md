@@ -1463,6 +1463,8 @@ with who made it and when.
 | `userEmailsDailyMax` | `USER_EMAILS_DAILY_MAX` | 300: emails to users a UTC day, every kind but codes (`src/email-budget.ts`; conservative, the provider's quota isn't known) |
 | `userEmailsTransactionalReserve` | `USER_EMAILS_TRANSACTIONAL_RESERVE` | 100: of `userEmailsDailyMax`, kept for transactional mail (dl.new's claim and welcome emails, `plan_80`, access answers); bulk and lifecycle mail and broadcasts stop short of it |
 | `emailCodesDailyMax` | `EMAIL_CODES_DAILY_MAX` | 300: dl.new sign-in and email-change codes a UTC day; outside `userEmailsDailyMax`, never stopped by it |
+| `broadcastEmailProvider` | `BROADCAST_EMAIL_PROVIDER` | `resend`: with `RESEND_API_KEY` set beside the `USER_EMAIL` binding, bulk mail (broadcasts and lifecycle emails) goes through Resend and codes and transactional mail stay on the binding; `cloudflare` keeps everything on the binding |
+| `resendBulkDailyMax` | `RESEND_BULK_DAILY_MAX` | 2000: bulk mail through Resend a UTC day (with `broadcastEmailProvider` `resend`); its own ceiling, outside `userEmailsDailyMax` |
 | `dlOnly` | `DL_ONLY` | true (a dl sign-in token works inside dl only; tool keys are never refused by it; see below) |
 | `toolKeys` | `TOOL_KEYS` | true: accounts in good standing may make API keys for other tools; false refuses new and existing ones (`tool_keys_off`, the keys are kept) |
 | `toolKeysMax` | `TOOL_KEYS_MAX` | 3: tool keys per account (server keys are counted apart) |
@@ -1693,6 +1695,18 @@ when each goes out is in `src/user-email-send.ts`. The provider:
 2. Otherwise **Resend** (`POST https://api.resend.com/emails`) when `RESEND_API_KEY` is set.
 3. Otherwise nothing is sent and nothing fails.
 
+With both the binding and `RESEND_API_KEY`, the runtime setting `broadcastEmailProvider`
+(default `resend`) splits them by class (`src/email-budget.ts`): sign-in codes and transactional
+mail (the claim email, the paid welcome, `plan_80`, access answers, trial emails) stay on the
+binding; bulk mail (lifecycle emails, `weekly_reset`, `plan_reset` and `POST
+/admin/emails/broadcast`) goes through Resend, with the same sender, Reply-To, stop link and
+`List-Unsubscribe` headers, paced at the same 2 requests a second. Bulk mail through Resend is
+counted in its own class, `resend_bulk`, against `resendBulkDailyMax` (default 2000 a UTC day),
+never against the binding's `userEmailsDailyMax`. A refused Resend send (non-2xx) counts as
+failed in the result and is logged with its status only; it never falls back to the binding,
+and a 429 stops the broadcast call. `broadcastEmailProvider: "cloudflare"` (POST /admin/config)
+puts bulk mail back on the binding and its budget.
+
 | email | when |
 |---|---|
 | welcome | right after a new sign-up gives their email on the details step; by level: `welcome` (Full), `welcome_basic`, `welcome_starter_small` (a Starter allowance), `welcome_starter` (no free tokens); on the trial, `welcome_trial` (one-time tokens, /upgrade) unless no free tokens |
@@ -1721,7 +1735,9 @@ same URL. GET shows a page with one button; POST (the button, or a mail app's on
 | env | default |
 |---|---|
 | `USER_EMAIL` (binding) | absent: Resend, if `RESEND_API_KEY` is set |
-| `RESEND_API_KEY` (secret) | unset (and no binding): nothing is sent and nothing fails |
+| `RESEND_API_KEY` (secret) | unset (and no binding): nothing is sent and nothing fails; beside the binding, bulk mail goes through it (`broadcastEmailProvider`) |
+| `BROADCAST_EMAIL_PROVIDER` (also the runtime setting `broadcastEmailProvider`) | `resend` |
+| `RESEND_BULK_DAILY_MAX` (also the runtime setting `resendBulkDailyMax`) | 2000 |
 | `EMAIL_FROM` | `sina <sina@directionallylocal.com>` |
 | `EMAIL_REPLY_TO` | `contact@directionallylocal.com` |
 | `USER_EMAILS` (also the runtime setting `userEmails`) | true |

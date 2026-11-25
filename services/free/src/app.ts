@@ -119,7 +119,10 @@ import {
   sendPlainEmail,
   stopUrl,
   userEmailsOn,
+  userEmailRoute,
+  userEmailRoutes,
   userEmailTransport,
+  type UserEmailRoutes,
   verifyStopToken,
   trialMostlyUsed,
   weekMostlyUsed,
@@ -1327,9 +1330,17 @@ function pausedError(headers: Record<string, string> = {}): Response {
 
 // ─── Emails to users (user-email-send.ts) ────────────────────────────────────
 
-/** The provider for emails to users: the USER_EMAIL binding, else Resend, else none. */
+/** The provider for codes and transactional emails to users: the USER_EMAIL binding, else Resend, else none. */
 export function userEmailVia(c: Pick<Ctx, "env" | "config" | "fetch">): UserEmailTransport | undefined {
   return userEmailTransport(c.env.USER_EMAIL, c.config, c.fetch);
+}
+
+/**
+ * The providers per class with the runtime `config` (its `broadcastEmailProvider`): bulk mail
+ * through Resend beside the binding, everything else as `userEmailVia` (user-email-send.ts).
+ */
+export function userEmailRoutesVia(c: Pick<Ctx, "env" | "fetch">, config: FreeConfig): UserEmailRoutes {
+  return userEmailRoutes(c.env.USER_EMAIL, config, c.fetch);
 }
 
 /** Sends one email to a user if it should go. Never throws and never fails the request. */
@@ -1341,11 +1352,11 @@ export async function userEmail(
   period: string,
   values: { planWarning?: PlanWarningValues; planWelcome?: PlanWelcomeValues; trial?: TrialEmailValues } = {},
 ): Promise<"sent" | "failed" | "skipped"> {
-  const transport = userEmailVia(c);
-  if (!userEmailsOn(config, transport)) return "skipped";
+  const routes = userEmailRoutesVia(c, config);
+  if (!userEmailsOn(config, userEmailRoute(routes, kind).transport)) return "skipped";
   const outcome = await deliverUserEmail({
     store: directory(c) as unknown as UserEmailStore,
-    transport,
+    routes,
     config,
     signingKey: await signingKey(c.config),
     base: c.config.publicUrl ?? EMAIL_STOP_BASE,
@@ -1371,6 +1382,7 @@ async function scheduledUserEmails(env: Env, envConfig: FreeConfig, fetcher: Fet
   const store = env.DIRECTORY.getByName("directory");
   const config = applyOverrides(envConfig, await store.overrides());
   if (!userEmailsOn(config, transport)) return;
+  const routes = userEmailRoutes(env.USER_EMAIL, config, fetcher);
   const candidates = await store.userEmailCandidates(now);
   const jobs: Array<{ kind: UserEmailKind; githubId: number; period: string; retry?: boolean }> = [
     ...candidates.retries.map((job) => ({ ...job, retry: true })),
@@ -1383,7 +1395,7 @@ async function scheduledUserEmails(env: Env, envConfig: FreeConfig, fetcher: Fet
   for (const job of jobs.slice(0, config.userEmailsDailyMax)) {
     const outcome = await deliverUserEmail({
       store: store as unknown as UserEmailStore,
-      transport,
+      routes,
       config,
       signingKey: key,
       base: config.publicUrl ?? EMAIL_STOP_BASE,
@@ -1436,11 +1448,12 @@ async function scheduledWeeklyReset(env: Env, envConfig: FreeConfig, fetcher: Fe
   const store = env.DIRECTORY.getByName("directory");
   const config = applyOverrides(envConfig, await store.overrides());
   if (!userEmailsOn(config, transport) || !config.weeklyResetEmail) return;
+  const routes = userEmailRoutes(env.USER_EMAIL, config, fetcher);
   const day = Math.floor(now / DAY_MS);
   const saved = await store.weeklyResetProgress();
   if (saved && saved.day === day && saved.done) return;
   let after = saved && saved.day === day ? saved.after : 0;
-  let room = Math.min(WEEKLY_RESET_BATCH, (await store.emailBudgetToday(now, emailBudgetOf(config))).room.bulk);
+  let room = Math.min(WEEKLY_RESET_BATCH, (await store.emailBudgetToday(now, emailBudgetOf(config))).room[routes.bulkClass]);
   if (room <= 0) return;
   const key = await signingKey(config);
   const policy = policyOf(config);
@@ -1459,7 +1472,7 @@ async function scheduledWeeklyReset(env: Env, envConfig: FreeConfig, fetcher: Fe
       if (typeof tokens === "number") {
         const outcome = await deliverUserEmail({
           store: store as unknown as UserEmailStore,
-          transport,
+          routes,
           config,
           signingKey: key,
           base: config.publicUrl ?? EMAIL_STOP_BASE,
@@ -1504,7 +1517,8 @@ async function scheduledPlanReset(env: Env, envConfig: FreeConfig, fetcher: Fetc
   const store = env.DIRECTORY.getByName("directory");
   const config = applyOverrides(envConfig, await store.overrides());
   if (!userEmailsOn(config, transport) || !config.weeklyResetEmail || !freeEnded(config.freeEndsAt, now)) return;
-  let room = (await store.emailBudgetToday(now, emailBudgetOf(config))).room.bulk;
+  const routes = userEmailRoutes(env.USER_EMAIL, config, fetcher);
+  let room = (await store.emailBudgetToday(now, emailBudgetOf(config))).room[routes.bulkClass];
   if (room <= 0) return;
   const key = await signingKey(config);
   const period = String(weekStart(now));
@@ -1522,7 +1536,7 @@ async function scheduledPlanReset(env: Env, envConfig: FreeConfig, fetcher: Fetc
       const [lastWeek, sessions] = await Promise.all([person.meters(now, weekStart(now) - 1), store.sessionsBetween(githubId, lastWeekStart, weekStart(now))]);
       const outcome = await deliverUserEmail({
         store: store as unknown as UserEmailStore,
-        transport,
+        routes,
         config,
         signingKey: key,
         base: config.publicUrl ?? EMAIL_STOP_BASE,
@@ -5489,7 +5503,8 @@ async function sendTestEmail(c: Ctx, adminId: number, body: Record<string, unkno
   if (!typed && !kinds.includes(kind)) return invalid(usage);
   const copy = typed ? parseCopy(body.subject, body.text) : undefined;
   if (copy && !copy.ok) return invalid(copy.message);
-  const transport = userEmailVia(c);
+  // The provider the real email would use: typed copy as a broadcast (bulk), a kind by its class.
+  const transport = userEmailRoute(userEmailRoutesVia(c, (await runtime(c)).config), copy ? "broadcast" : kind).transport;
   if (!transport) return NO_EMAIL_PROVIDER;
   const unsubscribeUrl = await stopUrl(c.config.publicUrl ?? EMAIL_STOP_BASE, await signingKey(c.config), adminId);
   const email = copy?.ok
@@ -5527,7 +5542,9 @@ type BroadcastOutcome =
   | { dryRun: false; id: string; provider: string; sent: number; failed: number; skipped: number; remaining: number; waitingForTomorrow: number; stoppedBy: string | null };
 
 async function runBroadcast(c: Ctx, config: FreeConfig, request: BroadcastRequest): Promise<BroadcastOutcome | AdminFailure> {
-  const transport = userEmailVia(c);
+  // Bulk mail: through Resend beside the binding while broadcastEmailProvider is "resend".
+  const routes = userEmailRoutesVia(c, config);
+  const transport = routes.bulk;
   if (!request.dryRun && !transport) return NO_EMAIL_PROVIDER;
   if (!request.dryRun && !config.userEmails) return { status: 409, code: "emails_off", message: "Emails to users are off (the userEmails setting)." };
   const id = await broadcastId(request.subject, request.text);
@@ -5553,13 +5570,15 @@ async function runBroadcast(c: Ctx, config: FreeConfig, request: BroadcastReques
   let failedCount = 0;
   let skipped = 0;
   let stoppedBy: string | null = null;
-  // Broadcasts are bulk mail: never past the day's bulk share (email-budget.ts).
+  // Broadcasts are bulk mail: never past the day's bulk share (email-budget.ts), or through
+  // Resend, never past resendBulkDailyMax (and never the binding's budget).
   const budget = emailBudgetOf(config);
-  const room = (await directory(c).emailBudgetToday(c.now(), budget)).room.bulk;
+  const budgetClass = routes.bulkClass;
+  const room = (await directory(c).emailBudgetToday(c.now(), budget)).room[budgetClass];
   if (room < Math.min(BROADCAST_BATCH, ready.length)) stoppedBy = "daily_budget";
   const batch = ready.slice(0, Math.min(BROADCAST_BATCH, room));
   for (const [index, person] of batch.entries()) {
-    const claim = await directory(c).claimBroadcast({ githubId: person.githubId, id, now: c.now(), skipIfSent: request.skipIfSent, budget, ...filter });
+    const claim = await directory(c).claimBroadcast({ githubId: person.githubId, id, now: c.now(), skipIfSent: request.skipIfSent, budget, budgetClass, ...filter });
     if (!claim) {
       skipped++;
       continue;
@@ -5582,8 +5601,8 @@ async function runBroadcast(c: Ctx, config: FreeConfig, request: BroadcastReques
     }
     if (index < batch.length - 1 && c.emailGapMs > 0) await new Promise((resolve) => setTimeout(resolve, c.emailGapMs));
   }
-  if (failedCount > 0) console.error(`user emails (broadcast): ${sent} sent, ${failedCount} failed`);
-  else if (sent > 0) console.log(`user emails (broadcast): ${sent} sent`);
+  if (failedCount > 0) console.error(`user emails (broadcast via ${transport!.provider}): ${sent} sent, ${failedCount} failed`);
+  else if (sent > 0) console.log(`user emails (broadcast via ${transport!.provider}): ${sent} sent`);
   return { dryRun: false, id, provider: transport!.provider, sent, failed: failedCount, skipped, remaining: ready.length - sent - skipped, waitingForTomorrow: waiting, stoppedBy };
 }
 
