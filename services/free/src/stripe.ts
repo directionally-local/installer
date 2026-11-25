@@ -306,8 +306,10 @@ export async function stripeRequest(
  * subscription is canceled, never left unpaid. The launch offer's coupon is NOT put on the
  * Checkout (it would be spent on the $0 trial invoice): `promo_eligible` records it, in the
  * session's and the subscription's metadata, for the first real charge (trial-end time).
+ * `trial.offerText`: Checkout's line above the button (`custom_text.submit`), so the trial
+ * Checkout still shows the launch offer that its first real charge will get.
  */
-export function planCheckoutParams(input: { plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; coupon?: string; trial?: { days: number; promoEligible?: string } }): Record<string, unknown> {
+export function planCheckoutParams(input: { plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; coupon?: string; trial?: { days: number; promoEligible?: string; offerText?: string } }): Record<string, unknown> {
   const metadata: Record<string, string> = { product: "plan", plan: input.plan, ...(input.campaign ? { campaign: input.campaign } : {}) };
   if (input.trial) {
     const trialMeta = { ...metadata, trial: "card", ...(input.trial.promoEligible ? { promo_eligible: input.trial.promoEligible } : {}) };
@@ -322,8 +324,14 @@ export function planCheckoutParams(input: { plan: string; price: string; success
       billing_address_collection: "auto",
       metadata: trialMeta,
       subscription_data: { metadata: trialMeta, trial_period_days: input.trial.days, trial_settings: { end_behavior: { missing_payment_method: "cancel" } } },
-      ...(input.termsConsent
-        ? { consent_collection: { terms_of_service: "required" }, custom_text: { terms_of_service_acceptance: { message: input.termsConsent } } }
+      ...(input.termsConsent ? { consent_collection: { terms_of_service: "required" } } : {}),
+      ...(input.termsConsent || input.trial.offerText
+        ? {
+            custom_text: {
+              ...(input.termsConsent ? { terms_of_service_acceptance: { message: input.termsConsent } } : {}),
+              ...(input.trial.offerText ? { submit: { message: input.trial.offerText } } : {}),
+            },
+          }
         : {}),
     };
   }
@@ -377,7 +385,7 @@ export function termsAccepted(session: Record<string, any>): boolean {
   return session.consent?.terms_of_service === "accepted";
 }
 
-export async function createPlanCheckout(fetcher: Fetch, input: { secretKey: string; plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; coupon?: string; trial?: { days: number; promoEligible?: string }; idempotencyKey: string }): Promise<{ id: string; url: string }> {
+export async function createPlanCheckout(fetcher: Fetch, input: { secretKey: string; plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; coupon?: string; trial?: { days: number; promoEligible?: string; offerText?: string }; idempotencyKey: string }): Promise<{ id: string; url: string }> {
   const session = await stripeRequest(fetcher, input.secretKey, "POST", "/v1/checkout/sessions", planCheckoutParams(input), input.idempotencyKey);
   if (typeof session.url !== "string" || typeof session.id !== "string") throw new StripeError("Stripe didn't return a Checkout URL.", 502);
   return { id: session.id, url: session.url };

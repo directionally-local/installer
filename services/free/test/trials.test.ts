@@ -135,6 +135,30 @@ describe("trials: the card trial's Checkout", () => {
     assert.equal(form.get("metadata[promo_eligible]"), "dlnew-bf-2026");
     assert.equal(form.get("subscription_data[metadata][promo_eligible]"), "dlnew-bf-2026");
     assert.equal(form.get("subscription_data[metadata][trial]"), "card");
+    // Checkout shows only "30 days free, then $20/month": the line above the button says the offer.
+    const offer = form.get("custom_text[submit][message]");
+    assert.equal(offer, "Launch offer: your first paid month is 50% off ($10 instead of $20). It's applied when your free 20M tokens are used or after 30 days.");
+    assert.ok(offer!.length <= 1200);
+    assert.equal(form.get("consent_collection[terms_of_service]"), "required", "the terms consent stays");
+    assert.ok(form.get("custom_text[terms_of_service_acceptance][message]"));
+  });
+
+  it("names the plan's own prices in the offer line", async () => {
+    const { service, stripe } = await world();
+    const { sessionId } = await startCheckout(service, "starter");
+    assert.equal(
+      stripe.sessions.get(sessionId)!.form.get("custom_text[submit][message]"),
+      "Launch offer: your first paid month is 50% off ($3.50 instead of $7). It's applied when your free 20M tokens are used or after 30 days.",
+    );
+  });
+
+  it("shows no offer line on a trial Checkout outside the offer's window", async () => {
+    const { service, stripe } = await world({}, AFTER);
+    const { sessionId, trial } = await startCheckout(service, "starter");
+    assert.equal(trial, true);
+    const form = stripe.sessions.get(sessionId)!.form;
+    assert.equal(form.get("custom_text[submit][message]"), null);
+    assert.ok(form.get("custom_text[terms_of_service_acceptance][message]"));
   });
 
   it("records no eligibility outside the offer's window", () => {

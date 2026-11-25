@@ -45,7 +45,7 @@ import type { BillingState, ServerKeyView } from "./account-object.js";
 import type { Alert } from "./alerts.js";
 import { emailBlocked, emailDomain, isDisposableDomain, normalizeEmail, plausibleEmail } from "./email-guard.js";
 import { apiError, json } from "./errors.js";
-import { activePromoCoupon, CLAIM_DAYS, isPlanId, promoView, welcomePromoLine, isUpgrade, PLAN_IDS, PLANS, planDescription, planOfPrice, plansView, checkoutConsentMessage, REFUND_BLOCK_TEXT, refundBlock, refundWindowText, type PlanId } from "./plan-prices.js";
+import { activePromoCoupon, promoPrice, CLAIM_DAYS, isPlanId, promoView, welcomePromoLine, isUpgrade, PLAN_IDS, PLANS, planDescription, planOfPrice, plansView, checkoutConsentMessage, REFUND_BLOCK_TEXT, refundBlock, refundWindowText, type PlanId } from "./plan-prices.js";
 import { approxTokens, planLimits, PLAN_MIX_LABEL, type PlanSettingsConfig } from "./plans.js";
 import { BONUS_LINE } from "./gpt6-bonus.js";
 import { emailBudgetOf } from "./email-budget.js";
@@ -215,7 +215,9 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
   // A card trial (trials.ts) while its budget has room: $0 now, and the offer's coupon is only
   // recorded (promo_eligible) for the first real charge, never put on the $0 trial invoice.
   const trialOn = (await directory(c).trialBudgets(config, c.now())).card.available;
-  const trial = trialOn ? { days: config.cardTrialDays, ...(coupon ? { promoEligible: coupon } : {}) } : undefined;
+  const trial = trialOn
+    ? { days: config.cardTrialDays, ...(coupon ? { promoEligible: coupon, offerText: trialOfferText(PLANS[plan].priceUsd, config.promoPercentOff, config.cardTrialTokens, config.cardTrialDays) } : {}) }
+    : undefined;
   if (trial) coupon = undefined;
   const create = (termsConsent: string | undefined, withCoupon: string | undefined) =>
     createPlanCheckout(c.fetch, {
@@ -266,6 +268,19 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
     if (error instanceof StripeError) return apiError(502, "billing_error", "Stripe couldn't start the checkout. Try again in a minute.");
     throw error;
   }
+}
+
+/**
+ * The launch offer's line on a card trial's Checkout (above the button): Stripe shows only "30 days
+ * free, then $7/month", since the coupon waits for the first real charge. Well under Stripe's 1,200.
+ */
+export function trialOfferText(priceUsd: number, percentOff: number, trialTokens: number, trialDays: number): string {
+  const tokens = trialTokens >= 1_000_000 ? `${Math.round(trialTokens / 100_000) / 10}M` : trialTokens.toLocaleString("en-US");
+  return `Launch offer: your first paid month is ${percentOff}% off (${usd(promoPrice(priceUsd, percentOff))} instead of ${usd(priceUsd)}). It's applied when your free ${tokens} tokens are used or after ${trialDays} days.`;
+}
+
+function usd(amount: number): string {
+  return Number.isInteger(amount) ? `$${amount}` : `$${amount.toFixed(2)}`;
 }
 
 /** Stripe refused the launch offer's coupon: promoCouponId turns off ("none", logged) and the owner gets an alert. */

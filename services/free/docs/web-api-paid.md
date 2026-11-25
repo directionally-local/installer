@@ -433,7 +433,10 @@ the Checkout has `subscription_data[trial_period_days]=30`,
 `subscription_data[trial_settings][end_behavior][missing_payment_method]=cancel`,
 `payment_method_collection=always`, metadata `trial=card` and, inside the launch offer's window,
 `promo_eligible=<coupon>` (session and subscription). **No coupon on the Checkout**: it would be
-spent on the $0 trial invoice. The completed session has `payment_status: no_payment_required`;
+spent on the $0 trial invoice. Instead, inside the window, the line above the button
+(`custom_text[submit][message]`) names the offer with the plan's prices: "Launch offer: your
+first paid month is 50% off ($3.50 instead of $7). It's applied when your free 20M tokens are
+used or after 30 days." (the terms consent text stays as it is). The completed session has `payment_status: no_payment_required`;
 `GET /web/checkout/:id` says `status: "paid", trial: true`. The claim starts the trial meter
 (`/web/account` `plan.trialing: true`, `plan.trialEndsAt`, and `trial`). The plan starts:
 
