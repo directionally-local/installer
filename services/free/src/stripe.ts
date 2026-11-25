@@ -300,22 +300,46 @@ export async function stripeRequest(
  * `termsConsent`: the checkbox text; Checkout then requires the terms-of-service consent (Stripe
  * needs a terms URL in the account's public details, else it refuses: isTermsConsentRefusal).
  */
-export function planCheckoutParams(input: { plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string }): Record<string, unknown> {
+export function planCheckoutParams(input: { plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; coupon?: string }): Record<string, unknown> {
   const metadata = { product: "plan", plan: input.plan, ...(input.campaign ? { campaign: input.campaign } : {}) };
   return {
     mode: "subscription",
     line_items: [{ price: input.price, quantity: 1 }],
     success_url: input.successUrl,
     cancel_url: input.cancelUrl,
-    allow_promotion_codes: false,
+    // The launch offer's coupon (duration "once": the first invoice only), applied without a code.
+    // Stripe takes either `discounts` or `allow_promotion_codes`, never both; codes stay off either way.
+    ...(input.coupon ? { discounts: [{ coupon: input.coupon }] } : { allow_promotion_codes: false }),
     automatic_tax: { enabled: true },
     billing_address_collection: "auto",
-    metadata,
+    metadata: input.coupon ? { ...metadata, promo: input.coupon } : metadata,
     subscription_data: { metadata },
     ...(input.termsConsent
       ? { consent_collection: { terms_of_service: "required" }, custom_text: { terms_of_service_acceptance: { message: input.termsConsent } } }
       : {}),
   };
+}
+
+/**
+ * Stripe refused the launch offer's coupon at Checkout (it doesn't exist, expired, or ran out of
+ * redemptions): a 400/404 about the coupon or the discounts parameter.
+ */
+export function isCouponRefusal(error: unknown): boolean {
+  return error instanceof StripeError && (error.status === 400 || error.status === 404) && /coupon|discounts/i.test(error.message);
+}
+
+/**
+ * A completed Checkout Session's discount: the coupon, the cents taken off and the percent of the
+ * first month (from Stripe's amounts), or null when nothing was taken off.
+ */
+export function checkoutPromo(session: Record<string, any>): { coupon: string; discountCents: number; percentOff: number } | null {
+  const discountCents = Number(session.total_details?.amount_discount ?? 0);
+  if (!Number.isFinite(discountCents) || discountCents <= 0) return null;
+  const first = Array.isArray(session.discounts) ? session.discounts[0] : undefined;
+  const coupon = idOf(first?.coupon) ?? idOf(first?.discount?.coupon) ?? (typeof session.metadata?.promo === "string" ? session.metadata.promo : undefined) ?? "discount";
+  const subtotal = Number(session.amount_subtotal ?? 0);
+  const percentOff = subtotal > 0 ? Math.round((discountCents / subtotal) * 100) : 0;
+  return { coupon, discountCents: Math.round(discountCents), percentOff };
 }
 
 /** Stripe refused the terms-of-service consent (no terms URL in the account's public details). */
@@ -328,7 +352,7 @@ export function termsAccepted(session: Record<string, any>): boolean {
   return session.consent?.terms_of_service === "accepted";
 }
 
-export async function createPlanCheckout(fetcher: Fetch, input: { secretKey: string; plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; idempotencyKey: string }): Promise<{ id: string; url: string }> {
+export async function createPlanCheckout(fetcher: Fetch, input: { secretKey: string; plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; coupon?: string; idempotencyKey: string }): Promise<{ id: string; url: string }> {
   const session = await stripeRequest(fetcher, input.secretKey, "POST", "/v1/checkout/sessions", planCheckoutParams(input), input.idempotencyKey);
   if (typeof session.url !== "string" || typeof session.id !== "string") throw new StripeError("Stripe didn't return a Checkout URL.", 502);
   return { id: session.id, url: session.url };

@@ -44,14 +44,14 @@ import type { BillingState, ServerKeyView } from "./account-object.js";
 import type { Alert } from "./alerts.js";
 import { emailBlocked, emailDomain, isDisposableDomain, normalizeEmail, plausibleEmail } from "./email-guard.js";
 import { apiError, json } from "./errors.js";
-import { CLAIM_DAYS, isPlanId, isUpgrade, PLAN_IDS, PLANS, planDescription, planOfPrice, plansView, checkoutConsentMessage, REFUND_BLOCK_TEXT, refundBlock, refundPolicy, refundWindowText, type PlanId } from "./plan-prices.js";
+import { activePromoCoupon, CLAIM_DAYS, isPlanId, promoView, welcomePromoLine, isUpgrade, PLAN_IDS, PLANS, planDescription, planOfPrice, plansView, checkoutConsentMessage, REFUND_BLOCK_TEXT, refundBlock, refundWindowText, type PlanId } from "./plan-prices.js";
 import { approxTokens, planLimits, PLAN_MIX_LABEL, type PlanSettingsConfig } from "./plans.js";
 import { BONUS_LINE } from "./gpt6-bonus.js";
 import { emailBudgetOf } from "./email-budget.js";
-import { claimable, type PaidCheckoutRow, type UsageRow } from "./paid-store.js";
+import { claimable, type CheckoutPromo, type PaidCheckoutRow, type UsageRow } from "./paid-store.js";
 import { CLI_LOGIN_INTERVAL_S, EMAIL_CODE_RESEND_MS, EMAIL_CODE_TTL_MS } from "./paid-auth.js";
 import { normalizeUserCode } from "./codes.js";
-import { CHECKOUT_SESSION_ID, createPlanCheckout, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, isTermsConsentRefusal, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, termsAccepted, type StripeEvent } from "./stripe.js";
+import { CHECKOUT_SESSION_ID, checkoutPromo, createPlanCheckout, isCouponRefusal, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, isTermsConsentRefusal, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, termsAccepted, type StripeEvent } from "./stripe.js";
 import { sendPlainEmail } from "./user-email-send.js";
 import { DAY_MS, weekEnd, weekStart, WEEK_MS } from "./week.js";
 
@@ -185,7 +185,7 @@ function billingUnavailable(): Response {
 /** GET /web/plans: the plan cards (part B's per-model limits, from the runtime settings). */
 async function webPlans(c: Ctx): Promise<Response> {
   const [catalog, { config }] = await Promise.all([planCatalogFor(c), runtime(c)]);
-  return json(plansView({ catalog, available: billingOn(c) && PLAN_IDS.every((plan) => planPrice(c, plan) !== undefined), refundWindowHours: config.refundWindowHours }));
+  return json(plansView({ catalog, available: billingOn(c) && PLAN_IDS.every((plan) => planPrice(c, plan) !== undefined), promo: promoView(config, c.now()) }));
 }
 
 /** A plan's line ("DeepSeek V4.1 Flash ~62M/week (95.5% caching applied). ...") at the live settings. */
@@ -205,7 +205,9 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
   const campaign = typeof body.campaign === "string" && /^[\x20-\x7e]{1,200}$/.test(body.campaign) ? body.campaign : undefined;
   const plan = body.plan;
   const { config } = await runtime(c);
-  const start = (termsConsent: string | undefined) =>
+  // The launch offer: inside its window the coupon goes on the Checkout, no code to type.
+  let coupon = activePromoCoupon(config, c.now());
+  const create = (termsConsent: string | undefined, withCoupon: string | undefined) =>
     createPlanCheckout(c.fetch, {
       secretKey: c.config.stripe.secretKey!,
       plan,
@@ -214,14 +216,30 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
       cancelUrl: `${site}/?plan=${plan}`,
       ...(campaign ? { campaign } : {}),
       ...(termsConsent ? { termsConsent } : {}),
+      ...(withCoupon ? { coupon: withCoupon } : {}),
       idempotencyKey: crypto.randomUUID(),
     });
+  const start = async (termsConsent: string | undefined) => {
+    if (!coupon) return create(termsConsent, undefined);
+    try {
+      return await create(termsConsent, coupon);
+    } catch (error) {
+      if (!isCouponRefusal(error) || isTermsConsentRefusal(error)) throw error;
+      // Stripe doesn't know the coupon (not created yet, expired, used up): never fail the checkout
+      // for it. The offer turns off (so no page shows a discount Checkout won't apply), logged, and
+      // the owner is told how to turn it back on.
+      const refused = coupon;
+      coupon = undefined;
+      await promoRefused(c, refused, error);
+      return create(termsConsent, undefined);
+    }
+  };
   try {
     let session: { id: string; url: string };
     if (!config.checkoutTermsConsent) session = await start(undefined);
     else {
       try {
-        session = await start(checkoutConsentMessage(config.refundWindowHours, `${site}/terms`));
+        session = await start(checkoutConsentMessage(`${site}/terms`));
       } catch (error) {
         if (!isTermsConsentRefusal(error)) throw error;
         // No terms URL in the Stripe account's public details: never fail the checkout for it.
@@ -239,6 +257,19 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
   }
 }
 
+/** Stripe refused the launch offer's coupon: promoCouponId turns off ("none", logged) and the owner gets an alert. */
+async function promoRefused(c: Ctx, coupon: string, error: unknown): Promise<void> {
+  const message = error instanceof Error ? error.message : "error";
+  console.warn("paid: Stripe refused the launch offer's coupon; promoCouponId turned off", message);
+  await directory(c).updateOverrides([{ key: "promoCouponId", value: null }], { githubId: 0, login: `auto: Stripe refused coupon ${coupon}`, now: c.now() });
+  await alert(c, [
+    {
+      subject: "dl.new: launch offer turned off (Stripe refused the coupon)",
+      text: `Stripe refused the coupon "${coupon}" on a plan Checkout: ${message}\nThat checkout went ahead at full price, and the offer is off now (the plan page no longer shows it).\nCreate the coupon in Stripe (Product catalog > Coupons, ID ${coupon}, 50% off, duration once), then POST /admin/config {"promoCouponId": "${coupon}"}.`,
+    },
+  ]);
+}
+
 /** A paid plan Checkout as Stripe reports it (read again on every claim: the webhook may not have come yet). */
 interface VerifiedCheckout {
   sessionId: string;
@@ -252,6 +283,8 @@ interface VerifiedCheckout {
   claimedBy: number | null;
   /** When the terms with the withdrawal waiver were accepted (the payment's time), or null without that consent. */
   termsAcceptedAt: number | null;
+  /** The launch offer's discount on the first payment, or null. */
+  promo: CheckoutPromo | null;
 }
 
 /** Reads a Checkout Session from Stripe and checks it is a paid dl.new plan; else the error response. */
@@ -287,6 +320,7 @@ async function verifyCheckout(c: Ctx, sessionId: unknown): Promise<VerifiedCheck
     paidAt,
     claimedBy: row?.claimed_by ?? null,
     termsAcceptedAt: termsAccepted(session) ? paidAt : null,
+    promo: checkoutPromo(session),
   };
 }
 
@@ -326,7 +360,7 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
     return apiError(409, "already_subscribed", "This account already has a plan. Manage it at dl.new/billing; write to contact@directionallylocal.com about the second payment and we'll refund it.");
   }
   const dir = directory(c);
-  await dir.recordPaidCheckout({ sessionId: checkout.sessionId, plan: checkout.plan, customerId: checkout.customerId, subscriptionId: checkout.subscriptionId, email: checkout.email, amountCents: checkout.amountCents, paidAt: checkout.paidAt, termsAcceptedAt: checkout.termsAcceptedAt });
+  await dir.recordPaidCheckout({ sessionId: checkout.sessionId, plan: checkout.plan, customerId: checkout.customerId, subscriptionId: checkout.subscriptionId, email: checkout.email, amountCents: checkout.amountCents, paidAt: checkout.paidAt, termsAcceptedAt: checkout.termsAcceptedAt, promo: checkout.promo });
   const claimed = await dir.claimPaidCheckout(checkout.sessionId, accountNumber, c.now());
   if (claimed !== "claimed") return apiError(409, "checkout_claimed", "This payment is already linked to another dl.new account. Sign in with that one.");
   if (checkout.customerId) {
@@ -368,7 +402,7 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
     }
   }
   // The welcome email (once per payment): where the key is, the plan's limits, the bonus.
-  const welcome = sendPlanWelcome(c, accountNumber, checkout.plan, checkout.sessionId).catch((error) => console.error("paid: welcome failed", error instanceof Error ? error.message : "error"));
+  const welcome = sendPlanWelcome(c, accountNumber, checkout.plan, checkout.sessionId, checkout.promo).catch((error) => console.error("paid: welcome failed", error instanceof Error ? error.message : "error"));
   if (c.background) c.background(welcome);
   else await welcome;
   return { plan: checkout.plan, sessionId: checkout.sessionId };
@@ -379,16 +413,19 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
  * caching applied)", and the GPT-6 launch bonus line when the account holds it (granted here,
  * right away, when it is on and there is room). Once per payment (the period is the session id).
  */
-async function sendPlanWelcome(c: Ctx, accountNumber: number, plan: PlanId, sessionId: string): Promise<void> {
+async function sendPlanWelcome(c: Ctx, accountNumber: number, plan: PlanId, sessionId: string, promo: CheckoutPromo | null): Promise<void> {
   const { config } = await runtime(c);
   const granted = await grantLaunchBonus(c, accountNumber);
-  await userEmail(c, config, "welcome_paid", accountNumber, sessionId, { planWelcome: welcomeValues(plan, config, granted) });
+  // The launch offer: the percent Stripe actually took off the first month (the setting's when Stripe gave no subtotal).
+  const percentOff = promo ? promo.percentOff || config.promoPercentOff : null;
+  await userEmail(c, config, "welcome_paid", accountNumber, sessionId, { planWelcome: welcomeValues(plan, config, granted, percentOff) });
 }
 
-/** welcome_paid's {plan}, {limits}, {bonus} and {refund}. */
-export function welcomeValues(plan: PlanId, config: PlanSettingsConfig & { cachedTokenWeight: number; refundWindowHours: number }, bonus: boolean) {
+/** welcome_paid's {plan}, {promo}, {limits} and {bonus} (no refund line: refunds are the owner's call, never promised). */
+export function welcomeValues(plan: PlanId, config: PlanSettingsConfig & { cachedTokenWeight: number }, bonus: boolean, promoPercentOff: number | null = null) {
   return {
-    refund: refundPolicy(config.refundWindowHours),
+    /** " Your first month was 50% off. It renews at $7/mo." when the first payment had the launch offer, else "". */
+    promo: welcomePromoLine(plan, promoPercentOff),
     plan: PLANS[plan].name,
     limits: planLimits(plan, config)
       .map((limit) => `- ${limit.name} ${approxTokens(limit.realTokens)}/week (${PLAN_MIX_LABEL})`)
@@ -606,11 +643,10 @@ async function signOut(c: Ctx): Promise<Response> {
 
 // ─── The account ────────────────────────────────────────────────────────────
 
-/** The account's plan; `limitReached`: a plan model is at 100% this week (no refund then). */
-function planView(billing: BillingState, now: number, config: PlanSettingsConfig & { cachedTokenWeight: number; refundWindowHours: number }, limitReached = false) {
+/** The account's plan (no refund fields: refunds aren't offered on the page; the owner refunds by hand). */
+function planView(billing: BillingState, config: PlanSettingsConfig & { cachedTokenWeight: number }) {
   if (billing.tier === null || billing.subscriptionId === null || billing.proState === "none") return null;
   const plan = PLANS[billing.tier];
-  const refundEnds = billing.firstPaidAt === null ? null : billing.firstPaidAt + config.refundWindowHours * HOUR_MS;
   return {
     id: plan.id,
     name: plan.name,
@@ -620,8 +656,6 @@ function planView(billing: BillingState, now: number, config: PlanSettingsConfig
     periodEnd: billing.periodEnd === null ? null : new Date(billing.periodEnd).toISOString(),
     cancelAtPeriodEnd: billing.cancelAtPeriodEnd,
     paymentFailed: billing.paymentFailed,
-    refundableUntil: refundEnds !== null && billing.refundedAt === null && !limitReached && now < refundEnds && billing.proState !== "canceled" ? new Date(refundEnds).toISOString() : null,
-    refundPolicy: refundPolicy(config.refundWindowHours),
   };
 }
 
@@ -637,8 +671,7 @@ async function accountView(c: Ctx, accountNumber: number) {
     runtime(c),
     planAccountFor(c, accountNumber),
   ]);
-  const limitReached = (bars.limits ?? []).some((limit) => limit.countedTokensPerWeek > 0 && limit.state === "used_up");
-  const current = planView(billing, c.now(), gate.config, limitReached);
+  const current = planView(billing, gate.config);
   const tier = current && current.status !== "canceled" ? billing.tier : null;
   return {
     accountId: accountIdOf(accountNumber),
@@ -808,7 +841,10 @@ async function billingUpgrade(c: Ctx): Promise<Response> {
   }
 }
 
-/** POST /web/billing/refund-request {reason?}: recorded, and the owner is told. */
+/**
+ * POST /web/billing/refund-request {reason?}: recorded, and the owner is told. No page links to it
+ * any more (no public refund promise); kept so a request from an old page still reaches the owner.
+ */
 async function refundRequest(c: Ctx): Promise<Response> {
   const caller = await paidCaller(c);
   if (caller instanceof Response) return caller;
@@ -839,7 +875,6 @@ async function refundRequest(c: Ctx): Promise<Response> {
     notEligible: notEligible === null ? null : `refund_not_eligible: ${notEligible}`,
     ...(block === "limit_reached" ? { limitsReached: reached } : {}),
     deadline: deadline === null ? null : new Date(deadline).toISOString(),
-    policy: refundPolicy(hours),
   });
 }
 
@@ -1080,6 +1115,8 @@ function checkoutAdminView(row: PaidCheckoutRow, now: number) {
     claimedAt: row.claimed_at === null ? null : new Date(row.claimed_at).toISOString(),
     claimEmailSentAt: row.claim_email_sent_at === null ? null : new Date(row.claim_email_sent_at).toISOString(),
     termsAcceptedAt: row.terms_accepted_at === null ? null : new Date(row.terms_accepted_at).toISOString(),
+    // The launch offer: the coupon on this Checkout (null: full price), what it took off, and its percent.
+    promo: row.promo_coupon === null ? null : { coupon: row.promo_coupon, discountCents: row.discount_cents, percentOff: row.promo_percent_off },
     expired: row.claimed_by === null && !claimable(row, now, CLAIM_DAYS),
   };
 }
@@ -1194,13 +1231,13 @@ async function sendClaimEmail(c: Ctx, row: PaidCheckoutRow): Promise<void> {
     return;
   }
   const text = [
-    `Thanks for subscribing to ${plan.name} ($${plan.priceUsd}/month): ${planLine(row.plan, config)}`,
+    `Thanks for subscribing to ${plan.name} (${row.promo_coupon === null ? `$${plan.priceUsd}/month` : `first month ${row.promo_percent_off ?? config.promoPercentOff}% off, then $${plan.priceUsd}/month`}): ${planLine(row.plan, config)}`,
     "",
     "Finish setting up dl.new to get your key:",
     link,
     "",
     `The link works for ${CLAIM_DAYS} days. Stripe sends your receipt separately.`,
-    `Not for you? ${refundPolicy(config.refundWindowHours)} Reply to this email.`,
+    "Questions? Reply to this email.",
     "",
     "dl.new, by Directionally Local",
   ].join("\n");
@@ -1234,10 +1271,12 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
         amountCents: typeof object.amount_total === "number" ? object.amount_total : 0,
         paidAt: event.created * 1000,
         termsAcceptedAt: termsAccepted(object) ? event.created * 1000 : null,
+        promo: checkoutPromo(object),
       });
       if (row.claimed_by !== null) return "plan_claimed";
       await sendClaimEmail(c, row);
-      const alerts: Alert[] = [{ subject: `dl.new: someone paid for ${PLANS[plan].name}`, text: `dl.new: ${row.email ?? "someone"} paid $${(row.amount_cents / 100).toFixed(2)} for ${PLANS[plan].name}. Not set up yet (unclaimed payments: GET /admin/paid/checkouts).` }];
+      const offer = row.promo_coupon === null ? "" : ` (launch offer ${row.promo_coupon}, $${(row.discount_cents / 100).toFixed(2)} off)`;
+      const alerts: Alert[] = [{ subject: `dl.new: someone paid for ${PLANS[plan].name}`, text: `dl.new: ${row.email ?? "someone"} paid $${(row.amount_cents / 100).toFixed(2)} for ${PLANS[plan].name}${offer}. Not set up yet (unclaimed payments: GET /admin/paid/checkouts).` }];
       await alert(c, alerts);
       return "plan_unclaimed";
     }

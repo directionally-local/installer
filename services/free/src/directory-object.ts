@@ -55,6 +55,7 @@ import {
   resolveIdentity,
   usageRows,
   type PaidCheckoutRow,
+  type CheckoutPromo,
   type UsageRow,
 } from "./paid-store.js";
 import { paidLogin, type IdentityKind } from "./accounts.js";
@@ -1106,6 +1107,10 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["refund_requests", "not_eligible", "TEXT"],
   // When a dl.new plan's customer accepted the terms with the withdrawal waiver at Checkout.
   ["paid_checkouts", "terms_accepted_at", "INTEGER"],
+  // The launch offer on a dl.new plan Checkout (paid-store.ts CheckoutPromo): the coupon, cents off, percent off.
+  ["paid_checkouts", "promo_coupon", "TEXT"],
+  ["paid_checkouts", "discount_cents", "INTEGER NOT NULL DEFAULT 0"],
+  ["paid_checkouts", "promo_percent_off", "INTEGER"],
   // Error events per person per day (the metrics' errorEvents), so they outlive the raw events.
   ["daily_activity", "error_events", "INTEGER NOT NULL DEFAULT 0"],
 ];
@@ -3000,7 +3005,7 @@ export class DirectoryObject extends DurableObject {
     });
   }
 
-  async recordPaidCheckout(input: { sessionId: string; plan: PlanId; customerId: string | null; subscriptionId: string | null; email: string | null; amountCents: number; paidAt: number; termsAcceptedAt?: number | null }): Promise<PaidCheckoutRow> {
+  async recordPaidCheckout(input: { sessionId: string; plan: PlanId; customerId: string | null; subscriptionId: string | null; email: string | null; amountCents: number; paidAt: number; termsAcceptedAt?: number | null; promo?: CheckoutPromo | null }): Promise<PaidCheckoutRow> {
     return recordPaidCheckout(this.ctx.storage.sql, input);
   }
 

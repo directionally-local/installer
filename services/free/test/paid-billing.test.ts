@@ -80,7 +80,9 @@ describe("plan webhooks", () => {
     assert.equal(claimEmails[0]!.to, "late@example.com");
     assert.match(String(claimEmails[0]!.text), new RegExp(`https://dl\\.new/account\\?session_id=${session.id}`));
     assert.match(String(claimEmails[0]!.text), /Kimi K3\.1 ~1\.5M\/week \(95\.5% caching applied\)/);
-    assert.ok(String(claimEmails[0]!.text).includes("Not for you? Full refund within 24 hours of your first payment, if you haven't reached your weekly limit. Reply to this email."));
+    // No refund promise in any customer email; refunds are the owner's call.
+    assert.doesNotMatch(String(claimEmails[0]!.text), /refund/i);
+    assert.ok(String(claimEmails[0]!.text).includes("Questions? Reply to this email."));
     // Claiming an unclaimed payment still has its own 7 days.
     assert.match(String(claimEmails[0]!.text), /The link works for 7 days\./);
     // A retried delivery under another event id doesn't email again.
@@ -183,7 +185,7 @@ describe("billing", () => {
     const answer = (await request.json()) as any;
     assert.equal(answer.eligible, true);
     assert.equal(answer.notEligible, null);
-    assert.equal(answer.policy, "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit.");
+    assert.equal(answer.policy, undefined, "no public refund policy");
     assert.ok(service.calls.emails.some((message) => message.raw.includes("refund request")));
     const admin = await adminToken(service);
     const listed = (await (await service.request("GET", "/admin/paid/refund-requests", { token: admin })).json()) as any;
@@ -233,7 +235,7 @@ describe("billing", () => {
     assert.equal((await service.request("POST", "/v1/chat/completions", { token: key, headers: { "user-agent": "opencode/1.2" }, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } })).status, 200);
     await service.settle();
     const account = (await (await service.request("GET", "/web/account", { token })).json()) as any;
-    assert.equal(account.plan.refundableUntil, null, "no refund once the limit is reached");
+    assert.equal(account.plan.refundableUntil, undefined, "no refund fields on the account page");
     const request = (await (await service.request("POST", "/web/billing/refund-request", { token, body: { reason: "used it all" } })).json()) as any;
     assert.equal(request.eligible, false);
     assert.equal(request.notEligible, "refund_not_eligible: weekly limit reached");

@@ -34,6 +34,8 @@ export interface FakeSession {
   amount_total: number;
   created: number;
   form: URLSearchParams;
+  /** The coupon Checkout applied (`discounts[0][coupon]`), or null. */
+  coupon: string | null;
 }
 
 export interface FakeSubscription {
@@ -57,6 +59,8 @@ export class FakeStripe {
   refuseTermsConsent = false;
   /** Set to make the next subscription update fail as a declined card. */
   declineNext = false;
+  /** Coupons Stripe knows, with their percent off (duration once); others are refused at Checkout as Stripe does. */
+  coupons = new Map<string, number>([["dlnew-bf-2026", 50]]);
   #n = 0;
 
   constructor(private readonly service: Service) {
@@ -75,13 +79,20 @@ export class FakeStripe {
           { status: 400 },
         );
       }
+      const coupon = form.get("discounts[0][coupon]");
+      if (coupon !== null && !this.coupons.has(coupon)) {
+        return Response.json({ error: { type: "invalid_request_error", code: "resource_missing", param: "discounts[0][coupon]", message: `No such coupon: '${coupon}'` } }, { status: 400 });
+      }
+      if (coupon !== null && form.get("allow_promotion_codes") !== null) {
+        return Response.json({ error: { type: "invalid_request_error", message: "You may only specify one of these parameters: allow_promotion_codes, discounts." } }, { status: 400 });
+      }
       const id = `cs_test_${String(++this.#n).padStart(12, "a")}`;
       const metadata: Record<string, string> = {};
       for (const [key, value] of form) {
         const match = /^metadata\[(\w+)\]$/.exec(key);
         if (match) metadata[match[1]!] = value;
       }
-      this.sessions.set(id, { id, mode: form.get("mode")!, status: "open", payment_status: "unpaid", metadata, price: form.get("line_items[0][price]")!, customer: null, subscription: null, email: null, amount_total: 0, created: this.now, form });
+      this.sessions.set(id, { id, mode: form.get("mode")!, status: "open", payment_status: "unpaid", metadata, price: form.get("line_items[0][price]")!, customer: null, subscription: null, email: null, amount_total: 0, created: this.now, form, coupon });
       return Response.json({ id, url: `https://checkout.stripe.com/c/pay/${id}` });
     }
     let match = /^\/v1\/checkout\/sessions\/(.+)$/.exec(path);
@@ -138,7 +149,7 @@ export class FakeStripe {
     session.customer = `cus_${n}`;
     session.subscription = `sub_${n}`;
     session.email = email;
-    session.amount_total = session.price === PRICES.plus ? 2000 : session.price === PRICES.max ? 6000 : 700;
+    session.amount_total = Math.round(this.subtotal(session) * (1 - (session.coupon ? this.coupons.get(session.coupon)! : 0) / 100));
     this.subscriptions.set(session.subscription, {
       id: session.subscription,
       customer: session.customer,
@@ -153,9 +164,19 @@ export class FakeStripe {
     return session;
   }
 
+  /** The session's price before any discount, in cents. */
+  subtotal(session: FakeSession): number {
+    return session.price === PRICES.plus ? 2000 : session.price === PRICES.max ? 6000 : 700;
+  }
+
   sessionObject(session: FakeSession, expand: boolean): Record<string, unknown> {
     const subscription = session.subscription ? this.subscriptions.get(session.subscription) : undefined;
+    const paid = session.status === "complete";
+    const discount = paid ? this.subtotal(session) - session.amount_total : 0;
     return {
+      amount_subtotal: paid ? this.subtotal(session) : 0,
+      total_details: { amount_discount: discount, amount_shipping: 0, amount_tax: 0 },
+      discounts: session.coupon ? [{ coupon: session.coupon, promotion_code: null }] : [],
       id: session.id,
       object: "checkout.session",
       mode: session.mode,

@@ -49,8 +49,8 @@ No auth. What the plan cards show.
   "caching": {"assumedCachedShare": 0.955, "label": "(95.5% caching applied)",
               "cachedTokenWeight": 0.02, "realToCounted": 0.0641},
   "resets": "Mon 00:00 UTC",
-  "refundWindowHours": 24,
-  "refundPolicy": "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit.",
+  "promo": {"active": true, "percentOff": 50, "label": "first month, ends Mon 30 Nov",
+            "endsAt": "2026-12-01T00:00:00.000Z"},
   "gpt6Bonus": {"enabled": false, "label": "launch bonus, through 31 Jan 2027",
                 "line": "$2/week of GPT-6.1 Sol usage in dl", "weeklyUsd": 2, "fullyClaimed": false,
                 "fullyClaimedText": "GPT-6 launch bonus: fully claimed", "endsAt": "2027-02-01T00:00:00.000Z"},
@@ -65,8 +65,14 @@ No auth. What the plan cards show.
   `plan-prices.ts`'s.
 - `gpt6Bonus`: the launch bonus offer (`plan-usage.ts` `bonusOffer`); `fullyClaimed: true` → the
   card shows `fullyClaimedText`.
-- `refundPolicy`: the refund line to show under the cards, word for word ("Full refund within 24 hours of your first payment, if you haven't reached your weekly limit.");
-  `refundWindowHours` follows the runtime setting `refundWindowHours` (default 24), and the line with it.
+- `promo`: the launch offer (Black Friday 2026). `active: true` only while plan Checkouts get the
+  coupon (runtime settings `promoCouponId`, `promoStartsAt` 2026-11-27T00:00:00Z inclusive,
+  `promoEndsAt` 2026-12-01T00:00:00Z exclusive, `promoPercentOff` 50, `promoLabel`); otherwise
+  `{"active": false, "percentOff": null, "label": null, "endsAt": null}`. Each plan then has
+  `promoPriceUsd` (3.5 / 10 / 30 at 50%; null when inactive): the first month's price. A page
+  shows a discount only when `promo.active` is true. `GET /v1/plans` carries the same `promo`
+  and, per plan, `priceUsd` and `promoPriceUsd`.
+- No refund line: no page or email promises a refund (refunds are the owner's call, below).
 - `available: false` while STRIPE_SECRET_KEY or a plan's price id is missing: show the cards but
   disable the button.
 
@@ -76,14 +82,22 @@ No auth. Starts Stripe Checkout for a plan. → `200 {"url": "https://checkout.s
 
 - Subscription mode, the plan's Stripe Price (STRIPE_PRICE_STARTER / _PLUS / _MAX), quantity 1,
   promotion codes off, Radar on (Stripe default), Stripe Tax as dl Pro has it.
+- **Launch offer**: inside the `promo` window the session gets `discounts[0][coupon]=<promoCouponId>`
+  (a Stripe coupon, duration "once": the first invoice only, renewals at full price) and
+  `metadata[promo]`; `allow_promotion_codes` is left out then (Stripe takes one or the other),
+  so no code can be typed either way. If Stripe refuses the coupon (not created, expired, used
+  up), Checkout never fails: the session is created again without it, `promoCouponId` turns
+  itself off (config change log, a warning, an alert to the owner, and `/web/plans` stops showing
+  the offer), and the owner turns it back on with `POST /admin/config {"promoCouponId": "dlnew-bf-2026"}`.
+  The completed session's discount (`total_details.amount_discount`, the coupon) is kept on the
+  paid checkout (`promo` in the admin list) and drives the welcome email's offer line.
 - `success_url = https://dl.new/account?session_id={CHECKOUT_SESSION_ID}`,
   `cancel_url = https://dl.new/?plan=<plan>` (back to the plan step with the card selected).
 - `campaign` (optional): the first-touch link tags, as `/v1/telemetry/web` takes them.
 - **Terms consent with the EU/UK withdrawal waiver** (runtime setting `checkoutTermsConsent`,
   default on): `consent_collection[terms_of_service]=required` and the checkbox text
   (`custom_text[terms_of_service_acceptance][message]`): "I want my dl.new plan to start right
-  away and understand I lose my 14-day right to cancel once it starts. Refunds: within 24 hours of
-  the first payment, if the weekly limit hasn't been reached. [Terms](https://dl.new/terms)."
+  away and understand I lose my 14-day right to withdraw once it starts. [Terms](https://dl.new/terms)."
   Stripe requires a terms of service URL in the account's public details (Dashboard → Settings →
   Public details); without it Stripe refuses the session. Checkout never fails for that: the
   service starts it again without the consent and turns `checkoutTermsConsent` off (in the config
@@ -197,9 +211,7 @@ Ends this web session at once (the token stops working).
     "id": "starter", "name": "dl.new Starter", "priceUsd": 7,
     "status": "active",
     "periodEnd": "2026-12-31T10:00:00.000Z", "cancelAtPeriodEnd": false,
-    "paymentFailed": false,
-    "refundableUntil": "2026-12-02T10:00:00.000Z",
-    "refundPolicy": "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit."
+    "paymentFailed": false
   },
   "legacy": null,
   "settings": {"fallback": true},
@@ -226,9 +238,8 @@ Ends this web session at once (the token stops working).
 - The plan the account's requests are held to is this one: part B's `AccountObject.planState()`
   reads `paidPlan()` (billing's tier, from the webhooks and the claim). A dl Pro subscription
   from before the launch (no tier) is held to Starter's limits (open question 4).
-- `refundableUntil`: 24 hours after the first payment (`refundWindowHours`); null once past, once
-  refunded, or once any plan model's weekly limit is reached (a `limits` entry `used_up`).
-- `refundPolicy`: "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit."
+- No refund fields: the page offers no refund. Cancelling is Stripe's Customer Portal (`POST
+  /web/billing/portal`, cancel at period end).
 
 ### POST /web/account/email {email} (web token) → `200 {"sent": true, "resendAfter": 30, "expiresIn": 600}`
 
@@ -278,13 +289,14 @@ may use is the account's plan **[B]**. A bad or revoked key is 401 `invalid_key`
   `/web/account` (the webhook confirms within seconds). Errors: 404 `no_subscription`; 400
   `not_an_upgrade` (same or lower plan: use the portal); 402 `payment_failed` (card declined;
   nothing changed); 503/502 as above.
-- **POST /web/billing/refund-request {reason?}** (web token) → `200 {"requested": true, "eligible": true, "notEligible": null, "deadline", "policy"}`.
-  Records the request and alerts the owner. Eligible: within 24 hours of the first payment
+- **POST /web/billing/refund-request {reason?}** (web token) → `200 {"requested": true, "eligible": true, "notEligible": null, "deadline"}`.
+  No page links to it any more (no public refund promise); kept so a request from an old page
+  still reaches the owner. Records the request and alerts the owner. Eligible: within 24 hours of the first payment
   (`refundWindowHours`) **and** no plan model at 100% of its weekly limit this week; the owner
   then refunds it (admin endpoint below). Otherwise `eligible: false` (still recorded) and
   `notEligible` says why: `"refund_not_eligible: weekly limit reached"` (with `limitsReached`,
   the models' names), `"refund_not_eligible: refund window passed"` or
-  `"refund_not_eligible: already refunded"`. `policy` is the refund line. 404 `no_subscription`.
+  `"refund_not_eligible: already refunded"`. 404 `no_subscription`.
 - `dl.new/upgrade` (the link in limit errors) is a page: signed in, it calls `/web/billing/upgrade`
   with the next plan after a confirm; signed out, it goes to sign-in first.
 
@@ -441,10 +453,11 @@ Unclaimed sessions get plan changes recorded on the session row and applied when
   the end on 31 Jan 2027, never on cash). GPT-6 outside the bonus still needs trust.
 - **Welcome email** (`welcome_paid`, user-emails.ts): on claim, once per payment: where the key
   is (dl.new/connect), `curl -fsSL dl.new | sh` then `dl claude`, other tools' base URL and
-  dl.new/keys, dl.new/signin, each plan model's weekly limit with "(95.5% caching applied)", the
-  refund policy ("Full refund within 24 hours of your first payment, if you haven't reached your weekly limit. reply to this email."), and the bonus line when the account holds it.
-  The claim email ("Finish setting up dl.new") has the same refund line; its link still works 7
-  days (claiming is separate from the refund window).
+  dl.new/keys, dl.new/signin, each plan model's weekly limit with "(95.5% caching applied)", and
+  the bonus line when the account holds it. No refund line. When the payment had the launch
+  offer, the first line adds "Your first month was 50% off. It renews at $20/mo." (the percent
+  Stripe took off, the plan's full price). The claim email ("Finish setting up dl.new") says
+  "first month 50% off, then $20/month" for such a payment; its link works 7 days.
 - **Email budget** (email-budget.ts): settings `userEmailsDailyMax` (300), of it
   `userEmailsTransactionalReserve` (100) kept for transactional mail (claim, paid welcome,
   plan_80, access answers); bulk and lifecycle mail (welcome_*, didnt_start, week_80, gone_quiet,

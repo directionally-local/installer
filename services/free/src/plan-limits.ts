@@ -31,6 +31,11 @@ export function freeEnded(freeEndsAt: number | undefined, now: number): boolean 
   return freeEndsAt !== undefined && now >= freeEndsAt;
 }
 
+/** Whether free tokens have ended for this account: past `freeEndsAt` and not on the `freeForever` list. */
+export function freeEndedFor(config: { freeEndsAt: number | undefined; freeForever: readonly number[] }, githubId: number, now: number): boolean {
+  return freeEnded(config.freeEndsAt, now) && !config.freeForever.includes(githubId);
+}
+
 // ─── Copy ────────────────────────────────────────────────────────────────────
 
 /** "3d 4h", "5h 12m", "12m": the time until `at`. */

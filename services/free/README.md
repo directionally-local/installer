@@ -783,12 +783,26 @@ The HTTP contract the site calls is [docs/web-api-paid.md](docs/web-api-paid.md)
   invoice for the refund). A plan stays on while past due (Stripe's retries decide);
   `unpaid`, `canceled` and `customer.subscription.deleted` end it. Upgrades are prorated and
   invoiced at once; refunds are an admin action (`POST /admin/paid/refund`).
-- **Refunds.** "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit." The window is the runtime setting `refundWindowHours` (REFUND_WINDOW_HOURS,
-  default 24); a plan model at 100% of its weekly limit this week also ends it. The admin's
-  `{"force": true}` overrides both. The claim link's 7 days are separate and unchanged.
+- **Refunds.** No page or email promises one; the owner refunds by hand with
+  `POST /admin/paid/refund`, which refunds the first invoice's payment in full (what was actually
+  charged, so a discounted first month refunds the discounted amount). Without `{"force": true}`
+  it keeps to the runtime setting `refundWindowHours` (REFUND_WINDOW_HOURS, default 24) and
+  refuses once a plan model is at 100% of its weekly limit this week.
+- **Launch offer** (Black Friday 2026; runtime settings `promoCouponId` "dlnew-bf-2026",
+  `promoStartsAt` 2026-11-27T00:00:00Z, `promoEndsAt` 2026-12-01T00:00:00Z exclusive,
+  `promoPercentOff` 50, `promoLabel` "first month, ends Mon 30 Nov"): plan Checkouts started
+  inside the window get the Stripe coupon automatically (no code; duration "once", so renewals
+  are full price); `/web/plans` and `/v1/plans` show `promo` and each plan's `promoPriceUsd`. A
+  coupon Stripe refuses never fails Checkout: it goes on at full price and `promoCouponId` turns
+  itself off with an alert. The discount is kept on the paid checkout (admin list `promo`) and
+  the welcome email says "Your first month was 50% off. It renews at $X/mo."
+- **freeForever** (runtime setting, FREE_FOREVER, GitHub ids, default none): accounts that keep
+  their free allowance and level past `freeEndsAt` (no `plan_required`). Moderation, caps,
+  suspensions and blocks still apply. `/admin/people` shows `freeForever: true` for them.
 - **Terms consent at Checkout** (`checkoutTermsConsent`, CHECKOUT_TERMS_CONSENT, default on): the
-  plan Checkout requires Stripe's terms-of-service checkbox with the EU/UK withdrawal waiver and
-  the refund rule; the acceptance time is kept on the paid checkout. Stripe needs a terms URL in
+  plan Checkout requires Stripe's terms-of-service checkbox with the EU/UK withdrawal waiver ("I
+  want my dl.new plan to start right away and understand I lose my 14-day right to withdraw once
+  it starts. [Terms](https://dl.new/terms)."); the acceptance time is kept on the paid checkout. Stripe needs a terms URL in
   the account's public details; if it refuses, Checkout goes on without the consent and the
   setting turns itself off (logged, alerted) until the owner sets the URL and turns it back on.
 - **Keys.** `dl_sk_<account>_<id>_<secret>` tool keys, shown once; old `dlk_` keys unchanged.
