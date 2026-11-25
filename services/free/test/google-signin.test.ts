@@ -86,6 +86,20 @@ describe("Continue with Google", () => {
     assert.equal(await errorCode(response), "no_account");
   });
 
+  it("holds the verified Google sign-in with no account (pending) and finishes it after the payment", async () => {
+    const { service, stripe, google } = await world();
+    const refused = await session(service, await googleRoundTrip(service, google, { sub: "201", email: "new@gmail.com" }));
+    const pending = ((await refused.json()) as any).error.pending;
+    assert.equal(pending.email, "new@gmail.com");
+    const paid = await buy(service, stripe, "starter");
+    const done = await service.request("POST", "/web/auth/pending/session", { body: { token: pending.token, sessionId: paid.id }, headers: DL });
+    assert.equal(done.status, 200, await done.clone().text());
+    const body = (await done.json()) as SessionResponse;
+    assert.equal(body.created, true);
+    assert.deepEqual(body.account.identities, [{ kind: "google", email: "new@gmail.com" }]);
+    assert.equal(((await (await session(service, await googleRoundTrip(service, google, { sub: "201", email: "new@gmail.com" }))).json()) as SessionResponse).account.accountId, body.account.accountId);
+  });
+
   it("signs into the account that already signs in with that email by code, and links Google to it", async () => {
     const { service, stripe, google } = await world();
     const paid = await buy(service, stripe, "starter");

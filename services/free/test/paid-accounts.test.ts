@@ -356,6 +356,46 @@ describe("the account step: GitHub", () => {
     assert.equal(await errorCode(response), "no_account");
   });
 
+  it("holds an unknown GitHub sign-in (pending, an hour) and finishes it after the payment, without signing in again", async () => {
+    const { service, stripe } = await world();
+    const fragment = await githubRoundTrip(service, { id: 7100, login: "newbie", email: "newbie@example.com" }, "https://dl.new/signin");
+    const refused = await service.request("POST", "/web/auth/github/session", { body: { code: fragment.slice(7), state: PAGE_STATE }, headers: DL });
+    assert.equal(refused.status, 403);
+    const error = ((await refused.json()) as any).error;
+    assert.equal(error.code, "no_account");
+    assert.equal(error.pending.email, "newbie@example.com");
+    assert.equal(error.pending.expiresIn, 3600);
+    const pending = error.pending.token as string;
+    // It is no web session, and alone (no payment) it signs no one in.
+    assert.equal((await service.request("GET", "/web/account", { token: pending, headers: DL })).status, 401);
+    assert.equal(await errorCode(await service.request("POST", "/web/auth/pending/session", { body: { token: pending }, headers: DL })), "checkout_required");
+    // A tampered or unpaid one is refused.
+    const [h, p, sig] = pending.split(".");
+    const forged = `${h}.${Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(p!, "base64url").toString()), email: "boss@example.com" })).toString("base64url")}.${sig}`;
+    const paid = await buy(service, stripe, "plus");
+    assert.equal(await errorCode(await service.request("POST", "/web/auth/pending/session", { body: { token: forged, sessionId: paid.id }, headers: DL })), "invalid_grant");
+    // After Checkout: the account is made with the verified GitHub identity and the payment claimed.
+    const done = await service.request("POST", "/web/auth/pending/session", { body: { token: pending, sessionId: paid.id }, headers: DL });
+    assert.equal(done.status, 200, await done.clone().text());
+    const body = (await done.json()) as SessionResponse;
+    assert.equal(body.created, true);
+    assert.deepEqual(body.claimed, { plan: "plus", sessionId: paid.id });
+    assert.equal(body.account.email, "newbie@example.com");
+    assert.equal((await service.request("GET", "/web/account", { token: body.token, headers: DL })).status, 200);
+    // GitHub sign-in now finds that account.
+    const again = await service.request("POST", "/web/auth/github/session", { body: { code: (await githubRoundTrip(service, { id: 7100, login: "newbie", email: "newbie@example.com" })).slice(7), state: PAGE_STATE }, headers: DL });
+    assert.equal(((await again.json()) as SessionResponse).account.accountId, body.account.accountId);
+  });
+
+  it("refuses a pending sign-in after an hour", async () => {
+    const { service, stripe } = await world();
+    const fragment = await githubRoundTrip(service, { id: 7200, login: "slow", email: "slow@example.com" }, "https://dl.new/signin");
+    const pending = ((await (await service.request("POST", "/web/auth/github/session", { body: { code: fragment.slice(7), state: PAGE_STATE }, headers: DL })).json()) as any).error.pending.token;
+    const paid = await buy(service, stripe);
+    service.clock.now += 3600_000;
+    assert.equal(await errorCode(await service.request("POST", "/web/auth/pending/session", { body: { token: pending, sessionId: paid.id }, headers: DL })), "invalid_grant");
+  });
+
   it("keeps the admin's GitHub id an admin", async () => {
     const { service } = await world();
     await service.signIn({ id: ADMIN_ID, login: "owner" });

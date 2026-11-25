@@ -94,6 +94,9 @@ const PAID_LIMITS = {
 } satisfies Record<string, Limit>;
 
 const NO_ACCOUNT_MESSAGE = "There's no dl.new account for this yet. Pick a plan at dl.new first.";
+/** How long a verified sign-in with no account is held (the `pending` token) while its person picks a plan and pays. */
+export const PENDING_SIGNIN_TTL_S = 3600;
+const PENDING_KINDS: readonly IdentityKind[] = ["github", "google", "email"];
 
 // ─── Web sessions ───────────────────────────────────────────────────────────
 
@@ -147,6 +150,7 @@ const ROUTES: Record<string, PaidRoute> = {
   "/web/auth/email/verify": { POST: emailVerify },
   "/web/auth/github/session": { POST: githubSession },
   "/web/auth/google/session": { POST: googleSession },
+  "/web/auth/pending/session": { POST: pendingSession },
   "/web/signout": { POST: signOut },
   "/web/account": { GET: webAccount },
   "/web/account/email": { POST: contactEmailStart },
@@ -524,7 +528,7 @@ async function signIn(c: Ctx, identity: SignInIdentity, sessionId: unknown): Pro
   }
   let created = false;
   if (accountNumber === undefined) {
-    if (!checkout) return apiError(403, "no_account", NO_ACCOUNT_MESSAGE);
+    if (!checkout) return noAccount(c, identity);
     const made = await dir.signUpPaid({ kind: identity.kind, subject: identity.subject, label: identity.label, email: identity.email, now: c.now() });
     accountNumber = made.account;
     created = made.created;
@@ -546,6 +550,46 @@ async function signIn(c: Ctx, identity: SignInIdentity, sessionId: unknown): Pro
   }
   const session = await issueWebSession(c, accountNumber, person.login);
   return json({ ...session, account: await accountView(c, accountNumber), created, claimed });
+}
+
+/**
+ * 403 no_account for a verified identity with no account and no payment. It carries `pending`: a
+ * signed "pending" token (an hour) holding that identity, so the page can send its person to pick
+ * a plan and, after Checkout, finish the account step with POST /web/auth/pending/session instead
+ * of signing in again. The token is no web session (paidCaller wants typ "web") and works only
+ * with a paid Checkout.
+ */
+async function noAccount(c: Ctx, identity: SignInIdentity): Promise<Response> {
+  const iat = Math.floor(c.now() / 1000);
+  const token = await signJwt(
+    { iss: ISSUER, typ: "pending", sub: `${identity.kind}:${identity.subject}`, kind: identity.kind, subject: identity.subject, label: identity.label, email: identity.email, iat, exp: iat + PENDING_SIGNIN_TTL_S, jti: crypto.randomUUID() },
+    await signingKey(c.config),
+  );
+  return apiError(403, "no_account", NO_ACCOUNT_MESSAGE, { pending: { token, email: identity.email, expiresIn: PENDING_SIGNIN_TTL_S } });
+}
+
+/**
+ * POST /web/auth/pending/session {token, sessionId} → the session response: the sign-in a
+ * no_account answer held (`pending.token`), finished with a paid Checkout (makes the account and
+ * claims it, as signIn does with a sessionId). Without a sessionId it is refused: the token never
+ * signs anyone in by itself.
+ */
+async function pendingSession(c: Ctx): Promise<Response> {
+  const retry = await limited(c, `paid:verify:ip:${c.ipNet}`, PAID_LIMITS.verifyIp);
+  if (retry !== undefined) return rateLimited(retry);
+  const body = (await readJson(c)) ?? {};
+  const invalid = () => apiError(400, "invalid_grant", "This sign-in expired. Sign in again.");
+  if (typeof body.token !== "string" || body.token.length > 4096) return invalid();
+  const claims = await verifyJwt(body.token, await signingKey(c.config), Math.floor(c.now() / 1000), 0);
+  if (!claims || claims.typ !== "pending" || claims.iss !== ISSUER) return invalid();
+  const { kind, subject, label, email } = claims;
+  if (!PENDING_KINDS.includes(kind as IdentityKind) || typeof subject !== "string" || !subject || typeof label !== "string" || typeof email !== "string" || claims.sub !== `${kind}:${subject}`) return invalid();
+  if (typeof body.sessionId !== "string" || !body.sessionId) return apiError(400, "checkout_required", "Pick a plan at dl.new first.");
+  if (kind === "google") {
+    if (!c.config.google) return invalid();
+    await directory(c).resolveGoogleIdentity({ subject, email, now: c.now() });
+  }
+  return signIn(c, { kind: kind as IdentityKind, subject, label, email }, body.sessionId);
 }
 
 /** The address from a body, checked: plausible, not disposable, not blocked. */
