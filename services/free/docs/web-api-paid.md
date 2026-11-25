@@ -147,7 +147,7 @@ Every sign-in endpoint answers the same **session response**:
 
 | status | code | when |
 |---|---|---|
-| 403 | `no_account` | no account for this email/GitHub and no `sessionId`: "Pick a plan at dl.new first." |
+| 403 | `no_account` | no account for this email/GitHub/Google and no `sessionId`: "Pick a plan at dl.new first." After a verified sign-in it also carries `pending: {token, email, expiresIn: 3600}` (see below) |
 | 404 | `checkout_not_found` | `sessionId` unknown or not a plan checkout |
 | 409 | `checkout_claimed` | `sessionId` already linked to another account |
 | 410 | `checkout_expired` | unclaimed for more than 7 days |
@@ -220,6 +220,18 @@ endpoint below is a 404, and `GET /web/plans` says `"signIn": {"google": false}`
   verified address by email code** (the Google identity is linked to it now); else a new account,
   only with a paid unclaimed `sessionId` (card trials included), as for email and GitHub.
 - Errors: 400 `invalid_grant`; plus the common ones.
+
+### POST /web/auth/pending/session {token, sessionId} → the session response
+
+A verified sign-in (GitHub, Google, or an email code) with no account and no `sessionId` answers
+403 `no_account` with `pending.token`: a signed token (typ `pending`, one hour) holding that
+verified identity, never a web session. dl.new keeps it in the tab, sends the person to pick a
+plan, and after Checkout (`/account?session_id=`) posts it here with the Checkout id instead of
+asking them to sign in again. It then works exactly like that provider's session call with that
+`sessionId`: a new account with that identity, the payment claimed.
+
+- Errors: 400 `invalid_grant` (bad, tampered or expired token; sign in again); 400
+  `checkout_required` (no `sessionId`: the token alone signs no one in); plus the common ones.
 
 ### POST /web/checkout/claim {sessionId} (web token)
 
