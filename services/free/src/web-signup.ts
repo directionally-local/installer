@@ -6,11 +6,14 @@ import type { InstallOption, InstallPlan } from "./auth-object.js";
  * dl.new's web sign-up: sign in with GitHub on dl.new, choose where dl runs and (on this
  * computer) the plan, then a personal one-time install command that installs dl signed in.
  *
- *   GET  /web/signin?return=<url>&state=<page state>[&ref=<referral>]
+ *   GET  /web/signin?return=<url: WEB_SIGNUP_URL or WEB_API_URL>&state=<page state>[&ref=<referral>]
  *        → the CLI's own sign-in (a device code, GitHub, the details and invite steps, admission),
  *          then 303 to <url>#signin=<one-time code>&state=<page state>
  *   POST /web/session {code, state}        → {token, expires_in, login}: a web session (bearer)
- *   GET  /web/me                           → who, email, plan, trial, offers, referral link and joined count
+ *   GET  /web/me                           → who, email, plan, trial, tool keys' allowance, offers, referral link and joined count
+ *   GET  /web/keys                         → the account's tool keys (api.dl.new)
+ *   POST /web/keys {name}                  → a tool key, shown once (POST /v1/keys {kind: "tool"}'s checks)
+ *   DELETE /web/keys/:id                   → revokes one of the account's own tool keys
  *   POST /web/email {email, updates?}      → saves the contact email (the details step's checks)
  *   POST /web/choice {option}              → counted (funnel only)
  *   POST /web/checkout                     → {url}: Stripe Checkout for Pro, back to <url>?checkout=done|cancel
@@ -27,6 +30,12 @@ import type { InstallOption, InstallPlan } from "./auth-object.js";
 
 /** Where the web sign-up returns to unless WEB_SIGNUP_URL says otherwise. */
 export const DEFAULT_WEB_SIGNUP_URL = "https://dl.new/start";
+/**
+ * api.dl.new's key page unless WEB_API_URL says otherwise: a web sign-in may return there too
+ * (its script finishes the sign-in itself), and its origin is the other one /web/* answers CORS
+ * for. The API is served on the same host (api.dl.new/v1/*, api.dl.new/anthropic/*).
+ */
+export const DEFAULT_WEB_API_URL = "https://api.dl.new/";
 /** How long a web session lasts: time to choose, pay and copy the command. */
 export const WEB_SESSION_TTL_S = 3600;
 /** The page's random state: base64url, 16 to 128 characters. */
@@ -67,17 +76,21 @@ export function planFor(option: InstallOption, plan: unknown): InstallPlan | nul
   return option === "computer" && isInstallPlan(plan) ? plan : null;
 }
 
-/** Whether `raw` (the ?return= parameter) is the one page the web sign-up may return to: exact match, no lookalikes. */
-export function allowedReturn(raw: string | null, signupUrl: string): boolean {
-  return raw === null || raw === "" || raw === signupUrl;
+/**
+ * The page a web sign-in returns to for `raw` (the ?return= parameter): one of `pages` by exact
+ * match, no lookalikes; the first (the sign-up page) when none is given; undefined otherwise.
+ */
+export function allowedReturn(raw: string | null, pages: readonly [string, ...string[]]): string | undefined {
+  if (raw === null || raw === "") return pages[0];
+  return pages.find((page) => page === raw);
 }
 
-/** CORS headers for the web page's origin, or none when the request came from elsewhere (or no browser). */
-export function webCors(origin: string | null, allowed: string): Record<string, string> {
-  if (origin !== allowed) return { vary: "origin" };
+/** CORS headers for one of the web pages' origins, or none when the request came from elsewhere (or no browser). */
+export function webCors(origin: string | null, allowed: readonly string[]): Record<string, string> {
+  if (origin === null || !allowed.includes(origin)) return { vary: "origin" };
   return {
-    "access-control-allow-origin": allowed,
-    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-origin": origin,
+    "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
     "access-control-allow-headers": "authorization, content-type",
     "access-control-max-age": "600",
     vary: "origin",

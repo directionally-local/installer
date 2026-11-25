@@ -6,7 +6,7 @@
 
 import { ALLOCATOR_MODES, type AllocatorMode } from "./allocator.js";
 import { detectionRulesFrom, type DetectionRules, type DetectionRulesStatus, type ThresholdKey } from "./detection-rules.js";
-import { DEFAULT_WEB_SIGNUP_URL } from "./web-signup.js";
+import { DEFAULT_WEB_API_URL, DEFAULT_WEB_SIGNUP_URL } from "./web-signup.js";
 import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_PLANS, PROVIDER_STATUSES, REGISTRY_DEFAULTS, type ProviderId, type ProviderPlans, type ProviderStatus, type RegistrySettingsConfig } from "./providers.js";
 import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type DataCollection, type Quantization } from "./routing.js";
 
@@ -237,6 +237,13 @@ export interface FreeConfig extends RegistrySettingsConfig {
    * the /web/* endpoints answer CORS for (web-signup.ts).
    */
   webSignupUrl: string;
+  /**
+   * api.dl.new's key page (WEB_API_URL, an https URL; default https://api.dl.new/): a web sign-in
+   * may return there too, and /web/* answers CORS for its origin as well. Its origin also serves
+   * the API (Cloudflare routes api.dl.new/v1/* and /anthropic/* to this Worker), so links the
+   * service makes never use it (see `base`).
+   */
+  webApiUrl: string;
   /**
    * Resend's API key (RESEND_API_KEY, a secret) for emails to users, used only when the USER_EMAIL
    * binding (Cloudflare Email Service) is absent. With neither, none are sent. Never logged.
@@ -689,6 +696,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
     webSignupUrl: webSignupUrl(env.WEB_SIGNUP_URL),
+    webApiUrl: webSignupUrl(env.WEB_API_URL, "WEB_API_URL", DEFAULT_WEB_API_URL),
     resendApiKey: text(env.RESEND_API_KEY),
     emailFrom: sender(env.EMAIL_FROM) ?? DEFAULTS.emailFrom,
     emailReplyTo: emailAddress(env.EMAIL_REPLY_TO, "EMAIL_REPLY_TO") ?? DEFAULTS.emailReplyTo,
@@ -941,17 +949,17 @@ function stripeId(value: unknown, prefix: string, name: string): string | undefi
   return raw;
 }
 
-/** WEB_SIGNUP_URL: an https URL with a path and nothing after it (no query, no fragment). */
-function webSignupUrl(value: unknown): string {
-  const raw = httpsUrl(value, "WEB_SIGNUP_URL");
-  if (raw === undefined) return DEFAULT_WEB_SIGNUP_URL;
+/** WEB_SIGNUP_URL (or WEB_API_URL): an https URL with a path and nothing after it (no query, no fragment). */
+function webSignupUrl(value: unknown, name = "WEB_SIGNUP_URL", fallback = DEFAULT_WEB_SIGNUP_URL): string {
+  const raw = httpsUrl(value, name);
+  if (raw === undefined) return fallback;
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new ConfigError("WEB_SIGNUP_URL must be an https URL.");
+    throw new ConfigError(`${name} must be an https URL.`);
   }
-  if (url.search || url.hash || url.username || url.password || url.href !== raw) throw new ConfigError("WEB_SIGNUP_URL must be a plain https URL like https://dl.new/start.");
+  if (url.search || url.hash || url.username || url.password || url.href !== raw) throw new ConfigError(`${name} must be a plain https URL like ${fallback}.`);
   return raw;
 }
 

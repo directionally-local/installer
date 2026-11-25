@@ -57,7 +57,11 @@
       "new_sqlite_classes": ["AuthObject", "DirectoryObject", "AccountObject", "RateLimiterObject"]
     }
   ],
-  "routes": [{ "pattern": "free.directionallylocal.com", "custom_domain": true }],
+  "routes": [
+    { "pattern": "free.directionallylocal.com", "custom_domain": true },
+    { "pattern": "api.dl.new/v1/*", "zone_name": "dl.new" },
+    { "pattern": "api.dl.new/anthropic/*", "zone_name": "dl.new" }
+  ],
   "workers_dev": false,
   "observability": { "enabled": true }
 }

@@ -109,7 +109,7 @@ describe("server keys", () => {
     const listed = await service.request("GET", "/v1/keys", { token: alice.access_token });
     const text = await listed.text();
     assert.ok(!text.includes(keySecret(body.key)), "the secret is never listed");
-    assert.deepEqual(JSON.parse(text), { keys: [{ id: body.id, name: "hetzner-1", kind: "server", createdAt: "2026-11-04T12:00:00.000Z", lastUsedAt: "2026-11-04T12:00:05.000Z" }], max: 5, maxToolKeys: 3, toolKeys: true });
+    assert.deepEqual(JSON.parse(text), { keys: [{ id: body.id, name: "hetzner-1", kind: "server", createdAt: "2026-11-04T12:00:00.000Z", lastUsedAt: "2026-11-04T12:00:05.000Z", lastTool: null }], max: 5, maxToolKeys: 3, toolKeys: true });
 
     const people = await (await service.request("GET", "/admin/people", { token: admin })).text();
     assert.ok(!people.includes("dlk_"));
