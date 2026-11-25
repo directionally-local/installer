@@ -1,11 +1,13 @@
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
-import { CLAUDE_INSTALL, CLAUDE_MODEL, claudeCommand, claudeEnv, type ClaudeDeps } from "./claude.js";
+import { CLAUDE_INSTALL, CLAUDE_MODEL, UNRECOGNIZED_MODEL_PREFIX, claudeCommand, claudeEnv, claudePrintMode, type ClaudeDeps } from "./claude.js";
+import { diverter } from "./harness-launch.js";
 import { freeTierAccessToken } from "./free-tier-token.js";
 import { main } from "../cli.js";
 
@@ -101,7 +103,7 @@ describe("dl claude", () => {
     const [run] = child.started;
     assert.equal(run!.command, "/usr/local/bin/claude");
     assert.deepEqual(run!.args, ["-p", "fix the bug", "--model", "opus", "--", "x"]);
-    assert.equal(run!.options.stdio, "inherit");
+    assert.deepEqual(run!.options.stdio, ["inherit", "pipe", "inherit"], "print mode: stdout goes through dl, for Claude Code's diagnostic line");
     const env = run!.options.env as Record<string, string>;
     assert.deepEqual(
       Object.fromEntries(Object.entries(env).filter(([name]) => name.startsWith("ANTHROPIC_") || name.startsWith("CLAUDE_CODE_"))),
@@ -269,6 +271,67 @@ describe("dl claude", () => {
     const code = await main(["claude", "--resume", "-p", "hi", "--help"], capture().io, { claude: async (args) => ((got = args), 7) });
     assert.equal(code, 7);
     assert.deepEqual(got, ["--resume", "-p", "hi", "--help"]);
+  });
+});
+
+describe("Claude Code's [claude-code:unrecognized_model] line", () => {
+  const LINE = `${UNRECOGNIZED_MODEL_PREFIX} {"model":"${CLAUDE_MODEL}","query_source":"sdk"}\n`;
+
+  /** A fake `claude -p` that prints `chunks` on its piped stdout, then exits. */
+  function printingSpawn(chunks: string[]) {
+    const started: SpawnOptions[] = [];
+    const spawn = (_command: string, _args: string[], options: SpawnOptions): ChildProcess => {
+      started.push(options);
+      const child = new EventEmitter() as ChildProcess;
+      (child as unknown as { kill: () => boolean }).kill = () => true;
+      const stdout = new PassThrough();
+      if (Array.isArray(options.stdio) && options.stdio[1] === "pipe") (child as unknown as { stdout: PassThrough }).stdout = stdout;
+      setImmediate(() => {
+        for (const chunk of chunks) stdout.write(chunk);
+        stdout.end();
+        child.emit("exit", 0, null);
+      });
+      return child;
+    };
+    return { started, spawn };
+  }
+
+  it("goes to stderr in print mode; stdout is only the answer", async () => {
+    const child = printingSpawn([LINE.slice(0, 10), LINE.slice(10) + "o", "k\n"]);
+    const { io, out, err } = capture();
+    assert.equal(await claudeCommand(["-p", "say ok"], io, deps({ fetch: fakeService().fetch, spawn: child.spawn, stdoutIsTerminal: true })), 0);
+    assert.equal(out(), "ok\n");
+    assert.match(err(), /\[claude-code:unrecognized_model\] \{"model"/);
+  });
+
+  it("goes to stderr when a script reads stdout, -p or not", async () => {
+    const child = printingSpawn([LINE, "answer\n"]);
+    const { io, out } = capture();
+    assert.equal(await claudeCommand(["--output-format", "json"], io, deps({ fetch: fakeService().fetch, spawn: child.spawn, stdoutIsTerminal: false })), 0);
+    assert.equal(out(), "answer\n");
+  });
+
+  it("leaves an interactive Claude Code the terminal", async () => {
+    const child = printingSpawn([]);
+    assert.equal(await claudeCommand([], capture().io, deps({ fetch: fakeService().fetch, spawn: child.spawn, stdoutIsTerminal: true })), 0);
+    assert.equal(child.started[0]!.stdio, "inherit");
+    assert.equal(claudePrintMode(["--print"], true), true);
+    assert.equal(claudePrintMode(["--model", "opus"], true), false);
+  });
+
+  it("passes other lines through as they come, however they're split", () => {
+    let out = "";
+    let err = "";
+    const lines = diverter(UNRECOGNIZED_MODEL_PREFIX, (t) => void (out += t), (t) => void (err += t));
+    lines.write("hel");
+    assert.equal(out, "hel", "a line that can't be the diagnostic isn't held back");
+    lines.write("lo\n[claude");
+    assert.equal(out, "hello\n", "a line that might be is held");
+    lines.write("-code:unrecognized_model] {}\n[claude is fine\n\n");
+    lines.write("tail");
+    lines.end();
+    assert.equal(out, "hello\n[claude is fine\n\ntail");
+    assert.equal(err, "[claude-code:unrecognized_model] {}\n");
   });
 });
 

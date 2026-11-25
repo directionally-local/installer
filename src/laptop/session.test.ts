@@ -876,6 +876,28 @@ describe("dl the first time on a laptop", () => {
     assert.equal(api.requests.length, 0);
   });
 
+  it("dl -- ARGS runs Autopilot with them without a terminal too (scripts, CI); bare dl there is the overview", async () => {
+    const dir = join(root, "scripted");
+    await mkdir(dir);
+    const script = (extra: Partial<MainOptions> = {}) => laptop(undefined, { terminal: false, boxSummary: async () => "GPU BOX\n", ...extra });
+    let io = capture();
+    assert.equal(await inside(dir, () => main(["--", "-p", "say ok"], io, script())), 0);
+    assert.equal(plain.launches.length, 1);
+    assert.deepEqual(plain.launches[0]!.args, [...AUTOPILOT.args, "-p", "say ok"]);
+    assert.equal(io.text(), "", "stdout is Autopilot's: no status screen, no box summary");
+    assert.equal(await inside(dir, () => main(["--", "--version"], capture(), script())), 0);
+    assert.deepEqual(plain.launches[1]!.args, [...AUTOPILOT.args, "--version"]);
+    assert.equal(await inside(dir, () => main(["-c", "--", "-p", "next"], capture(), script())), 0);
+    assert.deepEqual(plain.launches[2]!.args, [...AUTOPILOT.args, "-c", "-p", "next"]);
+    assert.equal(await inside(dir, () => main(["new", "--", "-p", "hi"], capture(), script())), 0);
+    assert.deepEqual(plain.launches[3]!.args, [...AUTOPILOT.args, "-p", "hi"]);
+    // Bare dl with nothing for Autopilot and no terminal: the overview, and no Autopilot.
+    io = capture();
+    assert.equal(await inside(dir, () => main([], io, script())), 0);
+    assert.equal(plain.launches.length, 4);
+    assert.match(plainText(io.text()), /GPU BOX/);
+  });
+
   /** Autopilot that asks dl for `dl model up` (writes the GPU handoff) on the launches listed. */
   const asking = (on: number[], text = JSON.stringify({ version: 1, action: "model-up", gpu: { vendor: "nvidia", model: "NVIDIA GeForce RTX 4090", count: 2, vramGb: 24 } })): SessionSpawner => (command, args, env, options) => {
     if (on.includes(plain.launches.length) && env.DL_GPU_HANDOFF) writeFileSync(env.DL_GPU_HANDOFF, text, { mode: 0o600 });

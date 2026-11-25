@@ -1,10 +1,14 @@
 import { EventEmitter } from "node:events";
-import { describe, it } from "node:test";
+import { mkdtempSync } from "node:fs";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { FREE_TIER_MODELS, KEY_ENV } from "./opencode.js";
 import { REFRESH_EVERY_MS, SESSION_EVENT_EVERY_MS, type LaunchDeps } from "./harness-launch.js";
-import { T3_INSTALL, t3Command, t3Env, t3Refusal } from "./t3.js";
+import { T3_INSTALL, enableT3OpenCode, t3Command, t3Env, t3Refusal, t3SettingsPath, type T3Deps } from "./t3.js";
 import { main } from "../cli.js";
 
 const ORIGIN = "https://free.test";
@@ -70,8 +74,14 @@ function fakeTimers() {
   };
 }
 
-function deps(overrides: Partial<LaunchDeps> = {}): LaunchDeps {
+/** A temp HOME per test run: T3 Code's settings go here, never the real ~/.t3. */
+const HOME = mkdtempSync(join(tmpdir(), "dl-t3-test-"));
+let settingsN = 0;
+after(() => rm(HOME, { recursive: true, force: true }));
+
+function deps(overrides: Partial<T3Deps> = {}): T3Deps {
   return {
+    t3Settings: join(HOME, `run-${++settingsN}`, ".t3", "userdata", "settings.json"),
     env: { PATH: "/usr/bin", HOME: "/home/alice", ANTHROPIC_API_KEY: "sk-ant-mine", OPENCODE_CONFIG_CONTENT: "{}" },
     find: async () => "/home/alice/.local/bin/t3",
     token: async () => ({ ok: true, origin: ORIGIN, accessToken: "access-1" }),
@@ -241,5 +251,56 @@ describe("T3 Code's environment and arguments", () => {
     assert.match(t3Refusal(["service", "install"])!, /background service/);
     assert.match(t3Refusal(["up", "--lan"])!, /background service/);
     assert.match(t3Refusal(["app"])!, /desktop app/);
+  });
+});
+
+describe("dl t3 turns on T3 Code's OpenCode", () => {
+  it("creates ~/.t3/userdata/settings.json under HOME when missing, and says so with the dl/… hint", async () => {
+    const home = join(HOME, "fresh");
+    const path = t3SettingsPath({ HOME: home });
+    assert.equal(path, join(home, ".t3", "userdata", "settings.json"));
+    const service = fakeService();
+    const { io, err } = capture();
+    assert.equal(await t3Command(["serve"], io, deps({ fetch: service.fetch, spawn: fakeSpawn().spawn, t3Settings: undefined, env: { PATH: "/usr/bin", HOME: home } })), 0);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { providerInstances: { opencode: { driver: "opencode", enabled: true } } });
+    assert.match(err(), /Turned on OpenCode in T3 Code's settings/);
+    assert.match(err(), /In OpenCode pick a dl\/… model/);
+    assert.deepEqual((await readdir(join(home, ".t3", "userdata"))).sort(), ["settings.json"], "nothing to back up");
+  });
+
+  it("keeps every other key, backs the file up once, and leaves it alone when it's already on", async () => {
+    const dir = join(HOME, "merge");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "settings.json");
+    const original = { theme: "dark", providerInstances: { claude: { driver: "claude", enabled: true }, opencode: { driver: "opencode", enabled: false, serverUrl: "" } } };
+    await writeFile(path, JSON.stringify(original));
+    assert.deepEqual(await enableT3OpenCode(path), { result: "enabled" });
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), {
+      theme: "dark",
+      providerInstances: { claude: { driver: "claude", enabled: true }, opencode: { driver: "opencode", enabled: true, serverUrl: "" } },
+    });
+    assert.deepEqual(JSON.parse(await readFile(`${path}.dl-backup`, "utf8")), original);
+    assert.deepEqual(await enableT3OpenCode(path), { result: "unchanged" });
+    // Turned off again by the person: on again, and the first backup stays.
+    await writeFile(path, JSON.stringify({ providerInstances: { opencode: { driver: "opencode", enabled: false } } }));
+    assert.deepEqual(await enableT3OpenCode(path), { result: "enabled" });
+    assert.deepEqual(JSON.parse(await readFile(`${path}.dl-backup`, "utf8")), original);
+    assert.deepEqual((await readdir(dir)).sort(), ["settings.json", "settings.json.dl-backup"]);
+  });
+
+  it("never clobbers a file it can't read as settings; T3 Code still starts, with a note", async () => {
+    const dir = join(HOME, "broken");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "settings.json");
+    await writeFile(path, "{ not json");
+    const service = fakeService();
+    const child = fakeSpawn();
+    const { io, err } = capture();
+    assert.equal(await t3Command([], io, deps({ fetch: service.fetch, spawn: child.spawn, t3Settings: path })), 0);
+    assert.equal(child.started.length, 1);
+    assert.equal(await readFile(path, "utf8"), "{ not json");
+    assert.match(err(), /couldn't turn it on \(.*isn't valid JSON/);
+    await writeFile(path, JSON.stringify({ providerInstances: [] }));
+    assert.match((await enableT3OpenCode(path) as { error: string }).error, /providerInstances .* isn't an object/);
   });
 });

@@ -464,8 +464,13 @@ export async function main(
       case undefined:
       case "status": {
         const state = await readState(system);
-        // A GPU box (dl model deployments or a team chat) says what runs here first; elsewhere nothing is printed.
-        if (!values.brief) {
+        // Bare dl with something for Autopilot (`dl -- -p "…"`, `dl -c`, `dl -m MODEL`) runs it, at a
+        // terminal or not (scripts, CI); only a bare non-interactive `dl` shows the overview.
+        const forAutopilot = passthrough.length > 0 || values.continue === true || values.model !== undefined;
+        const runsAutopilot = !command && (terminal || forAutopilot);
+        // A GPU box (dl model deployments or a team chat) says what runs here first; elsewhere nothing is
+        // printed. Not before a script's Autopilot run, whose stdout is Autopilot's.
+        if (!values.brief && (terminal || !runsAutopilot)) {
           const summary = await (options.boxSummary ?? (() => boxSummary({ system, color: colorOn, ...(state ? { serverState: state } : {}) })))();
           if (summary) io.out(summary);
         }
@@ -474,7 +479,7 @@ export async function main(
           // Bare dl with a place set up: a new session here. On this computer that's plain
           // `autopilot` in this folder (`dl -c` is `autopilot -c`); on a server, the repository's
           // conversation or a chat (`dl -c` reopens the latest). `dl status` is the overview.
-          if (!command && terminal) {
+          if (runsAutopilot) {
             const input = sessionInput(values, passthrough, { continue: values.continue === true });
             if (values.server || (await loadRemotes()).length > 0) {
               const code = await openSession(input, laptopIO);
@@ -602,7 +607,7 @@ export async function main(
       case "new": {
         // An alias of bare dl for a release: a new conversation, the old one keeps running.
         if ((await loadRemotes()).length === 0) {
-          if (terminal && !values.server) return await startHere(sessionInput(values, passthrough, { continue: false }), laptopIO);
+          if ((terminal || passthrough.length > 0) && !values.server) return await startHere(sessionInput(values, passthrough, { continue: false }), laptopIO);
           io.err(`  dl new starts a new session in a terminal: dl\n`);
           return 1;
         }

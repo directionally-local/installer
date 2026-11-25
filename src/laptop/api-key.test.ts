@@ -52,6 +52,16 @@ describe("dl api-key", () => {
     assert.match(result.out, /GPT-6 is in Autopilot only/);
   });
 
+  it("gives the hosted free tier's keys api.dl.new's base URLs, and still makes them at the sign-in's origin", async () => {
+    const fake = fakeFetch({ "GET /v1/keys": listing(), "POST /v1/keys": { status: 201, body: { id: "abcdefabcdef", name: "tools", kind: "tool", key: KEY } } });
+    const result = await run([], { fetch: fake.fetch, token: async () => ({ ok: true, origin: "https://free.directionallylocal.com", accessToken: "access-1" }) });
+    assert.equal(result.code, 0, result.err);
+    assert.match(result.out, /base URL {2}https:\/\/api\.dl\.new\/v1\n/);
+    assert.match(result.out, /base URL {2}https:\/\/api\.dl\.new\/anthropic\n/);
+    assert.doesNotMatch(result.out, /free\.directionallylocal\.com/);
+    assert.ok(fake.calls.every((call) => call.url.startsWith("https://free.directionallylocal.com/v1/keys")));
+  });
+
   it("takes a name", async () => {
     const fake = fakeFetch({ "GET /v1/keys": listing(), "POST /v1/keys": { status: 201, body: { id: "abcdefabcdef", name: "cursor", kind: "tool", key: KEY } } });
     const result = await run(["cursor"], { fetch: fake.fetch });
@@ -125,6 +135,9 @@ describe("api-key helpers", () => {
 
   it("builds the base URLs", () => {
     assert.deepEqual(toolUrls(ORIGIN), { openai: `${ORIGIN}/v1`, anthropic: `${ORIGIN}/anthropic` });
+    // The hosted free tier: api.dl.new, not the sign-in's origin.
+    assert.deepEqual(toolUrls("https://free.directionallylocal.com"), { openai: "https://api.dl.new/v1", anthropic: "https://api.dl.new/anthropic" });
+    assert.deepEqual(toolUrls("https://free.directionallylocal.com/"), { openai: "https://api.dl.new/v1", anthropic: "https://api.dl.new/anthropic" });
     assert.match(apiKeyText({ origin: ORIGIN, key: KEY, name: "x", max: 3, color: palette(false) }), /At most 3 keys/);
   });
 });
