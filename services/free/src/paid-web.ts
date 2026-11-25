@@ -903,7 +903,9 @@ function share(part: number, whole: number): number {
 /**
  * GET /web/usage?week=YYYY-MM-DD: the week's usage from the account's per-model meters (part B's
  * `planUsageFor`, plan-meter.ts: this week and the four before it), with each plan model's bar
- * (`limit`, as `/web/account` `limits[]`). The request log feeds only the live box.
+ * (`limit`, as `/web/account` `limits[]`). The request log feeds only the live box. Every
+ * account's settled requests are metered (AccountObject.settle), plan or not: free tier, admins
+ * and legacy dl Pro see their usage without bars. Meters start with the paid-plans release.
  */
 async function usage(c: Ctx): Promise<Response> {
   const caller = await paidCaller(c);
