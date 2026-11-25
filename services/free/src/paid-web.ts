@@ -228,13 +228,13 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
   const { config } = await runtime(c);
   // The launch offer: inside its window the coupon goes on the Checkout, no code to type.
   let coupon = activePromoCoupon(config, c.now());
-  // A card trial (trials.ts) while its budget has room: $0 now, and the offer's coupon is only
-  // recorded (promo_eligible) for the first real charge, never put on the $0 trial invoice.
+  // A card trial (trials.ts) while its budget has room: $0 now, and the offer's coupon goes on the
+  // Checkout too (shown there, kept for the first paid invoice) and is recorded as promo_eligible
+  // so trial end re-applies it if it's gone.
   const trialOn = (await directory(c).trialBudgets(config, c.now())).card.available;
   const trial = trialOn
     ? { days: config.cardTrialDays, ...(coupon ? { promoEligible: coupon, offerText: trialOfferText(PLANS[plan].priceUsd, config.promoPercentOff, config.cardTrialTokens, config.cardTrialDays) } : {}) }
     : undefined;
-  if (trial) coupon = undefined;
   const create = (termsConsent: string | undefined, withCoupon: string | undefined) =>
     createPlanCheckout(c.fetch, {
       secretKey: c.config.stripe.secretKey!,
@@ -287,8 +287,8 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
 }
 
 /**
- * The launch offer's line on a card trial's Checkout (above the button): Stripe shows only "30 days
- * free, then $7/month", since the coupon waits for the first real charge. Well under Stripe's 1,200.
+ * The launch offer's line on a card trial's Checkout (above the button): Stripe shows the discounted
+ * month after the trial; this says when that is. Well under Stripe's 1,200.
  */
 export function trialOfferText(priceUsd: number, percentOff: number, trialTokens: number, trialDays: number): string {
   const tokens = trialTokens >= 1_000_000 ? `${Math.round(trialTokens / 100_000) / 10}M` : trialTokens.toLocaleString("en-US");
