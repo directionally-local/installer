@@ -161,11 +161,17 @@ Every sign-in endpoint answers the same **session response**:
 
 - Sends a 6-digit code to `email` (from the user-email sender, no unsubscribe header). One live
   code per address; a new send replaces it.
-- Without `sessionId`, the address must belong to an account (sign-in): else 403 `no_account`.
+- Without `sessionId` (sign-in) the answer is the same whether the address has an account or
+  not. An address with no account gets the code inside a short welcome (subject "Your dl.new
+  sign-in code", with "To finish setting up, pick a plan: https://dl.new" and Starter's price,
+  plus the card trial's tokens "(95.5% caching applied)" while card trials are open); entering it
+  answers 403 `no_account` with `pending` (see the pending session below), like GitHub and Google.
+  Sign-in codes have stricter limits, the same for every address: per address 3 an hour and 10 a
+  day, per network 10 an hour (on top of the ones below).
 - Errors: 400 `invalid_email`; 400 `email_disposable` (the vendored disposable-domain list or the
   admin blocklist); 429 `resend_too_soon` (`retryAfter`, under 30 s since the last code to this
   address); 429 `rate_limited` (per address: 5 an hour; per network: 20 an hour); 503
-  `email_unavailable` (no email transport configured).
+  `email_unavailable` (no email transport configured, or the day's `emailCodesDailyMax` used up).
 
 **POST /web/auth/email/verify {email, code, sessionId?}** → the session response.
 
@@ -229,6 +235,11 @@ verified identity, never a web session. dl.new keeps it in the tab, sends the pe
 plan, and after Checkout (`/account?session_id=`) posts it here with the Checkout id instead of
 asking them to sign in again. It then works exactly like that provider's session call with that
 `sessionId`: a new account with that identity, the payment claimed.
+
+After a GitHub or Google sign-in with no account, the verified address also gets one welcome
+email ("Welcome to dl.new", pick a plan at https://dl.new, Starter's price and the card trial line):
+at most once per address per 7 days and 10 per network an hour, from the transactional budget.
+The HTTP answer never says whether it went.
 
 - Errors: 400 `invalid_grant` (bad, tampered or expired token; sign in again); 400
   `checkout_required` (no `sessionId`: the token alone signs no one in); plus the common ones.
@@ -570,8 +581,8 @@ Settings: `cardTrial` (true), `cardTrialTokens` (20000000), `cardTrialDays` (30,
 1. **Tax**: dl Pro used Stripe Tax with exclusive prices (tax added on top where it applies).
    Keep that for $7/$20/$60, or make the prices tax-inclusive? (Code follows the Price's
    `tax_behavior`; the PR body lists `exclusive`.)
-2. **Sign-in leak**: `/web/auth/email/start` without `sessionId` says `no_account` for unknown
-   addresses (better UX, but tells whether an address has an account). Fine?
+2. **Sign-in leak**: resolved. `/web/auth/email/start` without `sessionId` answers the same for
+   every address; only entering the code (proof of the inbox) says `no_account`.
 3. **Legacy free accounts on cli-login** before 8 Dec **[B]**.
 4. **Existing dl Pro subscribers** (`tier: null`): map to Starter limits? **[B]/owner**. Today a dl
    Pro subscriber who buys a plan gets 409 `already_subscribed` (two subscriptions would both

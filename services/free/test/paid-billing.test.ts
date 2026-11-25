@@ -290,7 +290,8 @@ describe("billing", () => {
     assert.equal(view.email, "new@example.com");
     assert.deepEqual(view.identities, [{ kind: "email", email: "new@example.com" }]);
     // The email sign-in moved with it.
-    assert.equal(await errorCode(await service.request("POST", "/web/auth/email/start", { body: { email: "old@example.com" } })), "no_account");
+    assert.equal((await service.request("POST", "/web/auth/email/start", { body: { email: "old@example.com" } })).status, 200);
+    assert.equal(service.calls.userEmail.at(-1)!.subject, "Your dl.new sign-in code", "the welcome code: no account signs in with it now");
     service.clock.now += 31_000;
     assert.equal((await emailSignIn(service, "new@example.com")).account.accountId, view.accountId);
     // Another account's address is refused.

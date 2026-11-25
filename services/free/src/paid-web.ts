@@ -57,6 +57,7 @@ import { endNoCardTrialForPlan, noCardTrialSignIn, parseTrialCheck, startCardTri
 import { trialCountedLimit, trialsOffer, trialView } from "./trials.js";
 import { CHECKOUT_SESSION_ID, checkoutPromo, createPlanCheckout, invoiceAmount, isTrialCheckout, promoEligible, subscriptionTrial, isCouponRefusal, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, isTermsConsentRefusal, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, termsAccepted, type StripeEvent } from "./stripe.js";
 import { sendPlainEmail } from "./user-email-send.js";
+import { newAddressCodeEmail, noAccountWelcomeEmail, type NoAccountOffer } from "./no-account-emails.js";
 import { DAY_MS, weekEnd, weekStart, WEEK_MS } from "./week.js";
 
 const HOUR_MS = 3_600_000;
@@ -82,6 +83,14 @@ const PAID_LIMITS = {
   checkoutLookupIp: { capacity: 120, perHour: 600 },
   emailAddress: { capacity: 5, perHour: 5 },
   emailIp: { capacity: 20, perHour: 20 },
+  // Sign-in codes without a payment (an account's, or a welcome code to an address with none):
+  // the same for every address, so a limit never tells whether an account exists.
+  signinAddress: { capacity: 3, perHour: 3 },
+  signinAddressDay: { capacity: 10, perHour: 10 / 24 },
+  signinIp: { capacity: 10, perHour: 10 },
+  // The welcome after a GitHub/Google sign-in with no account: once per address a week, and few per network.
+  welcomeAddress: { capacity: 1, perHour: 1 / 168 },
+  welcomeIp: { capacity: 10, perHour: 10 },
   verifyIp: { capacity: 60, perHour: 60 },
   githubIp: { capacity: 30, perHour: 30 },
   googleIp: { capacity: 30, perHour: 30 },
@@ -559,12 +568,43 @@ async function signIn(c: Ctx, identity: SignInIdentity, sessionId: unknown): Pro
  * with a paid Checkout.
  */
 async function noAccount(c: Ctx, identity: SignInIdentity): Promise<Response> {
+  if (identity.kind === "github" || identity.kind === "google") {
+    const welcome = sendNoAccountWelcome(c, identity.kind, identity.email).catch(() => undefined);
+    if (c.background) c.background(welcome);
+    else await welcome;
+  }
   const iat = Math.floor(c.now() / 1000);
   const token = await signJwt(
     { iss: ISSUER, typ: "pending", sub: `${identity.kind}:${identity.subject}`, kind: identity.kind, subject: identity.subject, label: identity.label, email: identity.email, iat, exp: iat + PENDING_SIGNIN_TTL_S, jti: crypto.randomUUID() },
     await signingKey(c.config),
   );
   return apiError(403, "no_account", NO_ACCOUNT_MESSAGE, { pending: { token, email: identity.email, expiresIn: PENDING_SIGNIN_TTL_S } });
+}
+
+/** What the no-account emails offer: the site, Starter's price, and the card trial while it's open. */
+async function noAccountOffer(c: Ctx): Promise<NoAccountOffer> {
+  const { config } = await runtime(c);
+  const card = (await directory(c).trialBudgets(config, c.now())).card;
+  return { site: webOrigin(c), trialTokens: card.available ? config.cardTrialTokens : null };
+}
+
+/**
+ * The welcome after a GitHub or Google sign-in found no account (no-account-emails.ts): at most
+ * once per address per 7 days and a few per network an hour, from the transactional budget,
+ * through the same transport as codes. Never throws; the HTTP answer never says whether it went.
+ */
+async function sendNoAccountWelcome(c: Ctx, via: "github" | "google", email: string): Promise<void> {
+  if (!plausibleEmail(email)) return;
+  const norm = normalizeEmail(email);
+  const { config } = await runtime(c);
+  if (isDisposableDomain(emailDomain(norm)) || emailBlocked(norm, config.blockedEmails)) return;
+  const transport = userEmailVia(c);
+  if (!transport) return;
+  if ((await limited(c, `paid:welcome:ip:${c.ipNet}`, PAID_LIMITS.welcomeIp)) !== undefined) return;
+  if ((await limited(c, `paid:welcome:addr:${norm}`, PAID_LIMITS.welcomeAddress)) !== undefined) return;
+  if (!(await directory(c).takeEmailBudget({ emailClass: "transactional", now: c.now(), budget: emailBudgetOf(config) }))) return;
+  const message = noAccountWelcomeEmail({ ...(await noAccountOffer(c)), via });
+  await sendPlainEmail(transport, c.config, { to: email, ...message, idempotencyKey: `welcome-no-account-${norm}-${Math.floor(c.now() / (7 * DAY_MS))}` });
 }
 
 /**
@@ -603,18 +643,35 @@ async function checkedEmail(c: Ctx, raw: unknown): Promise<{ email: string; norm
   return { email, norm };
 }
 
-/** Sends a 6-digit code to an address for a purpose, with the rate limits and the 30-second resend. */
-async function sendCode(c: Ctx, email: string, norm: string, purpose: string, subject: string, intro: string): Promise<Response> {
+type CodeEmail = (code: string) => { subject: string; text: string } | Promise<{ subject: string; text: string }>;
+
+/** The plain code email: `intro`, the code, how long it works. */
+function plainCodeEmail(subject: string, intro: string): CodeEmail {
+  return (code) => ({ subject, text: `${intro}\n\n    ${code}\n\nIt works for ${EMAIL_CODE_TTL_MS / 60_000} minutes. If you didn't ask for it, ignore this email.\n\ndl.new` });
+}
+
+/**
+ * Sends a 6-digit code to an address for a purpose, with the rate limits and the 30-second
+ * resend. `extra` adds limits: `ip` ones before the code is made, `address` ones after (a
+ * refusal drops the code), like the built-in ones.
+ */
+async function sendCode(c: Ctx, email: string, norm: string, purpose: string, compose: CodeEmail, extra: { ip?: Array<[string, Limit]>; address?: Array<[string, Limit]> } = {}): Promise<Response> {
   const ipRetry = await limited(c, `paid:email:ip:${c.ipNet}`, PAID_LIMITS.emailIp);
   if (ipRetry !== undefined) return rateLimited(ipRetry);
+  for (const [key, limit] of extra.ip ?? []) {
+    const retry = await limited(c, key, limit);
+    if (retry !== undefined) return rateLimited(retry);
+  }
   const transport = userEmailVia(c);
   if (!transport) return apiError(503, "email_unavailable", "We can't send email right now. Try GitHub, or again in a few minutes.");
   const issued = await auth(c).issueEmailCode({ emailNorm: norm, purpose, now: c.now() });
   if (!issued.ok) return apiError(429, "resend_too_soon", `Wait ${issued.retryAfter} seconds before asking for another code.`, { retryAfter: issued.retryAfter }, { "retry-after": String(issued.retryAfter) });
-  const addressRetry = await limited(c, `paid:email:addr:${norm}`, PAID_LIMITS.emailAddress);
-  if (addressRetry !== undefined) {
-    await auth(c).dropEmailCode(norm, purpose);
-    return rateLimited(addressRetry);
+  for (const [key, limit] of [[`paid:email:addr:${norm}`, PAID_LIMITS.emailAddress] as [string, Limit], ...(extra.address ?? [])]) {
+    const addressRetry = await limited(c, key, limit);
+    if (addressRetry !== undefined) {
+      await auth(c).dropEmailCode(norm, purpose);
+      return rateLimited(addressRetry);
+    }
   }
   // Codes never wait for the daily email cap, only for their own hard ceiling (email-budget.ts).
   const { config } = await runtime(c);
@@ -624,8 +681,7 @@ async function sendCode(c: Ctx, email: string, norm: string, purpose: string, su
   }
   const sent = await sendPlainEmail(transport, c.config, {
     to: email,
-    subject,
-    text: `${intro}\n\n    ${issued.code}\n\nIt works for ${EMAIL_CODE_TTL_MS / 60_000} minutes. If you didn't ask for it, ignore this email.\n\ndl.new`,
+    ...(await compose(issued.code)),
     idempotencyKey: `code-${purpose}-${norm}-${c.now()}`,
   });
   if (!sent.ok) {
@@ -635,7 +691,12 @@ async function sendCode(c: Ctx, email: string, norm: string, purpose: string, su
   return json({ sent: true, resendAfter: EMAIL_CODE_RESEND_MS / 1000, expiresIn: EMAIL_CODE_TTL_MS / 1000 });
 }
 
-/** POST /web/auth/email/start {email, sessionId?}: a sign-up or sign-in code. */
+/**
+ * POST /web/auth/email/start {email, sessionId?}: a sign-up or sign-in code. Without a payment,
+ * an address with no account gets the code too, in a short welcome (no-account-emails.ts):
+ * entering it answers 403 no_account with a `pending` token, as GitHub and Google do. The answer
+ * and the limits are the same whether the address has an account or not.
+ */
 async function emailStart(c: Ctx): Promise<Response> {
   const body = (await readJson(c)) ?? {};
   const checked = await checkedEmail(c, body.email);
@@ -648,10 +709,20 @@ async function emailStart(c: Ctx): Promise<Response> {
       const verified = await verifyCheckout(c, sessionId);
       if (verified instanceof Response) return verified;
     }
-  } else if ((await directory(c).resolveIdentity("email", checked.norm, c.now())) === undefined) {
-    return apiError(403, "no_account", NO_ACCOUNT_MESSAGE);
+  } else {
+    const known = (await directory(c).resolveIdentity("email", checked.norm, c.now())) !== undefined;
+    const compose: CodeEmail = known
+      ? plainCodeEmail("Your dl.new code", "Your dl.new sign-in code:")
+      : async (code) => newAddressCodeEmail({ ...(await noAccountOffer(c)), code, minutes: EMAIL_CODE_TTL_MS / 60_000 });
+    return sendCode(c, checked.email, checked.norm, "signin", compose, {
+      ip: [[`paid:signin:ip:${c.ipNet}`, PAID_LIMITS.signinIp]],
+      address: [
+        [`paid:signin:addr:${checked.norm}`, PAID_LIMITS.signinAddress],
+        [`paid:signin:addr-day:${checked.norm}`, PAID_LIMITS.signinAddressDay],
+      ],
+    });
   }
-  return sendCode(c, checked.email, checked.norm, "signin", "Your dl.new code", "Your dl.new sign-in code:");
+  return sendCode(c, checked.email, checked.norm, "signin", plainCodeEmail("Your dl.new code", "Your dl.new sign-in code:"));
 }
 
 function codeRefusal(check: { reason: "invalid"; attemptsLeft: number } | { reason: "expired" }): Response {
@@ -883,7 +954,7 @@ async function contactEmailStart(c: Ctx): Promise<Response> {
   const checked = await checkedEmail(c, body.email);
   if (checked instanceof Response) return checked;
   if (await directory(c).emailIdentityTaken(checked.email, caller.account)) return apiError(409, "email_in_use", "Another dl.new account signs in with this email.");
-  return sendCode(c, checked.email, checked.norm, `change:${caller.account}`, "Confirm your new dl.new email", "Confirm this address for your dl.new account with this code:");
+  return sendCode(c, checked.email, checked.norm, `change:${caller.account}`, plainCodeEmail("Confirm your new dl.new email", "Confirm this address for your dl.new account with this code:"));
 }
 
 /** POST /web/account/email/verify {email, code}: the contact email moves (and Stripe's customer email). */

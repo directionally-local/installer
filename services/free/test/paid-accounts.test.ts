@@ -201,7 +201,7 @@ describe("the account step: email", () => {
     assert.equal(((await me.json()) as any).accountId, body.account.accountId);
   });
 
-  it("signs an existing account in without a Checkout, and refuses unknown addresses", async () => {
+  it("signs an existing account in without a Checkout, with the plain code email", async () => {
     const { service, stripe } = await world();
     const session = await buy(service, stripe);
     const first = await emailSignIn(service, "ben@example.com", session.id);
@@ -210,9 +210,82 @@ describe("the account step: email", () => {
     assert.equal(second.created, false);
     assert.equal(second.claimed, null);
     assert.equal(second.account.accountId, first.account.accountId);
-    const unknown = await service.request("POST", "/web/auth/email/start", { body: { email: "nobody@example.com" } });
-    assert.equal(unknown.status, 403);
-    assert.equal(await errorCode(unknown), "no_account");
+    const sent = service.calls.userEmail.at(-1)!;
+    assert.equal(sent.subject, "Your dl.new code");
+    assert.doesNotMatch(String(sent.text), /pick a plan/i);
+  });
+
+  it("sends an address with no account its code in a welcome, and holds the sign-in like GitHub (pending) until the payment", async () => {
+    const { service, stripe } = await world();
+    const known = await service.request("POST", "/web/auth/email/start", { body: { email: "nobody@example.com" }, headers: DL });
+    assert.equal(known.status, 200, await known.clone().text());
+    assert.deepEqual(await known.json(), { sent: true, resendAfter: 30, expiresIn: 600 });
+    const sent = service.calls.userEmail.at(-1)!;
+    assert.equal(sent.to, "nobody@example.com");
+    assert.equal(sent.subject, "Your dl.new sign-in code");
+    const code = lastCode(service, "nobody@example.com");
+    assert.equal(
+      sent.text,
+      `Welcome to dl.new. Your sign-in code:\n\n    ${code}\n\nIt works for 10 minutes. If you didn't ask for it, ignore this email.\n\nTo finish setting up, pick a plan: https://dl.new\nStarter is $7/mo, and your first 20M tokens (95.5% caching applied) are free with a card.\n\ndl.new`,
+    );
+    assert.doesNotMatch(String(sent.text), /refund|cancel anytime/i);
+    // The code proves the inbox: 403 no_account with the pending token (identity: the verified address).
+    const verify = await service.request("POST", "/web/auth/email/verify", { body: { email: "Nobody@Example.com", code }, headers: DL });
+    assert.equal(verify.status, 403);
+    const error = ((await verify.json()) as any).error;
+    assert.equal(error.code, "no_account");
+    assert.equal(error.pending.email, "Nobody@Example.com");
+    assert.equal(error.pending.expiresIn, 3600);
+    // After Checkout the account is made with the email identity and the payment claimed.
+    const paid = await buy(service, stripe);
+    const done = await service.request("POST", "/web/auth/pending/session", { body: { token: error.pending.token, sessionId: paid.id }, headers: DL });
+    assert.equal(done.status, 200, await done.clone().text());
+    const body = (await done.json()) as SessionResponse;
+    assert.equal(body.created, true);
+    assert.deepEqual(body.claimed, { plan: "starter", sessionId: paid.id });
+    assert.deepEqual(body.account.identities, [{ kind: "email", email: "Nobody@Example.com" }]);
+    // The next email sign-in finds the account and gets the plain code.
+    service.clock.now += 60_000;
+    const again = await emailSignIn(service, "nobody@example.com");
+    assert.equal(again.account.accountId, body.account.accountId);
+    assert.equal(service.calls.userEmail.at(-1)!.subject, "Your dl.new code");
+  });
+
+  it("leaves the card trial out of the welcome code email when card trials are off", async () => {
+    const { service } = await world({ CARD_TRIAL: "false" });
+    assert.equal((await service.request("POST", "/web/auth/email/start", { body: { email: "notrial@example.com" }, headers: DL })).status, 200);
+    const text = String(service.calls.userEmail.at(-1)!.text);
+    assert.match(text, /\nStarter is \$7\/mo\.\n/);
+    assert.doesNotMatch(text, /free with a card/);
+  });
+
+  it("limits sign-in codes the same way for addresses with and without an account", async () => {
+    const { service, stripe } = await world();
+    await emailSignIn(service, "has@example.com", (await buy(service, stripe)).id);
+    service.clock.now += 3_600_000;
+    for (const email of ["has@example.com", "hasnt@example.com"]) {
+      for (let i = 0; i < 3; i++) {
+        const ok = await service.request("POST", "/web/auth/email/start", { body: { email }, headers: DL, ip: `198.51.100.${i + 1}` });
+        assert.equal(ok.status, 200, `${email} ${i}: ${await ok.clone().text()}`);
+        service.clock.now += 31_000;
+      }
+      const fourth = await service.request("POST", "/web/auth/email/start", { body: { email }, headers: DL, ip: "198.51.100.9" });
+      assert.equal(fourth.status, 429, email);
+      assert.equal(await errorCode(fourth), "rate_limited");
+    }
+    // Per network: 10 sign-in codes an hour, whichever addresses.
+    service.clock.now += 3_600_000;
+    const ip = { headers: DL, ip: "203.0.113.70" };
+    for (let i = 0; i < 10; i++) assert.equal((await service.request("POST", "/web/auth/email/start", { body: { email: `n${i}@example.com` }, ...ip })).status, 200);
+    assert.equal(await errorCode(await service.request("POST", "/web/auth/email/start", { body: { email: "n10@example.com" }, ...ip })), "rate_limited");
+  });
+
+  it("counts welcome codes against the daily code ceiling", async () => {
+    const { service } = await world({ EMAIL_CODES_DAILY_MAX: "1" });
+    assert.equal((await service.request("POST", "/web/auth/email/start", { body: { email: "one@example.com" }, headers: DL })).status, 200);
+    const over = await service.request("POST", "/web/auth/email/start", { body: { email: "two@example.com" }, headers: DL });
+    assert.equal(over.status, 503);
+    assert.equal(await errorCode(over), "email_unavailable");
   });
 
   it("refuses a payment claimed by someone else, disposable addresses, and fast resends", async () => {
@@ -385,6 +458,30 @@ describe("the account step: GitHub", () => {
     // GitHub sign-in now finds that account.
     const again = await service.request("POST", "/web/auth/github/session", { body: { code: (await githubRoundTrip(service, { id: 7100, login: "newbie", email: "newbie@example.com" })).slice(7), state: PAGE_STATE }, headers: DL });
     assert.equal(((await again.json()) as SessionResponse).account.accountId, body.account.accountId);
+  });
+
+  it("welcomes an unknown GitHub sign-in by email, at most once per address a week", async () => {
+    const { service } = await world();
+    const tryOnce = async () => {
+      const fragment = await githubRoundTrip(service, { id: 7300, login: "fresh", email: "fresh@example.com" }, "https://dl.new/signin");
+      const refused = await service.request("POST", "/web/auth/github/session", { body: { code: fragment.slice(7), state: PAGE_STATE }, headers: DL });
+      assert.equal(await errorCode(refused), "no_account");
+      await service.settle();
+    };
+    const welcomes = () => service.calls.userEmail.filter((message) => message.to === "fresh@example.com");
+    await tryOnce();
+    assert.equal(welcomes().length, 1);
+    assert.equal(welcomes()[0]!.subject, "Welcome to dl.new");
+    assert.equal(
+      welcomes()[0]!.text,
+      "Welcome to dl.new. You signed in with GitHub; there's no plan on this address yet.\n\nTo finish setting up, pick a plan: https://dl.new\nStarter is $7/mo, and your first 20M tokens (95.5% caching applied) are free with a card.\n\nIf you didn't sign in to dl.new, ignore this email.\n\ndl.new",
+    );
+    service.clock.now += 6 * 86_400_000;
+    await tryOnce();
+    assert.equal(welcomes().length, 1, "not again within 7 days");
+    service.clock.now += 86_400_000 + 60_000;
+    await tryOnce();
+    assert.equal(welcomes().length, 2, "again after 7 days");
   });
 
   it("refuses a pending sign-in after an hour", async () => {
