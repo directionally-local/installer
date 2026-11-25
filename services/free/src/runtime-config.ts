@@ -251,6 +251,14 @@ export const RUNTIME_SETTINGS = {
    * dl Pro's old rules.
    */
   paidPlans: { kind: "flag", env: "PAID_PLANS" },
+  /** dl.new's refund window: hours after the first payment (default 24); a reached weekly limit also ends it. */
+  refundWindowHours: { kind: "count", env: "REFUND_WINDOW_HOURS" },
+  /**
+   * The plan Checkout requires the terms consent with the EU/UK withdrawal waiver (default on).
+   * Turned off by itself, with a warning, when Stripe refuses it (no terms URL in the account's
+   * public details); set it in the Stripe Dashboard, then back on with POST /admin/config.
+   */
+  checkoutTermsConsent: { kind: "flag", env: "CHECKOUT_TERMS_CONSENT" },
   /** Starter's DeepSeek V4.1 Flash a week (default 62M). */
   "planTokens.starter.deepseek": { kind: "tokens", env: "PLAN_TOKENS_STARTER_DEEPSEEK" },
   /** Plus's DeepSeek V4.1 Flash a week (default 150M). */

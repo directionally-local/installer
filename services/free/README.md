@@ -780,9 +780,17 @@ The HTTP contract the site calls is [docs/web-api-paid.md](docs/web-api-paid.md)
   dl.new" (`dl.new/account?session_id=…`, 7 days). The account step claims it: the customer and
   subscription are linked, the plan starts, Stripe's customer gets the verified email.
 - **Plan state** lives in the Account object's `billing` row (`tier`, `payment_failed`, the first
-  invoice for the 7-day refund). A plan stays on while past due (Stripe's retries decide);
+  invoice for the refund). A plan stays on while past due (Stripe's retries decide);
   `unpaid`, `canceled` and `customer.subscription.deleted` end it. Upgrades are prorated and
   invoiced at once; refunds are an admin action (`POST /admin/paid/refund`).
+- **Refunds.** "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit." The window is the runtime setting `refundWindowHours` (REFUND_WINDOW_HOURS,
+  default 24); a plan model at 100% of its weekly limit this week also ends it. The admin's
+  `{"force": true}` overrides both. The claim link's 7 days are separate and unchanged.
+- **Terms consent at Checkout** (`checkoutTermsConsent`, CHECKOUT_TERMS_CONSENT, default on): the
+  plan Checkout requires Stripe's terms-of-service checkbox with the EU/UK withdrawal waiver and
+  the refund rule; the acceptance time is kept on the paid checkout. Stripe needs a terms URL in
+  the account's public details; if it refuses, Checkout goes on without the consent and the
+  setting turns itself off (logged, alerted) until the owner sets the URL and turns it back on.
 - **Keys.** `dl_sk_<account>_<id>_<secret>` tool keys, shown once; old `dlk_` keys unchanged.
 - **cli-login.** `POST /v1/cli-login/start` and `/poll` (the CLI), approved on dl.new/cli-login.
 
@@ -797,12 +805,14 @@ The HTTP contract the site calls is [docs/web-api-paid.md](docs/web-api-paid.md)
    Dashboard (the script refuses live keys).
 2. **Stripe Tax.** Dashboard → Tax: add the business address and turn on collection where
    registered.
-3. **Customer Portal.** Dashboard → Settings → Billing → Customer portal: allow cancelling
+3. **Terms URL.** Dashboard → Settings → Public details: set the terms of service URL
+   (`https://dl.new/terms`); the plan Checkout's terms consent needs it.
+4. **Customer Portal.** Dashboard → Settings → Billing → Customer portal: allow cancelling
    subscriptions (at period end) and updating payment methods, then save.
-4. **Webhook endpoint** (if not made by the script): `https://free.directionallylocal.com/v1/billing/webhook`
+5. **Webhook endpoint** (if not made by the script): `https://free.directionallylocal.com/v1/billing/webhook`
    with the events `checkout.session.completed`, `invoice.paid`, `invoice.payment_failed`,
    `customer.subscription.updated`, `customer.subscription.deleted`.
-5. **Secrets and vars:** `wrangler secret put STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`;
+6. **Secrets and vars:** `wrangler secret put STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`;
    vars `STRIPE_PRICE_TOPUP` and dl.new's plans `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_PLUS`,
    `STRIPE_PRICE_MAX` (`STRIPE_PRICE_PRO` is no longer read). Without the secret key, the billing endpoints
    answer `billing_unavailable` and everything else works as before.

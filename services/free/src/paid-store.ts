@@ -32,7 +32,8 @@ export const PAID_SCHEMA = [
      paid_at             INTEGER NOT NULL,
      claimed_by          INTEGER,
      claimed_at          INTEGER,
-     claim_email_sent_at INTEGER
+     claim_email_sent_at INTEGER,
+     terms_accepted_at   INTEGER
    )`,
   `CREATE INDEX IF NOT EXISTS paid_checkouts_subscription ON paid_checkouts (subscription_id)`,
   `CREATE TABLE IF NOT EXISTS refund_requests (
@@ -41,7 +42,8 @@ export const PAID_SCHEMA = [
      at          INTEGER NOT NULL,
      reason      TEXT,
      eligible    INTEGER NOT NULL,
-     refunded_at INTEGER
+     refunded_at INTEGER,
+     not_eligible TEXT
    )`,
 ];
 
@@ -56,6 +58,8 @@ export interface PaidCheckoutRow {
   claimed_by: number | null;
   claimed_at: number | null;
   claim_email_sent_at: number | null;
+  /** When the customer accepted the terms with the withdrawal waiver at Checkout (Unix ms), or null. */
+  terms_accepted_at: number | null;
 }
 
 /** The identity's subject as stored: a GitHub id as digits, an address normalized. */
@@ -140,12 +144,12 @@ export function emailIdentityTaken(sql: Sql, email: string, account: number): bo
 /** Stores (or refreshes) a paid plan Checkout from its webhook or a claim's read of it. Never unclaims. */
 export function recordPaidCheckout(
   sql: Sql,
-  input: { sessionId: string; plan: PlanId; customerId: string | null; subscriptionId: string | null; email: string | null; amountCents: number; paidAt: number },
+  input: { sessionId: string; plan: PlanId; customerId: string | null; subscriptionId: string | null; email: string | null; amountCents: number; paidAt: number; termsAcceptedAt?: number | null },
 ): PaidCheckoutRow {
   sql.exec(
-    `INSERT INTO paid_checkouts (session_id, plan, customer_id, subscription_id, email, amount_cents, paid_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO paid_checkouts (session_id, plan, customer_id, subscription_id, email, amount_cents, paid_at, terms_accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(session_id) DO UPDATE SET customer_id = COALESCE(excluded.customer_id, customer_id), subscription_id = COALESCE(excluded.subscription_id, subscription_id),
-       email = COALESCE(excluded.email, email), amount_cents = excluded.amount_cents`,
+       email = COALESCE(excluded.email, email), amount_cents = excluded.amount_cents, terms_accepted_at = COALESCE(terms_accepted_at, excluded.terms_accepted_at)`,
     input.sessionId,
     input.plan,
     input.customerId,
@@ -153,6 +157,7 @@ export function recordPaidCheckout(
     input.email,
     input.amountCents,
     input.paidAt,
+    input.termsAcceptedAt ?? null,
   );
   return paidCheckout(sql, input.sessionId)!;
 }
@@ -191,18 +196,19 @@ export function firstCheckoutOf(sql: Sql, account: number): PaidCheckoutRow | un
 
 // ─── Refund requests ────────────────────────────────────────────────────────
 
-export function recordRefundRequest(sql: Sql, input: { account: number; reason: string | null; eligible: boolean; now: number }): void {
-  sql.exec("INSERT INTO refund_requests (account, at, reason, eligible) VALUES (?, ?, ?, ?)", input.account, input.now, input.reason, input.eligible ? 1 : 0);
+/** `notEligible`: why not ("weekly limit reached", "refund window passed", "already refunded"), null when eligible. */
+export function recordRefundRequest(sql: Sql, input: { account: number; reason: string | null; eligible: boolean; notEligible?: string | null; now: number }): void {
+  sql.exec("INSERT INTO refund_requests (account, at, reason, eligible, not_eligible) VALUES (?, ?, ?, ?, ?)", input.account, input.now, input.reason, input.eligible ? 1 : 0, input.notEligible ?? null);
 }
 
 export function markRefunded(sql: Sql, account: number, now: number): void {
   sql.exec("UPDATE refund_requests SET refunded_at = ? WHERE account = ? AND refunded_at IS NULL", now, account);
 }
 
-export function listRefundRequests(sql: Sql): Array<{ account: number; email: string | null; reason: string | null; at: number; eligible: number; refunded_at: number | null }> {
+export function listRefundRequests(sql: Sql): Array<{ account: number; email: string | null; reason: string | null; at: number; eligible: number; not_eligible: string | null; refunded_at: number | null }> {
   return sql
-    .exec<{ account: number; email: string | null; reason: string | null; at: number; eligible: number; refunded_at: number | null }>(
-      "SELECT r.account, p.email, r.reason, r.at, r.eligible, r.refunded_at FROM refund_requests r LEFT JOIN people p ON p.github_id = r.account ORDER BY r.at DESC LIMIT 500",
+    .exec<{ account: number; email: string | null; reason: string | null; at: number; eligible: number; not_eligible: string | null; refunded_at: number | null }>(
+      "SELECT r.account, p.email, r.reason, r.at, r.eligible, r.not_eligible, r.refunded_at FROM refund_requests r LEFT JOIN people p ON p.github_id = r.account ORDER BY r.at DESC LIMIT 500",
     )
     .toArray();
 }

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADMIN_ID, createService, errorCode, type Service } from "./harness.js";
-import { buy, DL, emailSignIn, FakeStripe, githubRoundTrip, lastCode, PAGE_STATE, PAID_VARS, PRICES, type SessionResponse } from "./paid-fixtures.js";
+import { buy, DL, emailSignIn, FakeStripe, githubRoundTrip, lastCode, PAGE_STATE, PAID_VARS, PRICES, webhook, type SessionResponse } from "./paid-fixtures.js";
 import { accountIdOf, formatApiKey, isPaidAccountNumber, PAID_ACCOUNT_BASE, parseAccountId, parseApiKey } from "../src/accounts.js";
 import { isDisposableDomain } from "../src/email-guard.js";
 import { countedTokens, planDescription, realToCounted } from "../src/plan-prices.js";
@@ -71,6 +71,12 @@ describe("plans and Checkout", () => {
     assert.equal(form.get("metadata[product]"), "plan");
     assert.equal(form.get("subscription_data[metadata][plan]"), "plus");
     assert.equal(form.get("client_reference_id"), null);
+    // The EU/UK withdrawal waiver and the refund rule, as Stripe's required terms consent.
+    assert.equal(form.get("consent_collection[terms_of_service]"), "required");
+    assert.equal(
+      form.get("custom_text[terms_of_service_acceptance][message]"),
+      "I want my dl.new plan to start right away and understand I lose my 14-day right to cancel once it starts. Refunds: within 24 hours of the first payment, if the weekly limit hasn't been reached. [Terms](https://dl.new/terms).",
+    );
     assert.equal(await errorCode(await service.request("POST", "/web/checkout/plan", { body: { plan: "pro" } })), "invalid_plan");
     const off = await createService({ ...PAID_VARS, STRIPE_PRICE_PLUS: "" });
     assert.equal(await errorCode(await off.request("POST", "/web/checkout/plan", { body: { plan: "plus" } })), "billing_unavailable");
@@ -90,6 +96,65 @@ describe("plans and Checkout", () => {
     await emailSignIn(service, "ana@example.com", sessionId);
     assert.equal((await status()).status, "claimed");
     assert.equal((await service.request("GET", "/web/checkout/cs_test_doesnotexist000", { headers: DL })).status, 404);
+  });
+});
+
+describe("the terms consent at Checkout", () => {
+  it("records when the terms were accepted, from the webhook and from the claim", async () => {
+    const { service, stripe } = await world();
+    const session = await buy(service, stripe, "plus", "late@example.com");
+    const paidAt = service.clock.now;
+    assert.equal((await webhook(service, "checkout.session.completed", stripe.sessionObject(session, false))).body.outcome, "plan_unclaimed");
+    const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    const listed = (await (await service.request("GET", "/admin/paid/checkouts", { token: admin })).json()) as any;
+    assert.equal(listed.checkouts[0].termsAcceptedAt, new Date(Math.floor(paidAt / 1000) * 1000).toISOString());
+    // Claimed straight from the page, before any webhook: the claim's read of the session records it.
+    const direct = await buy(service, stripe, "starter", "ana@example.com");
+    await emailSignIn(service, "ana@example.com", direct.id);
+    const all = (await (await service.request("GET", "/admin/paid/checkouts?status=all", { token: admin })).json()) as any;
+    assert.ok(all.checkouts.find((row: any) => row.sessionId === direct.id).termsAcceptedAt);
+  });
+
+  it("leaves the consent off with checkoutTermsConsent false, and records no consent", async () => {
+    const { service, stripe } = await world({ CHECKOUT_TERMS_CONSENT: "false" });
+    const session = await buy(service, stripe, "plus", "late@example.com");
+    assert.equal(session.form.get("consent_collection[terms_of_service]"), null);
+    assert.equal(session.form.get("custom_text[terms_of_service_acceptance][message]"), null);
+    await webhook(service, "checkout.session.completed", stripe.sessionObject(session, false));
+    const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    assert.equal(((await (await service.request("GET", "/admin/paid/checkouts", { token: admin })).json()) as any).checkouts[0].termsAcceptedAt, null);
+  });
+
+  it("never fails Checkout when Stripe refuses the consent: turns checkoutTermsConsent off, logs it and tells the owner", async () => {
+    const service = await createService({ ...PAID_VARS, ALERT_EMAIL_TO: "owner@example.com" }, { userEmail: true, email: true });
+    const stripe = new FakeStripe(service);
+    stripe.refuseTermsConsent = true;
+    const warned: unknown[][] = [];
+    const warn = console.warn;
+    console.warn = (...args: unknown[]) => void warned.push(args);
+    let response: Response;
+    try {
+      response = await service.request("POST", "/web/checkout/plan", { body: { plan: "plus" }, headers: DL });
+    } finally {
+      console.warn = warn;
+    }
+    assert.equal(response.status, 200, await response.clone().text());
+    const { sessionId } = (await response.json()) as { sessionId: string };
+    assert.equal(stripe.sessions.get(sessionId)!.form.get("consent_collection[terms_of_service]"), null, "retried without the consent");
+    assert.match(String(warned[0]?.[0]), /terms consent/);
+    assert.ok(service.calls.emails.some((message) => message.raw.includes("Checkout terms consent turned off")));
+    const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    const config = (await (await service.request("GET", "/admin/config", { token: admin })).json()) as any;
+    assert.equal(config.effective.checkoutTermsConsent, false);
+    // The next Checkout goes straight through without asking Stripe for the consent again.
+    const before = service.calls.stripe.filter((call) => call.path === "/v1/checkout/sessions").length;
+    assert.equal((await service.request("POST", "/web/checkout/plan", { body: { plan: "starter" }, headers: DL })).status, 200);
+    assert.equal(service.calls.stripe.filter((call) => call.path === "/v1/checkout/sessions").length, before + 1);
+    // Back on once the owner has set the terms URL.
+    stripe.refuseTermsConsent = false;
+    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { checkoutTermsConsent: true } })).status, 200);
+    const again = (await (await service.request("POST", "/web/checkout/plan", { body: { plan: "max" }, headers: DL })).json()) as { sessionId: string };
+    assert.equal(stripe.sessions.get(again.sessionId)!.form.get("consent_collection[terms_of_service]"), "required");
   });
 });
 
@@ -119,7 +184,9 @@ describe("the account step: email", () => {
     assert.deepEqual(body.account.identities, [{ kind: "email", email: "ana@example.com" }]);
     assert.equal(body.account.plan.id, "starter");
     assert.equal(body.account.plan.status, "active");
-    assert.ok(body.account.plan.refundableUntil);
+    const refundEnds = Date.parse(body.account.plan.refundableUntil);
+    assert.ok(refundEnds > service.clock.now && refundEnds <= service.clock.now + 24 * 3_600_000, "24 hours from the first payment");
+    assert.equal(body.account.plan.refundPolicy, "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit.");
     assert.deepEqual(body.account.upgrade.map((option: any) => option.plan), ["plus", "max"]);
     // The account object is the account's own, named after its number.
     assert.equal(await (service.namespaces.ACCOUNT as any).getByName(`acct:${accountNumber}`).paidPlan(service.clock.now), "starter");

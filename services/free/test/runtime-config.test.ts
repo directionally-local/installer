@@ -136,6 +136,8 @@ describe("runtime settings (units)", () => {
       userEmailsTransactionalReserve: 100,
       emailCodesDailyMax: 300,
       paidPlans: false,
+      refundWindowHours: 24,
+      checkoutTermsConsent: true,
       "planTokens.starter.deepseek": 62_000_000,
       "planTokens.plus.deepseek": 150_000_000,
       "planTokens.plus.kimi": 1_500_000,

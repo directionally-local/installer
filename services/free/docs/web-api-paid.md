@@ -49,7 +49,8 @@ No auth. What the plan cards show.
   "caching": {"assumedCachedShare": 0.955, "label": "(95.5% caching applied)",
               "cachedTokenWeight": 0.02, "realToCounted": 0.0641},
   "resets": "Mon 00:00 UTC",
-  "refundDays": 7,
+  "refundWindowHours": 24,
+  "refundPolicy": "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit.",
   "gpt6Bonus": {"enabled": false, "label": "launch bonus, through 31 Jan 2027",
                 "line": "$2/week of GPT-6.1 Sol usage in dl", "weeklyUsd": 2, "fullyClaimed": false,
                 "fullyClaimedText": "GPT-6 launch bonus: fully claimed", "endsAt": "2027-02-01T00:00:00.000Z"},
@@ -64,6 +65,8 @@ No auth. What the plan cards show.
   `plan-prices.ts`'s.
 - `gpt6Bonus`: the launch bonus offer (`plan-usage.ts` `bonusOffer`); `fullyClaimed: true` → the
   card shows `fullyClaimedText`.
+- `refundPolicy`: the refund line to show under the cards, word for word ("Full refund within 24 hours of your first payment, if you haven't reached your weekly limit.");
+  `refundWindowHours` follows the runtime setting `refundWindowHours` (default 24), and the line with it.
 - `available: false` while STRIPE_SECRET_KEY or a plan's price id is missing: show the cards but
   disable the button.
 
@@ -76,6 +79,17 @@ No auth. Starts Stripe Checkout for a plan. → `200 {"url": "https://checkout.s
 - `success_url = https://dl.new/account?session_id={CHECKOUT_SESSION_ID}`,
   `cancel_url = https://dl.new/?plan=<plan>` (back to the plan step with the card selected).
 - `campaign` (optional): the first-touch link tags, as `/v1/telemetry/web` takes them.
+- **Terms consent with the EU/UK withdrawal waiver** (runtime setting `checkoutTermsConsent`,
+  default on): `consent_collection[terms_of_service]=required` and the checkbox text
+  (`custom_text[terms_of_service_acceptance][message]`): "I want my dl.new plan to start right
+  away and understand I lose my 14-day right to cancel once it starts. Refunds: within 24 hours of
+  the first payment, if the weekly limit hasn't been reached. [Terms](https://dl.new/terms)."
+  Stripe requires a terms of service URL in the account's public details (Dashboard → Settings →
+  Public details); without it Stripe refuses the session. Checkout never fails for that: the
+  service starts it again without the consent and turns `checkoutTermsConsent` off (in the config
+  change log, a warning in the logs, an alert to the owner); the owner turns it back on with
+  `POST /admin/config {"checkoutTermsConsent": true}` once the URL is set. The time of the
+  consent is kept on the paid checkout (`termsAcceptedAt` in the admin list).
 - Errors: 400 `invalid_plan`; 503 `billing_unavailable`; 502 `billing_error`; 429 `rate_limited`
   (20 an hour per network).
 
@@ -184,7 +198,8 @@ Ends this web session at once (the token stops working).
     "status": "active",
     "periodEnd": "2026-12-31T10:00:00.000Z", "cancelAtPeriodEnd": false,
     "paymentFailed": false,
-    "refundableUntil": "2026-12-08T10:00:00.000Z"
+    "refundableUntil": "2026-12-02T10:00:00.000Z",
+    "refundPolicy": "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit."
   },
   "legacy": null,
   "settings": {"fallback": true},
@@ -211,7 +226,9 @@ Ends this web session at once (the token stops working).
 - The plan the account's requests are held to is this one: part B's `AccountObject.planState()`
   reads `paidPlan()` (billing's tier, from the webhooks and the claim). A dl Pro subscription
   from before the launch (no tier) is held to Starter's limits (open question 4).
-- `refundableUntil`: 7 days after the first payment; null once past or refunded.
+- `refundableUntil`: 24 hours after the first payment (`refundWindowHours`); null once past, once
+  refunded, or once any plan model's weekly limit is reached (a `limits` entry `used_up`).
+- `refundPolicy`: "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit."
 
 ### POST /web/account/email {email} (web token) → `200 {"sent": true, "resendAfter": 30, "expiresIn": 600}`
 
@@ -261,10 +278,13 @@ may use is the account's plan **[B]**. A bad or revoked key is 401 `invalid_key`
   `/web/account` (the webhook confirms within seconds). Errors: 404 `no_subscription`; 400
   `not_an_upgrade` (same or lower plan: use the portal); 402 `payment_failed` (card declined;
   nothing changed); 503/502 as above.
-- **POST /web/billing/refund-request {reason?}** (web token) → `200 {"requested": true, "eligible": true, "deadline"}`.
-  Records the request and alerts the owner; within 7 days of the first payment the owner refunds
-  it (admin endpoint below). `eligible: false` past the deadline (still recorded). 404
-  `no_subscription`.
+- **POST /web/billing/refund-request {reason?}** (web token) → `200 {"requested": true, "eligible": true, "notEligible": null, "deadline", "policy"}`.
+  Records the request and alerts the owner. Eligible: within 24 hours of the first payment
+  (`refundWindowHours`) **and** no plan model at 100% of its weekly limit this week; the owner
+  then refunds it (admin endpoint below). Otherwise `eligible: false` (still recorded) and
+  `notEligible` says why: `"refund_not_eligible: weekly limit reached"` (with `limitsReached`,
+  the models' names), `"refund_not_eligible: refund window passed"` or
+  `"refund_not_eligible: already refunded"`. `policy` is the refund line. 404 `no_subscription`.
 - `dl.new/upgrade` (the link in limit errors) is a page: signed in, it calls `/web/billing/upgrade`
   with the next plan after a confirm; signed out, it goes to sign-in first.
 
@@ -347,19 +367,21 @@ Polling, every 2 seconds (no SSE: one cheap Directory read; works through every 
 
 ## 8. Admin (admin bearer, as the other /admin endpoints)
 
-- **GET /admin/paid/checkouts?status=unclaimed|claimed|all** → `{"checkouts": [{"sessionId", "plan", "email", "customerId", "subscriptionId", "amountCents", "paidAt", "claimedBy": "acct_…" | null, "claimedAt", "claimEmailSentAt", "expired"}]}`.
+- **GET /admin/paid/checkouts?status=unclaimed|claimed|all** → `{"checkouts": [{"sessionId", "plan", "email", "customerId", "subscriptionId", "amountCents", "paidAt", "claimedBy": "acct_…" | null, "claimedAt", "claimEmailSentAt", "termsAcceptedAt", "expired"}]}`. `termsAcceptedAt`: when the customer accepted the terms with the withdrawal waiver at Checkout; null without that consent.
 - **POST /admin/paid/refund {accountId | sessionId}** → refunds the first payment in full and
   cancels the subscription now. `{"refunded": true, "amountCents", "refundId", "subscriptionCanceled": true}`.
-  409 `refund_window_passed` after 7 days (send `{"force": true}` to refund anyway); 404
+  409 `refund_window_passed` more than `refundWindowHours` (24) after the first payment; 409
+  `refund_not_eligible` (`reason: "weekly limit reached"`, `limitsReached`) once a plan model's
+  weekly limit is reached this week. `{"force": true}` refunds anyway in both cases. 404
   `no_subscription`; 409 `already_refunded`.
-- **GET /admin/paid/refund-requests** → `{"requests": [{"accountId", "email", "reason", "at", "eligible", "refundedAt"}]}`.
+- **GET /admin/paid/refund-requests** → `{"requests": [{"accountId", "email", "reason", "at", "eligible", "notEligible", "refundedAt"}]}`; `notEligible` as the refund request answered it.
 
 ## 9. Stripe webhooks (POST /v1/billing/webhook, existing endpoint)
 
 | event | what happens |
 |---|---|
 | `checkout.session.completed` (metadata `product=plan`) | stores the paid session (unclaimed unless an account already claimed it), sends the "Finish setting up dl.new" email to the Checkout email with `https://dl.new/account?session_id=…` (works 7 days) |
-| `invoice.paid` | plan active until the invoice period's end; records the payment (first one starts the 7-day refund window) |
+| `invoice.paid` | plan active until the invoice period's end; records the payment (first one starts the 24-hour refund window) |
 | `invoice.payment_failed` | `paymentFailed: true`, status `past_due`; the plan keeps working while Stripe retries (Stripe's dunning) |
 | `customer.subscription.updated` | plan id from the subscription item's price; status; cancel at period end |
 | `customer.subscription.deleted` | plan ends (status `canceled`): the keys stay but requests get part B's "no plan" error |
@@ -420,7 +442,9 @@ Unclaimed sessions get plan changes recorded on the session row and applied when
 - **Welcome email** (`welcome_paid`, user-emails.ts): on claim, once per payment: where the key
   is (dl.new/connect), `curl -fsSL dl.new | sh` then `dl claude`, other tools' base URL and
   dl.new/keys, dl.new/signin, each plan model's weekly limit with "(95.5% caching applied)", the
-  refund policy, and the bonus line when the account holds it.
+  refund policy ("Full refund within 24 hours of your first payment, if you haven't reached your weekly limit. reply to this email."), and the bonus line when the account holds it.
+  The claim email ("Finish setting up dl.new") has the same refund line; its link still works 7
+  days (claiming is separate from the refund window).
 - **Email budget** (email-budget.ts): settings `userEmailsDailyMax` (300), of it
   `userEmailsTransactionalReserve` (100) kept for transactional mail (claim, paid welcome,
   plan_80, access answers); bulk and lifecycle mail (welcome_*, didnt_start, week_80, gone_quiet,
