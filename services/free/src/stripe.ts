@@ -178,7 +178,8 @@ export interface StripeEvent {
   type: string;
   /** Unix seconds. */
   created: number;
-  data: { object: Record<string, any> };
+  /** `previous_attributes`: on *.updated events, the fields that changed, as they were. */
+  data: { object: Record<string, any>; previous_attributes?: Record<string, any> };
 }
 
 /**

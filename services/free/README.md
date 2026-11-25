@@ -950,6 +950,25 @@ dl free tier: auto-blocked @<login> (0.92)   (subject; automated moderation bloc
 dl free tier: review @<login>: watch (0.60)   (subject; a review that didn't block; once per person per UTC day)
 ```
 
+### Plan payment emails
+
+Every dl.new plan event below emails the owner (`ALERT_EMAIL` to `ALERT_EMAIL_TO` only, from
+"dl.new"; `src/owner-payment-alerts.ts`), once per Stripe event id (the Directory's
+`owner_payment_alerts` table), whether or not the payment was claimed yet:
+
+| Stripe event | Subject |
+|---|---|
+| `checkout.session.completed`, card trial | `dl.new: card trial started (Starter)` |
+| `checkout.session.completed`, paid | `dl.new: new Plus subscription ($10 first month)` |
+| `invoice.paid`, money taken, not the Checkout's own first invoice | `dl.new: payment ($20, Plus renewal)` |
+| `customer.subscription.updated`, price changed | `dl.new: upgraded (Plus to Max)` / `downgraded` |
+| `customer.subscription.updated`, set to end (`cancel_at_period_end` or `cancel_at`) | `dl.new: cancelled (Max)` / `cancellation undone` |
+| `customer.subscription.deleted` | `dl.new: subscription ended (Max)` / `card trial ended unpaid` |
+
+The body is plain text: plan, amount and currency (subtotal, discount, tax), the coupon, the
+customer's email, the account (`acct_…`, or "not set up yet") and the Stripe ids. No card details
+or secrets. A failed send logs only the error's name and never fails the webhook.
+
 ### Runway alerts
 
 The threshold alerts above say when money has gone; the runway alerts (`src/runway.ts`) say

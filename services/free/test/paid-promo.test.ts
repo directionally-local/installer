@@ -239,7 +239,11 @@ describe("the launch offer: after paying", () => {
     assert.equal(result.body.outcome, "plan_unclaimed");
     const claim = service.calls.userEmail.find((entry) => entry.to === "hook@example.com" && entry.subject === "Finish setting up dl.new");
     assert.match(String(claim?.text), /Thanks for subscribing to dl\.new Max \(first month 50% off, then \$60\/month\)/);
-    assert.ok(alerts(service).some((text) => text.includes("paid $30.00 for dl.new Max (launch offer dlnew-bf-2026, $30.00 off)")));
+    // The owner's email (owner-payment-alerts.ts): the amount paid and the launch offer's coupon.
+    const owner = alerts(service).find((text) => text.includes("Subject: dl.new: new Max subscription ($30 first month)"));
+    assert.ok(owner, alerts(service).join("\n---\n"));
+    assert.ok(owner.includes("Amount: $30 USD (subtotal $60, discount $30, tax $0)"), owner);
+    assert.ok(owner.includes("Discount: dlnew-bf-2026 (50% off)"), owner);
     const unclaimed = (await (await service.request("GET", "/admin/paid/checkouts", { token: await admin(service) })).json()) as any;
     assert.deepEqual(unclaimed.checkouts[0].promo, { coupon: "dlnew-bf-2026", discountCents: 3000, percentOff: 50 });
   });

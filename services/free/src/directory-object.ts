@@ -688,6 +688,11 @@ const SCHEMA = [
      kind TEXT NOT NULL,
      at   INTEGER NOT NULL
    )`,
+  // Stripe events the owner was emailed about (owner-payment-alerts.ts): one email per event id.
+  `CREATE TABLE IF NOT EXISTS owner_payment_alerts (
+     event_id TEXT PRIMARY KEY,
+     at       INTEGER NOT NULL
+   )`,
   `CREATE TABLE IF NOT EXISTS customers (
      customer_id TEXT PRIMARY KEY,
      github_id   INTEGER NOT NULL
@@ -3141,6 +3146,11 @@ export class DirectoryObject extends DurableObject {
   /** Marks an event handled; false when another delivery got there first. */
   async markBillingEvent(id: string, kind: string, now: number): Promise<boolean> {
     return this.ctx.storage.sql.exec("INSERT INTO billing_events (id, kind, at) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING RETURNING id", id, kind, now).toArray().length > 0;
+  }
+
+  /** Claims the owner's payment email for a Stripe event; false when it was already sent (or is being sent). */
+  async markOwnerPaymentAlert(eventId: string, now: number): Promise<boolean> {
+    return this.ctx.storage.sql.exec("INSERT INTO owner_payment_alerts (event_id, at) VALUES (?, ?) ON CONFLICT(event_id) DO NOTHING RETURNING event_id", eventId, now).toArray().length > 0;
   }
 
   async mapCustomer(customerId: string, githubId: number): Promise<void> {
