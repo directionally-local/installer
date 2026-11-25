@@ -75,6 +75,7 @@ describe("emails to users: the copy", () => {
         resets: "monday 10 nov",
         unsubscribeUrl: "https://free.directionallylocal.com/email/stop?u=1&t=x",
         weeklyReset: { tokens: 10_000_000, fullTokens: 50_000_000, login: "alice" },
+        planWarning: { model: "DeepSeek V4.1 Flash", share: "80", used: "~50M", limit: "~62M", left: "~12M" },
       });
       assert.match(rendered.body, /\n\ndon't want these\? https:\/\/free\.directionallylocal\.com\/email\/stop\?u=1&t=x\n$/);
       assert.doesNotMatch(rendered.body, /\{\w+\}/, `${kind} has a placeholder left`);
