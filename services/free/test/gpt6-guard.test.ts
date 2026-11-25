@@ -169,6 +169,7 @@ describe("pre-send checks on GPT-6 requests", () => {
     assert.deepEqual(safeguard.body.reasoning, { effort: "low" });
     assert.equal(safeguard.body.max_tokens, 400);
     assert.equal(safeguard.body.temperature, 0);
+    assert.deepEqual(safeguard.body.provider, { data_collection: "deny" }, "only hosts that neither store nor train on prompts");
     assert.equal((safeguard.body.messages as Array<{ role: string; content: string }>)[0]!.content, "SYNTHETIC GUARD POLICY");
     for (const sent of sentToCheckers(service)) {
       assert.ok(sent.includes("NEW-USER") && sent.includes("NEW-TOOL"));

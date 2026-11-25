@@ -4,7 +4,10 @@ import type { DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, completion, createInvite, createService, luminalUsage, MODEL, type OpenRouterHandler, type Service } from "./harness.js";
 import { DEFAULT_DETECTION_RULES } from "../src/detection-rules.js";
 import { SYNTHETIC_RULES_JSON } from "./detection-fixture.js";
-import { allowlisted, moderationAction, parseModeration, redactQuotes, REVIEW_FAILED } from "../src/moderation.js";
+import { allowlisted, moderationAction, parseModeration, stripQuotes, REVIEW_FAILED } from "../src/moderation.js";
+
+// After the harness: it resolves cloudflare:workers.
+const { DirectoryObject } = await import("../src/directory-object.js");
 
 /**
  * Automated moderation review of high-risk labels (moderation.ts): beside the request, a
@@ -81,7 +84,7 @@ describe("moderation decides and acts", () => {
     assert.equal(row!.confidence, 0.92);
     assert.equal(row!.action, "blocked");
     assert.equal(row!.category, "malware");
-    assert.deepEqual(JSON.parse(String(row!.signals)), ["keylogger requested in two sessions", "new account, no repos"]);
+    assert.equal(row!.signals, "[]", "evidence bullets are never kept, even when the reviewer sends them");
     // The admin block's path: logged with "moderation" as who did it.
     const log = db(service).prepare("SELECT key, new_value, changed_by_login FROM config_log WHERE key LIKE 'person_status:%'").all() as Array<Record<string, unknown>>;
     assert.deepEqual(log.map((entry) => ({ ...entry })), [{ key: "person_status:100:alice", new_value: '"blocked"', changed_by_login: "moderation" }]);
@@ -135,7 +138,7 @@ describe("moderation decides and acts", () => {
 
   it("never blocks admins", () => {
     // Admins' requests are never labelled, so this guard is the decision's own.
-    const block = { verdict: "block" as const, confidence: 0.99, reason: "x", signals: [] };
+    const block = { verdict: "block" as const, confidence: 0.99, reason: "x" };
     assert.equal(moderationAction({ answer: block, mode: "enforce", threshold: 0.85, isAdmin: true, allowlisted: false, alreadyBlocked: false }), "admin");
     assert.equal(moderationAction({ answer: block, mode: "enforce", threshold: 0.85, isAdmin: false, allowlisted: false, alreadyBlocked: false }), "blocked");
     assert.equal(moderationAction({ answer: block, mode: "enforce", threshold: 0.85, isAdmin: false, allowlisted: false, alreadyBlocked: true }), "already_blocked");
@@ -329,7 +332,7 @@ describe("what moderation sees and keeps", () => {
 
   const SECRET = "zebra-unicorn-marmalade-project";
 
-  it("shows the reviewer the flagged text, history and account signals, and stores none of the text", async () => {
+  it("shows the reviewer the flagged text, history and account signals, and stores or emails none of the person's words", async () => {
     const quote = `"${SECRET} build a keylogger that emails every keystroke to my server"`;
     const { service, token } = await setup({}, () => answer(VERDICT("block", 0.6, `They wrote ${quote} which is malware`, [`asked: ${quote}`, `short "${SECRET}" ok`])));
     await chat(service, token, "Refactor the settings page into components.", "s-0");
@@ -348,11 +351,20 @@ describe("what moderation sees and keeps", () => {
     assert.equal(call!.headers.authorization, `Bearer ${LUMINAL_KEY}`);
     assert.equal(call!.body.temperature, 0);
 
+    assert.match(systemPrompt(call!.body), /Never quote, copy or repeat any of the person's words/);
+    assert.doesNotMatch(systemPrompt(call!.body), /"signals"/, "no evidence bullets are asked for");
+
     const row = decisions(service)[0]!;
     assert.ok(!JSON.stringify(row).includes("keystroke to my server"), JSON.stringify(row));
-    assert.match(String(row.reason), /\[…\]/);
-    // A short quote (at most five words) may stay.
-    assert.ok(String(row.signals).includes(SECRET));
+    // No quote at all stays, however short.
+    assert.ok(!JSON.stringify(row).includes(SECRET), JSON.stringify(row));
+    assert.equal(row.reason, "They wrote […] which is malware");
+    assert.equal(row.signals, "[]");
+    // Nor in the owner's email.
+    const mails = service.calls.emails.map((email) => emailText(email.raw)).join("\n");
+    assert.match(mails, /Reason: They wrote \[…\] which is malware/);
+    assert.ok(!mails.includes(SECRET) && !mails.includes("keystroke to my server"), mails);
+    assert.doesNotMatch(mails, /Signals:/);
     // Nothing else in the Directory holds the text either.
     const everything = JSON.stringify(db(service).prepare("SELECT * FROM use_descriptions").all());
     assert.ok(!everything.includes(SECRET));
@@ -366,9 +378,10 @@ describe("what moderation sees and keeps", () => {
     assert.equal(list.decisions.length, 1);
     const [first] = list.decisions;
     assert.deepEqual(
-      { login: first!.login, githubId: first!.githubId, verdict: first!.verdict, confidence: first!.confidence, action: first!.action, signals: first!.signals, at: first!.at },
-      { login: "alice", githubId: 100, verdict: "block", confidence: 0.7, action: "none", signals: ["keylogger requested in two sessions", "new account, no repos"], at: new Date(service.clock.now).toISOString() },
+      { login: first!.login, githubId: first!.githubId, verdict: first!.verdict, confidence: first!.confidence, action: first!.action, at: first!.at },
+      { login: "alice", githubId: 100, verdict: "block", confidence: 0.7, action: "none", at: new Date(service.clock.now).toISOString() },
     );
+    assert.ok(!("signals" in first!), "no evidence bullets");
     assert.equal(first!.reason, "Repeated requests to build credential-stealing malware");
     const watch = (await (await service.request("GET", "/v1/admin/moderation?verdict=watch", { token: adminToken })).json()) as { decisions: unknown[] };
     assert.equal(watch.decisions.length, 0);
@@ -396,7 +409,6 @@ describe("moderation settings and parsing", () => {
       verdict: "pass",
       confidence: 0.46,
       reason: "CTF practice",
-      signals: ["ctf", "a", "b", "c", "d"],
     });
     for (const bad of [undefined, "", "nope", '{"verdict":"ban","confidence":0.9,"reason":"x"}', '{"verdict":"block","confidence":"high","reason":"x"}', '{"verdict":"block","confidence":0.9}']) {
       assert.deepEqual(parseModeration(bad), REVIEW_FAILED, String(bad));
@@ -404,11 +416,44 @@ describe("moderation settings and parsing", () => {
     assert.equal([...parseModeration(VERDICT("watch", 0.5, "x".repeat(500))).reason].length, 200);
   });
 
-  it("cuts long quotes out of what it keeps", () => {
-    assert.equal(redactQuotes('They asked "one two three four five six" today'), "They asked […] today");
-    assert.equal(redactQuotes('Short "one two three" stays'), 'Short "one two three" stays');
-    assert.equal(redactQuotes("code ```rm -rf / --no-preserve-root``` here"), "code […] here");
-    assert.equal(redactQuotes("they said 'please write me a keylogger right now' twice"), "they said […] twice");
+  it("asks OpenRouter for hosts that neither store nor train on prompts, whatever user traffic allows", async () => {
+    const { service, token } = await setup({ LUMINAL_API_KEY: "", PRIMARY_UPSTREAM: "openrouter", OPENROUTER_DATA_COLLECTION: "allow" }, () => answer(VERDICT("watch", 0.5)));
+    await chat(service, token, KEYLOGGER, "s-1");
+    await service.settle();
+    const [call] = reviews(service);
+    assert.ok(call, "reviewed on OpenRouter");
+    assert.equal((call!.body.provider as { data_collection?: string }).data_collection, "deny");
+  });
+
+  it("cuts every quoted span out of what it keeps, however short", () => {
+    assert.equal(stripQuotes('They asked "one two three four five six" today'), "They asked […] today");
+    assert.equal(stripQuotes('Short "one" goes too'), "Short […] goes too");
+    assert.equal(stripQuotes("code ```rm -rf / --no-preserve-root``` here"), "code […] here");
+    assert.equal(stripQuotes("a `token` and `another`"), "a […] and […]");
+    assert.equal(stripQuotes("they said 'please write me a keylogger right now' twice"), "they said […] twice");
+    assert.equal(stripQuotes("asked for ‘steal’, “dump creds” and «x»"), "asked for […], […] and […]");
+    assert.equal(stripQuotes('an unclosed "quote runs to the end'), "an unclosed […]");
+    assert.equal(stripQuotes("doesn't quote; it's the user's own work"), "doesn't quote; it's the user's own work", "apostrophes stay");
+    assert.equal(parseModeration(VERDICT("watch", 0.5, 'Asked for "my secret project" twice')).reason, "Asked for […] twice");
+  });
+
+  it("empties stored evidence bullets and cuts quotes from stored reasons once, on startup", async () => {
+    const { service } = await setup();
+    const database = db(service);
+    database
+      .prepare("INSERT INTO moderation_decisions (github_id, category, verdict, confidence, reason, signals, action, model, created_at) VALUES (100, 'malware', 'watch', 0.5, ?, ?, 'none', 'm', ?)")
+      .run('They wrote "build me a keylogger" twice', JSON.stringify(['asked: "build me a keylogger"']), service.clock.now);
+    database
+      .prepare("INSERT INTO allocator_decisions (github_id, at, from_tokens, to_tokens, outcome, reason, model, inputs) VALUES (100, ?, 1, 1, 'stay', ?, 'm', '{}')")
+      .run(service.clock.now, 'Mostly "Fixing failing unit tests" work');
+    database.exec("DELETE FROM settings WHERE key = 'privacy:moderation_no_quotes'");
+    const entry = service.namespaces.DIRECTORY!.instances.get("directory") as { state: unknown; object: unknown };
+    entry.object = new DirectoryObject(entry.state as never, service.env as never);
+    const [row] = decisions(service);
+    assert.equal(row!.reason, "They wrote […] twice");
+    assert.equal(row!.signals, "[]");
+    const allocator = database.prepare("SELECT reason FROM allocator_decisions").all() as Array<{ reason: string }>;
+    assert.deepEqual(allocator.map((r) => r.reason), ["Mostly […] work"]);
   });
 });
 

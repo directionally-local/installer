@@ -16,10 +16,11 @@
  * and their earlier moderation verdicts. The reviewer is DeepSeek V4.1 Flash on the company key,
  * the same call path and internal accounting as use descriptions.
  *
- * Each decision is stored (the Directory's `moderation_decisions`): verdict, confidence, the
- * reviewer's short reason and evidence bullets, the action taken. Never the request's text: the
- * reason and bullets are asked to quote at most five words, and longer quotes are cut out here
- * anyway (redactQuotes) before anything is kept.
+ * Each decision is stored (the Directory's `moderation_decisions`): verdict, category, confidence,
+ * the reviewer's short reason and the action taken, kept USE_KEEP_DAYS (90) days. Never the
+ * request's text nor any of the person's words: the reviewer is told to describe in its own words
+ * and never quote, and anything inside quotation marks or code marks is cut out here anyway
+ * (stripQuotes) before the reason is kept or emailed. No evidence bullets are asked for or kept.
  *
  * Limits: one review per person per `moderationCooldownMinutes` unless the new label's category
  * differs, and `moderationDailyCap` reviews a UTC day; past the cap the owner gets the plain
@@ -36,7 +37,7 @@ export const MODERATION_INPUT_CHARS = 12_000;
 export const MODERATION_HISTORY_DAYS = 30;
 /** At most this many of those labels, newest first (each is a 60-character description). */
 export const MODERATION_HISTORY_ROWS = 100;
-/** The answer: a verdict, a 200-character reason and five short bullets fit in about 250 tokens. */
+/** The answer: a verdict and a 200-character reason fit in about 100 tokens. */
 export const MODERATION_MAX_TOKENS = 400;
 /**
  * Room for DeepSeek's reasoning on Luminal, which counts as output and comes before the answer.
@@ -47,10 +48,6 @@ export const MODERATION_REASONING_ROOM = 4_000;
 export const MODERATION_RETRY_ROOM = 8_000;
 export const MODERATION_TIMEOUT_SECONDS = 30;
 export const MODERATION_REASON_CHARS = 200;
-export const MODERATION_SIGNAL_CHARS = 120;
-export const MODERATION_MAX_SIGNALS = 5;
-/** The longest quote of the person's words a stored reason or bullet may keep. */
-export const MODERATION_QUOTE_WORDS = 5;
 
 export const MODERATION_VERDICTS = ["block", "watch", "pass"] as const;
 export type ModerationVerdict = (typeof MODERATION_VERDICTS)[number];
@@ -58,12 +55,12 @@ export type ModerationVerdict = (typeof MODERATION_VERDICTS)[number];
 export interface ModerationAnswer {
   verdict: ModerationVerdict;
   confidence: number;
+  /** In the reviewer's own words, quoted spans cut out (stripQuotes), at most MODERATION_REASON_CHARS. */
   reason: string;
-  signals: string[];
 }
 
 /** What any failure (no answer, a timeout, an answer that doesn't parse) is taken as: never a block. */
-export const REVIEW_FAILED: ModerationAnswer = { verdict: "watch", confidence: 0, reason: "review failed", signals: [] };
+export const REVIEW_FAILED: ModerationAnswer = { verdict: "watch", confidence: 0, reason: "review failed" };
 
 /**
  * Why a review failed (stored on the decision as `error`, and logged; a code, never content):
@@ -130,8 +127,8 @@ You get: the flagged request's text (between <request> tags; long text is shown 
 ${policy}
 
 Answer with one JSON object and nothing else:
-{"verdict":"block"|"watch"|"pass","confidence":<0 to 1>,"reason":"<at most ${MODERATION_REASON_CHARS} characters>","signals":["<short evidence bullet>", ... at most ${MODERATION_MAX_SIGNALS}]}
-Never quote more than ${MODERATION_QUOTE_WORDS} words of the person's text in the reason or signals; describe instead. No names, emails, keys, URLs or secrets.`;
+{"verdict":"block"|"watch"|"pass","confidence":<0 to 1>,"reason":"<at most ${MODERATION_REASON_CHARS} characters>"}
+Write the reason in your own words, as a description of the kind of work (for example: asks for a credential stealer aimed at third parties). Never quote, copy or repeat any of the person's words, code, file names or identifiers, and use no quotation marks. No names, emails, keys, URLs or secrets.`;
 }
 
 /** "YYYY-MM-DD" for a UTC day number or a Unix ms time. */
@@ -177,28 +174,31 @@ export function moderationMessages(text: string, input: ModerationCase, rules: D
 const CONTROL = /[\u0000-\u001f\u007f]+/g;
 
 /**
- * `text` with any quote longer than MODERATION_QUOTE_WORDS words cut out, and code spans and
- * blocks too: whatever the reviewer was told, a stored reason must not carry the person's words.
+ * `text` with every quoted span cut out, whatever its length: anything inside straight or curly
+ * double or single quotes, guillemets, backticks or code blocks becomes "[…]", and an unclosed
+ * opening mark cuts the rest. Whatever the reviewer (or the allocator) was told, a stored or
+ * emailed reason must not carry the person's words. Apostrophes inside words (don't) are kept.
  */
-export function redactQuotes(text: string): string {
-  const long = (inner: string) => inner.trim().split(/\s+/).filter(Boolean).length > MODERATION_QUOTE_WORDS;
+export function stripQuotes(text: string): string {
   return text
     .replace(/```[\s\S]*?(```|$)/g, "[…]")
-    .replace(/`[^`]*`/g, (match) => (long(match.slice(1, -1)) ? "[…]" : match))
-    .replace(/"([^"]*)"|“([^”]*)”|‘([^’]*)’|«([^»]*)»/g, (match, a, b, c, d) => (long(String(a ?? b ?? c ?? d ?? "")) ? "[…]" : match))
-    .replace(/(^|[\s(])'([^']{2,})'(?=[\s.,;:)!?]|$)/g, (match, lead, inner) => (long(String(inner)) ? `${lead}[…]` : match));
+    .replace(/`[^`]*(`|$)/g, "[…]")
+    .replace(/"[^"]*("|$)|“[^”]*(”|$)|„[^“”]*([“”]|$)|«[^»]*(»|$)|‹[^›]*(›|$)|「[^」]*(」|$)|『[^』]*(』|$)/g, "[…]")
+    .replace(/‘[^’]*(’|$)/g, "[…]")
+    .replace(/(^|[^\p{L}\p{N}])'(?:[^']|'(?=[\p{L}\p{N}]))*('(?![\p{L}\p{N}])|$)/gu, (_match, lead: string) => `${lead}[…]`)
+    .replace(/\[…\](\s*\[…\])+/g, "[…]");
 }
 
-/** One line, quotes redacted, at most `limit` characters. */
-function clean(text: string, limit: number): string {
-  const line = redactQuotes(text.replace(CONTROL, " ")).replace(/\s+/g, " ").trim();
+/** One line, quoted spans cut out, at most `limit` characters. */
+export function cleanReason(text: string, limit: number): string {
+  const line = stripQuotes(text.replace(CONTROL, " ")).replace(/\s+/g, " ").trim();
   return [...line].slice(0, limit).join("").trim();
 }
 
 /**
  * The reviewer's answer, or REVIEW_FAILED when it isn't one: the first JSON object in the text
- * (a code fence around it is fine), a known verdict, a confidence from 0 to 1, a reason (cut to
- * MODERATION_REASON_CHARS, quotes redacted) and up to MODERATION_MAX_SIGNALS bullets.
+ * (a code fence around it is fine), a known verdict, a confidence from 0 to 1 and a reason (quoted
+ * spans cut out, then cut to MODERATION_REASON_CHARS). Anything else in it is ignored, never kept.
  */
 export function parseModeration(text: unknown): ModerationAnswer {
   if (typeof text !== "string") return REVIEW_FAILED;
@@ -212,18 +212,11 @@ export function parseModeration(text: unknown): ModerationAnswer {
     return REVIEW_FAILED;
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return REVIEW_FAILED;
-  const { verdict, confidence, reason, signals } = parsed as Record<string, unknown>;
+  const { verdict, confidence, reason } = parsed as Record<string, unknown>;
   if (typeof verdict !== "string" || !(MODERATION_VERDICTS as readonly string[]).includes(verdict)) return REVIEW_FAILED;
   if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) return REVIEW_FAILED;
   if (typeof reason !== "string") return REVIEW_FAILED;
-  const bullets = Array.isArray(signals)
-    ? signals
-        .filter((signal): signal is string => typeof signal === "string")
-        .map((signal) => clean(signal, MODERATION_SIGNAL_CHARS))
-        .filter(Boolean)
-        .slice(0, MODERATION_MAX_SIGNALS)
-    : [];
-  return { verdict: verdict as ModerationVerdict, confidence: Math.round(confidence * 100) / 100, reason: clean(reason, MODERATION_REASON_CHARS) || "(no reason given)", signals: bullets };
+  return { verdict: verdict as ModerationVerdict, confidence: Math.round(confidence * 100) / 100, reason: cleanReason(reason, MODERATION_REASON_CHARS) || "(no reason given)" };
 }
 
 /** Whether moderationAllowlist names this person, by GitHub id or login (any case). */

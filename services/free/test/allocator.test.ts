@@ -144,6 +144,7 @@ describe("decisions", () => {
     const call = allocatorCalls(service)[0]!.body;
     assert.equal(call.temperature, 0);
     assert.deepEqual(call.reasoning, { effort: "low" });
+    assert.deepEqual(call.provider, { data_collection: "deny" }, "only hosts that neither store nor train on prompts");
     assert.equal(call.max_tokens, 600);
     assert.match(String(call.user), /^dl-[0-9a-f]{32}$/, "a safety identifier, never the GitHub id");
     const [row] = rows(service);
@@ -329,6 +330,7 @@ describe("pieces", () => {
   it("parses answers defensively", () => {
     assert.deepEqual(parseAllocation('```json\n{"decision":"10m","reason":"real work"}\n```'), { decision: "10m", reason: "real work" });
     assert.deepEqual(parseAllocation('{"decision":"FULL"}'), { decision: "full", reason: "(no reason given)" });
+    assert.deepEqual(parseAllocation('{"decision":"10m","reason":"Mostly \\"Fixing failing unit tests\\" work"}'), { decision: "10m", reason: "Mostly […] work" }, "no quotes of the descriptions are kept");
     assert.equal(parseAllocation('{"decision":"100m","reason":"x"}'), undefined);
     assert.equal(parseAllocation("{not json"), undefined);
     assert.equal(parseAllocation(undefined), undefined);

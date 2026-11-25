@@ -42,10 +42,13 @@
  */
 
 import { DEFAULT_DETECTION_RULES, type DetectionRules } from "./detection-rules.js";
+import { cleanReason } from "./moderation.js";
 import type { Limits } from "./account-object.js";
 
 export const ALLOCATOR_MODEL = "openai/gpt-oss-safeguard-20b";
 export const ALLOCATOR_URL = "https://openrouter.ai/api/v1/chat/completions";
+/** OpenRouter provider preferences: only hosts that neither store nor train on what they're sent. */
+export const ALLOCATOR_PROVIDER = { data_collection: "deny" } as const;
 /** Output tokens, low-effort reasoning included. */
 export const ALLOCATOR_MAX_TOKENS = 600;
 export const ALLOCATOR_REASON_CHARS = 160;
@@ -285,10 +288,11 @@ export interface AllocatorAnswer {
   reason: string;
 }
 
-// eslint-disable-next-line no-control-regex
-const CONTROL = /[\u0000-\u001f\u007f]+/g;
-
-/** The model's answer, or undefined: the first JSON object in the text, a known decision, a reason cut to ALLOCATOR_REASON_CHARS. */
+/**
+ * The model's answer, or undefined: the first JSON object in the text, a known decision, a reason
+ * with quoted spans cut out (moderation.ts stripQuotes: the descriptions it saw are never quoted
+ * into a stored reason) and cut to ALLOCATOR_REASON_CHARS.
+ */
 export function parseAllocation(text: unknown): AllocatorAnswer | undefined {
   if (typeof text !== "string") return undefined;
   const start = text.indexOf("{");
@@ -304,7 +308,7 @@ export function parseAllocation(text: unknown): AllocatorAnswer | undefined {
   const { decision, reason } = parsed as Record<string, unknown>;
   const normal = typeof decision === "string" ? decision.trim().toLowerCase() : undefined;
   if (!normal || !(ALLOCATOR_DECISIONS as readonly string[]).includes(normal)) return undefined;
-  const line = typeof reason === "string" ? [...reason.replace(CONTROL, " ").replace(/\s+/g, " ").trim()].slice(0, ALLOCATOR_REASON_CHARS).join("").trim() : "";
+  const line = typeof reason === "string" ? cleanReason(reason, ALLOCATOR_REASON_CHARS) : "";
   return { decision: normal as AllocatorDecision, reason: line || "(no reason given)" };
 }
 
@@ -316,7 +320,7 @@ Steps: "stay" (no change), "10m" (10 million tokens a week), "full" (the full al
 ${policy}
 
 Answer with one JSON object and nothing else:
-{"decision":"stay"|"10m"|"full","reason":"<at most ${ALLOCATOR_REASON_CHARS} characters, no names, emails, URLs or quotes>"}`;
+{"decision":"stay"|"10m"|"full","reason":"<at most ${ALLOCATOR_REASON_CHARS} characters, in your own words: never quote or copy the descriptions, no quotation marks, names, emails or URLs>"}`;
 }
 
 const known = (value: number | null) => (value === null ? "unknown" : String(value));
@@ -472,7 +476,7 @@ export async function runAllocation(run: AllocatorRun, input: { githubId: number
         {
           method: "POST",
           headers: { authorization: `Bearer ${run.apiKey}`, "content-type": "application/json", "http-referer": "https://directionallylocal.com", "x-title": "Directionally Local" },
-          body: JSON.stringify({ model: ALLOCATOR_MODEL, messages, max_tokens: ALLOCATOR_MAX_TOKENS, temperature: 0, stream: false, reasoning: { effort: "low" }, usage: { include: true }, user: run.user }),
+          body: JSON.stringify({ model: ALLOCATOR_MODEL, messages, max_tokens: ALLOCATOR_MAX_TOKENS, temperature: 0, stream: false, reasoning: { effort: "low" }, usage: { include: true }, provider: ALLOCATOR_PROVIDER, user: run.user }),
         },
         run.settings.allocatorTimeoutMs,
       );
