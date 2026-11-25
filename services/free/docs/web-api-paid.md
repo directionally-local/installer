@@ -397,8 +397,101 @@ Polling, every 2 seconds (no SSE: one cheap Directory read; works through every 
 | `invoice.payment_failed` | `paymentFailed: true`, status `past_due`; the plan keeps working while Stripe retries (Stripe's dunning) |
 | `customer.subscription.updated` | plan id from the subscription item's price; status; cancel at period end |
 | `customer.subscription.deleted` | plan ends (status `canceled`): the keys stay but requests get part B's "no plan" error |
+| `customer.subscription.trial_will_end` | **new (trials)**: a trialing subscription eligible for the launch offer gets the coupon before its first real charge |
 
 Unclaimed sessions get plan changes recorded on the session row and applied when claimed.
+
+## 10. Free trials (trials.ts, trial-web.ts)
+
+Sizes are **real tokens with 95.5% caching applied** (as the plan cards), enforced in counted
+tokens with the plans' factor: 20M real = **1,282,000 counted**, 10M = **641,000** (at
+`cachedTokenWeight` 0.02). Both trials serve **DeepSeek V4.1 Flash only**; any other model
+falls back to it with a notice (`[dl.new] Kimi K3.1 starts when your plan starts. Now using
+DeepSeek V4.1 Flash.` on a card trial whose plan has the model; `… isn't in the free trial.`
+otherwise). Trial usage is shown in the week's usage but never counts against the plan's weekly
+limits (`model_usage.trial_counted`).
+
+**`GET /web/plans` and `/v1/plans`** add:
+
+```json
+"trials": {
+  "card":   {"enabled": true, "available": true, "fullyClaimed": false, "tokens": 20000000, "countedTokens": 1282000, "days": 30,
+             "line": "First 20M tokens free (95.5% caching applied). Card required; your plan starts when you've used them or after 30 days.",
+             "fullyClaimedText": "Free trial: fully claimed"},
+  "noCard": {"enabled": true, "available": true, "fullyClaimed": false, "tokens": 10000000, "countedTokens": 641000,
+             "line": "No card? Get 10M tokens free (95.5% caching applied). Sign in with GitHub.",
+             "fullyClaimedText": "Free trial: fully claimed"},
+  "label": "(95.5% caching applied)"
+}
+```
+
+`enabled`: the setting; `available`: enabled and the budget has room for one more full trial;
+`fullyClaimed`: enabled but no room (show `fullyClaimedText`).
+
+**Card trial.** `POST /web/checkout/plan` answers `trial: true` while `trials.card.available`:
+the Checkout has `subscription_data[trial_period_days]=30`,
+`subscription_data[trial_settings][end_behavior][missing_payment_method]=cancel`,
+`payment_method_collection=always`, metadata `trial=card` and, inside the launch offer's window,
+`promo_eligible=<coupon>` (session and subscription). **No coupon on the Checkout**: it would be
+spent on the $0 trial invoice. The completed session has `payment_status: no_payment_required`;
+`GET /web/checkout/:id` says `status: "paid", trial: true`. The claim starts the trial meter
+(`/web/account` `plan.trialing: true`, `plan.trialEndsAt`, and `trial`). The plan starts:
+
+- when the trial's counted tokens are used: the service calls `POST /v1/subscriptions/:id`
+  `trial_end=now`, `proration_behavior=none`, `payment_behavior=error_if_incomplete` and, when
+  eligible, `discounts[0][coupon]` (the first real charge gets the 50%); a declined card is
+  `402 trial_payment_failed` ("…Update your card at dl.new/billing…") and Stripe isn't asked
+  again for 10 minutes; while Stripe is answering, `503 trial_converting` (retry-after 30);
+- or by Stripe after 30 days; `customer.subscription.trial_will_end` (3 days before) puts the
+  eligible coupon on the subscription first.
+
+Either way `trial_converted` is emailed once ("your plan started: dl.new Plus, $20/mo. first month
+50% off."), the GPT-6 launch bonus is granted, and Kimi/plan limits apply from then. One card
+trial per account: a second trial Checkout on the same account gets 0 trial tokens (its plan
+starts at once). A trial whose first real charge never succeeded never gets the plan while past
+due.
+
+**No-card trial.** The page sends the browser to `GET /web/auth/github?return=https://dl.new/trial&state=…`
+(the callback reads the free tier's checks with the GitHub token), then
+`POST /web/auth/github/session {code, state, trial: true}` → the session response plus
+`trialStarted: true` for a new account. Refusals: `403 trial_unavailable` with `reason`:
+`not_eligible` (below the free tier's bar, creation batch, network or domain sign-up limit,
+disposable or blocked email), `used` (this GitHub account or verified email had one, or the
+email belongs to another account), `fully_claimed`, `off`. A GitHub account that already has an
+account (including a free-tier account from before the launch) just signs in: no trial, legacy
+accounts keep their grace until `freeEndsAt`. Used up: `402 trial_used_up` "Your 10M free tokens
+are used up. Pick a plan at dl.new to keep going." Buying a plan ends it.
+
+**`trial` on `/web/account` and `/web/usage`** (null without one to show):
+
+```json
+{"kind": "card" | "no_card", "status": "active" | "used_up" | "ended", "plan": "plus" | null,
+ "tokens": 20000000, "usedAtMix": 4100000, "leftAtMix": 15900000,
+ "countedLimit": 1282000, "countedUsed": 262000, "countedLeft": 1020000, "percent": 20, "state": "ok" | "warning" | "used_up",
+ "realUsed": 4250000, "cachedInput": 4050000, "freshInput": 170000, "output": 30000, "cachingShare": 0.96,
+ "startedAt": "…", "endsAt": "…" | null, "daysLeft": 27 | null, "line": "Free trial: ~4.1M of 20M tokens used (95.5% caching applied). …"}
+```
+
+The bar is `usedAtMix` of `tokens` (counted used converted at the plan mix); `realUsed` is what
+was actually sent and received.
+
+**Notices and emails.** 80%: once per trial in the tool (`[dl.new] Free trial: 81% used (~16.2M of
+20M at 95.5% caching). Your Starter plan starts at 20M, ~3.8M left.`) and, card trials only,
+`trial_card_80`. Welcome: `welcome_trial_card` (when charging starts) or `welcome_trial_nocard`.
+All four are transactional (the email budget's reserve) and exempt from one-a-day.
+
+**Budgets** (runtime settings): `trialBudgetUsd` (300) for card trials, `noCardTrialBudgetUsd`
+(200) for no-card trials: what trials actually cost (OpenRouter cash, else the provider's
+credit) plus the rest of every active trial (card: not ended and before day 30; no-card: used or
+started in the last 30 days) at `trialUsdPerMillionCounted` (0.30 until trials have used 20M
+counted, then their measured rate). Full: new sign-ups don't get that trial. `GET /admin/paid/trials`
+shows both budgets and the latest trials; `GET /admin/paid/checkouts` shows `trial`.
+
+Settings: `cardTrial` (true), `cardTrialTokens` (20000000), `cardTrialDays` (30, 1 to 90),
+`trialBudgetUsd` (300), `noCardTrial` (true), `noCardTrialTokens` (10000000),
+`noCardTrialBudgetUsd` (200), `trialUsdPerMillionCounted` (0.3). Env: `CARD_TRIAL`,
+`CARD_TRIAL_TOKENS`, `CARD_TRIAL_DAYS`, `TRIAL_BUDGET_USD`, `NO_CARD_TRIAL`,
+`NO_CARD_TRIAL_TOKENS`, `NO_CARD_TRIAL_BUDGET_USD`, `TRIAL_USD_PER_MILLION_COUNTED`.
 
 ## For part B (how to read the account)
 

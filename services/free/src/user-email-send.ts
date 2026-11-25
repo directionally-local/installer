@@ -1,6 +1,6 @@
 import { base64urlDecode, base64urlEncode } from "../../shared/src/auth.js";
 import type { FreeConfig } from "./config.js";
-import { renderUserEmail, resetsText, type PlanResetValues, type PlanWarningValues, type PlanWelcomeValues, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
+import { renderUserEmail, resetsText, type PlanResetValues, type PlanWarningValues, type PlanWelcomeValues, type TrialEmailValues, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
 import { emailBudgetOf, type EmailBudget } from "./email-budget.js";
 import { DAY_MS, weekEnd, weekStart } from "./week.js";
 
@@ -240,6 +240,8 @@ export async function deliverUserEmail(input: {
   planWelcome?: PlanWelcomeValues;
   /** plan_reset's values (last week per model). */
   planReset?: PlanResetValues;
+  /** The trial emails' values (trials.ts). */
+  trial?: TrialEmailValues;
   /** Claim only while fewer than this many emails to users were claimed today (every kind). */
   dailyLimit?: number;
 }): Promise<"sent" | "failed" | "skipped"> {
@@ -263,7 +265,7 @@ export async function deliverUserEmail(input: {
   }
   if (!claim) return "skipped";
   const unsubscribeUrl = await stopUrl(input.base, input.signingKey, claim.githubId);
-  const email = renderUserEmail(claim.kind, { resets: resetsText(weekEnd(input.now)), unsubscribeUrl, proOffered: config.proOffered, ...(input.weeklyReset ? { weeklyReset: input.weeklyReset } : {}), ...(input.planWarning ? { planWarning: input.planWarning } : {}), ...(input.planWelcome ? { planWelcome: input.planWelcome } : {}), ...(input.planReset ? { planReset: input.planReset } : {}) });
+  const email = renderUserEmail(claim.kind, { resets: resetsText(weekEnd(input.now)), unsubscribeUrl, proOffered: config.proOffered, ...(input.weeklyReset ? { weeklyReset: input.weeklyReset } : {}), ...(input.planWarning ? { planWarning: input.planWarning } : {}), ...(input.planWelcome ? { planWelcome: input.planWelcome } : {}), ...(input.planReset ? { planReset: input.planReset } : {}), ...(input.trial ? { trial: input.trial } : {}) });
   const { ok } = await sendPlainEmail(transport, config, {
     to: claim.email,
     subject: email.subject,

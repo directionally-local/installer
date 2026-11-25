@@ -300,8 +300,33 @@ export async function stripeRequest(
  * `termsConsent`: the checkbox text; Checkout then requires the terms-of-service consent (Stripe
  * needs a terms URL in the account's public details, else it refuses: isTermsConsentRefusal).
  */
-export function planCheckoutParams(input: { plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; coupon?: string }): Record<string, unknown> {
-  const metadata = { product: "plan", plan: input.plan, ...(input.campaign ? { campaign: input.campaign } : {}) };
+/**
+ * `trial` (trials.ts): a card trial. The card is collected now and nothing is charged:
+ * `trial_period_days` is the 30-day backstop, and without a payment method at its end the
+ * subscription is canceled, never left unpaid. The launch offer's coupon is NOT put on the
+ * Checkout (it would be spent on the $0 trial invoice): `promo_eligible` records it, in the
+ * session's and the subscription's metadata, for the first real charge (trial-end time).
+ */
+export function planCheckoutParams(input: { plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; coupon?: string; trial?: { days: number; promoEligible?: string } }): Record<string, unknown> {
+  const metadata: Record<string, string> = { product: "plan", plan: input.plan, ...(input.campaign ? { campaign: input.campaign } : {}) };
+  if (input.trial) {
+    const trialMeta = { ...metadata, trial: "card", ...(input.trial.promoEligible ? { promo_eligible: input.trial.promoEligible } : {}) };
+    return {
+      mode: "subscription",
+      line_items: [{ price: input.price, quantity: 1 }],
+      success_url: input.successUrl,
+      cancel_url: input.cancelUrl,
+      allow_promotion_codes: false,
+      payment_method_collection: "always",
+      automatic_tax: { enabled: true },
+      billing_address_collection: "auto",
+      metadata: trialMeta,
+      subscription_data: { metadata: trialMeta, trial_period_days: input.trial.days, trial_settings: { end_behavior: { missing_payment_method: "cancel" } } },
+      ...(input.termsConsent
+        ? { consent_collection: { terms_of_service: "required" }, custom_text: { terms_of_service_acceptance: { message: input.termsConsent } } }
+        : {}),
+    };
+  }
   return {
     mode: "subscription",
     line_items: [{ price: input.price, quantity: 1 }],
@@ -352,7 +377,7 @@ export function termsAccepted(session: Record<string, any>): boolean {
   return session.consent?.terms_of_service === "accepted";
 }
 
-export async function createPlanCheckout(fetcher: Fetch, input: { secretKey: string; plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; coupon?: string; idempotencyKey: string }): Promise<{ id: string; url: string }> {
+export async function createPlanCheckout(fetcher: Fetch, input: { secretKey: string; plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; coupon?: string; trial?: { days: number; promoEligible?: string }; idempotencyKey: string }): Promise<{ id: string; url: string }> {
   const session = await stripeRequest(fetcher, input.secretKey, "POST", "/v1/checkout/sessions", planCheckoutParams(input), input.idempotencyKey);
   if (typeof session.url !== "string" || typeof session.id !== "string") throw new StripeError("Stripe didn't return a Checkout URL.", 502);
   return { id: session.id, url: session.url };
@@ -396,4 +421,58 @@ export async function invoicePayment(fetcher: Fetch, secretKey: string, invoiceI
   if (viaPayment) return { payment_intent: viaPayment };
   const viaCharge = idOf(paid?.payment?.charge);
   return viaCharge ? { charge: viaCharge } : undefined;
+}
+
+// ─── Card trials (trials.ts) ────────────────────────────────────────────────
+
+/** A subscription's trial as Stripe has it: trialing, and its trial_end (Unix ms). */
+export function subscriptionTrial(subscription: Record<string, any>): { trialing: boolean; trialEnd: number | null } {
+  const trialing = subscription.status === "trialing";
+  return { trialing, trialEnd: trialing && typeof subscription.trial_end === "number" ? subscription.trial_end * 1000 : null };
+}
+
+/** Whether a completed Checkout Session is a dl.new card trial: no payment taken, a trial on the subscription. */
+export function isTrialCheckout(session: Record<string, any>): boolean {
+  return session.metadata?.trial === "card" && session.payment_status === "no_payment_required";
+}
+
+/** The launch offer's coupon a trial Checkout was eligible for (started inside the window), or undefined. */
+export function promoEligible(object: Record<string, any>): string | undefined {
+  const value = object?.metadata?.promo_eligible;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Ends a card trial now, so Stripe makes the first real charge at once (`trial_end=now`), with the
+ * launch offer's coupon on that charge when the Checkout was eligible. `error_if_incomplete`: a
+ * declined card is a 402 and the subscription stays as it was (still trialing).
+ */
+export async function endTrialNow(fetcher: Fetch, secretKey: string, input: { subscriptionId: string; coupon?: string; idempotencyKey: string }): Promise<Record<string, any>> {
+  return stripeRequest(
+    fetcher,
+    secretKey,
+    "POST",
+    `/v1/subscriptions/${encodeURIComponent(input.subscriptionId)}`,
+    { trial_end: "now", proration_behavior: "none", payment_behavior: "error_if_incomplete", ...(input.coupon ? { discounts: [{ coupon: input.coupon }] } : {}) },
+    input.idempotencyKey,
+  );
+}
+
+/** Puts a coupon on a subscription (the next invoice: the first real charge after its trial). */
+export async function attachCoupon(fetcher: Fetch, secretKey: string, input: { subscriptionId: string; coupon: string; idempotencyKey: string }): Promise<Record<string, any>> {
+  return stripeRequest(fetcher, secretKey, "POST", `/v1/subscriptions/${encodeURIComponent(input.subscriptionId)}`, { discounts: [{ coupon: input.coupon }] }, input.idempotencyKey);
+}
+
+/** An invoice's discount as a percent of its subtotal (0 without one), across API versions. */
+export function invoiceDiscountPercent(invoice: Record<string, any>): number {
+  const amounts = (invoice.total_discount_amounts ?? []) as Array<{ amount?: number }>;
+  const discount = amounts.reduce((sum, entry) => sum + (typeof entry.amount === "number" ? entry.amount : 0), 0);
+  const subtotal = Number(invoice.subtotal ?? 0);
+  return discount > 0 && subtotal > 0 ? Math.round((discount / subtotal) * 100) : 0;
+}
+
+/** What an invoice charged, in cents (amount_paid, else total). */
+export function invoiceAmount(invoice: Record<string, any>): number {
+  const value = Number(invoice.amount_paid ?? invoice.total ?? 0);
+  return Number.isFinite(value) ? Math.round(value) : 0;
 }

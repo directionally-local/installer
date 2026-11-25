@@ -18,7 +18,8 @@ const END = Date.UTC(2026, 11, 1);
 const INSIDE = Date.UTC(2026, 10, 28, 15);
 
 async function world(vars: Record<string, string> = {}, now = INSIDE) {
-  const service = await createService({ ...PAID_VARS, ALERT_EMAIL_TO: "owner@example.com", ...vars }, { userEmail: true, email: true });
+  // The non-trial Checkout (a card trial puts the coupon on the first real charge instead: trials.test.ts).
+  const service = await createService({ ...PAID_VARS, CARD_TRIAL: "false", ALERT_EMAIL_TO: "owner@example.com", ...vars }, { userEmail: true, email: true });
   service.clock.now = now;
   const stripe = new FakeStripe(service);
   return { service, stripe };

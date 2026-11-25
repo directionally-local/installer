@@ -100,10 +100,13 @@ import { anthropicError, errorStatus, estimateInputTokens, toAnthropicMessage, t
 import { DAY_MS, isoDay, weekEnd, weekStart, WEEK_MS } from "./week.js";
 import { planResetValues } from "./plan-reset.js";
 import { FREE_ENDED_CODE, FREE_ENDED_MESSAGE, freeEnded, freeEndedFor, limitRefusal, meterFor, warningEmailValues, withNotices } from "./plan-limits.js";
+import { convertTrial, sendTrial80 } from "./trial-web.js";
+import { noCardUsedUpMessage, notInTrialNotice, trialsOffer, startsWithPlanNotice, TRIAL_CONVERTING_MESSAGE, TRIAL_PAYMENT_FAILED_MESSAGE, TRIAL_WARN_SHARE, trialWarningNotice, type TrialMeter } from "./trials.js";
+import { displayName as planDisplayName, isPaidPlan, planLimitFor, planName as planTitle } from "./plans.js";
 import { PLAN_METER_MODELS, afterMeterFull, anthropicModelFor, bonusProjection, dueWarning, planRoute, tokenMeter, type PlanServe } from "./plan-route.js";
 import { bonusAccountView, planCatalog, planLimitsView, planUsageView } from "./plan-usage.js";
 import { isPlanId, PLANS, promoPrice, promoView } from "./plan-prices.js";
-import { bonusBlock } from "./gpt6-bonus.js";
+import { BONUS_MODEL, bonusBlock } from "./gpt6-bonus.js";
 import type { PlanState } from "./account-object.js";
 import { allocateIfDue, allocatedLimits, anthropicSessionHint, limitedLevel, rescue, sessionKeyOf, stageOf, stepOf, usedShare, type AllocatorRun } from "./allocator.js";
 import { healthWindow } from "./health-data.js";
@@ -126,7 +129,7 @@ import {
   type UserEmailTransport,
   type WeeklyResetSkip,
 } from "./user-email-send.js";
-import { renderUserEmail, resetsText, USER_EMAILS, type PlanWarningValues, type PlanWelcomeValues, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
+import { renderUserEmail, resetsText, USER_EMAILS, type PlanWarningValues, type PlanWelcomeValues, type TrialEmailValues, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
 import { emailBudgetOf } from "./email-budget.js";
 import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, onlyListed, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
 import { refusalsCsv, refusalsView, requestClient, requestRefusalReason, type RefusalClient, type RefusalReason } from "./refusals.js";
@@ -1322,7 +1325,7 @@ export async function userEmail(
   kind: UserEmailKind,
   githubId: number,
   period: string,
-  values: { planWarning?: PlanWarningValues; planWelcome?: PlanWelcomeValues } = {},
+  values: { planWarning?: PlanWarningValues; planWelcome?: PlanWelcomeValues; trial?: TrialEmailValues } = {},
 ): Promise<"sent" | "failed" | "skipped"> {
   const transport = userEmailVia(c);
   if (!userEmailsOn(config, transport)) return "skipped";
@@ -1338,6 +1341,7 @@ export async function userEmail(
     now: c.now(),
     ...(values.planWarning ? { planWarning: values.planWarning } : {}),
     ...(values.planWelcome ? { planWelcome: values.planWelcome } : {}),
+    ...(values.trial ? { trial: values.trial } : {}),
   });
   logUserEmails(kind, [outcome]);
   return outcome;
@@ -1796,7 +1800,8 @@ export async function createKey(c: Ctx, githubId: number, rawName: unknown, kind
   if (kind === "tool") {
     const { config } = await runtime(c);
     // A dl.new plan's keys (dl_sk_) aren't held to the free tier's tool key switch and checks.
-    const paid = format === "dl_sk" && (await person.paidPlan(c.now())) !== null;
+    // ... nor are an open no-card trial's (trials.ts).
+    const paid = format === "dl_sk" && ((await person.paidPlan(c.now())) !== null || (await person.trialAccess(c.now())));
     if (!paid && !config.toolKeys) return apiError(403, "tool_keys_off", TOOL_KEYS_OFF_MESSAGE);
     if (!paid && stored?.status === "active" && !(await toolKeysAllowed(c, githubId, stored))) return apiError(403, "tool_keys_unavailable", TOOL_KEYS_UNAVAILABLE_MESSAGE);
     max = paid ? Math.max(config.toolKeysMax, PAID_KEYS_MAX) : config.toolKeysMax;
@@ -2194,6 +2199,32 @@ async function readSignals(c: Ctx, user: { id: number; createdAt: number | undef
   ]);
   const checks = levelChecks(signals, thresholds, rules, { now: c.now(), batchPeers, youngAccounts });
   return { signals, level: levelFor(checks, signals, basicRule(config)), levelReason: levelReason(signals, thresholds, checks), batchFlagged: !checks.full && checks.creationBatch };
+}
+
+/**
+ * The no-card trial's account check (trial-web.ts), at dl.new's GitHub callback: the free tier's
+ * own rules, as a sign-up would meet them. The level from the GitHub signals (account age,
+ * activity, the creation-batch check), the per-network sign-up limit (past it, only an account
+ * that is Full on its own signals), and whether GitHub failed open. Never throws.
+ */
+export async function trialAccountCheck(c: Ctx, user: { id: number; createdAt: number | undefined; publicRepos: number | undefined }, accessToken: string): Promise<{ level: Level; levelReason: string; batchFlagged: boolean; networkLimited: boolean }> {
+  try {
+    const signIn = await readSignals(c, user, accessToken);
+    const { config } = await runtime(c);
+    const signupKey = `signup:ip:${c.ipNet}`;
+    const signupLimit = { capacity: config.networkSignupsPerDay, perHour: config.networkSignupsPerDay / 24 };
+    const left = (await c.env.RATE_LIMITER.getByName(signupKey).check(signupKey, signupLimit, 1, c.now())).allowed;
+    return { level: signIn.level, levelReason: signIn.levelReason, batchFlagged: signIn.batchFlagged === true, networkLimited: !left && signIn.level !== "full" };
+  } catch (error) {
+    console.warn("trial account check failed open:", error instanceof Error ? error.message : "error");
+    return { level: "full", levelReason: "qualifies", batchFlagged: false, networkLimited: false };
+  }
+}
+
+/** Counts a no-card trial against the network's daily sign-ups, as an admission does. */
+export async function spendTrialSignup(c: Ctx): Promise<void> {
+  const signupKey = `signup:ip:${c.ipNet}`;
+  await c.env.RATE_LIMITER.getByName(signupKey).spend(signupKey, LIMITS.signupIp, 1, c.now());
 }
 
 /**
@@ -2676,7 +2707,8 @@ async function plansPublic(c: Ctx): Promise<Response> {
     const price = isPlanId(plan.id) ? PLANS[plan.id].priceUsd : undefined;
     return { ...plan, priceUsd: price ?? null, promoPriceUsd: promo.active && price !== undefined && promo.percentOff !== null ? promoPrice(price, promo.percentOff) : null };
   });
-  return json({ ...catalog, plans, promo }, 200, cors);
+  const trials = trialsOffer(gate.config, await directory(c).trialBudgets(gate.config, c.now()));
+  return json({ ...catalog, plans, promo, trials }, 200, cors);
 }
 
 /** GET /v1/usage: the caller's plan usage this week (a sign-in, a server key or a tool key). */
@@ -3637,10 +3669,22 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // Paid plans (plans.ts): the tier, the fallback setting and this week's meters. Admins skip
   // plans; a non-paying account past `freeEndsAt` is refused (the end of free tokens), unless
   // it is on the `freeForever` list (its free allowance and level go on as before).
-  const planState: PlanState | undefined = isAdmin ? undefined : await person.planState(c.now(), PLAN_METER_MODELS);
-  const paidPlan = gate.config.paidPlans && planState && planState.tier !== "none" ? planState.tier : undefined;
+  let planState: PlanState | undefined = isAdmin ? undefined : await person.planState(c.now(), PLAN_METER_MODELS);
+  let paidPlan = gate.config.paidPlans && planState && planState.tier !== "none" ? planState.tier : undefined;
+  // A free trial (trials.ts): DeepSeek only, held to the trial's counted tokens. A used no-card
+  // trial is refused; a used card trial starts its plan in Stripe now (the first real charge).
+  let trialMeter: TrialMeter | undefined = planState?.trial?.active ? planState.trial : undefined;
+  if (trialMeter && trialMeter.usedUp) {
+    if (trialMeter.kind === "nocard") return apiError(402, "trial_used_up", noCardUsedUpMessage(trialMeter.realLimit), { reason: "trial_used_up", plansUrl: "https://dl.new" }, await headers());
+    const converted = await convertTrial(c, identity.githubId);
+    if (converted === "declined") return apiError(402, "trial_payment_failed", TRIAL_PAYMENT_FAILED_MESSAGE, { reason: "trial_payment_failed", billingUrl: "https://dl.new/billing" }, await headers());
+    if (converted !== "converted") return apiError(503, "trial_converting", TRIAL_CONVERTING_MESSAGE, { retryable: true }, { ...(await headers()), "retry-after": "30" });
+    planState = await person.planState(c.now(), PLAN_METER_MODELS);
+    paidPlan = gate.config.paidPlans && planState.tier !== "none" ? planState.tier : undefined;
+    trialMeter = undefined;
+  }
   // Accounts made by the paid sign-up (part A's account numbers, from 2^50) never had free tokens.
-  if (planState && planState.tier === "none" && (freeEndedFor(gate.config, identity.githubId, c.now()) || identity.githubId >= PAID_ACCOUNTS_FROM)) {
+  if (!trialMeter && planState && planState.tier === "none" && (freeEndedFor(gate.config, identity.githubId, c.now()) || identity.githubId >= PAID_ACCOUNTS_FROM)) {
     return apiError(402, FREE_ENDED_CODE, FREE_ENDED_MESSAGE, { reason: "free_ended", plansUrl: "https://dl.new" }, await headers());
   }
   if (tool && identity.keyId) {
@@ -3703,7 +3747,26 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // provider's per-person caps (Pro's ration) don't apply: the plan's meter replaces them.
   let planServe: PlanServe | undefined;
   const deepseekAvailable = () => modelAvailable(modelById(DEEPSEEK_MODEL)!, gate.config, gate);
-  if (paidPlan && planState) {
+  if (trialMeter) {
+    // The trial serves DeepSeek V4.1 Flash only: any other model falls back to it with a notice
+    // ("Kimi K3.1 starts when your plan starts."), whatever the fallback setting says.
+    const notices: string[] = [];
+    if (requested.id !== DEEPSEEK_MODEL) {
+      const trialPlan = trialMeter.kind === "card" && isPaidPlan(trialMeter.plan) ? trialMeter.plan : undefined;
+      const inPlan = trialPlan !== undefined && (planLimitFor(trialPlan, requested.id, gate.config) !== undefined || requested.id === BONUS_MODEL);
+      notices.push(inPlan ? startsWithPlanNotice(requested.id === BONUS_MODEL ? "The GPT-6 launch bonus" : planDisplayName(requested)) : notInTrialNotice(planDisplayName(requested)));
+    }
+    planServe = {
+      kind: "serve",
+      model: DEEPSEEK_MODEL,
+      meter: { kind: "trial", model: DEEPSEEK_MODEL, limit: trialMeter.limit, cachedTokenWeight: gate.config.cachedTokenWeight },
+      view: undefined,
+      notices,
+      fellBack: requested.id !== DEEPSEEK_MODEL,
+      bonus: false,
+    };
+    requested = modelById(DEEPSEEK_MODEL)!;
+  } else if (paidPlan && planState) {
     const routed = await planRoute({
       plan: paidPlan,
       state: planState,
@@ -3892,6 +3955,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // On a paid plan every attempt is held to the meter of the model that serves it: the plan's
   // meter for its own model (a backup upstream included), DeepSeek's for a fallback to it.
   const meterOf = (modelId: string) => {
+    // A trial: its own meter for DeepSeek, nothing for any other model.
+    if (planServe && trialMeter) return modelId === planServe.model ? planServe.meter : { kind: "trial" as const, model: modelId, limit: 0, cachedTokenWeight: gate.config.cachedTokenWeight };
     if (!planServe || !paidPlan || !planState) return undefined;
     if (modelId === planServe.model) return planServe.meter;
     const view = meterFor(paidPlan, modelId, planState.counted[modelId] ?? 0, gate.config);
@@ -3911,6 +3976,13 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     });
   };
   let reservation = await reserveFor(pool, serving);
+  // The trial filled up between the read and the reservation (requests in parallel).
+  if (!reservation.ok && reservation.code === "plan_limit" && trialMeter) {
+    if (trialMeter.kind === "nocard") return apiError(402, "trial_used_up", noCardUsedUpMessage(trialMeter.realLimit), { reason: "trial_used_up", plansUrl: "https://dl.new" }, quotaHeaders(reservation.allowance));
+    const task = convertTrial(c, identity.githubId).catch(() => "failed");
+    if (c.background) c.background(task);
+    return apiError(503, "trial_converting", TRIAL_CONVERTING_MESSAGE, { retryable: true }, { ...quotaHeaders(reservation.allowance), "retry-after": "30" });
+  }
   // The meter filled up between the plan's read and the reservation (requests in parallel):
   // DeepSeek in its place when allowed, else the plan's refusal.
   if (!reservation.ok && reservation.code === "plan_limit" && planServe && paidPlan && planState) {
@@ -4051,9 +4123,14 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     const noUsage = charged === undefined ? { outputTokens: options.outputTokens ?? 0, prices: model.prices, cachedTokenWeight: gate.config.cachedTokenWeight } : undefined;
     // A backup provider or a fallback model served (a plan's fallback, a provider's failover).
     const failover = model.id !== asked.id || provider !== serving!.provider;
-    const meter = { tool: recordedClient ?? "autopilot", failover, bonus: planServe?.bonus === true && model.id === planServe.model };
+    const meter = { tool: recordedClient ?? "autopilot", failover, bonus: planServe?.bonus === true && model.id === planServe.model, ...(trialMeter ? { trial: true } : {}) };
     const settled = await person.settle({ reservationId, charged, costUsd: cost, ...(rawTokens !== undefined ? { rawTokens } : {}), ...(usage && !chargeNothing ? { usage } : {}), ...(noUsage ? { noUsage } : {}), meter, limits, now: c.now() });
     const estimated = settled.estimate?.usage;
+    // A card trial just used up: its plan starts now (Stripe's first real charge), beside the request.
+    if (trialMeter?.kind === "card" && settled.trial?.active && settled.trial.usedUp) {
+      const task = convertTrial(c, identity.githubId).catch(() => "failed");
+      if (c.background) c.background(task);
+    }
     // A provider that reports its charge (Liquid's `exchange.charge.total_usd`) is charged that.
     // Without usage, the credit gets our best estimate of what the provider billed, apart from
     // the person's charge: the estimate charged when output was streamed; the prompt alone when
@@ -4104,6 +4181,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       ...(sessionKey ? { sessionKey } : {}),
       // Multi-turn use for GPT-6's trust gate, from any agent: the session id, or the harness key of a dl opencode run.
       ...(trustSession ? { trustSession } : {}),
+      ...(trialMeter ? { trial: trialMeter.kind } : {}),
     };
     await alert(c, await directory(c).recordRequest(record, policyOf(gate.config), servingContext(c, gate.config)));
     // Most of the week's free tokens used: one email a week, on the settlement that crossed 80%.
@@ -4195,6 +4273,16 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     const task = userEmail(c, gate.config, "plan_80", identity.githubId, `${weekStart(c.now())}:${planServe.view.model}`, { planWarning: values });
     if (c.background) c.background(task);
     else await task;
+  }
+  // A trial's 80% notice, once per trial (and, for a card trial, the trial_card_80 email).
+  if (trialMeter && answered.status === 200 && trialMeter.counted >= trialMeter.limit * TRIAL_WARN_SHARE && trialMeter.counted < trialMeter.limit && (await person.claimTrialWarning())) {
+    const planName = trialMeter.kind === "card" && isPaidPlan(trialMeter.plan) ? planTitle(trialMeter.plan) : undefined;
+    notices.push(trialWarningNotice({ kind: trialMeter.kind, counted: trialMeter.counted, limit: trialMeter.limit, realLimit: trialMeter.realLimit, ...(planName ? { planName } : {}) }));
+    if (trialMeter.kind === "card") {
+      const task = sendTrial80(c, identity.githubId, trialMeter).catch(() => undefined);
+      if (c.background) c.background(task);
+      else await task;
+    }
   }
   const response = notices.length > 0 ? await withNotices(answered, notices, serving.model.id) : answered;
   const fellBackTo = serving.fallback ? serving.model.id : effective !== requested ? effective.id : undefined;

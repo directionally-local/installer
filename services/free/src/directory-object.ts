@@ -63,6 +63,22 @@ import type { PlanId } from "./plan-prices.js";
 import { BONUS_SCHEMA, bonusHolders, canGrantOneMore, grantBonus, type BonusProjectionInput } from "./gpt6-bonus.js";
 import { classOfKind, EMAIL_BUDGET_SCHEMA, emailCounts, emailRoom, takeEmailBudget, type EmailBudget, type EmailClass, type EmailCounts } from "./email-budget.js";
 import { PAID_ACCOUNT_BASE } from "./accounts.js";
+import {
+  endTrialRow,
+  hadOtherCardTrial,
+  insertNoCardTrial,
+  noteTrialUsage,
+  recordCardTrial,
+  takeNoCardTrial,
+  TRIAL_SCHEMA,
+  trialBudgetStatus,
+  trialsAdminView,
+  type NoCardRefusal,
+  type TrialBudgetView,
+  type TrialEndReason,
+  type TrialKind,
+  type TrialSettingsConfig,
+} from "./trials.js";
 
 /**
  * Who is in, and what they used. One object (`getByName("directory")`): admissions, invite
@@ -202,6 +218,9 @@ export interface PersonRow {
   email_stop: number;
 }
 
+/** User emails exempt from the one-a-day rule: answers people wait for, and what their plan or trial does next. */
+const ANY_DAY_KINDS: readonly UserEmailKind[] = ["access_granted", "plan_80", "welcome_paid", "welcome_trial_card", "welcome_trial_nocard", "trial_card_80", "trial_converted"];
+
 export interface RequestRecord {
   githubId: number;
   /** Admin usage is kept apart from the global caps. */
@@ -252,6 +271,8 @@ export interface RequestRecord {
   harness?: string;
   /** The weekly dollar budget it was charged to (the requested model's); unset: the served model's. */
   family?: Family;
+  /** Held to a free trial (trials.ts): its counted tokens and cost go to the trial's budget. */
+  trial?: TrialKind;
   /** The client's session id, when it sent one (allocator.ts sessionKeyOf): the token allocator's session counts. */
   sessionKey?: string | null;
   /** Its session for GPT-6's trust gate (gpt6-trust.ts): the session id, or "harness:<key id>". Not stored on the row. */
@@ -1111,6 +1132,8 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["paid_checkouts", "promo_coupon", "TEXT"],
   ["paid_checkouts", "discount_cents", "INTEGER NOT NULL DEFAULT 0"],
   ["paid_checkouts", "promo_percent_off", "INTEGER"],
+  ["paid_checkouts", "trial", "INTEGER NOT NULL DEFAULT 0"],
+  ["paid_checkouts", "promo_eligible", "TEXT"],
   // Error events per person per day (the metrics' errorEvents), so they outlive the raw events.
   ["daily_activity", "error_events", "INTEGER NOT NULL DEFAULT 0"],
 ];
@@ -1145,7 +1168,7 @@ export class DirectoryObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA, ...EVENT_CODE_SCHEMA, ...BONUS_SCHEMA, ...PAID_SCHEMA, ...EMAIL_BUDGET_SCHEMA]) this.ctx.storage.sql.exec(statement);
+      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA, ...EVENT_CODE_SCHEMA, ...BONUS_SCHEMA, ...PAID_SCHEMA, ...EMAIL_BUDGET_SCHEMA, ...TRIAL_SCHEMA]) this.ctx.storage.sql.exec(statement);
       ensureAllocatorSchema(this.ctx.storage.sql);
       const added = new Set<string>();
       for (const [table, column, definition] of ADDED_COLUMNS) {
@@ -2020,7 +2043,7 @@ export class DirectoryObject extends DurableObject {
       const today = sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND day = ? AND status IN ('pending', 'sent') LIMIT 1", input.githubId, day).toArray();
       // plan_80 too: a paying account's limit warning, at most once per model a week; and the
       // paid welcome, which carries where the key is.
-      if (today.length > 0 && input.kind !== "access_granted" && input.kind !== "plan_80" && input.kind !== "welcome_paid") return undefined;
+      if (today.length > 0 && !ANY_DAY_KINDS.includes(input.kind)) return undefined;
       // `dailyLimit` (the weekly_reset run): at most this many emails to users claimed today, every kind.
       if (input.dailyLimit !== undefined && this.#userEmailsToday(day) >= input.dailyLimit) return undefined;
       // The day's email budget (email-budget.ts): bulk mail never takes the transactional reserve.
@@ -2069,7 +2092,7 @@ export class DirectoryObject extends DurableObject {
       .exec<{ github_id: number; kind: UserEmailKind; period: string }>(
         // Broadcasts are retried only by the owner calling the endpoint again.
         // The weekly ones (week_80, weekly_reset) only within their own week; plan_80 never (its numbers were the request's).
-        "SELECT github_id, kind, period FROM user_emails WHERE status = 'failed' AND attempts < 2 AND kind NOT IN ('broadcast', 'plan_80') AND (kind NOT IN ('week_80', 'weekly_reset') OR period = ?) ORDER BY claimed_at",
+        "SELECT github_id, kind, period FROM user_emails WHERE status = 'failed' AND attempts < 2 AND kind NOT IN ('broadcast', 'plan_80', 'welcome_trial_card', 'welcome_trial_nocard', 'trial_card_80', 'trial_converted') AND (kind NOT IN ('week_80', 'weekly_reset') OR period = ?) ORDER BY claimed_at",
         week,
       )
       .toArray()
@@ -2756,6 +2779,52 @@ export class DirectoryObject extends DurableObject {
     return this.ctx.storage.transactionSync(() => grantBonus(this.ctx.storage.sql, githubId, projection));
   }
 
+  // ─── Free trials (trials.ts) ───────────────────────────────────────────────
+
+  /** Both trial budgets now: spent, projected, and whether a new trial still fits. */
+  async trialBudgets(config: TrialSettingsConfig & { cachedTokenWeight: number }, now: number): Promise<{ card: TrialBudgetView; noCard: TrialBudgetView }> {
+    const sql = this.ctx.storage.sql;
+    return { card: trialBudgetStatus(sql, "card", config, now), noCard: trialBudgetStatus(sql, "nocard", config, now) };
+  }
+
+  /** A card trial Stripe started, once per subscription (the account once it's claimed). */
+  async recordCardTrial(input: { subscriptionId: string; plan: string; limit: number; startedAt: number; endsAt: number | null; account?: number }): Promise<void> {
+    recordCardTrial(this.ctx.storage.sql, input);
+  }
+
+  /** Whether the account had a card trial on another subscription before (one card trial per account). */
+  async hadOtherCardTrial(account: number, subscriptionId: string): Promise<boolean> {
+    return hadOtherCardTrial(this.ctx.storage.sql, account, subscriptionId);
+  }
+
+  /**
+   * A no-card trial for a new GitHub sign-in: the account is made and the trial taken in one
+   * transaction, only if the GitHub id and the verified email never had one and the budget has
+   * room. An identity that has an account already gets `existing` (no trial).
+   */
+  async startNoCardTrial(input: { githubId: number; login: string; email: string; emailNorm: string; config: TrialSettingsConfig & { cachedTokenWeight: number }; now: number }): Promise<{ ok: true; account: number; limit: number } | { ok: false; reason: NoCardRefusal } | { ok: false; reason: "existing"; account: number }> {
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      const existing = resolveIdentity(sql, "github", String(input.githubId), input.now);
+      if (existing !== undefined) return { ok: false as const, reason: "existing" as const, account: existing };
+      const taken = takeNoCardTrial(sql, { githubId: input.githubId, emailNorm: input.emailNorm, config: input.config, now: input.now });
+      if (!taken.ok) return taken;
+      const account = createPaidAccount(sql, { kind: "github", subject: String(input.githubId), label: input.login, email: input.email, now: input.now, login: paidLogin });
+      insertNoCardTrial(sql, { account, githubId: input.githubId, emailNorm: input.emailNorm, limit: taken.limit, now: input.now });
+      return { ok: true as const, account, limit: taken.limit };
+    });
+  }
+
+  /** Ends a trial in the Directory's record (the budgets stop projecting it). */
+  async endTrial(input: { account?: number; subscriptionId?: string; kind: TrialKind; reason: TrialEndReason; at: number }): Promise<void> {
+    endTrialRow(this.ctx.storage.sql, input);
+  }
+
+  /** GET /admin/trials: both budgets and the latest trials. */
+  async trialsAdmin(config: TrialSettingsConfig & { cachedTokenWeight: number }, now: number) {
+    return trialsAdminView(this.ctx.storage.sql, config, now);
+  }
+
   /** Whether this account holds the bonus, how many do, and whether a new subscriber would still get it. */
   async gpt6BonusStatus(githubId: number | undefined, projection: Omit<BonusProjectionInput, "holders">): Promise<{ granted: boolean; holders: number; fullyClaimed: boolean }> {
     const sql = this.ctx.storage.sql;
@@ -3005,7 +3074,7 @@ export class DirectoryObject extends DurableObject {
     });
   }
 
-  async recordPaidCheckout(input: { sessionId: string; plan: PlanId; customerId: string | null; subscriptionId: string | null; email: string | null; amountCents: number; paidAt: number; termsAcceptedAt?: number | null; promo?: CheckoutPromo | null }): Promise<PaidCheckoutRow> {
+  async recordPaidCheckout(input: { sessionId: string; plan: PlanId; customerId: string | null; subscriptionId: string | null; email: string | null; amountCents: number; paidAt: number; termsAcceptedAt?: number | null; promo?: CheckoutPromo | null; trial?: boolean; promoEligible?: string | null }): Promise<PaidCheckoutRow> {
     return recordPaidCheckout(this.ctx.storage.sql, input);
   }
 
@@ -3184,6 +3253,10 @@ export class DirectoryObject extends DurableObject {
         openaiCredit,
         free ? openaiCredit : 0,
       );
+      // A free trial's usage, for its global budget: what it cost us (OpenRouter's cash, else the provider's credit).
+      if (record.trial && !admin) {
+        noteTrialUsage(this.ctx.storage.sql, { account: record.githubId, kind: record.trial, counted: record.chargedTokens, costUsd: upstream === "openrouter" ? record.costUsd : (record.creditUsd ?? 0), at: record.at });
+      }
       if (!admin) {
         // cost_usd here is what the allowance was charged (OpenRouter prices), for cost per person.
         this.#addActivity(record.githubId, record.at, {

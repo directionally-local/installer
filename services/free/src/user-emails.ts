@@ -13,7 +13,8 @@
  * The emails are plain text, so commands are written as they are typed, without backticks.
  *
  * dl.new's paid plans have their own: welcome_paid (on claiming a payment), plan_80 and
- * plan_reset (Mondays, paying accounts only). The one capitalised line is plan_reset's subject,
+ * plan_reset (Mondays, paying accounts only). Its free trials (trials.ts): welcome_trial_card,
+ * welcome_trial_nocard, trial_card_80 and trial_converted. The one capitalised line is plan_reset's subject,
  * "Your ~62M tokens reset.", as the owner wrote it.
  *
  * When each one goes out is in user-email-send.ts.
@@ -34,7 +35,11 @@ export type UserEmailKind =
   | "gone_quiet"
   | "weekly_reset"
   | "welcome_paid"
-  | "plan_reset";
+  | "plan_reset"
+  | "welcome_trial_card"
+  | "welcome_trial_nocard"
+  | "trial_card_80"
+  | "trial_converted";
 
 /** The welcome kinds: held back while the person waits in line for free tokens. */
 export const WELCOME_KINDS: readonly UserEmailKind[] = ["welcome", "welcome_basic", "welcome_starter", "welcome_starter_small", "welcome_trial"];
@@ -257,6 +262,104 @@ if anything breaks or feels off, just reply. it comes straight to me.
 sina`,
   },
 
+  // 3d. dl.new's card trial (trials.ts): right after a trial Checkout is claimed. {plan} the plan's
+  // name, {price} "$7/mo", {promo} " (first month 50% off)" when the Checkout was in the launch
+  // offer's window, else nothing, {tokens} the trial's size ("20M", real tokens at 95.5% caching),
+  // {ends} the day the plan starts at the latest ("26 dec"), {limits} the plan's weekly limits.
+  welcome_trial_card: {
+    subject: "your dl.new key is ready",
+    body: `hey,
+
+sina here, i build dl.new. your free trial of {plan} has started.
+
+how it works:
+- your first {tokens} tokens are free (95.5% caching applied).
+- during the trial you get deepseek v4.1 flash. the rest of your plan starts with the plan.
+- your plan starts, and your card is charged {price}{promo}, when you've used the {tokens} or on {ends}, whichever comes first. we email you at 80%.
+- don't want it? cancel before then at https://dl.new/billing and you won't be charged.
+
+your key is waiting at https://dl.new/connect
+
+with claude code, run this once:
+    curl -fsSL dl.new | sh
+then start it with:
+    dl claude
+
+other tools (opencode, cline, cursor, any openai sdk): use the base url https://api.dl.new/v1 and a key from https://dl.new/keys
+
+to sign in again, go to https://dl.new/signin and use github or a code we email you.
+
+once your plan starts, its weekly limits, reset every monday 00:00 utc:
+{limits}
+
+if anything breaks or feels off, just reply. it comes straight to me.
+
+sina`,
+  },
+
+  // 3e. dl.new's no-card trial (trials.ts): right after the GitHub sign-in that started it.
+  // {tokens} "10M" (real tokens at 95.5% caching).
+  welcome_trial_nocard: {
+    subject: "your dl.new key is ready",
+    body: `hey,
+
+sina here, i build dl.new. your free trial has started: {tokens} tokens of deepseek v4.1 flash (95.5% caching applied), no card needed.
+
+it's one time and doesn't reset. when it's used up, pick a plan at https://dl.new to keep going.
+
+your key is waiting at https://dl.new/connect
+
+with claude code, run this once:
+    curl -fsSL dl.new | sh
+then start it with:
+    dl claude
+
+other tools (opencode, cline, cursor, any openai sdk): use the base url https://api.dl.new/v1 and a key from https://dl.new/keys
+
+your usage: https://dl.new/usage
+
+if anything breaks or feels off, just reply. it comes straight to me.
+
+sina`,
+  },
+
+  // 3f. A card trial at 80% (once per trial; real tokens at 95.5% caching). {share} the percent, {used}
+  // "16.2M", {tokens} "20M", {left} "~3.8M", {plan}, {price}, {promo}, {limits} as above.
+  trial_card_80: {
+    subject: "your free trial is {share}% used",
+    body: `hey,
+
+your free trial is {share}% used ({used} of {tokens} tokens at 95.5% caching). your plan starts at {tokens}, {left} left.
+
+when it starts, your card is charged {price}{promo} for {plan}, with these weekly limits:
+{limits}
+
+don't want it? cancel before then at https://dl.new/billing and you won't be charged.
+your usage: https://dl.new/usage
+
+sina`,
+  },
+
+  // 3g. A card trial converted: the plan started and the first real charge went through.
+  // {plan}, {price} "$7/mo", {promo} " first month 50% off." when the launch offer applied, else
+  // nothing, {reason} why it started now, {limits}, {bonus} as in welcome_paid.
+  trial_converted: {
+    subject: "your dl.new plan started",
+    body: `hey,
+
+your plan started: {plan}, {price}.{promo}
+
+{reason}
+
+its weekly limits, reset every monday 00:00 utc:
+{limits}
+{bonus}
+manage or cancel: https://dl.new/billing
+your usage: https://dl.new/usage
+
+sina`,
+  },
+
   // 5b. dl.new: every Monday, to paying accounts only, once free tokens have ended (freeEndsAt)
   // and while weeklyResetEmail is on (app.ts scheduledPlanReset). {tokens} is the plan's main
   // model's weekly limit ("~62M"), {plan} its name, {models} last week per model with the
@@ -345,6 +448,9 @@ export interface PlanWelcomeValues {
   promo: string;
 }
 
+/** The trial emails' values (paid-web.ts trialEmailValues): every placeholder they use, as text. */
+export type TrialEmailValues = Partial<Record<"plan" | "price" | "promo" | "tokens" | "ends" | "limits" | "share" | "used" | "left" | "reason" | "bonus", string>>;
+
 /** plan_reset's values (plan-reset.ts planResetValues). */
 export interface PlanResetValues {
   tokens: string;
@@ -376,7 +482,7 @@ const PRO_OR_TOPUP = /dl pro or a top up/g;
  */
 export function renderUserEmail(
   kind: UserEmailKind,
-  values: { resets: string; unsubscribeUrl: string; proOffered?: boolean; weeklyReset?: WeeklyResetValues; planWarning?: PlanWarningValues; planWelcome?: PlanWelcomeValues; planReset?: PlanResetValues },
+  values: { resets: string; unsubscribeUrl: string; proOffered?: boolean; weeklyReset?: WeeklyResetValues; planWarning?: PlanWarningValues; planWelcome?: PlanWelcomeValues; planReset?: PlanResetValues; trial?: TrialEmailValues },
 ): UserEmailCopy {
   const reset = values.weeklyReset;
   const named: Record<string, string> = {
@@ -392,6 +498,7 @@ export function renderUserEmail(
     ...(values.planWarning ?? {}),
     ...(values.planWelcome ?? {}),
     ...(values.planReset ?? {}),
+    ...(values.trial ?? {}),
   };
   const fill = (text: string) => {
     const filled = text.replace(/\{(\w+)\}/g, (match, name: string) => named[name] ?? match);

@@ -48,6 +48,10 @@ export interface FakeSubscription {
   cancel_at_period_end: boolean;
   latest_invoice: string;
   metadata: Record<string, string>;
+  /** Unix seconds while trialing, else null. */
+  trial_end: number | null;
+  /** Coupons on the subscription (the next invoice's discount). */
+  discounts: string[];
 }
 
 export class FakeStripe {
@@ -59,6 +63,10 @@ export class FakeStripe {
   refuseTermsConsent = false;
   /** Set to make the next subscription update fail as a declined card. */
   declineNext = false;
+  /** Set to make ending a trial now (the first real charge) fail as a declined card. */
+  declineTrialEnd = false;
+  /** Every subscription update's form, in order. */
+  updates: Array<{ id: string; form: URLSearchParams }> = [];
   /** Coupons Stripe knows, with their percent off (duration once); others are refused at Checkout as Stripe does. */
   coupons = new Map<string, number>([["dlnew-bf-2026", 50]]);
   #n = 0;
@@ -110,6 +118,24 @@ export class FakeStripe {
           this.declineNext = false;
           return Response.json({ error: { message: "Your card was declined.", code: "card_declined" } }, { status: 402 });
         }
+        this.updates.push({ id: subscription.id, form });
+        if (form.get("trial_end") === "now") {
+          if (this.declineTrialEnd) return Response.json({ error: { message: "Your card was declined.", code: "card_declined" } }, { status: 402 });
+          const coupon = form.get("discounts[0][coupon]");
+          if (coupon !== null && !this.coupons.has(coupon)) return Response.json({ error: { message: `No such coupon: '${coupon}'`, code: "resource_missing" } }, { status: 400 });
+          if (coupon) subscription.discounts = [coupon];
+          subscription.status = "active";
+          subscription.trial_end = null;
+          subscription.current_period_end = this.now + 30 * 86_400;
+          subscription.latest_invoice = `in_trial_end_${subscription.id}`;
+          return Response.json(this.subscriptionObject(subscription));
+        }
+        if (form.get("discounts[0][coupon]") !== null) {
+          const coupon = form.get("discounts[0][coupon]")!;
+          if (!this.coupons.has(coupon)) return Response.json({ error: { message: `No such coupon: '${coupon}'`, code: "resource_missing" } }, { status: 400 });
+          subscription.discounts = [coupon];
+          return Response.json(this.subscriptionObject(subscription));
+        }
         for (const [key, value] of form) {
           const meta = /^metadata\[(\w+)\]$/.exec(key);
           if (meta) subscription.metadata[meta[1]!] = value;
@@ -160,8 +186,47 @@ export class FakeStripe {
       cancel_at_period_end: false,
       latest_invoice: `in_first_${n}`,
       metadata: { ...session.metadata },
+      trial_end: null,
+      discounts: session.coupon ? [session.coupon] : [],
     });
     return session;
+  }
+
+  /** A card trial's Checkout completed: the card saved, $0 now, the subscription trialing for its trial_period_days. */
+  startTrial(sessionId: string, email = "payer@example.com"): FakeSession {
+    const session = this.sessions.get(sessionId)!;
+    const days = Number(session.form.get("subscription_data[trial_period_days]"));
+    assert.ok(days > 0, "not a trial Checkout");
+    const n = this.sessions.size;
+    session.status = "complete";
+    session.payment_status = "no_payment_required";
+    session.customer = `cus_${n}`;
+    session.subscription = `sub_${n}`;
+    session.email = email;
+    session.amount_total = 0;
+    this.subscriptions.set(session.subscription, {
+      id: session.subscription,
+      customer: session.customer,
+      status: "trialing",
+      price: session.price,
+      item: `si_${n}`,
+      current_period_end: this.now + days * 86_400,
+      cancel_at_period_end: false,
+      latest_invoice: `in_trial_${n}`,
+      metadata: { ...this.subscriptionMetadata(session.form) },
+      trial_end: this.now + days * 86_400,
+      discounts: [],
+    });
+    return session;
+  }
+
+  subscriptionMetadata(form: URLSearchParams): Record<string, string> {
+    const metadata: Record<string, string> = {};
+    for (const [key, value] of form) {
+      const match = /^subscription_data\[metadata\]\[(\w+)\]$/.exec(key);
+      if (match) metadata[match[1]!] = value;
+    }
+    return metadata;
   }
 
   /** The session's price before any discount, in cents. */
@@ -171,7 +236,7 @@ export class FakeStripe {
 
   sessionObject(session: FakeSession, expand: boolean): Record<string, unknown> {
     const subscription = session.subscription ? this.subscriptions.get(session.subscription) : undefined;
-    const paid = session.status === "complete";
+    const paid = session.status === "complete" && session.payment_status === "paid";
     const discount = paid ? this.subtotal(session) - session.amount_total : 0;
     return {
       amount_subtotal: paid ? this.subtotal(session) : 0,
@@ -202,6 +267,8 @@ export class FakeStripe {
       cancel_at_period_end: subscription.cancel_at_period_end,
       latest_invoice: subscription.latest_invoice,
       metadata: subscription.metadata,
+      trial_end: subscription.trial_end,
+      discounts: subscription.discounts,
       items: { data: [{ id: subscription.item, price: { id: subscription.price }, current_period_end: subscription.current_period_end }] },
     };
   }
@@ -252,7 +319,7 @@ export async function emailSignIn(service: Service, email: string, sessionId?: s
 }
 
 /** dl.new's GitHub sign-in up to the page's one-time code (or the error fragment). */
-export async function githubRoundTrip(service: Service, user: { id: number; login: string; email?: string | null }, returnTo = "https://dl.new/account"): Promise<string> {
+export async function githubRoundTrip(service: Service, user: { id: number; login: string; email?: string | null; createdAt?: string; publicRepos?: number; contributions?: number }, returnTo = "https://dl.new/account"): Promise<string> {
   const start = await service.request("GET", `/web/auth/github?return=${encodeURIComponent(returnTo)}&state=${PAGE_STATE}`);
   assert.equal(start.status, 302, await start.clone().text());
   const location = new URL(start.headers.get("location")!);

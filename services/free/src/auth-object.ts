@@ -12,6 +12,7 @@ import {
   isAccountOAuthState,
   issueAccountHandoff,
   issueEmailCode,
+  migrateAccountHandoffs,
   PAID_AUTH_SCHEMA,
   pendingPaidAuth,
   pollCliLogin,
@@ -172,6 +173,7 @@ export class AuthObject extends DurableObject {
       this.#migrateReferralCode();
       this.#migrateDetails();
       this.#migrateWeb();
+      migrateAccountHandoffs(this.ctx.storage.sql);
     });
   }
 
@@ -559,11 +561,11 @@ export class AuthObject extends DurableObject {
     return claimAccountOAuth(this.ctx.storage.sql, input);
   }
 
-  async issueAccountHandoff(input: { pageStateHash: string; githubId: number; login: string; email: string; now: number }): Promise<string> {
+  async issueAccountHandoff(input: { pageStateHash: string; githubId: number; login: string; email: string; details?: string | null; now: number }): Promise<string> {
     return issueAccountHandoff(this.ctx.storage.sql, input);
   }
 
-  async claimAccountHandoff(input: { code: string; state: string; now: number }): Promise<{ githubId: number; login: string; email: string } | undefined> {
+  async claimAccountHandoff(input: { code: string; state: string; now: number }): Promise<{ githubId: number; login: string; email: string; details: string | null } | undefined> {
     return claimAccountHandoff(this.ctx.storage.sql, input);
   }
 

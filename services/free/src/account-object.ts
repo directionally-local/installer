@@ -23,7 +23,21 @@ import {
 import { weekEnd, weekStart } from "./week.js";
 import { formatApiKey } from "./accounts.js";
 import { isPlanId, type PlanId } from "./plan-prices.js";
-import { META, METER_SCHEMA, bonusUsdThisWeek, claimNotice, countedThisWeek, expectedCounted, inFlightOn, meterSnapshot, pruneMeters, readMeta, recordMeter, tierOf, writeMeta, type MeterSnapshot } from "./plan-meter.js";
+import { META, METER_SCHEMA, bonusUsdThisWeek, claimNotice, countedThisWeek, expectedCounted, inFlightOn, meterSnapshot, migrateMeters, pruneMeters, readMeta, recordMeter, tierOf, writeMeta, type MeterSnapshot } from "./plan-meter.js";
+import {
+  ACCOUNT_TRIAL_SCHEMA,
+  addTrialUsage,
+  claimTrialConversion,
+  claimTrialWarning,
+  endAccountTrial,
+  readAccountTrial,
+  releaseTrialConversion,
+  startAccountTrial,
+  trialConverting,
+  type TrialEndReason,
+  type TrialKind,
+  type TrialMeter,
+} from "./trials.js";
 import { isPaidPlan, type PlanTier } from "./plans.js";
 
 /**
@@ -214,7 +228,8 @@ export interface Allowance {
  * against `limit`; "bonus": the GPT-6 launch bonus's dollars this week against `limit`.
  */
 export interface ReserveMeter {
-  kind: "tokens" | "bonus";
+  /** "trial": a free trial's counted tokens (trials.ts), for its lifetime, against `limit`. */
+  kind: "tokens" | "bonus" | "trial";
   /** The model the meter is for (the one that serves). */
   model: string;
   limit: number;
@@ -233,6 +248,10 @@ export interface PlanState {
   counted: Record<string, number>;
   /** GPT-6 launch bonus dollars spent this week. */
   bonusUsd: number;
+  /** The account's free trial (trials.ts), or null: a card trial while its subscription is trialing, a no-card one until used. */
+  trial: TrialMeter | null;
+  /** A card trial's conversion (Stripe ending the trial) is under way right now. */
+  converting: boolean;
 }
 
 export type ReserveResult =
@@ -320,6 +339,10 @@ export interface BillingState {
   firstPaidAt: number | null;
   /** When the first payment was refunded (Unix ms), or null. */
   refundedAt: number | null;
+  /** Stripe says the subscription is in its free trial (trials.ts): the plan hasn't started yet. */
+  trialing: boolean;
+  /** Stripe's trial_end (Unix ms) while trialing, else null. */
+  trialEnd: number | null;
 }
 
 /** The account's own settings on dl.new (docs/web-api-paid.md). */
@@ -432,6 +455,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
     ctx.blockConcurrencyWhile(async () => {
       for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
       for (const statement of METER_SCHEMA) this.ctx.storage.sql.exec(statement);
+      migrateMeters(this.ctx.storage.sql);
+      for (const statement of ACCOUNT_TRIAL_SCHEMA) this.ctx.storage.sql.exec(statement);
       // Reservations made before billing were all against the weekly allowance, unpaid.
       const columns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('reservations')").toArray().map((column) => column.name);
       if (!columns.includes("source")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN source TEXT NOT NULL DEFAULT 'weekly'");
@@ -468,7 +493,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
       if (!accountColumns.includes("cached_seen")) this.ctx.storage.sql.exec("ALTER TABLE account ADD COLUMN cached_seen INTEGER NOT NULL DEFAULT 0");
       // dl.new's plans (docs/web-api-paid.md): the tier, a failed renewal, the first payment and its refund.
       const billingColumns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('billing')").toArray().map((column) => column.name);
-      for (const [column, definition] of [["tier", "TEXT"], ["payment_failed", "INTEGER NOT NULL DEFAULT 0"], ["first_invoice_id", "TEXT"], ["first_paid_at", "INTEGER"], ["refunded_at", "INTEGER"]] as const) {
+      for (const [column, definition] of [["tier", "TEXT"], ["payment_failed", "INTEGER NOT NULL DEFAULT 0"], ["first_invoice_id", "TEXT"], ["first_paid_at", "INTEGER"], ["refunded_at", "INTEGER"], ["trialing", "INTEGER NOT NULL DEFAULT 0"], ["trial_end", "INTEGER"]] as const) {
         if (!billingColumns.includes(column)) this.ctx.storage.sql.exec(`ALTER TABLE billing ADD COLUMN ${column} ${definition}`);
       }
       // dl.new's API keys (dl_sk_) live with the others; every key before them was a dlk_ key.
@@ -610,7 +635,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const outputCap = model?.family === "deepseek" ? Math.min(model.maxOutputTokens, DEEPSEEK_MAX_OUTPUT_TOKENS) : MAX_OUTPUT_TOKENS;
     const plan = planReservation(input.promptEstimate, input.requestedMaxTokens, Number.MAX_SAFE_INTEGER, outputCap)!;
     const cost = model ? estimateCostUsd(input.promptEstimate, plan.maxTokens, model.prices) : ((Math.max(0, input.promptEstimate) + plan.maxTokens) * FALLBACK_USD_PER_MILLION_TOKENS) / 1_000_000;
-    const used = meter.kind === "bonus" ? bonusUsdThisWeek(sql, input.now) : countedThisWeek(sql, meter.model, input.now);
+    const used = meter.kind === "bonus" ? bonusUsdThisWeek(sql, input.now) : meter.kind === "trial" ? (readAccountTrial(sql, input.now)?.counted ?? Number.MAX_SAFE_INTEGER) : countedThisWeek(sql, meter.model, input.now);
     const inFlight = meter.kind === "bonus" ? flight.usd : flight.counted;
     const own = meter.kind === "bonus" ? cost : expectedCounted(input.promptEstimate, share ?? 0.9617, meter.cachedTokenWeight);
     const fits = used < meter.limit && (flight.count === 0 || used + inFlight + own <= meter.limit);
@@ -659,7 +684,61 @@ export class AccountObject extends DurableObject<AccountEnv> {
     }
     const counted: Record<string, number> = {};
     for (const model of models) counted[model] = countedThisWeek(sql, model, now);
-    return { tier, paidSince, fallback: readMeta(sql, META.fallback) !== "off", counted, bonusUsd: bonusUsdThisWeek(sql, now) };
+    return { tier, paidSince, fallback: readMeta(sql, META.fallback) !== "off", counted, bonusUsd: bonusUsdThisWeek(sql, now), trial: this.#trialMeter(now, tier), converting: trialConverting(sql, now) };
+  }
+
+  /**
+   * The free trial requests are held to: a card trial only while the subscription is on (its
+   * tier) and Stripe still says trialing; a no-card trial while the account has no plan.
+   */
+  #trialMeter(now: number, tier: PlanTier): TrialMeter | null {
+    const trial = readAccountTrial(this.ctx.storage.sql, now);
+    if (!trial) return null;
+    if (trial.kind === "card") return tier !== "none" && this.#billing().trialing ? trial : trial.active ? { ...trial, active: false } : trial;
+    // A plan replaces a no-card trial.
+    return tier === "none" ? trial : null;
+  }
+
+  // ─── Free trials (trials.ts) ──────────────────────────────────────────────
+
+  /** Starts the account's trial (idempotent for the same card subscription). True when it started now. */
+  async startTrial(input: { kind: TrialKind; limit: number; realLimit: number; startedAt: number; endsAt: number | null; plan?: string | null; subscriptionId?: string | null; promoCoupon?: string | null }): Promise<boolean> {
+    return startAccountTrial(this.ctx.storage.sql, input);
+  }
+
+  /** The trial as stored (whatever the plan), or null. */
+  async trial(now: number): Promise<TrialMeter | null> {
+    return readAccountTrial(this.ctx.storage.sql, now);
+  }
+
+  /** Ends the open trial; true when this call ended it. */
+  async endTrial(input: { reason: TrialEndReason; at: number; subscriptionId?: string }): Promise<boolean> {
+    return endAccountTrial(this.ctx.storage.sql, input);
+  }
+
+  /** The 80% notice, once per trial. */
+  async claimTrialWarning(): Promise<boolean> {
+    return claimTrialWarning(this.ctx.storage.sql);
+  }
+
+  /** One caller at a time ends a used card trial in Stripe. */
+  async claimTrialConversion(now: number): Promise<boolean> {
+    return claimTrialConversion(this.ctx.storage.sql, now);
+  }
+
+  /** Lets the next caller try again; `declinedAt`: Stripe declined the first real charge then. */
+  async releaseTrialConversion(declinedAt?: number): Promise<void> {
+    releaseTrialConversion(this.ctx.storage.sql, declinedAt);
+  }
+
+  /** Whether the account may use its keys now without a plan: an open no-card trial (trials.ts). */
+  async trialAccess(now: number): Promise<boolean> {
+    return this.#noCardTrialOpen(now);
+  }
+
+  #noCardTrialOpen(now: number): boolean {
+    const trial = readAccountTrial(this.ctx.storage.sql, now);
+    return trial !== null && trial.kind === "nocard" && trial.active;
   }
 
   /** Part A's hook: the paid plan the subscription is on (from its Stripe price). Undefined clears it. */
@@ -707,10 +786,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
     /** With `charged` undefined: what was streamed, the serving model's prices (undefined: none known) and the cached-token weight. */
     noUsage?: { outputTokens: number; prices: TokenPrices | undefined; cachedTokenWeight: number };
     /** For the per-model meters (plan-meter.ts): the client, whether a backup or fallback served, and whether the GPT-6 bonus paid. */
-    meter?: { tool: string; failover: boolean; bonus: boolean };
+    meter?: { tool: string; failover: boolean; bonus: boolean; trial?: boolean };
     limits: Limits;
     now: number;
-  }): Promise<{ charged: number; costUsd: number; paid: boolean; allowance: Allowance; estimate?: NoUsageEstimate }> {
+  }): Promise<{ charged: number; costUsd: number; paid: boolean; allowance: Allowance; estimate?: NoUsageEstimate; trial?: TrialMeter | null }> {
     const reservation = this.ctx.storage.sql
       .exec<{ amount: number; source: Source; paid: number; pool: Pool; model: string | null; prompt_estimate: number | null }>(
         "SELECT amount, source, paid, pool, model, prompt_estimate FROM reservations WHERE id = ?",
@@ -746,8 +825,14 @@ export class AccountObject extends DurableObject<AccountEnv> {
           tool: input.meter.tool,
           failover: input.meter.failover,
           bonus: input.meter.bonus,
+          ...(input.meter.trial ? { trial: true } : {}),
           now: input.now,
         });
+      }
+      // A free trial's meter: its counted tokens for the trial's lifetime (trials.ts).
+      if (input.meter?.trial) {
+        const usage = input.usage ?? estimate?.usage;
+        addTrialUsage(this.ctx.storage.sql, { counted: finalCharged, prompt: usage?.promptTokens ?? 0, cached: usage?.cachedTokens ?? 0, output: usage?.completionTokens ?? 0, costUsd: finalCost });
       }
       if (input.usage && input.usage.promptTokens > 0) {
         this.ctx.storage.sql.exec(
@@ -764,6 +849,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
       paid: reservation.paid === 1,
       allowance: this.#allowance(this.#current(input.now), input.now, input.limits, reservation.pool),
       ...(estimate ? { estimate } : {}),
+      // The trial after this request: the caller starts a used card trial's plan (trials.ts).
+      ...(input.meter?.trial ? { trial: readAccountTrial(this.ctx.storage.sql, input.now) } : {}),
     };
   }
 
@@ -890,6 +977,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
         first_invoice_id: string | null;
         first_paid_at: number | null;
         refunded_at: number | null;
+        trialing: number | null;
+        trial_end: number | null;
       }>("SELECT * FROM billing WHERE k = 1")
       .toArray()[0];
     return {
@@ -903,6 +992,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
       firstInvoiceId: row?.first_invoice_id ?? null,
       firstPaidAt: row?.first_paid_at ?? null,
       refundedAt: row?.refunded_at ?? null,
+      trialing: row?.trialing === 1,
+      trialEnd: row?.trialing === 1 ? (row?.trial_end ?? null) : null,
       stateAt: row?.state_at ?? 0,
     };
   }
@@ -913,7 +1004,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
    */
   #plan(now: number): Plan {
     const billing = this.#billing();
-    const on = billing.proState === "active" || (billing.tier !== null && billing.proState === "past_due");
+    // Past due keeps a plan on while Stripe retries, but only once something was paid: a card
+    // trial whose first real charge failed never gets the plan (trials.ts).
+    const pastDueOn = billing.tier !== null && billing.proState === "past_due" && (billing.firstPaidAt !== null || readAccountTrial(this.ctx.storage.sql, now)?.kind !== "card");
+    const on = billing.proState === "active" || pastDueOn;
     return on && (billing.periodEnd === null || now < billing.periodEnd + PRO_GRACE_MS) ? "pro" : "free";
   }
 
@@ -982,6 +1076,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
     tier?: PlanId;
     /** The last invoice failed (true) or was paid (false); undefined keeps it. */
     paymentFailed?: boolean;
+    /** Stripe's status is trialing (with its trial_end, Unix ms), or not; undefined keeps it. */
+    trial?: { trialing: boolean; trialEnd: number | null };
   }): Promise<boolean> {
     const current = this.#billing();
     if (input.eventAt < current.stateAt) return false;
@@ -1000,6 +1096,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
     );
     if (input.tier !== undefined) this.ctx.storage.sql.exec("UPDATE billing SET tier = ? WHERE k = 1", input.tier);
     if (input.paymentFailed !== undefined) this.ctx.storage.sql.exec("UPDATE billing SET payment_failed = ? WHERE k = 1", input.paymentFailed ? 1 : 0);
+    if (input.trial !== undefined) this.ctx.storage.sql.exec("UPDATE billing SET trialing = ?, trial_end = ? WHERE k = 1", input.trial.trialing ? 1 : 0, input.trial.trialing ? input.trial.trialEnd : null);
     return true;
   }
 
@@ -1241,7 +1338,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
       this.ctx.storage.sql.exec("UPDATE server_keys SET last_tool = ? WHERE id = ?", lastTool, id);
     }
     // `paid`: a dl.new plan is on (its keys skip the free tier's tool key switch).
-    return { githubId: row.github_id, login: row.login, kind, paid: this.#billing().tier !== null && this.#plan(now) === "pro" };
+    // An open no-card trial's keys too (trials.ts): it's a dl.new account without a plan yet.
+    return { githubId: row.github_id, login: row.login, kind, paid: (this.#billing().tier !== null && this.#plan(now) === "pro") || this.#noCardTrialOpen(now) };
   }
 
   /**

@@ -805,6 +805,14 @@ The HTTP contract the site calls is [docs/web-api-paid.md](docs/web-api-paid.md)
   it starts. [Terms](https://dl.new/terms)."); the acceptance time is kept on the paid checkout. Stripe needs a terms URL in
   the account's public details; if it refuses, Checkout goes on without the consent and the
   setting turns itself off (logged, alerted) until the owner sets the URL and turns it back on.
+- **Free trials** (`trials.ts`, `trial-web.ts`; docs/web-api-paid.md §10). A card trial on
+  every plan's Checkout (20M tokens at 95.5% caching, 1,282,000 counted; $0 now; the plan
+  starts with `trial_end=now` when they're used, or by Stripe after 30 days; the launch coupon
+  goes on that first real charge) and a no-card trial after GitHub on dl.new/trial (10M, 641,000
+  counted; one per GitHub account and per verified email; the free tier's account checks).
+  DeepSeek only. Global budgets `trialBudgetUsd` (300) and `noCardTrialBudgetUsd` (200): spent
+  plus the projected rest of active trials; full shows "Free trial: fully claimed". Admin:
+  `GET /admin/paid/trials`. Needs the webhook event `customer.subscription.trial_will_end`.
 - **Keys.** `dl_sk_<account>_<id>_<secret>` tool keys, shown once; old `dlk_` keys unchanged.
 - **cli-login.** `POST /v1/cli-login/start` and `/poll` (the CLI), approved on dl.new/cli-login.
 
@@ -825,7 +833,8 @@ The HTTP contract the site calls is [docs/web-api-paid.md](docs/web-api-paid.md)
    subscriptions (at period end) and updating payment methods, then save.
 5. **Webhook endpoint** (if not made by the script): `https://free.directionallylocal.com/v1/billing/webhook`
    with the events `checkout.session.completed`, `invoice.paid`, `invoice.payment_failed`,
-   `customer.subscription.updated`, `customer.subscription.deleted`.
+   `customer.subscription.updated`, `customer.subscription.deleted` and (for dl.new's card
+   trials) `customer.subscription.trial_will_end`.
 6. **Secrets and vars:** `wrangler secret put STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`;
    vars `STRIPE_PRICE_TOPUP` and dl.new's plans `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_PLUS`,
    `STRIPE_PRICE_MAX` (`STRIPE_PRICE_PRO` is no longer read). Without the secret key, the billing endpoints
