@@ -95,6 +95,10 @@ import { measureKey } from "./provider-store.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
 import { anthropicError, errorStatus, estimateInputTokens, toAnthropicMessage, toAnthropicStream, toChatRequest } from "./anthropic.js";
 import { DAY_MS, isoDay, weekEnd, weekStart } from "./week.js";
+import { FREE_ENDED_CODE, FREE_ENDED_MESSAGE, freeEnded, limitRefusal, meterFor, warningEmailValues, withNotices } from "./plan-limits.js";
+import { PLAN_METER_MODELS, afterMeterFull, anthropicModelFor, bonusProjection, dueWarning, planRoute, tokenMeter, type PlanServe } from "./plan-route.js";
+import { planCatalog, planUsageView } from "./plan-usage.js";
+import type { PlanState } from "./account-object.js";
 import { allocateIfDue, allocatedLimits, anthropicSessionHint, limitedLevel, rescue, sessionKeyOf, stageOf, stepOf, usedShare, type AllocatorRun } from "./allocator.js";
 import { healthWindow } from "./health-data.js";
 import {
@@ -116,7 +120,7 @@ import {
   type UserEmailTransport,
   type WeeklyResetSkip,
 } from "./user-email-send.js";
-import { renderUserEmail, resetsText, USER_EMAILS, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
+import { renderUserEmail, resetsText, USER_EMAILS, type PlanWarningValues, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
 import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, onlyListed, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
 import { refusalsCsv, refusalsView, requestClient, requestRefusalReason, type RefusalClient, type RefusalReason } from "./refusals.js";
 import { allowedReturn, CAMPAIGN_CLIENT_STEPS, campaignFromParams, campaignTotals, isInstallOption, ONE_TIME_CODE, parseCampaign, planFor, WEB_SESSION_TTL_S, WEB_STATE, webCors, webFunnelCsv, type Campaign, type CampaignStep, type WebStep } from "./web-signup.js";
@@ -515,6 +519,9 @@ async function route(c: Ctx): Promise<Response> {
   if (path === "/v1/status" && (method === "GET" || method === "OPTIONS")) return status(c);
   if (path === "/v1/providers" && (method === "GET" || method === "OPTIONS")) return providersPublic(c);
   if (method === "GET" && path === "/v1/me") return me(c);
+  if (path === "/v1/plans" && (method === "GET" || method === "OPTIONS")) return plansPublic(c);
+  if (method === "GET" && path === "/v1/usage") return usage(c);
+  if (method === "POST" && path === "/v1/plan/fallback") return planFallback(c);
   if (method === "GET" && path === "/v1/models") return models(c);
   if (method === "POST" && path === "/v1/chat/completions") return chatCompletions(c);
   if (method === "POST" && path === "/v1/events") return events(c);
@@ -1268,7 +1275,7 @@ function userEmailVia(c: Pick<Ctx, "env" | "config" | "fetch">): UserEmailTransp
 }
 
 /** Sends one email to a user if it should go. Never throws and never fails the request. */
-async function userEmail(c: Ctx, config: FreeConfig, kind: UserEmailKind, githubId: number, period: string): Promise<void> {
+async function userEmail(c: Ctx, config: FreeConfig, kind: UserEmailKind, githubId: number, period: string, values: { planWarning?: PlanWarningValues } = {}): Promise<void> {
   const transport = userEmailVia(c);
   if (!userEmailsOn(config, transport)) return;
   const outcome = await deliverUserEmail({
@@ -1281,6 +1288,7 @@ async function userEmail(c: Ctx, config: FreeConfig, kind: UserEmailKind, github
     githubId,
     period,
     now: c.now(),
+    ...(values.planWarning ? { planWarning: values.planWarning } : {}),
   });
   logUserEmails(kind, [outcome]);
 }
@@ -2482,6 +2490,62 @@ async function runProbes(env: Env, fetcher: Fetch, now: () => number, at: number
  * 0 while queued): `plan`, `topupTokensLeft`, `queue` (null, or `{position, etaAt}`),
  * `referral` and `offers`. See the README for the exact shapes.
  */
+// ─── Paid plans: catalogue, usage, fallback setting (plans.ts, plan-usage.ts) ──
+
+/** Part A's account numbers for accounts made by the paid sign-up start here (CONTRACT.md). */
+const PAID_ACCOUNTS_FROM = 2 ** 50;
+
+/**
+ * The plan catalogue with the GPT-6 launch bonus's state (`bonus.fullyClaimed`: no room for new
+ * subscribers). Part A's pages and Checkout read this (or `planCatalogFor`).
+ */
+export async function planCatalogFor(c: Ctx) {
+  const gate = await runtime(c);
+  const status = await directory(c).gpt6BonusStatus(undefined, bonusProjection(gate.config, gate, c.now()));
+  return planCatalog(gate.config, status, c.now());
+}
+
+/** One account's plan usage this week (plan-usage.ts planUsageView): what the dashboard shows. */
+export async function planUsageFor(c: Ctx, githubId: number) {
+  c.callerId ??= githubId;
+  const gate = await runtime(c);
+  const person = account(c, githubId);
+  const [state, meters, bonus] = await Promise.all([
+    person.planState(c.now(), PLAN_METER_MODELS),
+    person.meters(c.now()),
+    directory(c).gpt6BonusStatus(githubId, bonusProjection(gate.config, gate, c.now())),
+  ]);
+  return planUsageView({ state, meters, config: gate.config, bonus, now: c.now() });
+}
+
+/** GET /v1/plans: public, like /v1/status. */
+async function plansPublic(c: Ctx): Promise<Response> {
+  const cors = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET", "cache-control": "public, max-age=60" };
+  if (c.request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+  return json(await planCatalogFor(c), 200, cors);
+}
+
+/** GET /v1/usage: the caller's plan usage this week (a sign-in, a server key or a tool key). */
+async function usage(c: Ctx): Promise<Response> {
+  const identity = await authenticate(c, { keys: true, toolKeys: true });
+  if (identity instanceof Response) return identity;
+  const guarded = await apiGuard(c, identity);
+  if (guarded) return guarded;
+  return json(await planUsageFor(c, identity.githubId));
+}
+
+/** POST /v1/plan/fallback {on: boolean}: fall back to DeepSeek at a model's limit (on, the default) or refuse. */
+async function planFallback(c: Ctx): Promise<Response> {
+  const identity = await authenticate(c, {});
+  if (identity instanceof Response) return identity;
+  const guarded = await apiGuard(c, identity);
+  if (guarded) return guarded;
+  const body = await readJson(c);
+  if (!body || typeof body.on !== "boolean") return apiError(400, "invalid_request", 'Send {"on": true} or {"on": false}.');
+  await account(c, identity.githubId).setPlanFallback(body.on);
+  return json({ fallback: body.on });
+}
+
 async function me(c: Ctx): Promise<Response> {
   const identity = await authenticate(c, { keys: true, toolKeys: true });
   if (identity instanceof Response) return identity;
@@ -3069,7 +3133,9 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
     if (guarded) return toAnthropicErrorResponse(guarded, tool);
     return json({ input_tokens: estimateInputTokens(request) });
   }
-  const model = modelById(DEEPSEEK_MODEL)!;
+  // Claude Code's own model names (claude-*) go to the plan's default model (DeepSeek); an exact
+  // open-model id it names (ANTHROPIC_MODEL=moonshotai/kimi-k3.1-pro) is served when the plan has it.
+  const model = anthropicModelFor(request.model);
   const translated = toChatRequest(request, { model: model.id, vision: model.vision });
   if (!translated.ok) return anthropicErrorResponse(400, translated.message, "invalid_request");
   const hint = anthropicSessionHint(request);
@@ -3411,6 +3477,14 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
 
   const guarded = await apiGuard(c, identity, headers);
   if (guarded) return guarded;
+  // Paid plans (plans.ts): the tier, the fallback setting and this week's meters. Admins skip
+  // plans; a non-paying account past `freeEndsAt` is refused (the end of free tokens).
+  const planState: PlanState | undefined = isAdmin ? undefined : await person.planState(c.now(), PLAN_METER_MODELS);
+  const paidPlan = gate.config.paidPlans && planState && planState.tier !== "none" ? planState.tier : undefined;
+  // Accounts made by the paid sign-up (part A's account numbers, from 2^50) never had free tokens.
+  if (planState && planState.tier === "none" && (freeEnded(gate.config.freeEndsAt, c.now()) || identity.githubId >= PAID_ACCOUNTS_FROM)) {
+    return apiError(402, FREE_ENDED_CODE, FREE_ENDED_MESSAGE, { reason: "free_ended", plansUrl: "https://dl.new" }, await headers());
+  }
   if (tool && identity.keyId) {
     const retry = await limited(c, `api:key:${identity.githubId}:${identity.keyId}`, perMinute(Math.max(1, gate.config.toolKeyRequestsPerMinute)));
     if (retry !== undefined) return rateLimited(retry, await headers());
@@ -3448,7 +3522,9 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       .map((model) => model.id);
     return apiError(400, "model_not_allowed", `The free tier serves ${allowed.join(", ")} only.`, { allowed }, await headers());
   }
-  const requested = modelById(body.model)!;
+  let requested = modelById(body.model)!;
+  // What the client asked for, whatever serves (a plan's fallback, a provider's failover).
+  const asked = requested;
   // Claude Code gets DeepSeek only; OpenCode and Pi, every model.
   if (harness && !HARNESS_FAMILIES[harness].includes(requested.family)) {
     return apiError(400, "model_not_allowed", `Claude Code through dl is served by ${DEEPSEEK_MODEL} only.`, { allowed: [DEEPSEEK_MODEL] }, await headers());
@@ -3464,6 +3540,27 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       await headers(),
     );
   }
+  // A paid plan (plans.ts, plan-route.ts): the model that serves and the meter it's held to, a
+  // fallback to DeepSeek at a model's limit (with its notice), or the plan's refusal. The
+  // provider's per-person caps (Pro's ration) don't apply: the plan's meter replaces them.
+  let planServe: PlanServe | undefined;
+  const deepseekAvailable = () => modelAvailable(modelById(DEEPSEEK_MODEL)!, gate.config, gate);
+  if (paidPlan && planState) {
+    const routed = await planRoute({
+      plan: paidPlan,
+      state: planState,
+      requested,
+      agent,
+      config: gate.config,
+      deepseekAvailable: deepseekAvailable(),
+      gate,
+      grantBonus: (projection) => directory(c).gpt6BonusGrant(identity.githubId, projection),
+      now: c.now(),
+    });
+    if (routed.kind === "refuse") return apiError(routed.status, routed.code, routed.message, routed.details, await headers());
+    planServe = routed;
+    requested = modelById(routed.model)!;
+  }
   // A registry provider's model (providers.ts) that can't serve this person now: the GPT-6
   // limit's shape, pointing at DeepSeek. Out of credit, paused, its weekly budget or the
   // person's opt-in cap; checked before anything is reserved or sent.
@@ -3475,8 +3572,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // `x-dl-fallback` and the reason in `x-dl-notice`.
   // GLM 5.3 Flash has two upstreams (Liquid, then Open Relay): it's blocked only when neither can
   // serve; the block names the upstream it is about. Its Pro-only rule and person cap are its own.
-  const providerPlan = await planForProviders(c, gate.config, identity.githubId, [requested]);
-  const route = routeFor(requested, gate.config, gate, isAdmin, providerPlan);
+  const providerPlan = planServe ? "pro" : await planForProviders(c, gate.config, identity.githubId, [requested]);
+  const route = routeFor(requested, gate.config, planServe ? { ...gate, personProviderWeekUsd: {} } : gate, isAdmin, providerPlan);
   const block = route.block;
   let effective = requested;
   let fallbackNotice: string | undefined;
@@ -3581,7 +3678,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   if (gate.paused) return pausedError(await headers());
   // Which model actually serves: the requested one when its provider has a key and credit left,
   // else its fallback (GPT-6 Luna → DeepSeek). Never another model.
-  const serving = servingModel(effective, gate, gate.config);
+  let serving = servingModel(effective, gate, gate.config);
   if (!serving) {
     if (providerExhausted(requested.provider, gate.config, gate)) {
       // The credit is used up: free and Pro usage pause (admins too) until it is topped up.
@@ -3624,13 +3721,24 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
               }
             : undefined;
 
-  const requestedMax = numberOrUndefined(body.max_tokens) ?? numberOrUndefined(body.max_completion_tokens);
+  const askedMax = numberOrUndefined(body.max_tokens) ?? numberOrUndefined(body.max_completion_tokens);
+  // The GPT-6 launch bonus caps output per request.
+  const requestedMax = planServe?.maxOutputTokens !== undefined ? Math.min(askedMax ?? planServe.maxOutputTokens, planServe.maxOutputTokens) : askedMax;
   const promptEstimate = estimatePromptTokens(bodyBytes);
   // The requested model’s pool pays for the request, even when its fallback serves it: someone
   // who asks for Sol spends Sol’s allowance, not Luna’s.
-  const pool = effective.pool;
-  const reserveFor = (pool: Pool, serves: { model: FreeModel; provider: Upstream }) =>
-    person.reserve({
+  let pool = effective.pool;
+  // On a paid plan every attempt is held to the meter of the model that serves it: the plan's
+  // meter for its own model (a backup upstream included), DeepSeek's for a fallback to it.
+  const meterOf = (modelId: string) => {
+    if (!planServe || !paidPlan || !planState) return undefined;
+    if (modelId === planServe.model) return planServe.meter;
+    const view = meterFor(paidPlan, modelId, planState.counted[modelId] ?? 0, gate.config);
+    return view ? tokenMeter(view, gate.config.cachedTokenWeight) : { kind: "tokens" as const, model: modelId, limit: 0, cachedTokenWeight: gate.config.cachedTokenWeight };
+  };
+  const reserveFor = (pool: Pool, serves: { model: FreeModel; provider: Upstream }) => {
+    const meter = meterOf(serves.model.id);
+    return person.reserve({
       pool,
       promptEstimate,
       requestedMaxTokens: requestedMax,
@@ -3638,8 +3746,30 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       now: c.now(),
       provider: serves.provider,
       model: serves.model.id,
+      ...(meter ? { meter } : {}),
     });
+  };
   let reservation = await reserveFor(pool, serving);
+  // The meter filled up between the plan's read and the reservation (requests in parallel):
+  // DeepSeek in its place when allowed, else the plan's refusal.
+  if (!reservation.ok && reservation.code === "plan_limit" && planServe && paidPlan && planState) {
+    const next = afterMeterFull({ plan: paidPlan, state: planState, served: planServe, deepseekAvailable: deepseekAvailable(), config: gate.config, now: c.now() });
+    if (next.kind === "refuse") return apiError(next.status, next.code, next.message, next.details, quotaHeaders(reservation.allowance));
+    const nextModel = modelById(next.model)!;
+    const nextServing = servingModel(nextModel, gate, gate.config);
+    if (!nextServing) return apiError(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, { retryable: true }, quotaHeaders(reservation.allowance));
+    planServe = next;
+    requested = nextModel;
+    effective = nextModel;
+    serving = nextServing;
+    pool = nextModel.pool;
+    reservation = await reserveFor(pool, nextServing);
+    if (!reservation.ok && reservation.code === "plan_limit") {
+      const view = meterFor(paidPlan, next.model, Number.MAX_SAFE_INTEGER, gate.config);
+      const refusal = view ? limitRefusal(paidPlan, view, c.now(), gate.config, planState.fallback) : undefined;
+      if (refusal) return apiError(refusal.status, refusal.code, refusal.message, refusal.details, quotaHeaders(reservation.allowance));
+    }
+  }
   // Out of tokens on a limited allowance: the allocator is waited for (or its grace given) rather
   // than refusing on our own system's account (allocator.ts rescue).
   if (
@@ -3673,6 +3803,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   }
   if (!reservation.ok) {
     const quota = quotaHeaders(reservation.allowance);
+    if (reservation.code === "plan_limit") return apiError(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, { retryable: true }, quota);
     // Another coding agent's share is used up while the whole allowance isn't: say so, and that
     // Autopilot can still use the rest.
     if (agent && (reservation.code === "quota_exceeded" || reservation.code === "trial_ended") && !(freeBlock && reservation.allowance.plan === "free")) {
@@ -3757,7 +3888,10 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     // Without usage the person is charged an estimate (AccountObject.settle): nothing when no
     // output was streamed, else a realistic prompt plus the output streamed, at the model's prices.
     const noUsage = charged === undefined ? { outputTokens: options.outputTokens ?? 0, prices: model.prices, cachedTokenWeight: gate.config.cachedTokenWeight } : undefined;
-    const settled = await person.settle({ reservationId, charged, costUsd: cost, ...(rawTokens !== undefined ? { rawTokens } : {}), ...(usage && !chargeNothing ? { usage } : {}), ...(noUsage ? { noUsage } : {}), limits, now: c.now() });
+    // A backup provider or a fallback model served (a plan's fallback, a provider's failover).
+    const failover = model.id !== asked.id || provider !== serving!.provider;
+    const meter = { tool: recordedClient ?? "autopilot", failover, bonus: planServe?.bonus === true && model.id === planServe.model };
+    const settled = await person.settle({ reservationId, charged, costUsd: cost, ...(rawTokens !== undefined ? { rawTokens } : {}), ...(usage && !chargeNothing ? { usage } : {}), ...(noUsage ? { noUsage } : {}), meter, limits, now: c.now() });
     const estimated = settled.estimate?.usage;
     // A provider that reports its charge (Liquid's `exchange.charge.total_usd`) is charged that.
     // Without usage, the credit gets our best estimate of what the provider billed, apart from
@@ -3801,6 +3935,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       ttftMs: options.ttftMs ?? null,
       ...(options.upstreamError ? { upstreamError: true } : {}),
       ...(options.outcome ? { upstreamOutcome: options.outcome } : {}),
+      ...(failover ? { failover: true } : {}),
       ...(identity.via === "key" ? { viaKey: true } : {}),
       ...(recordedClient ? { harness: recordedClient } : {}),
       // The requested model's budget paid, even when its fallback served.
@@ -3870,7 +4005,9 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       return openRelayChat(c, { model, body, stream, maxTokens: res.maxTokens, user, started, settle: settleFor, timeoutSeconds: gate.config.openrelayFirstByteTimeoutSeconds, reservedAllowance: res.allowance, ...(retry ? { retry } : {}) });
     }
     if (provider === "liquid") {
-      return liquidChat(c, { model, config: gate.config, body, stream, maxTokens: res.maxTokens, user, sessionId, started, settle: settleFor, timeoutSeconds: gate.config.liquidFirstByteTimeoutSeconds, reservedAllowance: res.allowance, ...(retry ? { retry } : {}) });
+      // Liquid keeps a conversation on the seller that holds its prompt cache by session id: Claude
+      // Code's own session id (x-claude-code-session-id, metadata.user_id) when the client sends no x-session-id.
+      return liquidChat(c, { model, config: gate.config, body, stream, maxTokens: res.maxTokens, user, sessionId: sessionId ?? sessionKey ?? undefined, started, settle: settleFor, timeoutSeconds: gate.config.liquidFirstByteTimeoutSeconds, reservedAllowance: res.allowance, ...(retry ? { retry } : {}) });
     }
     if (provider === "luminal") {
       return luminalChat(c, { model, body, stream, maxTokens: res.maxTokens, user, started, settle: settleFor, timeoutSeconds: gate.config.luminalFirstByteTimeoutSeconds, reservedAllowance: res.allowance });
@@ -3886,7 +4023,18 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   }
   // OpenAI's models and registry models retry on what nextSteps gives; Luminal and OpenRouter don't.
   const retries = serving.provider === "openai" || isRegistryProvider(serving.provider) ? nextSteps(serving.model, serving.backups ?? []) : [];
-  const response = await attempt(serving.model, serving.provider, reservation, retries);
+  const answered = await attempt(serving.model, serving.provider, reservation, retries);
+  // A paid plan's notices: its fallback's, and the 80% warning once per model per week (also by email).
+  const notices = [...(planServe?.notices ?? [])];
+  const warning = planServe ? dueWarning(planServe) : undefined;
+  if (warning && planServe?.view && answered.status === 200 && (await person.claimPlanNotice(`warn:${planServe.view.model}`, c.now()))) {
+    notices.push(warning);
+    const values = warningEmailValues(planServe.view);
+    const task = userEmail(c, gate.config, "plan_80", identity.githubId, `${weekStart(c.now())}:${planServe.view.model}`, { planWarning: values });
+    if (c.background) c.background(task);
+    else await task;
+  }
+  const response = notices.length > 0 ? await withNotices(answered, notices, serving.model.id) : answered;
   const fellBackTo = serving.fallback ? serving.model.id : effective !== requested ? effective.id : undefined;
   if (!fellBackTo) return response;
   // The requested model's provider couldn't serve it, so its fallback did: say which, and why

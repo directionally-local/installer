@@ -10,9 +10,21 @@ import { DEFAULT_WEB_API_URL, DEFAULT_WEB_SIGNUP_URL } from "./web-signup.js";
 import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_PLANS, PROVIDER_STATUSES, REGISTRY_DEFAULTS, type ProviderId, type ProviderPlans, type ProviderStatus, type RegistrySettingsConfig } from "./providers.js";
 import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type DataCollection, type Quantization } from "./routing.js";
 
+import { PLAN_DEFAULTS, PLAN_SETTING_ENV, type PlanSettingsConfig } from "./plans.js";
+import { GPT6_BONUS_DEFAULTS, type Gpt6BonusSettingsConfig } from "./gpt6-bonus.js";
+import { FREE_ENDS_AT } from "./plan-limits.js";
+
 export class ConfigError extends Error {}
 
-export interface FreeConfig extends RegistrySettingsConfig {
+export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, Gpt6BonusSettingsConfig {
+  /** Paid plans on (PAID_PLANS, default off until launch; also a runtime setting): see plans.ts. */
+  paidPlans: boolean;
+  /**
+   * When free tokens end for non-paying accounts (FREE_ENDS_AT, default Tue 8 Dec 2026 00:00 UTC;
+   * Unix ms here; also a runtime setting): after it their requests get 402 plan_required. Paying
+   * accounts and admins are unaffected. Undefined ("none"): free tokens never end.
+   */
+  freeEndsAt: number | undefined;
   /** Optional: without it the service never calls OpenRouter (Luminal serves, or nothing does). */
   openRouterApiKey: string | undefined;
   githubClientId: string;
@@ -693,6 +705,9 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     openrelayFirstByteTimeoutSeconds: timeoutSeconds(env.OPENRELAY_FIRST_BYTE_TIMEOUT_SECONDS, 30, "OPENRELAY_FIRST_BYTE_TIMEOUT_SECONDS"),
     speedProbes: flag(env.SPEED_PROBES, true, "SPEED_PROBES"),
     ...registrySettings(env),
+    ...planSettings(env),
+    paidPlans: flag(env.PAID_PLANS, false, "PAID_PLANS"),
+    freeEndsAt: env.FREE_ENDS_AT === undefined ? FREE_ENDS_AT : instant(env.FREE_ENDS_AT, "FREE_ENDS_AT"),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
     webSignupUrl: webSignupUrl(env.WEB_SIGNUP_URL),
@@ -736,6 +751,22 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     allocatorGraceShare: share(env.ALLOCATOR_GRACE_SHARE, DEFAULTS.allocatorGraceShare, "ALLOCATOR_GRACE_SHARE"),
     detection: detection.rules,
     detectionStatus: detection.status,
+  };
+}
+
+/** The paid plans' limits (plans.ts) and the GPT-6 launch bonus (gpt6-bonus.ts) from env, else their defaults. */
+function planSettings(env: Record<string, unknown>): PlanSettingsConfig & Gpt6BonusSettingsConfig {
+  const plans = {} as Record<keyof PlanSettingsConfig, number>;
+  for (const [key, name] of Object.entries(PLAN_SETTING_ENV) as Array<[keyof PlanSettingsConfig, string]>) plans[key] = whole(env[name], PLAN_DEFAULTS[key], name);
+  const b = GPT6_BONUS_DEFAULTS;
+  return {
+    ...plans,
+    gpt6Bonus: flag(env.GPT6_BONUS, b.gpt6Bonus, "GPT6_BONUS"),
+    gpt6BonusWeeklyUsd: amount(env.GPT6_BONUS_WEEKLY_USD, b.gpt6BonusWeeklyUsd, "GPT6_BONUS_WEEKLY_USD"),
+    gpt6BonusEndsAt: env.GPT6_BONUS_ENDS_AT === undefined ? b.gpt6BonusEndsAt : instant(env.GPT6_BONUS_ENDS_AT, "GPT6_BONUS_ENDS_AT"),
+    gpt6BonusDelayHours: whole(env.GPT6_BONUS_DELAY_HOURS, b.gpt6BonusDelayHours, "GPT6_BONUS_DELAY_HOURS"),
+    gpt6BonusMaxOutputTokens: whole(env.GPT6_BONUS_MAX_OUTPUT_TOKENS, b.gpt6BonusMaxOutputTokens, "GPT6_BONUS_MAX_OUTPUT_TOKENS"),
+    gpt6BonusRunRateUsdPerWeek: env.GPT6_BONUS_RUN_RATE_USD_PER_WEEK === undefined ? undefined : usd(env.GPT6_BONUS_RUN_RATE_USD_PER_WEEK, 0, "GPT6_BONUS_RUN_RATE_USD_PER_WEEK"),
   };
 }
 

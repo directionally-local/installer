@@ -26,6 +26,7 @@ export type UserEmailKind =
   | "didnt_start"
   | "week_80"
   | "trial_80"
+  | "plan_80"
   | "gone_quiet"
   | "weekly_reset";
 
@@ -171,6 +172,23 @@ if you're building something cool with it, reply and tell me. i'm curious.
 sina`,
   },
 
+  // 3a. A paid plan's model at 80% of its weekly limit (once per model per week; plan-limits.ts).
+  // {model} is the model's name, {share} the percent used, {used} {limit} {left} real tokens at
+  // the plan mix, like "~50M".
+  plan_80: {
+    subject: "{model}: {share}% of this week used",
+    body: `hey,
+
+{model}: {share}% used ({used} of {limit} at 95.5% caching). {left} left until mon 00:00 utc.
+
+when it runs out, dl.new switches to deepseek v4.1 flash while your plan has some left (you can turn that off in settings), or pauses until monday. there are no overage charges.
+
+need more room every week? https://dl.new/upgrade
+your usage: https://dl.new/usage
+
+sina`,
+  },
+
   // 3b. Someone on the trial used 80% of their trial tokens (once: the trial doesn't reset).
   trial_80: {
     subject: "you've used most of your free trial",
@@ -244,6 +262,15 @@ export interface WeeklyResetValues {
   login: string;
 }
 
+/** plan_80's values (plan-limits.ts warningEmailValues). */
+export interface PlanWarningValues {
+  model: string;
+  share: string;
+  used: string;
+  limit: string;
+  left: string;
+}
+
 /** Under every email, after a blank line. */
 export const FOOTER = "don't want these? {unsubscribeUrl}";
 
@@ -263,7 +290,7 @@ const PRO_OR_TOPUP = /dl pro or a top up/g;
  * One email, placeholders filled in, footer added. `proOffered` false leaves dl pro out of it (top
  * ups stay). `weeklyReset` fills weekly_reset's {tokens}, {grows} and {login}.
  */
-export function renderUserEmail(kind: UserEmailKind, values: { resets: string; unsubscribeUrl: string; proOffered?: boolean; weeklyReset?: WeeklyResetValues }): UserEmailCopy {
+export function renderUserEmail(kind: UserEmailKind, values: { resets: string; unsubscribeUrl: string; proOffered?: boolean; weeklyReset?: WeeklyResetValues; planWarning?: PlanWarningValues }): UserEmailCopy {
   const reset = values.weeklyReset;
   const named: Record<string, string> = {
     resets: values.resets,
@@ -275,9 +302,10 @@ export function renderUserEmail(kind: UserEmailKind, values: { resets: string; u
           login: reset.login,
         }
       : {}),
+    ...(values.planWarning ?? {}),
   };
   const fill = (text: string) => {
-    const filled = text.replace(/\{(resets|unsubscribeUrl|tokens|grows|login)\}/g, (match, name: string) => named[name] ?? match);
+    const filled = text.replace(/\{(resets|unsubscribeUrl|tokens|grows|login|model|share|used|limit|left)\}/g, (match, name: string) => named[name] ?? match);
     return values.proOffered === false ? filled.replace(PRO_OR_TOPUP, "a top up") : filled;
   };
   const copy = USER_EMAILS[kind];
