@@ -156,6 +156,22 @@ export function replaceEmailIdentity(sql: Sql, input: { account: number; email: 
   return "ok";
 }
 
+/**
+ * "Continue with Google" (paid-web.ts googleSession): the account a Google sign-in belongs to.
+ * Its own identity first; else an account that already signs in with the same address by email
+ * code gets the Google identity linked (Google verified the address, as the code would), so the
+ * same person doesn't end up with two accounts. Undefined: no account yet (sign-up rules apply).
+ * Run inside a transaction.
+ */
+export function resolveGoogleIdentity(sql: Sql, input: { subject: string; email: string; now: number }): number | undefined {
+  const own = resolveIdentity(sql, "google", input.subject, input.now);
+  if (own !== undefined) return own;
+  const byEmail = sql.exec<{ account: number }>("SELECT account FROM identities WHERE kind = 'email' AND subject = ?", normalizeEmail(input.email)).toArray()[0];
+  if (!byEmail) return undefined;
+  sql.exec("INSERT INTO identities (kind, subject, account, label, created_at) VALUES ('google', ?, ?, ?, ?) ON CONFLICT DO NOTHING", input.subject, byEmail.account, input.email.trim(), input.now);
+  return byEmail.account;
+}
+
 /** Whether another account signs in with this address. */
 export function emailIdentityTaken(sql: Sql, email: string, account: number): boolean {
   return sql.exec("SELECT 1 FROM identities WHERE kind = 'email' AND subject = ? AND account != ?", normalizeEmail(email), account).toArray().length > 0;

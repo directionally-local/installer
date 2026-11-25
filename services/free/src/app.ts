@@ -10,7 +10,8 @@ import { TOOL_KEYS_OFF_MESSAGE, TOOL_KEYS_UNAVAILABLE_MESSAGE, TOOL_KEY_NOT_HERE
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { accountObjectName, API_KEY_PREFIX, parseApiKey } from "./accounts.js";
-import { applyPlanEvent, githubCallback, githubStart, paidAdmin, paidV1, paidWebRoute } from "./paid-web.js";
+import { applyPlanEvent, githubCallback, githubStart, googleCallback, googleStart, paidAdmin, paidV1, paidWebRoute } from "./paid-web.js";
+import { GOOGLE_CALLBACK_PATH } from "./google.js";
 import type { KeyFormat } from "./account-object.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
 import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, LevelSignalRow, PersonRow, PersonState, PersonStatus, RequestRecord, SpendSummary, UseClient } from "./directory-object.js";
@@ -264,6 +265,8 @@ export interface Env {
   OPENROUTER_API_KEY?: string;
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
   TOKEN_SIGNING_KEY?: string;
   ADMIN_GITHUB_IDS?: string;
   WEEKLY_TOKENS?: string;
@@ -6438,6 +6441,12 @@ async function web(c: Ctx, path: string, method: string): Promise<Response> {
   if (path === "/web/signin") return method === "GET" ? webSignIn(c) : apiError(405, "method_not_allowed", "GET /web/signin.");
   // dl.new's own GitHub sign-in (paid-web.ts): a navigation, not a fetch.
   if (path === "/web/auth/github") return method === "GET" ? githubStart(c) : apiError(405, "method_not_allowed", "GET /web/auth/github.");
+  // "Continue with Google" (paid-web.ts): navigations too. Off (a 404) without GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.
+  if (path === "/web/auth/google" || path === GOOGLE_CALLBACK_PATH) {
+    if (!c.config.google) return apiError(404, "not_found", "Google sign-in isn't on.");
+    if (method !== "GET") return apiError(405, "method_not_allowed", `GET ${path}.`);
+    return path === GOOGLE_CALLBACK_PATH ? googleCallback(c) : googleStart(c);
+  }
   const route = webRoute(path) ?? paidWebRoute(path);
   if (!route) return apiError(404, "not_found", `${method} ${c.url.pathname} isn't a route.`);
   const origin = c.request.headers.get("origin");

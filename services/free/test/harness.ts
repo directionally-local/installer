@@ -204,6 +204,8 @@ export interface Service {
   setUserEmail(handler: (message: Record<string, unknown>) => { messageId: string } | Promise<{ messageId: string }>): void;
   /** Answers calls to Resend (default: 200 with an id). */
   setResend(handler: (body: Record<string, unknown>) => Response | Promise<Response>): void;
+  /** Answers calls to Google's OAuth endpoints (oauth2.googleapis.com, www.googleapis.com/oauth2): google-fixtures.ts's FakeGoogle. */
+  setGoogle(handler: (url: string, init: RequestInit) => Response | Promise<Response>): void;
   /** Answers calls to api.stripe.com (default: a Checkout or portal session with a URL). */
   setStripe(handler: (path: string, form: URLSearchParams, method: string) => Response | Promise<Response>): void;
   setOpenRouter(handler: OpenRouterHandler): void;
@@ -441,6 +443,9 @@ export async function createService(vars: Record<string, string> = {}, options: 
     path === "/v1/checkout/sessions"
       ? Response.json({ id: `cs_test_${calls.stripe.length}`, url: `https://checkout.stripe.com/c/pay/cs_test_${calls.stripe.length}` })
       : Response.json({ id: "bps_test_1", url: "https://billing.stripe.com/p/session/test_1" });
+  let google = (url: string, _init: RequestInit): Response | Promise<Response> => {
+    throw new Error(`unexpected fetch ${url} (no FakeGoogle)`);
+  };
   let userEmail = (_message: Record<string, unknown>): { messageId: string } | Promise<{ messageId: string }> => ({ messageId: `cf-${calls.userEmail.length}` });
   if (options.userEmail) {
     envRef.env.USER_EMAIL = {
@@ -563,6 +568,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
       calls.resend.push({ body, headers: Object.fromEntries(new Headers(init.headers).entries()) });
       return resend(body);
     }
+    if (url.startsWith("https://oauth2.googleapis.com/") || url.startsWith("https://www.googleapis.com/oauth2/")) return google(url, init);
     if (url.startsWith("https://api.stripe.com/")) {
       const path = new URL(url).pathname;
       const method = init.method ?? "GET";
@@ -644,6 +650,9 @@ export async function createService(vars: Record<string, string> = {}, options: 
     },
     setModerations: (next) => {
       moderations = next;
+    },
+    setGoogle: (next) => {
+      google = next;
     },
     setStripe: (next) => {
       stripe = next as never;

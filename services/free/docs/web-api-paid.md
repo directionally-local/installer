@@ -54,9 +54,12 @@ No auth. What the plan cards show.
   "gpt6Bonus": {"enabled": false, "label": "launch bonus, through 31 Jan 2027",
                 "line": "$2/week of GPT-6.1 Sol usage in dl", "weeklyUsd": 2, "fullyClaimed": false,
                 "fullyClaimedText": "GPT-6 launch bonus: fully claimed", "endsAt": "2027-02-01T00:00:00.000Z"},
+  "signIn": {"google": true},
   "available": true
 }
 ```
+
+- `signIn.google`: "Continue with Google" is on (§ 2, Google); the pages hide its button when false.
 
 - `tokensPerWeek` is **real** tokens at the assumed caching mix (what the page shows, always with
   `caching.label`); `countedTokensPerWeek` is what is enforced. Both come from part B's
@@ -188,6 +191,36 @@ Every sign-in endpoint answers the same **session response**:
 - An existing free-tier GitHub account signs straight in (its identity is linked on first use).
 - Errors: 400 `invalid_grant`; plus the common ones.
 
+### Google (OpenID Connect)
+
+Off unless the service has `GOOGLE_CLIENT_ID` and the secret `GOOGLE_CLIENT_SECRET`: then every
+endpoint below is a 404, and `GET /web/plans` says `"signIn": {"google": false}` (the pages show
+"Continue with Google" only when it's `true`).
+
+**GET /web/auth/google?return=<page>&state=<random>** (a browser navigation, not fetch)
+
+- `return`: `https://dl.new/account`, `https://dl.new/signin` or `https://dl.new/cli-login` (exact
+  match; **not** `/trial`: the no-card trial stays GitHub-only, its anti-farm checks read GitHub).
+  `state` as for GitHub.
+- Redirects to Google (authorization code flow, `scope=openid email profile`, PKCE `S256`, its own
+  `state` and `nonce`, `prompt=select_account`); the redirect URI is
+  `<PUBLIC_URL>/web/auth/google/callback` (`https://free.directionallylocal.com/web/auth/google/callback`).
+- The callback exchanges the code with the PKCE verifier and checks the ID token: RS256 signature
+  against Google's JWKS, `iss` (`https://accounts.google.com`), `aud` = the client id, `exp`,
+  `nonce`, and `email_verified: true`.
+- Ends with `303 <return>#signin=<one-time code>` (or `#error=<code>`; codes: `google_cancelled`,
+  `google_failed`, `google_no_verified_email`, `expired`, `rate_limited`).
+
+**POST /web/auth/google/session {code, state, sessionId?}** → the session response.
+
+- The identity is `google:<sub>` (stable per Google account; the name from `profile` is not kept), shown on `/web/account` as
+  `{"kind": "google", "email": "<the Google email at link time>"}`. A new account's contact email
+  is the verified Google email.
+- The account: the Google identity's; else the account that already signs in with the **same
+  verified address by email code** (the Google identity is linked to it now); else a new account,
+  only with a paid unclaimed `sessionId` (card trials included), as for email and GitHub.
+- Errors: 400 `invalid_grant`; plus the common ones.
+
 ### POST /web/checkout/claim {sessionId} (web token)
 
 For someone already signed in who paid again (e.g. after cancelling): claims onto the signed-in
@@ -206,7 +239,7 @@ Ends this web session at once (the token stops working).
 {
   "accountId": "acct_2fq0x9",
   "email": "ana@example.com",
-  "identities": [{"kind": "github", "login": "ana"}, {"kind": "email", "email": "ana@example.com"}],
+  "identities": [{"kind": "github", "login": "ana"}, {"kind": "email", "email": "ana@example.com"}, {"kind": "google", "email": "ana@gmail.com"}],
   "plan": {
     "id": "starter", "name": "dl.new Starter", "priceUsd": 7,
     "status": "active",

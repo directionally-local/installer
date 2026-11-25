@@ -840,6 +840,22 @@ The HTTP contract the site calls is [docs/web-api-paid.md](docs/web-api-paid.md)
    `STRIPE_PRICE_MAX` (`STRIPE_PRICE_PRO` is no longer read). Without the secret key, the billing endpoints
    answer `billing_unavailable` and everything else works as before.
 
+### Google sign-in setup (the owner, once)
+
+"Continue with Google" on dl.new (`src/google.ts`; contract in `docs/web-api-paid.md` § Google)
+is off until both values are set; while off, `/web/auth/google*` answer 404 and `/web/plans`
+says `signIn.google: false`, so the pages hide the button.
+
+1. **OAuth consent screen** (Google Cloud → Google Auth Platform): External, app name `dl.new`,
+   home page `https://dl.new`, privacy policy `https://dl.new/privacy`, terms `https://dl.new/terms`,
+   authorized domains `dl.new` and `directionallylocal.com`. Scopes: `openid`, `.../auth/userinfo.email`,
+   `.../auth/userinfo.profile` (all non-sensitive: no verification review). Publish it ("In production").
+2. **OAuth client**: type *Web application*. Authorized redirect URI (exact):
+   `https://free.directionallylocal.com/web/auth/google/callback` (`<PUBLIC_URL>/web/auth/google/callback`).
+   Authorized JavaScript origins: none needed (the browser never calls Google from a page; the
+   service does the code exchange).
+3. **Secrets and vars:** var `GOOGLE_CLIENT_ID`, `wrangler secret put GOOGLE_CLIENT_SECRET`.
+
 ## The queue for free tokens
 
 From the open launch, sign-up is never a hard block for new people. While **this week's free
