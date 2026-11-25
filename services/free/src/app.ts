@@ -817,6 +817,9 @@ async function tokenBody(c: Ctx, identity: Identity, refreshToken: string, sid: 
 }
 
 /** Who is calling: from a sign-in session's access token, or from a server key. */
+/** The 401 on /v1 and /anthropic for a caller with no auth or a bad dl.new API key (`dl_sk_`, `dlk_`). */
+export const API_KEY_MISSING_MESSAGE = "Missing or invalid API key. Create one at dl.new/keys.";
+
 interface Caller extends Identity {
   /** "harness": a harness key from `dl claude` or `dl opencode` (see HARNESS_KEY in account-object.ts). */
   via: "access" | "key" | "harness";
@@ -846,9 +849,14 @@ async function authenticate(
   const apiKey = options.apiKeyHeader ? c.request.headers.get("x-api-key")?.trim() : undefined;
   const header = c.request.headers.get("authorization") ?? (apiKey ? `Bearer ${apiKey}` : "");
   const match = /^Bearer\s+(\S+)$/i.exec(header);
-  const invalid = () => apiError(401, "invalid_token", "Sign in again: the access token is missing, invalid or expired.", {}, { "www-authenticate": 'Bearer error="invalid_token"' });
+  // On the model APIs (/v1, /anthropic) a caller with no auth, or with an API key, gets the
+  // API-key wording; a dl or Autopilot access token keeps "Sign in again".
+  const modelApi = /^\/(?:v1|anthropic)\//.test(c.url.pathname);
+  const bearer = match?.[1] ?? "";
+  const apiKeyCaller = modelApi && (!match || bearer.startsWith(API_KEY_PREFIX) || bearer.startsWith("dlk_"));
+  const invalid = () =>
+    apiError(401, "invalid_token", apiKeyCaller ? API_KEY_MISSING_MESSAGE : "Sign in again: the access token is missing, invalid or expired.", {}, { "www-authenticate": 'Bearer error="invalid_token"' });
   if (!match) return invalid();
-  const bearer = match[1]!;
   if (bearer.startsWith("dlh_")) {
     // A harness key works only where `harness` allows it, and only for the agents it lists:
     // Claude Code's on the Anthropic endpoint, OpenCode's on chat completions; never on keys.
@@ -866,7 +874,7 @@ async function authenticate(
   }
   if (bearer.startsWith("dlk_")) {
     const invalidKey = () =>
-      apiError(401, "invalid_key", "This server key is invalid or was revoked. Create a new one from a signed-in machine.", {}, { "www-authenticate": 'Bearer error="invalid_token"' });
+      apiError(401, "invalid_key", modelApi ? API_KEY_MISSING_MESSAGE : "This server key is invalid or was revoked. Create a new one from a signed-in machine.", {}, { "www-authenticate": 'Bearer error="invalid_token"' });
     const parsed = parseServerKey(bearer);
     if (!options.keys || !parsed) return options.keys ? invalidKey() : invalid();
     const found = await account(c, parsed.githubId).verifyKey(parsed.id, parsed.secret, c.now(), toolName(c.request.headers));
@@ -889,7 +897,7 @@ async function authenticate(
   }
   if (bearer.startsWith(API_KEY_PREFIX)) {
     // dl.new's API keys (accounts.ts): tool keys tied to the account, not a GitHub id.
-    const invalidKey = () => apiError(401, "invalid_key", "This API key is invalid or was revoked. Make a new one at dl.new/keys.", {}, { "www-authenticate": 'Bearer error="invalid_token"' });
+    const invalidKey = () => apiError(401, "invalid_key", API_KEY_MISSING_MESSAGE, {}, { "www-authenticate": 'Bearer error="invalid_token"' });
     const parsed = parseApiKey(bearer);
     if (!options.keys || !parsed) return options.keys ? invalidKey() : invalid();
     if (!options.toolKeys) return apiError(403, "tool_key_not_allowed", TOOL_KEY_NOT_HERE_MESSAGE);

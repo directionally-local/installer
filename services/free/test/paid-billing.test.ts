@@ -61,6 +61,26 @@ describe("dl_sk_ keys", () => {
     assert.equal(await errorCode(await service.request("DELETE", `/web/api-keys/${key.id}`, { token })), "key_not_found");
   });
 
+  it("says 'Missing or invalid API key' to API callers on /v1 and /anthropic, and 'Sign in again' to a bad access token", async () => {
+    const { service } = await world();
+    const API_KEY = "Missing or invalid API key. Create one at dl.new/keys.";
+    const message = async (response: Response) => {
+      assert.equal(response.status, 401);
+      return ((await response.json()) as { error: { message: string } }).error.message;
+    };
+    const body = { model: MODEL, messages: [{ role: "user", content: "hi" }] };
+    const anthropicBody = { model: "claude-sonnet-4-5", max_tokens: 100, messages: [{ role: "user", content: "hi" }] };
+    assert.equal(await message(await service.request("POST", "/v1/chat/completions", { body })), API_KEY, "no auth");
+    assert.equal(await message(await service.request("GET", "/v1/models")), API_KEY, "no auth");
+    assert.equal(await message(await service.request("POST", "/anthropic/v1/messages", { body: anthropicBody })), API_KEY, "no auth");
+    assert.equal(await message(await service.request("POST", "/v1/chat/completions", { token: "dl_sk_zz_abcdef012345_" + "a".repeat(43), body })), API_KEY);
+    assert.equal(await message(await service.request("POST", "/anthropic/v1/messages", { headers: { "x-api-key": "dl_sk_nope" }, body: anthropicBody })), API_KEY);
+    assert.equal(await message(await service.request("GET", "/v1/me", { token: "dlk_nope" })), API_KEY);
+    // A dl or Autopilot access token (a JWT) keeps the sign-in wording.
+    assert.equal(await message(await service.request("GET", "/v1/me", { token: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln" })), "Sign in again: the access token is missing, invalid or expired.");
+    assert.equal(await message(await service.request("POST", "/v1/chat/completions", { token: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln", body })), "Sign in again: the access token is missing, invalid or expired.");
+  });
+
   it("refuses a malformed or unknown dl_sk_ key", async () => {
     const { service } = await world();
     assert.equal(await errorCode(await service.request("GET", "/v1/models", { token: "dl_sk_zz_abcdef012345_" + "a".repeat(43) })), "invalid_key");
