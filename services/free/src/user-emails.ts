@@ -230,12 +230,12 @@ sina`,
   // 3c. dl.new: right after a payment is claimed onto an account (paid-web.ts). {plan} is the
   // plan's name, {limits} one line per model ("- DeepSeek V4.1 Flash ~62M/week (95.5% caching
   // applied)"), {bonus} the GPT-6 launch bonus paragraph when the account holds it, else nothing,
-  // {refund} the refund policy (plan-prices.ts refundPolicy, at the refundWindowHours setting).
+  // {promo} the launch offer's sentence when the first payment had it, else nothing. No refund line.
   welcome_paid: {
     subject: "your dl.new key is ready",
     body: `hey,
 
-sina here, i build dl.new. thanks for subscribing to {plan}.
+sina here, i build dl.new. thanks for subscribing to {plan}.{promo}
 
 your key is waiting at https://dl.new/connect
 
@@ -251,7 +251,6 @@ to sign in again, go to https://dl.new/signin and use github or a code we email 
 your plan's weekly limits, reset every monday 00:00 utc:
 {limits}
 {bonus}
-{refund} reply to this email.
 
 if anything breaks or feels off, just reply. it comes straight to me.
 
@@ -340,10 +339,10 @@ export interface PlanWarningValues {
 /** welcome_paid's values (paid-web.ts welcomeValues). */
 export interface PlanWelcomeValues {
   plan: string;
-  /** "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit." */
-  refund: string;
   limits: string;
   bonus: string;
+  /** " Your first month was 50% off. It renews at $7/mo." after a launch-offer payment, else "". */
+  promo: string;
 }
 
 /** plan_reset's values (plan-reset.ts planResetValues). */

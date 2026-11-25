@@ -78,7 +78,7 @@ describe("emails to users: the copy", () => {
         unsubscribeUrl: "https://free.directionallylocal.com/email/stop?u=1&t=x",
         weeklyReset: { tokens: 10_000_000, fullTokens: 50_000_000, login: "alice" },
         planWarning: { model: "DeepSeek V4.1 Flash", share: "80", used: "~50M", limit: "~62M", left: "~12M" },
-        planWelcome: { plan: "dl.new Starter", limits: "- DeepSeek V4.1 Flash ~62M/week (95.5% caching applied)", bonus: "", refund: "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit." },
+        planWelcome: { plan: "dl.new Starter", limits: "- DeepSeek V4.1 Flash ~62M/week (95.5% caching applied)", bonus: "", promo: " Your first month was 50% off. It renews at $7/mo." },
         planReset: { tokens: "~62M", plan: "dl.new Starter", models: "- DeepSeek V4.1 Flash", cachedpct: "2%", sessions: "3", failovers: "0" },
       });
       assert.match(rendered.body, /\n\ndon't want these\? https:\/\/free\.directionallylocal\.com\/email\/stop\?u=1&t=x\n$/);

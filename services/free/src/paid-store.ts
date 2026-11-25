@@ -33,7 +33,10 @@ export const PAID_SCHEMA = [
      claimed_by          INTEGER,
      claimed_at          INTEGER,
      claim_email_sent_at INTEGER,
-     terms_accepted_at   INTEGER
+     terms_accepted_at   INTEGER,
+     promo_coupon        TEXT,
+     discount_cents      INTEGER NOT NULL DEFAULT 0,
+     promo_percent_off   INTEGER
    )`,
   `CREATE INDEX IF NOT EXISTS paid_checkouts_subscription ON paid_checkouts (subscription_id)`,
   `CREATE TABLE IF NOT EXISTS refund_requests (
@@ -46,6 +49,13 @@ export const PAID_SCHEMA = [
      not_eligible TEXT
    )`,
 ];
+
+/** A completed Checkout's discount (stripe.ts checkoutPromo). */
+export interface CheckoutPromo {
+  coupon: string;
+  discountCents: number;
+  percentOff: number;
+}
 
 export interface PaidCheckoutRow {
   session_id: string;
@@ -60,6 +70,12 @@ export interface PaidCheckoutRow {
   claim_email_sent_at: number | null;
   /** When the customer accepted the terms with the withdrawal waiver at Checkout (Unix ms), or null. */
   terms_accepted_at: number | null;
+  /** The launch offer's coupon when the Checkout had it (its first invoice was discounted), else null. */
+  promo_coupon: string | null;
+  /** What the discount took off the first payment, in cents (0 without one). */
+  discount_cents: number;
+  /** The discount as a percent of the first month (from Stripe's amounts), or null without one. */
+  promo_percent_off: number | null;
 }
 
 /** The identity's subject as stored: a GitHub id as digits, an address normalized. */
@@ -144,12 +160,13 @@ export function emailIdentityTaken(sql: Sql, email: string, account: number): bo
 /** Stores (or refreshes) a paid plan Checkout from its webhook or a claim's read of it. Never unclaims. */
 export function recordPaidCheckout(
   sql: Sql,
-  input: { sessionId: string; plan: PlanId; customerId: string | null; subscriptionId: string | null; email: string | null; amountCents: number; paidAt: number; termsAcceptedAt?: number | null },
+  input: { sessionId: string; plan: PlanId; customerId: string | null; subscriptionId: string | null; email: string | null; amountCents: number; paidAt: number; termsAcceptedAt?: number | null; promo?: CheckoutPromo | null },
 ): PaidCheckoutRow {
   sql.exec(
-    `INSERT INTO paid_checkouts (session_id, plan, customer_id, subscription_id, email, amount_cents, paid_at, terms_accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO paid_checkouts (session_id, plan, customer_id, subscription_id, email, amount_cents, paid_at, terms_accepted_at, promo_coupon, discount_cents, promo_percent_off) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(session_id) DO UPDATE SET customer_id = COALESCE(excluded.customer_id, customer_id), subscription_id = COALESCE(excluded.subscription_id, subscription_id),
-       email = COALESCE(excluded.email, email), amount_cents = excluded.amount_cents, terms_accepted_at = COALESCE(terms_accepted_at, excluded.terms_accepted_at)`,
+       email = COALESCE(excluded.email, email), amount_cents = excluded.amount_cents, terms_accepted_at = COALESCE(terms_accepted_at, excluded.terms_accepted_at),
+       promo_coupon = COALESCE(excluded.promo_coupon, promo_coupon), discount_cents = MAX(excluded.discount_cents, discount_cents), promo_percent_off = COALESCE(excluded.promo_percent_off, promo_percent_off)`,
     input.sessionId,
     input.plan,
     input.customerId,
@@ -158,6 +175,9 @@ export function recordPaidCheckout(
     input.amountCents,
     input.paidAt,
     input.termsAcceptedAt ?? null,
+    input.promo?.coupon ?? null,
+    input.promo?.discountCents ?? 0,
+    input.promo?.percentOff ?? null,
   );
   return paidCheckout(sql, input.sessionId)!;
 }

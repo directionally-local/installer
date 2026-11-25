@@ -13,12 +13,12 @@ import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type
 import { PLAN_DEFAULTS, PLAN_SETTING_ENV, type PlanSettingsConfig } from "./plans.js";
 import { GPT6_BONUS_DEFAULTS, type Gpt6BonusSettingsConfig } from "./gpt6-bonus.js";
 import { FREE_ENDS_AT } from "./plan-limits.js";
-import { REFUND_WINDOW_HOURS } from "./plan-prices.js";
+import { PROMO_DEFAULTS, REFUND_WINDOW_HOURS, type PromoSettingsConfig } from "./plan-prices.js";
 import { EMAIL_BUDGET_DEFAULTS, type EmailBudgetSettingsConfig } from "./email-budget.js";
 
 export class ConfigError extends Error {}
 
-export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, Gpt6BonusSettingsConfig, EmailBudgetSettingsConfig {
+export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, Gpt6BonusSettingsConfig, EmailBudgetSettingsConfig, PromoSettingsConfig {
   /** Paid plans on (PAID_PLANS, default off until launch; also a runtime setting): see plans.ts. */
   paidPlans: boolean;
   /**
@@ -34,6 +34,12 @@ export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, 
    * accounts and admins are unaffected. Undefined ("none"): free tokens never end.
    */
   freeEndsAt: number | undefined;
+  /**
+   * GitHub ids exempt from the end of free tokens (FREE_FOREVER, comma-separated; also a runtime
+   * setting; default none): past `freeEndsAt` they keep their free allowance and level as before.
+   * Moderation, caps, suspensions and blocks still apply.
+   */
+  freeForever: readonly number[];
   /** Optional: without it the service never calls OpenRouter (Luminal serves, or nothing does). */
   openRouterApiKey: string | undefined;
   githubClientId: string;
@@ -726,6 +732,12 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     refundWindowHours: whole(env.REFUND_WINDOW_HOURS, REFUND_WINDOW_HOURS, "REFUND_WINDOW_HOURS"),
     checkoutTermsConsent: flag(env.CHECKOUT_TERMS_CONSENT, true, "CHECKOUT_TERMS_CONSENT"),
     freeEndsAt: env.FREE_ENDS_AT === undefined ? FREE_ENDS_AT : instant(env.FREE_ENDS_AT, "FREE_ENDS_AT"),
+    freeForever: [...githubIds(text(env.FREE_FOREVER), "FREE_FOREVER")],
+    promoCouponId: env.PROMO_COUPON_ID === undefined ? PROMO_DEFAULTS.promoCouponId : couponId(env.PROMO_COUPON_ID),
+    promoStartsAt: env.PROMO_STARTS_AT === undefined ? PROMO_DEFAULTS.promoStartsAt : instant(env.PROMO_STARTS_AT, "PROMO_STARTS_AT"),
+    promoEndsAt: env.PROMO_ENDS_AT === undefined ? PROMO_DEFAULTS.promoEndsAt : instant(env.PROMO_ENDS_AT, "PROMO_ENDS_AT"),
+    promoPercentOff: percentOff(env.PROMO_PERCENT_OFF),
+    promoLabel: text(env.PROMO_LABEL) ?? PROMO_DEFAULTS.promoLabel,
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
     webSignupUrl: webSignupUrl(env.WEB_SIGNUP_URL),
@@ -1196,13 +1208,31 @@ function flag(value: unknown, fallback: boolean, name: string): boolean {
   throw new ConfigError(`${name} must be true or false (got "${raw}").`);
 }
 
-function githubIds(raw: string | undefined): ReadonlySet<number> {
+function githubIds(raw: string | undefined, name = "ADMIN_GITHUB_IDS"): ReadonlySet<number> {
   const ids = new Set<number>();
   for (const part of (raw ?? "").split(/[\s,]+/)) {
     if (!part) continue;
     const id = Number(part);
-    if (!Number.isSafeInteger(id) || id <= 0) throw new ConfigError(`ADMIN_GITHUB_IDS must be numeric GitHub ids (got "${part}").`);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new ConfigError(`${name} must be numeric GitHub ids (got "${part}").`);
     ids.add(id);
   }
   return ids;
+}
+
+/** A Stripe coupon id (PROMO_COUPON_ID); "none" or "off" turns the launch offer off. */
+export const COUPON_ID = /^[A-Za-z0-9_-]{1,64}$/;
+function couponId(value: unknown): string | undefined {
+  const raw = text(value);
+  if (raw === undefined || ["none", "off"].includes(raw.toLowerCase())) return undefined;
+  if (!COUPON_ID.test(raw)) throw new ConfigError(`PROMO_COUPON_ID must be a Stripe coupon id (letters, digits, - and _) or "none" (got "${raw}").`);
+  return raw;
+}
+
+/** PROMO_PERCENT_OFF: a whole percent, 1 to 100. */
+function percentOff(value: unknown): number {
+  const raw = text(value);
+  if (raw === undefined) return PROMO_DEFAULTS.promoPercentOff;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 100) throw new ConfigError(`PROMO_PERCENT_OFF must be a whole number from 1 to 100 (got "${raw}").`);
+  return parsed;
 }

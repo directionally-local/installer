@@ -1,5 +1,5 @@
 import { ALLOCATOR_MODES } from "./allocator.js";
-import { ACCESS_REQUEST_ALERT_MODES, GPT6_CLIENTS, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, isKeepDays, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, RAW_LOG_MAX_KEEP_DAYS, RAW_LOG_MIN_KEEP_DAYS, PRO_MULTIPLIER_MAX, PRO_MULTIPLIER_MIN, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
+import { ACCESS_REQUEST_ALERT_MODES, COUPON_ID, GPT6_CLIENTS, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, isKeepDays, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, RAW_LOG_MAX_KEEP_DAYS, RAW_LOG_MIN_KEEP_DAYS, PRO_MULTIPLIER_MAX, PRO_MULTIPLIER_MIN, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
 import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_PLANS, PROVIDER_STATUSES } from "./providers.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
@@ -271,6 +271,22 @@ export const RUNTIME_SETTINGS = {
   "planTokens.max.kimi": { kind: "tokens", env: "PLAN_TOKENS_MAX_KIMI" },
   /** When free tokens end for non-paying accounts (default 2026-12-08T00:00:00Z); "none": never. */
   freeEndsAt: { kind: "instant", env: "FREE_ENDS_AT" },
+  /** GitHub ids that keep their free allowance past freeEndsAt (default none); moderation, caps and blocks still apply. */
+  freeForever: { kind: "githubIds", env: "FREE_FOREVER" },
+  /**
+   * The launch offer (plan-prices.ts): the Stripe coupon plan Checkouts started inside
+   * [promoStartsAt, promoEndsAt) get, applied automatically (default "dlnew-bf-2026"; "none" turns
+   * the offer off). Turned off by itself, with an alert, when Stripe refuses the coupon.
+   */
+  promoCouponId: { kind: "couponId", env: "PROMO_COUPON_ID" },
+  /** The offer's start, inclusive (default 2026-11-27T00:00:00Z). */
+  promoStartsAt: { kind: "instant", env: "PROMO_STARTS_AT" },
+  /** The offer's end, exclusive (default 2026-12-01T00:00:00Z). */
+  promoEndsAt: { kind: "instant", env: "PROMO_ENDS_AT" },
+  /** The percent the pages and the welcome email show (default 50); the coupon decides what Stripe takes off. */
+  promoPercentOff: { kind: "percent", env: "PROMO_PERCENT_OFF" },
+  /** The cards' line (default "first month, ends Mon 30 Nov"). */
+  promoLabel: { kind: "label", env: "PROMO_LABEL" },
   /** The GPT-6 launch bonus for paying accounts (gpt6-bonus.ts); default off. */
   gpt6Bonus: { kind: "flag", env: "GPT6_BONUS" },
   /** The bonus a paying account gets a week, USD of GPT-6.1 Sol usage (default 2). */
@@ -383,6 +399,18 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return Array.isArray(value) && isSellerList(value) ? value.map((v) => v.trim()) : "invalid";
     case "prices":
       return Array.isArray(value) && isPriceList(value) ? [...value] : "invalid";
+    case "githubIds": {
+      if (!Array.isArray(value) || value.length > 500) return "invalid";
+      const ids = value.map((v) => (typeof v === "string" && /^\d{1,16}$/.test(v.trim()) ? Number(v.trim()) : v));
+      return ids.every((id) => typeof id === "number" && Number.isSafeInteger(id) && id > 0) ? [...new Set(ids as number[])] : "invalid";
+    }
+    case "couponId":
+      if (value === null || (typeof value === "string" && ["none", "off"].includes(value.toLowerCase()))) return null;
+      return typeof value === "string" && COUPON_ID.test(value) ? value : "invalid";
+    case "percent":
+      return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 100 ? value : "invalid";
+    case "label":
+      return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 80 ? value.trim() : "invalid";
     case "instant": {
       // Stored as Unix ms; "none" (null) turns it off whatever the env says.
       const parsed = parseInstant(value);
@@ -418,6 +446,10 @@ const RULES: Record<Kind, string> = {
   models: 'a list of the provider\'s model ids, e.g. ["moonshotai/kimi-k3.1-pro"], or [] for none',
   sellers: 'a list of up to 10 seller handles, e.g. ["deeprelay"], or [] for any seller that passes the other rules',
   prices: "three prices, [input, cache read, output], USD per million tokens",
+  githubIds: 'a list of up to 500 numeric GitHub ids, e.g. [12345, 67890], or [] for none',
+  couponId: 'a Stripe coupon id (letters, digits, - and _), or "none" to turn the offer off',
+  percent: 'a whole percent, 1 to 100',
+  label: 'a line of text, 1 to 80 characters',
   instant: 'an ISO time with its zone, e.g. "2026-11-20T00:00:00Z", Unix ms, or "none" to turn it off',
 };
 
@@ -471,6 +503,7 @@ export function applyOverrides<T extends Partial<FreeConfig>>(config: T, overrid
     switch (RUNTIME_SETTINGS[key].kind) {
       case "usd":
       case "instant":
+      case "couponId":
         (next as unknown as Record<string, unknown>)[key] = value === null ? undefined : value;
         break;
       default:

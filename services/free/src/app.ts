@@ -99,9 +99,10 @@ import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "
 import { anthropicError, errorStatus, estimateInputTokens, toAnthropicMessage, toAnthropicStream, toChatRequest } from "./anthropic.js";
 import { DAY_MS, isoDay, weekEnd, weekStart, WEEK_MS } from "./week.js";
 import { planResetValues } from "./plan-reset.js";
-import { FREE_ENDED_CODE, FREE_ENDED_MESSAGE, freeEnded, limitRefusal, meterFor, warningEmailValues, withNotices } from "./plan-limits.js";
+import { FREE_ENDED_CODE, FREE_ENDED_MESSAGE, freeEnded, freeEndedFor, limitRefusal, meterFor, warningEmailValues, withNotices } from "./plan-limits.js";
 import { PLAN_METER_MODELS, afterMeterFull, anthropicModelFor, bonusProjection, dueWarning, planRoute, tokenMeter, type PlanServe } from "./plan-route.js";
 import { bonusAccountView, planCatalog, planLimitsView, planUsageView } from "./plan-usage.js";
+import { isPlanId, PLANS, promoPrice, promoView } from "./plan-prices.js";
 import { bonusBlock } from "./gpt6-bonus.js";
 import type { PlanState } from "./account-object.js";
 import { allocateIfDue, allocatedLimits, anthropicSessionHint, limitedLevel, rescue, sessionKeyOf, stageOf, stepOf, usedShare, type AllocatorRun } from "./allocator.js";
@@ -2668,7 +2669,14 @@ export async function grantLaunchBonus(c: Ctx, githubId: number): Promise<boolea
 async function plansPublic(c: Ctx): Promise<Response> {
   const cors = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET", "cache-control": "public, max-age=60" };
   if (c.request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
-  return json(await planCatalogFor(c), 200, cors);
+  const [catalog, gate] = await Promise.all([planCatalogFor(c), runtime(c)]);
+  // The launch offer, as /web/plans has it: `promo`, and each plan's first-month price while it runs.
+  const promo = promoView(gate.config, c.now());
+  const plans = catalog.plans.map((plan) => {
+    const price = isPlanId(plan.id) ? PLANS[plan.id].priceUsd : undefined;
+    return { ...plan, priceUsd: price ?? null, promoPriceUsd: promo.active && price !== undefined && promo.percentOff !== null ? promoPrice(price, promo.percentOff) : null };
+  });
+  return json({ ...catalog, plans, promo }, 200, cors);
 }
 
 /** GET /v1/usage: the caller's plan usage this week (a sign-in, a server key or a tool key). */
@@ -3627,11 +3635,12 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   const guarded = await apiGuard(c, identity, headers);
   if (guarded) return guarded;
   // Paid plans (plans.ts): the tier, the fallback setting and this week's meters. Admins skip
-  // plans; a non-paying account past `freeEndsAt` is refused (the end of free tokens).
+  // plans; a non-paying account past `freeEndsAt` is refused (the end of free tokens), unless
+  // it is on the `freeForever` list (its free allowance and level go on as before).
   const planState: PlanState | undefined = isAdmin ? undefined : await person.planState(c.now(), PLAN_METER_MODELS);
   const paidPlan = gate.config.paidPlans && planState && planState.tier !== "none" ? planState.tier : undefined;
   // Accounts made by the paid sign-up (part A's account numbers, from 2^50) never had free tokens.
-  if (planState && planState.tier === "none" && (freeEnded(gate.config.freeEndsAt, c.now()) || identity.githubId >= PAID_ACCOUNTS_FROM)) {
+  if (planState && planState.tier === "none" && (freeEndedFor(gate.config, identity.githubId, c.now()) || identity.githubId >= PAID_ACCOUNTS_FROM)) {
     return apiError(402, FREE_ENDED_CODE, FREE_ENDED_MESSAGE, { reason: "free_ended", plansUrl: "https://dl.new" }, await headers());
   }
   if (tool && identity.keyId) {
@@ -5218,6 +5227,8 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
         trial: trialView(allowance),
         level: person.level,
         levelReason: person.level_reason,
+        // On the `freeForever` list: free tokens never end for them (moderation, caps and blocks still apply).
+        freeForever: config.freeForever.includes(person.github_id),
         signals: {
           accountAgeDays: person.account_age_days,
           publicRepos: person.public_repos,
@@ -5272,6 +5283,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       return json({
         ...detail,
         level: own.level,
+        freeForever: config.freeForever.includes(githubId),
         access: own.limits.trialTokens !== undefined ? "trial" : "grandfathered",
         trial: trialView(allowance),
         allowance: allowanceView(allowance),

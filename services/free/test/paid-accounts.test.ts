@@ -71,11 +71,11 @@ describe("plans and Checkout", () => {
     assert.equal(form.get("metadata[product]"), "plan");
     assert.equal(form.get("subscription_data[metadata][plan]"), "plus");
     assert.equal(form.get("client_reference_id"), null);
-    // The EU/UK withdrawal waiver and the refund rule, as Stripe's required terms consent.
+    // The EU/UK withdrawal waiver, as Stripe's required terms consent (no refund promise).
     assert.equal(form.get("consent_collection[terms_of_service]"), "required");
     assert.equal(
       form.get("custom_text[terms_of_service_acceptance][message]"),
-      "I want my dl.new plan to start right away and understand I lose my 14-day right to cancel once it starts. Refunds: within 24 hours of the first payment, if the weekly limit hasn't been reached. [Terms](https://dl.new/terms).",
+      "I want my dl.new plan to start right away and understand I lose my 14-day right to withdraw once it starts. [Terms](https://dl.new/terms).",
     );
     assert.equal(await errorCode(await service.request("POST", "/web/checkout/plan", { body: { plan: "pro" } })), "invalid_plan");
     const off = await createService({ ...PAID_VARS, STRIPE_PRICE_PLUS: "" });
@@ -184,9 +184,9 @@ describe("the account step: email", () => {
     assert.deepEqual(body.account.identities, [{ kind: "email", email: "ana@example.com" }]);
     assert.equal(body.account.plan.id, "starter");
     assert.equal(body.account.plan.status, "active");
-    const refundEnds = Date.parse(body.account.plan.refundableUntil);
-    assert.ok(refundEnds > service.clock.now && refundEnds <= service.clock.now + 24 * 3_600_000, "24 hours from the first payment");
-    assert.equal(body.account.plan.refundPolicy, "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit.");
+    // No refund promise on the account page (the owner refunds by hand).
+    assert.equal(body.account.plan.refundableUntil, undefined);
+    assert.equal(body.account.plan.refundPolicy, undefined);
     assert.deepEqual(body.account.upgrade.map((option: any) => option.plan), ["plus", "max"]);
     // The account object is the account's own, named after its number.
     assert.equal(await (service.namespaces.ACCOUNT as any).getByName(`acct:${accountNumber}`).paidPlan(service.clock.now), "starter");
