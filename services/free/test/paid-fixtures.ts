@@ -53,6 +53,8 @@ export class FakeStripe {
   subscriptions = new Map<string, FakeSubscription>();
   customers = new Map<string, Record<string, string>>();
   refunds: URLSearchParams[] = [];
+  /** Set to refuse Checkout's terms consent the way Stripe does without a terms URL in the public details. */
+  refuseTermsConsent = false;
   /** Set to make the next subscription update fail as a declined card. */
   declineNext = false;
   #n = 0;
@@ -67,6 +69,12 @@ export class FakeStripe {
 
   handle(path: string, form: URLSearchParams, method: string): Response {
     if (method === "POST" && path === "/v1/checkout/sessions") {
+      if (this.refuseTermsConsent && form.get("consent_collection[terms_of_service]")) {
+        return Response.json(
+          { error: { type: "invalid_request_error", message: "You cannot collect consent to your terms of service unless a URL is set in the Stripe Dashboard. Update your public business details at https://dashboard.stripe.com/settings/public to add a terms of service URL." } },
+          { status: 400 },
+        );
+      }
       const id = `cs_test_${String(++this.#n).padStart(12, "a")}`;
       const metadata: Record<string, string> = {};
       for (const [key, value] of form) {
@@ -159,6 +167,8 @@ export class FakeStripe {
       customer_details: session.email ? { email: session.email } : null,
       amount_total: session.amount_total,
       created: session.created,
+      // Checkout can't complete without the checkbox when it was required.
+      consent: session.status === "complete" && session.form.get("consent_collection[terms_of_service]") === "required" ? { terms_of_service: "accepted", promotions: null } : null,
     };
   }
 

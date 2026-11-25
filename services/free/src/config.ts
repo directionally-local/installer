@@ -13,6 +13,7 @@ import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type
 import { PLAN_DEFAULTS, PLAN_SETTING_ENV, type PlanSettingsConfig } from "./plans.js";
 import { GPT6_BONUS_DEFAULTS, type Gpt6BonusSettingsConfig } from "./gpt6-bonus.js";
 import { FREE_ENDS_AT } from "./plan-limits.js";
+import { REFUND_WINDOW_HOURS } from "./plan-prices.js";
 import { EMAIL_BUDGET_DEFAULTS, type EmailBudgetSettingsConfig } from "./email-budget.js";
 
 export class ConfigError extends Error {}
@@ -20,6 +21,13 @@ export class ConfigError extends Error {}
 export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, Gpt6BonusSettingsConfig, EmailBudgetSettingsConfig {
   /** Paid plans on (PAID_PLANS, default off until launch; also a runtime setting): see plans.ts. */
   paidPlans: boolean;
+  /**
+   * dl.new's refund window (REFUND_WINDOW_HOURS, default 24; also a runtime setting): a full refund
+   * of the first payment within this many hours of it, if no plan model's weekly limit is reached.
+   */
+  refundWindowHours: number;
+  /** The plan Checkout requires the terms consent with the withdrawal waiver (CHECKOUT_TERMS_CONSENT, default on; also a runtime setting). */
+  checkoutTermsConsent: boolean;
   /**
    * When free tokens end for non-paying accounts (FREE_ENDS_AT, default Tue 8 Dec 2026 00:00 UTC;
    * Unix ms here; also a runtime setting): after it their requests get 402 plan_required. Paying
@@ -715,6 +723,8 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     userEmailsTransactionalReserve: whole(env.USER_EMAILS_TRANSACTIONAL_RESERVE, EMAIL_BUDGET_DEFAULTS.userEmailsTransactionalReserve, "USER_EMAILS_TRANSACTIONAL_RESERVE"),
     emailCodesDailyMax: whole(env.EMAIL_CODES_DAILY_MAX, EMAIL_BUDGET_DEFAULTS.emailCodesDailyMax, "EMAIL_CODES_DAILY_MAX"),
     paidPlans: flag(env.PAID_PLANS, false, "PAID_PLANS"),
+    refundWindowHours: whole(env.REFUND_WINDOW_HOURS, REFUND_WINDOW_HOURS, "REFUND_WINDOW_HOURS"),
+    checkoutTermsConsent: flag(env.CHECKOUT_TERMS_CONSENT, true, "CHECKOUT_TERMS_CONSENT"),
     freeEndsAt: env.FREE_ENDS_AT === undefined ? FREE_ENDS_AT : instant(env.FREE_ENDS_AT, "FREE_ENDS_AT"),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),

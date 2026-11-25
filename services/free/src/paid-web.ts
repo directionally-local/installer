@@ -44,16 +44,18 @@ import type { BillingState, ServerKeyView } from "./account-object.js";
 import type { Alert } from "./alerts.js";
 import { emailBlocked, emailDomain, isDisposableDomain, normalizeEmail, plausibleEmail } from "./email-guard.js";
 import { apiError, json } from "./errors.js";
-import { CLAIM_DAYS, isPlanId, isUpgrade, PLAN_IDS, PLANS, planDescription, planOfPrice, plansView, REFUND_DAYS, type PlanId } from "./plan-prices.js";
+import { CLAIM_DAYS, isPlanId, isUpgrade, PLAN_IDS, PLANS, planDescription, planOfPrice, plansView, checkoutConsentMessage, REFUND_BLOCK_TEXT, refundBlock, refundPolicy, refundWindowText, type PlanId } from "./plan-prices.js";
 import { approxTokens, planLimits, PLAN_MIX_LABEL, type PlanSettingsConfig } from "./plans.js";
 import { BONUS_LINE } from "./gpt6-bonus.js";
 import { emailBudgetOf } from "./email-budget.js";
 import { claimable, type PaidCheckoutRow, type UsageRow } from "./paid-store.js";
 import { CLI_LOGIN_INTERVAL_S, EMAIL_CODE_RESEND_MS, EMAIL_CODE_TTL_MS } from "./paid-auth.js";
 import { normalizeUserCode } from "./codes.js";
-import { CHECKOUT_SESSION_ID, createPlanCheckout, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, type StripeEvent } from "./stripe.js";
+import { CHECKOUT_SESSION_ID, createPlanCheckout, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, isTermsConsentRefusal, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, termsAccepted, type StripeEvent } from "./stripe.js";
 import { sendPlainEmail } from "./user-email-send.js";
 import { DAY_MS, weekEnd, weekStart, WEEK_MS } from "./week.js";
+
+const HOUR_MS = 3_600_000;
 import { METER_KEEP_DAYS } from "./plan-meter.js";
 
 /** A dl.new web session lives this long (the old GitHub one: an hour). */
@@ -182,7 +184,8 @@ function billingUnavailable(): Response {
 
 /** GET /web/plans: the plan cards (part B's per-model limits, from the runtime settings). */
 async function webPlans(c: Ctx): Promise<Response> {
-  return json(plansView({ catalog: await planCatalogFor(c), available: billingOn(c) && PLAN_IDS.every((plan) => planPrice(c, plan) !== undefined) }));
+  const [catalog, { config }] = await Promise.all([planCatalogFor(c), runtime(c)]);
+  return json(plansView({ catalog, available: billingOn(c) && PLAN_IDS.every((plan) => planPrice(c, plan) !== undefined), refundWindowHours: config.refundWindowHours }));
 }
 
 /** A plan's line ("DeepSeek V4.1 Flash ~62M/week (95.5% caching applied). ...") at the live settings. */
@@ -200,16 +203,35 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
   if (!billingOn(c) || !price) return billingUnavailable();
   const site = webOrigin(c);
   const campaign = typeof body.campaign === "string" && /^[\x20-\x7e]{1,200}$/.test(body.campaign) ? body.campaign : undefined;
-  try {
-    const session = await createPlanCheckout(c.fetch, {
+  const plan = body.plan;
+  const { config } = await runtime(c);
+  const start = (termsConsent: string | undefined) =>
+    createPlanCheckout(c.fetch, {
       secretKey: c.config.stripe.secretKey!,
-      plan: body.plan,
+      plan,
       price,
       successUrl: `${site}/account?session_id={CHECKOUT_SESSION_ID}`,
-      cancelUrl: `${site}/?plan=${body.plan}`,
+      cancelUrl: `${site}/?plan=${plan}`,
       ...(campaign ? { campaign } : {}),
+      ...(termsConsent ? { termsConsent } : {}),
       idempotencyKey: crypto.randomUUID(),
     });
+  try {
+    let session: { id: string; url: string };
+    if (!config.checkoutTermsConsent) session = await start(undefined);
+    else {
+      try {
+        session = await start(checkoutConsentMessage(config.refundWindowHours, `${site}/terms`));
+      } catch (error) {
+        if (!isTermsConsentRefusal(error)) throw error;
+        // No terms URL in the Stripe account's public details: never fail the checkout for it.
+        // Consent collection turns off (the setting, logged) until the owner sets the URL and turns it back on.
+        console.warn("paid: Stripe refused the terms consent at Checkout; checkoutTermsConsent turned off", error instanceof Error ? error.message : "");
+        await directory(c).updateOverrides([{ key: "checkoutTermsConsent", value: false }], { githubId: 0, login: "auto: Stripe refused terms consent (set a terms URL in Stripe's public details)", now: c.now() });
+        await alert(c, [{ subject: "dl.new: Checkout terms consent turned off", text: `Stripe refused the terms-of-service consent on the plan Checkout: ${error instanceof Error ? error.message : "error"}\nSet a terms URL in the Stripe Dashboard (Settings > Public details), then POST /admin/config {"checkoutTermsConsent": true}.` }]);
+        session = await start(undefined);
+      }
+    }
     return json({ url: session.url, sessionId: session.id });
   } catch (error) {
     if (error instanceof StripeError) return apiError(502, "billing_error", "Stripe couldn't start the checkout. Try again in a minute.");
@@ -228,6 +250,8 @@ interface VerifiedCheckout {
   amountCents: number;
   paidAt: number;
   claimedBy: number | null;
+  /** When the terms with the withdrawal waiver were accepted (the payment's time), or null without that consent. */
+  termsAcceptedAt: number | null;
 }
 
 /** Reads a Checkout Session from Stripe and checks it is a paid dl.new plan; else the error response. */
@@ -262,6 +286,7 @@ async function verifyCheckout(c: Ctx, sessionId: unknown): Promise<VerifiedCheck
     amountCents: typeof session.amount_total === "number" ? session.amount_total : 0,
     paidAt,
     claimedBy: row?.claimed_by ?? null,
+    termsAcceptedAt: termsAccepted(session) ? paidAt : null,
   };
 }
 
@@ -301,7 +326,7 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
     return apiError(409, "already_subscribed", "This account already has a plan. Manage it at dl.new/billing; write to contact@directionallylocal.com about the second payment and we'll refund it.");
   }
   const dir = directory(c);
-  await dir.recordPaidCheckout({ sessionId: checkout.sessionId, plan: checkout.plan, customerId: checkout.customerId, subscriptionId: checkout.subscriptionId, email: checkout.email, amountCents: checkout.amountCents, paidAt: checkout.paidAt });
+  await dir.recordPaidCheckout({ sessionId: checkout.sessionId, plan: checkout.plan, customerId: checkout.customerId, subscriptionId: checkout.subscriptionId, email: checkout.email, amountCents: checkout.amountCents, paidAt: checkout.paidAt, termsAcceptedAt: checkout.termsAcceptedAt });
   const claimed = await dir.claimPaidCheckout(checkout.sessionId, accountNumber, c.now());
   if (claimed !== "claimed") return apiError(409, "checkout_claimed", "This payment is already linked to another dl.new account. Sign in with that one.");
   if (checkout.customerId) {
@@ -360,9 +385,10 @@ async function sendPlanWelcome(c: Ctx, accountNumber: number, plan: PlanId, sess
   await userEmail(c, config, "welcome_paid", accountNumber, sessionId, { planWelcome: welcomeValues(plan, config, granted) });
 }
 
-/** welcome_paid's {plan}, {limits} and {bonus}. */
-export function welcomeValues(plan: PlanId, config: PlanSettingsConfig & { cachedTokenWeight: number }, bonus: boolean) {
+/** welcome_paid's {plan}, {limits}, {bonus} and {refund}. */
+export function welcomeValues(plan: PlanId, config: PlanSettingsConfig & { cachedTokenWeight: number; refundWindowHours: number }, bonus: boolean) {
   return {
+    refund: refundPolicy(config.refundWindowHours),
     plan: PLANS[plan].name,
     limits: planLimits(plan, config)
       .map((limit) => `- ${limit.name} ${approxTokens(limit.realTokens)}/week (${PLAN_MIX_LABEL})`)
@@ -580,10 +606,11 @@ async function signOut(c: Ctx): Promise<Response> {
 
 // ─── The account ────────────────────────────────────────────────────────────
 
-function planView(billing: BillingState, now: number, config: PlanSettingsConfig & { cachedTokenWeight: number }) {
+/** The account's plan; `limitReached`: a plan model is at 100% this week (no refund then). */
+function planView(billing: BillingState, now: number, config: PlanSettingsConfig & { cachedTokenWeight: number; refundWindowHours: number }, limitReached = false) {
   if (billing.tier === null || billing.subscriptionId === null || billing.proState === "none") return null;
   const plan = PLANS[billing.tier];
-  const refundEnds = billing.firstPaidAt === null ? null : billing.firstPaidAt + REFUND_DAYS * DAY_MS;
+  const refundEnds = billing.firstPaidAt === null ? null : billing.firstPaidAt + config.refundWindowHours * HOUR_MS;
   return {
     id: plan.id,
     name: plan.name,
@@ -593,7 +620,8 @@ function planView(billing: BillingState, now: number, config: PlanSettingsConfig
     periodEnd: billing.periodEnd === null ? null : new Date(billing.periodEnd).toISOString(),
     cancelAtPeriodEnd: billing.cancelAtPeriodEnd,
     paymentFailed: billing.paymentFailed,
-    refundableUntil: refundEnds !== null && billing.refundedAt === null && now < refundEnds && billing.proState !== "canceled" ? new Date(refundEnds).toISOString() : null,
+    refundableUntil: refundEnds !== null && billing.refundedAt === null && !limitReached && now < refundEnds && billing.proState !== "canceled" ? new Date(refundEnds).toISOString() : null,
+    refundPolicy: refundPolicy(config.refundWindowHours),
   };
 }
 
@@ -609,7 +637,8 @@ async function accountView(c: Ctx, accountNumber: number) {
     runtime(c),
     planAccountFor(c, accountNumber),
   ]);
-  const current = planView(billing, c.now(), gate.config);
+  const limitReached = (bars.limits ?? []).some((limit) => limit.countedTokensPerWeek > 0 && limit.state === "used_up");
+  const current = planView(billing, c.now(), gate.config, limitReached);
   const tier = current && current.status !== "canceled" ? billing.tier : null;
   return {
     accountId: accountIdOf(accountNumber),
@@ -787,17 +816,42 @@ async function refundRequest(c: Ctx): Promise<Response> {
   const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 1000) || null : null;
   const billing = await account(c, caller.account).billing();
   if (!billing.subscriptionId || billing.tier === null) return apiError(404, "no_subscription", "This account has no plan to refund.");
-  const deadline = billing.firstPaidAt === null ? null : billing.firstPaidAt + REFUND_DAYS * DAY_MS;
-  const eligible = deadline !== null && c.now() <= deadline && billing.refundedAt === null;
-  await directory(c).recordRefundRequest({ account: caller.account, reason, eligible, now: c.now() });
+  const { config } = await runtime(c);
+  const hours = config.refundWindowHours;
+  const deadline = billing.firstPaidAt === null ? null : billing.firstPaidAt + hours * HOUR_MS;
+  const reached = await limitsReached(c, caller.account, billing.tier, config);
+  const block = billing.refundedAt !== null ? "already_refunded" : refundBlock({ firstPaidAt: billing.firstPaidAt, now: c.now(), hours, limitsReached: reached });
+  const eligible = block === undefined;
+  const notEligible = block === undefined ? null : block === "already_refunded" ? "already refunded" : REFUND_BLOCK_TEXT[block];
+  await directory(c).recordRefundRequest({ account: caller.account, reason, eligible, notEligible, now: c.now() });
   const id = accountIdOf(caller.account);
+  const why = block === "limit_reached" ? `weekly limit reached (${reached.join(", ")})` : notEligible;
   await alert(c, [
     {
-      subject: `dl.new: refund request from ${caller.email ?? id}${eligible ? "" : " (past 7 days)"}`,
-      text: `dl.new: ${caller.email ?? id} (${id}, ${PLANS[billing.tier].name}) asked for a refund.${reason ? `\nReason: ${reason}` : ""}\n${eligible ? "Within the 7 days: refund with POST /admin/paid/refund {\"accountId\": \"" + id + "\"}." : "Past the 7 days: refund only with {\"force\": true}."}`,
+      subject: `dl.new: refund request from ${caller.email ?? id}${eligible ? "" : ` (not eligible: ${notEligible})`}`,
+      text: `dl.new: ${caller.email ?? id} (${id}, ${PLANS[billing.tier].name}) asked for a refund.${reason ? `\nReason: ${reason}` : ""}\n${eligible ? `Eligible (within ${refundWindowText(hours)}, no weekly limit reached): refund with POST /admin/paid/refund {"accountId": "${id}"}.` : `Not eligible: ${why}. Refund only with {"force": true}.`}`,
     },
   ]);
-  return json({ requested: true, eligible, deadline: deadline === null ? null : new Date(deadline).toISOString() });
+  return json({
+    requested: true,
+    eligible,
+    /** Null when eligible; else "refund_not_eligible: weekly limit reached" and the like. */
+    notEligible: notEligible === null ? null : `refund_not_eligible: ${notEligible}`,
+    ...(block === "limit_reached" ? { limitsReached: reached } : {}),
+    deadline: deadline === null ? null : new Date(deadline).toISOString(),
+    policy: refundPolicy(hours),
+  });
+}
+
+/**
+ * The names of the plan's models whose weekly meter is at 100% this week (counted tokens at or
+ * over the limit, as plan-limits.ts refuses them): any one makes the first payment non-refundable.
+ */
+async function limitsReached(c: Ctx, accountNumber: number, plan: PlanId, config: PlanSettingsConfig & { cachedTokenWeight: number }): Promise<string[]> {
+  const meters = await account(c, accountNumber).meters(c.now());
+  return planLimits(plan, config)
+    .filter((limit) => limit.countedTokens > 0 && (meters.models.find((row) => row.model === limit.model)?.counted ?? 0) >= limit.countedTokens)
+    .map((limit) => limit.name);
 }
 
 // ─── cli-login ──────────────────────────────────────────────────────────────
@@ -1025,6 +1079,7 @@ function checkoutAdminView(row: PaidCheckoutRow, now: number) {
     claimedBy: row.claimed_by === null ? null : accountIdOf(row.claimed_by),
     claimedAt: row.claimed_at === null ? null : new Date(row.claimed_at).toISOString(),
     claimEmailSentAt: row.claim_email_sent_at === null ? null : new Date(row.claim_email_sent_at).toISOString(),
+    termsAcceptedAt: row.terms_accepted_at === null ? null : new Date(row.terms_accepted_at).toISOString(),
     expired: row.claimed_by === null && !claimable(row, now, CLAIM_DAYS),
   };
 }
@@ -1044,6 +1099,7 @@ export async function paidAdmin(c: Ctx, rest: string, method: string): Promise<R
         reason: row.reason,
         at: new Date(row.at).toISOString(),
         eligible: row.eligible === 1,
+        notEligible: row.not_eligible === null ? null : `refund_not_eligible: ${row.not_eligible}`,
         refundedAt: row.refunded_at === null ? null : new Date(row.refunded_at).toISOString(),
       })),
     });
@@ -1072,8 +1128,18 @@ async function adminRefund(c: Ctx): Promise<Response> {
   const subscriptionId = billing?.subscriptionId ?? row?.subscription_id ?? null;
   if (!subscriptionId) return apiError(404, "no_subscription", "No subscription to refund.");
   const paidAt = billing?.firstPaidAt ?? row?.paid_at ?? (accountNumber !== undefined ? (await dir.firstCheckoutOf(accountNumber))?.paid_at : undefined) ?? null;
-  if (!force && (paidAt === null || c.now() > paidAt + REFUND_DAYS * DAY_MS)) {
-    return apiError(409, "refund_window_passed", `The first payment is more than ${REFUND_DAYS} days old. Send {"force": true} to refund anyway.`);
+  if (!force) {
+    const { config } = await runtime(c);
+    const hours = config.refundWindowHours;
+    const tier = billing?.tier ?? (row && isPlanId(row.plan) ? row.plan : null);
+    const reached = accountNumber !== undefined && tier !== null ? await limitsReached(c, accountNumber, tier, config) : [];
+    const block = refundBlock({ firstPaidAt: paidAt, now: c.now(), hours, limitsReached: reached });
+    if (block === "window_passed") {
+      return apiError(409, "refund_window_passed", `The first payment is more than ${refundWindowText(hours)} old. Send {"force": true} to refund anyway.`, { reason: REFUND_BLOCK_TEXT.window_passed });
+    }
+    if (block === "limit_reached") {
+      return apiError(409, "refund_not_eligible", `Not eligible: weekly limit reached (${reached.join(", ")}). Send {"force": true} to refund anyway.`, { reason: REFUND_BLOCK_TEXT.limit_reached, limitsReached: reached });
+    }
   }
   try {
     let invoiceId = billing?.firstInvoiceId ?? null;
@@ -1134,7 +1200,7 @@ async function sendClaimEmail(c: Ctx, row: PaidCheckoutRow): Promise<void> {
     link,
     "",
     `The link works for ${CLAIM_DAYS} days. Stripe sends your receipt separately.`,
-    `Not for you? Reply within ${REFUND_DAYS} days of your first payment for a full refund.`,
+    `Not for you? ${refundPolicy(config.refundWindowHours)} Reply to this email.`,
     "",
     "dl.new, by Directionally Local",
   ].join("\n");
@@ -1167,6 +1233,7 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
         email: typeof object.customer_details?.email === "string" ? object.customer_details.email : null,
         amountCents: typeof object.amount_total === "number" ? object.amount_total : 0,
         paidAt: event.created * 1000,
+        termsAcceptedAt: termsAccepted(object) ? event.created * 1000 : null,
       });
       if (row.claimed_by !== null) return "plan_claimed";
       await sendClaimEmail(c, row);

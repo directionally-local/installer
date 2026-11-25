@@ -296,7 +296,11 @@ export async function stripeRequest(
  * codes, Stripe Tax as dl Pro has it, and the plan in the session's and the subscription's metadata
  * (`product: "plan"`), so the webhooks know it. The account is linked when the session is claimed.
  */
-export function planCheckoutParams(input: { plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string }): Record<string, unknown> {
+/**
+ * `termsConsent`: the checkbox text; Checkout then requires the terms-of-service consent (Stripe
+ * needs a terms URL in the account's public details, else it refuses: isTermsConsentRefusal).
+ */
+export function planCheckoutParams(input: { plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string }): Record<string, unknown> {
   const metadata = { product: "plan", plan: input.plan, ...(input.campaign ? { campaign: input.campaign } : {}) };
   return {
     mode: "subscription",
@@ -308,10 +312,23 @@ export function planCheckoutParams(input: { plan: string; price: string; success
     billing_address_collection: "auto",
     metadata,
     subscription_data: { metadata },
+    ...(input.termsConsent
+      ? { consent_collection: { terms_of_service: "required" }, custom_text: { terms_of_service_acceptance: { message: input.termsConsent } } }
+      : {}),
   };
 }
 
-export async function createPlanCheckout(fetcher: Fetch, input: { secretKey: string; plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; idempotencyKey: string }): Promise<{ id: string; url: string }> {
+/** Stripe refused the terms-of-service consent (no terms URL in the account's public details). */
+export function isTermsConsentRefusal(error: unknown): boolean {
+  return error instanceof StripeError && error.status === 400 && /terms[ _]of[ _]service|consent_collection/i.test(error.message);
+}
+
+/** Whether a completed Checkout Session carries the customer's terms-of-service consent. */
+export function termsAccepted(session: Record<string, any>): boolean {
+  return session.consent?.terms_of_service === "accepted";
+}
+
+export async function createPlanCheckout(fetcher: Fetch, input: { secretKey: string; plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; idempotencyKey: string }): Promise<{ id: string; url: string }> {
   const session = await stripeRequest(fetcher, input.secretKey, "POST", "/v1/checkout/sessions", planCheckoutParams(input), input.idempotencyKey);
   if (typeof session.url !== "string" || typeof session.id !== "string") throw new StripeError("Stripe didn't return a Checkout URL.", 502);
   return { id: session.id, url: session.url };

@@ -1101,7 +1101,12 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   // The client's session id (any coding agent that sends one), for the token allocator's session counts.
   ["requests", "session_key", "TEXT"],
   // Which coding agent a use description came from (UseClient); NULL for rows stored before it was kept.
-  ["use_descriptions", "client", "TEXT"],  // Error events per person per day (the metrics' errorEvents), so they outlive the raw events.
+  ["use_descriptions", "client", "TEXT"],
+  // Why a dl.new refund request wasn't eligible (paid-web.ts refundRequest); NULL when it was.
+  ["refund_requests", "not_eligible", "TEXT"],
+  // When a dl.new plan's customer accepted the terms with the withdrawal waiver at Checkout.
+  ["paid_checkouts", "terms_accepted_at", "INTEGER"],
+  // Error events per person per day (the metrics' errorEvents), so they outlive the raw events.
   ["daily_activity", "error_events", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
@@ -2995,7 +3000,7 @@ export class DirectoryObject extends DurableObject {
     });
   }
 
-  async recordPaidCheckout(input: { sessionId: string; plan: PlanId; customerId: string | null; subscriptionId: string | null; email: string | null; amountCents: number; paidAt: number }): Promise<PaidCheckoutRow> {
+  async recordPaidCheckout(input: { sessionId: string; plan: PlanId; customerId: string | null; subscriptionId: string | null; email: string | null; amountCents: number; paidAt: number; termsAcceptedAt?: number | null }): Promise<PaidCheckoutRow> {
     return recordPaidCheckout(this.ctx.storage.sql, input);
   }
 
@@ -3023,7 +3028,7 @@ export class DirectoryObject extends DurableObject {
     return firstCheckoutOf(this.ctx.storage.sql, account);
   }
 
-  async recordRefundRequest(input: { account: number; reason: string | null; eligible: boolean; now: number }): Promise<void> {
+  async recordRefundRequest(input: { account: number; reason: string | null; eligible: boolean; notEligible?: string | null; now: number }): Promise<void> {
     recordRefundRequest(this.ctx.storage.sql, input);
   }
 

@@ -80,6 +80,9 @@ describe("plan webhooks", () => {
     assert.equal(claimEmails[0]!.to, "late@example.com");
     assert.match(String(claimEmails[0]!.text), new RegExp(`https://dl\\.new/account\\?session_id=${session.id}`));
     assert.match(String(claimEmails[0]!.text), /Kimi K3\.1 ~1\.5M\/week \(95\.5% caching applied\)/);
+    assert.ok(String(claimEmails[0]!.text).includes("Not for you? Full refund within 24 hours of your first payment, if you haven't reached your weekly limit. Reply to this email."));
+    // Claiming an unclaimed payment still has its own 7 days.
+    assert.match(String(claimEmails[0]!.text), /The link works for 7 days\./);
     // A retried delivery under another event id doesn't email again.
     await webhook(service, "checkout.session.completed", object, "evt_cs_2");
     assert.equal(service.calls.userEmail.filter((message) => message.subject === "Finish setting up dl.new").length, 1);
@@ -172,12 +175,15 @@ describe("billing", () => {
     assert.equal(call.form.get("return_url"), "https://dl.new/billing");
   });
 
-  it("records a refund request, and the admin refunds the first payment and cancels within 7 days", async () => {
+  it("records a refund request, and the admin refunds the first payment and cancels within 24 hours", async () => {
     const { service, stripe } = await world({ ALERT_EMAIL_TO: "owner@example.com" });
     const { session, account, token, signedIn } = await paidAccount(service, stripe);
     const request = await service.request("POST", "/web/billing/refund-request", { token, body: { reason: "not for me" } });
     assert.equal(request.status, 200);
-    assert.equal(((await request.json()) as any).eligible, true);
+    const answer = (await request.json()) as any;
+    assert.equal(answer.eligible, true);
+    assert.equal(answer.notEligible, null);
+    assert.equal(answer.policy, "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit.");
     assert.ok(service.calls.emails.some((message) => message.raw.includes("refund request")));
     const admin = await adminToken(service);
     const listed = (await (await service.request("GET", "/admin/paid/refund-requests", { token: admin })).json()) as any;
@@ -192,13 +198,58 @@ describe("billing", () => {
     assert.equal(((await (await service.request("GET", "/admin/paid/refund-requests", { token: admin })).json()) as any).requests[0].refundedAt !== null, true);
   });
 
-  it("refuses a refund after 7 days unless forced", async () => {
+  it("refuses a refund after 24 hours unless forced", async () => {
+    const { service, stripe } = await world();
+    const { signedIn, token } = await paidAccount(service, stripe);
+    service.clock.now += 23 * 3_600_000;
+    assert.equal(((await (await service.request("POST", "/web/billing/refund-request", { token, body: {} })).json()) as any).eligible, true, "still inside 24 hours");
+    service.clock.now += 2 * 3_600_000;
+    const late = (await (await service.request("POST", "/web/billing/refund-request", { token, body: {} })).json()) as any;
+    assert.equal(late.eligible, false);
+    assert.equal(late.notEligible, "refund_not_eligible: refund window passed");
+    const admin = await adminToken(service);
+    const refused = await service.request("POST", "/admin/paid/refund", { token: admin, body: { accountId: signedIn.account.accountId } });
+    assert.equal(refused.status, 409);
+    assert.match(((await refused.clone().json()) as any).error.message, /more than 24 hours old/);
+    assert.equal(await errorCode(refused), "refund_window_passed");
+    assert.equal((await service.request("POST", "/admin/paid/refund", { token: admin, body: { accountId: signedIn.account.accountId, force: true } })).status, 200);
+  });
+
+  it("takes the refund window from the runtime setting refundWindowHours", async () => {
     const { service, stripe } = await world();
     const { signedIn } = await paidAccount(service, stripe);
-    service.clock.now += 8 * 86_400_000;
+    assert.equal((await service.request("POST", "/admin/config", { token: await adminToken(service), body: { refundWindowHours: 72 } })).status, 200);
+    service.clock.now += 48 * 3_600_000;
     const admin = await adminToken(service);
-    assert.equal(await errorCode(await service.request("POST", "/admin/paid/refund", { token: admin, body: { accountId: signedIn.account.accountId } })), "refund_window_passed");
+    assert.equal((await service.request("POST", "/admin/paid/refund", { token: admin, body: { accountId: signedIn.account.accountId } })).status, 200);
+  });
+
+  it("refuses a refund once a plan model's weekly limit is reached, inside the 24 hours, unless forced", async () => {
+    // Starter's DeepSeek at 1,000 real tokens a week (64 counted): one request uses it up.
+    const { service, stripe } = await world({ PLAN_TOKENS_STARTER_DEEPSEEK: "1000" });
+    const { signedIn, token } = await paidAccount(service, stripe);
+    const key = ((await (await service.request("POST", "/web/api-keys", { token, body: { name: "cc" } })).json()) as any).key as string;
+    service.setLuminal(() => completion(luminalUsage(1000, 50, 0)));
+    assert.equal((await service.request("POST", "/v1/chat/completions", { token: key, headers: { "user-agent": "opencode/1.2" }, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } })).status, 200);
+    await service.settle();
+    const account = (await (await service.request("GET", "/web/account", { token })).json()) as any;
+    assert.equal(account.plan.refundableUntil, null, "no refund once the limit is reached");
+    const request = (await (await service.request("POST", "/web/billing/refund-request", { token, body: { reason: "used it all" } })).json()) as any;
+    assert.equal(request.eligible, false);
+    assert.equal(request.notEligible, "refund_not_eligible: weekly limit reached");
+    assert.deepEqual(request.limitsReached, ["DeepSeek V4.1 Flash"]);
+    const admin = await adminToken(service);
+    const listed = (await (await service.request("GET", "/admin/paid/refund-requests", { token: admin })).json()) as any;
+    assert.equal(listed.requests[0].eligible, false);
+    assert.equal(listed.requests[0].notEligible, "refund_not_eligible: weekly limit reached");
+    const refused = await service.request("POST", "/admin/paid/refund", { token: admin, body: { accountId: signedIn.account.accountId } });
+    assert.equal(refused.status, 409);
+    const error = ((await refused.json()) as any).error;
+    assert.equal(error.code, "refund_not_eligible");
+    assert.equal(error.reason, "weekly limit reached");
+    assert.equal(stripe.refunds.length, 0);
     assert.equal((await service.request("POST", "/admin/paid/refund", { token: admin, body: { accountId: signedIn.account.accountId, force: true } })).status, 200);
+    assert.equal(stripe.refunds.length, 1);
   });
 
   it("changes the contact email with a code to the new address, and Stripe's customer email with it", async () => {

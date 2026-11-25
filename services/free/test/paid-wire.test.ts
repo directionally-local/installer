@@ -108,6 +108,12 @@ describe("parts A and B: one plan", () => {
     assert.equal(body.plans[2].models.length, 2);
     assert.equal(body.caching.realToCounted, 0.0641);
     assert.equal(body.gpt6Bonus.enabled, false);
+    assert.equal(body.refundWindowHours, 24);
+    assert.equal(body.refundPolicy, "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit.");
+    // The window is a runtime setting; the policy text follows it.
+    assert.equal((await service.request("POST", "/admin/config", { token: owner, body: { refundWindowHours: 48 } })).status, 200);
+    const later = (await (await service.request("GET", "/web/plans", { headers: DL })).json()) as any;
+    assert.equal(later.refundPolicy, "Full refund within 48 hours of your first payment, if you haven't reached your weekly limit.");
   });
 
   it("gives a dl.new account with no active plan no free tokens (plan_required)", async () => {
@@ -187,7 +193,7 @@ describe("the welcome email", () => {
       "https://dl.new/keys",
       "https://dl.new/signin",
       "- DeepSeek V4.1 Flash ~150M/week (95.5% caching applied)\n- Kimi K3.1 ~1.5M/week (95.5% caching applied)\n",
-      "full refund within 7 days of your first payment: reply to this email.",
+      "Full refund within 24 hours of your first payment, if you haven't reached your weekly limit. reply to this email.",
       "\nsina\n",
     ]) {
       assert.ok(text.includes(part), `missing ${JSON.stringify(part)}`);
