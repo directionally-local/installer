@@ -53,7 +53,7 @@ No auth. What the plan cards show.
 
 - `tokensPerWeek` is **real** tokens at the assumed caching mix (what the page shows, always with
   `caching.label`); `countedTokensPerWeek` is what is enforced **[B]**. Both come from
-  `src/plans.ts` (one table, part B owns the numbers).
+  part B's `plans.ts` (`planLimits()`); until it lands, the spec's table in `plan-prices.ts`.
 - `available: false` while STRIPE_SECRET_KEY or a plan's price id is missing: show the cards but
   disable the button.
 
@@ -360,7 +360,10 @@ Unclaimed sessions get plan changes recorded on the session row and applied when
 - `AccountObject.settings()` → `{fallback: boolean}`.
 - `plan` (`"free" | "pro"`) keeps its meaning for the old code: any active subscription, tier or
   legacy, is `"pro"` there until part B switches limits to tiers.
-- Plan catalog: `src/plans.ts` (`PLANS`, per-model `tokensPerWeek`), edited by part B.
+- Prices, names and Price ids: `plan-prices.ts` (part A). Limits: part B's `plans.ts`; `/web/plans`,
+  Checkout's descriptions and the claim email switch to `planLimits()` once both are merged.
+- Fallback: `AccountObject.settings()` / `setSettings({fallback})` use meta `plan_fallback`, the
+  key part B's `setPlanFallback` writes.
 
 ## Open questions
 

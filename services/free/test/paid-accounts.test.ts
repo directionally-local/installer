@@ -4,7 +4,7 @@ import { ADMIN_ID, createService, errorCode, type Service } from "./harness.js";
 import { buy, DL, emailSignIn, FakeStripe, githubRoundTrip, lastCode, PAGE_STATE, PAID_VARS, PRICES, type SessionResponse } from "./paid-fixtures.js";
 import { accountIdOf, formatApiKey, isPaidAccountNumber, PAID_ACCOUNT_BASE, parseAccountId, parseApiKey } from "../src/accounts.js";
 import { isDisposableDomain } from "../src/email-guard.js";
-import { countedTokens, planDescription, PLANS, realToCounted } from "../src/plans.js";
+import { countedTokens, planDescription, PLANS, realToCounted } from "../src/plan-prices.js";
 
 /**
  * dl.new's paid launch, accounts (docs/web-api-paid.md): plans and Checkout before any account,

@@ -1,12 +1,12 @@
 /**
- * dl.new's paid plans (docs/web-api-paid.md): Starter $7, Plus $20, Max $60 a month, each with
- * fixed per-model weekly limits. This table is what the plan cards, Checkout's descriptions and
- * the account page show. The limits themselves are part B's (metering and enforcement): the
- * numbers here are the owner-approved spec's, in REAL tokens at the assumed caching mix, always
- * shown with CACHING_LABEL. What is enforced is counted tokens (`countedTokens`).
+ * dl.new's paid plans as sold (docs/web-api-paid.md): Starter $7, Plus $20, Max $60 a month, the
+ * names Stripe shows, the claim and refund windows, and the Price ids from config
+ * (STRIPE_PRICE_STARTER, STRIPE_PRICE_PLUS, STRIPE_PRICE_MAX; never created by the service).
  *
- * Stripe Prices are config (STRIPE_PRICE_STARTER, STRIPE_PRICE_PLUS, STRIPE_PRICE_MAX), never
- * created by the service.
+ * The per-model weekly limits are part B's (`plans.ts`, `planLimits()`): PLAN_MODELS below is the
+ * spec's table, used for the plan cards and Checkout's descriptions until that lands, then read
+ * from there instead. Numbers are REAL tokens at the assumed caching mix, always shown with
+ * CACHING_LABEL; what is enforced is counted tokens.
  */
 
 import { DEEPSEEK_MODEL } from "./models.js";
@@ -30,10 +30,7 @@ export interface PlanSpec {
 
 const KIMI_MODEL = "moonshotai/kimi-k3.1-pro";
 
-/**
- * The spec's per-model limits. Part B owns these numbers (and adds Max's other open models,
- * each with its own limit); keep the order: plan cards and Checkout list models as written.
- */
+/** The spec's per-model limits (part B's plans.ts is the source once merged); in card order. */
 export const PLANS: Record<PlanId, PlanSpec> = {
   starter: { id: "starter", name: "dl.new Starter", priceUsd: 7, models: [{ id: DEEPSEEK_MODEL, name: "DeepSeek V4.1 Flash", tokensPerWeek: 62_000_000 }] },
   plus: {

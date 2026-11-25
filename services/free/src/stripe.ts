@@ -264,7 +264,7 @@ export function proState(status: unknown): "active" | "past_due" | "canceled" {
   return "past_due";
 }
 
-// ─── dl.new's plans (plans.ts, docs/web-api-paid.md) ────────────────────────
+// ─── dl.new's plans (plan-prices.ts, docs/web-api-paid.md) ────────────────────────
 
 /** Any Stripe call: GET reads (query string), POST writes (form body), DELETE cancels. */
 export async function stripeRequest(

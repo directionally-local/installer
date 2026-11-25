@@ -766,7 +766,7 @@ Starter ($7), Plus ($20) and Max ($60) a month, bought on dl.new **before** any 
 The HTTP contract the site calls is [docs/web-api-paid.md](docs/web-api-paid.md); the code is
 `paid-web.ts` (routes), `paid-store.ts` (Directory: identities, paid Checkouts, refund requests),
 `paid-auth.ts` (AuthObject: email codes, dl.new's GitHub round trip, cli-login), `accounts.ts`
-(account numbers, `dl_sk_` keys) and `plans.ts` (the plan table).
+(account numbers, `dl_sk_` keys) and `plan-prices.ts` (the plans as sold; the limits are part B's `plans.ts`).
 
 - **Accounts.** The number the service keys everything on (`githubId` in the code) is now the
   account number: the GitHub id for accounts from before (unchanged, linked as a GitHub identity

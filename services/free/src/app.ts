@@ -294,7 +294,7 @@ export interface Env {
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_PRICE_TOPUP?: string;
-  /** dl.new's plans' monthly Prices (plans.ts), made in Stripe by the owner. */
+  /** dl.new's plans' monthly Prices (plan-prices.ts), made in Stripe by the owner. */
   STRIPE_PRICE_STARTER?: string;
   STRIPE_PRICE_PLUS?: string;
   STRIPE_PRICE_MAX?: string;

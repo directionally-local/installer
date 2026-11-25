@@ -443,7 +443,7 @@ export interface StripeConfig {
   secretKey: string | undefined;
   webhookSecret: string | undefined;
   priceTopup: string | undefined;
-  /** dl.new's plans (plans.ts): STRIPE_PRICE_STARTER, STRIPE_PRICE_PLUS, STRIPE_PRICE_MAX, monthly Prices made in Stripe by the owner. */
+  /** dl.new's plans (plan-prices.ts): STRIPE_PRICE_STARTER, STRIPE_PRICE_PLUS, STRIPE_PRICE_MAX, monthly Prices made in Stripe by the owner. */
   prices?: { starter?: string; plus?: string; max?: string };
   successUrl: string;
   cancelUrl: string;

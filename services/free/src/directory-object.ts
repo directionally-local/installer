@@ -58,7 +58,7 @@ import {
   type UsageRow,
 } from "./paid-store.js";
 import { paidLogin, type IdentityKind } from "./accounts.js";
-import type { PlanId } from "./plans.js";
+import type { PlanId } from "./plan-prices.js";
 
 /**
  * Who is in, and what they used. One object (`getByName("directory")`): admissions, invite

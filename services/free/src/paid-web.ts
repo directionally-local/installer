@@ -39,7 +39,7 @@ import type { BillingState, ServerKeyView } from "./account-object.js";
 import type { Alert } from "./alerts.js";
 import { emailBlocked, emailDomain, isDisposableDomain, normalizeEmail, plausibleEmail } from "./email-guard.js";
 import { apiError, json } from "./errors.js";
-import { CLAIM_DAYS, isPlanId, isUpgrade, PLAN_IDS, PLANS, planDescription, planOfPrice, plansView, REFUND_DAYS, type PlanId } from "./plans.js";
+import { CLAIM_DAYS, isPlanId, isUpgrade, PLAN_IDS, PLANS, planDescription, planOfPrice, plansView, REFUND_DAYS, type PlanId } from "./plan-prices.js";
 import { claimable, type PaidCheckoutRow, type UsageRow } from "./paid-store.js";
 import { CLI_LOGIN_INTERVAL_S, EMAIL_CODE_RESEND_MS, EMAIL_CODE_TTL_MS } from "./paid-auth.js";
 import { normalizeUserCode } from "./codes.js";

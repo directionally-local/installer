@@ -22,7 +22,7 @@ import {
 } from "./quota.js";
 import { weekEnd, weekStart } from "./week.js";
 import { formatApiKey } from "./accounts.js";
-import { isPlanId, type PlanId } from "./plans.js";
+import { isPlanId, type PlanId } from "./plan-prices.js";
 
 /**
  * One person's allowance: `getByName("gh:<githubId>")`. The single serialization point for
@@ -280,7 +280,7 @@ export interface BillingState {
   proState: "none" | "active" | "past_due" | "canceled";
   periodEnd: number | null;
   cancelAtPeriodEnd: boolean;
-  /** dl.new's plan (plans.ts) the subscription is on; null for dl Pro's inline price, or none. */
+  /** dl.new's plan (plan-prices.ts) the subscription is on; null for dl Pro's inline price, or none. */
   tier: PlanId | null;
   /** The last invoice failed and Stripe is retrying (a dl.new plan keeps working meanwhile). */
   paymentFailed: boolean;
@@ -788,13 +788,14 @@ export class AccountObject extends DurableObject<AccountEnv> {
   }
 
   async settings(): Promise<AccountSettings> {
-    const fallback = this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'fallback'").toArray()[0]?.value;
+    // `plan_fallback`: the same meta key part B's plan limits read ("off" = off).
+    const fallback = this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'plan_fallback'").toArray()[0]?.value;
     return { fallback: fallback !== "off" };
   }
 
   async setSettings(input: Partial<AccountSettings>): Promise<AccountSettings> {
     if (input.fallback !== undefined) {
-      this.ctx.storage.sql.exec("INSERT INTO meta (key, value) VALUES ('fallback', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", input.fallback ? "on" : "off");
+      this.ctx.storage.sql.exec("INSERT INTO meta (key, value) VALUES ('plan_fallback', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", input.fallback ? "on" : "off");
     }
     return this.settings();
   }

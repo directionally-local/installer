@@ -7,7 +7,7 @@
 import type { Sql } from "./dashboard-data.js";
 import { isPaidAccountNumber, randomAccountNumber, type IdentityKind } from "./accounts.js";
 import { normalizeEmail } from "./email-guard.js";
-import type { PlanId } from "./plans.js";
+import type { PlanId } from "./plan-prices.js";
 import { DAY_MS } from "./week.js";
 
 export const PAID_SCHEMA = [
