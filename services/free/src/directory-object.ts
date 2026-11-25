@@ -34,6 +34,31 @@ import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
 import { WELCOME_KINDS, type UserEmailKind } from "./user-emails.js";
 import { runwayAlert, runwayFindings } from "./runway.js";
 import type { BroadcastAudience } from "./broadcast.js";
+import {
+  claimPaidCheckout,
+  createPaidAccount,
+  emailIdentityTaken,
+  firstCheckoutOf,
+  identitiesOf,
+  linkIdentity,
+  listPaidCheckouts,
+  listRefundRequests,
+  liveRows,
+  markClaimEmail,
+  markRefunded,
+  PAID_SCHEMA,
+  paidCheckout,
+  paidCheckoutBySubscription,
+  recordPaidCheckout,
+  recordRefundRequest,
+  replaceEmailIdentity,
+  resolveIdentity,
+  usageRows,
+  type PaidCheckoutRow,
+  type UsageRow,
+} from "./paid-store.js";
+import { paidLogin, type IdentityKind } from "./accounts.js";
+import type { PlanId } from "./plans.js";
 
 /**
  * Who is in, and what they used. One object (`getByName("directory")`): admissions, invite
@@ -1100,7 +1125,7 @@ export class DirectoryObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA, ...EVENT_CODE_SCHEMA]) this.ctx.storage.sql.exec(statement);
+      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA, ...EVENT_CODE_SCHEMA, ...PAID_SCHEMA]) this.ctx.storage.sql.exec(statement);
       ensureAllocatorSchema(this.ctx.storage.sql);
       const added = new Set<string>();
       for (const [table, column, definition] of ADDED_COLUMNS) {
@@ -2822,6 +2847,99 @@ export class DirectoryObject extends DurableObject {
   // ─── Billing ─────────────────────────────────────────────────────────────
 
   /** Whether a Stripe event id was handled already (webhooks are delivered at least once). */
+  // ─── dl.new accounts (paid-store.ts, docs/web-api-paid.md) ──────────────────
+
+  /** The account an identity signs in to (a free-tier GitHub person is linked on first use). */
+  async resolveIdentity(kind: IdentityKind, subject: string, now: number): Promise<number | undefined> {
+    return this.ctx.storage.transactionSync(() => resolveIdentity(this.ctx.storage.sql, kind, subject, now));
+  }
+
+  /**
+   * The identity's account, made now if there is none: a dl.new account (paid-store.ts
+   * createPaidAccount). `created` is false when the identity already had one (a race).
+   */
+  async signUpPaid(input: { kind: IdentityKind; subject: string; label: string | null; email: string; now: number }): Promise<{ account: number; created: boolean }> {
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      const existing = resolveIdentity(sql, input.kind, input.subject, input.now);
+      if (existing !== undefined) return { account: existing, created: false };
+      return { account: createPaidAccount(sql, { ...input, login: paidLogin }), created: true };
+    });
+  }
+
+  async linkIdentity(input: { kind: IdentityKind; subject: string; account: number; label: string | null; now: number }): Promise<"linked" | "taken"> {
+    return this.ctx.storage.transactionSync(() => linkIdentity(this.ctx.storage.sql, input));
+  }
+
+  async identities(account: number): Promise<Array<{ kind: IdentityKind; subject: string; label: string | null }>> {
+    return identitiesOf(this.ctx.storage.sql, account);
+  }
+
+  async emailIdentityTaken(email: string, account: number): Promise<boolean> {
+    return emailIdentityTaken(this.ctx.storage.sql, email, account);
+  }
+
+  /** The contact-email change: the people row's email and the email sign-in move together. */
+  async changeContactEmail(input: { account: number; email: string; now: number }): Promise<"ok" | "taken"> {
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      const moved = replaceEmailIdentity(sql, input);
+      if (moved === "taken") return moved;
+      sql.exec("UPDATE people SET email = ?, email_norm = ?, email_at = ? WHERE github_id = ?", input.email.trim(), normalizeEmail(input.email), input.now, input.account);
+      return "ok";
+    });
+  }
+
+  async recordPaidCheckout(input: { sessionId: string; plan: PlanId; customerId: string | null; subscriptionId: string | null; email: string | null; amountCents: number; paidAt: number }): Promise<PaidCheckoutRow> {
+    return recordPaidCheckout(this.ctx.storage.sql, input);
+  }
+
+  async paidCheckout(sessionId: string): Promise<PaidCheckoutRow | undefined> {
+    return paidCheckout(this.ctx.storage.sql, sessionId);
+  }
+
+  async paidCheckoutBySubscription(subscriptionId: string): Promise<PaidCheckoutRow | undefined> {
+    return paidCheckoutBySubscription(this.ctx.storage.sql, subscriptionId);
+  }
+
+  async claimPaidCheckout(sessionId: string, account: number, now: number): Promise<"claimed" | "taken" | "missing"> {
+    return this.ctx.storage.transactionSync(() => claimPaidCheckout(this.ctx.storage.sql, sessionId, account, now));
+  }
+
+  async markClaimEmail(sessionId: string, now: number): Promise<boolean> {
+    return markClaimEmail(this.ctx.storage.sql, sessionId, now);
+  }
+
+  async paidCheckouts(status: "unclaimed" | "claimed" | "all"): Promise<PaidCheckoutRow[]> {
+    return listPaidCheckouts(this.ctx.storage.sql, status);
+  }
+
+  async firstCheckoutOf(account: number): Promise<PaidCheckoutRow | undefined> {
+    return firstCheckoutOf(this.ctx.storage.sql, account);
+  }
+
+  async recordRefundRequest(input: { account: number; reason: string | null; eligible: boolean; now: number }): Promise<void> {
+    recordRefundRequest(this.ctx.storage.sql, input);
+  }
+
+  async markRefunded(account: number, now: number): Promise<void> {
+    markRefunded(this.ctx.storage.sql, account, now);
+  }
+
+  async refundRequests(): Promise<ReturnType<typeof listRefundRequests>> {
+    return listRefundRequests(this.ctx.storage.sql);
+  }
+
+  /** One account's request rows in [from, to), for dl.new/usage. */
+  async usageRows(account: number, from: number, to: number): Promise<UsageRow[]> {
+    return usageRows(this.ctx.storage.sql, account, from, to);
+  }
+
+  /** dl.new/connect's live box: the newest rows after `after`, and the first request ever. */
+  async liveRows(account: number, after: number, limit: number): Promise<{ rows: UsageRow[]; first: UsageRow | undefined }> {
+    return liveRows(this.ctx.storage.sql, account, after, limit);
+  }
+
   async billingEventSeen(id: string): Promise<boolean> {
     return this.ctx.storage.sql.exec("SELECT 1 FROM billing_events WHERE id = ?", id).toArray().length > 0;
   }
@@ -2844,7 +2962,7 @@ export class DirectoryObject extends DurableObject {
    * Records a payment once per id. Returns the "someone paid" alert for a new one, undefined
    * for a payment already recorded (a retried or replayed webhook).
    */
-  async recordPayment(input: { id: string; githubId: number; kind: "pro" | "topup"; amountCents: number; at: number; renewal?: boolean }): Promise<Alert | undefined> {
+  async recordPayment(input: { id: string; githubId: number; kind: "pro" | "topup"; amountCents: number; at: number; renewal?: boolean; product?: string }): Promise<Alert | undefined> {
     const sql = this.ctx.storage.sql;
     const inserted = sql.exec(
       "INSERT INTO payments (id, github_id, kind, amount_cents, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING RETURNING id",
@@ -2857,7 +2975,7 @@ export class DirectoryObject extends DurableObject {
     if (inserted === 0) return undefined;
     const login = sql.exec<{ login: string }>("SELECT login FROM people WHERE github_id = ?", input.githubId).toArray()[0]?.login;
     const totals = sql.exec<{ payments: number; payers: number; cents: number }>("SELECT COUNT(*) AS payments, COUNT(DISTINCT github_id) AS payers, COALESCE(SUM(amount_cents), 0) AS cents FROM payments").one();
-    return paymentAlert({ login, kind: input.kind, renewal: input.renewal === true, amountCents: input.amountCents, payments: totals.payments, payers: totals.payers, totalCents: totals.cents });
+    return paymentAlert({ login, kind: input.kind, renewal: input.renewal === true, amountCents: input.amountCents, payments: totals.payments, payers: totals.payers, totalCents: totals.cents, ...(input.product ? { product: input.product } : {}) });
   }
 
   /** The dashboard's copy of a Pro subscription's state; older events don't overwrite newer ones. */

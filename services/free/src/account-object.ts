@@ -21,6 +21,8 @@ import {
   type Usage,
 } from "./quota.js";
 import { weekEnd, weekStart } from "./week.js";
+import { formatApiKey } from "./accounts.js";
+import { isPlanId, type PlanId } from "./plans.js";
 
 /**
  * One person's allowance: `getByName("gh:<githubId>")`. The single serialization point for
@@ -106,6 +108,10 @@ export interface ServerKeyView {
   lastUsedAt: number | null;
   /** A tool key's last tool (tool-keys.ts toolName, a short name); null for a server key or one never used. */
   lastTool: string | null;
+  /** "dl_sk" for dl.new's API keys; "dlk" for the others. */
+  format: KeyFormat;
+  /** The secret's last four characters (dl_sk keys only), for "dl_sk_…a1b2"; null otherwise. */
+  hint: string | null;
 }
 
 export type CreateKeyResult =
@@ -274,7 +280,25 @@ export interface BillingState {
   proState: "none" | "active" | "past_due" | "canceled";
   periodEnd: number | null;
   cancelAtPeriodEnd: boolean;
+  /** dl.new's plan (plans.ts) the subscription is on; null for dl Pro's inline price, or none. */
+  tier: PlanId | null;
+  /** The last invoice failed and Stripe is retrying (a dl.new plan keeps working meanwhile). */
+  paymentFailed: boolean;
+  /** The subscription's first invoice and when it was paid (Unix ms): the refund window. */
+  firstInvoiceId: string | null;
+  firstPaidAt: number | null;
+  /** When the first payment was refunded (Unix ms), or null. */
+  refundedAt: number | null;
 }
+
+/** The account's own settings on dl.new (docs/web-api-paid.md). */
+export interface AccountSettings {
+  /** At a model's weekly limit, move to DeepSeek while it has allowance (default on); off: a limit error. */
+  fallback: boolean;
+}
+
+/** What `server_keys.format` says a key looks like: `dlk_<githubId>_…` or dl.new's `dl_sk_<account>_…`. */
+export type KeyFormat = "dlk" | "dl_sk";
 
 interface AccountRow {
   github_id: number;
@@ -410,6 +434,14 @@ export class AccountObject extends DurableObject<AccountEnv> {
       // share, which a request that ended without usage is estimated with. 0 for accounts from before.
       if (!accountColumns.includes("prompt_seen")) this.ctx.storage.sql.exec("ALTER TABLE account ADD COLUMN prompt_seen INTEGER NOT NULL DEFAULT 0");
       if (!accountColumns.includes("cached_seen")) this.ctx.storage.sql.exec("ALTER TABLE account ADD COLUMN cached_seen INTEGER NOT NULL DEFAULT 0");
+      // dl.new's plans (docs/web-api-paid.md): the tier, a failed renewal, the first payment and its refund.
+      const billingColumns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('billing')").toArray().map((column) => column.name);
+      for (const [column, definition] of [["tier", "TEXT"], ["payment_failed", "INTEGER NOT NULL DEFAULT 0"], ["first_invoice_id", "TEXT"], ["first_paid_at", "INTEGER"], ["refunded_at", "INTEGER"]] as const) {
+        if (!billingColumns.includes(column)) this.ctx.storage.sql.exec(`ALTER TABLE billing ADD COLUMN ${column} ${definition}`);
+      }
+      // dl.new's API keys (dl_sk_) live with the others; every key before them was a dlk_ key.
+      if (!keyColumns.includes("format")) this.ctx.storage.sql.exec("ALTER TABLE server_keys ADD COLUMN format TEXT NOT NULL DEFAULT 'dlk'");
+      if (!keyColumns.includes("hint")) this.ctx.storage.sql.exec("ALTER TABLE server_keys ADD COLUMN hint TEXT");
     });
   }
 
@@ -692,9 +724,19 @@ export class AccountObject extends DurableObject<AccountEnv> {
 
   #billing(): BillingState & { stateAt: number } {
     const row = this.ctx.storage.sql
-      .exec<{ customer_id: string | null; subscription_id: string | null; pro_state: BillingState["proState"]; period_end: number | null; cancel_at_period_end: number; state_at: number }>(
-        "SELECT * FROM billing WHERE k = 1",
-      )
+      .exec<{
+        customer_id: string | null;
+        subscription_id: string | null;
+        pro_state: BillingState["proState"];
+        period_end: number | null;
+        cancel_at_period_end: number;
+        state_at: number;
+        tier: string | null;
+        payment_failed: number;
+        first_invoice_id: string | null;
+        first_paid_at: number | null;
+        refunded_at: number | null;
+      }>("SELECT * FROM billing WHERE k = 1")
       .toArray()[0];
     return {
       customerId: row?.customer_id ?? null,
@@ -702,14 +744,59 @@ export class AccountObject extends DurableObject<AccountEnv> {
       proState: row?.pro_state ?? "none",
       periodEnd: row?.period_end ?? null,
       cancelAtPeriodEnd: row?.cancel_at_period_end === 1,
+      tier: isPlanId(row?.tier) ? row.tier : null,
+      paymentFailed: row?.payment_failed === 1,
+      firstInvoiceId: row?.first_invoice_id ?? null,
+      firstPaidAt: row?.first_paid_at ?? null,
+      refundedAt: row?.refunded_at ?? null,
       stateAt: row?.state_at ?? 0,
     };
   }
 
-  /** Pro while the subscription is active and its paid period (plus a grace) hasn't ended. */
+  /**
+   * Pro while the subscription is active and its paid period (plus a grace) hasn't ended. A
+   * dl.new plan (a tier) also stays on while past due: Stripe's retries decide when it ends.
+   */
   #plan(now: number): Plan {
     const billing = this.#billing();
-    return billing.proState === "active" && (billing.periodEnd === null || now < billing.periodEnd + PRO_GRACE_MS) ? "pro" : "free";
+    const on = billing.proState === "active" || (billing.tier !== null && billing.proState === "past_due");
+    return on && (billing.periodEnd === null || now < billing.periodEnd + PRO_GRACE_MS) ? "pro" : "free";
+  }
+
+  /** dl.new's plan now: the tier while the subscription is on (see #plan), else null. */
+  async paidPlan(now: number): Promise<PlanId | null> {
+    const billing = this.#billing();
+    return billing.tier !== null && this.#plan(now) === "pro" ? billing.tier : null;
+  }
+
+  /** The plan's tier, set at once after an upgrade (the webhook that follows confirms it). */
+  async setTier(tier: PlanId): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT INTO billing (k, tier) VALUES (1, ?) ON CONFLICT(k) DO UPDATE SET tier = excluded.tier", tier);
+  }
+
+  /** The subscription's first paid invoice, once: it starts the refund window. */
+  async noteFirstPayment(input: { invoiceId: string; at: number }): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO billing (k, first_invoice_id, first_paid_at) VALUES (1, ?, ?) ON CONFLICT(k) DO UPDATE SET first_invoice_id = COALESCE(first_invoice_id, excluded.first_invoice_id), first_paid_at = COALESCE(first_paid_at, excluded.first_paid_at)",
+      input.invoiceId,
+      input.at,
+    );
+  }
+
+  async markRefunded(at: number): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT INTO billing (k, refunded_at) VALUES (1, ?) ON CONFLICT(k) DO UPDATE SET refunded_at = excluded.refunded_at", at);
+  }
+
+  async settings(): Promise<AccountSettings> {
+    const fallback = this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'fallback'").toArray()[0]?.value;
+    return { fallback: fallback !== "off" };
+  }
+
+  async setSettings(input: Partial<AccountSettings>): Promise<AccountSettings> {
+    if (input.fallback !== undefined) {
+      this.ctx.storage.sql.exec("INSERT INTO meta (key, value) VALUES ('fallback', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", input.fallback ? "on" : "off");
+    }
+    return this.settings();
   }
 
   /** "pro" or "free" now (see #plan). */
@@ -739,6 +826,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
     cancelAtPeriodEnd?: boolean;
     customerId?: string;
     eventAt: number;
+    /** dl.new's plan; undefined keeps the one stored. */
+    tier?: PlanId;
+    /** The last invoice failed (true) or was paid (false); undefined keeps it. */
+    paymentFailed?: boolean;
   }): Promise<boolean> {
     const current = this.#billing();
     if (input.eventAt < current.stateAt) return false;
@@ -755,6 +846,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
       input.cancelAtPeriodEnd ? 1 : 0,
       input.eventAt,
     );
+    if (input.tier !== undefined) this.ctx.storage.sql.exec("UPDATE billing SET tier = ? WHERE k = 1", input.tier);
+    if (input.paymentFailed !== undefined) this.ctx.storage.sql.exec("UPDATE billing SET payment_failed = ? WHERE k = 1", input.paymentFailed ? 1 : 0);
     return true;
   }
 
@@ -872,7 +965,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
    * Creates a named key of one kind (a server key unless said). The secret is returned here once;
    * only its hash is kept. `max`: that kind's keys per account (MAX_SERVER_KEYS for server keys).
    */
-  async createKey(input: { name: string; now: number; kind?: KeyKind; max?: number }): Promise<CreateKeyResult> {
+  async createKey(input: { name: string; now: number; kind?: KeyKind; max?: number; format?: KeyFormat }): Promise<CreateKeyResult> {
     const row = this.#row();
     if (!row) return { ok: false, code: "not_invited" };
     if (row.status === "blocked") return { ok: false, code: "blocked" };
@@ -884,19 +977,23 @@ export class AccountObject extends DurableObject<AccountEnv> {
     if (sql.exec("SELECT 1 FROM server_keys WHERE name = ?", input.name).toArray().length > 0) return { ok: false, code: "key_name_taken" };
     const id = [...crypto.getRandomValues(new Uint8Array(6))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
     const secret = randomToken();
-    sql.exec("INSERT INTO server_keys (id, name, key_hash, created_at, kind) VALUES (?, ?, ?, ?, ?)", id, input.name, await sha256Hex(secret), input.now, kind);
-    return { ok: true, key: `dlk_${row.github_id}_${id}_${secret}`, view: { id, name: input.name, kind, createdAt: input.now, lastUsedAt: null, lastTool: null } };
+    const format = input.format ?? "dlk";
+    const hint = format === "dl_sk" ? secret.slice(-4) : null;
+    sql.exec("INSERT INTO server_keys (id, name, key_hash, created_at, kind, format, hint) VALUES (?, ?, ?, ?, ?, ?, ?)", id, input.name, await sha256Hex(secret), input.now, kind, format, hint);
+    const key = format === "dl_sk" ? formatApiKey(row.github_id, id, secret) : `dlk_${row.github_id}_${id}_${secret}`;
+    return { ok: true, key, view: { id, name: input.name, kind, createdAt: input.now, lastUsedAt: null, lastTool: null, format, hint } };
   }
 
   async listKeys(): Promise<ServerKeyView[]> {
     return this.ctx.storage.sql
-      .exec<{ id: string; name: string; kind: string; created_at: number; last_used_at: number | null; last_tool: string | null }>(
-        "SELECT id, name, kind, created_at, last_used_at, last_tool FROM server_keys ORDER BY created_at, id",
+      .exec<{ id: string; name: string; kind: string; created_at: number; last_used_at: number | null; last_tool: string | null; format: string; hint: string | null }>(
+        "SELECT id, name, kind, created_at, last_used_at, last_tool, format, hint FROM server_keys ORDER BY created_at, id",
       )
       .toArray()
       .map((key) => {
         const kind = keyKind(key.kind);
-        return { id: key.id, name: key.name, kind, createdAt: key.created_at, lastUsedAt: key.last_used_at, lastTool: kind === "tool" ? key.last_tool : null };
+        const format: KeyFormat = key.format === "dl_sk" ? "dl_sk" : "dlk";
+        return { id: key.id, name: key.name, kind, createdAt: key.created_at, lastUsedAt: key.last_used_at, lastTool: kind === "tool" ? key.last_tool : null, format, hint: key.hint };
       });
   }
 
@@ -978,7 +1075,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
    * The account behind a key and the key's kind, or undefined when the key is unknown or revoked.
    * `tool`: the tool the request came from (tool-keys.ts toolName), kept on a tool key as its last tool.
    */
-  async verifyKey(id: string, secret: string, now: number, tool?: string): Promise<{ githubId: number; login: string; kind: KeyKind } | undefined> {
+  async verifyKey(id: string, secret: string, now: number, tool?: string): Promise<{ githubId: number; login: string; kind: KeyKind; paid: boolean } | undefined> {
     const row = this.#row();
     const key = this.ctx.storage.sql
       .exec<{ key_hash: string; kind: string; last_used_at: number | null; last_tool: string | null }>("SELECT key_hash, kind, last_used_at, last_tool FROM server_keys WHERE id = ?", id)
@@ -991,7 +1088,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
     } else if (lastTool !== key.last_tool) {
       this.ctx.storage.sql.exec("UPDATE server_keys SET last_tool = ? WHERE id = ?", lastTool, id);
     }
-    return { githubId: row.github_id, login: row.login, kind };
+    // `paid`: a dl.new plan is on (its keys skip the free tier's tool key switch).
+    return { githubId: row.github_id, login: row.login, kind, paid: this.#billing().tier !== null && this.#plan(now) === "pro" };
   }
 
   /**

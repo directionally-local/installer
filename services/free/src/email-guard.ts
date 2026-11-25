@@ -4,6 +4,18 @@
  * Farms reuse one inbox through `name+tag@` and Gmail's ignored dots, or a catch-all domain.
  */
 
+import { DISPOSABLE_DOMAINS } from "./disposable-domains.js";
+
+let disposable: Set<string> | undefined;
+
+/** Whether a domain or any parent of it is on the vendored disposable-domain list (disposable-domains.ts). */
+export function isDisposableDomain(domain: string): boolean {
+  disposable ??= new Set(DISPOSABLE_DOMAINS.split("\n").filter(Boolean));
+  const parts = domain.toLowerCase().split(".");
+  for (let i = 0; i < parts.length - 1; i++) if (disposable.has(parts.slice(i).join("."))) return true;
+  return false;
+}
+
 /** Big public mail providers: anyone can have an address there, so the per-domain cap skips them. */
 export const PUBLIC_EMAIL_DOMAINS = new Set([
   "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "yahoo.com", "ymail.com",

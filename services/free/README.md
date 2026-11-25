@@ -760,6 +760,32 @@ Sent by the free tier service. The message and the reply address aren't stored a
 - **Revenue** on the dashboard is before tax (`amount_subtotal` of a top-up session,
   `total_excluding_tax` of a Pro invoice), in USD.
 
+### dl.new's paid plans (from 1 Dec 2026)
+
+Starter ($7), Plus ($20) and Max ($60) a month, bought on dl.new **before** any account exists.
+The HTTP contract the site calls is [docs/web-api-paid.md](docs/web-api-paid.md); the code is
+`paid-web.ts` (routes), `paid-store.ts` (Directory: identities, paid Checkouts, refund requests),
+`paid-auth.ts` (AuthObject: email codes, dl.new's GitHub round trip, cli-login), `accounts.ts`
+(account numbers, `dl_sk_` keys) and `plans.ts` (the plan table).
+
+- **Accounts.** The number the service keys everything on (`githubId` in the code) is now the
+  account number: the GitHub id for accounts from before (unchanged, linked as a GitHub identity
+  on first use), a random number from 2^50 up for accounts made on dl.new (their Account object is
+  `acct:<n>`). Identities: `github:<id>` (verified primary email, scope `user:email`) and
+  `email:<normalized address>` (6-digit codes: 10 minutes, 5 tries, resend after 30 s, 5 an hour
+  per address and 20 per network, disposable domains refused from `disposable-domains.ts`).
+- **Checkout first.** `POST /web/checkout/plan` makes a subscription Checkout for the plan's Price
+  (`STRIPE_PRICE_STARTER`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_MAX`), with `metadata[product]=plan`.
+  `checkout.session.completed` keeps the paid session unclaimed and emails "Finish setting up
+  dl.new" (`dl.new/account?session_id=…`, 7 days). The account step claims it: the customer and
+  subscription are linked, the plan starts, Stripe's customer gets the verified email.
+- **Plan state** lives in the Account object's `billing` row (`tier`, `payment_failed`, the first
+  invoice for the 7-day refund). A plan stays on while past due (Stripe's retries decide);
+  `unpaid`, `canceled` and `customer.subscription.deleted` end it. Upgrades are prorated and
+  invoiced at once; refunds are an admin action (`POST /admin/paid/refund`).
+- **Keys.** `dl_sk_<account>_<id>_<secret>` tool keys, shown once; old `dlk_` keys unchanged.
+- **cli-login.** `POST /v1/cli-login/start` and `/poll` (the CLI), approved on dl.new/cli-login.
+
 ### Stripe setup (the owner, once)
 
 1. **Products and prices.** In test mode first:
@@ -777,7 +803,8 @@ Sent by the free tier service. The message and the reply address aren't stored a
    with the events `checkout.session.completed`, `invoice.paid`, `invoice.payment_failed`,
    `customer.subscription.updated`, `customer.subscription.deleted`.
 5. **Secrets and vars:** `wrangler secret put STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`;
-   var `STRIPE_PRICE_TOPUP` (`STRIPE_PRICE_PRO` is no longer read). Without the secret key, the billing endpoints
+   vars `STRIPE_PRICE_TOPUP` and dl.new's plans `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_PLUS`,
+   `STRIPE_PRICE_MAX` (`STRIPE_PRICE_PRO` is no longer read). Without the secret key, the billing endpoints
    answer `billing_unavailable` and everything else works as before.
 
 ## The queue for free tokens

@@ -194,7 +194,7 @@ export interface Service {
     /** Messages sent through the fake ALERT_EMAIL binding (with `email: true`). */
     emails: Array<{ from: string; to: string; raw: string }>;
     /** Calls to api.stripe.com: path, form body (decoded) and headers. */
-    stripe: Array<{ path: string; form: URLSearchParams; headers: Record<string, string> }>;
+    stripe: Array<{ path: string; form: URLSearchParams; headers: Record<string, string>; method: string }>;
     /** Calls to Resend (https://api.resend.com/emails): JSON body and headers. Nothing leaves the process. */
     resend: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>;
     /** Messages sent through the fake USER_EMAIL binding (Cloudflare Email Service, with `userEmail: true`). */
@@ -205,7 +205,7 @@ export interface Service {
   /** Answers calls to Resend (default: 200 with an id). */
   setResend(handler: (body: Record<string, unknown>) => Response | Promise<Response>): void;
   /** Answers calls to api.stripe.com (default: a Checkout or portal session with a URL). */
-  setStripe(handler: (path: string, form: URLSearchParams) => Response | Promise<Response>): void;
+  setStripe(handler: (path: string, form: URLSearchParams, method: string) => Response | Promise<Response>): void;
   setOpenRouter(handler: OpenRouterHandler): void;
   /** Answers GET https://api.github.com/users/<login> (default: a profile with no public email). */
   setGithubProfile(handler: (login: string) => Response | Promise<Response>): void;
@@ -437,7 +437,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
   const clock = { now: NOW };
   const calls: Service["calls"] = { openRouter: [], luminal: [], liquid: [], openrelay: [], openai: [], moderations: [], githubTokens: [], githubGraphql: [], githubProfiles: [], webhooks: [], emails: [], stripe: [], resend: [], userEmail: [] };
   let resend = (_body: Record<string, unknown>): Response | Promise<Response> => Response.json({ id: `email-${calls.resend.length}` });
-  let stripe = (path: string, _form?: URLSearchParams): Response | Promise<Response> =>
+  let stripe = (path: string, _form?: URLSearchParams, _method?: string): Response | Promise<Response> =>
     path === "/v1/checkout/sessions"
       ? Response.json({ id: `cs_test_${calls.stripe.length}`, url: `https://checkout.stripe.com/c/pay/cs_test_${calls.stripe.length}` })
       : Response.json({ id: "bps_test_1", url: "https://billing.stripe.com/p/session/test_1" });
@@ -565,9 +565,10 @@ export async function createService(vars: Record<string, string> = {}, options: 
     }
     if (url.startsWith("https://api.stripe.com/")) {
       const path = new URL(url).pathname;
-      const form = new URLSearchParams(String(init.body));
-      calls.stripe.push({ path, form, headers: Object.fromEntries(new Headers(init.headers).entries()) });
-      return stripe(path, form);
+      const method = init.method ?? "GET";
+      const form = method === "POST" ? new URLSearchParams(String(init.body)) : new URL(url).searchParams;
+      calls.stripe.push({ path, form, headers: Object.fromEntries(new Headers(init.headers).entries()), method });
+      return stripe(path, form, method);
     }
     if (/^https:\/\/(alerts\.test|discord\.com|hooks\.slack\.com|api\.telegram\.org)\//.test(url)) {
       calls.webhooks.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });

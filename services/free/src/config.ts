@@ -443,6 +443,8 @@ export interface StripeConfig {
   secretKey: string | undefined;
   webhookSecret: string | undefined;
   priceTopup: string | undefined;
+  /** dl.new's plans (plans.ts): STRIPE_PRICE_STARTER, STRIPE_PRICE_PLUS, STRIPE_PRICE_MAX, monthly Prices made in Stripe by the owner. */
+  prices?: { starter?: string; plus?: string; max?: string };
   successUrl: string;
   cancelUrl: string;
   portalReturnUrl: string;
@@ -671,6 +673,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
       secretKey: text(env.STRIPE_SECRET_KEY),
       webhookSecret: text(env.STRIPE_WEBHOOK_SECRET),
       priceTopup: stripeId(env.STRIPE_PRICE_TOPUP, "price_", "STRIPE_PRICE_TOPUP"),
+      prices: planPrices(env),
       successUrl: httpsUrl(env.BILLING_SUCCESS_URL, "BILLING_SUCCESS_URL") ?? DEFAULTS.billingSuccessUrl,
       cancelUrl: httpsUrl(env.BILLING_CANCEL_URL, "BILLING_CANCEL_URL") ?? DEFAULTS.billingCancelUrl,
       portalReturnUrl: httpsUrl(env.BILLING_PORTAL_RETURN_URL, "BILLING_PORTAL_RETURN_URL") ?? DEFAULTS.billingPortalReturnUrl,
@@ -940,6 +943,16 @@ function valueLine(value: unknown): string {
   if (raw === undefined) return DEFAULTS.proValueLine;
   if (raw.length > 80 || /[\r\n]/.test(raw)) throw new ConfigError(`PRO_VALUE_LINE must be one line of at most 80 characters (got "${raw}").`);
   return raw;
+}
+
+/** The plans' Stripe Price ids; a missing one leaves that plan unavailable. */
+function planPrices(env: Record<string, unknown>): NonNullable<StripeConfig["prices"]> {
+  const prices: NonNullable<StripeConfig["prices"]> = {};
+  for (const [plan, name] of [["starter", "STRIPE_PRICE_STARTER"], ["plus", "STRIPE_PRICE_PLUS"], ["max", "STRIPE_PRICE_MAX"]] as const) {
+    const id = stripeId(env[name], "price_", name);
+    if (id) prices[plan] = id;
+  }
+  return prices;
 }
 
 function stripeId(value: unknown, prefix: string, name: string): string | undefined {
