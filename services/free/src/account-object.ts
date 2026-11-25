@@ -104,6 +104,8 @@ export interface ServerKeyView {
   createdAt: number;
   /** Unix ms, to the minute; null when never used. */
   lastUsedAt: number | null;
+  /** A tool key's last tool (tool-keys.ts toolName, a short name); null for a server key or one never used. */
+  lastTool: string | null;
 }
 
 export type CreateKeyResult =
@@ -401,6 +403,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
       // Key kinds (KEY_KINDS): every key made before them was a server key.
       const keyColumns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('server_keys')").toArray().map((column) => column.name);
       if (!keyColumns.includes("kind")) this.ctx.storage.sql.exec("ALTER TABLE server_keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'server'");
+      // The tool a tool key was last used from (a short name only, never a header as sent).
+      if (!keyColumns.includes("last_tool")) this.ctx.storage.sql.exec("ALTER TABLE server_keys ADD COLUMN last_tool TEXT");
       if (!accountColumns.includes("trial_used")) this.ctx.storage.sql.exec("ALTER TABLE account ADD COLUMN trial_used INTEGER NOT NULL DEFAULT 0");
       // Prompt and cached tokens the providers reported for this person, all time: their cached
       // share, which a request that ended without usage is estimated with. 0 for accounts from before.
@@ -881,14 +885,19 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const id = [...crypto.getRandomValues(new Uint8Array(6))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
     const secret = randomToken();
     sql.exec("INSERT INTO server_keys (id, name, key_hash, created_at, kind) VALUES (?, ?, ?, ?, ?)", id, input.name, await sha256Hex(secret), input.now, kind);
-    return { ok: true, key: `dlk_${row.github_id}_${id}_${secret}`, view: { id, name: input.name, kind, createdAt: input.now, lastUsedAt: null } };
+    return { ok: true, key: `dlk_${row.github_id}_${id}_${secret}`, view: { id, name: input.name, kind, createdAt: input.now, lastUsedAt: null, lastTool: null } };
   }
 
   async listKeys(): Promise<ServerKeyView[]> {
     return this.ctx.storage.sql
-      .exec<{ id: string; name: string; kind: string; created_at: number; last_used_at: number | null }>("SELECT id, name, kind, created_at, last_used_at FROM server_keys ORDER BY created_at, id")
+      .exec<{ id: string; name: string; kind: string; created_at: number; last_used_at: number | null; last_tool: string | null }>(
+        "SELECT id, name, kind, created_at, last_used_at, last_tool FROM server_keys ORDER BY created_at, id",
+      )
       .toArray()
-      .map((key) => ({ id: key.id, name: key.name, kind: keyKind(key.kind), createdAt: key.created_at, lastUsedAt: key.last_used_at }));
+      .map((key) => {
+        const kind = keyKind(key.kind);
+        return { id: key.id, name: key.name, kind, createdAt: key.created_at, lastUsedAt: key.last_used_at, lastTool: kind === "tool" ? key.last_tool : null };
+      });
   }
 
   /** The allowance and the key counts in one call, for the admin people list (one RPC per person, not two). */
@@ -901,9 +910,9 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM server_keys WHERE kind = ?", kind).toArray()[0]?.n ?? 0;
   }
 
-  /** Deletes one key; false when there is no such key. */
-  async revokeKey(id: string): Promise<boolean> {
-    const found = this.ctx.storage.sql.exec("SELECT 1 FROM server_keys WHERE id = ?", id).toArray().length > 0;
+  /** Deletes one key (only of `kind` when given); false when there is no such key. */
+  async revokeKey(id: string, kind?: KeyKind): Promise<boolean> {
+    const found = (kind === undefined ? this.ctx.storage.sql.exec("SELECT 1 FROM server_keys WHERE id = ?", id) : this.ctx.storage.sql.exec("SELECT 1 FROM server_keys WHERE id = ? AND kind = ?", id, kind)).toArray().length > 0;
     if (found) this.ctx.storage.sql.exec("DELETE FROM server_keys WHERE id = ?", id);
     return found;
   }
@@ -965,13 +974,24 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return { githubId: row.github_id, login: row.login, harness: key.harness as Harness, ...(key.sid !== null ? { sid: key.sid } : {}) };
   }
 
-  /** The account behind a key and the key's kind, or undefined when the key is unknown or revoked. */
-  async verifyKey(id: string, secret: string, now: number): Promise<{ githubId: number; login: string; kind: KeyKind } | undefined> {
+  /**
+   * The account behind a key and the key's kind, or undefined when the key is unknown or revoked.
+   * `tool`: the tool the request came from (tool-keys.ts toolName), kept on a tool key as its last tool.
+   */
+  async verifyKey(id: string, secret: string, now: number, tool?: string): Promise<{ githubId: number; login: string; kind: KeyKind } | undefined> {
     const row = this.#row();
-    const key = this.ctx.storage.sql.exec<{ key_hash: string; kind: string; last_used_at: number | null }>("SELECT key_hash, kind, last_used_at FROM server_keys WHERE id = ?", id).toArray()[0];
+    const key = this.ctx.storage.sql
+      .exec<{ key_hash: string; kind: string; last_used_at: number | null; last_tool: string | null }>("SELECT key_hash, kind, last_used_at, last_tool FROM server_keys WHERE id = ?", id)
+      .toArray()[0];
     if (!row || !key || !timingSafeEqual(await sha256Hex(secret), key.key_hash)) return undefined;
-    if (key.last_used_at === null || now - key.last_used_at >= KEY_TOUCH_MS) this.ctx.storage.sql.exec("UPDATE server_keys SET last_used_at = ? WHERE id = ?", now, id);
-    return { githubId: row.github_id, login: row.login, kind: keyKind(key.kind) };
+    const kind = keyKind(key.kind);
+    const lastTool = kind === "tool" && tool !== undefined ? tool.slice(0, 32) : key.last_tool;
+    if (key.last_used_at === null || now - key.last_used_at >= KEY_TOUCH_MS) {
+      this.ctx.storage.sql.exec("UPDATE server_keys SET last_used_at = ?, last_tool = ? WHERE id = ?", now, lastTool, id);
+    } else if (lastTool !== key.last_tool) {
+      this.ctx.storage.sql.exec("UPDATE server_keys SET last_tool = ? WHERE id = ?", lastTool, id);
+    }
+    return { githubId: row.github_id, login: row.login, kind };
   }
 
   /**

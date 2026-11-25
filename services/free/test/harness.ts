@@ -219,7 +219,8 @@ export interface Service {
   setOpenAI(handler: OpenRouterHandler): void;
   /** Answers calls to OpenAI's Moderation API (default: nothing flagged). */
   setModerations(handler: OpenRouterHandler): void;
-  request(method: string, path: string, options?: { body?: unknown; token?: string; headers?: Record<string, string>; form?: Record<string, string>; ip?: string }): Promise<Response>;
+  /** `origin`: the request's own scheme and host (default https://free.test), e.g. https://api.dl.new. */
+  request(method: string, path: string, options?: { body?: unknown; token?: string; headers?: Record<string, string>; form?: Record<string, string>; ip?: string; origin?: string }): Promise<Response>;
   signIn(user: GitHubUserFixture, options?: { invite?: string; deviceId?: string }): Promise<Tokens>;
   directory(): any;
   account(githubId: number): any;
@@ -595,7 +596,7 @@ export async function createService(vars: Record<string, string> = {}, options: 
       headers.set("content-type", "application/json");
       body = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
     }
-    return handler.fetch(new Request(`https://free.test${path}`, { method, headers, body }), envRef.env as never, execution);
+    return handler.fetch(new Request(`${options.origin ?? "https://free.test"}${path}`, { method, headers, body }), envRef.env as never, execution);
   };
 
   const signIn: Service["signIn"] = async (user, options = {}) => {

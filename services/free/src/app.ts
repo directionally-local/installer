@@ -6,7 +6,7 @@ import { githubSignals } from "../../shared/src/github-signals.js";
 import { hmacKey, signJwt, verifyJwt } from "../../shared/src/jwt.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
 import { HARNESSES, HARNESS_KEY_TTL_MS, MAX_HARNESS_KEYS, MAX_SERVER_KEYS, parseHarnessKey, parseServerKey, type AccountObject, type Harness, type KeyKind, type Allowance, type Limits, type Plan, type ServerKeyView } from "./account-object.js";
-import { TOOL_KEYS_OFF_MESSAGE, TOOL_KEYS_UNAVAILABLE_MESSAGE, TOOL_KEY_NOT_HERE_MESSAGE, forTool, toolClient, toolLimitMessage } from "./tool-keys.js";
+import { TOOL_KEYS_OFF_MESSAGE, TOOL_KEYS_UNAVAILABLE_MESSAGE, TOOL_KEY_NOT_HERE_MESSAGE, forTool, toolClient, toolLimitMessage, toolName } from "./tool-keys.js";
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
@@ -485,7 +485,10 @@ export function createHandler(options: HandlerOptions = {}): {
       const url = new URL(request.url);
       const ip = clientIp(request);
       const background = options.background ?? backgroundOf(execution);
-      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base: config.publicUrl ?? url.origin, statusCache, providersCache, emailGapMs, ...(background ? { background } : {}) };
+      // api.dl.new serves only the API (Cloudflare routes its /v1/* and /anthropic/* here; its
+      // other paths are dl.new's key page), so links made from a request there use the service's own address.
+      const base = config.publicUrl ?? (url.origin === new URL(config.webApiUrl).origin ? DEFAULT_PUBLIC_URL : url.origin);
+      const ctx: Ctx = { request, url, env, config, now, fetch: fetcher, ip, ipNet: rateLimitNetwork(ip), base, statusCache, providersCache, emailGapMs, ...(background ? { background } : {}) };
       return route(ctx);
     },
   };
@@ -829,7 +832,7 @@ async function authenticate(
       apiError(401, "invalid_key", "This server key is invalid or was revoked. Create a new one from a signed-in machine.", {}, { "www-authenticate": 'Bearer error="invalid_token"' });
     const parsed = parseServerKey(bearer);
     if (!options.keys || !parsed) return options.keys ? invalidKey() : invalid();
-    const found = await account(c, parsed.githubId).verifyKey(parsed.id, parsed.secret, c.now());
+    const found = await account(c, parsed.githubId).verifyKey(parsed.id, parsed.secret, c.now(), toolName(c.request.headers));
     if (!found) return invalidKey();
     const { kind, ...owner } = found;
     // A tool key (tool-keys.ts) works only where `toolKeys` allows it, while the setting is on,
@@ -1595,6 +1598,8 @@ function keyView(key: ServerKeyView) {
     kind: key.kind,
     createdAt: new Date(key.createdAt).toISOString(),
     lastUsedAt: key.lastUsedAt === null ? null : new Date(key.lastUsedAt).toISOString(),
+    /** A tool key's last tool ("cursor", "opencode"…, tool-keys.ts), null for a server key or one never used. */
+    lastTool: key.lastTool,
   };
 }
 
@@ -1650,42 +1655,53 @@ async function keys(c: Ctx, rest: string, method: string): Promise<Response> {
   }
   if (rest === "" && method === "POST") {
     const body = await readJson(c);
-    const name = typeof body?.name === "string" ? body.name.trim() : "";
     const kind = body?.kind === undefined ? "server" : body.kind;
     if (kind !== "server" && kind !== "tool") return apiError(400, "invalid_request", 'Send {name, kind?}: kind is "server" (the default) or "tool".');
-    if (!KEY_NAME.test(name)) return apiError(400, "invalid_request", "Send {name}: 1 to 64 printable characters, e.g. the server's hostname.");
-    const stored = await directory(c).getPerson(identity.githubId);
-    let max = MAX_SERVER_KEYS;
-    if (kind === "tool") {
-      const { config } = await runtime(c);
-      if (!config.toolKeys) return apiError(403, "tool_keys_off", TOOL_KEYS_OFF_MESSAGE);
-      if (stored?.status === "active" && !(await toolKeysAllowed(c, identity.githubId, stored))) return apiError(403, "tool_keys_unavailable", TOOL_KEYS_UNAVAILABLE_MESSAGE);
-      max = config.toolKeysMax;
-    } else if (stored?.status === "active" && !(await serverKeysAllowed(c, identity.githubId, stored))) {
-      return serverKeysUnavailable();
-    }
-    const created = await person.createKey({ name, now: c.now(), kind, max });
-    if (created.ok) return json({ ...keyView(created.view), key: created.key }, 201);
-    switch (created.code) {
-      case "key_limit_reached":
-        return kind === "tool"
-          ? apiError(409, "key_limit_reached", `This account already has ${max} API keys for other tools. Revoke one first (dl api-key revoke ID).`, { max })
-          : apiError(409, "key_limit_reached", `This account already has ${MAX_SERVER_KEYS} server keys. Revoke one first.`, { max: MAX_SERVER_KEYS });
-      case "key_name_taken":
-        return apiError(409, "key_name_taken", "This account already has a key with that name.");
-      case "suspended":
-        return apiError(403, "suspended", "This account is suspended from the free tier.");
-      case "blocked":
-        return blockedError();
-      case "not_invited":
-        return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
-    }
+    return createKey(c, identity.githubId, body?.name, kind, "dl api-key revoke ID");
   }
   if (/^[a-z0-9]{12}$/.test(rest) && method === "DELETE") {
     if (!(await person.revokeKey(rest))) return apiError(404, "key_not_found", "No key with that id on this account.");
     return json({ id: rest, revoked: true });
   }
   return apiError(404, "not_found", `${method} /v1/keys/${rest} isn't a route.`);
+}
+
+/**
+ * Makes a key of one kind for an account, with every check POST /v1/keys has (POST /web/keys
+ * makes tool keys the same way): the name, who may make one (`toolKeysAllowed` and the `toolKeys`
+ * setting for a tool key, `serverKeysAllowed` for a server key), the per-kind limit, the
+ * account's state. `revokeHint`: how to revoke one, for the limit's message.
+ */
+async function createKey(c: Ctx, githubId: number, rawName: unknown, kind: KeyKind, revokeHint: string): Promise<Response> {
+  const name = typeof rawName === "string" ? rawName.trim() : "";
+  if (!KEY_NAME.test(name)) return apiError(400, "invalid_request", kind === "tool" ? "Send {name}: 1 to 64 printable characters, e.g. the tool's name." : "Send {name}: 1 to 64 printable characters, e.g. the server's hostname.");
+  const person = account(c, githubId);
+  const stored = await directory(c).getPerson(githubId);
+  let max = MAX_SERVER_KEYS;
+  if (kind === "tool") {
+    const { config } = await runtime(c);
+    if (!config.toolKeys) return apiError(403, "tool_keys_off", TOOL_KEYS_OFF_MESSAGE);
+    if (stored?.status === "active" && !(await toolKeysAllowed(c, githubId, stored))) return apiError(403, "tool_keys_unavailable", TOOL_KEYS_UNAVAILABLE_MESSAGE);
+    max = config.toolKeysMax;
+  } else if (stored?.status === "active" && !(await serverKeysAllowed(c, githubId, stored))) {
+    return serverKeysUnavailable();
+  }
+  const created = await person.createKey({ name, now: c.now(), kind, max });
+  if (created.ok) return json({ ...keyView(created.view), key: created.key }, 201);
+  switch (created.code) {
+    case "key_limit_reached":
+      return kind === "tool"
+        ? apiError(409, "key_limit_reached", `This account already has ${max} API keys for other tools. Revoke one first (${revokeHint}).`, { max })
+        : apiError(409, "key_limit_reached", `This account already has ${MAX_SERVER_KEYS} server keys. Revoke one first.`, { max: MAX_SERVER_KEYS });
+    case "key_name_taken":
+      return apiError(409, "key_name_taken", "This account already has a key with that name.");
+    case "suspended":
+      return apiError(403, "suspended", "This account is suspended from the free tier.");
+    case "blocked":
+      return blockedError();
+    case "not_invited":
+      return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
+  }
 }
 
 // ─── Sign-in: the browser side ──────────────────────────────────────────────
@@ -5918,9 +5934,14 @@ async function webTelemetry(c: Ctx): Promise<Response> {
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 }
 
-/** The web page's origin (WEB_SIGNUP_URL's): the only one /web/* answers CORS for. */
+/** The web sign-up page's origin (WEB_SIGNUP_URL's, dl.new). */
 function webOrigin(c: Ctx): string {
   return new URL(c.config.webSignupUrl).origin;
+}
+
+/** The web pages' origins (dl.new's, and WEB_API_URL's, api.dl.new): the only ones /web/* answers CORS for. */
+function webOrigins(c: Ctx): string[] {
+  return [webOrigin(c), new URL(c.config.webApiUrl).origin];
 }
 
 /** A plain page for a web sign-in that can't start, with the way back to the web page. */
@@ -5929,13 +5950,14 @@ function webSignInProblem(c: Ctx, heading: string, message: string, status: numb
 }
 
 /**
- * GET /web/signin?return=<WEB_SIGNUP_URL>&state=<the page's random state>[&ref=<referral>]: starts
- * the CLI's own browser sign-in (device code, GitHub, the details and invite steps, admission) for
- * the web page. `return` may only be the configured page itself (no open redirect).
+ * GET /web/signin?return=<WEB_SIGNUP_URL or WEB_API_URL>&state=<the page's random state>[&ref=<referral>]:
+ * starts the CLI's own browser sign-in (device code, GitHub, the details and invite steps,
+ * admission) for the web page. `return` may only be one of the configured pages itself (no open
+ * redirect): dl.new/start, or api.dl.new's key page, which finishes the sign-in itself.
  */
 async function webSignIn(c: Ctx): Promise<Response> {
-  const signupUrl = c.config.webSignupUrl;
-  if (!allowedReturn(c.url.searchParams.get("return"), signupUrl)) return webSignInProblem(c, "Sign-in link not valid", "This sign-in link isn't valid.", 400);
+  const signupUrl = allowedReturn(c.url.searchParams.get("return"), [c.config.webSignupUrl, c.config.webApiUrl]);
+  if (!signupUrl) return webSignInProblem(c, "Sign-in link not valid", "This sign-in link isn't valid.", 400);
   const state = c.url.searchParams.get("state") ?? "";
   if (!WEB_STATE.test(state)) return webSignInProblem(c, "Sign-in link not valid", "This sign-in link isn't valid.", 400);
   if (await isPaused(c)) return donePage("Paused", PAUSED_MESSAGE, 503);
@@ -5974,32 +5996,72 @@ async function webPerson(c: Ctx): Promise<{ identity: Identity; person: PersonRo
   return { identity, person };
 }
 
-const WEB_ROUTES: Record<string, { method: "GET" | "POST"; handle: (c: Ctx) => Promise<Response> }> = {
-  "/web/session": { method: "POST", handle: webSession },
-  "/web/me": { method: "GET", handle: webMe },
-  "/web/email": { method: "POST", handle: webEmail },
-  "/web/choice": { method: "POST", handle: webChoice },
-  "/web/checkout": { method: "POST", handle: webCheckout },
-  "/web/portal": { method: "POST", handle: webPortal },
-  "/web/install-code": { method: "POST", handle: webInstallCode },
+type WebHandler = (c: Ctx) => Promise<Response>;
+type WebRoute = Partial<Record<"GET" | "POST" | "DELETE", WebHandler>>;
+
+const WEB_ROUTES: Record<string, WebRoute> = {
+  "/web/session": { POST: webSession },
+  "/web/me": { GET: webMe },
+  "/web/email": { POST: webEmail },
+  "/web/choice": { POST: webChoice },
+  "/web/checkout": { POST: webCheckout },
+  "/web/portal": { POST: webPortal },
+  "/web/install-code": { POST: webInstallCode },
+  "/web/keys": { GET: webKeys, POST: webCreateKey },
 };
 
-/** /web/*: the sign-in redirect, and the JSON endpoints the web page calls (CORS for its origin only). */
+/** A /web/* path's route: the table above, or /web/keys/<id>. */
+function webRoute(path: string): WebRoute | undefined {
+  const key = /^\/web\/keys\/([a-z0-9]{12})$/.exec(path);
+  if (key) return { DELETE: (c) => webRevokeKey(c, key[1]!) };
+  return WEB_ROUTES[path];
+}
+
+/** /web/*: the sign-in redirect, and the JSON endpoints the web pages call (CORS for their origins only). */
 async function web(c: Ctx, path: string, method: string): Promise<Response> {
   if (path === "/web/signin") return method === "GET" ? webSignIn(c) : apiError(405, "method_not_allowed", "GET /web/signin.");
-  const route = WEB_ROUTES[path];
+  const route = webRoute(path);
   if (!route) return apiError(404, "not_found", `${method} ${c.url.pathname} isn't a route.`);
   const origin = c.request.headers.get("origin");
-  const cors = webCors(origin, webOrigin(c));
+  const origins = webOrigins(c);
+  const cors = webCors(origin, origins);
   if (method === "OPTIONS") return new Response(null, { status: 204, headers: { ...cors, "cache-control": "no-store" } });
-  if (method !== route.method) return apiError(405, "method_not_allowed", `${route.method} ${path}.`, {}, cors);
+  const handle = route[method as keyof WebRoute];
+  if (!handle) return apiError(405, "method_not_allowed", `${Object.keys(route).join(" or ")} ${path}.`, {}, cors);
   // A page on another site gets nothing, whatever it sends (its browser wouldn't show it the answer anyway).
-  if (origin !== null && origin !== webOrigin(c)) return apiError(403, "forbidden_origin", "Only dl.new can call this.", {}, cors);
-  const response = await route.handle(c);
+  if (origin !== null && !origins.includes(origin)) return apiError(403, "forbidden_origin", "Only dl.new can call this.", {}, cors);
+  const response = await handle(c);
   const headers = new Headers(response.headers);
   for (const [name, value] of Object.entries(cors)) headers.set(name, value);
   headers.set("cache-control", "no-store");
   return new Response(response.body, { status: response.status, headers });
+}
+
+/** GET /web/keys: the account's API keys for other tools (tool keys only), for api.dl.new. */
+async function webKeys(c: Ctx): Promise<Response> {
+  const found = await webPerson(c);
+  if (found instanceof Response) return found;
+  c.callerId = found.identity.githubId;
+  const { config } = await runtime(c);
+  const keys = (await account(c, found.identity.githubId).listKeys()).filter((key) => key.kind === "tool").map(keyView);
+  return json({ keys, max: config.toolKeysMax, toolKeys: config.toolKeys });
+}
+
+/** POST /web/keys {name}: a tool key, with every check and limit of POST /v1/keys {kind: "tool"}; shown once. */
+async function webCreateKey(c: Ctx): Promise<Response> {
+  const found = await webPerson(c);
+  if (found instanceof Response) return found;
+  c.callerId = found.identity.githubId;
+  const body = (await readJson(c)) ?? {};
+  return createKey(c, found.identity.githubId, body.name, "tool", "on api.dl.new or with dl api-key revoke ID");
+}
+
+/** DELETE /web/keys/:id: revokes one of the account's own tool keys (a server key isn't touched here). */
+async function webRevokeKey(c: Ctx, id: string): Promise<Response> {
+  const found = await webPerson(c);
+  if (found instanceof Response) return found;
+  if (!(await account(c, found.identity.githubId).revokeKey(id, "tool"))) return apiError(404, "key_not_found", "No API key with that id on this account.");
+  return json({ id, revoked: true });
 }
 
 /** POST /web/session {code, state}: the one-time code from the sign-in's redirect → a web session for the page. */
@@ -6024,10 +6086,13 @@ async function webMe(c: Ctx): Promise<Response> {
   const { identity, person: stored } = found;
   c.callerId = identity.githubId;
   const { config, person } = await runtime(c);
-  const allowance = await account(c, identity.githubId).allowance(
-    c.now(),
-    allocated(config, limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens), identity.githubId, person, c.now()),
-  );
+  const limits = allocated(config, limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens), identity.githubId, person, c.now());
+  // The week as a tool key sees it too: DeepSeek's pool (the model tools get; GPT-6 stays in
+  // Autopilot), with the other agents' share applied (all of it on Pro).
+  const [allowance, tools] = await Promise.all([
+    account(c, identity.githubId).allowance(c.now(), limits),
+    account(c, identity.githubId).allowance(c.now(), { ...limits, harnessShare: config.otherHarnessShare }, "deepseek"),
+  ]);
   return json({
     login: identity.login,
     "email": stored.email,
@@ -6036,6 +6101,18 @@ async function webMe(c: Ctx): Promise<Response> {
     trial: trialView(allowance),
     /** The free weekly tokens, for an account not on the trial (grandfathered); 0 when there are none. */
     weeklyTokens: allowance.trial ? 0 : allowance.tokensPerWeek,
+    /**
+     * What API keys for other tools may use this week (tool-keys.ts), for api.dl.new: `share` of
+     * the allowance (otherHarnessShare; 1 on Pro), DeepSeek's weekly tokens with the share applied
+     * (null: no token cap), what the account used of them this week (all of it, Autopilot too: a
+     * tool key is refused once the week's use reaches its share) and when the week resets.
+     */
+    toolAllowance: {
+      share: tools.plan === "pro" ? 1 : Math.min(1, Math.max(0, config.otherHarnessShare)),
+      tokensPerWeek: tools.tokensPerWeek,
+      usedThisWeek: tools.usedThisWeek,
+      resetsAt: new Date(tools.resetsAt).toISOString(),
+    },
     offers: offers(config),
     /** Pro's state for the account page: when it renews or ends, and whether it was set to end. */
     pro: allowance.plan === "pro" || allowance.proPeriodEnd !== null
