@@ -17,6 +17,8 @@ const DAY = 86_400_000;
 const SECRET = "whsec_test_0123456789abcdef";
 const BILLING = { STRIPE_SECRET_KEY: "sk_test_fake", STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_PRICE_TOPUP: "price_topup123", OPEN_ADMISSION: "true" };
 const PROMPT = "You've hit this week's free limit. dl Pro: $7/month for higher limits and early access to new models.";
+/** The prompt on a refusal: the same, naming the limit that ran out. */
+const SPEND_PROMPT = PROMPT.replace("free limit.", "free $8 spending limit on DeepSeek V4.1 Flash.");
 const PAGE = "https://dl.new/start";
 const ORIGIN = "https://dl.new";
 const STATE = "page-state-0123456789abcdef";
@@ -87,8 +89,8 @@ describe("dl Pro phase 1: the prompt", () => {
     await useUpDeepseek(service, admin);
     const error = await errorOf(await chat(service, token));
     assert.equal(error.code, "quota_exceeded");
-    assert.equal(error.message, `${PROMPT} Upgrade: https://dl.new/account`);
-    assert.deepEqual(error.proPrompt, { text: PROMPT, price: "$7/month", upgradeUrl: "https://dl.new/account" });
+    assert.equal(error.message, `${SPEND_PROMPT} Upgrade: https://dl.new/account`);
+    assert.deepEqual(error.proPrompt, { text: SPEND_PROMPT, price: "$7/month", upgradeUrl: "https://dl.new/account" });
     assert.equal(error.offers.pro.price, "$7/month");
     // A retry the same day is the same person seeing it.
     await chat(service, token);

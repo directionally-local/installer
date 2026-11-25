@@ -282,8 +282,10 @@ export function basicLine(weeklyTokens: number, weeklyUsd: number | undefined, d
 }
 
 /** What a basic or Starter account is told when this week's allowance is used up: "free", never the level's name. */
-export function limitLine(_level: "basic" | "starter", weeklyTokens: number, weeklyUsd: number | undefined, deepseekUsd?: number): string {
-  return `You've used this week's free allowance (${allowanceText(weeklyTokens, weeklyUsd, deepseekUsd)}). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.`;
+export function limitLine(_level: "basic" | "starter", weeklyTokens: number, weeklyUsd: number | undefined, deepseekUsd?: number, limit?: string): string {
+  // `limit` (messages.ts freeLimitName): which of the week's limits ran out, when the caller knows.
+  const lead = limit ? `You've hit this week's free ${limit}.` : `You've used this week's free allowance (${allowanceText(weeklyTokens, weeklyUsd, deepseekUsd)}).`;
+  return `${lead} It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.`;
 }
 
 /** "5M", "1.2M", "800k". */

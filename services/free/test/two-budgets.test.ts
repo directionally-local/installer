@@ -157,7 +157,7 @@ describe("two weekly budgets: refusals", () => {
     const error = await errorOf(await chat(service, token, LUNA));
     assert.equal(error.code, "starter_limit");
     assert.doesNotMatch(error.message, /basic|starter/i);
-    assert.match(error.message, /^You've hit this week's free limit\. dl Pro/);
+    assert.match(error.message, /^You've hit this week's free \$2 spending limit on GPT-6\. dl Pro/, "names the limit that ran out");
   });
 
   it("doesn't point at DeepSeek when nothing can serve it", async () => {
