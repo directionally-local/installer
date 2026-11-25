@@ -25,6 +25,7 @@ import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, ty
 import { apiError, json } from "./errors.js";
 import { adminHomePage } from "./admin-home-page.js";
 import { dashboardCsv, deniedPage, earlyAccessCsv, healthCsv, isCsvTable, isHealthCsvTable, noGithubCsv, signedInPage, signInPage, toolsPage, type SpendView, type ToolsState } from "./dashboard-page.js";
+import { PROVIDER_INQUIRY_MAX_BYTES, parseProviderInquiry, providerInquiriesJson, providerInquiryEmail } from "./provider-inquiry.js";
 import { NO_GITHUB_PATH, noGithubBody, noGithubClickAlert, noGithubJson, noGithubLeadAlert, noGithubSource, parseNoGithubLead } from "./no-github.js";
 import { ACCESS_REQUEST_MAX_BYTES, ACCESS_REQUEST_USAGE, ACCESS_REQUESTS_PER_DAY, parseAccessRequest } from "./access-request.js";
 import { cleanBatch, cleanGpuTelemetry, earlyAccessEmail, type GpuCount } from "./events.js";
@@ -259,6 +260,8 @@ const LIMITS = {
   // "Don't have GitHub?" (no-github.ts): each counted click and answer emails the owner.
   noGithubClickIp: { capacity: 20, perHour: 20 },
   noGithubLeadIp: { capacity: 5, perHour: 5 },
+  // dl.new/providers' form (provider-inquiry.ts): each kept inquiry can email the owner.
+  providerInquiryIp: { capacity: 5, perHour: 5 },
 } satisfies Record<string, Limit>;
 
 export interface Env {
@@ -5081,6 +5084,10 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     const until = Math.floor(now / DAY_MS) * DAY_MS + DAY_MS;
     return json({ days, ...noGithubJson(await directory(c).noGithub({ from: until - days * DAY_MS, until })) });
   }
+  if (method === "GET" && rest === "provider-inquiries") {
+    // dl.new/providers' inquiries (provider-inquiry.ts), newest first. User content.
+    return json(providerInquiriesJson(await directory(c).providerInquiries()));
+  }
   if (method === "GET" && rest === "providers") {
     // Each provider's credit (balance, used, left, this week, the probes' share) and the speed
     // probes over ?hours= (1 to 360, default 24), newest first. Admins only: amounts live here,
@@ -6077,13 +6084,14 @@ async function toolsState(
   csrf: string | undefined,
   posted: ToolsPosted,
 ): Promise<ToolsState> {
-  const [cohorts, me, requests, leads, noGithub, eventCodes] = await Promise.all([
+  const [cohorts, me, requests, leads, noGithub, eventCodes, providerInquiries] = await Promise.all([
     directory(c).broadcastCohorts({ days: COHORT_PICKER_DAYS, adminIds: [...c.config.adminGithubIds], includeAdmins: config.userEmailsToAdmins }),
     directory(c).getPerson(identity.githubId),
     directory(c).pendingAccessRequests(c.now()),
     directory(c).earlyAccessLeads(),
     directory(c).noGithub({ from: Math.floor(c.now() / DAY_MS) * DAY_MS - 13 * DAY_MS, until: Math.floor(c.now() / DAY_MS) * DAY_MS + DAY_MS }),
     directory(c).listEventCodes(c.now()),
+    directory(c).providerInquiries(),
   ]);
   return {
     login: identity.login,
@@ -6096,6 +6104,7 @@ async function toolsState(
     requests,
     leads,
     noGithub,
+    providerInquiries,
     grantUsd: config.grantWeeklyUsdCap ?? 0,
     routing: {
       primaryUpstream: config.primaryUpstream,
@@ -6427,6 +6436,7 @@ const WEB_ROUTES: Record<string, WebRoute> = {
   "/web/portal": { POST: webPortal },
   "/web/install-code": { POST: webInstallCode },
   "/web/keys": { GET: webKeys, POST: webCreateKey },
+  "/web/provider-inquiry": { POST: webProviderInquiry },
 };
 
 /** A /web/* path's route: the table above, or /web/keys/<id>. */
@@ -6596,6 +6606,45 @@ async function webChoice(c: Ctx): Promise<Response> {
   const body = (await readJson(c)) ?? {};
   if (!isInstallOption(body.option)) return apiError(400, "invalid_request", 'Send {option: "computer"} or {option: "gpu"}.');
   await countWebStep(c, body.option === "gpu" ? "chose_gpu" : "chose_computer");
+  return json({ ok: true });
+}
+
+/**
+ * POST /web/provider-inquiry {company, name, email, website?, models?, regions?, credits?, notes?}
+ * → {ok: true}: dl.new/providers' form (provider-inquiry.ts). No sign-in. Kept in the Directory
+ * (no IP), and emailed to the owner (ALERT_EMAIL to ALERT_EMAIL_TO, Reply-To the sender) for the
+ * first PROVIDER_INQUIRY_EMAILS_PER_DAY a UTC day. 5 an hour per network, PROVIDER_INQUIRIES_PER_DAY
+ * in all a UTC day (429 past either).
+ */
+async function webProviderInquiry(c: Ctx): Promise<Response> {
+  if (Number(c.request.headers.get("content-length") ?? 0) > PROVIDER_INQUIRY_MAX_BYTES) return apiError(400, "invalid_request", "The inquiry is too large.");
+  const text = await c.request.text();
+  if (new TextEncoder().encode(text).length > PROVIDER_INQUIRY_MAX_BYTES) return apiError(400, "invalid_request", "The inquiry is too large.");
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = undefined;
+  }
+  const parsed = parseProviderInquiry(body);
+  if (!parsed.ok) return apiError(400, "invalid_request", parsed.message);
+  const retry = await limited(c, `provider-inquiry:ip:${c.ipNet}`, LIMITS.providerInquiryIp);
+  if (retry !== undefined) return rateLimited(retry);
+  const now = c.now();
+  const saved = await directory(c).saveProviderInquiry({ now, inquiry: parsed.value });
+  if (!saved.ok) return rateLimited(Math.max(1, Math.ceil((Math.floor(now / DAY_MS) * DAY_MS + DAY_MS - now) / 1000)));
+  const binding = c.env.ALERT_EMAIL;
+  const { alertEmailTo, alertEmailFrom } = c.config;
+  if (saved.email && binding && alertEmailTo) {
+    const mail = providerInquiryEmail(parsed.value, now, saved.today);
+    const sender = parsed.value.email;
+    try {
+      await sendEmail(binding, { from: alertEmailFrom, to: alertEmailTo, fromName: "dl providers", subject: mail.subject, body: mail.body, now, ...(isHeaderSafeAddress(sender) ? { replyTo: sender } : {}) });
+    } catch (error) {
+      // Kept already, and listed for admins: the error's name only, never what was sent.
+      console.error("provider inquiry email failed", error instanceof Error ? error.name : "error");
+    }
+  }
   return json({ ok: true });
 }
 

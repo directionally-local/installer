@@ -4,6 +4,7 @@ import { REGULAR_DAYS, RETENTION_DAYS, RETENTION_OFFSETS, type DashboardData } f
 import { BRAND_ORIGIN, BRAND_TOKENS, PRODUCT_NAME } from "./pages.js";
 import { isoDay } from "./week.js";
 import type { EarlyAccessLead, PendingAccessRequest } from "./directory-object.js";
+import { providerInquiriesCard, type ProviderInquiry } from "./provider-inquiry.js";
 import { noGithubCard, noGithubCsvRows, type NoGithubReport } from "./no-github.js";
 import { hasCapitals, type BroadcastAudience } from "./broadcast.js";
 import { GRANT_LABELS, grantUsdText, MAX_GRANT_LOGINS, MAX_GRANT_USD, type GrantResult } from "./grant.js";
@@ -420,6 +421,8 @@ export interface ToolsState {
   leads: EarlyAccessLead[];
   /** "Don't have GitHub?" clicks and answers (no-github.ts); answers are user content (escaped). */
   noGithub?: NoGithubReport;
+  /** Provider inquiries from dl.new/providers (provider-inquiry.ts), newest first; user content (escaped). */
+  providerInquiries?: { inquiries: ProviderInquiry[]; total: number };
   /** What the last "delete a lead" did. */
   leadNotice?: { error: boolean; text: string };
   /** What the last "re-check below-bar accounts" did. */
@@ -889,7 +892,7 @@ export function toolsPage(state: ToolsState): Response {
 ${adminNav("tools")}
 ${state.signOut ? `<form method="post" action="/admin/signout"><button type="submit" class="out">Sign out</button></form>` : ""}
 </div></header>`;
-  const cards = [requestsCard(state), grantCard(state), eventCodesCard(state), blockCard(state), routingCard(state), recheckCard(state), emailCard(state), leadsCard(state), ...(state.noGithub ? [noGithubCard(state.noGithub)] : [])];
+  const cards = [requestsCard(state), grantCard(state), eventCodesCard(state), blockCard(state), routingCard(state), recheckCard(state), emailCard(state), leadsCard(state), ...(state.noGithub ? [noGithubCard(state.noGithub)] : []), ...(state.providerInquiries ? [providerInquiriesCard(state.providerInquiries)] : [])];
   return shell(`Tools · ${PRODUCT_NAME}`, `${header}\n<main class="tools">\n${cards.join("\n")}\n</main>`, 200, {}, "", TOOLS_STYLE);
 }
 
