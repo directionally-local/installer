@@ -237,13 +237,13 @@ dl api-key cursor   # makes an API key named "cursor" and prints it once, with t
 
 | your tool speaks | base URL | API key | model |
 |---|---|---|---|
-| OpenAI's API | `https://free.directionallylocal.com/v1` | the `dlk_…` key | `deepseek/deepseek-v4.1-flash-1017` |
-| Anthropic's API | `https://free.directionallylocal.com/anthropic` | the `dlk_…` key | any: DeepSeek answers |
+| OpenAI's API | `https://api.dl.new/v1` | the `dlk_…` key | `deepseek/deepseek-v4.1-flash-1017` |
+| Anthropic's API | `https://api.dl.new/anthropic` | the `dlk_…` key | any: DeepSeek answers |
 
 Try it in one line:
 
 ```sh
-curl https://free.directionallylocal.com/v1/chat/completions -H "Authorization: Bearer $DL_API_KEY" \
+curl https://api.dl.new/v1/chat/completions -H "Authorization: Bearer $DL_API_KEY" \
   -H "content-type: application/json" -d '{"model":"deepseek/deepseek-v4.1-flash-1017","messages":[{"role":"user","content":"hi"}]}'
 ```
 

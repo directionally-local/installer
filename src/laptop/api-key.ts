@@ -1,4 +1,5 @@
 import { palette } from "../ui.js";
+import { FREE_TIER_DEFAULT_URL } from "./free-tier.js";
 import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
 import { autopilotSignIn, type LaunchIO } from "./harness-launch.js";
 import { PROXY_MODEL } from "./proxy.js";
@@ -49,9 +50,17 @@ export const API_KEY_USAGE = `  Usage: dl api-key [NAME] | dl api-key list | dl 
   dl api-key revoke ID   delete one; it stops working at once
 `;
 
-/** The base URLs a tool needs, from the free tier's origin. */
+/** The public API address of the hosted free tier: the same service, routed at /v1 and /anthropic. */
+export const PUBLIC_API_URL = "https://api.dl.new";
+
+/**
+ * The base URLs a tool needs. The hosted free tier's are api.dl.new's (the address its docs and
+ * keys page give); another origin (DL_FREE_TIER_URL: a self-hosted or test service) is its own.
+ */
 export function toolUrls(origin: string): { openai: string; anthropic: string } {
-  return { openai: `${origin}/v1`, anthropic: `${origin}/anthropic` };
+  const trimmed = origin.replace(/\/+$/, "");
+  const base = trimmed === FREE_TIER_DEFAULT_URL ? PUBLIC_API_URL : trimmed;
+  return { openai: `${base}/v1`, anthropic: `${base}/anthropic` };
 }
 
 /** What `dl api-key` prints once a key is made. */

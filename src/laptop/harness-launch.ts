@@ -61,6 +61,13 @@ export interface HarnessLaunch {
    * its own harness key, so its requests are counted as that agent's; `prepare` gets them in `keys`.
    */
   alsoHarnesses?: Harness[];
+  /**
+   * The agent's own diagnostic lines on stdout (`[claude-code:unrecognized_model] …` in print
+   * mode), moved to stderr so a script's stdout is only the agent's answer. Stdout goes through
+   * dl only when `when` says so for these arguments (and whether stdout is a terminal); an
+   * interactive agent keeps the terminal itself.
+   */
+  stdoutDiagnostics?: { prefix: string; when: (args: string[], stdoutIsTerminal: boolean) => boolean };
   /** Checked before sign-in: a message stops dl here, before any key is made. */
   check?: (args: string[]) => string | undefined;
   /**
@@ -92,6 +99,50 @@ export interface LaunchDeps {
   now?: () => number;
   /** Whether dl's output is a terminal (the Autopilot nudge shows only there); stderr's unless replaced. */
   terminal?: boolean;
+  /** Whether stdout is a terminal (HarnessLaunch.stdoutDiagnostics); process.stdout's unless replaced. */
+  stdoutIsTerminal?: boolean;
+}
+
+/** How long dl waits, once the agent has exited, for the rest of its piped stdout (a process it left behind may hold it). */
+const STDOUT_DRAIN_MS = 2_000;
+
+/**
+ * Splits a stream into lines and sends each to `out`, or to `err` when it starts with `prefix`.
+ * A line whose start already differs from `prefix` passes through at once, so streamed output
+ * isn't held back to the end of the line.
+ */
+export function diverter(prefix: string, out: (text: string) => void, err: (text: string) => void): { write: (chunk: string) => void; end: () => void } {
+  /** The start of the current line, held while it could still be a diagnostic. */
+  let held = "";
+  /** Where the rest of the current line goes, once known. */
+  let to: ((text: string) => void) | undefined;
+  return {
+    write: (chunk) => {
+      let rest = chunk;
+      while (rest.length > 0) {
+        const newline = rest.indexOf("\n");
+        const piece = newline === -1 ? rest : rest.slice(0, newline + 1);
+        rest = newline === -1 ? "" : rest.slice(newline + 1);
+        if (!to) {
+          held += piece;
+          if (held.startsWith(prefix)) to = err;
+          else if (!prefix.startsWith(held.replace(/\n$/, "")) || newline !== -1) to = out;
+          if (to) {
+            to(held);
+            held = "";
+          }
+        } else {
+          to(piece);
+        }
+        if (newline !== -1) to = undefined;
+      }
+    },
+    end: () => {
+      if (held !== "") out(held);
+      held = "";
+      to = undefined;
+    },
+  };
 }
 
 /**
@@ -243,7 +294,20 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
   refresher.unref?.();
   heartbeat.unref?.();
 
-  const child = (deps.spawn ?? nodeSpawn)(binary, prepared.args, { stdio: "inherit", env: prepared.env as NodeJS.ProcessEnv });
+  const diagnostics = spec.stdoutDiagnostics;
+  const divert = diagnostics?.when(prepared.args, deps.stdoutIsTerminal ?? process.stdout.isTTY === true) === true;
+  const child = (deps.spawn ?? nodeSpawn)(binary, prepared.args, { stdio: divert ? ["inherit", "pipe", "inherit"] : "inherit", env: prepared.env as NodeJS.ProcessEnv });
+  let drained: Promise<void> = Promise.resolve();
+  if (divert && diagnostics && child.stdout) {
+    const lines = diverter(diagnostics.prefix, io.out, io.err);
+    const stdout = child.stdout;
+    stdout.setEncoding("utf8");
+    stdout.on("data", (chunk: string) => lines.write(chunk));
+    drained = new Promise<void>((resolve) => {
+      stdout.on("end", resolve);
+      stdout.on("error", () => resolve());
+    }).then(() => lines.end());
+  }
   // Ctrl-C reaches the agent from the terminal itself; dl just mustn't die of it. Other signals
   // sent to dl alone are passed on, so the agent exits and dl still cleans up.
   const onSignal = deps.onSignal ?? ((signal: NodeJS.Signals, handler: () => void) => {
@@ -262,6 +326,13 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
     });
     child.on("exit", (code, signal) => resolve(signal ? { code: 128 + (SIGNALS[signal] ?? 1), reason: `signal_${signal}` } : { code: code ?? 1, reason: "exit" }));
   });
+  if (divert) {
+    let timer: NodeJS.Timeout | undefined;
+    // Ended, or held open by something the agent left running: stop reading it either way.
+    await Promise.race([drained, new Promise<void>((resolve) => { timer = setTimeout(resolve, STDOUT_DRAIN_MS); timer.unref?.(); })]);
+    clearTimeout(timer);
+    child.stdout?.destroy();
+  }
   for (const off of unsubscribe) off();
   stop(refresher);
   stop(heartbeat);

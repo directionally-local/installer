@@ -96,6 +96,18 @@ export function claudeEnv(parent: Env, input: { origin: string; key: string }): 
   return { env, removed };
 }
 
+/**
+ * What Claude Code prints on stdout in print mode (`claude -p`) the first time it sees a model it
+ * doesn't know, as dl's DeepSeek is: one `[claude-code:unrecognized_model] {"model":…}` line
+ * before the answer. dl moves it to stderr, so `dl claude -p "…"`'s stdout is only the answer.
+ */
+export const UNRECOGNIZED_MODEL_PREFIX = "[claude-code:unrecognized_model]";
+
+/** Print mode (`-p`, `--print`), or stdout that isn't a terminal (a script reading it). */
+export function claudePrintMode(args: string[], stdoutIsTerminal: boolean): boolean {
+  return !stdoutIsTerminal || args.some((arg) => arg === "-p" || arg === "--print" || arg.startsWith("--print="));
+}
+
 /** `dl claude` for the shared launcher (harness-launch.ts). */
 export const CLAUDE_LAUNCH: HarnessLaunch = {
   harness: HARNESS,
@@ -104,6 +116,7 @@ export const CLAUDE_LAUNCH: HarnessLaunch = {
   sessionPrefix: "dl-claude",
   missing: `${CLAUDE_INSTALL}\n\n  or with npm: ${CLAUDE_INSTALL_NPM}`,
   binaries: BINARIES,
+  stdoutDiagnostics: { prefix: UNRECOGNIZED_MODEL_PREFIX, when: claudePrintMode },
   prepare: async ({ env, args, origin, key }) => ({ ...claudeEnv(env, { origin, key }), args }),
 };
 
