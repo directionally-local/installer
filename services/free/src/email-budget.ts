@@ -55,7 +55,7 @@ export function emailBudgetOf(config: EmailBudgetSettingsConfig): EmailBudget {
 }
 
 /** The user-email kinds people are waiting for; every other kind is bulk. */
-export const TRANSACTIONAL_KINDS: readonly (UserEmailKind | "claim")[] = ["welcome_paid", "plan_80", "access_granted", "access_granted_trial", "claim"];
+export const TRANSACTIONAL_KINDS: readonly (UserEmailKind | "claim")[] = ["welcome_paid", "plan_80", "access_granted", "access_granted_trial", "claim", "welcome_trial_card", "welcome_trial_nocard", "trial_card_80", "trial_converted"];
 
 export function classOfKind(kind: UserEmailKind | "broadcast" | "claim"): EmailClass {
   return (TRANSACTIONAL_KINDS as readonly string[]).includes(kind) ? "transactional" : "bulk";

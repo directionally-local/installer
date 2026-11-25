@@ -14,11 +14,12 @@ import { PLAN_DEFAULTS, PLAN_SETTING_ENV, type PlanSettingsConfig } from "./plan
 import { GPT6_BONUS_DEFAULTS, type Gpt6BonusSettingsConfig } from "./gpt6-bonus.js";
 import { FREE_ENDS_AT } from "./plan-limits.js";
 import { PROMO_DEFAULTS, REFUND_WINDOW_HOURS, type PromoSettingsConfig } from "./plan-prices.js";
+import { MAX_TRIAL_DAYS, TRIAL_DEFAULTS, type TrialSettingsConfig } from "./trials.js";
 import { EMAIL_BUDGET_DEFAULTS, type EmailBudgetSettingsConfig } from "./email-budget.js";
 
 export class ConfigError extends Error {}
 
-export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, Gpt6BonusSettingsConfig, EmailBudgetSettingsConfig, PromoSettingsConfig {
+export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, Gpt6BonusSettingsConfig, EmailBudgetSettingsConfig, PromoSettingsConfig, TrialSettingsConfig {
   /** Paid plans on (PAID_PLANS, default off until launch; also a runtime setting): see plans.ts. */
   paidPlans: boolean;
   /**
@@ -738,6 +739,15 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     promoEndsAt: env.PROMO_ENDS_AT === undefined ? PROMO_DEFAULTS.promoEndsAt : instant(env.PROMO_ENDS_AT, "PROMO_ENDS_AT"),
     promoPercentOff: percentOff(env.PROMO_PERCENT_OFF),
     promoLabel: text(env.PROMO_LABEL) ?? PROMO_DEFAULTS.promoLabel,
+    // dl.new's free trials (trials.ts): card trials on every plan, no-card trials after GitHub.
+    cardTrial: flag(env.CARD_TRIAL, TRIAL_DEFAULTS.cardTrial, "CARD_TRIAL"),
+    cardTrialTokens: whole(env.CARD_TRIAL_TOKENS, TRIAL_DEFAULTS.cardTrialTokens, "CARD_TRIAL_TOKENS"),
+    cardTrialDays: trialDays(env.CARD_TRIAL_DAYS),
+    trialBudgetUsd: amount(env.TRIAL_BUDGET_USD, TRIAL_DEFAULTS.trialBudgetUsd, "TRIAL_BUDGET_USD"),
+    noCardTrial: flag(env.NO_CARD_TRIAL, TRIAL_DEFAULTS.noCardTrial, "NO_CARD_TRIAL"),
+    noCardTrialTokens: whole(env.NO_CARD_TRIAL_TOKENS, TRIAL_DEFAULTS.noCardTrialTokens, "NO_CARD_TRIAL_TOKENS"),
+    noCardTrialBudgetUsd: amount(env.NO_CARD_TRIAL_BUDGET_USD, TRIAL_DEFAULTS.noCardTrialBudgetUsd, "NO_CARD_TRIAL_BUDGET_USD"),
+    trialUsdPerMillionCounted: amount(env.TRIAL_USD_PER_MILLION_COUNTED, TRIAL_DEFAULTS.trialUsdPerMillionCounted, "TRIAL_USD_PER_MILLION_COUNTED"),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
     webSignupUrl: webSignupUrl(env.WEB_SIGNUP_URL),
@@ -1226,6 +1236,14 @@ function couponId(value: unknown): string | undefined {
   if (raw === undefined || ["none", "off"].includes(raw.toLowerCase())) return undefined;
   if (!COUPON_ID.test(raw)) throw new ConfigError(`PROMO_COUPON_ID must be a Stripe coupon id (letters, digits, - and _) or "none" (got "${raw}").`);
   return raw;
+}
+
+/** CARD_TRIAL_DAYS: whole days, 1 to MAX_TRIAL_DAYS (Stripe's trial_period_days). */
+function trialDays(raw: unknown): number {
+  if (raw === undefined || raw === null || raw === "") return TRIAL_DEFAULTS.cardTrialDays;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MAX_TRIAL_DAYS) throw new ConfigError(`CARD_TRIAL_DAYS must be a whole number from 1 to ${MAX_TRIAL_DAYS} (got "${String(raw)}").`);
+  return parsed;
 }
 
 /** PROMO_PERCENT_OFF: a whole percent, 1 to 100. */

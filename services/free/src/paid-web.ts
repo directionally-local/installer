@@ -14,6 +14,7 @@ import type { Limit } from "../../shared/src/rate-limit.js";
 import {
   account,
   alert,
+  trialAccountCheck,
   auth,
   blockedError,
   CALLBACK_PATH,
@@ -51,7 +52,9 @@ import { emailBudgetOf } from "./email-budget.js";
 import { claimable, type CheckoutPromo, type PaidCheckoutRow, type UsageRow } from "./paid-store.js";
 import { CLI_LOGIN_INTERVAL_S, EMAIL_CODE_RESEND_MS, EMAIL_CODE_TTL_MS } from "./paid-auth.js";
 import { normalizeUserCode } from "./codes.js";
-import { CHECKOUT_SESSION_ID, checkoutPromo, createPlanCheckout, isCouponRefusal, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, isTermsConsentRefusal, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, termsAccepted, type StripeEvent } from "./stripe.js";
+import { endNoCardTrialForPlan, noCardTrialSignIn, parseTrialCheck, startCardTrialOnClaim, trialFromInvoice, trialFromSubscription, trialWillEnd } from "./trial-web.js";
+import { trialCountedLimit, trialsOffer, trialView } from "./trials.js";
+import { CHECKOUT_SESSION_ID, checkoutPromo, createPlanCheckout, invoiceAmount, isTrialCheckout, promoEligible, subscriptionTrial, isCouponRefusal, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, isTermsConsentRefusal, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, termsAccepted, type StripeEvent } from "./stripe.js";
 import { sendPlainEmail } from "./user-email-send.js";
 import { DAY_MS, weekEnd, weekStart, WEEK_MS } from "./week.js";
 
@@ -62,7 +65,7 @@ import { METER_KEEP_DAYS } from "./plan-meter.js";
 export const PAID_WEB_SESSION_TTL_S = 7 * 86_400;
 const ACCOUNT_OAUTH_COOKIE = "__Host-dl_account_oauth";
 /** The pages a dl.new GitHub sign-in may return to (paths on WEB_SIGNUP_URL's origin). */
-export const GITHUB_RETURN_PATHS = ["/account", "/signin", "/cli-login"] as const;
+export const GITHUB_RETURN_PATHS = ["/account", "/signin", "/cli-login", "/trial"] as const;
 const PAGE_STATE = /^[A-Za-z0-9_-]{16,128}$/;
 const HANDOFF_CODE = /^[A-Za-z0-9_-]{22,64}$/;
 const LOGIN_ID = /^[A-Za-z0-9_-]{22,64}$/;
@@ -185,7 +188,9 @@ function billingUnavailable(): Response {
 /** GET /web/plans: the plan cards (part B's per-model limits, from the runtime settings). */
 async function webPlans(c: Ctx): Promise<Response> {
   const [catalog, { config }] = await Promise.all([planCatalogFor(c), runtime(c)]);
-  return json(plansView({ catalog, available: billingOn(c) && PLAN_IDS.every((plan) => planPrice(c, plan) !== undefined), promo: promoView(config, c.now()) }));
+  const budgets = await directory(c).trialBudgets(config, c.now());
+  // The free trials (trials.ts): `trials.card.available` puts the line on every card; `fullyClaimed` shows "Free trial: fully claimed".
+  return json({ ...plansView({ catalog, available: billingOn(c) && PLAN_IDS.every((plan) => planPrice(c, plan) !== undefined), promo: promoView(config, c.now()) }), trials: trialsOffer(config, budgets) });
 }
 
 /** A plan's line ("DeepSeek V4.1 Flash ~62M/week (95.5% caching applied). ...") at the live settings. */
@@ -207,6 +212,11 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
   const { config } = await runtime(c);
   // The launch offer: inside its window the coupon goes on the Checkout, no code to type.
   let coupon = activePromoCoupon(config, c.now());
+  // A card trial (trials.ts) while its budget has room: $0 now, and the offer's coupon is only
+  // recorded (promo_eligible) for the first real charge, never put on the $0 trial invoice.
+  const trialOn = (await directory(c).trialBudgets(config, c.now())).card.available;
+  const trial = trialOn ? { days: config.cardTrialDays, ...(coupon ? { promoEligible: coupon } : {}) } : undefined;
+  if (trial) coupon = undefined;
   const create = (termsConsent: string | undefined, withCoupon: string | undefined) =>
     createPlanCheckout(c.fetch, {
       secretKey: c.config.stripe.secretKey!,
@@ -217,6 +227,7 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
       ...(campaign ? { campaign } : {}),
       ...(termsConsent ? { termsConsent } : {}),
       ...(withCoupon ? { coupon: withCoupon } : {}),
+      ...(trial ? { trial } : {}),
       idempotencyKey: crypto.randomUUID(),
     });
   const start = async (termsConsent: string | undefined) => {
@@ -250,7 +261,7 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
         session = await start(undefined);
       }
     }
-    return json({ url: session.url, sessionId: session.id });
+    return json({ url: session.url, sessionId: session.id, trial: trial !== undefined });
   } catch (error) {
     if (error instanceof StripeError) return apiError(502, "billing_error", "Stripe couldn't start the checkout. Try again in a minute.");
     throw error;
@@ -285,6 +296,8 @@ interface VerifiedCheckout {
   termsAcceptedAt: number | null;
   /** The launch offer's discount on the first payment, or null. */
   promo: CheckoutPromo | null;
+  /** A card trial (trials.ts): nothing paid yet; the coupon the first real charge gets, if any. */
+  trial: { promoEligible: string | undefined } | null;
 }
 
 /** Reads a Checkout Session from Stripe and checks it is a paid dl.new plan; else the error response. */
@@ -300,7 +313,9 @@ async function verifyCheckout(c: Ctx, sessionId: unknown): Promise<VerifiedCheck
     throw error;
   }
   if (session.metadata?.product !== "plan" || session.mode !== "subscription") return apiError(404, "checkout_not_found", "We couldn't find that payment. Start again at dl.new.");
-  if (session.status !== "complete" || session.payment_status !== "paid") return apiError(402, "checkout_unpaid", "This checkout wasn't paid. Pick a plan at dl.new to try again.");
+  // A card trial completes with nothing to pay (payment_status no_payment_required, the card saved).
+  const trialCheckout = isTrialCheckout(session);
+  if (session.status !== "complete" || (session.payment_status !== "paid" && !trialCheckout)) return apiError(402, "checkout_unpaid", "This checkout wasn't paid. Pick a plan at dl.new to try again.");
   const subscription = session.subscription && typeof session.subscription === "object" ? (session.subscription as Record<string, any>) : null;
   const plan = planOfPrice(c.config.stripe.prices ?? {}, subscription ? subscriptionPrice(subscription) : undefined) ?? (isPlanId(session.metadata?.plan) ? session.metadata.plan : undefined);
   if (!plan) return apiError(404, "checkout_not_found", "We couldn't find that payment. Start again at dl.new.");
@@ -321,6 +336,7 @@ async function verifyCheckout(c: Ctx, sessionId: unknown): Promise<VerifiedCheck
     claimedBy: row?.claimed_by ?? null,
     termsAcceptedAt: termsAccepted(session) ? paidAt : null,
     promo: checkoutPromo(session),
+    trial: trialCheckout ? { promoEligible: promoEligible(session) } : null,
   };
 }
 
@@ -339,6 +355,7 @@ async function checkoutStatus(c: Ctx, sessionId: string): Promise<Response> {
   return json({
     sessionId,
     status: claimed ? "claimed" : "paid",
+    trial: verified.trial !== null,
     plan: verified.plan,
     emailHint: emailHint(verified.email),
     claimable: !claimed,
@@ -360,7 +377,7 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
     return apiError(409, "already_subscribed", "This account already has a plan. Manage it at dl.new/billing; write to contact@directionallylocal.com about the second payment and we'll refund it.");
   }
   const dir = directory(c);
-  await dir.recordPaidCheckout({ sessionId: checkout.sessionId, plan: checkout.plan, customerId: checkout.customerId, subscriptionId: checkout.subscriptionId, email: checkout.email, amountCents: checkout.amountCents, paidAt: checkout.paidAt, termsAcceptedAt: checkout.termsAcceptedAt, promo: checkout.promo });
+  await dir.recordPaidCheckout({ sessionId: checkout.sessionId, plan: checkout.plan, customerId: checkout.customerId, subscriptionId: checkout.subscriptionId, email: checkout.email, amountCents: checkout.amountCents, paidAt: checkout.paidAt, termsAcceptedAt: checkout.termsAcceptedAt, promo: checkout.promo, ...(checkout.trial ? { trial: true, promoEligible: checkout.trial.promoEligible ?? null } : {}) });
   const claimed = await dir.claimPaidCheckout(checkout.sessionId, accountNumber, c.now());
   if (claimed !== "claimed") return apiError(409, "checkout_claimed", "This payment is already linked to another dl.new account. Sign in with that one.");
   if (checkout.customerId) {
@@ -380,10 +397,16 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
       eventAt: Math.floor(c.now() / 1000),
       tier: checkout.plan,
       paymentFailed: false,
+      ...(subscription ? { trial: subscriptionTrial(subscription) } : checkout.trial ? { trial: { trialing: true, trialEnd: null } } : {}),
     });
     await dir.mirrorSubscription({ githubId: accountNumber, state, periodEnd: end, eventAt: Math.floor(c.now() / 1000) });
     const invoiceId = idOf(subscription?.latest_invoice);
-    if (invoiceId) {
+    // A card trial: nothing was paid (the $0 trial invoice is no payment); the trial's meter starts.
+    const trialing = checkout.trial !== null && (subscription === null || subscription.status === "trialing");
+    if (trialing) {
+      await startCardTrialOnClaim(c, accountNumber, { plan: checkout.plan, subscriptionId: checkout.subscriptionId, subscription, startedAt: checkout.paidAt, ...(checkout.trial?.promoEligible ? { promoEligible: checkout.trial.promoEligible } : {}) });
+    } else await endNoCardTrialForPlan(c, accountNumber);
+    if (invoiceId && !trialing && checkout.amountCents > 0) {
       await person.noteFirstPayment({ invoiceId, at: checkout.paidAt });
       const paymentAlert = await dir.recordPayment({ id: invoiceId, githubId: accountNumber, kind: "pro", amountCents: checkout.amountCents, at: checkout.paidAt, product: PLANS[checkout.plan].name });
       if (paymentAlert) await alert(c, [paymentAlert]);
@@ -401,7 +424,8 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
       console.error("paid: claim's Stripe update failed", error instanceof StripeError ? error.status : "error");
     }
   }
-  // The welcome email (once per payment): where the key is, the plan's limits, the bonus.
+  // A trial's welcome went out with it (trial-web.ts); a plan's (once per payment): where the key is, the plan's limits, the bonus.
+  if (checkout.trial !== null) return { plan: checkout.plan, sessionId: checkout.sessionId };
   const welcome = sendPlanWelcome(c, accountNumber, checkout.plan, checkout.sessionId, checkout.promo).catch((error) => console.error("paid: welcome failed", error instanceof Error ? error.message : "error"));
   if (c.background) c.background(welcome);
   else await welcome;
@@ -617,7 +641,9 @@ export async function githubCallback(c: Ctx): Promise<Response> {
   if (!signedIn) return back("error=github_failed");
   const email = await githubPrimaryEmail(signedIn.accessToken, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS);
   if (!email) return back("error=github_no_verified_email");
-  const handoff = await auth(c).issueAccountHandoff({ pageStateHash: claimed.pageStateHash, githubId: signedIn.user.id, login: signedIn.user.login, email, now: c.now() });
+  // dl.new/trial: the free tier's account check, read now while the GitHub token is at hand.
+  const details = new URL(claimed.returnUrl).pathname === "/trial" ? JSON.stringify({ trial: true, ...(await trialAccountCheck(c, signedIn.user, signedIn.accessToken)) }) : null;
+  const handoff = await auth(c).issueAccountHandoff({ pageStateHash: claimed.pageStateHash, githubId: signedIn.user.id, login: signedIn.user.login, email, details, now: c.now() });
   return back(`signin=${handoff}`);
 }
 
@@ -630,6 +656,16 @@ async function githubSession(c: Ctx): Promise<Response> {
   if (typeof body.code !== "string" || !HANDOFF_CODE.test(body.code) || typeof body.state !== "string" || !PAGE_STATE.test(body.state)) return invalid();
   const handoff = await auth(c).claimAccountHandoff({ code: body.code, state: body.state, now: c.now() });
   if (!handoff) return invalid();
+  // dl.new/trial: the no-card trial (trial-web.ts). A GitHub account with an account already signs in as usual.
+  if (body.trial === true && !body.sessionId) {
+    const started = await noCardTrialSignIn(c, { githubId: handoff.githubId, login: handoff.login, email: handoff.email, check: parseTrialCheck(handoff.details) });
+    if (started instanceof Response) return started;
+    const person = await directory(c).getPerson(started.account);
+    if (!person) return apiError(403, "no_account", NO_ACCOUNT_MESSAGE);
+    if (person.status === "blocked") return blockedError();
+    const session = await issueWebSession(c, started.account, person.login);
+    return json({ ...session, account: await accountView(c, started.account), created: started.created, claimed: null, trialStarted: started.created });
+  }
   return signIn(c, { kind: "github", subject: String(handoff.githubId), label: handoff.login, email: handoff.email }, body.sessionId);
 }
 
@@ -656,6 +692,9 @@ function planView(billing: BillingState, config: PlanSettingsConfig & { cachedTo
     periodEnd: billing.periodEnd === null ? null : new Date(billing.periodEnd).toISOString(),
     cancelAtPeriodEnd: billing.cancelAtPeriodEnd,
     paymentFailed: billing.paymentFailed,
+    /** In its free trial (trials.ts): the plan starts at the trial's end at the latest. */
+    trialing: billing.trialing,
+    trialEndsAt: billing.trialEnd === null ? null : new Date(billing.trialEnd).toISOString(),
   };
 }
 
@@ -671,6 +710,7 @@ async function accountView(c: Ctx, accountNumber: number) {
     runtime(c),
     planAccountFor(c, accountNumber),
   ]);
+  const trial = trialView(bars.state.trial, gate.config, c.now());
   const current = planView(billing, gate.config);
   const tier = current && current.status !== "canceled" ? billing.tier : null;
   return {
@@ -683,6 +723,8 @@ async function accountView(c: Ctx, accountNumber: number) {
     // Part B: one bar per plan model and the GPT-6 launch bonus (plan-usage.ts), null without them.
     limits: bars.limits,
     gpt6Bonus: bars.gpt6Bonus,
+    // The free trial's meter (trials.ts), or null: counted used of its limit, and as real tokens at 95.5% caching.
+    trial,
     upgrade: PLAN_IDS.filter((id) => tier === null || isUpgrade(tier, id)).map((id) => ({ plan: id, name: PLANS[id].name, priceUsd: PLANS[id].priceUsd })),
   };
 }
@@ -755,7 +797,7 @@ async function listApiKeys(c: Ctx): Promise<Response> {
   const { config } = await runtime(c);
   const person = account(c, caller.account);
   const keys = (await person.listKeys()).filter((key) => key.kind === "tool");
-  const paid = (await person.paidPlan(c.now())) !== null;
+  const paid = (await person.paidPlan(c.now())) !== null || (await person.trialAccess(c.now()));
   return json({ keys: keys.map(apiKeyView), max: paid ? Math.max(config.toolKeysMax, PAID_KEYS_MAX) : config.toolKeysMax });
 }
 
@@ -955,7 +997,7 @@ async function cliDecide(c: Ctx, raw: string, approve: boolean): Promise<Respons
   if (caller instanceof Response) return caller;
   const userCode = normalizeUserCode(raw);
   if (!userCode) return apiError(404, "cli_login_not_found", "That code is unknown or expired. Run the command again.");
-  if (approve && isPaidAccountNumber(caller.account) && (await account(c, caller.account).paidPlan(c.now())) === null) {
+  if (approve && isPaidAccountNumber(caller.account) && (await account(c, caller.account).paidPlan(c.now())) === null && !(await account(c, caller.account).trialAccess(c.now()))) {
     return apiError(403, "no_plan", "This account has no active plan. Pick one at dl.new.", { url: `${webOrigin(c)}/` });
   }
   const decided = await auth(c).decideCliLogin({ userCode, account: caller.account, approve, now: c.now() });
@@ -1051,6 +1093,7 @@ async function usage(c: Ctx): Promise<Response> {
       })),
     days: view.days.map((day) => ({ day: day.date, countedTokens: day.counted, realTokens: day.real })),
     tools: view.tools.map((tool) => ({ tool: meterTool(tool.tool), requests: tool.requests, realTokens: tool.real, countedTokens: tool.counted })).sort((a, b) => b.countedTokens - a.countedTokens),
+    trial: trialView((await planAccountFor(c, caller.account)).state.trial, config, now),
     gpt6Bonus: thisWeek && view.bonus.enabled && view.bonus.granted ? { usdPerWeek: view.bonus.weeklyUsd, usedUsd: view.bonus.spentUsd, leftUsd: view.bonus.leftUsd, label: view.bonus.label, line: view.bonus.line } : null,
     cachedTokenWeight: weight,
   });
@@ -1118,6 +1161,7 @@ function checkoutAdminView(row: PaidCheckoutRow, now: number) {
     claimEmailSentAt: row.claim_email_sent_at === null ? null : new Date(row.claim_email_sent_at).toISOString(),
     termsAcceptedAt: row.terms_accepted_at === null ? null : new Date(row.terms_accepted_at).toISOString(),
     // The launch offer: the coupon on this Checkout (null: full price), what it took off, and its percent.
+    trial: row.trial === 1 ? { promoEligible: row.promo_eligible } : null,
     promo: row.promo_coupon === null ? null : { coupon: row.promo_coupon, discountCents: row.discount_cents, percentOff: row.promo_percent_off },
     expired: row.claimed_by === null && !claimable(row, now, CLAIM_DAYS),
   };
@@ -1144,6 +1188,11 @@ export async function paidAdmin(c: Ctx, rest: string, method: string): Promise<R
     });
   }
   if (method === "POST" && rest === "refund") return adminRefund(c);
+  // The free trials (trials.ts): both budgets (spent, projected, fully claimed) and the latest trials.
+  if (method === "GET" && rest === "trials") {
+    const { config } = await runtime(c);
+    return json(await directory(c).trialsAdmin(config, c.now()));
+  }
   return apiError(404, "not_found", `${method} /admin/paid/${rest} isn't a route.`);
 }
 
@@ -1211,7 +1260,7 @@ function isPlanEvent(c: Ctx, event: StripeEvent): boolean {
   if (event.type === "invoice.paid" || event.type === "invoice.payment_failed") {
     return invoiceSubscription(object).metadata.product === "plan" || invoicePrices(object).some((price) => prices.includes(price));
   }
-  if (event.type === "customer.subscription.updated" || event.type === "customer.subscription.deleted") {
+  if (event.type === "customer.subscription.updated" || event.type === "customer.subscription.deleted" || event.type === "customer.subscription.trial_will_end") {
     const price = subscriptionPrice(object);
     return object.metadata?.product === "plan" || (price !== undefined && prices.includes(price));
   }
@@ -1232,7 +1281,20 @@ async function sendClaimEmail(c: Ctx, row: PaidCheckoutRow): Promise<void> {
     console.error("paid: claim email over the daily email budget");
     return;
   }
-  const text = [
+  const trialText = row.trial === 1;
+  const text = trialText
+    ? [
+        `Your free trial of ${plan.name} has started: the first ${config.cardTrialTokens / 1_000_000}M tokens are free (95.5% caching applied). Your plan ($${plan.priceUsd}/month${row.promo_eligible ? `, first month ${config.promoPercentOff}% off` : ""}) starts when you've used them or after ${config.cardTrialDays} days.`,
+        "",
+        "Finish setting up dl.new to get your key:",
+        link,
+        "",
+        `The link works for ${CLAIM_DAYS} days. Nothing was charged today.`,
+        "Questions? Reply to this email.",
+        "",
+        "dl.new, by Directionally Local",
+      ].join("\n")
+    : [
     `Thanks for subscribing to ${plan.name} (${row.promo_coupon === null ? `$${plan.priceUsd}/month` : `first month ${row.promo_percent_off ?? config.promoPercentOff}% off, then $${plan.priceUsd}/month`}): ${planLine(row.plan, config)}`,
     "",
     "Finish setting up dl.new to get your key:",
@@ -1261,7 +1323,8 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
   const prices = c.config.stripe.prices ?? {};
   switch (event.type) {
     case "checkout.session.completed": {
-      if (object.payment_status !== "paid") return "plan_unpaid";
+      const trialCheckout = isTrialCheckout(object);
+      if (object.payment_status !== "paid" && !trialCheckout) return "plan_unpaid";
       const plan: PlanId | undefined = isPlanId(object.metadata?.plan) ? object.metadata.plan : undefined;
       if (!plan || typeof object.id !== "string") return "ignored";
       const row = await dir.recordPaidCheckout({
@@ -1274,11 +1337,20 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
         paidAt: event.created * 1000,
         termsAcceptedAt: termsAccepted(object) ? event.created * 1000 : null,
         promo: checkoutPromo(object),
+        ...(trialCheckout ? { trial: true, promoEligible: promoEligible(object) ?? null } : {}),
       });
+      // A card trial (trials.ts) is on the trial budget from now, whoever claims it.
+      const { config: trialConfig } = await runtime(c);
+      const subscriptionId = idOf(object.subscription);
+      if (trialCheckout && subscriptionId) {
+        await dir.recordCardTrial({ subscriptionId, plan, limit: trialCountedLimit("card", trialConfig), startedAt: event.created * 1000, endsAt: event.created * 1000 + trialConfig.cardTrialDays * DAY_MS, ...(row.claimed_by !== null ? { account: row.claimed_by } : {}) });
+      }
       if (row.claimed_by !== null) return "plan_claimed";
       await sendClaimEmail(c, row);
       const offer = row.promo_coupon === null ? "" : ` (launch offer ${row.promo_coupon}, $${(row.discount_cents / 100).toFixed(2)} off)`;
-      const alerts: Alert[] = [{ subject: `dl.new: someone paid for ${PLANS[plan].name}`, text: `dl.new: ${row.email ?? "someone"} paid $${(row.amount_cents / 100).toFixed(2)} for ${PLANS[plan].name}${offer}. Not set up yet (unclaimed payments: GET /admin/paid/checkouts).` }];
+      const alerts: Alert[] = trialCheckout
+        ? [{ subject: `dl.new: someone started a ${PLANS[plan].name} trial`, text: `dl.new: ${row.email ?? "someone"} started a free trial of ${PLANS[plan].name} (card saved, $0 now)${row.promo_eligible ? ` (launch offer ${row.promo_eligible} on the first charge)` : ""}. Not set up yet (unclaimed: GET /admin/paid/checkouts).` }]
+        : [{ subject: `dl.new: someone paid for ${PLANS[plan].name}`, text: `dl.new: ${row.email ?? "someone"} paid $${(row.amount_cents / 100).toFixed(2)} for ${PLANS[plan].name}${offer}. Not set up yet (unclaimed payments: GET /admin/paid/checkouts).` }];
       await alert(c, alerts);
       return "plan_unclaimed";
     }
@@ -1294,8 +1366,13 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
         return "plan_past_due";
       }
       const end = invoicePeriodEnd(object);
+      const amount = invoiceAmount(object);
       const applied = await person.applySubscription({ subscriptionId, state: "active", periodEnd: end, eventAt: event.created, paymentFailed: false, ...(tier ? { tier } : {}) });
-      if (object.billing_reason === "subscription_create" && typeof object.id === "string") await person.noteFirstPayment({ invoiceId: object.id, at: event.created * 1000 });
+      // The first money taken (a trial's $0 invoice isn't a payment): it starts the refund window.
+      if (amount > 0 && typeof object.id === "string") await person.noteFirstPayment({ invoiceId: object.id, at: event.created * 1000 });
+      // Money taken while a card trial is open: the trial is over and the plan started (trials.ts).
+      if (amount > 0) await trialFromInvoice(c, owner, object, subscriptionId);
+      if (amount === 0 && object.billing_reason === "subscription_create") return applied ? "plan_trial_invoice" : "stale";
       const billed = tier ?? (await person.billing()).tier;
       const paymentAlert = await dir.recordPayment({
         id: String(object.id),
@@ -1310,6 +1387,9 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
       if (applied) await dir.mirrorSubscription({ githubId: owner, state: "active", periodEnd: end, eventAt: event.created });
       return applied ? "plan_active" : "stale";
     }
+    case "customer.subscription.trial_will_end":
+      // The launch offer's coupon onto a trialing subscription before its first real charge.
+      return `plan_${await trialWillEnd(c, object)}`;
     case "customer.subscription.updated":
     case "customer.subscription.deleted": {
       if (typeof object.id !== "string") return "ignored";
@@ -1317,8 +1397,10 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
       const state = event.type === "customer.subscription.deleted" ? "canceled" : planState(object.status);
       const tier = planOfPrice(prices, subscriptionPrice(object));
       const end = periodEnd(object);
-      const applied = await account(c, owner).applySubscription({ subscriptionId: object.id, state, periodEnd: end, cancelAtPeriodEnd: object.cancel_at_period_end === true, eventAt: event.created, ...(tier ? { tier } : {}) });
+      const applied = await account(c, owner).applySubscription({ subscriptionId: object.id, state, periodEnd: end, cancelAtPeriodEnd: object.cancel_at_period_end === true, eventAt: event.created, ...(tier ? { tier } : {}), trial: event.type === "customer.subscription.deleted" ? { trialing: false, trialEnd: null } : subscriptionTrial(object) });
       if (applied) await dir.mirrorSubscription({ githubId: owner, state, periodEnd: end, eventAt: event.created });
+      // A card trial over in Stripe (its plan started, or it was canceled) closes here (trials.ts).
+      if (applied) await trialFromSubscription(c, owner, object, event.type === "customer.subscription.deleted");
       return applied ? `plan_${state}` : "stale";
     }
   }

@@ -1,6 +1,7 @@
 import { ALLOCATOR_MODES } from "./allocator.js";
 import { ACCESS_REQUEST_ALERT_MODES, COUPON_ID, GPT6_CLIENTS, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, isKeepDays, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, RAW_LOG_MAX_KEEP_DAYS, RAW_LOG_MIN_KEEP_DAYS, PRO_MULTIPLIER_MAX, PRO_MULTIPLIER_MIN, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
+import { MAX_TRIAL_DAYS } from "./trials.js";
 import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_PLANS, PROVIDER_STATUSES } from "./providers.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
@@ -287,6 +288,22 @@ export const RUNTIME_SETTINGS = {
   promoPercentOff: { kind: "percent", env: "PROMO_PERCENT_OFF" },
   /** The cards' line (default "first month, ends Mon 30 Nov"). */
   promoLabel: { kind: "label", env: "PROMO_LABEL" },
+  /** Card trials on every plan's Checkout (trials.ts): $0 now, the first cardTrialTokens free; default on. */
+  cardTrial: { kind: "flag", env: "CARD_TRIAL" },
+  /** Real tokens (95.5% caching applied) a card trial includes (default 20M; enforced as counted, x0.0641). */
+  cardTrialTokens: { kind: "tokens", env: "CARD_TRIAL_TOKENS" },
+  /** Days until the plan starts anyway (default 30): Stripe's trial_period_days on new Checkouts. */
+  cardTrialDays: { kind: "trialDays", env: "CARD_TRIAL_DAYS" },
+  /** Card trials' global budget, USD (default 300): spent plus the projected rest of active trials. */
+  trialBudgetUsd: { kind: "amount", env: "TRIAL_BUDGET_USD" },
+  /** No-card trials after a GitHub sign-in (default on). */
+  noCardTrial: { kind: "flag", env: "NO_CARD_TRIAL" },
+  /** Real tokens (95.5% caching applied) a no-card trial includes (default 10M; enforced as counted), one time. */
+  noCardTrialTokens: { kind: "tokens", env: "NO_CARD_TRIAL_TOKENS" },
+  /** No-card trials' global budget, USD (default 200). */
+  noCardTrialBudgetUsd: { kind: "amount", env: "NO_CARD_TRIAL_BUDGET_USD" },
+  /** USD per million counted trial tokens for the projection until trials have used 20M counted (default 0.30). */
+  trialUsdPerMillionCounted: { kind: "amount", env: "TRIAL_USD_PER_MILLION_COUNTED" },
   /** The GPT-6 launch bonus for paying accounts (gpt6-bonus.ts); default off. */
   gpt6Bonus: { kind: "flag", env: "GPT6_BONUS" },
   /** The bonus a paying account gets a week, USD of GPT-6.1 Sol usage (default 2). */
@@ -409,6 +426,8 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "string" && COUPON_ID.test(value) ? value : "invalid";
     case "percent":
       return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 100 ? value : "invalid";
+    case "trialDays":
+      return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= MAX_TRIAL_DAYS ? value : "invalid";
     case "label":
       return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 80 ? value.trim() : "invalid";
     case "instant": {
@@ -449,6 +468,7 @@ const RULES: Record<Kind, string> = {
   githubIds: 'a list of up to 500 numeric GitHub ids, e.g. [12345, 67890], or [] for none',
   couponId: 'a Stripe coupon id (letters, digits, - and _), or "none" to turn the offer off',
   percent: 'a whole percent, 1 to 100',
+  trialDays: `a whole number of days, 1 to ${MAX_TRIAL_DAYS}`,
   label: 'a line of text, 1 to 80 characters',
   instant: 'an ISO time with its zone, e.g. "2026-11-20T00:00:00Z", Unix ms, or "none" to turn it off',
 };

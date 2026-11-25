@@ -167,27 +167,38 @@ export async function claimAccountOAuth(sql: Sql, input: { state: string; browse
 }
 
 /** The one-time code that hands a finished GitHub sign-in (with its verified email) back to the page. */
-export async function issueAccountHandoff(sql: Sql, input: { pageStateHash: string; githubId: number; login: string; email: string; now: number }): Promise<string> {
+/** Adds `account_handoffs.details` to tables made before the no-card trial (AuthObject's constructor). */
+export function migrateAccountHandoffs(sql: Sql): void {
+  const columns = sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('account_handoffs')").toArray().map((column) => column.name);
+  if (!columns.includes("details")) sql.exec("ALTER TABLE account_handoffs ADD COLUMN details TEXT");
+}
+
+/**
+ * `details`: what a no-card trial's GitHub sign-in read at the callback (trial-web.ts: the
+ * account's level from its GitHub signals), as JSON; null for every other sign-in.
+ */
+export async function issueAccountHandoff(sql: Sql, input: { pageStateHash: string; githubId: number; login: string; email: string; details?: string | null; now: number }): Promise<string> {
   const code = randomToken();
   sql.exec(
-    "INSERT INTO account_handoffs (code_hash, state_hash, github_id, login, email, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO account_handoffs (code_hash, state_hash, github_id, login, email, expires_at, details) VALUES (?, ?, ?, ?, ?, ?, ?)",
     await sha256Hex(code),
     input.pageStateHash,
     input.githubId,
     input.login,
     input.email,
     input.now + HANDOFF_TTL_MS,
+    input.details ?? null,
   );
   return code;
 }
 
-export async function claimAccountHandoff(sql: Sql, input: { code: string; state: string; now: number }): Promise<{ githubId: number; login: string; email: string } | undefined> {
+export async function claimAccountHandoff(sql: Sql, input: { code: string; state: string; now: number }): Promise<{ githubId: number; login: string; email: string; details: string | null } | undefined> {
   const codeHash = await sha256Hex(input.code);
-  const row = sql.exec<{ state_hash: string; github_id: number; login: string; email: string; expires_at: number }>("SELECT * FROM account_handoffs WHERE code_hash = ?", codeHash).toArray()[0];
+  const row = sql.exec<{ state_hash: string; github_id: number; login: string; email: string; expires_at: number; details: string | null }>("SELECT * FROM account_handoffs WHERE code_hash = ?", codeHash).toArray()[0];
   if (!row) return undefined;
   sql.exec("DELETE FROM account_handoffs WHERE code_hash = ?", codeHash);
   if (row.expires_at <= input.now || !timingSafeEqual(await sha256Hex(input.state), row.state_hash)) return undefined;
-  return { githubId: row.github_id, login: row.login, email: row.email };
+  return { githubId: row.github_id, login: row.login, email: row.email, details: row.details ?? null };
 }
 
 // ─── cli-login ──────────────────────────────────────────────────────────────

@@ -32,6 +32,7 @@ export const METER_SCHEMA = [
      requests   INTEGER NOT NULL DEFAULT 0,
      failovers  INTEGER NOT NULL DEFAULT 0,
      cost_usd   REAL NOT NULL DEFAULT 0,
+     trial_counted INTEGER NOT NULL DEFAULT 0,
      PRIMARY KEY (week_start, model)
    ) WITHOUT ROWID`,
   `CREATE TABLE IF NOT EXISTS model_usage_daily (
@@ -77,7 +78,15 @@ export interface MeterRecord {
   failover: boolean;
   /** Paid from the GPT-6 launch bonus. */
   bonus: boolean;
+  /** Held to a free trial (trials.ts): shown in the week's usage, never counted against the plan's weekly limit. */
+  trial?: boolean;
   now: number;
+}
+
+/** Adds `model_usage.trial_counted` to meters made before trials (AccountObject's constructor). */
+export function migrateMeters(sql: MeterSql): void {
+  const columns = sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('model_usage')").toArray().map((column) => column.name);
+  if (!columns.includes("trial_counted")) sql.exec("ALTER TABLE model_usage ADD COLUMN trial_counted INTEGER NOT NULL DEFAULT 0");
 }
 
 export function recordMeter(sql: MeterSql, record: MeterRecord): void {
@@ -88,9 +97,10 @@ export function recordMeter(sql: MeterSql, record: MeterRecord): void {
   const output = record.usage?.completionTokens ?? 0;
   const counted = Math.max(0, Math.round(record.counted));
   sql.exec(
-    `INSERT INTO model_usage (week_start, model, counted, prompt, cached, output, requests, failovers, cost_usd) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `INSERT INTO model_usage (week_start, model, counted, prompt, cached, output, requests, failovers, cost_usd, trial_counted) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
      ON CONFLICT (week_start, model) DO UPDATE SET counted = counted + excluded.counted, prompt = prompt + excluded.prompt, cached = cached + excluded.cached,
-       output = output + excluded.output, requests = requests + 1, failovers = failovers + excluded.failovers, cost_usd = cost_usd + excluded.cost_usd`,
+       output = output + excluded.output, requests = requests + 1, failovers = failovers + excluded.failovers, cost_usd = cost_usd + excluded.cost_usd,
+       trial_counted = trial_counted + excluded.trial_counted`,
     week,
     record.model,
     counted,
@@ -99,6 +109,7 @@ export function recordMeter(sql: MeterSql, record: MeterRecord): void {
     output,
     record.failover ? 1 : 0,
     Math.max(0, record.costUsd),
+    record.trial ? counted : 0,
   );
   sql.exec(
     `INSERT INTO model_usage_daily (day, model, counted, prompt, cached, output) VALUES (?, ?, ?, ?, ?, ?)
@@ -134,9 +145,10 @@ export function pruneMeters(sql: MeterSql, now: number): void {
   sql.exec("DELETE FROM plan_notices WHERE week_start < ?", weekStart(now));
 }
 
-/** Counted tokens this week on one model. */
+/** Counted tokens this week on one model, held to the plan's limit: a free trial's usage left out. */
 export function countedThisWeek(sql: MeterSql, model: string, now: number): number {
-  return sql.exec<{ counted: number }>("SELECT counted FROM model_usage WHERE week_start = ? AND model = ?", weekStart(now), model).toArray()[0]?.counted ?? 0;
+  const row = sql.exec<{ counted: number; trial_counted: number }>("SELECT counted, trial_counted FROM model_usage WHERE week_start = ? AND model = ?", weekStart(now), model).toArray()[0];
+  return row ? Math.max(0, row.counted - row.trial_counted) : 0;
 }
 
 /** The bonus dollars spent this week. */
@@ -220,6 +232,8 @@ export interface MeterWeekRow {
   requests: number;
   failovers: number;
   costUsd: number;
+  /** Of `counted`, what a free trial used (not held to the plan's limit). */
+  trialCounted: number;
 }
 
 export interface MeterSnapshot {
@@ -234,12 +248,12 @@ export interface MeterSnapshot {
 export function meterSnapshot(sql: MeterSql, now: number): MeterSnapshot {
   const week = weekStart(now);
   const models = sql
-    .exec<{ model: string; counted: number; prompt: number; cached: number; output: number; requests: number; failovers: number; cost_usd: number }>(
-      "SELECT model, counted, prompt, cached, output, requests, failovers, cost_usd FROM model_usage WHERE week_start = ? ORDER BY model",
+    .exec<{ model: string; counted: number; prompt: number; cached: number; output: number; requests: number; failovers: number; cost_usd: number; trial_counted: number }>(
+      "SELECT model, counted, prompt, cached, output, requests, failovers, cost_usd, trial_counted FROM model_usage WHERE week_start = ? ORDER BY model",
       week,
     )
     .toArray()
-    .map((row) => ({ model: row.model, counted: row.counted, prompt: row.prompt, cached: row.cached, output: row.output, requests: row.requests, failovers: row.failovers, costUsd: row.cost_usd }));
+    .map((row) => ({ model: row.model, counted: row.counted, prompt: row.prompt, cached: row.cached, output: row.output, requests: row.requests, failovers: row.failovers, costUsd: row.cost_usd, trialCounted: row.trial_counted ?? 0 }));
   const daily = sql
     .exec<{ day: number; model: string; counted: number; prompt: number; output: number }>("SELECT day, model, counted, prompt, output FROM model_usage_daily WHERE day >= ? ORDER BY day", week)
     .toArray();

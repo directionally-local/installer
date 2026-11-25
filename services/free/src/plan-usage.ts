@@ -81,7 +81,8 @@ export function planUsageView(input: {
   const rowOf = (model: string) => meters.models.find((row) => row.model === model);
   const modelView = (model: string, name: string, limit?: { realTokens: number; countedTokens: number }) => {
     const row = rowOf(model);
-    const counted = row?.counted ?? 0;
+    // The plan's bar leaves out what a free trial used this week (trials.ts): it never counts against the plan.
+    const counted = Math.max(0, (row?.counted ?? 0) - (limit ? (row?.trialCounted ?? 0) : 0));
     const cached = row?.cached ?? 0;
     const prompt = row?.prompt ?? 0;
     const output = row?.output ?? 0;
@@ -165,7 +166,7 @@ export function planLimitsView(input: { state: PlanState; meters: MeterSnapshot;
   const resetsAt = new Date(weekEnd(now)).toISOString();
   return planLimits(state.tier, config).map((limit) => {
     const row = meters.models.find((entry) => entry.model === limit.model);
-    const countedUsed = row?.counted ?? 0;
+    const countedUsed = Math.max(0, (row?.counted ?? 0) - (row?.trialCounted ?? 0));
     const percent = limit.countedTokens > 0 ? Math.min(100, Math.floor((countedUsed / limit.countedTokens) * 100)) : 100;
     return {
       model: limit.model,
