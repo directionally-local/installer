@@ -122,7 +122,7 @@ describe("trials: the numbers and the copy", () => {
 });
 
 describe("trials: the card trial's Checkout", () => {
-  it("collects the card, charges $0 for 30 days, cancels without a card, and keeps the launch coupon off the $0 invoice", async () => {
+  it("collects the card, charges $0 for 30 days, cancels without a card, and puts the launch coupon on it for the first paid month", async () => {
     const { service, stripe } = await world();
     const { sessionId, trial } = await startCheckout(service, "plus");
     assert.equal(trial, true);
@@ -130,12 +130,15 @@ describe("trials: the card trial's Checkout", () => {
     assert.equal(form.get("subscription_data[trial_period_days]"), "30");
     assert.equal(form.get("subscription_data[trial_settings][end_behavior][missing_payment_method]"), "cancel");
     assert.equal(form.get("payment_method_collection"), "always");
-    assert.equal(form.get("discounts[0][coupon]"), null, "no coupon on the trial Checkout");
-    assert.equal(form.get("allow_promotion_codes"), "false");
+    // The coupon is on the trial Checkout, so the page shows the discounted first paid month
+    // (Stripe keeps a duration-once coupon for the first invoice after the trial).
+    assert.equal(form.get("discounts[0][coupon]"), "dlnew-bf-2026");
+    assert.equal(form.get("allow_promotion_codes"), null, "Stripe takes discounts or allow_promotion_codes, never both");
+    assert.equal(form.get("metadata[promo]"), "dlnew-bf-2026");
     assert.equal(form.get("metadata[promo_eligible]"), "dlnew-bf-2026");
     assert.equal(form.get("subscription_data[metadata][promo_eligible]"), "dlnew-bf-2026");
     assert.equal(form.get("subscription_data[metadata][trial]"), "card");
-    // Checkout shows only "30 days free, then $20/month": the line above the button says the offer.
+    // The line above the button says when the discounted month comes.
     const offer = form.get("custom_text[submit][message]");
     assert.equal(offer, "Launch offer: your first paid month is 50% off ($10 instead of $20). It's applied when your free 20M tokens are used or after 30 days.");
     assert.ok(offer!.length <= 1200);
@@ -158,6 +161,8 @@ describe("trials: the card trial's Checkout", () => {
     assert.equal(trial, true);
     const form = stripe.sessions.get(sessionId)!.form;
     assert.equal(form.get("custom_text[submit][message]"), null);
+    assert.equal(form.get("discounts[0][coupon]"), null);
+    assert.equal(form.get("allow_promotion_codes"), "false");
     assert.ok(form.get("custom_text[terms_of_service_acceptance][message]"));
   });
 

@@ -303,11 +303,12 @@ export async function stripeRequest(
 /**
  * `trial` (trials.ts): a card trial. The card is collected now and nothing is charged:
  * `trial_period_days` is the 30-day backstop, and without a payment method at its end the
- * subscription is canceled, never left unpaid. The launch offer's coupon is NOT put on the
- * Checkout (it would be spent on the $0 trial invoice): `promo_eligible` records it, in the
- * session's and the subscription's metadata, for the first real charge (trial-end time).
- * `trial.offerText`: Checkout's line above the button (`custom_text.submit`), so the trial
- * Checkout still shows the launch offer that its first real charge will get.
+ * subscription is canceled, never left unpaid. While the launch offer runs, its coupon (`coupon`)
+ * goes on the trial Checkout too, so the page shows the first paid month's discount; Stripe
+ * keeps a duration-once coupon for the first invoice with an amount, not the $0 trial invoice.
+ * `promo_eligible` (session and subscription metadata) still records it, so trial end
+ * (trial-web.ts) puts it back if the subscription has no discount left by then.
+ * `trial.offerText`: Checkout's line above the button (`custom_text.submit`) explaining when.
  */
 export function planCheckoutParams(input: { plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; termsConsent?: string; coupon?: string; trial?: { days: number; promoEligible?: string; offerText?: string } }): Record<string, unknown> {
   const metadata: Record<string, string> = { product: "plan", plan: input.plan, ...(input.campaign ? { campaign: input.campaign } : {}) };
@@ -318,11 +319,12 @@ export function planCheckoutParams(input: { plan: string; price: string; success
       line_items: [{ price: input.price, quantity: 1 }],
       success_url: input.successUrl,
       cancel_url: input.cancelUrl,
-      allow_promotion_codes: false,
+      // Stripe takes either `discounts` or `allow_promotion_codes`, never both; codes stay off either way.
+      ...(input.coupon ? { discounts: [{ coupon: input.coupon }] } : { allow_promotion_codes: false }),
       payment_method_collection: "always",
       automatic_tax: { enabled: true },
       billing_address_collection: "auto",
-      metadata: trialMeta,
+      metadata: input.coupon ? { ...trialMeta, promo: input.coupon } : trialMeta,
       subscription_data: { metadata: trialMeta, trial_period_days: input.trial.days, trial_settings: { end_behavior: { missing_payment_method: "cancel" } } },
       ...(input.termsConsent ? { consent_collection: { terms_of_service: "required" } } : {}),
       ...(input.termsConsent || input.trial.offerText
