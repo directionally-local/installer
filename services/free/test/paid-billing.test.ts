@@ -324,10 +324,21 @@ describe("usage", () => {
     assert.equal(week.models[0].model, MODEL);
     assert.deepEqual(week.tools.map((tool: any) => tool.tool), ["opencode"]);
     assert.equal(week.days.length, 3, "Monday to today (a Wednesday)");
-    assert.equal(week.days.at(-1).requests, 2);
+    assert.equal(week.days.at(-1).realTokens, 1050 + 18_612);
+    assert.equal(week.days.at(-1).countedTokens, week.totals.countedTokens);
+    // The plan's bar, the same as /web/account's limits[] (part B's planLimitsView).
+    assert.equal(week.models[0].limit.tokensPerWeek, 62_000_000);
+    assert.equal(week.models[0].limit.countedUsed, week.totals.countedTokens);
+    assert.equal(week.models[0].limit.state, "ok");
+    assert.equal(week.totals.realToCounted, Math.round((week.totals.countedTokens / week.totals.realTokens) * 10_000) / 10_000);
     assert.equal(week.week.resetsAt, "2026-11-09T00:00:00.000Z");
     assert.equal(await errorCode(await service.request("GET", "/web/usage?week=2026-11-04", { token })), "invalid_week");
     assert.equal(await errorCode(await service.request("GET", "/web/usage?week=2026-08-03", { token })), "week_unavailable");
     assert.equal((await service.request("GET", "/web/usage?week=2026-11-02", { token })).status, 200);
+    // A week back reads that week's meters, without bars; nothing was used then.
+    const last = (await (await service.request("GET", "/web/usage?week=2026-10-26", { token })).json()) as any;
+    assert.equal(last.totals.requests, 0);
+    assert.equal(last.days.length, 7);
+    assert.equal(last.models.find((model: any) => model.model === MODEL)?.limit ?? null, null);
   });
 });

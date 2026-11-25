@@ -23,13 +23,18 @@ import {
   GITHUB_USER_AGENT,
   ISSUER,
   keyView,
+  grantLaunchBonus,
   limited,
   PAID_KEYS_MAX,
+  planAccountFor,
+  planCatalogFor,
+  planUsageFor,
   rateLimited,
   readCookie,
   readJson,
   runtime,
   signingKey,
+  userEmail,
   userEmailVia,
   webOrigin,
   type Ctx,
@@ -40,12 +45,16 @@ import type { Alert } from "./alerts.js";
 import { emailBlocked, emailDomain, isDisposableDomain, normalizeEmail, plausibleEmail } from "./email-guard.js";
 import { apiError, json } from "./errors.js";
 import { CLAIM_DAYS, isPlanId, isUpgrade, PLAN_IDS, PLANS, planDescription, planOfPrice, plansView, REFUND_DAYS, type PlanId } from "./plan-prices.js";
+import { approxTokens, planLimits, PLAN_MIX_LABEL, type PlanSettingsConfig } from "./plans.js";
+import { BONUS_LINE } from "./gpt6-bonus.js";
+import { emailBudgetOf } from "./email-budget.js";
 import { claimable, type PaidCheckoutRow, type UsageRow } from "./paid-store.js";
 import { CLI_LOGIN_INTERVAL_S, EMAIL_CODE_RESEND_MS, EMAIL_CODE_TTL_MS } from "./paid-auth.js";
 import { normalizeUserCode } from "./codes.js";
 import { CHECKOUT_SESSION_ID, createPlanCheckout, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, type StripeEvent } from "./stripe.js";
 import { sendPlainEmail } from "./user-email-send.js";
-import { DAY_MS, isoDay, weekEnd, weekStart, WEEK_MS } from "./week.js";
+import { DAY_MS, weekEnd, weekStart, WEEK_MS } from "./week.js";
+import { METER_KEEP_DAYS } from "./plan-meter.js";
 
 /** A dl.new web session lives this long (the old GitHub one: an hour). */
 export const PAID_WEB_SESSION_TTL_S = 7 * 86_400;
@@ -171,10 +180,14 @@ function billingUnavailable(): Response {
   return apiError(503, "billing_unavailable", "Paying isn't open yet. Try again soon.");
 }
 
-/** GET /web/plans: the plan cards. */
+/** GET /web/plans: the plan cards (part B's per-model limits, from the runtime settings). */
 async function webPlans(c: Ctx): Promise<Response> {
-  const { config } = await runtime(c);
-  return json(plansView({ cachedTokenWeight: config.cachedTokenWeight, available: billingOn(c) && PLAN_IDS.every((plan) => planPrice(c, plan) !== undefined) }));
+  return json(plansView({ catalog: await planCatalogFor(c), available: billingOn(c) && PLAN_IDS.every((plan) => planPrice(c, plan) !== undefined) }));
+}
+
+/** A plan's line ("DeepSeek V4.1 Flash ~62M/week (95.5% caching applied). ...") at the live settings. */
+function planLine(plan: PlanId, config: PlanSettingsConfig & { cachedTokenWeight: number }): string {
+  return planDescription(planLimits(plan, config));
 }
 
 /** POST /web/checkout/plan {plan, campaign?} → {url, sessionId}: Stripe Checkout, no account yet. */
@@ -329,7 +342,33 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
       console.error("paid: claim's Stripe update failed", error instanceof StripeError ? error.status : "error");
     }
   }
+  // The welcome email (once per payment): where the key is, the plan's limits, the bonus.
+  const welcome = sendPlanWelcome(c, accountNumber, checkout.plan, checkout.sessionId).catch((error) => console.error("paid: welcome failed", error instanceof Error ? error.message : "error"));
+  if (c.background) c.background(welcome);
+  else await welcome;
   return { plan: checkout.plan, sessionId: checkout.sessionId };
+}
+
+/**
+ * welcome_paid (user-emails.ts) after a claim: the plan's per-model weekly limits, each "(95.5%
+ * caching applied)", and the GPT-6 launch bonus line when the account holds it (granted here,
+ * right away, when it is on and there is room). Once per payment (the period is the session id).
+ */
+async function sendPlanWelcome(c: Ctx, accountNumber: number, plan: PlanId, sessionId: string): Promise<void> {
+  const { config } = await runtime(c);
+  const granted = await grantLaunchBonus(c, accountNumber);
+  await userEmail(c, config, "welcome_paid", accountNumber, sessionId, { planWelcome: welcomeValues(plan, config, granted) });
+}
+
+/** welcome_paid's {plan}, {limits} and {bonus}. */
+export function welcomeValues(plan: PlanId, config: PlanSettingsConfig & { cachedTokenWeight: number }, bonus: boolean) {
+  return {
+    plan: PLANS[plan].name,
+    limits: planLimits(plan, config)
+      .map((limit) => `- ${limit.name} ${approxTokens(limit.realTokens)}/week (${PLAN_MIX_LABEL})`)
+      .join("\n"),
+    bonus: bonus ? `\nplus ${BONUS_LINE}, launch bonus through 31 Jan 2027.\n` : "",
+  };
 }
 
 /** POST /web/checkout/claim {sessionId}: a signed-in person claims a new payment onto their account. */
@@ -419,6 +458,12 @@ async function sendCode(c: Ctx, email: string, norm: string, purpose: string, su
   if (addressRetry !== undefined) {
     await auth(c).dropEmailCode(norm, purpose);
     return rateLimited(addressRetry);
+  }
+  // Codes never wait for the daily email cap, only for their own hard ceiling (email-budget.ts).
+  const { config } = await runtime(c);
+  if (!(await directory(c).takeEmailBudget({ emailClass: "code", now: c.now(), budget: emailBudgetOf(config) }))) {
+    await auth(c).dropEmailCode(norm, purpose);
+    return apiError(503, "email_unavailable", "We can't send more codes today. Try GitHub, or again tomorrow.");
   }
   const sent = await sendPlainEmail(transport, c.config, {
     to: email,
@@ -535,7 +580,7 @@ async function signOut(c: Ctx): Promise<Response> {
 
 // ─── The account ────────────────────────────────────────────────────────────
 
-function planView(billing: BillingState, now: number) {
+function planView(billing: BillingState, now: number, config: PlanSettingsConfig & { cachedTokenWeight: number }) {
   if (billing.tier === null || billing.subscriptionId === null || billing.proState === "none") return null;
   const plan = PLANS[billing.tier];
   const refundEnds = billing.firstPaidAt === null ? null : billing.firstPaidAt + REFUND_DAYS * DAY_MS;
@@ -543,7 +588,7 @@ function planView(billing: BillingState, now: number) {
     id: plan.id,
     name: plan.name,
     priceUsd: plan.priceUsd,
-    description: planDescription(plan),
+    description: planLine(plan.id, config),
     status: billing.proState,
     periodEnd: billing.periodEnd === null ? null : new Date(billing.periodEnd).toISOString(),
     cancelAtPeriodEnd: billing.cancelAtPeriodEnd,
@@ -555,14 +600,16 @@ function planView(billing: BillingState, now: number) {
 /** GET /web/account's body (also in every session response). */
 async function accountView(c: Ctx, accountNumber: number) {
   const person = account(c, accountNumber);
-  const [stored, identities, billing, settings, plan] = await Promise.all([
+  const [stored, identities, billing, settings, plan, gate, bars] = await Promise.all([
     directory(c).getPerson(accountNumber),
     directory(c).identities(accountNumber),
     person.billing(),
     person.settings(),
     person.plan(c.now()),
+    runtime(c),
+    planAccountFor(c, accountNumber),
   ]);
-  const current = planView(billing, c.now());
+  const current = planView(billing, c.now(), gate.config);
   const tier = current && current.status !== "canceled" ? billing.tier : null;
   return {
     accountId: accountIdOf(accountNumber),
@@ -571,9 +618,9 @@ async function accountView(c: Ctx, accountNumber: number) {
     plan: current,
     legacy: isPaidAccountNumber(accountNumber) || billing.tier !== null ? null : { plan },
     settings,
-    // Part B: per-model limits and the GPT-6 launch bonus (docs/web-api-paid.md).
-    limits: null,
-    gpt6Bonus: null,
+    // Part B: one bar per plan model and the GPT-6 launch bonus (plan-usage.ts), null without them.
+    limits: bars.limits,
+    gpt6Bonus: bars.gpt6Bonus,
     upgrade: PLAN_IDS.filter((id) => tier === null || isUpgrade(tier, id)).map((id) => ({ plan: id, name: PLANS[id].name, priceUsd: PLANS[id].priceUsd })),
   };
 }
@@ -837,6 +884,11 @@ function toolOf(row: UsageRow & { via_key?: number }): string {
   return "autopilot";
 }
 
+/** A meter's client ("tool:cursor") as the usage page names it ("cursor"). */
+function meterTool(tool: string): string {
+  return tool.startsWith("tool:") ? tool.slice(5) || "other" : tool || "other";
+}
+
 function tokensOf(row: UsageRow, weight: number) {
   const cached = Math.max(0, row.cached_tokens);
   const fresh = Math.max(0, row.prompt_tokens - cached);
@@ -844,81 +896,71 @@ function tokensOf(row: UsageRow, weight: number) {
   return { cached, fresh, output, real: cached + fresh + output, counted: Math.round(cached * weight + fresh + output) };
 }
 
-interface Sum {
-  requests: number;
-  cachedInput: number;
-  freshInput: number;
-  output: number;
-  realTokens: number;
-  countedTokens: number;
-}
-
-function emptySum(): Sum {
-  return { requests: 0, cachedInput: 0, freshInput: 0, output: 0, realTokens: 0, countedTokens: 0 };
-}
-
-function add(sum: Sum, tokens: ReturnType<typeof tokensOf>): void {
-  sum.requests += 1;
-  sum.cachedInput += tokens.cached;
-  sum.freshInput += tokens.fresh;
-  sum.output += tokens.output;
-  sum.realTokens += tokens.real;
-  sum.countedTokens += Math.round(tokens.counted);
-}
-
 function share(part: number, whole: number): number {
   return whole > 0 ? Math.round((part / whole) * 1000) / 1000 : 0;
 }
 
-/** GET /web/usage?week=YYYY-MM-DD: the week's usage from the request log. */
+/**
+ * GET /web/usage?week=YYYY-MM-DD: the week's usage from the account's per-model meters (part B's
+ * `planUsageFor`, plan-meter.ts: this week and the four before it), with each plan model's bar
+ * (`limit`, as `/web/account` `limits[]`). The request log feeds only the live box.
+ */
 async function usage(c: Ctx): Promise<Response> {
   const caller = await paidCaller(c);
   if (caller instanceof Response) return caller;
   const { config } = await runtime(c);
   const raw = c.url.searchParams.get("week");
-  let start = weekStart(c.now());
+  const now = c.now();
+  let start = weekStart(now);
   if (raw !== null) {
     const parsed = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? Date.parse(`${raw}T00:00:00.000Z`) : Number.NaN;
-    if (!Number.isFinite(parsed) || weekStart(parsed) !== parsed || parsed > c.now()) return apiError(400, "invalid_week", "Send ?week= as a Monday (YYYY-MM-DD).");
+    if (!Number.isFinite(parsed) || weekStart(parsed) !== parsed || parsed > now) return apiError(400, "invalid_week", "Send ?week= as a Monday (YYYY-MM-DD).");
     start = parsed;
   }
-  if (start + WEEK_MS < c.now() - config.rawLogKeepDays * DAY_MS) return apiError(400, "week_unavailable", `Usage is kept ${config.rawLogKeepDays} days.`);
+  if (start < weekStart(now - METER_KEEP_DAYS * DAY_MS) + WEEK_MS) return apiError(400, "week_unavailable", `Usage is kept for this week and the ${Math.floor(METER_KEEP_DAYS / 7)} before it.`);
   const end = weekEnd(start);
+  const at = Math.min(now, end - 1);
   const weight = config.cachedTokenWeight;
-  const rows = await directory(c).usageRows(caller.account, start, end);
-  const totals = emptySum();
-  let failovers = 0;
-  const models = new Map<string, Sum>();
-  const days = new Map<string, Sum>();
-  const tools = new Map<string, Sum>();
-  for (const row of rows) {
-    if (row.upstream_error === 1) {
-      failovers += 1;
-      continue;
-    }
-    const tokens = tokensOf(row, weight);
-    add(totals, tokens);
-    for (const [map, key] of [[models, row.model], [days, isoDay(row.at)], [tools, toolOf(row)]] as const) {
-      let sum = map.get(key);
-      if (!sum) map.set(key, (sum = emptySum()));
-      add(sum, tokens);
-    }
-  }
-  const dayList: Array<{ day: string } & Sum> = [];
-  for (let at = start; at < end && at <= c.now(); at += DAY_MS) dayList.push({ day: isoDay(at), ...(days.get(isoDay(at)) ?? emptySum()) });
-  const prompt = totals.cachedInput + totals.freshInput;
+  const view = await planUsageFor(c, caller.account, at);
+  // The bars are this week's only: a past week's usage isn't held to today's limits.
+  const thisWeek = start === weekStart(now);
+  const bars = thisWeek ? (await planAccountFor(c, caller.account)).limits : null;
+  const t = view.totals;
+  const prompt = t.cachedInput + t.freshInput;
   return json({
     week: { start: new Date(start).toISOString(), resetsAt: new Date(end).toISOString() },
+    plan: view.plan,
+    plansEnforced: view.plansEnforced,
     totals: {
-      ...totals,
-      cachedCountedAs: Math.round(totals.cachedInput * weight),
-      cachingShare: share(totals.cachedInput, prompt),
-      realToCounted: totals.realTokens > 0 ? Math.round((totals.countedTokens / totals.realTokens) * 10_000) / 10_000 : null,
-      failovers,
+      requests: t.requests,
+      realTokens: t.realTokens,
+      countedTokens: t.countedTokens,
+      cachedInput: t.cachedInput,
+      cachedCountedAs: Math.round(t.cachedInput * weight),
+      freshInput: t.freshInput,
+      output: t.output,
+      cachingShare: share(t.cachedInput, prompt),
+      realToCounted: t.realTokens > 0 ? Math.round((t.countedTokens / t.realTokens) * 10_000) / 10_000 : null,
+      failovers: t.failovers,
     },
-    models: [...models.entries()].map(([model, sum]) => ({ model, ...sum, cachingShare: share(sum.cachedInput, sum.cachedInput + sum.freshInput), limit: null })),
-    days: dayList.map(({ day, requests, realTokens, countedTokens }) => ({ day, requests, realTokens, countedTokens })),
-    tools: [...tools.entries()].map(([tool, sum]) => ({ tool, requests: sum.requests, realTokens: sum.realTokens, countedTokens: sum.countedTokens })).sort((a, b) => b.countedTokens - a.countedTokens),
+    models: view.models
+      .filter((model) => model.requests > 0 || model.realLimit !== null)
+      .map((model) => ({
+        model: model.model,
+        name: model.name,
+        requests: model.requests,
+        cachedInput: model.cachedInput,
+        freshInput: model.freshInput,
+        output: model.output,
+        realTokens: model.realTokens,
+        countedTokens: model.countedUsed,
+        cachingShare: share(model.cachedInput, model.cachedInput + model.freshInput),
+        failovers: model.failovers,
+        limit: bars?.find((bar) => bar.model === model.model) ?? null,
+      })),
+    days: view.days.map((day) => ({ day: day.date, countedTokens: day.counted, realTokens: day.real })),
+    tools: view.tools.map((tool) => ({ tool: meterTool(tool.tool), requests: tool.requests, realTokens: tool.real, countedTokens: tool.counted })).sort((a, b) => b.countedTokens - a.countedTokens),
+    gpt6Bonus: thisWeek && view.bonus.enabled && view.bonus.granted ? { usdPerWeek: view.bonus.weeklyUsd, usedUsd: view.bonus.spentUsd, leftUsd: view.bonus.leftUsd, label: view.bonus.label, line: view.bonus.line } : null,
     cachedTokenWeight: weight,
   });
 }
@@ -1079,8 +1121,14 @@ async function sendClaimEmail(c: Ctx, row: PaidCheckoutRow): Promise<void> {
   if (!(await directory(c).markClaimEmail(row.session_id, c.now()))) return;
   const plan = PLANS[row.plan];
   const link = `${webOrigin(c)}/account?session_id=${row.session_id}`;
+  const { config } = await runtime(c);
+  // Transactional: it may use the reserve bulk mail can't (email-budget.ts).
+  if (!(await directory(c).takeEmailBudget({ emailClass: "transactional", now: c.now(), budget: emailBudgetOf(config) }))) {
+    console.error("paid: claim email over the daily email budget");
+    return;
+  }
   const text = [
-    `Thanks for subscribing to ${plan.name} ($${plan.priceUsd}/month): ${planDescription(plan)}`,
+    `Thanks for subscribing to ${plan.name} ($${plan.priceUsd}/month): ${planLine(row.plan, config)}`,
     "",
     "Finish setting up dl.new to get your key:",
     link,

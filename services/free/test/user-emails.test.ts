@@ -61,7 +61,9 @@ function stopLink(s: Service, index = 0): string {
 describe("emails to users: the copy", () => {
   it("is lowercase, has no em or en dash, never names the person, and ends with the stop link", () => {
     for (const [kind, copy] of Object.entries(USER_EMAILS)) {
-      for (const text of [copy.subject, copy.body, FOOTER].map((part) => part.replace("{unsubscribeUrl}", ""))) {
+      // plan_reset's subject is the owner's own, capitalised: "Your ~62M tokens reset."
+      const subject = kind === "plan_reset" ? copy.subject.toLowerCase() : copy.subject;
+      for (const text of [subject, copy.body, FOOTER].map((part) => part.replace("{unsubscribeUrl}", ""))) {
         // Links keep their case (an invite code is case-sensitive), and so does the install
         // command's curl flags; the words around them don't.
         const words = text.replace(/https?:\/\/\S+/g, "").replace("curl -fsSL", "");
@@ -76,6 +78,8 @@ describe("emails to users: the copy", () => {
         unsubscribeUrl: "https://free.directionallylocal.com/email/stop?u=1&t=x",
         weeklyReset: { tokens: 10_000_000, fullTokens: 50_000_000, login: "alice" },
         planWarning: { model: "DeepSeek V4.1 Flash", share: "80", used: "~50M", limit: "~62M", left: "~12M" },
+        planWelcome: { plan: "dl.new Starter", limits: "- DeepSeek V4.1 Flash ~62M/week (95.5% caching applied)", bonus: "" },
+        planReset: { tokens: "~62M", plan: "dl.new Starter", models: "- DeepSeek V4.1 Flash", cachedpct: "2%", sessions: "3", failovers: "0" },
       });
       assert.match(rendered.body, /\n\ndon't want these\? https:\/\/free\.directionallylocal\.com\/email\/stop\?u=1&t=x\n$/);
       assert.doesNotMatch(rendered.body, /\{\w+\}/, `${kind} has a placeholder left`);

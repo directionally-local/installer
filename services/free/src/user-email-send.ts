@@ -1,6 +1,7 @@
 import { base64urlDecode, base64urlEncode } from "../../shared/src/auth.js";
 import type { FreeConfig } from "./config.js";
-import { renderUserEmail, resetsText, type PlanWarningValues, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
+import { renderUserEmail, resetsText, type PlanResetValues, type PlanWarningValues, type PlanWelcomeValues, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
+import { emailBudgetOf, type EmailBudget } from "./email-budget.js";
 import { DAY_MS, weekEnd, weekStart } from "./week.js";
 
 /**
@@ -10,6 +11,8 @@ import { DAY_MS, weekEnd, weekStart } from "./week.js";
  * is sent and nothing fails; the runtime setting `userEmails` turns them all off without a deploy.
  *
  *   welcome      right after a new sign-up gives their email on the details step (app.ts)
+ *   welcome_paid dl.new: right after a payment is claimed onto an account (paid-web.ts)
+ *   plan_reset   dl.new: Mondays, paying accounts, once free tokens ended (app.ts scheduledPlanReset)
  *   didnt_start  daily cron: admitted 24 to 72 hours ago, no request yet
  *   plan_80      a paid plan's model at 80% of its weekly limit, once per model per week (app.ts chat)
  *   week_80      when a request's settlement takes the week's usage to 80% of a pool's tokens
@@ -22,7 +25,9 @@ import { DAY_MS, weekEnd, weekStart } from "./week.js";
  *
  * Only to people with an email who haven't pressed stop, never to admins (unless
  * USER_EMAILS_TO_ADMINS, for testing), at most one a day per person, each kind once per person
- * (week_80 once per week). Every send is claimed in the Directory's `user_emails` table before
+ * (week_80 once per week). The free tier's lifecycle kinds never go to accounts made on dl.new.
+ * Every send takes from the day's email budget (email-budget.ts): bulk and lifecycle mail can
+ * never use the share kept for transactional mail. Every send is claimed in the Directory's `user_emails` table before
  * the provider is called and marked after it, so nothing double-sends across retries or deploys;
  * with Resend, its Idempotency-Key also covers a crash between the two. A failed send is retried
  * once, on the next daily run. Failures are logged as counts, never with an address or the key.
@@ -52,7 +57,7 @@ export type BroadcastClaim = Omit<UserEmailClaim, "kind"> & { kind: "broadcast" 
 
 /** The Directory's side (directory-object.ts). */
 export interface UserEmailStore {
-  claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean; dailyLimit?: number }): Promise<UserEmailClaim | undefined>;
+  claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean; dailyLimit?: number; budget?: EmailBudget }): Promise<UserEmailClaim | undefined>;
   finishUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; ok: boolean; now: number }): Promise<void>;
 }
 
@@ -231,6 +236,10 @@ export async function deliverUserEmail(input: {
   weeklyReset?: WeeklyResetValues;
   /** plan_80's values (the model and its numbers). */
   planWarning?: PlanWarningValues;
+  /** welcome_paid's values (the plan, its limits, the bonus line). */
+  planWelcome?: PlanWelcomeValues;
+  /** plan_reset's values (last week per model). */
+  planReset?: PlanResetValues;
   /** Claim only while fewer than this many emails to users were claimed today (every kind). */
   dailyLimit?: number;
 }): Promise<"sent" | "failed" | "skipped"> {
@@ -247,13 +256,14 @@ export async function deliverUserEmail(input: {
       includeAdmins: config.userEmailsToAdmins,
       ...(input.retry ? { retry: true } : {}),
       ...(input.dailyLimit !== undefined ? { dailyLimit: input.dailyLimit } : {}),
+      budget: emailBudgetOf(config),
     });
   } catch {
     return "failed";
   }
   if (!claim) return "skipped";
   const unsubscribeUrl = await stopUrl(input.base, input.signingKey, claim.githubId);
-  const email = renderUserEmail(claim.kind, { resets: resetsText(weekEnd(input.now)), unsubscribeUrl, proOffered: config.proOffered, ...(input.weeklyReset ? { weeklyReset: input.weeklyReset } : {}), ...(input.planWarning ? { planWarning: input.planWarning } : {}) });
+  const email = renderUserEmail(claim.kind, { resets: resetsText(weekEnd(input.now)), unsubscribeUrl, proOffered: config.proOffered, ...(input.weeklyReset ? { weeklyReset: input.weeklyReset } : {}), ...(input.planWarning ? { planWarning: input.planWarning } : {}), ...(input.planWelcome ? { planWelcome: input.planWelcome } : {}), ...(input.planReset ? { planReset: input.planReset } : {}) });
   const { ok } = await sendPlainEmail(transport, config, {
     to: claim.email,
     subject: email.subject,

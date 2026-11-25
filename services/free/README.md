@@ -1404,7 +1404,10 @@ with who made it and when.
 | `luminalWeeklyCreditUsd` | `LUMINAL_WEEKLY_CREDIT_USD` | 250; `none` for no weekly credit budget |
 | `luminalFirstByteTimeoutSeconds` | `LUMINAL_FIRST_BYTE_TIMEOUT_SECONDS` | 30 |
 | `userEmails` | `USER_EMAILS` | true (sends only with the `USER_EMAIL` binding or `RESEND_API_KEY`) |
-| `weeklyResetEmail` | `WEEKLY_RESET_EMAIL` | true: the Monday "tokens reset" email (`weekly_reset`); false stops it alone (`userEmails` off stops it too) |
+| `weeklyResetEmail` | `WEEKLY_RESET_EMAIL` | true: the Monday "tokens reset" emails (`weekly_reset` for free tokens, `plan_reset` for paying accounts once `freeEndsAt` has passed); false stops them alone (`userEmails` off stops them too) |
+| `userEmailsDailyMax` | `USER_EMAILS_DAILY_MAX` | 300: emails to users a UTC day, every kind but codes (`src/email-budget.ts`; conservative, the provider's quota isn't known) |
+| `userEmailsTransactionalReserve` | `USER_EMAILS_TRANSACTIONAL_RESERVE` | 100: of `userEmailsDailyMax`, kept for transactional mail (dl.new's claim and welcome emails, `plan_80`, access answers); bulk and lifecycle mail and broadcasts stop short of it |
+| `emailCodesDailyMax` | `EMAIL_CODES_DAILY_MAX` | 300: dl.new sign-in and email-change codes a UTC day; outside `userEmailsDailyMax`, never stopped by it |
 | `dlOnly` | `DL_ONLY` | true (a dl sign-in token works inside dl only; tool keys are never refused by it; see below) |
 | `toolKeys` | `TOOL_KEYS` | true: accounts in good standing may make API keys for other tools; false refuses new and existing ones (`tool_keys_off`, the keys are kept) |
 | `toolKeysMax` | `TOOL_KEYS_MAX` | 3: tool keys per account (server keys are counted apart) |
@@ -1684,8 +1687,9 @@ person's own weekly allowance as `dl status` shows it, said short and rounded do
 dl, up to {full} a week." The invite link is the person's own (`https://dl.new/r/<code>`).
 
 It starts at the daily run on Monday (01:00 UTC, after its other emails) and carries on in the
-10-minute ticks from 01:30, through Tuesday: each run sends at most 100, and only while fewer
-than 300 emails to users were claimed that UTC day, every kind together. The one-a-day cap
+10-minute ticks from 01:30, through Tuesday: each run sends at most 100, and only while the
+day's email budget has bulk room (`userEmailsDailyMax` less `userEmailsTransactionalReserve`,
+200 by default; see `src/email-budget.ts`). The one-a-day cap
 applies, so someone who got another email on Monday gets this one on Tuesday. Never on other
 days, never twice a week (the `user_emails` row, period the week's Monday); a failed one is
 retried once by the next daily run, within the week. `GET /v1/admin/metrics` has
@@ -1696,6 +1700,12 @@ nothing, and answers `{week, firstWeek, on, emailsOn, provider, fullTokens, coun
 skipped: {trial, pro, no_allowance, not_active}, alreadyThisWeek: {sent, failed}, samples}`,
 where `count` is who would still get it this week and `samples` are 3 rendered emails (login,
 tokens, subject and body, with the calling admin's own stop link).
+
+Paying dl.new accounts get `plan_reset` instead ("Your ~62M tokens reset.": last week per plan
+model, the caching rate, the counted math, sessions, failovers, dl.new/usage and dl.new/billing),
+in the same window, under the same switches, and only once free tokens have ended (`freeEndsAt`).
+The free tier's lifecycle emails (welcome, didn't start, week_80, gone quiet, weekly_reset) and
+broadcasts never go to accounts made on dl.new.
 
 ### Test email (admins)
 

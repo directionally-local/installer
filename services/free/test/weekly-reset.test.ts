@@ -257,12 +257,12 @@ describe("weekly reset email: once a week", () => {
     assert.deepEqual(resetTo(s), ["fay@example.com"]);
   });
 
-  it("keeps within the daily limit and carries on in later runs", async () => {
+  it("keeps within the day's bulk share and carries on in later runs", async () => {
     const s = await service();
     for (let id = 900; id < 905; id++) await person(s, id, `p${id}`);
-    // 297 other emails were already claimed today: room for 3.
-    const insert = db(s).prepare("INSERT INTO user_emails (github_id, kind, period, status, attempts, day, claimed_at, sent_at) VALUES (?, 'didnt_start', '', 'sent', 1, ?, ?, ?)");
-    for (let id = 20_000; id < 20_297; id++) insert.run(id, MONDAY / DAY, MONDAY, MONDAY);
+    // 197 bulk emails already went today: the bulk share is 300 - 100 kept for transactional
+    // mail (email-budget.ts), so room for 3.
+    db(s).prepare("INSERT INTO email_budget_daily (day, class, n) VALUES (?, 'bulk', 197)").run(MONDAY / DAY);
     await scheduled(s, RUN);
     assert.equal(resets(s).length, 3);
     await scheduled(s, MONDAY + 2 * HOUR, PROBE_CRON);

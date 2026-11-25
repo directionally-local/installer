@@ -97,10 +97,12 @@ import { PROBE_CRON, probeOnce, probeTargets } from "./probes.js";
 import { measureKey } from "./provider-store.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
 import { anthropicError, errorStatus, estimateInputTokens, toAnthropicMessage, toAnthropicStream, toChatRequest } from "./anthropic.js";
-import { DAY_MS, isoDay, weekEnd, weekStart } from "./week.js";
+import { DAY_MS, isoDay, weekEnd, weekStart, WEEK_MS } from "./week.js";
+import { planResetValues } from "./plan-reset.js";
 import { FREE_ENDED_CODE, FREE_ENDED_MESSAGE, freeEnded, limitRefusal, meterFor, warningEmailValues, withNotices } from "./plan-limits.js";
 import { PLAN_METER_MODELS, afterMeterFull, anthropicModelFor, bonusProjection, dueWarning, planRoute, tokenMeter, type PlanServe } from "./plan-route.js";
-import { planCatalog, planUsageView } from "./plan-usage.js";
+import { bonusAccountView, planCatalog, planLimitsView, planUsageView } from "./plan-usage.js";
+import { bonusBlock } from "./gpt6-bonus.js";
 import type { PlanState } from "./account-object.js";
 import { allocateIfDue, allocatedLimits, anthropicSessionHint, limitedLevel, rescue, sessionKeyOf, stageOf, stepOf, usedShare, type AllocatorRun } from "./allocator.js";
 import { healthWindow } from "./health-data.js";
@@ -123,7 +125,8 @@ import {
   type UserEmailTransport,
   type WeeklyResetSkip,
 } from "./user-email-send.js";
-import { renderUserEmail, resetsText, USER_EMAILS, type PlanWarningValues, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
+import { renderUserEmail, resetsText, USER_EMAILS, type PlanWarningValues, type PlanWelcomeValues, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
+import { emailBudgetOf } from "./email-budget.js";
 import { BROADCAST_BATCH, broadcastBody, broadcastId, hasCapitals, onlyListed, parseBroadcast, parseCopy, type BroadcastRequest } from "./broadcast.js";
 import { refusalsCsv, refusalsView, requestClient, requestRefusalReason, type RefusalClient, type RefusalReason } from "./refusals.js";
 import { allowedReturn, CAMPAIGN_CLIENT_STEPS, campaignFromParams, campaignTotals, isInstallOption, ONE_TIME_CODE, parseCampaign, planFor, WEB_SESSION_TTL_S, WEB_STATE, webCors, webFunnelCsv, type Campaign, type CampaignStep, type WebStep } from "./web-signup.js";
@@ -462,6 +465,13 @@ export function createHandler(options: HandlerOptions = {}): {
         } catch (error) {
           console.error("user emails (weekly_reset): run failed", error instanceof Error ? error.name : "error");
         }
+        // The same for paying accounts' plan_reset (once free tokens have ended).
+        try {
+          const at = now();
+          if (weeklyResetWindow(at, "tick")) await scheduledPlanReset(env, readFreeConfig(env as unknown as Record<string, unknown>), fetcher, at, emailGapMs, "tick");
+        } catch (error) {
+          console.error("user emails (plan_reset): run failed", error instanceof Error ? error.name : "error");
+        }
         return;
       }
       if (controller.cron !== DIGEST_CRON) {
@@ -483,6 +493,11 @@ export function createHandler(options: HandlerOptions = {}): {
         await scheduledWeeklyReset(env, config, fetcher, now(), emailGapMs, "daily");
       } catch (error) {
         console.error("user emails (weekly_reset): run failed", error instanceof Error ? error.name : "error");
+      }
+      try {
+        await scheduledPlanReset(env, config, fetcher, now(), emailGapMs, "daily");
+      } catch (error) {
+        console.error("user emails (plan_reset): run failed", error instanceof Error ? error.name : "error");
       }
     },
     async fetch(request: Request, env: Env, execution?: BackgroundContext): Promise<Response> {
@@ -1300,9 +1315,16 @@ export function userEmailVia(c: Pick<Ctx, "env" | "config" | "fetch">): UserEmai
 }
 
 /** Sends one email to a user if it should go. Never throws and never fails the request. */
-async function userEmail(c: Ctx, config: FreeConfig, kind: UserEmailKind, githubId: number, period: string, values: { planWarning?: PlanWarningValues } = {}): Promise<void> {
+export async function userEmail(
+  c: Ctx,
+  config: FreeConfig,
+  kind: UserEmailKind,
+  githubId: number,
+  period: string,
+  values: { planWarning?: PlanWarningValues; planWelcome?: PlanWelcomeValues } = {},
+): Promise<"sent" | "failed" | "skipped"> {
   const transport = userEmailVia(c);
-  if (!userEmailsOn(config, transport)) return;
+  if (!userEmailsOn(config, transport)) return "skipped";
   const outcome = await deliverUserEmail({
     store: directory(c) as unknown as UserEmailStore,
     transport,
@@ -1314,8 +1336,10 @@ async function userEmail(c: Ctx, config: FreeConfig, kind: UserEmailKind, github
     period,
     now: c.now(),
     ...(values.planWarning ? { planWarning: values.planWarning } : {}),
+    ...(values.planWelcome ? { planWelcome: values.planWelcome } : {}),
   });
   logUserEmails(kind, [outcome]);
+  return outcome;
 }
 
 /**
@@ -1336,7 +1360,8 @@ async function scheduledUserEmails(env: Env, envConfig: FreeConfig, fetcher: Fet
   ];
   const key = await signingKey(config);
   const outcomes: Array<"sent" | "failed" | "skipped"> = [];
-  for (const job of jobs.slice(0, MAX_DAILY_USER_EMAILS)) {
+  // The day's budget (email-budget.ts) stops bulk mail short of the transactional reserve.
+  for (const job of jobs.slice(0, config.userEmailsDailyMax)) {
     const outcome = await deliverUserEmail({
       store: store as unknown as UserEmailStore,
       transport,
@@ -1352,10 +1377,7 @@ async function scheduledUserEmails(env: Env, envConfig: FreeConfig, fetcher: Fet
   logUserEmails("daily", outcomes);
 }
 
-/** At most this many emails to users per daily run; the rest wait a day. */
-const MAX_DAILY_USER_EMAILS = 300;
-
-/** weekly_reset: sends per run at most (the day's total stays within MAX_DAILY_USER_EMAILS). */
+/** weekly_reset: sends per run at most (the day's total stays within the email budget's bulk share). */
 const WEEKLY_RESET_BATCH = 100;
 /** weekly_reset: candidates per Directory call. */
 const WEEKLY_RESET_PAGE = 100;
@@ -1381,8 +1403,8 @@ function weeklyResetValues(config: FreeConfig, candidate: { login: string; perso
 /**
  * The Monday "tokens reset" email, weekly_reset. Runs from the daily run on Monday (after its
  * other emails) and from the 10-minute ticks after it, Monday and Tuesday (weeklyResetWindow).
- * Each run sends at most WEEKLY_RESET_BATCH, and only while fewer than MAX_DAILY_USER_EMAILS
- * emails to users were claimed that UTC day; it goes through people in github id order and keeps
+ * Each run sends at most WEEKLY_RESET_BATCH, and only while the day's email budget has bulk room
+ * (email-budget.ts: never the transactional reserve); it goes through people in github id order and keeps
  * its place in the Directory, so the next run carries on. A day whose pass reached the end is
  * done; Tuesday starts over for anyone Monday's one-a-day cap held back. The user_emails row
  * (kind weekly_reset, period the week's Monday) keeps it to once a week per person. Needs the
@@ -1399,7 +1421,7 @@ async function scheduledWeeklyReset(env: Env, envConfig: FreeConfig, fetcher: Fe
   const saved = await store.weeklyResetProgress();
   if (saved && saved.day === day && saved.done) return;
   let after = saved && saved.day === day ? saved.after : 0;
-  let room = Math.min(WEEKLY_RESET_BATCH, MAX_DAILY_USER_EMAILS - (await store.userEmailsClaimedToday(now)));
+  let room = Math.min(WEEKLY_RESET_BATCH, (await store.emailBudgetToday(now, emailBudgetOf(config))).room.bulk);
   if (room <= 0) return;
   const key = await signingKey(config);
   const policy = policyOf(config);
@@ -1427,7 +1449,6 @@ async function scheduledWeeklyReset(env: Env, envConfig: FreeConfig, fetcher: Fe
           period,
           now,
           weeklyReset: weeklyResetValues(config, candidate, tokens),
-          dailyLimit: MAX_DAILY_USER_EMAILS,
         });
         outcomes.push(outcome);
         if (outcome !== "skipped") {
@@ -1443,6 +1464,64 @@ async function scheduledWeeklyReset(env: Env, envConfig: FreeConfig, fetcher: Fe
   }
   await store.setWeeklyResetProgress({ day, after, done });
   logUserEmails("weekly_reset", outcomes);
+}
+
+/** plan_reset: candidates per Directory call. */
+const PLAN_RESET_PAGE = 100;
+
+/**
+ * The Monday email to paying dl.new accounts, plan_reset ("Your ~62M tokens reset."): last
+ * week's tokens per plan model, the caching rate, the counted math, sessions and failovers,
+ * the dashboard and the billing links. Same window and switches as weekly_reset (Monday from
+ * 01:00 UTC through Tuesday; `userEmails` and `weeklyResetEmail` on), and only once free tokens
+ * have ended (`freeEndsAt`): before then the free tier's Monday email covers everyone. Bulk mail:
+ * it stops at the day's bulk share (email-budget.ts) and carries on in the next run. Once a week
+ * per person (kind plan_reset, period the week's Monday).
+ */
+async function scheduledPlanReset(env: Env, envConfig: FreeConfig, fetcher: Fetch, now: number, gapMs: number, via: "daily" | "tick"): Promise<void> {
+  if (!weeklyResetWindow(now, via)) return;
+  const transport = userEmailVia({ env, config: envConfig, fetch: fetcher });
+  if (!transport) return;
+  const store = env.DIRECTORY.getByName("directory");
+  const config = applyOverrides(envConfig, await store.overrides());
+  if (!userEmailsOn(config, transport) || !config.weeklyResetEmail || !freeEnded(config.freeEndsAt, now)) return;
+  let room = (await store.emailBudgetToday(now, emailBudgetOf(config))).room.bulk;
+  if (room <= 0) return;
+  const key = await signingKey(config);
+  const period = String(weekStart(now));
+  const lastWeekStart = weekStart(now) - WEEK_MS;
+  const outcomes: Array<"sent" | "failed" | "skipped"> = [];
+  let after = 0;
+  while (room > 0) {
+    const page = await store.planResetCandidates({ now, after, limit: PLAN_RESET_PAGE, adminIds: [...config.adminGithubIds], includeAdmins: config.userEmailsToAdmins });
+    if (page.last === null) break;
+    for (const githubId of page.people) {
+      if (room <= 0) break;
+      const person = env.ACCOUNT.getByName(accountObjectName(githubId));
+      const state = await person.planState(now, []);
+      if (state.tier === "none") continue;
+      const [lastWeek, sessions] = await Promise.all([person.meters(now, weekStart(now) - 1), store.sessionsBetween(githubId, lastWeekStart, weekStart(now))]);
+      const outcome = await deliverUserEmail({
+        store: store as unknown as UserEmailStore,
+        transport,
+        config,
+        signingKey: key,
+        base: config.publicUrl ?? EMAIL_STOP_BASE,
+        kind: "plan_reset",
+        githubId,
+        period,
+        now,
+        planReset: planResetValues({ plan: state.tier, lastWeek, config, sessions }),
+      });
+      outcomes.push(outcome);
+      if (outcome !== "skipped") {
+        room--;
+        if (gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
+      }
+    }
+    after = page.last;
+  }
+  logUserEmails("plan_reset", outcomes);
 }
 
 /**
@@ -2535,17 +2614,54 @@ export async function planCatalogFor(c: Ctx) {
   return planCatalog(gate.config, status, c.now());
 }
 
-/** One account's plan usage this week (plan-usage.ts planUsageView): what the dashboard shows. */
-export async function planUsageFor(c: Ctx, githubId: number) {
+/**
+ * One account's plan usage this week (plan-usage.ts planUsageView): what the dashboard shows. `at`:
+ * a time in an earlier week to read that week's meters instead (this week and the four before it
+ * are kept); the plan is today's.
+ */
+export async function planUsageFor(c: Ctx, githubId: number, at = c.now()) {
   c.callerId ??= githubId;
   const gate = await runtime(c);
   const person = account(c, githubId);
   const [state, meters, bonus] = await Promise.all([
     person.planState(c.now(), PLAN_METER_MODELS),
-    person.meters(c.now()),
+    person.meters(c.now(), at),
     directory(c).gpt6BonusStatus(githubId, bonusProjection(gate.config, gate, c.now())),
   ]);
-  return planUsageView({ state, meters, config: gate.config, bonus, now: c.now() });
+  return planUsageView({ state, meters, config: gate.config, bonus, now: at });
+}
+
+/**
+ * One account's plan bars and GPT-6 launch bonus (`/web/account` `limits` and `gpt6Bonus`,
+ * CONTRACT.md): null without a plan or without the bonus.
+ */
+export async function planAccountFor(c: Ctx, githubId: number, now = c.now()) {
+  const gate = await runtime(c);
+  const person = account(c, githubId);
+  const [state, meters] = await Promise.all([person.planState(now, PLAN_METER_MODELS), person.meters(now)]);
+  const bonus = state.tier === "none" ? { granted: false, fullyClaimed: false } : await directory(c).gpt6BonusStatus(githubId, bonusProjection(gate.config, gate, now));
+  return {
+    state,
+    meters,
+    limits: planLimitsView({ state, meters, config: gate.config, now }),
+    gpt6Bonus: bonusAccountView({ state, meters, config: gate.config, granted: bonus.granted, now }),
+  };
+}
+
+/**
+ * Grants the GPT-6 launch bonus to an account that just started paying, when it is on and a new
+ * subscriber still fits the projection (gpt6-bonus.ts): paying users get it right away, so the
+ * welcome email can say so. The request-time conditions (Autopilot only, the pre-send guard,
+ * the $2/week meter, credit left) still apply to every use. True when the account holds it.
+ */
+export async function grantLaunchBonus(c: Ctx, githubId: number): Promise<boolean> {
+  const gate = await runtime(c);
+  const now = c.now();
+  if (!gate.config.paidPlans) return false;
+  const projection = bonusProjection(gate.config, gate, now);
+  const block = bonusBlock({ config: gate.config, paying: true, paidSince: now, agent: undefined, remainingCreditUsd: projection.remainingCreditUsd, now });
+  if (block !== undefined && block !== "waiting") return false;
+  return (await directory(c).gpt6BonusGrant(githubId, projection)).granted;
 }
 
 /** GET /v1/plans: public, like /v1/status. */
@@ -3691,9 +3807,12 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // GPT-6 for non-admins, after the keyword pre-check: the trust gate (gpt6-trust.ts; on once
   // gpt6TrustedWeeklyUsdCap is above 0), then the pre-send checks of the request's new content
   // (presend-guard.ts). Every agent's GPT-6 request comes through here, whatever its API shape.
+  // The GPT-6 launch bonus (planServe.bonus) skips the trust gate: an active paid plan is trusted
+  // for the bonus only (its own $2/week meter, Autopilot only, the pre-send guard below). GPT-6
+  // outside the bonus still needs trust.
   let trustedGpt6 = false;
   if (requested.family === "gpt6" && !isAdmin) {
-    const trust = await gpt6TrustFor(c, gate.config, identity.githubId);
+    const trust = planServe?.bonus ? undefined : await gpt6TrustFor(c, gate.config, identity.githubId);
     if (trust && !trust.trusted) {
       return apiError(402, "gpt_limit", UNTRUSTED_GPT6_MESSAGE, { family: "gpt6", resetsAt: new Date(weekEnd(c.now())).toISOString(), reason: TRUST_REASON, alternative: DEEPSEEK_MODEL }, await headers());
     }
@@ -3980,7 +4099,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     await alert(c, await directory(c).recordRequest(record, policyOf(gate.config), servingContext(c, gate.config)));
     // Most of the week's free tokens used: one email a week, on the settlement that crossed 80%.
     // On the trial, most of the trial instead (once): its weekly allowance isn't what it runs out of.
-    if (!settled.paid && !isAdmin && userEmailsOn(gate.config, userEmailVia(c))) {
+    // A paying account gets plan_80 per model instead (below), never week_80.
+    if (!settled.paid && !paidPlan && !isAdmin && userEmailsOn(gate.config, userEmailVia(c))) {
       if (trial) {
         if (trialMostlyUsed(settled.allowance)) await userEmail(c, gate.config, "trial_80", identity.githubId, "");
       } else if (weekMostlyUsed(settled.allowance)) {
@@ -5316,9 +5436,13 @@ async function runBroadcast(c: Ctx, config: FreeConfig, request: BroadcastReques
   let failedCount = 0;
   let skipped = 0;
   let stoppedBy: string | null = null;
-  const batch = ready.slice(0, BROADCAST_BATCH);
+  // Broadcasts are bulk mail: never past the day's bulk share (email-budget.ts).
+  const budget = emailBudgetOf(config);
+  const room = (await directory(c).emailBudgetToday(c.now(), budget)).room.bulk;
+  if (room < Math.min(BROADCAST_BATCH, ready.length)) stoppedBy = "daily_budget";
+  const batch = ready.slice(0, Math.min(BROADCAST_BATCH, room));
   for (const [index, person] of batch.entries()) {
-    const claim = await directory(c).claimBroadcast({ githubId: person.githubId, id, now: c.now(), skipIfSent: request.skipIfSent, ...filter });
+    const claim = await directory(c).claimBroadcast({ githubId: person.githubId, id, now: c.now(), skipIfSent: request.skipIfSent, budget, ...filter });
     if (!claim) {
       skipped++;
       continue;

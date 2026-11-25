@@ -12,6 +12,10 @@
  *
  * The emails are plain text, so commands are written as they are typed, without backticks.
  *
+ * dl.new's paid plans have their own: welcome_paid (on claiming a payment), plan_80 and
+ * plan_reset (Mondays, paying accounts only). The one capitalised line is plan_reset's subject,
+ * "Your ~62M tokens reset.", as the owner wrote it.
+ *
  * When each one goes out is in user-email-send.ts.
  */
 
@@ -28,10 +32,18 @@ export type UserEmailKind =
   | "trial_80"
   | "plan_80"
   | "gone_quiet"
-  | "weekly_reset";
+  | "weekly_reset"
+  | "welcome_paid"
+  | "plan_reset";
 
 /** The welcome kinds: held back while the person waits in line for free tokens. */
 export const WELCOME_KINDS: readonly UserEmailKind[] = ["welcome", "welcome_basic", "welcome_starter", "welcome_starter_small", "welcome_trial"];
+
+/**
+ * The free tier's lifecycle emails: never to accounts made on dl.new (their numbers start at
+ * 2^50), which get welcome_paid, plan_80 and plan_reset instead.
+ */
+export const FREE_TIER_KINDS: readonly UserEmailKind[] = [...WELCOME_KINDS, "access_granted", "access_granted_trial", "didnt_start", "week_80", "trial_80", "gone_quiet", "weekly_reset"];
 
 export interface UserEmailCopy {
   subject: string;
@@ -215,6 +227,59 @@ what made you stop? one line is plenty, just hit reply.
 sina`,
   },
 
+  // 3c. dl.new: right after a payment is claimed onto an account (paid-web.ts). {plan} is the
+  // plan's name, {limits} one line per model ("- DeepSeek V4.1 Flash ~62M/week (95.5% caching
+  // applied)"), {bonus} the GPT-6 launch bonus paragraph when the account holds it, else nothing.
+  welcome_paid: {
+    subject: "your dl.new key is ready",
+    body: `hey,
+
+sina here, i build dl.new. thanks for subscribing to {plan}.
+
+your key is waiting at https://dl.new/connect
+
+with claude code, run this once:
+    curl -fsSL dl.new | sh
+then start it with:
+    dl claude
+
+other tools (opencode, cline, cursor, any openai sdk): use the base url https://api.dl.new/v1 and a key from https://dl.new/keys
+
+to sign in again, go to https://dl.new/signin and use github or a code we email you.
+
+your plan's weekly limits, reset every monday 00:00 utc:
+{limits}
+{bonus}
+full refund within 7 days of your first payment: reply to this email.
+
+if anything breaks or feels off, just reply. it comes straight to me.
+
+sina`,
+  },
+
+  // 5b. dl.new: every Monday, to paying accounts only, once free tokens have ended (freeEndsAt)
+  // and while weeklyResetEmail is on (app.ts scheduledPlanReset). {tokens} is the plan's main
+  // model's weekly limit ("~62M"), {plan} its name, {models} last week per model with the
+  // counted math, {sessions} and {failovers} last week's counts.
+  plan_reset: {
+    subject: "Your {tokens} tokens reset.",
+    body: `hey,
+
+new week: your {plan} limits are back to full.
+
+last week:
+{models}
+
+counted tokens: cached input x {cachedpct}, fresh input x 100%, output x 100%.
+sessions: {sessions}
+failovers: {failovers} (requests a backup provider or model answered)
+
+your usage: https://dl.new/usage
+manage or cancel your plan: https://dl.new/billing
+
+sina`,
+  },
+
   // 5. Every Monday after the weekly allowance resets (user-email-send.ts weeklyResetEligible):
   // active free-allowance people who used dl in the last 28 days. {tokens} is their own weekly
   // allowance; {grows} adds WEEKLY_RESET_GROWS for anyone below the Full allowance.
@@ -271,6 +336,23 @@ export interface PlanWarningValues {
   left: string;
 }
 
+/** welcome_paid's values (paid-web.ts welcomeValues). */
+export interface PlanWelcomeValues {
+  plan: string;
+  limits: string;
+  bonus: string;
+}
+
+/** plan_reset's values (plan-reset.ts planResetValues). */
+export interface PlanResetValues {
+  tokens: string;
+  plan: string;
+  models: string;
+  cachedpct: string;
+  sessions: string;
+  failovers: string;
+}
+
 /** Under every email, after a blank line. */
 export const FOOTER = "don't want these? {unsubscribeUrl}";
 
@@ -290,7 +372,10 @@ const PRO_OR_TOPUP = /dl pro or a top up/g;
  * One email, placeholders filled in, footer added. `proOffered` false leaves dl pro out of it (top
  * ups stay). `weeklyReset` fills weekly_reset's {tokens}, {grows} and {login}.
  */
-export function renderUserEmail(kind: UserEmailKind, values: { resets: string; unsubscribeUrl: string; proOffered?: boolean; weeklyReset?: WeeklyResetValues; planWarning?: PlanWarningValues }): UserEmailCopy {
+export function renderUserEmail(
+  kind: UserEmailKind,
+  values: { resets: string; unsubscribeUrl: string; proOffered?: boolean; weeklyReset?: WeeklyResetValues; planWarning?: PlanWarningValues; planWelcome?: PlanWelcomeValues; planReset?: PlanResetValues },
+): UserEmailCopy {
   const reset = values.weeklyReset;
   const named: Record<string, string> = {
     resets: values.resets,
@@ -303,9 +388,11 @@ export function renderUserEmail(kind: UserEmailKind, values: { resets: string; u
         }
       : {}),
     ...(values.planWarning ?? {}),
+    ...(values.planWelcome ?? {}),
+    ...(values.planReset ?? {}),
   };
   const fill = (text: string) => {
-    const filled = text.replace(/\{(resets|unsubscribeUrl|tokens|grows|login|model|share|used|limit|left)\}/g, (match, name: string) => named[name] ?? match);
+    const filled = text.replace(/\{(\w+)\}/g, (match, name: string) => named[name] ?? match);
     return values.proOffered === false ? filled.replace(PRO_OR_TOPUP, "a top up") : filled;
   };
   const copy = USER_EMAILS[kind];

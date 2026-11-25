@@ -31,7 +31,7 @@ import { countGuard, everyonesTrust, GPT6_GUARD_SCHEMA, guardDays, noteTrustSess
 import { GUARD_OUTCOMES, type Checker, type GuardOutcome } from "./presend-guard.js";
 import { dayIso, MODERATION_HISTORY_DAYS, MODERATION_HISTORY_ROWS, MODERATION_VERDICTS, type ModerationAction, type ModerationAnswer, type ModerationCase, type ModerationVerdict, type TriggerLabel } from "./moderation.js";
 import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
-import { WELCOME_KINDS, type UserEmailKind } from "./user-emails.js";
+import { FREE_TIER_KINDS, WELCOME_KINDS, type UserEmailKind } from "./user-emails.js";
 import { runwayAlert, runwayFindings } from "./runway.js";
 import type { BroadcastAudience } from "./broadcast.js";
 import {
@@ -60,6 +60,8 @@ import {
 import { paidLogin, type IdentityKind } from "./accounts.js";
 import type { PlanId } from "./plan-prices.js";
 import { BONUS_SCHEMA, bonusHolders, canGrantOneMore, grantBonus, type BonusProjectionInput } from "./gpt6-bonus.js";
+import { classOfKind, EMAIL_BUDGET_SCHEMA, emailCounts, emailRoom, takeEmailBudget, type EmailBudget, type EmailClass, type EmailCounts } from "./email-budget.js";
+import { PAID_ACCOUNT_BASE } from "./accounts.js";
 
 /**
  * Who is in, and what they used. One object (`getByName("directory")`): admissions, invite
@@ -1130,7 +1132,7 @@ export class DirectoryObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA, ...EVENT_CODE_SCHEMA, ...BONUS_SCHEMA, ...PAID_SCHEMA]) this.ctx.storage.sql.exec(statement);
+      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA, ...EVENT_CODE_SCHEMA, ...BONUS_SCHEMA, ...PAID_SCHEMA, ...EMAIL_BUDGET_SCHEMA]) this.ctx.storage.sql.exec(statement);
       ensureAllocatorSchema(this.ctx.storage.sql);
       const added = new Set<string>();
       for (const [table, column, definition] of ADDED_COLUMNS) {
@@ -1956,7 +1958,7 @@ export class DirectoryObject extends DurableObject {
    * being sent, one already sent or being sent today, or (with `retry` only) a failed attempt
    * that may be tried once more. Atomic, so two runs can't both claim it.
    */
-  async claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean; dailyLimit?: number }): Promise<UserEmailClaim | undefined> {
+  async claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean; dailyLimit?: number; budget?: EmailBudget }): Promise<UserEmailClaim | undefined> {
     const sql = this.ctx.storage.sql;
     const day = Math.floor(input.now / DAY_MS);
     return this.ctx.storage.transactionSync((): UserEmailClaim | undefined => {
@@ -1968,6 +1970,9 @@ export class DirectoryObject extends DurableObject {
         .toArray()[0];
       if (!person || person.status !== "active" || !person.email || person.email_stop === 1) return undefined;
       if (!input.includeAdmins && (person.admitted_via === "admin" || input.adminIds.includes(input.githubId))) return undefined;
+      // The free tier's lifecycle emails don't apply to accounts made on dl.new (paid sign-up);
+      // the plan's own emails (welcome_paid, plan_80, plan_reset) are theirs.
+      if (input.githubId >= PAID_ACCOUNT_BASE && FREE_TIER_KINDS.includes(input.kind)) return undefined;
       const existing = sql
         .exec<{ status: string; attempts: number }>("SELECT status, attempts FROM user_emails WHERE github_id = ? AND kind = ? AND period = ?", input.githubId, input.kind, input.period)
         .toArray()[0];
@@ -1977,10 +1982,13 @@ export class DirectoryObject extends DurableObject {
       if ((WELCOME_KINDS.includes(input.kind) || input.kind === "didnt_start") && sql.exec("SELECT 1 FROM queue WHERE github_id = ? AND admitted_at IS NULL", input.githubId).toArray().length > 0) return undefined;
       // At most one a day, except the answer to an access request the person asked for.
       const today = sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND day = ? AND status IN ('pending', 'sent') LIMIT 1", input.githubId, day).toArray();
-      // plan_80 too: a paying account's limit warning, at most once per model a week.
-      if (today.length > 0 && input.kind !== "access_granted" && input.kind !== "plan_80") return undefined;
+      // plan_80 too: a paying account's limit warning, at most once per model a week; and the
+      // paid welcome, which carries where the key is.
+      if (today.length > 0 && input.kind !== "access_granted" && input.kind !== "plan_80" && input.kind !== "welcome_paid") return undefined;
       // `dailyLimit` (the weekly_reset run): at most this many emails to users claimed today, every kind.
       if (input.dailyLimit !== undefined && this.#userEmailsToday(day) >= input.dailyLimit) return undefined;
+      // The day's email budget (email-budget.ts): bulk mail never takes the transactional reserve.
+      if (input.budget && !takeEmailBudget(sql, classOfKind(input.kind), day, input.budget)) return undefined;
       sql.exec(
         `INSERT INTO user_emails (github_id, kind, period, status, attempts, day, claimed_at) VALUES (?, ?, ?, 'pending', 1, ?, ?)
          ON CONFLICT (github_id, kind, period) DO UPDATE SET status = 'pending', attempts = attempts + 1, day = excluded.day, claimed_at = excluded.claimed_at`,
@@ -2039,10 +2047,11 @@ export class DirectoryObject extends DurableObject {
              AND NOT (q.github_id IS NOT NULL AND q.admitted_at IS NULL)
              AND COALESCE(q.admitted_at, p.admitted_at) > ? AND COALESCE(q.admitted_at, p.admitted_at) <= ?
              AND NOT EXISTS (SELECT 1 FROM person_totals r WHERE r.github_id = p.github_id)
-             AND p.level IN ('full', 'basic')
+             AND p.level IN ('full', 'basic') AND p.github_id < ?
            ORDER BY p.github_id`,
           now - 72 * 3_600_000,
           now - 24 * 3_600_000,
+          PAID_ACCOUNT_BASE,
         )
         .toArray(),
     );
@@ -2052,10 +2061,11 @@ export class DirectoryObject extends DurableObject {
           `SELECT p.github_id FROM people p
            JOIN person_totals t ON t.github_id = p.github_id
            JOIN (SELECT github_id, COUNT(DISTINCT day) AS days FROM person_daily GROUP BY github_id) r ON r.github_id = p.github_id
-           WHERE p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0 AND r.days >= 2 AND t.last_at < ?
+           WHERE p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0 AND r.days >= 2 AND t.last_at < ? AND p.github_id < ?
              AND NOT EXISTS (SELECT 1 FROM user_emails e WHERE e.github_id = p.github_id AND e.kind = 'gone_quiet' AND e.claimed_at > ?)
            ORDER BY p.github_id`,
           now - 7 * DAY_MS,
+          PAID_ACCOUNT_BASE,
           now - 30 * DAY_MS,
         )
         .toArray(),
@@ -2071,6 +2081,17 @@ export class DirectoryObject extends DurableObject {
   /** The same, for the weekly_reset run's budget (`now`'s UTC day). */
   async userEmailsClaimedToday(now: number): Promise<number> {
     return this.#userEmailsToday(Math.floor(now / DAY_MS));
+  }
+
+  /** Today's email budget (email-budget.ts): sends counted per class, and the room each has left. */
+  async emailBudgetToday(now: number, budget: EmailBudget): Promise<{ counts: EmailCounts; room: Record<EmailClass, number> }> {
+    const counts = emailCounts(this.ctx.storage.sql, Math.floor(now / DAY_MS));
+    return { counts, room: { code: emailRoom("code", counts, budget), transactional: emailRoom("transactional", counts, budget), bulk: emailRoom("bulk", counts, budget) } };
+  }
+
+  /** Takes one send of a class from today's budget (codes, the claim email): false when there's no room. */
+  async takeEmailBudget(input: { emailClass: EmailClass; now: number; budget: EmailBudget }): Promise<boolean> {
+    return this.ctx.storage.transactionSync(() => takeEmailBudget(this.ctx.storage.sql, input.emailClass, Math.floor(input.now / DAY_MS), input.budget));
   }
 
   /**
@@ -2090,12 +2111,13 @@ export class DirectoryObject extends DurableObject {
         `SELECT p.github_id, p.login, p.admitted_via FROM people p
          JOIN person_totals t ON t.github_id = p.github_id
          LEFT JOIN queue q ON q.github_id = p.github_id
-         WHERE p.github_id > ? AND p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0
+         WHERE p.github_id > ? AND p.github_id < ? AND p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0
            AND NOT (q.github_id IS NOT NULL AND q.admitted_at IS NULL)
            AND t.last_at > ?
            AND NOT EXISTS (SELECT 1 FROM user_emails e WHERE e.github_id = p.github_id AND e.kind = 'weekly_reset' AND e.period = ?)
          ORDER BY p.github_id LIMIT ?`,
         input.after,
+        PAID_ACCOUNT_BASE,
         input.now - WEEKLY_RESET_ACTIVE_DAYS * DAY_MS,
         week,
         input.limit,
@@ -2105,6 +2127,37 @@ export class DirectoryObject extends DurableObject {
       .filter((row) => input.includeAdmins || (row.admitted_via !== "admin" && !input.adminIds.includes(row.github_id)))
       .map((row) => ({ githubId: row.github_id, login: row.login, person: this.#personState(row.github_id, input.now, input.policy) }));
     return { people, last: rows.at(-1)?.github_id ?? null };
+  }
+
+  /**
+   * Who may get this week's plan_reset (paying dl.new plans), id above `after`, in id order, at
+   * most `limit`: a subscription active or past due, active (never blocked), with an email and
+   * stop not pressed, not an admin (unless `includeAdmins`), and no plan_reset row this week. The
+   * caller checks the plan itself against the Account object. `last`: the last id looked at.
+   */
+  async planResetCandidates(input: { now: number; after: number; limit: number; adminIds: number[]; includeAdmins: boolean }): Promise<{ people: number[]; last: number | null }> {
+    const rows = this.ctx.storage.sql
+      .exec<{ github_id: number; admitted_via: string }>(
+        `SELECT p.github_id, p.admitted_via FROM people p JOIN subscriptions s ON s.github_id = p.github_id
+         WHERE p.github_id > ? AND s.state IN ('active', 'past_due') AND p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0
+           AND NOT EXISTS (SELECT 1 FROM user_emails e WHERE e.github_id = p.github_id AND e.kind = 'plan_reset' AND e.period = ?)
+         ORDER BY p.github_id LIMIT ?`,
+        input.after,
+        String(weekStart(input.now)),
+        input.limit,
+      )
+      .toArray();
+    const people = rows.filter((row) => input.includeAdmins || (row.admitted_via !== "admin" && !input.adminIds.includes(row.github_id))).map((row) => row.github_id);
+    return { people, last: rows.at(-1)?.github_id ?? null };
+  }
+
+  /** Distinct sessions (any agent's session key) in one account's requests in [from, to). */
+  async sessionsBetween(githubId: number, from: number, to: number): Promise<number> {
+    return (
+      this.ctx.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(DISTINCT session_key) AS n FROM requests WHERE github_id = ? AND at >= ? AND at < ? AND session_key IS NOT NULL", githubId, from, to)
+        .toArray()[0]?.n ?? 0
+    );
   }
 
   /**
@@ -2159,7 +2212,7 @@ export class DirectoryObject extends DurableObject {
         `SELECT p.github_id, p.login, p.email, p.admitted_via,
                 EXISTS (SELECT 1 FROM user_emails t WHERE t.github_id = p.github_id AND t.day = ? AND t.status IN ('pending', 'sent')) AS today
          FROM people p
-         WHERE p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0
+         WHERE p.status = 'active' AND p.email IS NOT NULL AND p.email_stop = 0 AND p.github_id < ?
            AND (? = 'all' OR p.level = ?)
            AND (? IS NULL OR p.admitted_at >= ?) AND (? IS NULL OR p.admitted_at < ?)
            AND NOT EXISTS (
@@ -2169,6 +2222,7 @@ export class DirectoryObject extends DurableObject {
              SELECT 1 FROM user_emails s WHERE s.github_id = p.github_id AND s.kind = 'broadcast' AND s.period = ? AND s.status = 'sent'))
          ORDER BY p.github_id`,
         day,
+        PAID_ACCOUNT_BASE,
         input.audience,
         input.audience,
         input.from,
@@ -2191,7 +2245,7 @@ export class DirectoryObject extends DurableObject {
    * hasn't gone to them (a failed one may be tried again, 3 attempts in all; a claim left
    * pending for an hour counts as failed). Atomic, so two calls can't both send it.
    */
-  async claimBroadcast(input: { githubId: number; id: string; now: number; adminIds: number[]; includeAdmins: boolean; skipIfSent?: string | null }): Promise<BroadcastClaim | undefined> {
+  async claimBroadcast(input: { githubId: number; id: string; now: number; adminIds: number[]; includeAdmins: boolean; skipIfSent?: string | null; budget?: EmailBudget }): Promise<BroadcastClaim | undefined> {
     const sql = this.ctx.storage.sql;
     const day = Math.floor(input.now / DAY_MS);
     return this.ctx.storage.transactionSync((): BroadcastClaim | undefined => {
@@ -2200,12 +2254,15 @@ export class DirectoryObject extends DurableObject {
         .toArray()[0];
       if (!person || person.status !== "active" || !person.email || person.email_stop === 1) return undefined;
       if (!input.includeAdmins && (person.admitted_via === "admin" || input.adminIds.includes(input.githubId))) return undefined;
+      // Broadcasts are the free tier's (check-ins, win-back): never to accounts made on dl.new.
+      if (input.githubId >= PAID_ACCOUNT_BASE) return undefined;
       const existing = sql
         .exec<{ status: string; attempts: number; claimed_at: number }>("SELECT status, attempts, claimed_at FROM user_emails WHERE github_id = ? AND kind = 'broadcast' AND period = ?", input.githubId, input.id)
         .toArray()[0];
       if (existing && (existing.status === "sent" || existing.attempts >= 3 || (existing.status === "pending" && existing.claimed_at > input.now - 3_600_000))) return undefined;
       if (input.skipIfSent && sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND kind = 'broadcast' AND period = ? AND status = 'sent' LIMIT 1", input.githubId, input.skipIfSent).toArray().length > 0) return undefined;
       if (sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND day = ? AND status IN ('pending', 'sent') LIMIT 1", input.githubId, day).toArray().length > 0) return undefined;
+      if (input.budget && !takeEmailBudget(sql, "bulk", day, input.budget)) return undefined;
       sql.exec(
         `INSERT INTO user_emails (github_id, kind, period, status, attempts, day, claimed_at) VALUES (?, 'broadcast', ?, 'pending', 1, ?, ?)
          ON CONFLICT (github_id, kind, period) DO UPDATE SET status = 'pending', attempts = attempts + 1, day = excluded.day, claimed_at = excluded.claimed_at`,

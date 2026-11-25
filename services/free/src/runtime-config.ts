@@ -182,8 +182,14 @@ export const RUNTIME_SETTINGS = {
   speedProbes: { kind: "flag", env: "SPEED_PROBES" },
   /** Emails to users (user-emails.ts) on or off; they also need the USER_EMAIL binding or RESEND_API_KEY. */
   userEmails: { kind: "flag", env: "USER_EMAILS" },
-  /** The Monday "tokens reset" email (weekly_reset) on or off; userEmails off stops it too. */
+  /** The Monday "tokens reset" emails on or off: weekly_reset (free tokens) and plan_reset (paying, after freeEndsAt); userEmails off stops them too. */
   weeklyResetEmail: { kind: "flag", env: "WEEKLY_RESET_EMAIL" },
+  /** Emails to users a UTC day at most, every kind but codes (email-budget.ts; default 300). */
+  userEmailsDailyMax: { kind: "count", env: "USER_EMAILS_DAILY_MAX" },
+  /** Of userEmailsDailyMax, kept for transactional mail (claim, paid welcome, plan_80): bulk and lifecycle mail stop short of it (default 100). */
+  userEmailsTransactionalReserve: { kind: "count", env: "USER_EMAILS_TRANSACTIONAL_RESERVE" },
+  /** Sign-in and email-change codes a UTC day at most, outside userEmailsDailyMax (default 300). */
+  emailCodesDailyMax: { kind: "count", env: "EMAIL_CODES_DAILY_MAX" },
   /** Free tokens inside dl only: chat requests without session events are refused (app.ts). */
   dlOnly: { kind: "flag", env: "DL_ONLY" },
   /** Free tokens in other coding agents launched by dl (`dl claude`); false refuses them (harness_not_allowed). */
