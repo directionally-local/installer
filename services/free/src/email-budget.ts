@@ -10,8 +10,14 @@
  *                                   never count against the daily max and are never stopped by
  *                                   it, only by this separate hard ceiling
  *
- * So a day sends at most userEmailsDailyMax + emailCodesDailyMax (600 by default). Raise them once
- * the provider's quota is known.
+ * So a day sends at most userEmailsDailyMax + emailCodesDailyMax (600 by default) through the
+ * USER_EMAIL binding. Raise them once the provider's quota is known.
+ *
+ * Bulk mail through Resend (`broadcastEmailProvider` "resend", the default when RESEND_API_KEY is
+ * set beside the binding; user-email-send.ts userEmailRoutes) has its own class and ceiling, so it
+ * never takes from the binding's budget above:
+ *
+ *   resendBulkDailyMax              (default 2000) bulk mail through Resend a UTC day
  *
  * Classes:
  *   code           a 6-digit sign-in or email-change code (paid-web.ts)
@@ -27,7 +33,10 @@
 
 import type { UserEmailKind } from "./user-emails.js";
 
-export type EmailClass = "code" | "transactional" | "bulk";
+/** `resend_bulk`: bulk mail sent through Resend beside the binding, counted apart from the binding's budget. */
+export type EmailClass = "code" | "transactional" | "bulk" | "resend_bulk";
+
+export const EMAIL_CLASSES: readonly EmailClass[] = ["code", "transactional", "bulk", "resend_bulk"];
 
 export interface EmailBudget {
   /** Every email to users a UTC day, codes aside. */
@@ -36,26 +45,34 @@ export interface EmailBudget {
   transactionalReserve: number;
   /** Codes a UTC day: their own ceiling, outside dailyMax. */
   codesMax: number;
+  /** Bulk mail through Resend a UTC day: its own ceiling, outside dailyMax. */
+  resendBulkMax: number;
 }
 
 export type EmailBudgetSettingsConfig = {
   userEmailsDailyMax: number;
   userEmailsTransactionalReserve: number;
   emailCodesDailyMax: number;
+  resendBulkDailyMax: number;
 };
 
 export const EMAIL_BUDGET_DEFAULTS: EmailBudgetSettingsConfig = {
   userEmailsDailyMax: 300,
   userEmailsTransactionalReserve: 100,
   emailCodesDailyMax: 300,
+  resendBulkDailyMax: 2000,
 };
 
 export function emailBudgetOf(config: EmailBudgetSettingsConfig): EmailBudget {
-  return { dailyMax: config.userEmailsDailyMax, transactionalReserve: config.userEmailsTransactionalReserve, codesMax: config.emailCodesDailyMax };
+  return { dailyMax: config.userEmailsDailyMax, transactionalReserve: config.userEmailsTransactionalReserve, codesMax: config.emailCodesDailyMax, resendBulkMax: config.resendBulkDailyMax };
 }
 
 /** The user-email kinds people are waiting for; every other kind is bulk. */
 export const TRANSACTIONAL_KINDS: readonly (UserEmailKind | "claim")[] = ["welcome_paid", "plan_80", "access_granted", "access_granted_trial", "claim", "welcome_trial_card", "welcome_trial_nocard", "trial_card_80", "trial_converted"];
+
+/** Where bulk mail goes when RESEND_API_KEY is set beside the USER_EMAIL binding (runtime setting `broadcastEmailProvider`). */
+export const BROADCAST_EMAIL_PROVIDERS = ["resend", "cloudflare"] as const;
+export type BroadcastEmailProvider = (typeof BROADCAST_EMAIL_PROVIDERS)[number];
 
 export function classOfKind(kind: UserEmailKind | "broadcast" | "claim"): EmailClass {
   return (TRANSACTIONAL_KINDS as readonly string[]).includes(kind) ? "transactional" : "bulk";
@@ -67,6 +84,7 @@ export type EmailCounts = Record<EmailClass, number>;
 /** How many of `emailClass` may still go today (0: none). */
 export function emailRoom(emailClass: EmailClass, counts: EmailCounts, budget: EmailBudget): number {
   if (emailClass === "code") return Math.max(0, budget.codesMax - counts.code);
+  if (emailClass === "resend_bulk") return Math.max(0, budget.resendBulkMax - counts.resend_bulk);
   const max = Math.max(0, budget.dailyMax);
   const total = counts.transactional + counts.bulk;
   if (emailClass === "transactional") return Math.max(0, max - total);
@@ -92,9 +110,9 @@ export const EMAIL_BUDGET_SCHEMA = [
 const KEEP_DAYS = 14;
 
 export function emailCounts(sql: Sql, day: number): EmailCounts {
-  const counts: EmailCounts = { code: 0, transactional: 0, bulk: 0 };
+  const counts: EmailCounts = { code: 0, transactional: 0, bulk: 0, resend_bulk: 0 };
   for (const row of sql.exec<{ class: string; n: number }>("SELECT class, n FROM email_budget_daily WHERE day = ?", day).toArray()) {
-    if (row.class === "code" || row.class === "transactional" || row.class === "bulk") counts[row.class] = row.n;
+    if ((EMAIL_CLASSES as readonly string[]).includes(row.class)) counts[row.class as EmailClass] = row.n;
   }
   return counts;
 }

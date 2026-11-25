@@ -1,6 +1,7 @@
 import { ALLOCATOR_MODES } from "./allocator.js";
 import { ACCESS_REQUEST_ALERT_MODES, COUPON_ID, GPT6_CLIENTS, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, isKeepDays, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, RAW_LOG_MAX_KEEP_DAYS, RAW_LOG_MIN_KEEP_DAYS, PRO_MULTIPLIER_MAX, PRO_MULTIPLIER_MIN, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
+import { BROADCAST_EMAIL_PROVIDERS } from "./email-budget.js";
 import { MAX_TRIAL_DAYS } from "./trials.js";
 import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_PLANS, PROVIDER_STATUSES } from "./providers.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
@@ -191,6 +192,10 @@ export const RUNTIME_SETTINGS = {
   userEmailsTransactionalReserve: { kind: "count", env: "USER_EMAILS_TRANSACTIONAL_RESERVE" },
   /** Sign-in and email-change codes a UTC day at most, outside userEmailsDailyMax (default 300). */
   emailCodesDailyMax: { kind: "count", env: "EMAIL_CODES_DAILY_MAX" },
+  /** Where bulk mail (broadcasts, lifecycle) goes when RESEND_API_KEY is set beside the USER_EMAIL binding: "resend" (default) or "cloudflare". Codes and transactional mail stay on the binding. */
+  broadcastEmailProvider: { kind: "emailProvider", env: "BROADCAST_EMAIL_PROVIDER" },
+  /** Bulk mail through Resend a UTC day at most, outside the binding's userEmailsDailyMax (default 2000). */
+  resendBulkDailyMax: { kind: "count", env: "RESEND_BULK_DAILY_MAX" },
   /** Free tokens inside dl only: chat requests without session events are refused (app.ts). */
   dlOnly: { kind: "flag", env: "DL_ONLY" },
   /** Free tokens in other coding agents launched by dl (`dl claude`); false refuses them (harness_not_allowed). */
@@ -402,6 +407,8 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "string" && (GPT6_CLIENTS as readonly string[]).includes(value) ? value : "invalid";
     case "moderationMode":
       return typeof value === "string" && (MODERATION_MODES as readonly string[]).includes(value) ? value : "invalid";
+    case "emailProvider":
+      return typeof value === "string" && (BROADCAST_EMAIL_PROVIDERS as readonly string[]).includes(value) ? value : "invalid";
     case "allocatorMode":
       return typeof value === "string" && (ALLOCATOR_MODES as readonly string[]).includes(value) ? value : "invalid";
     case "people":
@@ -459,6 +466,7 @@ const RULES: Record<Kind, string> = {
   gpt6Clients: '"autopilot" (GPT-6 in Autopilot only) or "all" (every coding agent)',
   moderationMode: '"enforce", "shadow" or "off"',
   allocatorMode: '"on" or "off"',
+  emailProvider: '"resend" or "cloudflare"',
   people: 'a list of up to 500 GitHub logins or numeric ids, e.g. ["octocat", "12345"], or [] for none',
   providerStatus: '"on" or "paused"',
   providerPlans: '"pro" (dl Pro and admins only) or "all"',

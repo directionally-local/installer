@@ -135,6 +135,8 @@ describe("runtime settings (units)", () => {
       userEmailsDailyMax: 300,
       userEmailsTransactionalReserve: 100,
       emailCodesDailyMax: 300,
+      broadcastEmailProvider: "resend",
+      resendBulkDailyMax: 2000,
       paidPlans: false,
       refundWindowHours: 24,
       checkoutTermsConsent: true,

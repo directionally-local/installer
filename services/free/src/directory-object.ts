@@ -2021,7 +2021,7 @@ export class DirectoryObject extends DurableObject {
    * being sent, one already sent or being sent today, or (with `retry` only) a failed attempt
    * that may be tried once more. Atomic, so two runs can't both claim it.
    */
-  async claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean; dailyLimit?: number; budget?: EmailBudget }): Promise<UserEmailClaim | undefined> {
+  async claimUserEmail(input: { githubId: number; kind: UserEmailKind; period: string; now: number; adminIds: number[]; includeAdmins: boolean; retry?: boolean; dailyLimit?: number; budget?: EmailBudget; budgetClass?: EmailClass }): Promise<UserEmailClaim | undefined> {
     const sql = this.ctx.storage.sql;
     const day = Math.floor(input.now / DAY_MS);
     return this.ctx.storage.transactionSync((): UserEmailClaim | undefined => {
@@ -2050,8 +2050,9 @@ export class DirectoryObject extends DurableObject {
       if (today.length > 0 && !ANY_DAY_KINDS.includes(input.kind)) return undefined;
       // `dailyLimit` (the weekly_reset run): at most this many emails to users claimed today, every kind.
       if (input.dailyLimit !== undefined && this.#userEmailsToday(day) >= input.dailyLimit) return undefined;
-      // The day's email budget (email-budget.ts): bulk mail never takes the transactional reserve.
-      if (input.budget && !takeEmailBudget(sql, classOfKind(input.kind), day, input.budget)) return undefined;
+      // The day's email budget (email-budget.ts): bulk mail never takes the transactional reserve;
+      // bulk mail through Resend (budgetClass "resend_bulk") has its own ceiling instead.
+      if (input.budget && !takeEmailBudget(sql, input.budgetClass ?? classOfKind(input.kind), day, input.budget)) return undefined;
       sql.exec(
         `INSERT INTO user_emails (github_id, kind, period, status, attempts, day, claimed_at) VALUES (?, ?, ?, 'pending', 1, ?, ?)
          ON CONFLICT (github_id, kind, period) DO UPDATE SET status = 'pending', attempts = attempts + 1, day = excluded.day, claimed_at = excluded.claimed_at`,
@@ -2149,7 +2150,7 @@ export class DirectoryObject extends DurableObject {
   /** Today's email budget (email-budget.ts): sends counted per class, and the room each has left. */
   async emailBudgetToday(now: number, budget: EmailBudget): Promise<{ counts: EmailCounts; room: Record<EmailClass, number> }> {
     const counts = emailCounts(this.ctx.storage.sql, Math.floor(now / DAY_MS));
-    return { counts, room: { code: emailRoom("code", counts, budget), transactional: emailRoom("transactional", counts, budget), bulk: emailRoom("bulk", counts, budget) } };
+    return { counts, room: { code: emailRoom("code", counts, budget), transactional: emailRoom("transactional", counts, budget), bulk: emailRoom("bulk", counts, budget), resend_bulk: emailRoom("resend_bulk", counts, budget) } };
   }
 
   /** Takes one send of a class from today's budget (codes, the claim email): false when there's no room. */
@@ -2308,7 +2309,7 @@ export class DirectoryObject extends DurableObject {
    * hasn't gone to them (a failed one may be tried again, 3 attempts in all; a claim left
    * pending for an hour counts as failed). Atomic, so two calls can't both send it.
    */
-  async claimBroadcast(input: { githubId: number; id: string; now: number; adminIds: number[]; includeAdmins: boolean; skipIfSent?: string | null; budget?: EmailBudget }): Promise<BroadcastClaim | undefined> {
+  async claimBroadcast(input: { githubId: number; id: string; now: number; adminIds: number[]; includeAdmins: boolean; skipIfSent?: string | null; budget?: EmailBudget; budgetClass?: "bulk" | "resend_bulk" }): Promise<BroadcastClaim | undefined> {
     const sql = this.ctx.storage.sql;
     const day = Math.floor(input.now / DAY_MS);
     return this.ctx.storage.transactionSync((): BroadcastClaim | undefined => {
@@ -2325,7 +2326,7 @@ export class DirectoryObject extends DurableObject {
       if (existing && (existing.status === "sent" || existing.attempts >= 3 || (existing.status === "pending" && existing.claimed_at > input.now - 3_600_000))) return undefined;
       if (input.skipIfSent && sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND kind = 'broadcast' AND period = ? AND status = 'sent' LIMIT 1", input.githubId, input.skipIfSent).toArray().length > 0) return undefined;
       if (sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND day = ? AND status IN ('pending', 'sent') LIMIT 1", input.githubId, day).toArray().length > 0) return undefined;
-      if (input.budget && !takeEmailBudget(sql, "bulk", day, input.budget)) return undefined;
+      if (input.budget && !takeEmailBudget(sql, input.budgetClass ?? "bulk", day, input.budget)) return undefined;
       sql.exec(
         `INSERT INTO user_emails (github_id, kind, period, status, attempts, day, claimed_at) VALUES (?, 'broadcast', ?, 'pending', 1, ?, ?)
          ON CONFLICT (github_id, kind, period) DO UPDATE SET status = 'pending', attempts = attempts + 1, day = excluded.day, claimed_at = excluded.claimed_at`,

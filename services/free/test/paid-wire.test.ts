@@ -213,20 +213,25 @@ describe("the welcome email", () => {
 });
 
 describe("the daily email budget", () => {
-  const budget: EmailBudget = { dailyMax: 300, transactionalReserve: 100, codesMax: 300 };
+  const budget: EmailBudget = { dailyMax: 300, transactionalReserve: 100, codesMax: 300, resendBulkMax: 2000 };
 
   it("keeps the reserve for transactional mail and gives codes their own ceiling", () => {
-    assert.equal(emailRoom("bulk", { code: 0, transactional: 0, bulk: 0 }, budget), 200);
-    assert.equal(emailRoom("bulk", { code: 0, transactional: 0, bulk: 200 }, budget), 0);
-    assert.equal(emailRoom("transactional", { code: 0, transactional: 0, bulk: 200 }, budget), 100);
+    assert.equal(emailRoom("bulk", { code: 0, transactional: 0, bulk: 0, resend_bulk: 0 }, budget), 200);
+    assert.equal(emailRoom("bulk", { code: 0, transactional: 0, bulk: 200, resend_bulk: 0 }, budget), 0);
+    assert.equal(emailRoom("transactional", { code: 0, transactional: 0, bulk: 200, resend_bulk: 0 }, budget), 100);
     // Transactional mail may also use what bulk left: bulk never takes the reserve, but not the other way round.
-    assert.equal(emailRoom("transactional", { code: 0, transactional: 250, bulk: 0 }, budget), 50);
-    assert.equal(emailRoom("bulk", { code: 0, transactional: 250, bulk: 0 }, budget), 50);
-    assert.equal(emailRoom("transactional", { code: 0, transactional: 100, bulk: 200 }, budget), 0);
+    assert.equal(emailRoom("transactional", { code: 0, transactional: 250, bulk: 0, resend_bulk: 0 }, budget), 50);
+    assert.equal(emailRoom("bulk", { code: 0, transactional: 250, bulk: 0, resend_bulk: 0 }, budget), 50);
+    assert.equal(emailRoom("transactional", { code: 0, transactional: 100, bulk: 200, resend_bulk: 0 }, budget), 0);
     // Codes don't count against the daily max, and the daily max doesn't stop them.
-    assert.equal(emailRoom("code", { code: 0, transactional: 100, bulk: 200 }, budget), 300);
-    assert.equal(emailRoom("code", { code: 300, transactional: 0, bulk: 0 }, budget), 0);
-    assert.equal(emailRoom("bulk", { code: 0, transactional: 0, bulk: 0 }, { ...budget, transactionalReserve: 500 }), 0);
+    assert.equal(emailRoom("code", { code: 0, transactional: 100, bulk: 200, resend_bulk: 0 }, budget), 300);
+    assert.equal(emailRoom("code", { code: 300, transactional: 0, bulk: 0, resend_bulk: 0 }, budget), 0);
+    assert.equal(emailRoom("bulk", { code: 0, transactional: 0, bulk: 0, resend_bulk: 0 }, { ...budget, transactionalReserve: 500 }), 0);
+    // Bulk mail through Resend has its own ceiling: the binding's counts never touch it, nor it theirs.
+    assert.equal(emailRoom("resend_bulk", { code: 300, transactional: 100, bulk: 200, resend_bulk: 0 }, budget), 2000);
+    assert.equal(emailRoom("resend_bulk", { code: 0, transactional: 0, bulk: 0, resend_bulk: 2000 }, budget), 0);
+    assert.equal(emailRoom("bulk", { code: 0, transactional: 0, bulk: 0, resend_bulk: 2000 }, budget), 200);
+    assert.equal(emailRoom("transactional", { code: 0, transactional: 0, bulk: 0, resend_bulk: 2000 }, budget), 300);
     assert.equal(classOfKind("welcome_paid"), "transactional");
     assert.equal(classOfKind("plan_80"), "transactional");
     assert.equal(classOfKind("claim"), "transactional");
