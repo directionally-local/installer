@@ -123,7 +123,8 @@ export function resendRequest(input: {
   to: string;
   subject: string;
   text: string;
-  unsubscribeUrl: string;
+  /** Left out for a transactional email (a sign-in code, a receipt link): no List-Unsubscribe headers. */
+  unsubscribeUrl?: string;
   idempotencyKey: string;
 }): RequestInit {
   return {
@@ -135,7 +136,7 @@ export function resendRequest(input: {
       reply_to: input.replyTo,
       subject: input.subject,
       text: input.text,
-      headers: { "List-Unsubscribe": `<${input.unsubscribeUrl}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
+      ...(input.unsubscribeUrl ? { headers: { "List-Unsubscribe": `<${input.unsubscribeUrl}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" } } : {}),
     }),
   };
 }
@@ -162,14 +163,14 @@ export function bindingSender(from: string): string | { email: string; name: str
 }
 
 /** The binding's message for one plain-text email: the same fields and headers as Resend's. */
-export function bindingMessage(input: { from: string; replyTo: string; to: string; subject: string; text: string; unsubscribeUrl: string }): Parameters<UserEmailBinding["send"]>[0] {
+export function bindingMessage(input: { from: string; replyTo: string; to: string; subject: string; text: string; unsubscribeUrl?: string }): Parameters<UserEmailBinding["send"]>[0] {
   return {
     from: bindingSender(input.from),
     to: input.to,
     replyTo: input.replyTo,
     subject: input.subject,
     text: input.text,
-    headers: { "List-Unsubscribe": `<${input.unsubscribeUrl}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
+    ...(input.unsubscribeUrl ? { headers: { "List-Unsubscribe": `<${input.unsubscribeUrl}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" } } : {}),
   };
 }
 
@@ -204,7 +205,7 @@ export interface SendOutcome {
 export async function sendPlainEmail(
   transport: UserEmailTransport,
   config: Pick<FreeConfig, "emailFrom" | "emailReplyTo">,
-  input: { to: string; subject: string; text: string; unsubscribeUrl: string; idempotencyKey: string },
+  input: { to: string; subject: string; text: string; unsubscribeUrl?: string; idempotencyKey: string },
 ): Promise<SendOutcome> {
   const fields = { from: config.emailFrom, replyTo: config.emailReplyTo, to: input.to, subject: input.subject, text: input.text, unsubscribeUrl: input.unsubscribeUrl };
   if (transport.provider === "cloudflare") return sendThroughBinding(transport.binding, bindingMessage(fields));

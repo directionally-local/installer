@@ -9,6 +9,9 @@ import { HARNESSES, HARNESS_KEY_TTL_MS, MAX_HARNESS_KEYS, MAX_SERVER_KEYS, parse
 import { TOOL_KEYS_OFF_MESSAGE, TOOL_KEYS_UNAVAILABLE_MESSAGE, TOOL_KEY_NOT_HERE_MESSAGE, forTool, toolClient, toolLimitMessage, toolName } from "./tool-keys.js";
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
+import { accountObjectName, API_KEY_PREFIX, parseApiKey } from "./accounts.js";
+import { applyPlanEvent, githubCallback, githubStart, paidAdmin, paidV1, paidWebRoute } from "./paid-web.js";
+import type { KeyFormat } from "./account-object.js";
 import { ConfigError, readFreeConfig, type FreeConfig, type Upstream } from "./config.js";
 import type { DirectoryObject, Gate, GithubCheckOutcome, HostFailure, LevelSignalRow, PersonRow, PersonState, PersonStatus, RequestRecord, SpendSummary, UseClient } from "./directory-object.js";
 import type { ProFunnelStep } from "./pro-funnel.js";
@@ -194,7 +197,7 @@ const DEFAULT_RETRY_AFTER_S = 5;
 export const ACCESS_TTL_S = 3600;
 /** How long a revoked session id is remembered: past any access token from it (TTL plus verify leeway). */
 const REVOKED_SESSION_TTL_MS = (ACCESS_TTL_S + 120) * 1000;
-const ISSUER = "directionallylocal-free";
+export const ISSUER = "directionallylocal-free";
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const OAUTH_COOKIE = "__Host-dl_oauth";
 /** The admin dashboard's browser session (see `adminWeb`). */
@@ -206,7 +209,7 @@ const ADMIN_SESSION_TTL_S = 3600;
  * The OAuth app's one registered callback. GitHub matches redirect URIs exactly, so admin
  * sign-in comes back here too; the stored state's purpose says which flow to finish.
  */
-const CALLBACK_PATH = "/device/callback";
+export const CALLBACK_PATH = "/device/callback";
 /**
  * Where admin sign-in used to come back to. Kept as an alias for a while: harmless if it was
  * added to the OAuth app, and it finishes any sign-in started before the change.
@@ -295,6 +298,10 @@ export interface Env {
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_PRICE_TOPUP?: string;
+  /** dl.new's plans' monthly Prices (plan-prices.ts), made in Stripe by the owner. */
+  STRIPE_PRICE_STARTER?: string;
+  STRIPE_PRICE_PLUS?: string;
+  STRIPE_PRICE_MAX?: string;
   BILLING_SUCCESS_URL?: string;
   BILLING_CANCEL_URL?: string;
   BILLING_PORTAL_RETURN_URL?: string;
@@ -370,7 +377,7 @@ export interface BackgroundContext {
   waitUntil(task: Promise<unknown>): void; // portable-exception: optional, used only when the runtime passes it
 }
 
-interface Ctx {
+export interface Ctx {
   request: Request;
   url: URL;
   env: Env;
@@ -535,6 +542,10 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/v1/telemetry/gpu") return telemetry(c, "gpu");
   if (method === "POST" && path === "/v1/telemetry/web") return webTelemetry(c);
   if (method === "POST" && path === "/v1/install-code/exchange") return installCodeExchange(c);
+  if (path.startsWith("/v1/cli-login/")) {
+    const handled = paidV1(c, path, method);
+    if (handled) return handled;
+  }
   if (path.startsWith("/web/")) return web(c, path, method);
   if (method === "GET" && path.startsWith("/v1/referrals/")) return referralLookup(c, path.slice("/v1/referrals/".length));
   if (method === "POST" && path === "/v1/billing/checkout") return billingCheckout(c);
@@ -566,16 +577,16 @@ function clientIp(request: Request): string {
   return request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
 }
 
-async function limited(c: Ctx, key: string, limit: Limit): Promise<number | undefined> {
+export async function limited(c: Ctx, key: string, limit: Limit): Promise<number | undefined> {
   const outcome = await c.env.RATE_LIMITER.getByName(key).spend(key, limit, 1, c.now());
   return outcome.allowed ? undefined : outcome.retryAfterSeconds;
 }
 
-function rateLimited(retryAfter: number, headers: Record<string, string> = {}): Response {
+export function rateLimited(retryAfter: number, headers: Record<string, string> = {}): Response {
   return apiError(429, "rate_limited", `Too many requests. Try again in ${retryAfter} seconds.`, { retryAfter }, { "retry-after": String(retryAfter), ...headers });
 }
 
-async function readJson(c: Ctx): Promise<Record<string, unknown> | undefined> {
+export async function readJson(c: Ctx): Promise<Record<string, unknown> | undefined> {
   try {
     const value = (await c.request.json()) as unknown;
     return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
@@ -763,7 +774,7 @@ function peopleChecks(people: LevelSignalRow[], config: FreeConfig, now: number,
 }
 
 const signingKeys = new Map<string, Promise<CryptoKey>>();
-function signingKey(config: FreeConfig): Promise<CryptoKey> {
+export function signingKey(config: FreeConfig): Promise<CryptoKey> {
   let key = signingKeys.get(config.tokenSigningKey);
   if (!key) {
     key = hmacKey(config.tokenSigningKey);
@@ -841,7 +852,7 @@ async function authenticate(
     if (!options.keys || !parsed) return options.keys ? invalidKey() : invalid();
     const found = await account(c, parsed.githubId).verifyKey(parsed.id, parsed.secret, c.now(), toolName(c.request.headers));
     if (!found) return invalidKey();
-    const { kind, ...owner } = found;
+    const { kind, paid: _paid, ...owner } = found;
     // A tool key (tool-keys.ts) works only where `toolKeys` allows it, while the setting is on,
     // and needs no grant: who may make one is checked when it is made, and every request still
     // meets the blocks and refusals below it.
@@ -857,6 +868,19 @@ async function authenticate(
     if ((!stored || stored.status === "active") && !(await serverKeysAllowed(c, owner.githubId, stored))) return serverKeysUnavailable();
     return { ...owner, via: "key", keyKind: "server", keyId: parsed.id };
   }
+  if (bearer.startsWith(API_KEY_PREFIX)) {
+    // dl.new's API keys (accounts.ts): tool keys tied to the account, not a GitHub id.
+    const invalidKey = () => apiError(401, "invalid_key", "This API key is invalid or was revoked. Make a new one at dl.new/keys.", {}, { "www-authenticate": 'Bearer error="invalid_token"' });
+    const parsed = parseApiKey(bearer);
+    if (!options.keys || !parsed) return options.keys ? invalidKey() : invalid();
+    if (!options.toolKeys) return apiError(403, "tool_key_not_allowed", TOOL_KEY_NOT_HERE_MESSAGE);
+    const found = await account(c, parsed.account).verifyKey(parsed.id, parsed.secret, c.now(), toolName(c.request.headers));
+    if (!found || found.kind !== "tool") return invalidKey();
+    const { kind: _kind, paid, ...owner } = found;
+    // The tool keys switch is for free accounts; a paying one's keys always work.
+    if (!paid && !applyOverrides(c.config, await directory(c).overrides()).toolKeys) return apiError(403, "tool_keys_off", TOOL_KEYS_OFF_MESSAGE);
+    return { ...owner, via: "key", keyKind: "tool", keyId: parsed.id };
+  }
   const claims = await verifyJwt(bearer, await signingKey(c.config), Math.floor(c.now() / 1000));
   if (!claims || claims.typ !== "access" || claims.iss !== ISSUER || typeof claims.login !== "string") return invalid();
   const githubId = Number(claims.sub);
@@ -866,15 +890,16 @@ async function authenticate(
   return { githubId, login: claims.login, via: "access", ...(sid ? { sid } : {}) };
 }
 
-function account(c: Ctx, githubId: number) {
-  return c.env.ACCOUNT.getByName(`gh:${githubId}`);
+/** An account's Durable Object (accounts.ts accountObjectName: `gh:<n>` as before, `acct:<n>` for dl.new's). */
+export function account(c: Ctx, githubId: number) {
+  return c.env.ACCOUNT.getByName(accountObjectName(githubId));
 }
 
-function directory(c: Ctx) {
+export function directory(c: Ctx) {
   return c.env.DIRECTORY.getByName("directory");
 }
 
-function auth(c: Ctx) {
+export function auth(c: Ctx) {
   return c.env.AUTH.getByName("auth");
 }
 
@@ -884,7 +909,7 @@ function hosts(c: Ctx) {
 }
 
 /** The config with the admin's runtime overrides applied, the kill switch, and non-admin spend. */
-interface Runtime {
+export interface Runtime {
   config: FreeConfig;
   paused: boolean;
   weekUsd: number;
@@ -909,7 +934,7 @@ interface Runtime {
  * Read once per request: an override changed mid-request applies from the next one. The
  * Directory also runs Monday's queue admission here, on the first request of the week.
  */
-function runtime(c: Ctx): Promise<Runtime> {
+export function runtime(c: Ctx): Promise<Runtime> {
   c.runtimeState ??= directory(c)
     .gate(c.now(), policyOf(c.config), c.callerId)
     .then((gate: Gate) => ({
@@ -930,7 +955,7 @@ function runtime(c: Ctx): Promise<Runtime> {
 }
 
 /** Sends alerts by email and/or webhook; never fails the request. */
-async function alert(c: Ctx, alerts: readonly Alert[]): Promise<void> {
+export async function alert(c: Ctx, alerts: readonly Alert[]): Promise<void> {
   await deliver(c, alerts);
 }
 
@@ -1259,7 +1284,7 @@ async function isPaused(c: Ctx): Promise<boolean> {
 }
 
 /** The 403 a blocked account gets on chat, refresh, keys and sign-in polling. */
-function blockedError(headers: Record<string, string> = {}): Response {
+export function blockedError(headers: Record<string, string> = {}): Response {
   return apiError(403, "blocked", BLOCKED_MESSAGE, {}, headers);
 }
 
@@ -1270,7 +1295,7 @@ function pausedError(headers: Record<string, string> = {}): Response {
 // ─── Emails to users (user-email-send.ts) ────────────────────────────────────
 
 /** The provider for emails to users: the USER_EMAIL binding, else Resend, else none. */
-function userEmailVia(c: Pick<Ctx, "env" | "config" | "fetch">): UserEmailTransport | undefined {
+export function userEmailVia(c: Pick<Ctx, "env" | "config" | "fetch">): UserEmailTransport | undefined {
   return userEmailTransport(c.env.USER_EMAIL, c.config, c.fetch);
 }
 
@@ -1344,7 +1369,7 @@ async function weeklyResetFor(env: Env, config: FreeConfig, candidate: { githubI
   if (person.blocked) return "not_active";
   const trial = onTrial(config, githubId, person.admittedAt);
   const limits = allocated(config, limitsFor(config, person.bonusTokens, person.level, person.batchFlagged, trial, person.trialBonusTokens), githubId, person, now);
-  const allowance = await env.ACCOUNT.getByName(`gh:${githubId}`).allowance(now, limits);
+  const allowance = await env.ACCOUNT.getByName(accountObjectName(githubId)).allowance(now, limits);
   return weeklyResetTokens(allowance, trial);
 }
 
@@ -1598,8 +1623,10 @@ async function revoke(c: Ctx): Promise<Response> {
 // ─── Server keys ────────────────────────────────────────────────────────────
 
 const KEY_NAME = /^[\x20-\x7e]{1,64}$/;
+/** API keys (dl_sk_) an account on a dl.new plan may hold: one per tool and machine (cli-login makes one each). */
+export const PAID_KEYS_MAX = 10;
 
-function keyView(key: ServerKeyView) {
+export function keyView(key: ServerKeyView) {
   return {
     id: key.id,
     name: key.name,
@@ -1680,7 +1707,7 @@ async function keys(c: Ctx, rest: string, method: string): Promise<Response> {
  * setting for a tool key, `serverKeysAllowed` for a server key), the per-kind limit, the
  * account's state. `revokeHint`: how to revoke one, for the limit's message.
  */
-async function createKey(c: Ctx, githubId: number, rawName: unknown, kind: KeyKind, revokeHint: string): Promise<Response> {
+export async function createKey(c: Ctx, githubId: number, rawName: unknown, kind: KeyKind, revokeHint: string, format: KeyFormat = "dlk"): Promise<Response> {
   const name = typeof rawName === "string" ? rawName.trim() : "";
   if (!KEY_NAME.test(name)) return apiError(400, "invalid_request", kind === "tool" ? "Send {name}: 1 to 64 printable characters, e.g. the tool's name." : "Send {name}: 1 to 64 printable characters, e.g. the server's hostname.");
   const person = account(c, githubId);
@@ -1688,13 +1715,15 @@ async function createKey(c: Ctx, githubId: number, rawName: unknown, kind: KeyKi
   let max = MAX_SERVER_KEYS;
   if (kind === "tool") {
     const { config } = await runtime(c);
-    if (!config.toolKeys) return apiError(403, "tool_keys_off", TOOL_KEYS_OFF_MESSAGE);
-    if (stored?.status === "active" && !(await toolKeysAllowed(c, githubId, stored))) return apiError(403, "tool_keys_unavailable", TOOL_KEYS_UNAVAILABLE_MESSAGE);
-    max = config.toolKeysMax;
+    // A dl.new plan's keys (dl_sk_) aren't held to the free tier's tool key switch and checks.
+    const paid = format === "dl_sk" && (await person.paidPlan(c.now())) !== null;
+    if (!paid && !config.toolKeys) return apiError(403, "tool_keys_off", TOOL_KEYS_OFF_MESSAGE);
+    if (!paid && stored?.status === "active" && !(await toolKeysAllowed(c, githubId, stored))) return apiError(403, "tool_keys_unavailable", TOOL_KEYS_UNAVAILABLE_MESSAGE);
+    max = paid ? Math.max(config.toolKeysMax, PAID_KEYS_MAX) : config.toolKeysMax;
   } else if (stored?.status === "active" && !(await serverKeysAllowed(c, githubId, stored))) {
     return serverKeysUnavailable();
   }
-  const created = await person.createKey({ name, now: c.now(), kind, max });
+  const created = await person.createKey({ name, now: c.now(), kind, max, format });
   if (created.ok) return json({ ...keyView(created.view), key: created.key }, 201);
   switch (created.code) {
     case "key_limit_reached":
@@ -1755,7 +1784,7 @@ function toGitHub(c: Ctx, begun: { state: string; browser: string }): Response {
   });
 }
 
-function readCookie(request: Request, name: string): string | undefined {
+export function readCookie(request: Request, name: string): string | undefined {
   for (const part of (request.headers.get("cookie") ?? "").split(";")) {
     const index = part.indexOf("=");
     if (index > 0 && part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
@@ -1771,6 +1800,7 @@ function readCookie(request: Request, name: string): string | undefined {
 async function oauthCallback(c: Ctx): Promise<Response> {
   const state = c.url.searchParams.get("state");
   const purpose = state ? await auth(c).oauthPurpose(state, c.now()) : undefined;
+  if (purpose === "account") return githubCallback(c);
   return purpose === "admin" ? adminCallback(c, CALLBACK_PATH) : deviceCallback(c);
 }
 
@@ -1976,14 +2006,14 @@ async function deviceDetails(c: Ctx): Promise<Response> {
   return response;
 }
 
-const GITHUB_USER_AGENT = "directionallylocal-free";
+export const GITHUB_USER_AGENT = "directionallylocal-free";
 
 /** The sign-in OAuth app's credentials, for public GitHub reads at the app's rate limit. */
 function githubApp(config: FreeConfig): GitHubAppCredentials {
   return { clientId: config.githubClientId, clientSecret: config.githubClientSecret };
 }
 /** How long the sign-up activity check waits for GitHub's GraphQL API before letting the person through. */
-const GITHUB_CHECK_TIMEOUT_MS = 5000;
+export const GITHUB_CHECK_TIMEOUT_MS = 5000;
 
 /** Why an account needs an invite code even when admission is open. */
 type InviteReason = "account_too_new" | "no_github_activity";
@@ -2829,6 +2859,9 @@ async function billingWebhook(c: Ctx): Promise<Response> {
 
 /** Applies one event. Every step is idempotent on its own, so a retried delivery is harmless. */
 async function applyBillingEvent(c: Ctx, event: StripeEvent): Promise<string> {
+  // dl.new's plans (paid-web.ts); everything else (dl Pro, top-ups) as before.
+  const plan = await applyPlanEvent(c, event);
+  if (plan !== undefined) return plan;
   const object = event.data.object;
   const eventAt = event.created;
   const customerId = idOf(object.customer);
@@ -4809,6 +4842,8 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
   const { config, paused } = await runtime(c);
   const limits = limitsFor(config);
   const actor = { githubId: identity.githubId, login: identity.login, now };
+  // dl.new's paid plans: unclaimed payments, refunds (paid-web.ts).
+  if (rest.startsWith("paid/")) return paidAdmin(c, rest.slice("paid/".length), method);
 
   if (method === "GET" && rest === "metrics") return adminMetrics(c);
   if (method === "GET" && rest === "no-github") {
@@ -6083,7 +6118,7 @@ async function webTelemetry(c: Ctx): Promise<Response> {
 }
 
 /** The web sign-up page's origin (WEB_SIGNUP_URL's, dl.new). */
-function webOrigin(c: Ctx): string {
+export function webOrigin(c: Ctx): string {
   return new URL(c.config.webSignupUrl).origin;
 }
 
@@ -6129,6 +6164,8 @@ async function webCaller(c: Ctx): Promise<Identity | Response> {
   if (!claims || claims.typ !== "web" || claims.iss !== ISSUER || typeof claims.login !== "string") return invalid();
   const githubId = Number(claims.sub);
   if (!Number.isSafeInteger(githubId) || githubId <= 0) return invalid();
+  // A dl.new session (paid-web.ts) carries its own id: signing out ends it everywhere.
+  if (typeof claims.sid === "string" && !(await account(c, githubId).sessionAllowed(claims.sid, Number(claims.iat)))) return invalid();
   return { githubId, login: claims.login };
 }
 
@@ -6145,7 +6182,7 @@ async function webPerson(c: Ctx): Promise<{ identity: Identity; person: PersonRo
 }
 
 type WebHandler = (c: Ctx) => Promise<Response>;
-type WebRoute = Partial<Record<"GET" | "POST" | "DELETE", WebHandler>>;
+type WebRoute = Partial<Record<"GET" | "POST" | "PUT" | "DELETE", WebHandler>>;
 
 const WEB_ROUTES: Record<string, WebRoute> = {
   "/web/session": { POST: webSession },
@@ -6168,7 +6205,9 @@ function webRoute(path: string): WebRoute | undefined {
 /** /web/*: the sign-in redirect, and the JSON endpoints the web pages call (CORS for their origins only). */
 async function web(c: Ctx, path: string, method: string): Promise<Response> {
   if (path === "/web/signin") return method === "GET" ? webSignIn(c) : apiError(405, "method_not_allowed", "GET /web/signin.");
-  const route = webRoute(path);
+  // dl.new's own GitHub sign-in (paid-web.ts): a navigation, not a fetch.
+  if (path === "/web/auth/github") return method === "GET" ? githubStart(c) : apiError(405, "method_not_allowed", "GET /web/auth/github.");
+  const route = webRoute(path) ?? paidWebRoute(path);
   if (!route) return apiError(404, "not_found", `${method} ${c.url.pathname} isn't a route.`);
   const origin = c.request.headers.get("origin");
   const origins = webOrigins(c);

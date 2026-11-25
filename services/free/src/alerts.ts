@@ -133,20 +133,23 @@ export function spendMilestoneAlert(input: {
  * A payment just came in: who, what and how much (before tax), plus the running totals so the
  * owner sees the trend without opening Stripe. Sent once per payment id.
  */
-export function paymentAlert(input: { login: string | undefined; kind: "pro" | "topup"; renewal: boolean; amountCents: number; payments: number; payers: number; totalCents: number }): Alert {
+export function paymentAlert(input: { login: string | undefined; kind: "pro" | "topup"; renewal: boolean; amountCents: number; payments: number; payers: number; totalCents: number; product?: string }): Alert {
   const who = input.login ? `@${input.login}` : "someone";
-  const what = input.kind === "topup" ? "a top-up" : input.renewal ? "a Pro renewal" : "Pro";
+  // `product`: a dl.new plan's name ("dl.new Starter"); dl Pro otherwise.
+  const name = input.product ?? "Pro";
+  const what = input.kind === "topup" ? "a top-up" : input.renewal ? `a ${name} renewal` : name;
   const amount = dollars(input.amountCents / 100);
+  const github = input.login && !input.login.startsWith("acct_");
   const lines = [
     `dl free tier: ${who} paid ${amount} for ${what}.`,
     "",
-    ...(input.login ? [`Login: @${input.login} (https://github.com/${input.login})`] : []),
-    `Product: ${input.kind === "topup" ? "top-up" : input.renewal ? "Pro (renewal)" : "Pro (new)"}`,
+    ...(github ? [`Login: @${input.login} (https://github.com/${input.login})`] : input.login ? [`Account: ${input.login}`] : []),
+    `Product: ${input.kind === "topup" ? "top-up" : input.renewal ? `${name} (renewal)` : `${name} (new)`}`,
     `Amount: ${amount} before tax`,
     `All time: ${input.payments} ${input.payments === 1 ? "payment" : "payments"} from ${input.payers} ${input.payers === 1 ? "person" : "people"}, ${dollars(input.totalCents / 100)} before tax`,
   ];
   return {
-    subject: `dl: ${who} paid ${amount} (${input.kind === "topup" ? "top-up" : input.renewal ? "Pro renewal" : "Pro"})`,
+    subject: `dl: ${who} paid ${amount} (${input.kind === "topup" ? "top-up" : input.renewal ? `${name} renewal` : name})`,
     text: lines.join("\n"),
     footer: "Sent for every payment.",
   };

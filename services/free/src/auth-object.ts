@@ -2,6 +2,27 @@ import { DurableObject, type DurableObjectState } from "cloudflare:workers";
 import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.js";
 import { newUserCode } from "./codes.js";
 import { parseCampaign, type Campaign } from "./web-signup.js";
+import {
+  beginAccountOAuth,
+  claimAccountHandoff,
+  claimAccountOAuth,
+  cliLogin,
+  decideCliLogin,
+  dropEmailCode,
+  isAccountOAuthState,
+  issueAccountHandoff,
+  issueEmailCode,
+  PAID_AUTH_SCHEMA,
+  pendingPaidAuth,
+  pollCliLogin,
+  prunePaidAuth,
+  startCliLogin,
+  verifyEmailCode,
+  type CliLoginView,
+  type CliPoll,
+  type EmailCodeCheck,
+  type EmailCodeIssue,
+} from "./paid-auth.js";
 
 /**
  * Sign-in state: device codes, the OAuth `state` values that bind a GitHub round trip to one
@@ -40,8 +61,8 @@ const POLL_TOLERANCE_MS = 250;
 /** Earlier admin rows carried this in `device_hash`; the purpose column replaced it. */
 const LEGACY_ADMIN_MARKER = "admin-dashboard";
 
-/** What a GitHub round trip is for: finishing a device code, or an admin dashboard sign-in. */
-export type OAuthPurpose = "device" | "admin";
+/** What a GitHub round trip is for: finishing a device code, an admin dashboard sign-in, or a dl.new account sign-in (paid-auth.ts). */
+export type OAuthPurpose = "device" | "admin" | "account";
 
 export type DeviceStatus = "pending" | "needs_invite" | "needs_details" | "approved" | "denied" | "not_invited" | "consumed";
 
@@ -146,7 +167,7 @@ export class AuthObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
+      for (const statement of [...SCHEMA, ...PAID_AUTH_SCHEMA]) this.ctx.storage.sql.exec(statement);
       this.#migrateOAuthPurpose();
       this.#migrateReferralCode();
       this.#migrateDetails();
@@ -259,6 +280,7 @@ export class AuthObject extends DurableObject {
    * expired. Only routes the callback: the claim that follows checks everything again.
    */
   async oauthPurpose(state: string, now: number): Promise<OAuthPurpose | undefined> {
+    if (await isAccountOAuthState(this.ctx.storage.sql, state, now)) return "account";
     const row = this.ctx.storage.sql
       .exec<{ purpose: string; expires_at: number }>("SELECT purpose, expires_at FROM oauth_states WHERE state_hash = ?", await sha256Hex(state))
       .toArray()[0];
@@ -511,6 +533,58 @@ export class AuthObject extends DurableObject {
   }
 
   /** A new sign-in session (refresh-token family) for someone already admitted: an install code's exchange. */
+  // ─── dl.new accounts (paid-auth.ts) ─────────────────────────────────────────
+
+  async issueEmailCode(input: { emailNorm: string; purpose: string; now: number }): Promise<EmailCodeIssue> {
+    const issued = await issueEmailCode(this.ctx.storage.sql, input);
+    if (issued.ok) await this.#scheduleCleanup(input.now);
+    return issued;
+  }
+
+  async dropEmailCode(emailNorm: string, purpose: string): Promise<void> {
+    dropEmailCode(this.ctx.storage.sql, emailNorm, purpose);
+  }
+
+  async verifyEmailCode(input: { emailNorm: string; purpose: string; code: string; now: number }): Promise<EmailCodeCheck> {
+    return verifyEmailCode(this.ctx.storage.sql, input);
+  }
+
+  async beginAccountOAuth(input: { returnUrl: string; pageState: string; now: number }): Promise<{ state: string; browser: string }> {
+    const begun = await beginAccountOAuth(this.ctx.storage.sql, input);
+    await this.#scheduleCleanup(input.now);
+    return begun;
+  }
+
+  async claimAccountOAuth(input: { state: string; browser: string; now: number }): Promise<{ returnUrl: string; pageStateHash: string } | undefined> {
+    return claimAccountOAuth(this.ctx.storage.sql, input);
+  }
+
+  async issueAccountHandoff(input: { pageStateHash: string; githubId: number; login: string; email: string; now: number }): Promise<string> {
+    return issueAccountHandoff(this.ctx.storage.sql, input);
+  }
+
+  async claimAccountHandoff(input: { code: string; state: string; now: number }): Promise<{ githubId: number; login: string; email: string } | undefined> {
+    return claimAccountHandoff(this.ctx.storage.sql, input);
+  }
+
+  async startCliLogin(input: { tool: string; deviceName: string | null; now: number }): Promise<{ loginId: string; userCode: string; expiresAt: number }> {
+    const started = await startCliLogin(this.ctx.storage.sql, input);
+    await this.#scheduleCleanup(input.now);
+    return started;
+  }
+
+  async cliLogin(userCode: string, now: number): Promise<CliLoginView | undefined> {
+    return cliLogin(this.ctx.storage.sql, userCode, now);
+  }
+
+  async decideCliLogin(input: { userCode: string; account: number; approve: boolean; now: number }): Promise<ReturnType<typeof decideCliLogin>> {
+    return decideCliLogin(this.ctx.storage.sql, input);
+  }
+
+  async pollCliLogin(input: { loginId: string; now: number }): Promise<CliPoll> {
+    return pollCliLogin(this.ctx.storage.sql, input);
+  }
+
   async issueSession(identity: Identity, now: number): Promise<{ refreshToken: string; family: string }> {
     const family = crypto.randomUUID();
     return { refreshToken: await this.#issueRefresh(identity, family, now), family };
@@ -523,9 +597,10 @@ export class AuthObject extends DurableObject {
     this.ctx.storage.sql.exec("DELETE FROM device_codes WHERE expires_at <= ?", now - DEVICE_CODE_TTL_MS);
     this.ctx.storage.sql.exec("DELETE FROM oauth_states WHERE expires_at <= ?", now);
     this.ctx.storage.sql.exec("DELETE FROM refresh_tokens WHERE expires_at <= ? OR (used_at IS NOT NULL AND used_at <= ?)", now, now - REFRESH_TTL_MS);
-    const pending = this.ctx.storage.sql
-      .exec<{ n: number }>("SELECT (SELECT COUNT(*) FROM device_codes) + (SELECT COUNT(*) FROM web_handoffs) + (SELECT COUNT(*) FROM install_codes) AS n")
-      .toArray()[0]?.n ?? 0;
+    prunePaidAuth(this.ctx.storage.sql, now);
+    const pending =
+      (this.ctx.storage.sql.exec<{ n: number }>("SELECT (SELECT COUNT(*) FROM device_codes) + (SELECT COUNT(*) FROM web_handoffs) + (SELECT COUNT(*) FROM install_codes) AS n").toArray()[0]?.n ?? 0) +
+      pendingPaidAuth(this.ctx.storage.sql);
     if (pending > 0) await this.ctx.storage.setAlarm(now + 3_600_000);
   }
 

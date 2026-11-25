@@ -28,6 +28,8 @@ export class StripeError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** Stripe's error code (`card_declined`, `resource_missing`…), when it gave one. */
+    readonly code?: string,
   ) {
     super(message);
   }
@@ -260,4 +262,97 @@ export function proState(status: unknown): "active" | "past_due" | "canceled" {
   if (status === "active" || status === "trialing") return "active";
   if (status === "canceled" || status === "incomplete_expired") return "canceled";
   return "past_due";
+}
+
+// ─── dl.new's plans (plan-prices.ts, docs/web-api-paid.md) ────────────────────────
+
+/** Any Stripe call: GET reads (query string), POST writes (form body), DELETE cancels. */
+export async function stripeRequest(
+  fetcher: Fetch,
+  secretKey: string,
+  method: "GET" | "POST" | "DELETE",
+  path: string,
+  body: Record<string, unknown> = {},
+  idempotencyKey?: string,
+): Promise<Record<string, any>> {
+  const encoded = formEncode(body);
+  const url = method === "POST" || !encoded ? `${STRIPE_API}${path}` : `${STRIPE_API}${path}?${encoded}`;
+  const response = await fetcher(url, {
+    method,
+    headers: {
+      authorization: `Bearer ${secretKey}`,
+      ...(method === "POST" ? { "content-type": "application/x-www-form-urlencoded" } : {}),
+      ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
+    },
+    ...(method === "POST" ? { body: encoded } : {}),
+  });
+  const parsed = (await response.json().catch(() => ({}))) as Record<string, any> & { error?: { message?: string; code?: string; decline_code?: string } };
+  if (!response.ok) throw new StripeError(parsed.error?.message ?? `Stripe answered ${response.status}.`, response.status, parsed.error?.code);
+  return parsed;
+}
+
+/**
+ * Checkout for a plan, before any account exists: subscription mode, the plan's Price, no promotion
+ * codes, Stripe Tax as dl Pro has it, and the plan in the session's and the subscription's metadata
+ * (`product: "plan"`), so the webhooks know it. The account is linked when the session is claimed.
+ */
+export function planCheckoutParams(input: { plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string }): Record<string, unknown> {
+  const metadata = { product: "plan", plan: input.plan, ...(input.campaign ? { campaign: input.campaign } : {}) };
+  return {
+    mode: "subscription",
+    line_items: [{ price: input.price, quantity: 1 }],
+    success_url: input.successUrl,
+    cancel_url: input.cancelUrl,
+    allow_promotion_codes: false,
+    automatic_tax: { enabled: true },
+    billing_address_collection: "auto",
+    metadata,
+    subscription_data: { metadata },
+  };
+}
+
+export async function createPlanCheckout(fetcher: Fetch, input: { secretKey: string; plan: string; price: string; successUrl: string; cancelUrl: string; campaign?: string; idempotencyKey: string }): Promise<{ id: string; url: string }> {
+  const session = await stripeRequest(fetcher, input.secretKey, "POST", "/v1/checkout/sessions", planCheckoutParams(input), input.idempotencyKey);
+  if (typeof session.url !== "string" || typeof session.id !== "string") throw new StripeError("Stripe didn't return a Checkout URL.", 502);
+  return { id: session.id, url: session.url };
+}
+
+/** A Checkout Session id as Stripe makes them (the page passes it back from the success URL). */
+export const CHECKOUT_SESSION_ID = /^cs_(test|live)_[A-Za-z0-9]{10,200}$/;
+
+/** The price id of a subscription's (first) item. */
+export function subscriptionPrice(subscription: Record<string, any>): string | undefined {
+  return idOf(subscription.items?.data?.[0]?.price);
+}
+
+/** The price ids on an invoice's lines, across API versions. */
+export function invoicePrices(invoice: Record<string, any>): string[] {
+  const lines = (invoice.lines?.data ?? []) as Array<Record<string, any>>;
+  return lines.map((line) => idOf(line.price) ?? idOf(line.pricing?.price_details?.price)).filter((id): id is string => typeof id === "string");
+}
+
+/**
+ * A dl.new plan subscription's state: active and past due keep the plan (Stripe retries a failed
+ * renewal per its dunning settings), unpaid and canceled end it, incomplete hasn't started.
+ */
+export function planState(status: unknown): "active" | "past_due" | "canceled" {
+  if (status === "active" || status === "trialing") return "active";
+  if (status === "past_due") return "past_due";
+  return "canceled";
+}
+
+/** The payment behind an invoice, for a refund: its PaymentIntent or charge, across API versions. */
+export async function invoicePayment(fetcher: Fetch, secretKey: string, invoiceId: string): Promise<{ payment_intent: string } | { charge: string } | undefined> {
+  const invoice = await stripeRequest(fetcher, secretKey, "GET", `/v1/invoices/${encodeURIComponent(invoiceId)}`);
+  const intent = idOf(invoice.payment_intent);
+  if (intent) return { payment_intent: intent };
+  const charge = idOf(invoice.charge);
+  if (charge) return { charge };
+  // Newer API versions list an invoice's payments separately.
+  const payments = await stripeRequest(fetcher, secretKey, "GET", "/v1/invoice_payments", { invoice: invoiceId });
+  const paid = ((payments.data ?? []) as Array<Record<string, any>>).find((entry) => entry.status === "paid") ?? payments.data?.[0];
+  const viaPayment = idOf(paid?.payment?.payment_intent);
+  if (viaPayment) return { payment_intent: viaPayment };
+  const viaCharge = idOf(paid?.payment?.charge);
+  return viaCharge ? { charge: viaCharge } : undefined;
 }

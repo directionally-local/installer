@@ -1,0 +1,333 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { ADMIN_ID, completion, createService, errorCode, luminalUsage, MODEL, type Service } from "./harness.js";
+import { buy, DL, emailSignIn, FakeStripe, lastCode, PAID_VARS, PRICES, webhook, type SessionResponse } from "./paid-fixtures.js";
+import { parseAccountId } from "../src/accounts.js";
+
+/**
+ * dl.new's paid launch after the account step (docs/web-api-paid.md): dl_sk_ keys, the plan
+ * webhooks, upgrades, refunds, the contact email, settings, cli-login and the usage read-outs.
+ */
+
+async function world(vars: Record<string, string> = {}) {
+  const service = await createService({ ...PAID_VARS, ...vars }, { userEmail: true, email: true });
+  const stripe = new FakeStripe(service);
+  return { service, stripe };
+}
+
+async function paidAccount(service: Service, stripe: FakeStripe, plan: "starter" | "plus" | "max" = "starter", email = "pat@example.com") {
+  const session = await buy(service, stripe, plan, email);
+  const signedIn = await emailSignIn(service, email, session.id);
+  return { session, signedIn, account: parseAccountId(signedIn.account.accountId)!, token: signedIn.token };
+}
+
+async function adminToken(service: Service): Promise<string> {
+  return (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+}
+
+function accountObject(service: Service, account: number): any {
+  return (service.namespaces.ACCOUNT as any).getByName(`acct:${account}`);
+}
+
+describe("dl_sk_ keys", () => {
+  it("makes a key shown once, lists it by its hint, serves chat with it and revokes it", async () => {
+    const { service, stripe } = await world({ TOOL_KEYS: "false" });
+    const { token } = await paidAccount(service, stripe);
+    const made = await service.request("POST", "/web/api-keys", { token, body: {}, headers: DL });
+    assert.equal(made.status, 201, await made.clone().text());
+    const key = (await made.json()) as { id: string; key: string; name: string; hint: string; format: string };
+    assert.match(key.key, /^dl_sk_[0-9a-z]+_[a-z0-9]{12}_[A-Za-z0-9_-]{43}$/);
+    assert.equal(key.name, "key 1");
+    assert.equal(key.hint, `dl_sk_…${key.key.slice(-4)}`);
+    const listed = (await (await service.request("GET", "/web/api-keys", { token })).json()) as { keys: Array<Record<string, unknown>>; max: number };
+    assert.equal(listed.max, 10);
+    assert.equal(listed.keys.length, 1);
+    assert.equal(listed.keys[0]!.key, undefined);
+    assert.equal(listed.keys[0]!.hint, key.hint);
+    // Paid keys work with the free tier's tool keys switch off.
+    const chat = await service.request("POST", "/v1/chat/completions", { token: key.key, headers: { "user-agent": "opencode/1.2" }, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } });
+    assert.equal(chat.status, 200, await chat.clone().text());
+    const anthropic = await service.request("POST", "/anthropic/v1/messages", { headers: { "x-api-key": key.key, "user-agent": "claude-cli/2.1 (external, cli)", "anthropic-version": "2023-06-01" }, body: { model: "claude-sonnet-4-5", max_tokens: 100, messages: [{ role: "user", content: "hi" }] } });
+    assert.equal(anthropic.status, 200, await anthropic.clone().text());
+    const after = (await (await service.request("GET", "/web/api-keys", { token })).json()) as { keys: Array<Record<string, unknown>> };
+    assert.ok(after.keys[0]!.lastUsedAt);
+    assert.ok(after.keys[0]!.lastTool);
+    // Not on the events endpoint (tool keys never are).
+    assert.equal((await service.request("POST", "/v1/events", { token: key.key, body: { events: [] } })).status, 403);
+    assert.equal((await service.request("DELETE", `/web/api-keys/${key.id}`, { token })).status, 200);
+    const revoked = await service.request("POST", "/v1/chat/completions", { token: key.key, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } });
+    assert.equal(revoked.status, 401);
+    assert.equal(await errorCode(revoked), "invalid_key");
+    assert.equal(await errorCode(await service.request("DELETE", `/web/api-keys/${key.id}`, { token })), "key_not_found");
+  });
+
+  it("refuses a malformed or unknown dl_sk_ key", async () => {
+    const { service } = await world();
+    assert.equal(await errorCode(await service.request("GET", "/v1/models", { token: "dl_sk_zz_abcdef012345_" + "a".repeat(43) })), "invalid_key");
+    assert.equal(await errorCode(await service.request("GET", "/v1/models", { token: "dl_sk_nope" })), "invalid_key");
+  });
+});
+
+describe("plan webhooks", () => {
+  it("keeps an unclaimed payment, emails the claim link once, lists it for the admin, then links it on claim", async () => {
+    const { service, stripe } = await world();
+    const session = await buy(service, stripe, "plus", "late@example.com");
+    const object = stripe.sessionObject(session, false);
+    const first = await webhook(service, "checkout.session.completed", object, "evt_cs_1");
+    assert.equal(first.body.outcome, "plan_unclaimed");
+    const claimEmails = service.calls.userEmail.filter((message) => message.subject === "Finish setting up dl.new");
+    assert.equal(claimEmails.length, 1);
+    assert.equal(claimEmails[0]!.to, "late@example.com");
+    assert.match(String(claimEmails[0]!.text), new RegExp(`https://dl\\.new/account\\?session_id=${session.id}`));
+    assert.match(String(claimEmails[0]!.text), /Kimi K3\.1 ~1\.5M\/week \(95\.5% caching applied\)/);
+    // A retried delivery under another event id doesn't email again.
+    await webhook(service, "checkout.session.completed", object, "evt_cs_2");
+    assert.equal(service.calls.userEmail.filter((message) => message.subject === "Finish setting up dl.new").length, 1);
+    // Plan events before the claim are acknowledged and left for the claim.
+    assert.equal((await webhook(service, "customer.subscription.updated", stripe.subscriptionObject(stripe.subscriptions.get(session.subscription!)!))).body.outcome, "plan_unclaimed");
+    const admin = await adminToken(service);
+    const unclaimed = (await (await service.request("GET", "/admin/paid/checkouts", { token: admin })).json()) as { checkouts: Array<Record<string, unknown>> };
+    assert.equal(unclaimed.checkouts.length, 1);
+    assert.equal(unclaimed.checkouts[0]!.sessionId, session.id);
+    assert.equal(unclaimed.checkouts[0]!.claimedBy, null);
+    assert.ok(unclaimed.checkouts[0]!.claimEmailSentAt);
+    const signedIn = await emailSignIn(service, "late@example.com", session.id);
+    assert.equal(signedIn.account.plan.id, "plus");
+    assert.equal(((await (await service.request("GET", "/admin/paid/checkouts", { token: admin })).json()) as any).checkouts.length, 0);
+    const claimed = (await (await service.request("GET", "/admin/paid/checkouts?status=claimed", { token: admin })).json()) as any;
+    assert.equal(claimed.checkouts[0].claimedBy, signedIn.account.accountId);
+    // Non-admins can't list them.
+    assert.equal((await service.request("GET", "/admin/paid/checkouts", { token: (await service.signIn({ id: 77, login: "someone" })).access_token })).status, 403);
+  });
+
+  it("follows the subscription: plan changes, a failed renewal keeps the plan, cancellation ends it", async () => {
+    const { service, stripe } = await world();
+    const { session, account, token } = await paidAccount(service, stripe);
+    const subscription = stripe.subscriptions.get(session.subscription!)!;
+    const person = accountObject(service, account);
+    service.clock.now += 60_000;
+    subscription.price = PRICES.max;
+    assert.equal((await webhook(service, "customer.subscription.updated", stripe.subscriptionObject(subscription))).body.outcome, "plan_active");
+    assert.equal(await person.paidPlan(service.clock.now), "max");
+    service.clock.now += 60_000;
+    const invoice = { id: "in_renew", customer: session.customer, billing_reason: "subscription_cycle", total_excluding_tax: 6000, parent: { subscription_details: { subscription: subscription.id, metadata: subscription.metadata } }, lines: { data: [{ price: { id: PRICES.max }, period: { end: subscription.current_period_end + 30 * 86_400 } }] } };
+    assert.equal((await webhook(service, "invoice.payment_failed", invoice)).body.outcome, "plan_past_due");
+    assert.equal(await person.paidPlan(service.clock.now), "max", "a failed renewal keeps the plan while Stripe retries");
+    const view = (await (await service.request("GET", "/web/account", { token })).json()) as any;
+    assert.equal(view.plan.status, "past_due");
+    assert.equal(view.plan.paymentFailed, true);
+    service.clock.now += 60_000;
+    assert.equal((await webhook(service, "invoice.paid", invoice)).body.outcome, "plan_active");
+    assert.equal((await person.billing()).paymentFailed, false);
+    service.clock.now += 60_000;
+    subscription.status = "unpaid";
+    assert.equal((await webhook(service, "customer.subscription.updated", stripe.subscriptionObject(subscription))).body.outcome, "plan_canceled");
+    assert.equal(await person.paidPlan(service.clock.now), null);
+    service.clock.now += 60_000;
+    subscription.status = "active";
+    await webhook(service, "customer.subscription.updated", stripe.subscriptionObject(subscription));
+    assert.equal(await person.paidPlan(service.clock.now), "max");
+    service.clock.now += 60_000;
+    assert.equal((await webhook(service, "customer.subscription.deleted", { ...stripe.subscriptionObject(subscription), status: "canceled" })).body.outcome, "plan_canceled");
+    assert.equal(await person.paidPlan(service.clock.now), null);
+    assert.equal(((await (await service.request("GET", "/web/account", { token })).json()) as any).plan.status, "canceled");
+  });
+
+  it("leaves dl Pro's events to the old handling", async () => {
+    const { service } = await world();
+    await service.signIn({ id: 300, login: "pro" });
+    const outcome = await webhook(service, "checkout.session.completed", { id: "cs_pro", mode: "subscription", client_reference_id: "300", customer: "cus_pro", subscription: "sub_pro", payment_status: "paid", metadata: { github_id: "300", product: "pro" } });
+    assert.equal(outcome.body.outcome, "pro_active");
+  });
+});
+
+describe("billing", () => {
+  it("upgrades with proration now, and refuses a downgrade or a declined card", async () => {
+    const { service, stripe } = await world();
+    const { session, account, token } = await paidAccount(service, stripe);
+    const response = await service.request("POST", "/web/billing/upgrade", { token, body: { plan: "plus" }, headers: DL });
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.deepEqual(await response.json(), { plan: "plus", status: "upgraded", amountDueUsd: 13 });
+    const call = [...service.calls.stripe].reverse().find((entry) => entry.method === "POST" && entry.path === `/v1/subscriptions/${session.subscription}`)!;
+    assert.equal(call.form.get("items[0][price]"), PRICES.plus);
+    assert.equal(call.form.get("items[0][id]"), stripe.subscriptions.get(session.subscription!)!.item);
+    assert.equal(call.form.get("proration_behavior"), "always_invoice");
+    assert.equal(call.form.get("payment_behavior"), "error_if_incomplete");
+    assert.equal(await accountObject(service, account).paidPlan(service.clock.now), "plus");
+    assert.equal(await errorCode(await service.request("POST", "/web/billing/upgrade", { token, body: { plan: "starter" } })), "not_an_upgrade");
+    stripe.declineNext = true;
+    const declined = await service.request("POST", "/web/billing/upgrade", { token, body: { plan: "max" } });
+    assert.equal(declined.status, 402);
+    assert.equal(await errorCode(declined), "payment_failed");
+    assert.equal(await accountObject(service, account).paidPlan(service.clock.now), "plus");
+  });
+
+  it("opens the portal back to dl.new/billing", async () => {
+    const { service, stripe } = await world();
+    const { session, token } = await paidAccount(service, stripe);
+    const response = await service.request("POST", "/web/billing/portal", { token, headers: DL });
+    assert.equal(response.status, 200);
+    const call = [...service.calls.stripe].reverse().find((entry) => entry.path === "/v1/billing_portal/sessions")!;
+    assert.equal(call.form.get("customer"), session.customer);
+    assert.equal(call.form.get("return_url"), "https://dl.new/billing");
+  });
+
+  it("records a refund request, and the admin refunds the first payment and cancels within 7 days", async () => {
+    const { service, stripe } = await world({ ALERT_EMAIL_TO: "owner@example.com" });
+    const { session, account, token, signedIn } = await paidAccount(service, stripe);
+    const request = await service.request("POST", "/web/billing/refund-request", { token, body: { reason: "not for me" } });
+    assert.equal(request.status, 200);
+    assert.equal(((await request.json()) as any).eligible, true);
+    assert.ok(service.calls.emails.some((message) => message.raw.includes("refund request")));
+    const admin = await adminToken(service);
+    const listed = (await (await service.request("GET", "/admin/paid/refund-requests", { token: admin })).json()) as any;
+    assert.equal(listed.requests[0].reason, "not for me");
+    const refund = await service.request("POST", "/admin/paid/refund", { token: admin, body: { accountId: signedIn.account.accountId } });
+    assert.equal(refund.status, 200, await refund.clone().text());
+    assert.deepEqual(await refund.json(), { refunded: true, amountCents: 700, refundId: "re_1", subscriptionCanceled: true });
+    assert.equal(stripe.refunds[0]!.get("payment_intent"), `pi_for_${stripe.subscriptions.get(session.subscription!)!.latest_invoice}`);
+    assert.equal(stripe.subscriptions.get(session.subscription!)!.status, "canceled");
+    assert.equal(await accountObject(service, account).paidPlan(service.clock.now), null);
+    assert.equal(await errorCode(await service.request("POST", "/admin/paid/refund", { token: admin, body: { accountId: signedIn.account.accountId } })), "already_refunded");
+    assert.equal(((await (await service.request("GET", "/admin/paid/refund-requests", { token: admin })).json()) as any).requests[0].refundedAt !== null, true);
+  });
+
+  it("refuses a refund after 7 days unless forced", async () => {
+    const { service, stripe } = await world();
+    const { signedIn } = await paidAccount(service, stripe);
+    service.clock.now += 8 * 86_400_000;
+    const admin = await adminToken(service);
+    assert.equal(await errorCode(await service.request("POST", "/admin/paid/refund", { token: admin, body: { accountId: signedIn.account.accountId } })), "refund_window_passed");
+    assert.equal((await service.request("POST", "/admin/paid/refund", { token: admin, body: { accountId: signedIn.account.accountId, force: true } })).status, 200);
+  });
+
+  it("changes the contact email with a code to the new address, and Stripe's customer email with it", async () => {
+    const { service, stripe } = await world();
+    const { session, token } = await paidAccount(service, stripe, "starter", "old@example.com");
+    const start = await service.request("POST", "/web/account/email", { token, body: { email: "new@example.com" } });
+    assert.equal(start.status, 200, await start.clone().text());
+    const code = lastCode(service, "new@example.com");
+    // A sign-in code can't be used for it, nor the other way round.
+    assert.equal(await errorCode(await service.request("POST", "/web/auth/email/verify", { body: { email: "new@example.com", code } })), "code_expired");
+    const verify = await service.request("POST", "/web/account/email/verify", { token, body: { email: "new@example.com", code } });
+    assert.equal(verify.status, 200, await verify.clone().text());
+    assert.deepEqual(await verify.json(), { email: "new@example.com", stripeUpdated: true });
+    assert.equal(stripe.customers.get(session.customer!)!.email, "new@example.com");
+    const view = (await (await service.request("GET", "/web/account", { token })).json()) as any;
+    assert.equal(view.email, "new@example.com");
+    assert.deepEqual(view.identities, [{ kind: "email", email: "new@example.com" }]);
+    // The email sign-in moved with it.
+    assert.equal(await errorCode(await service.request("POST", "/web/auth/email/start", { body: { email: "old@example.com" } })), "no_account");
+    service.clock.now += 31_000;
+    assert.equal((await emailSignIn(service, "new@example.com")).account.accountId, view.accountId);
+    // Another account's address is refused.
+    const other = await paidAccount(service, stripe, "starter", "other@example.com");
+    assert.equal(await errorCode(await service.request("POST", "/web/account/email", { token: other.token, body: { email: "new@example.com" } })), "email_in_use");
+  });
+
+  it("stores the fallback setting", async () => {
+    const { service, stripe } = await world();
+    const { token, account } = await paidAccount(service, stripe);
+    assert.deepEqual(await (await service.request("GET", "/web/settings", { token })).json(), { fallback: true });
+    const put = await service.request("PUT", "/web/settings", { token, body: { fallback: false }, headers: DL });
+    assert.deepEqual(await put.json(), { fallback: false });
+    assert.match(put.headers.get("access-control-allow-methods")!, /PUT/);
+    assert.deepEqual({ ...(await accountObject(service, account).settings()) }, { fallback: false });
+    assert.equal(await errorCode(await service.request("PUT", "/web/settings", { token, body: { fallback: "no" } })), "invalid_request");
+  });
+});
+
+describe("cli-login", () => {
+  it("lets the signed-in browser approve dl claude, which gets a dl_sk_ key once", async () => {
+    const { service, stripe } = await world();
+    const { token } = await paidAccount(service, stripe);
+    const start = await service.request("POST", "/v1/cli-login/start", { body: { tool: "claude-code", deviceName: "box" } });
+    assert.equal(start.status, 200);
+    const started = (await start.json()) as { loginId: string; userCode: string; verificationUri: string; interval: number };
+    assert.equal(started.verificationUri, `https://dl.new/cli-login?code=${started.userCode}`);
+    assert.equal(started.interval, 2);
+    assert.equal(await errorCode(await service.request("POST", "/v1/cli-login/poll", { body: { loginId: started.loginId } })), "authorization_pending");
+    assert.equal(await errorCode(await service.request("POST", "/v1/cli-login/poll", { body: { loginId: started.loginId } })), "slow_down");
+    const view = (await (await service.request("GET", `/web/cli-login/${started.userCode}`, { token, headers: DL })).json()) as any;
+    assert.equal(view.deviceName, "box");
+    assert.equal(view.status, "pending");
+    assert.equal((await service.request("POST", `/web/cli-login/${started.userCode}/approve`, { token, headers: DL })).status, 200);
+    assert.equal(await errorCode(await service.request("POST", `/web/cli-login/${started.userCode}/deny`, { token })), "cli_login_decided");
+    service.clock.now += 2000;
+    const poll = await service.request("POST", "/v1/cli-login/poll", { body: { loginId: started.loginId } });
+    assert.equal(poll.status, 200, await poll.clone().text());
+    const got = (await poll.json()) as any;
+    assert.match(got.key, /^dl_sk_/);
+    assert.equal(got.plan, "starter");
+    assert.equal(got.baseUrl, "https://api.dl.new");
+    assert.equal(got.anthropicBaseUrl, "https://api.dl.new/anthropic");
+    assert.equal(await errorCode(await service.request("POST", "/v1/cli-login/poll", { body: { loginId: started.loginId } })), "expired_token");
+    const keys = (await (await service.request("GET", "/web/api-keys", { token })).json()) as any;
+    assert.deepEqual(keys.keys.map((key: any) => key.name), ["dl claude on box"]);
+    // A second machine with the same name gets its own key.
+    const second = (await (await service.request("POST", "/v1/cli-login/start", { body: { deviceName: "box" } })).json()) as any;
+    await service.request("POST", `/web/cli-login/${second.userCode}/approve`, { token });
+    assert.equal((await service.request("POST", "/v1/cli-login/poll", { body: { loginId: second.loginId } })).status, 200);
+    assert.deepEqual(((await (await service.request("GET", "/web/api-keys", { token })).json()) as any).keys.map((key: any) => key.name).sort(), ["dl claude on box", "dl claude on box (2)"]);
+  });
+
+  it("tells the CLI about a denial, an expiry, and an account with no plan", async () => {
+    const { service, stripe } = await world();
+    const { token, session } = await paidAccount(service, stripe);
+    const denied = (await (await service.request("POST", "/v1/cli-login/start", { body: {} })).json()) as any;
+    await service.request("POST", `/web/cli-login/${denied.userCode}/deny`, { token });
+    assert.equal(await errorCode(await service.request("POST", "/v1/cli-login/poll", { body: { loginId: denied.loginId } })), "access_denied");
+    const late = (await (await service.request("POST", "/v1/cli-login/start", { body: {} })).json()) as any;
+    service.clock.now += 11 * 60_000;
+    assert.equal(await errorCode(await service.request("POST", `/web/cli-login/${late.userCode}/approve`, { token })), "cli_login_not_found");
+    assert.equal(await errorCode(await service.request("POST", "/v1/cli-login/poll", { body: { loginId: late.loginId } })), "expired_token");
+    await webhook(service, "customer.subscription.deleted", { ...stripe.subscriptionObject(stripe.subscriptions.get(session.subscription!)!), status: "canceled" });
+    const noPlan = (await (await service.request("POST", "/v1/cli-login/start", { body: {} })).json()) as any;
+    const refused = await service.request("POST", `/web/cli-login/${noPlan.userCode}/approve`, { token });
+    assert.equal(refused.status, 403);
+    assert.equal(await errorCode(refused), "no_plan");
+  });
+});
+
+describe("usage", () => {
+  it("adds up the week per model, day and tool, and feeds the live box", async () => {
+    const { service, stripe } = await world();
+    const { token } = await paidAccount(service, stripe);
+    const key = ((await (await service.request("POST", "/web/api-keys", { token, body: { name: "cc" } })).json()) as any).key as string;
+    const before = (await (await service.request("GET", "/web/usage/live", { token })).json()) as any;
+    assert.equal(before.connected, false);
+    assert.deepEqual(before.requests, []);
+    service.setLuminal(() => completion(luminalUsage(1000, 50, 0)));
+    const ask = () => service.request("POST", "/v1/chat/completions", { token: key, headers: { "user-agent": "opencode/1.2" }, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } });
+    assert.equal((await ask()).status, 200);
+    service.setLuminal(() => completion(luminalUsage(18_516, 96, 18_204)));
+    service.clock.now += 1000;
+    assert.equal((await ask()).status, 200);
+    const live = (await (await service.request("GET", "/web/usage/live", { token, headers: DL })).json()) as any;
+    assert.equal(live.connected, true);
+    assert.equal(live.requests.length, 2);
+    assert.equal(live.requests[0].cachedInput, 18_204);
+    assert.equal(live.requests[0].freshInput, 312);
+    assert.equal(live.requests[0].output, 96);
+    assert.equal(live.requests[0].countedTokens, Math.round(18_204 * 0.02 + 312 + 96));
+    assert.equal(live.requests[0].tool, "opencode");
+    assert.equal(live.line, "The 2nd request reused cached context, so 18,204 tokens counted as 364.");
+    const next = (await (await service.request("GET", `/web/usage/live?after=${live.cursor}`, { token })).json()) as any;
+    assert.deepEqual(next.requests, []);
+    assert.equal(next.cursor, live.cursor);
+    const week = (await (await service.request("GET", "/web/usage", { token, headers: DL })).json()) as any;
+    assert.equal(week.totals.requests, 2);
+    assert.equal(week.totals.cachedInput, 18_204);
+    assert.equal(week.totals.freshInput, 1000 + 312);
+    assert.equal(week.totals.output, 146);
+    assert.equal(week.totals.cachedCountedAs, 364);
+    assert.equal(week.models[0].model, MODEL);
+    assert.deepEqual(week.tools.map((tool: any) => tool.tool), ["opencode"]);
+    assert.equal(week.days.length, 3, "Monday to today (a Wednesday)");
+    assert.equal(week.days.at(-1).requests, 2);
+    assert.equal(week.week.resetsAt, "2026-11-09T00:00:00.000Z");
+    assert.equal(await errorCode(await service.request("GET", "/web/usage?week=2026-11-04", { token })), "invalid_week");
+    assert.equal(await errorCode(await service.request("GET", "/web/usage?week=2026-08-03", { token })), "week_unavailable");
+    assert.equal((await service.request("GET", "/web/usage?week=2026-11-02", { token })).status, 200);
+  });
+});
