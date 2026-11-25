@@ -10,6 +10,7 @@ import { TOOL_KEYS_OFF_MESSAGE, TOOL_KEYS_UNAVAILABLE_MESSAGE, TOOL_KEY_NOT_HERE
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
 import { accountObjectName, API_KEY_PREFIX, parseApiKey } from "./accounts.js";
+import { sendOwnerPaymentAlert } from "./owner-payment-alerts.js";
 import { applyPlanEvent, githubCallback, githubStart, googleCallback, googleStart, paidAdmin, paidV1, paidWebRoute } from "./paid-web.js";
 import { GOOGLE_CALLBACK_PATH } from "./google.js";
 import type { KeyFormat } from "./account-object.js";
@@ -3037,6 +3038,9 @@ async function billingWebhook(c: Ctx): Promise<Response> {
   const { event } = verified;
   if (await directory(c).billingEventSeen(event.id)) return json({ received: true, duplicate: true });
   const outcome = await applyBillingEvent(c, event);
+  // The owner's email about dl.new plan money (trial, payment, plan change, cancellation): once per
+  // event id, and never fails the webhook (owner-payment-alerts.ts).
+  await sendOwnerPaymentAlert(c, event);
   await directory(c).markBillingEvent(event.id, event.type, c.now());
   return json({ received: true, outcome });
 }

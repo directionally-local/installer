@@ -44,7 +44,6 @@ import {
 } from "./app.js";
 import { accountIdOf, emailHint, isPaidAccountNumber, keyHint, parseAccountId, type IdentityKind } from "./accounts.js";
 import type { BillingState, ServerKeyView } from "./account-object.js";
-import type { Alert } from "./alerts.js";
 import { emailBlocked, emailDomain, isDisposableDomain, normalizeEmail, plausibleEmail } from "./email-guard.js";
 import { apiError, json } from "./errors.js";
 import { activePromoCoupon, promoPrice, CLAIM_DAYS, isPlanId, promoView, welcomePromoLine, isUpgrade, PLAN_IDS, PLANS, planDescription, planOfPrice, plansView, checkoutConsentMessage, REFUND_BLOCK_TEXT, refundBlock, refundWindowText, type PlanId } from "./plan-prices.js";
@@ -439,8 +438,8 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
     } else await endNoCardTrialForPlan(c, accountNumber);
     if (invoiceId && !trialing && checkout.amountCents > 0) {
       await person.noteFirstPayment({ invoiceId, at: checkout.paidAt });
-      const paymentAlert = await dir.recordPayment({ id: invoiceId, githubId: accountNumber, kind: "pro", amountCents: checkout.amountCents, at: checkout.paidAt, product: PLANS[checkout.plan].name });
-      if (paymentAlert) await alert(c, [paymentAlert]);
+      // Recorded for the revenue numbers; the owner was emailed at Checkout (owner-payment-alerts.ts).
+      await dir.recordPayment({ id: invoiceId, githubId: accountNumber, kind: "pro", amountCents: checkout.amountCents, at: checkout.paidAt, product: PLANS[checkout.plan].name });
     }
   }
   // Stripe's customer gets the verified email; the subscription and customer carry the account id.
@@ -1488,11 +1487,7 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
       }
       if (row.claimed_by !== null) return "plan_claimed";
       await sendClaimEmail(c, row);
-      const offer = row.promo_coupon === null ? "" : ` (launch offer ${row.promo_coupon}, $${(row.discount_cents / 100).toFixed(2)} off)`;
-      const alerts: Alert[] = trialCheckout
-        ? [{ subject: `dl.new: someone started a ${PLANS[plan].name} trial`, text: `dl.new: ${row.email ?? "someone"} started a free trial of ${PLANS[plan].name} (card saved, $0 now)${row.promo_eligible ? ` (launch offer ${row.promo_eligible} on the first charge)` : ""}. Not set up yet (unclaimed: GET /admin/paid/checkouts).` }]
-        : [{ subject: `dl.new: someone paid for ${PLANS[plan].name}`, text: `dl.new: ${row.email ?? "someone"} paid $${(row.amount_cents / 100).toFixed(2)} for ${PLANS[plan].name}${offer}. Not set up yet (unclaimed payments: GET /admin/paid/checkouts).` }];
-      await alert(c, alerts);
+      // The owner's email about it is owner-payment-alerts.ts's (one per event, claimed or not).
       return "plan_unclaimed";
     }
     case "invoice.paid":
@@ -1515,7 +1510,8 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
       if (amount > 0) await trialFromInvoice(c, owner, object, subscriptionId);
       if (amount === 0 && object.billing_reason === "subscription_create") return applied ? "plan_trial_invoice" : "stale";
       const billed = tier ?? (await person.billing()).tier;
-      const paymentAlert = await dir.recordPayment({
+      // Recorded for the revenue numbers; the owner's email is owner-payment-alerts.ts's.
+      await dir.recordPayment({
         id: String(object.id),
         githubId: owner,
         kind: "pro",
@@ -1524,7 +1520,6 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
         renewal: object.billing_reason === "subscription_cycle",
         ...(billed ? { product: PLANS[billed].name } : {}),
       });
-      if (paymentAlert) await alert(c, [paymentAlert]);
       if (applied) await dir.mirrorSubscription({ githubId: owner, state: "active", periodEnd: end, eventAt: event.created });
       return applied ? "plan_active" : "stale";
     }
