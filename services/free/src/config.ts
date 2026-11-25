@@ -45,6 +45,12 @@ export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, 
   openRouterApiKey: string | undefined;
   githubClientId: string;
   githubClientSecret: string;
+  /**
+   * "Continue with Google" on dl.new (google.ts): the OAuth client's id and secret
+   * (GOOGLE_CLIENT_ID, secret GOOGLE_CLIENT_SECRET). Both or it's off: /web/auth/google is a 404
+   * and /web/plans says `signIn.google: false`, so the pages hide the button.
+   */
+  google: { clientId: string; clientSecret: string } | undefined;
   tokenSigningKey: string;
   /** GitHub numeric ids that may call the admin endpoints and skip the invite step. */
   adminGithubIds: ReadonlySet<number>;
@@ -631,6 +637,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     openRouterApiKey: text(env.OPENROUTER_API_KEY),
     githubClientId: required(env, "GITHUB_CLIENT_ID"),
     githubClientSecret: required(env, "GITHUB_CLIENT_SECRET"),
+    google: googleClient(env),
     tokenSigningKey: signingKey,
     adminGithubIds: githubIds(text(env.ADMIN_GITHUB_IDS)),
     weeklyTokens: whole(env.WEEKLY_TOKENS, DEFAULTS.weeklyTokens, "WEEKLY_TOKENS"),
@@ -886,6 +893,12 @@ export function joinedSecret(env: Record<string, unknown>, name: string): string
     joined += next;
   }
   return joined;
+}
+
+function googleClient(env: Record<string, unknown>): { clientId: string; clientSecret: string } | undefined {
+  const clientId = text(env.GOOGLE_CLIENT_ID);
+  const clientSecret = text(env.GOOGLE_CLIENT_SECRET);
+  return clientId && clientSecret ? { clientId, clientSecret } : undefined;
 }
 
 function required(env: Record<string, unknown>, name: string): string {

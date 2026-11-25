@@ -10,6 +10,8 @@
 
 import { githubAuthorizeUrl, githubPrimaryEmail, githubSignInFromCode } from "../../shared/src/github.js";
 import { signJwt, verifyJwt } from "../../shared/src/jwt.js";
+import { randomToken } from "../../shared/src/auth.js";
+import { GOOGLE_CALLBACK_PATH, googleAuthorizeUrl, googleSignInFromCode, pkcePair } from "./google.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
 import {
   account,
@@ -66,6 +68,9 @@ export const PAID_WEB_SESSION_TTL_S = 7 * 86_400;
 const ACCOUNT_OAUTH_COOKIE = "__Host-dl_account_oauth";
 /** The pages a dl.new GitHub sign-in may return to (paths on WEB_SIGNUP_URL's origin). */
 export const GITHUB_RETURN_PATHS = ["/account", "/signin", "/cli-login", "/trial"] as const;
+/** The pages "Continue with Google" may return to: GitHub's but /trial (the no-card trial stays GitHub-only: its anti-farm checks read GitHub). */
+export const GOOGLE_RETURN_PATHS = ["/account", "/signin", "/cli-login"] as const;
+const GOOGLE_OAUTH_COOKIE = "__Host-dl_google_oauth";
 const PAGE_STATE = /^[A-Za-z0-9_-]{16,128}$/;
 const HANDOFF_CODE = /^[A-Za-z0-9_-]{22,64}$/;
 const LOGIN_ID = /^[A-Za-z0-9_-]{22,64}$/;
@@ -80,6 +85,7 @@ const PAID_LIMITS = {
   emailIp: { capacity: 20, perHour: 20 },
   verifyIp: { capacity: 60, perHour: 60 },
   githubIp: { capacity: 30, perHour: 30 },
+  googleIp: { capacity: 30, perHour: 30 },
   cliStartIp: { capacity: 20, perHour: 20 },
   cliPollIp: { capacity: 120, perHour: 3600 },
   // The connect page polls every 2 seconds (livePerson), on top of its other calls.
@@ -140,6 +146,7 @@ const ROUTES: Record<string, PaidRoute> = {
   "/web/auth/email/start": { POST: (c) => emailStart(c) },
   "/web/auth/email/verify": { POST: emailVerify },
   "/web/auth/github/session": { POST: githubSession },
+  "/web/auth/google/session": { POST: googleSession },
   "/web/signout": { POST: signOut },
   "/web/account": { GET: webAccount },
   "/web/account/email": { POST: contactEmailStart },
@@ -190,7 +197,12 @@ async function webPlans(c: Ctx): Promise<Response> {
   const [catalog, { config }] = await Promise.all([planCatalogFor(c), runtime(c)]);
   const budgets = await directory(c).trialBudgets(config, c.now());
   // The free trials (trials.ts): `trials.card.available` puts the line on every card; `fullyClaimed` shows "Free trial: fully claimed".
-  return json({ ...plansView({ catalog, available: billingOn(c) && PLAN_IDS.every((plan) => planPrice(c, plan) !== undefined), promo: promoView(config, c.now()) }), trials: trialsOffer(config, budgets) });
+  return json({
+    ...plansView({ catalog, available: billingOn(c) && PLAN_IDS.every((plan) => planPrice(c, plan) !== undefined), promo: promoView(config, c.now()) }),
+    trials: trialsOffer(config, budgets),
+    // Which optional sign-ins are on: the pages show "Continue with Google" only when `google` is true.
+    signIn: { google: c.config.google !== undefined },
+  });
 }
 
 /** A plan's line ("DeepSeek V4.1 Flash ~62M/week (95.5% caching applied). ...") at the live settings. */
@@ -490,7 +502,7 @@ async function webClaim(c: Ctx): Promise<Response> {
 interface SignInIdentity {
   kind: IdentityKind;
   subject: string;
-  /** The address as typed, or the GitHub login. */
+  /** The address as typed, the GitHub login, or the Google account's email. */
   label: string;
   /** The verified email. */
   email: string;
@@ -684,6 +696,70 @@ async function githubSession(c: Ctx): Promise<Response> {
   return signIn(c, { kind: "github", subject: String(handoff.githubId), label: handoff.login, email: handoff.email }, body.sessionId);
 }
 
+// ─── Continue with Google (google.ts) ────────────────────────────────────────
+
+/** GET /web/auth/google?return=&state=: dl.new's Google sign-in (OIDC, PKCE). app.ts 404s it while Google is off. */
+export async function googleStart(c: Ctx): Promise<Response> {
+  const google = c.config.google!;
+  const site = webOrigin(c);
+  const returnUrl = c.url.searchParams.get("return") ?? "";
+  const allowed = GOOGLE_RETURN_PATHS.map((path) => `${site}${path}`);
+  const state = c.url.searchParams.get("state") ?? "";
+  if (!allowed.includes(returnUrl) || !PAGE_STATE.test(state)) return new Response("This sign-in link isn't valid. Start again at dl.new.", { status: 400, headers: { "content-type": "text/plain; charset=utf-8" } });
+  const retry = await limited(c, `paid:google:ip:${c.ipNet}`, PAID_LIMITS.googleIp);
+  if (retry !== undefined) return new Response(null, { status: 303, headers: { location: `${returnUrl}#error=rate_limited`, "cache-control": "no-store" } });
+  const pkce = await pkcePair();
+  const nonce = randomToken(16);
+  const begun = await auth(c).beginGoogleOAuth({ returnUrl, pageState: state, verifier: pkce.verifier, nonce, now: c.now() });
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: googleAuthorizeUrl({ clientId: google.clientId, redirectUri: `${c.base}${GOOGLE_CALLBACK_PATH}`, state: begun.state, nonce, challenge: pkce.challenge }),
+      "set-cookie": `${GOOGLE_OAUTH_COOKIE}=${begun.browser}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
+
+/** GET /web/auth/google/callback: Google's redirect. Back to the page with a one-time code (or #error=). */
+export async function googleCallback(c: Ctx): Promise<Response> {
+  const google = c.config.google!;
+  const state = c.url.searchParams.get("state") ?? "";
+  const browser = readCookie(c.request, GOOGLE_OAUTH_COOKIE);
+  const claimed = browser ? await auth(c).claimGoogleOAuth({ state, browser, now: c.now() }) : undefined;
+  if (!claimed) return new Response(null, { status: 303, headers: { location: `${webOrigin(c)}/signin#error=expired`, "cache-control": "no-store" } });
+  const back = (fragment: string) =>
+    new Response(null, { status: 303, headers: { location: `${claimed.returnUrl}#${fragment}`, "cache-control": "no-store", "referrer-policy": "no-referrer", "set-cookie": `${GOOGLE_OAUTH_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0` } });
+  if (c.url.searchParams.get("error")) return back("error=google_cancelled");
+  const code = c.url.searchParams.get("code");
+  if (!code) return back("error=google_failed");
+  const signedIn = await googleSignInFromCode(google, { code, verifier: claimed.verifier, redirectUri: `${c.base}${GOOGLE_CALLBACK_PATH}`, nonce: claimed.nonce, nowMs: c.now() }, c.fetch);
+  if (signedIn === "unverified_email") return back("error=google_no_verified_email");
+  if (!signedIn) return back("error=google_failed");
+  const handoff = await auth(c).issueGoogleHandoff({ pageStateHash: claimed.pageStateHash, subject: signedIn.sub, email: signedIn.email, now: c.now() });
+  return back(`signin=${handoff}`);
+}
+
+/**
+ * POST /web/auth/google/session {code, state, sessionId?} → the session response. The account:
+ * this Google account's, else the one that signs in with the same address by email code (linked
+ * now), else a new one only with a paid Checkout (`sessionId`), as for email and GitHub. No
+ * no-card trial: that stays GitHub-only.
+ */
+async function googleSession(c: Ctx): Promise<Response> {
+  if (!c.config.google) return apiError(404, "not_found", "Google sign-in isn't on.");
+  const retry = await limited(c, `paid:verify:ip:${c.ipNet}`, PAID_LIMITS.verifyIp);
+  if (retry !== undefined) return rateLimited(retry);
+  const body = (await readJson(c)) ?? {};
+  const invalid = () => apiError(400, "invalid_grant", "This sign-in is invalid, used or expired. Continue with Google again.");
+  if (typeof body.code !== "string" || !HANDOFF_CODE.test(body.code) || typeof body.state !== "string" || !PAGE_STATE.test(body.state)) return invalid();
+  const handoff = await auth(c).claimGoogleHandoff({ code: body.code, state: body.state, now: c.now() });
+  if (!handoff) return invalid();
+  await directory(c).resolveGoogleIdentity({ subject: handoff.subject, email: handoff.email, now: c.now() });
+  return signIn(c, { kind: "google", subject: handoff.subject, label: handoff.email, email: handoff.email }, body.sessionId);
+}
+
 /** POST /web/signout: this web session stops working at once. */
 async function signOut(c: Ctx): Promise<Response> {
   const caller = await paidCaller(c);
@@ -731,7 +807,13 @@ async function accountView(c: Ctx, accountNumber: number) {
   return {
     accountId: accountIdOf(accountNumber),
     email: stored?.email ?? null,
-    identities: identities.map((identity) => (identity.kind === "github" ? { kind: "github", login: identity.label ?? (identity.subject === String(accountNumber) ? (stored?.login ?? null) : null) } : { kind: "email", email: identity.label ?? identity.subject })),
+    identities: identities.map((identity) =>
+      identity.kind === "github"
+        ? { kind: "github", login: identity.label ?? (identity.subject === String(accountNumber) ? (stored?.login ?? null) : null) }
+        : identity.kind === "google"
+          ? { kind: "google", email: identity.label }
+          : { kind: "email", email: identity.label ?? identity.subject },
+    ),
     plan: current,
     legacy: isPaidAccountNumber(accountNumber) || billing.tier !== null ? null : { plan },
     settings,

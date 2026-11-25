@@ -52,6 +52,7 @@ import {
   recordPaidCheckout,
   recordRefundRequest,
   replaceEmailIdentity,
+  resolveGoogleIdentity,
   resolveIdentity,
   usageRows,
   type PaidCheckoutRow,
@@ -3049,6 +3050,11 @@ export class DirectoryObject extends DurableObject {
       if (existing !== undefined) return { account: existing, created: false };
       return { account: createPaidAccount(sql, { ...input, login: paidLogin }), created: true };
     });
+  }
+
+  /** A Google sign-in's account: its own identity, or linked now to the account that signs in with that email (paid-store.ts). */
+  async resolveGoogleIdentity(input: { subject: string; email: string; now: number }): Promise<number | undefined> {
+    return this.ctx.storage.transactionSync(() => resolveGoogleIdentity(this.ctx.storage.sql, input));
   }
 
   async linkIdentity(input: { kind: IdentityKind; subject: string; account: number; label: string | null; now: number }): Promise<"linked" | "taken"> {

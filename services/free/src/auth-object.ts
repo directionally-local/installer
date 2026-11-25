@@ -4,14 +4,18 @@ import { newUserCode } from "./codes.js";
 import { parseCampaign, type Campaign } from "./web-signup.js";
 import {
   beginAccountOAuth,
+  beginGoogleOAuth,
   claimAccountHandoff,
   claimAccountOAuth,
+  claimGoogleHandoff,
+  claimGoogleOAuth,
   cliLogin,
   decideCliLogin,
   dropEmailCode,
   isAccountOAuthState,
   issueAccountHandoff,
   issueEmailCode,
+  issueGoogleHandoff,
   migrateAccountHandoffs,
   PAID_AUTH_SCHEMA,
   pendingPaidAuth,
@@ -567,6 +571,24 @@ export class AuthObject extends DurableObject {
 
   async claimAccountHandoff(input: { code: string; state: string; now: number }): Promise<{ githubId: number; login: string; email: string; details: string | null } | undefined> {
     return claimAccountHandoff(this.ctx.storage.sql, input);
+  }
+
+  async beginGoogleOAuth(input: { returnUrl: string; pageState: string; verifier: string; nonce: string; now: number }): Promise<{ state: string; browser: string }> {
+    const begun = await beginGoogleOAuth(this.ctx.storage.sql, input);
+    await this.#scheduleCleanup(input.now);
+    return begun;
+  }
+
+  async claimGoogleOAuth(input: { state: string; browser: string; now: number }): Promise<{ returnUrl: string; pageStateHash: string; verifier: string; nonce: string } | undefined> {
+    return claimGoogleOAuth(this.ctx.storage.sql, input);
+  }
+
+  async issueGoogleHandoff(input: { pageStateHash: string; subject: string; email: string; now: number }): Promise<string> {
+    return issueGoogleHandoff(this.ctx.storage.sql, input);
+  }
+
+  async claimGoogleHandoff(input: { code: string; state: string; now: number }): Promise<{ subject: string; email: string } | undefined> {
+    return claimGoogleHandoff(this.ctx.storage.sql, input);
   }
 
   async startCliLogin(input: { tool: string; deviceName: string | null; now: number }): Promise<{ loginId: string; userCode: string; expiresAt: number }> {

@@ -8,7 +8,8 @@
  * get a random number from PAID_ACCOUNT_BASE (2^50) up, far above any GitHub id, so the two
  * can never collide and nothing that meters or logs per account has to change.
  *
- * Identities (`identities` in the Directory): `github:<GitHub id>` or `email:<normalized address>`
+ * Identities (`identities` in the Directory): `github:<GitHub id>`, `email:<normalized address>`
+ * or `google:<Google sub>`
  * → account number. The page sees an account as `acct_<base36>`.
  */
 
@@ -17,7 +18,8 @@ export const PAID_ACCOUNT_BASE = 2 ** 50;
 /** New account numbers are PAID_ACCOUNT_BASE plus a random offset below this (2^48). */
 export const PAID_ACCOUNT_SPAN = 2 ** 48;
 
-export type IdentityKind = "github" | "email";
+/** `google`: keyed by the Google ID token's `sub` (stable per Google account), labelled with its verified email. */
+export type IdentityKind = "github" | "email" | "google";
 
 export function isPaidAccountNumber(account: number): boolean {
   return Number.isSafeInteger(account) && account >= PAID_ACCOUNT_BASE;

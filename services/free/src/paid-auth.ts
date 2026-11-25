@@ -48,6 +48,23 @@ export const PAID_AUTH_SCHEMA = [
      email      TEXT NOT NULL,
      expires_at INTEGER NOT NULL
    )`,
+  // "Continue with Google" (google.ts): the round trip's state, PKCE verifier and nonce, and its one-time handoff to the page.
+  `CREATE TABLE IF NOT EXISTS google_oauth (
+     state_hash      TEXT PRIMARY KEY,
+     browser_hash    TEXT NOT NULL,
+     page_state_hash TEXT NOT NULL,
+     return_url      TEXT NOT NULL,
+     verifier        TEXT NOT NULL,
+     nonce           TEXT NOT NULL,
+     expires_at      INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS google_handoffs (
+     code_hash  TEXT PRIMARY KEY,
+     state_hash TEXT NOT NULL,
+     subject    TEXT NOT NULL,
+     email      TEXT NOT NULL,
+     expires_at INTEGER NOT NULL
+   )`,
   `CREATE TABLE IF NOT EXISTS cli_logins (
      login_hash   TEXT PRIMARY KEY,
      user_code    TEXT NOT NULL UNIQUE,
@@ -67,11 +84,13 @@ export function prunePaidAuth(sql: Sql, now: number): void {
   sql.exec("DELETE FROM account_oauth WHERE expires_at <= ?", now);
   sql.exec("DELETE FROM account_handoffs WHERE expires_at <= ?", now);
   sql.exec("DELETE FROM cli_logins WHERE expires_at <= ?", now);
+  sql.exec("DELETE FROM google_oauth WHERE expires_at <= ?", now);
+  sql.exec("DELETE FROM google_handoffs WHERE expires_at <= ?", now);
 }
 
 export function pendingPaidAuth(sql: Sql): number {
   return (
-    sql.exec<{ n: number }>("SELECT (SELECT COUNT(*) FROM email_codes) + (SELECT COUNT(*) FROM account_oauth) + (SELECT COUNT(*) FROM account_handoffs) + (SELECT COUNT(*) FROM cli_logins) AS n").toArray()[0]?.n ?? 0
+    sql.exec<{ n: number }>("SELECT (SELECT COUNT(*) FROM email_codes) + (SELECT COUNT(*) FROM account_oauth) + (SELECT COUNT(*) FROM account_handoffs) + (SELECT COUNT(*) FROM cli_logins) + (SELECT COUNT(*) FROM google_oauth) + (SELECT COUNT(*) FROM google_handoffs) AS n").toArray()[0]?.n ?? 0
   );
 }
 
@@ -199,6 +218,66 @@ export async function claimAccountHandoff(sql: Sql, input: { code: string; state
   sql.exec("DELETE FROM account_handoffs WHERE code_hash = ?", codeHash);
   if (row.expires_at <= input.now || !timingSafeEqual(await sha256Hex(input.state), row.state_hash)) return undefined;
   return { githubId: row.github_id, login: row.login, email: row.email, details: row.details ?? null };
+}
+
+// ─── Google for dl.new accounts ─────────────────────────────────────────────
+
+/**
+ * Starts the Google round trip: the URL's `state`, the browser cookie that binds it, and the
+ * PKCE verifier and nonce kept here until the callback (they never reach the page).
+ */
+export async function beginGoogleOAuth(sql: Sql, input: { returnUrl: string; pageState: string; verifier: string; nonce: string; now: number }): Promise<{ state: string; browser: string }> {
+  const state = randomToken();
+  const browser = randomToken();
+  sql.exec(
+    "INSERT INTO google_oauth (state_hash, browser_hash, page_state_hash, return_url, verifier, nonce, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    await sha256Hex(state),
+    await sha256Hex(browser),
+    await sha256Hex(input.pageState),
+    input.returnUrl,
+    input.verifier,
+    input.nonce,
+    input.now + OAUTH_TTL_MS,
+  );
+  return { state, browser };
+}
+
+/** Consumes the state: once, unexpired, with its browser cookie. */
+export async function claimGoogleOAuth(
+  sql: Sql,
+  input: { state: string; browser: string; now: number },
+): Promise<{ returnUrl: string; pageStateHash: string; verifier: string; nonce: string } | undefined> {
+  const stateHash = await sha256Hex(input.state);
+  const row = sql
+    .exec<{ browser_hash: string; page_state_hash: string; return_url: string; verifier: string; nonce: string; expires_at: number }>("SELECT * FROM google_oauth WHERE state_hash = ?", stateHash)
+    .toArray()[0];
+  if (!row) return undefined;
+  sql.exec("DELETE FROM google_oauth WHERE state_hash = ?", stateHash);
+  if (row.expires_at <= input.now || !timingSafeEqual(await sha256Hex(input.browser), row.browser_hash)) return undefined;
+  return { returnUrl: row.return_url, pageStateHash: row.page_state_hash, verifier: row.verifier, nonce: row.nonce };
+}
+
+/** The one-time code that hands a verified Google sign-in back to the page (as GitHub's). */
+export async function issueGoogleHandoff(sql: Sql, input: { pageStateHash: string; subject: string; email: string; now: number }): Promise<string> {
+  const code = randomToken();
+  sql.exec(
+    "INSERT INTO google_handoffs (code_hash, state_hash, subject, email, expires_at) VALUES (?, ?, ?, ?, ?)",
+    await sha256Hex(code),
+    input.pageStateHash,
+    input.subject,
+    input.email,
+    input.now + HANDOFF_TTL_MS,
+  );
+  return code;
+}
+
+export async function claimGoogleHandoff(sql: Sql, input: { code: string; state: string; now: number }): Promise<{ subject: string; email: string } | undefined> {
+  const codeHash = await sha256Hex(input.code);
+  const row = sql.exec<{ state_hash: string; subject: string; email: string; expires_at: number }>("SELECT * FROM google_handoffs WHERE code_hash = ?", codeHash).toArray()[0];
+  if (!row) return undefined;
+  sql.exec("DELETE FROM google_handoffs WHERE code_hash = ?", codeHash);
+  if (row.expires_at <= input.now || !timingSafeEqual(await sha256Hex(input.state), row.state_hash)) return undefined;
+  return { subject: row.subject, email: row.email };
 }
 
 // ─── cli-login ──────────────────────────────────────────────────────────────
