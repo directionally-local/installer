@@ -19,6 +19,7 @@ import { opencodeCommand } from "./laptop/opencode.js";
 import { piCommand } from "./laptop/pi.js";
 import { conductorCommand, proxyCommand } from "./laptop/proxy.js";
 import { t3Command } from "./laptop/t3.js";
+import { acpCommand, zedCommand } from "./laptop/zed.js";
 import { apiKeyCommand } from "./laptop/api-key.js";
 import { loadRemotes, resolveTarget } from "./laptop/config.js";
 import { dlUpdate } from "./laptop/self-update.js";
@@ -98,6 +99,10 @@ On your laptop:
   dl t3 [ARGS]            your own T3 Code server (t3; dl t3 serve for no browser) with its Claude
                           Code and OpenCode on free tokens while dl t3 runs; ARGS go to t3. Needs
                           t3 installed; the T3 Code desktop app doesn't get free tokens yet
+  dl zed                  add dl to Zed as an agent (Autopilot over ACP, your own provider or the free
+                          tier, signs in first if needed); edits Zed's settings.json after a backup,
+                          nothing else in it changes. dl zed remove takes it out
+  dl acp                  the same agent on stdio, for any ACP editor (T3 Code: "Local ACP command")
   dl claude-code hook install   when Claude Code hits its usage or rate limit, show how to continue
                           in dl (adds a hook to ~/.claude/settings.json after asking; backs it up)
   dl claude-code hook remove    take that hook out again
@@ -247,6 +252,10 @@ export interface MainOptions {
   apiKey?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** `dl t3`; the real one unless replaced. */
   t3?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
+  /** `dl acp`; the real one unless replaced. */
+  acp?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
+  /** `dl zed`; the real one unless replaced. */
+  zed?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** What a GPU box runs, printed first by `dl status` and plain `dl` (box-status.ts); the real one unless replaced. */
   boxSummary?: () => Promise<string | undefined>;
   /** `dl uninstall` on a server and on a laptop; the real ones unless replaced. */
@@ -276,6 +285,10 @@ export async function main(
   if (argv[0] === "api-key") return await (options.apiKey ?? apiKeyCommand)(argv.slice(1), io);
   // `dl t3 ARGS`: like `dl opencode`, for T3 Code's server, whose Claude Code and OpenCode get free tokens.
   if (argv[0] === "t3") return await (options.t3 ?? t3Command)(argv.slice(1), io);
+  // `dl acp ARGS`: Autopilot as an ACP agent on stdio (editors run it); stdout is the protocol's.
+  if (argv[0] === "acp") return await (options.acp ?? acpCommand)(argv.slice(1), { out: io.err, err: io.err });
+  // `dl zed [remove|--print]`: add dl to Zed's external agents.
+  if (argv[0] === "zed") return await (options.zed ?? zedCommand)(argv.slice(1), io);
   // Everything after `--` belongs to Autopilot (bare dl on this computer): `dl -- --session ID`.
   const split = splitPassthrough(argv);
   const passthrough = split.passthrough;

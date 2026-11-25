@@ -111,6 +111,8 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl api-key [NAME]` | Use dl's free tokens in any other tool (Cursor, Cline, Roo, Kilo, Continue, Zed, Aider, OpenCode…): makes an API key and prints it once with the base URLs. `dl api-key list`, `dl api-key revoke ID`. See [Use dl's free tokens in other tools](#use-dls-free-tokens-in-other-tools-dl-api-key). |
 | `dl conductor` | [Conductor](https://conductor.build) (and Zed, Cline and other desktop apps) on dl's free tokens: starts `dl proxy` if it isn't running and prints the settings to paste into the app. See [Desktop apps with free tokens: dl proxy and dl conductor](#desktop-apps-with-free-tokens-dl-proxy-and-dl-conductor). |
 | `dl proxy start` / `stop` / `status` | A local proxy on `127.0.0.1:4789` that desktop apps use for the free tier, with a local token as their API key. `dl proxy run` runs it in the terminal; `dl proxy install` / `uninstall` start it at login (macOS LaunchAgent, Linux systemd user service). |
+| `dl zed` | Add dl (Autopilot) to [Zed](https://zed.dev) as an external agent: signs in to the free tier first if Autopilot has no provider, backs up Zed's `settings.json` and adds one `agent_servers` entry, changing nothing else. `dl zed remove` takes it out; `dl zed --print` shows the entry. See [Editors: dl zed and dl acp](#editors-dl-zed-and-dl-acp). |
+| `dl acp [ARGS]` | Autopilot as an ACP (Agent Client Protocol) agent on stdio: the command an editor runs (Zed, T3 Code's "Local ACP command", JetBrains). |
 | `dl t3 [ARGS]` | Your own [T3 Code](https://github.com/pingdotgg/t3code) server (web and phone clients) with its Claude Code and OpenCode agents on dl's free tokens while `dl t3` runs. See [T3 Code with free tokens: dl t3](#t3-code-with-free-tokens-dl-t3). |
 | `dl claude-code hook install` / `remove` | Opt in to a Claude Code hook that, when Claude Code stops on a usage or rate limit, shows `Claude Code hit its limit. Continue in dl: dl --from-claude-code` as a terminal notification and window title. Shows the entry and asks before adding it to `~/.claude/settings.json`, backs the file up first, and merges into it; `remove` takes out only dl's entry. |
 | `dl setup` | Set up or repair where background tasks run. Safe to re-run. `--identity FILE` names the SSH key to use. |
@@ -344,6 +346,27 @@ server or tmux), `dl t3 ./my-project` starts in that folder.
   desktop app or the service), quit it first, or start `dl t3 --base-dir DIR` for a separate one.
   Commands that talk to a running server (`t3 thread`, `t3 pair`, `t3 project`) work as usual: run
   them as `t3 …`.
+
+### Editors: dl zed and dl acp
+
+`dl acp` is `autopilot acp` with the Autopilot dl comes with: Autopilot as an
+[Agent Client Protocol](https://agentclientprotocol.com) agent, which editors start and talk to
+over stdio. It is Autopilot itself, not another agent on dl's free tokens: your own Autopilot
+config, provider and model, hooks, MCP servers and sessions, and on the free tier its requests are
+Autopilot's own, with Autopilot's whole allowance. Threads are Autopilot sessions
+(`dl -- resume ID` reopens one in the terminal).
+
+- **Zed:** `dl zed` adds it under `agent_servers` in Zed's `settings.json` (`~/.config/zed`, or
+  `%APPDATA%\Zed` on Windows) as this Node running dl's script with `acp`, so it starts whatever
+  PATH Zed sees. It backs the file up first (`settings.json.dl-backup-…`), keeps your comments and
+  other settings, and writes through a symlinked file. Run it again after moving Node (a new nvm
+  version). If Autopilot has no provider yet it runs the free tier sign-in first; otherwise Zed
+  uses the provider Autopilot already has. Then pick **Autopilot by dl.new** in Zed's Agent Panel.
+- **T3 Code and other ACP clients:** use `dl acp` as the agent command (T3 Code: add a provider,
+  **Local ACP command**). The README of [Autopilot](https://github.com/directionally-local/autopilot#use-dl-in-zed-acp)
+  lists what works over ACP.
+- With no provider set up, the editor offers **Sign in to dl**: `dl acp --login` in a terminal
+  (the free tier's GitHub sign-in), or in the browser.
 
 ### On your own GPUs
 
