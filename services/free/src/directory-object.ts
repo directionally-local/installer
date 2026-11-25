@@ -1,4 +1,5 @@
 import { DurableObject, type DurableObjectState } from "cloudflare:workers";
+import { listProviderInquiries, PROVIDER_INQUIRY_SCHEMA, saveProviderInquiry, type ProviderInquiry, type ProviderInquiryInput } from "./provider-inquiry.js";
 import { NO_GITHUB_SCHEMA, noGithubDays, noGithubDigestLine, noGithubReport, recordNoGithubClick, saveNoGithubLead, withNoGithubLine, type NoGithubAlerts, type NoGithubDay, type NoGithubReport, type NoGithubSource } from "./no-github.js";
 import { normalizeEmail } from "./email-guard.js";
 import { sha256Hex } from "../../shared/src/auth.js";
@@ -502,6 +503,8 @@ const WEEK_OF_DAY = (column: string) => `((${column}) - (((${column}) + 3) % 7))
 const SCHEMA = [
   // "Don't have GitHub?" clicks and answers (no-github.ts).
   ...NO_GITHUB_SCHEMA,
+  // Provider inquiries from dl.new/providers (provider-inquiry.ts).
+  ...PROVIDER_INQUIRY_SCHEMA,
   `CREATE TABLE IF NOT EXISTS people (
      github_id    INTEGER PRIMARY KEY,
      login        TEXT NOT NULL,
@@ -4538,6 +4541,18 @@ export class DirectoryObject extends DurableObject {
       lead.email,
       lead.emailNorm,
     );
+  }
+
+  // ─── Provider inquiries (provider-inquiry.ts) ─────────────────────────────
+
+  /** Keeps an inquiry from dl.new/providers, unless today's cap is reached; `email`: whether to email the owner. */
+  async saveProviderInquiry(input: { now: number; inquiry: ProviderInquiryInput }): Promise<ReturnType<typeof saveProviderInquiry>> {
+    return saveProviderInquiry(this.ctx.storage.sql, input);
+  }
+
+  /** The newest inquiries and the total kept (admins). */
+  async providerInquiries(limit?: number): Promise<{ inquiries: ProviderInquiry[]; total: number }> {
+    return listProviderInquiries(this.ctx.storage.sql, limit);
   }
 
   // ─── "Don't have GitHub?" (no-github.ts) ─────────────────────────────────

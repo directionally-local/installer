@@ -2119,6 +2119,15 @@ Each click and each answer emails the owner (the alert channel: `ALERT_EMAIL` to
 
 `GET /v1/admin/no-github?days=30` (admins; 1 to 366 days) returns `{days: [{date, clicks: {device, web, dlnew, other}, total, leads}], totals: {clicks, leads, emails}, leads: [{at, source, email, uses}]}` (newest 1000 leads). `/v1/admin/metrics` has the same per-day counts as `noGithub`. The admin Tools tab has a "Don't have GitHub?" card, and `/admin/dashboard/no-github.csv` (answers) and `/admin/dashboard/no-github-clicks.csv` (clicks per day and source) download them.
 
+## Provider inquiries
+
+Inference companies that want dl to route traffic to them fill the form on dl.new/providers, which posts `POST /web/provider-inquiry` with JSON `{company, name, email, website?, models?, regions?, credits?, notes?}`. No sign-in; CORS and the origin check are the other `/web/*` routes' (dl.new and api.dl.new only; 403 `forbidden_origin` for another site's `Origin`).
+
+- Strings are trimmed and control characters removed (line breaks become spaces, except in `notes`). Longest, in characters: `company` 120, `name` 120, `email` 200 (an address with a dot in its domain), `website` 300, `models` 500, `regions` 300, `credits` 200 (free form, e.g. `$5,000`), `notes` 2000. `company`, `name` and `email` are required; an empty optional field counts as not given.
+- `200 {ok: true}` when kept. `400 invalid_request` with the field in the message (missing, too long, not a string, a bad email, an unknown field, a body over 32 KB); `429 rate_limited` past 5 an hour per network or 200 a UTC day in all; `405` for other methods.
+- Kept in the Directory's `provider_inquiries` table (the fields and the time; no IP). The owner gets a plain-text email (`ALERT_EMAIL` to `ALERT_EMAIL_TO`, from "dl providers", Reply-To the sender), subject `Provider inquiry: <company>`, listing every field, for the first 50 a UTC day; past that they are only kept.
+- `GET /v1/admin/provider-inquiries` (admins) returns `{total, inquiries: [{id, at, company, name, email, website, models, regions, credits, notes}]}`, newest 500 first; the admin Tools tab has a "Provider inquiries" card (escaped).
+
 ## Install counts
 
 Two public endpoints count the top of the funnel, anonymously. No sign-in; each adds one to a
