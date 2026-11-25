@@ -184,7 +184,8 @@ export function flaggedUseAlert(input: { login: string; githubId: number; use: s
 
 /**
  * A moderation review's outcome (moderation.ts), in place of flaggedUseAlert: who, the verdict,
- * the reviewer's reason and evidence, the label that started it, and how to undo or do the block.
+ * the reviewer's reason (its own words, quoted spans cut out; never the person's words), the label
+ * that started it (the stored 60-character description), and how to undo or do the block.
  * An auto-block is always sent; a "watch" (or a block verdict that didn't block) at most once per
  * person per UTC day. A "pass" sends nothing (the daily digest counts it).
  */
@@ -194,7 +195,6 @@ export function moderationAlert(input: {
   verdict: string;
   confidence: number;
   reason: string;
-  signals: readonly string[];
   action: string;
   mode: string;
   label: { use: string; category: string; model: string };
@@ -228,7 +228,6 @@ export function moderationAlert(input: {
     "",
     `Verdict: ${input.verdict} (confidence ${confidence}, mode ${input.mode})`,
     `Reason: ${input.reason}`,
-    ...(input.signals.length > 0 ? ["Signals:", ...input.signals.map((signal) => `  - ${signal}`)] : []),
     `Flagged by: ${input.label.model === "keyword" ? "keyword pre-check" : "model label"}: ${input.label.use} (${input.label.category})`,
     "",
     blocked

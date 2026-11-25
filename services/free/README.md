@@ -897,7 +897,7 @@ dl free tier: OpenRouter host <slug> failed 9 of 40 requests in the last hour (2
 dl free tier: $1,600 of the $2,000 Luminal credit used (80%).
 dl free tier: requests are refused with upstream_credit_exhausted: $2,000.12 of the $2,000 Luminal credit is used. Top up and raise luminalCreditUsd (POST /admin/config), or switch primaryUpstream to "openrouter".
 dl free tier: a session by @<login> (GitHub id <id>) was labelled high risk. (with the description, category and a link to block; once per person per UTC day; only with moderation off or over its daily cap)
-dl free tier: auto-blocked @<login> (0.92)   (subject; automated moderation blocked them: verdict, reason, signals, the label, how to unblock)
+dl free tier: auto-blocked @<login> (0.92)   (subject; automated moderation blocked them: verdict, reason, the label, how to unblock)
 dl free tier: review @<login>: watch (0.60)   (subject; a review that didn't block; once per person per UTC day)
 ```
 
@@ -1010,7 +1010,8 @@ the request and never awaited by it:
   accounting as use descriptions (never a person's allowance). Its policy (what to block, pass
   and watch, and how to weigh the history) is `moderationPolicy` in
   [detection rules](#detection-rules-detection_rules-private): private in production, generic by
-  default. It answers `{"verdict": "block|watch|pass", "confidence": 0..1, "reason", "signals"}`.
+  default. It answers `{"verdict": "block|watch|pass", "confidence": 0..1, "reason"}`, the reason
+  in its own words: it is told never to quote the person and to use no quotation marks.
   Anything that doesn't parse, an error or a timeout (30 s) is `watch` with confidence 0 and reason
   "review failed": never a block. Why is stored on the decision as `error` and logged as one line
   (`moderation review failed: <code>`, never content): `no_provider`, `timeout`, `http_<status>`,
@@ -1032,11 +1033,14 @@ the request and never awaited by it:
   nothing); `moderationDailyCap` (300) reviews a UTC day, past which a high label gets the plain
   alert above.
 - **Storage:** `moderation_decisions` in the Directory: GitHub id, the label's id and session id,
-  category, verdict, confidence, the reviewer's reason and up to five evidence bullets, the action,
-  model, the failure code (if any) and time. Never the request's text: the reviewer is told to quote at most five words, and
-  any longer quote (and any code) is cut out before the row is written. Kept 90 days.
+  category, verdict, confidence, the reviewer's reason (at most 200 characters), the action,
+  model, the failure code (if any) and time. Never the request's text nor any of the person's
+  words: no evidence bullets are asked for or kept, and anything inside quotation marks or code
+  marks is cut out of the reason before it is stored or emailed. Kept 90 days. (The `signals`
+  column once held evidence bullets; it is emptied once on startup and always `[]` now, and
+  quoted spans are cut from reasons stored before, allocator reasons included.)
 - **Admin:** `GET /admin/moderation?days=7&verdict=block` lists decisions newest first
-  (`login`, `githubId`, `verdict`, `confidence`, `reason`, `signals`, `action`, `category`,
+  (`login`, `githubId`, `verdict`, `confidence`, `reason`, `action`, `category`,
   `sessionId`, `labelId`, `model`, `error`, `at`); `verdict` is optional, `limit` 1–1000 (default 200).
   `action` is `blocked`, `shadow`, `allowlisted`, `admin`, `already_blocked` or `none`.
 
@@ -1217,13 +1221,14 @@ allocator only raises.
 
 When a free request leaves a Starter or basic account at `allocatorTriggerShare` (80%) of its
 weekly tokens, a decision runs beside the request (at most once per person per allowance step
-per 24 hours): `openai/gpt-oss-safeguard-20b` on OpenRouter (the company key, low reasoning,
-temperature 0, `allocatorTimeoutMs`), under the `allocatorPolicy` of `DETECTION_RULES` (a
+per 24 hours): `openai/gpt-oss-safeguard-20b` on OpenRouter (the company key, provider
+`data_collection: "deny"`, low reasoning, temperature 0, `allocatorTimeoutMs`), under the `allocatorPolicy` of `DETECTION_RULES` (a
 generic default otherwise). It sees counts and stored labels only, never prompts: use
 descriptions (30 days, up to 100), sessions and requests per session from the request log (every
 agent's session id, else idle-split runs) and Autopilot's session events, active days and weeks,
 request pacing, which agents were used, the allowance and its use, GitHub numbers, networks, the
-batch flag and moderation verdicts. It answers `stay`, `10m` or `full`.
+batch flag and moderation verdicts. It answers `stay`, `10m` or `full` and a short reason in its
+own words; quoted spans are cut out of the reason before it is kept (90 days).
 
 Hard rules win: a high-risk label or a moderation block or watch in 30 days can't be raised; farm
 signals (batch flag, a device shared with another account, `network_limit`) stop at 10M; one step
@@ -1255,7 +1260,8 @@ every client already turns into "switch to DeepSeek".
 content is checked by two classifiers at once, each with `gpt6GuardTimeoutMs` to answer:
 
 - OpenAI's Moderation API (`omni-moderation-latest`, the OpenAI key): flagged stops it.
-- `openai/gpt-oss-safeguard-20b` on OpenRouter (the OpenRouter key), given the policy in
+- `openai/gpt-oss-safeguard-20b` on OpenRouter (the OpenRouter key, provider
+  `data_collection: "deny"` always, whatever `OPENROUTER_DATA_COLLECTION` says), given the policy in
   `DETECTION_RULES`'s `guardPolicy` (private; a generic default is in the code). It answers 1
   (violates) or 0. Its cost goes to internal spend, never a person's allowance.
 

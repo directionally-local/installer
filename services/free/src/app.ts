@@ -4124,7 +4124,6 @@ async function presendGuard(c: Ctx, gate: Runtime, input: { githubId: number; se
       policy: config.detection.guardPolicy,
       timeoutMs: config.gpt6GuardTimeoutMs,
       user: await safetyIdentifier(input.githubId),
-      dataCollection: config.openRouterDataCollection,
     });
   } catch (error) {
     console.error(`gpt6 presend guard failed: ${error instanceof Error ? error.name : "error"}`);
@@ -4267,7 +4266,7 @@ async function internalDeepseek(
   const payload: Record<string, unknown> =
     provider === "luminal"
       ? { model: model.upstreamModel, messages: input.messages, max_completion_tokens: input.maxTokens + input.reasoningRoom, temperature: 0, stream: false, reasoning_effort: "low", user: input.user }
-      : { model: model.id, messages: input.messages, max_tokens: input.maxTokens, temperature: 0, stream: false, reasoning: { enabled: false }, usage: { include: true }, provider: providerPreferences(config), user: input.user };
+      : { model: model.id, messages: input.messages, max_tokens: input.maxTokens, temperature: 0, stream: false, reasoning: { enabled: false }, usage: { include: true }, provider: { ...providerPreferences(config), data_collection: "deny" }, user: input.user };
   const response = await fetchWithTimeout(
     c.fetch,
     provider === "luminal" ? LUMINAL_URL : OPENROUTER_URL,
@@ -4905,7 +4904,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     return json({
       days,
       verdict: verdict ?? null,
-      decisions: rows.map((row) => ({ login: row.login, githubId: row.githubId, verdict: row.verdict, confidence: row.confidence, reason: row.reason, signals: row.signals, action: row.action, category: row.category, sessionId: row.sessionId, labelId: row.labelId, model: row.model, error: row.error, at: new Date(row.at).toISOString() })),
+      decisions: rows.map((row) => ({ login: row.login, githubId: row.githubId, verdict: row.verdict, confidence: row.confidence, reason: row.reason, action: row.action, category: row.category, sessionId: row.sessionId, labelId: row.labelId, model: row.model, error: row.error, at: new Date(row.at).toISOString() })),
     });
   }
   if (method === "GET" && rest === "allocator") {

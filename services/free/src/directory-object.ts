@@ -20,7 +20,7 @@ import { DEEPSEEK_MODEL, familyOf, FREE_MODELS, upstreamsOf, type Family } from 
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, trialBonuses, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
-import { ALLOCATOR_MODEL, type AllocatorFacts, type AllocatorOutcome, type AllocatorState, type FinishInput } from "./allocator.js";
+import { ALLOCATOR_MODEL, ALLOCATOR_REASON_CHARS, type AllocatorFacts, type AllocatorOutcome, type AllocatorState, type FinishInput } from "./allocator.js";
 import { allocatorCounts, allocatorDaily, allocatorDecisions, allocatorFacts, allocatorGrace, allocatorState, allocatorStates, allocatorStatus, claimAllocation, ensureAllocatorSchema, finishAllocation, type AllocatorCounts, type AllocatorRow } from "./allocator-store.js";
 import { levelChecks, levelFor, type BasicRule, type GithubSignals, type Level, type LevelReason, type LevelThresholds, type SignalThresholds } from "./admission.js";
 import { DAY_MS, isoDay, WEEK_MS, weekEnd, weekStart } from "./week.js";
@@ -29,7 +29,7 @@ import { labelKeepsOffGpt6 } from "./security-route.js";
 import { activePro, countProStep, PRO_FUNNEL_SCHEMA, proDigestLine, proFunnelDays, type ProFunnelDay, type ProFunnelStep } from "./pro-funnel.js";
 import { countGuard, everyonesTrust, GPT6_GUARD_SCHEMA, guardDays, noteTrustSession, personTrust, TRUST_MIN_TURNS, type Trust } from "./gpt6-trust.js";
 import { GUARD_OUTCOMES, type Checker, type GuardOutcome } from "./presend-guard.js";
-import { dayIso, MODERATION_HISTORY_DAYS, MODERATION_HISTORY_ROWS, MODERATION_VERDICTS, type ModerationAction, type ModerationAnswer, type ModerationCase, type ModerationVerdict, type TriggerLabel } from "./moderation.js";
+import { cleanReason, dayIso, MODERATION_HISTORY_DAYS, MODERATION_REASON_CHARS, MODERATION_HISTORY_ROWS, MODERATION_VERDICTS, type ModerationAction, type ModerationAnswer, type ModerationCase, type ModerationVerdict, type TriggerLabel } from "./moderation.js";
 import type { BroadcastClaim, UserEmailClaim } from "./user-email-send.js";
 import { WELCOME_KINDS, type UserEmailKind } from "./user-emails.js";
 import { runwayAlert, runwayFindings } from "./runway.js";
@@ -142,8 +142,8 @@ export interface ModerationRow {
   category: string;
   verdict: string;
   confidence: number;
+  /** The reviewer's own words, quoted spans cut out (moderation.ts stripQuotes). */
   reason: string;
-  signals: string[];
   action: string;
   model: string;
   /** Why the review failed (moderation.ts ModerationFailure), or null. */
@@ -922,9 +922,10 @@ const SCHEMA = [
      created_at INTEGER NOT NULL,
      PRIMARY KEY (github_id, hold_key)
    ) WITHOUT ROWID`,
-  // Automated moderation reviews of high-risk labels (moderation.ts): the verdict, the reviewer's
-  // short reason and evidence bullets (quotes of the person's words redacted), and what was done.
-  // Never the request's text. A row is written when the review is claimed (as "review failed")
+  // Automated moderation reviews of high-risk labels (moderation.ts): the verdict, category,
+  // confidence, the reviewer's short reason in its own words (quoted spans cut out) and what was
+  // done. Never the request's text nor the person's words. `signals` once held evidence bullets;
+  // it is always '[]' now (emptied once on startup, see #dropModerationQuotes). Kept USE_KEEP_DAYS. A row is written when the review is claimed (as "review failed")
   // and filled in when it ends, so a review that dies half way still counts toward the cooldown
   // and the daily cap.
   `CREATE TABLE IF NOT EXISTS moderation_decisions (
@@ -936,7 +937,7 @@ const SCHEMA = [
      verdict    TEXT NOT NULL,
      confidence REAL NOT NULL,
      reason     TEXT NOT NULL,
-     signals    TEXT NOT NULL,
+     signals    TEXT NOT NULL DEFAULT '[]',
      action     TEXT NOT NULL,
      model      TEXT NOT NULL,
      created_at INTEGER NOT NULL
@@ -1120,6 +1121,8 @@ const PERSON_TOTALS_READY = "rollup:person_totals";
 const GRANT_HISTORY_READY = "rollup:grant_history";
 /** Set in `settings` once the raw log's rollups (`person_daily`, `person_events`, `person_event_types`, `daily_activity.error_events`) have been built. */
 const RAW_ROLLUPS_READY = "rollup:raw_log";
+/** Set in `settings` once stored moderation evidence bullets are emptied and quotes cut from stored reasons. */
+const MODERATION_NO_QUOTES = "privacy:moderation_no_quotes";
 /** Rows of each raw table one `pruneRawLogs` call deletes at most: a short write, so requests queue behind it briefly. */
 export const PRUNE_BATCH_ROWS = 2000;
 
@@ -1154,6 +1157,29 @@ export class DirectoryObject extends DurableObject {
       this.#backfillPersonTotals();
       this.#seedGrantHistory();
       this.#backfillRawRollups();
+      this.#dropModerationQuotes();
+    });
+  }
+
+  /**
+   * Once: no stored row keeps the person's words. Moderation decisions lose their evidence bullets
+   * (`signals`, which could quote the request) and have quoted spans cut out of their reasons, as
+   * new ones are (moderation.ts cleanReason); the allocator's reasons get the same cut.
+   */
+  #dropModerationQuotes(): void {
+    const sql = this.ctx.storage.sql;
+    if (sql.exec("SELECT 1 FROM settings WHERE key = ?", MODERATION_NO_QUOTES).toArray().length > 0) return;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("UPDATE moderation_decisions SET signals = '[]' WHERE signals != '[]'");
+      for (const row of sql.exec<{ id: number; reason: string }>("SELECT id, reason FROM moderation_decisions").toArray()) {
+        const reason = cleanReason(row.reason, MODERATION_REASON_CHARS) || "(no reason given)";
+        if (reason !== row.reason) sql.exec("UPDATE moderation_decisions SET reason = ? WHERE id = ?", reason, row.id);
+      }
+      for (const row of sql.exec<{ id: number; reason: string }>("SELECT id, reason FROM allocator_decisions WHERE reason != ''").toArray()) {
+        const reason = cleanReason(row.reason, ALLOCATOR_REASON_CHARS);
+        if (reason !== row.reason) sql.exec("UPDATE allocator_decisions SET reason = ? WHERE id = ?", reason, row.id);
+      }
+      sql.exec("INSERT INTO settings (key, value) VALUES (?, '1')", MODERATION_NO_QUOTES);
     });
   }
 
@@ -3637,11 +3663,10 @@ export class DirectoryObject extends DurableObject {
     return this.ctx.storage.transactionSync(() => {
       if (input.tokens > 0) this.#recordInternalSpend(input);
       sql.exec(
-        "UPDATE moderation_decisions SET verdict = ?, confidence = ?, reason = ?, signals = ?, action = ?, model = ?, error = ? WHERE id = ?",
+        "UPDATE moderation_decisions SET verdict = ?, confidence = ?, reason = ?, signals = '[]', action = ?, model = ?, error = ? WHERE id = ?",
         input.answer.verdict,
         input.answer.confidence,
-        input.answer.reason,
-        JSON.stringify(input.answer.signals),
+        cleanReason(input.answer.reason, MODERATION_REASON_CHARS),
         input.action,
         input.model,
         input.failure,
@@ -3694,8 +3719,8 @@ export class DirectoryObject extends DurableObject {
   /** Moderation decisions since `since`, newest first, optionally one verdict (GET /admin/moderation). */
   async moderationDecisions(input: { since: number; verdict?: ModerationVerdict; limit: number }): Promise<ModerationRow[]> {
     return this.ctx.storage.sql
-      .exec<{ github_id: number; login: string | null; label_id: number | null; session_id: string | null; category: string; verdict: string; confidence: number; reason: string; signals: string; action: string; model: string; error: string | null; created_at: number }>(
-        `SELECT m.github_id, p.login, m.label_id, m.session_id, m.category, m.verdict, m.confidence, m.reason, m.signals, m.action, m.model, m.error, m.created_at
+      .exec<{ github_id: number; login: string | null; label_id: number | null; session_id: string | null; category: string; verdict: string; confidence: number; reason: string; action: string; model: string; error: string | null; created_at: number }>(
+        `SELECT m.github_id, p.login, m.label_id, m.session_id, m.category, m.verdict, m.confidence, m.reason, m.action, m.model, m.error, m.created_at
          FROM moderation_decisions m LEFT JOIN people p ON p.github_id = m.github_id
          WHERE m.created_at >= ? AND (? IS NULL OR m.verdict = ?)
          ORDER BY m.created_at DESC, m.id DESC LIMIT ?`,
@@ -3706,13 +3731,6 @@ export class DirectoryObject extends DurableObject {
       )
       .toArray()
       .map((row) => {
-        let signals: string[] = [];
-        try {
-          const parsed: unknown = JSON.parse(row.signals);
-          if (Array.isArray(parsed)) signals = parsed.filter((signal): signal is string => typeof signal === "string");
-        } catch {
-          // A row is only ever written with a JSON list; anything else shows as none.
-        }
         return {
           githubId: row.github_id,
           login: row.login,
@@ -3722,7 +3740,6 @@ export class DirectoryObject extends DurableObject {
           verdict: row.verdict,
           confidence: row.confidence,
           reason: row.reason,
-          signals,
           action: row.action,
           model: row.model,
           error: row.error,

@@ -4,7 +4,8 @@
  *
  *   1. OpenAI's Moderation API (omni-moderation-latest) on the company's OpenAI key: "flagged"
  *      stops the request.
- *   2. gpt-oss-safeguard-20b on OpenRouter, told the policy in DETECTION_RULES's `guardPolicy`
+ *   2. gpt-oss-safeguard-20b on OpenRouter (provider data_collection "deny": only hosts that
+ *      neither store nor train on prompts), told the policy in DETECTION_RULES's `guardPolicy`
  *      (detection-rules.ts: private in production, a generic default here). It answers "1"
  *      (violates) or "0".
  *
@@ -243,7 +244,7 @@ export function safeguardVerdict(text: unknown): CheckResult {
 /** gpt-oss-safeguard-20b on OpenRouter, told `policy`, on `input`; with what the call cost. */
 export async function safeguardCheck(
   fetcher: Fetch,
-  input: { apiKey: string | undefined; policy: string; text: string; timeoutMs: number; user: string; dataCollection: string },
+  input: { apiKey: string | undefined; policy: string; text: string; timeoutMs: number; user: string },
 ): Promise<{ result: CheckResult; spend: GuardSpend }> {
   const spend: GuardSpend = { tokens: 0, cashUsd: 0 };
   if (!input.apiKey) return { result: { verdict: "error", reason: "no_key" }, spend };
@@ -262,7 +263,9 @@ export async function safeguardCheck(
         temperature: 0,
         stream: false,
         usage: { include: true },
-        provider: { data_collection: input.dataCollection },
+        // Always: the request's text goes to whichever host serves this, so only hosts that neither
+        // store nor train on prompts, whatever OPENROUTER_DATA_COLLECTION says for user traffic.
+        provider: { data_collection: "deny" },
         user: input.user,
       }),
       signal,
@@ -288,13 +291,13 @@ export async function safeguardCheck(
  */
 export async function runGuard(
   fetcher: Fetch,
-  input: { body: Json; openaiApiKey: string | undefined; openRouterApiKey: string | undefined; policy: string; timeoutMs: number; user: string; dataCollection: string },
+  input: { body: Json; openaiApiKey: string | undefined; openRouterApiKey: string | undefined; policy: string; timeoutMs: number; user: string },
 ): Promise<GuardResult> {
   const text = guardInput(input.body);
   if (!text.trim()) return { verdict: "pass", openai: { verdict: "pass" }, safeguard: { verdict: "pass" }, flaggedBy: [], reason: "empty", spend: { tokens: 0, cashUsd: 0 }, text };
   const [openai, safeguard] = await Promise.all([
     openaiModeration(fetcher, input.openaiApiKey, text, input.timeoutMs),
-    safeguardCheck(fetcher, { apiKey: input.openRouterApiKey, policy: input.policy, text, timeoutMs: input.timeoutMs, user: input.user, dataCollection: input.dataCollection }),
+    safeguardCheck(fetcher, { apiKey: input.openRouterApiKey, policy: input.policy, text, timeoutMs: input.timeoutMs, user: input.user }),
   ]);
   const flaggedBy: Checker[] = [];
   if (openai.verdict === "flag") flaggedBy.push("openai");
