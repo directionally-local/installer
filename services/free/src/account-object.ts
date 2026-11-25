@@ -637,15 +637,17 @@ export class AccountObject extends DurableObject<AccountEnv> {
   // ─── Paid plans (plans.ts, plan-meter.ts) ─────────────────────────────────
 
   /**
-   * The plan state and this week's meters for `models`. The tier is the stored one while the
-   * subscription is active (Starter for a subscription from before the three plans), else "none".
+   * The plan state and this week's meters for `models`. The tier is the subscription's plan
+   * while it is on (`paidPlan`: billing's tier, set by the webhooks and the claim), else the one
+   * `setPlanTier` stored, else Starter (dl Pro from before the three plans, open question 4);
+   * "none" when not paying. The fallback setting is meta `plan_fallback` (`settings()`).
    * The first call that sees the account paying records when (the bonus's wait counts from it).
    */
   async planState(now: number, models: readonly string[] = []): Promise<PlanState> {
     const sql = this.ctx.storage.sql;
     this.#current(now);
     const paying = this.#row() !== undefined && this.#plan(now) === "pro";
-    const tier = tierOf(paying, readMeta(sql, META.tier));
+    const tier = tierOf(paying, (await this.paidPlan(now)) ?? readMeta(sql, META.tier));
     let paidSince: number | null = null;
     if (paying) {
       const stored = Number(readMeta(sql, META.paidSince));
@@ -677,10 +679,13 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return claimNotice(this.ctx.storage.sql, key, now);
   }
 
-  /** This week's per-model, per-day and per-tool meters, and the bonus dollars (dashboard). */
-  async meters(now: number): Promise<MeterSnapshot> {
+  /**
+   * This week's per-model, per-day and per-tool meters, and the bonus dollars (dashboard). `at`:
+   * a time in an earlier week (kept: this week and the four before it) for that week's instead.
+   */
+  async meters(now: number, at = now): Promise<MeterSnapshot> {
     pruneMeters(this.ctx.storage.sql, now);
-    return meterSnapshot(this.ctx.storage.sql, now);
+    return meterSnapshot(this.ctx.storage.sql, Math.min(at, now));
   }
 
   /**
@@ -936,16 +941,13 @@ export class AccountObject extends DurableObject<AccountEnv> {
     this.ctx.storage.sql.exec("INSERT INTO billing (k, refunded_at) VALUES (1, ?) ON CONFLICT(k) DO UPDATE SET refunded_at = excluded.refunded_at", at);
   }
 
+  /** The person's settings. `fallback` is the one store `planState` reads (meta `plan_fallback`, "off" = off). */
   async settings(): Promise<AccountSettings> {
-    // `plan_fallback`: the same meta key part B's plan limits read ("off" = off).
-    const fallback = this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'plan_fallback'").toArray()[0]?.value;
-    return { fallback: fallback !== "off" };
+    return { fallback: readMeta(this.ctx.storage.sql, META.fallback) !== "off" };
   }
 
   async setSettings(input: Partial<AccountSettings>): Promise<AccountSettings> {
-    if (input.fallback !== undefined) {
-      this.ctx.storage.sql.exec("INSERT INTO meta (key, value) VALUES ('plan_fallback', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", input.fallback ? "on" : "off");
-    }
+    if (input.fallback !== undefined) await this.setPlanFallback(input.fallback);
     return this.settings();
   }
 

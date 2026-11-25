@@ -3,59 +3,33 @@
  * names Stripe shows, the claim and refund windows, and the Price ids from config
  * (STRIPE_PRICE_STARTER, STRIPE_PRICE_PLUS, STRIPE_PRICE_MAX; never created by the service).
  *
- * The per-model weekly limits are part B's (`plans.ts`, `planLimits()`): PLAN_MODELS below is the
- * spec's table, used for the plan cards and Checkout's descriptions until that lands, then read
- * from there instead. Numbers are REAL tokens at the assumed caching mix, always shown with
- * CACHING_LABEL; what is enforced is counted tokens.
+ * The per-model weekly limits are part B's (`plans.ts`, `planLimits()`, runtime settings
+ * `planTokens.<plan>.<model>`): every page, email and description here reads them from there.
+ * Numbers are REAL tokens at the assumed caching mix, always shown with CACHING_LABEL; what is
+ * enforced is counted tokens.
  */
 
-import { DEEPSEEK_MODEL } from "./models.js";
+import { PLAN_MIX, PLAN_MIX_LABEL, approxTokens, countedFactor, type PlanModelLimit } from "./plans.js";
 
 export const PLAN_IDS = ["starter", "plus", "max"] as const;
 export type PlanId = (typeof PLAN_IDS)[number];
-
-export interface PlanModel {
-  id: string;
-  name: string;
-  /** Real tokens a week at the assumed caching mix (the number people see). */
-  tokensPerWeek: number;
-}
 
 export interface PlanSpec {
   id: PlanId;
   name: string;
   priceUsd: number;
-  models: readonly PlanModel[];
 }
 
-const KIMI_MODEL = "moonshotai/kimi-k3.1-pro";
-
-/** The spec's per-model limits (part B's plans.ts is the source once merged); in card order. */
+/** In card order. */
 export const PLANS: Record<PlanId, PlanSpec> = {
-  starter: { id: "starter", name: "dl.new Starter", priceUsd: 7, models: [{ id: DEEPSEEK_MODEL, name: "DeepSeek V4.1 Flash", tokensPerWeek: 62_000_000 }] },
-  plus: {
-    id: "plus",
-    name: "dl.new Plus",
-    priceUsd: 20,
-    models: [
-      { id: DEEPSEEK_MODEL, name: "DeepSeek V4.1 Flash", tokensPerWeek: 150_000_000 },
-      { id: KIMI_MODEL, name: "Kimi K3.1", tokensPerWeek: 1_500_000 },
-    ],
-  },
-  max: {
-    id: "max",
-    name: "dl.new Max",
-    priceUsd: 60,
-    models: [
-      { id: DEEPSEEK_MODEL, name: "DeepSeek V4.1 Flash", tokensPerWeek: 450_000_000 },
-      { id: KIMI_MODEL, name: "Kimi K3.1", tokensPerWeek: 4_000_000 },
-    ],
-  },
+  starter: { id: "starter", name: "dl.new Starter", priceUsd: 7 },
+  plus: { id: "plus", name: "dl.new Plus", priceUsd: 20 },
+  max: { id: "max", name: "dl.new Max", priceUsd: 60 },
 };
 
-/** The caching mix the shown numbers assume: 95.5% cached input, 3.8% fresh input, 0.7% output. */
-export const ASSUMED_MIX = { cached: 0.955, fresh: 0.038, output: 0.007 } as const;
-export const CACHING_LABEL = "(95.5% caching applied)";
+/** The caching mix the shown numbers assume: 95.5% cached input, 3.8% fresh input, 0.7% output (plans.ts PLAN_MIX). */
+export const ASSUMED_MIX = PLAN_MIX;
+export const CACHING_LABEL = `(${PLAN_MIX_LABEL})`;
 /** Full refund on request within this many days of the first payment. */
 export const REFUND_DAYS = 7;
 /** An unclaimed paid Checkout can be claimed (and its email link works) this long. */
@@ -63,7 +37,7 @@ export const CLAIM_DAYS = 7;
 
 /** Counted tokens per real token at the assumed mix: cached × weight + fresh + output (0.0641 at weight 0.02). */
 export function realToCounted(cachedTokenWeight: number): number {
-  return ASSUMED_MIX.cached * cachedTokenWeight + ASSUMED_MIX.fresh + ASSUMED_MIX.output;
+  return countedFactor(cachedTokenWeight);
 }
 
 export function countedTokens(realTokens: number, cachedTokenWeight: number): number {
@@ -79,21 +53,12 @@ export function isUpgrade(from: PlanId, to: PlanId): boolean {
   return PLAN_IDS.indexOf(to) > PLAN_IDS.indexOf(from);
 }
 
-/** "~62M", "~1.5M": the short form plan cards and emails use. */
-export function approxTokens(tokens: number): string {
-  if (tokens >= 1_000_000) {
-    const millions = tokens / 1_000_000;
-    return `~${Number.isInteger(millions) ? millions : millions.toFixed(1).replace(/\.0$/, "")}M`;
-  }
-  return `~${Math.round(tokens / 1000)}K`;
-}
-
 /**
- * The plan's line for Checkout, receipts and emails, e.g.
+ * The plan's line for receipts, emails and the account page, from its limits (`planLimits()`), e.g.
  * "DeepSeek V4.1 Flash ~150M/week + Kimi K3.1 ~1.5M/week (95.5% caching applied). Weekly limits reset Mon 00:00 UTC."
  */
-export function planDescription(plan: PlanSpec): string {
-  const models = plan.models.map((model) => `${model.name} ${approxTokens(model.tokensPerWeek)}/week`).join(" + ");
+export function planDescription(limits: readonly Pick<PlanModelLimit, "name" | "realTokens">[]): string {
+  const models = limits.map((limit) => `${limit.name} ${approxTokens(limit.realTokens)}/week`).join(" + ");
   return `${models} ${CACHING_LABEL}. Weekly limits reset Mon 00:00 UTC.`;
 }
 
@@ -103,23 +68,45 @@ export function planOfPrice(prices: Partial<Record<PlanId, string>>, priceId: un
   return PLAN_IDS.find((plan) => prices[plan] === priceId);
 }
 
-/** The public catalog (GET /web/plans). */
-export function plansView(input: { cachedTokenWeight: number; available: boolean }) {
-  const ratio = realToCounted(input.cachedTokenWeight);
+/**
+ * The public catalog (GET /web/plans): A's prices and names with part B's catalogue
+ * (`planCatalog()`: each model's real and counted tokens a week, its `text`, the bonus offer).
+ */
+export function plansView(input: {
+  catalog: {
+    plans: ReadonlyArray<{ id: string; models: ReadonlyArray<{ model: string; name: string; realTokensPerWeek: number; countedTokensPerWeek: number; text: string }> }>;
+    mix: { cachedTokenWeight: number; countedFactor: number };
+    bonus: unknown;
+    resets: string;
+  };
+  available: boolean;
+}) {
+  const { catalog } = input;
   return {
     plans: PLAN_IDS.map((id) => {
       const plan = PLANS[id];
+      const models = catalog.plans.find((entry) => entry.id === id)?.models ?? [];
       return {
         id,
         name: plan.name,
         priceUsd: plan.priceUsd,
         interval: "month",
-        description: planDescription(plan),
-        models: plan.models.map((model) => ({ id: model.id, name: model.name, tokensPerWeek: model.tokensPerWeek, approx: approxTokens(model.tokensPerWeek), countedTokensPerWeek: Math.round(model.tokensPerWeek * ratio) })),
+        description: planDescription(models.map((model) => ({ name: model.name, realTokens: model.realTokensPerWeek }))),
+        models: models.map((model) => ({
+          id: model.model,
+          name: model.name,
+          tokensPerWeek: model.realTokensPerWeek,
+          approx: approxTokens(model.realTokensPerWeek),
+          countedTokensPerWeek: model.countedTokensPerWeek,
+          text: model.text,
+        })),
       };
     }),
-    caching: { assumedCachedShare: ASSUMED_MIX.cached, label: CACHING_LABEL, cachedTokenWeight: input.cachedTokenWeight, realToCounted: Math.round(ratio * 10_000) / 10_000 },
+    caching: { assumedCachedShare: ASSUMED_MIX.cached, label: CACHING_LABEL, cachedTokenWeight: catalog.mix.cachedTokenWeight, realToCounted: Math.round(catalog.mix.countedFactor * 10_000) / 10_000 },
+    resets: catalog.resets,
     refundDays: REFUND_DAYS,
+    /** The GPT-6 launch bonus offer (plan-usage.ts bonusOffer): `fullyClaimed` shows "GPT-6 launch bonus: fully claimed". */
+    gpt6Bonus: catalog.bonus,
     available: input.available,
   };
 }

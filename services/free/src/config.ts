@@ -13,10 +13,11 @@ import { FULL_PRECISION, isProviderSlugList, isQuantizationList, splitList, type
 import { PLAN_DEFAULTS, PLAN_SETTING_ENV, type PlanSettingsConfig } from "./plans.js";
 import { GPT6_BONUS_DEFAULTS, type Gpt6BonusSettingsConfig } from "./gpt6-bonus.js";
 import { FREE_ENDS_AT } from "./plan-limits.js";
+import { EMAIL_BUDGET_DEFAULTS, type EmailBudgetSettingsConfig } from "./email-budget.js";
 
 export class ConfigError extends Error {}
 
-export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, Gpt6BonusSettingsConfig {
+export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, Gpt6BonusSettingsConfig, EmailBudgetSettingsConfig {
   /** Paid plans on (PAID_PLANS, default off until launch; also a runtime setting): see plans.ts. */
   paidPlans: boolean;
   /**
@@ -709,6 +710,10 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     speedProbes: flag(env.SPEED_PROBES, true, "SPEED_PROBES"),
     ...registrySettings(env),
     ...planSettings(env),
+    // The daily email budget (email-budget.ts): the provider's quota is unknown, so conservative.
+    userEmailsDailyMax: whole(env.USER_EMAILS_DAILY_MAX, EMAIL_BUDGET_DEFAULTS.userEmailsDailyMax, "USER_EMAILS_DAILY_MAX"),
+    userEmailsTransactionalReserve: whole(env.USER_EMAILS_TRANSACTIONAL_RESERVE, EMAIL_BUDGET_DEFAULTS.userEmailsTransactionalReserve, "USER_EMAILS_TRANSACTIONAL_RESERVE"),
+    emailCodesDailyMax: whole(env.EMAIL_CODES_DAILY_MAX, EMAIL_BUDGET_DEFAULTS.emailCodesDailyMax, "EMAIL_CODES_DAILY_MAX"),
     paidPlans: flag(env.PAID_PLANS, false, "PAID_PLANS"),
     freeEndsAt: env.FREE_ENDS_AT === undefined ? FREE_ENDS_AT : instant(env.FREE_ENDS_AT, "FREE_ENDS_AT"),
     paused: flag(env.PAUSED, false, "PAUSED"),

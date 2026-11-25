@@ -36,9 +36,11 @@ No auth. What the plan cards show.
   "plans": [
     {
       "id": "starter", "name": "dl.new Starter", "priceUsd": 7, "interval": "month",
+      "description": "DeepSeek V4.1 Flash ~62M/week (95.5% caching applied). Weekly limits reset Mon 00:00 UTC.",
       "models": [
         {"id": "deepseek/deepseek-v4.1-flash-1017", "name": "DeepSeek V4.1 Flash",
-         "tokensPerWeek": 62000000, "countedTokensPerWeek": 3974200}
+         "tokensPerWeek": 62000000, "approx": "~62M", "countedTokensPerWeek": 3974200,
+         "text": "DeepSeek V4.1 Flash ~62M/week (95.5% caching applied)"}
       ]
     },
     {"id": "plus", "name": "dl.new Plus", "priceUsd": 20, "interval": "month", "models": [ ... ]},
@@ -46,14 +48,22 @@ No auth. What the plan cards show.
   ],
   "caching": {"assumedCachedShare": 0.955, "label": "(95.5% caching applied)",
               "cachedTokenWeight": 0.02, "realToCounted": 0.0641},
+  "resets": "Mon 00:00 UTC",
   "refundDays": 7,
+  "gpt6Bonus": {"enabled": false, "label": "launch bonus, through 31 Jan 2027",
+                "line": "$2/week of GPT-6.1 Sol usage in dl", "weeklyUsd": 2, "fullyClaimed": false,
+                "fullyClaimedText": "GPT-6 launch bonus: fully claimed", "endsAt": "2027-02-01T00:00:00.000Z"},
   "available": true
 }
 ```
 
 - `tokensPerWeek` is **real** tokens at the assumed caching mix (what the page shows, always with
-  `caching.label`); `countedTokensPerWeek` is what is enforced **[B]**. Both come from
-  part B's `plans.ts` (`planLimits()`); until it lands, the spec's table in `plan-prices.ts`.
+  `caching.label`); `countedTokensPerWeek` is what is enforced. Both come from part B's
+  `planCatalog()` (`plans.ts` `planLimits()`), so they follow the runtime settings
+  `planTokens.<plan>.<model>` and the live `cachedTokenWeight`; prices and names are
+  `plan-prices.ts`'s.
+- `gpt6Bonus`: the launch bonus offer (`plan-usage.ts` `bonusOffer`); `fullyClaimed: true` → the
+  card shows `fullyClaimedText`.
 - `available: false` while STRIPE_SECRET_KEY or a plan's price id is missing: show the cards but
   disable the button.
 
@@ -178,7 +188,10 @@ Ends this web session at once (the token stops working).
   },
   "legacy": null,
   "settings": {"fallback": true},
-  "limits": null,
+  "limits": [{"model": "deepseek/deepseek-v4.1-flash-1017", "name": "DeepSeek V4.1 Flash",
+              "tokensPerWeek": 62000000, "countedTokensPerWeek": 3974200, "countedUsed": 1254000,
+              "realUsed": 19600000, "usedAtPlanMix": 19564000, "cachingShare": 0.957, "percent": 31,
+              "resetsAt": "2026-12-07T00:00:00.000Z", "state": "ok"}],
   "gpt6Bonus": null,
   "upgrade": [{"plan": "plus", "priceUsd": 20}, {"plan": "max", "priceUsd": 60}]
 }
@@ -188,11 +201,16 @@ Ends this web session at once (the token stops working).
   Stripe retries per its dunning settings and the plan keeps working meanwhile), `"canceled"`.
 - `legacy`: for accounts from before the paid launch: `{"plan": "free" | "pro"}` (dl Pro's
   subscribers). Part B decides what they get after 8 Dec.
-- `limits` **[B]**: one entry per model of the plan, the bar data:
-  `[{"model", "name", "tokensPerWeek", "countedTokensPerWeek", "countedUsed", "realUsed",
-  "cachingShare", "percent", "resetsAt", "state": "ok" | "warning" | "used_up"}]`.
-- `gpt6Bonus` **[B]**: `{"usdPerWeek": 2, "usedUsd": 0.8, "leftUsd": 1.2, "resetsAt",
-  "until": "2027-01-31", "label": "launch bonus, through 31 Jan 2027"}` or null.
+- `limits`: one entry per model of the plan, the bar data (part B's `planLimitsView`), or null
+  without a plan: `[{"model", "name", "tokensPerWeek", "countedTokensPerWeek", "countedUsed",
+  "realUsed", "usedAtPlanMix", "cachingShare", "percent", "resetsAt", "state": "ok" | "warning" |
+  "used_up"}]`. `usedAtPlanMix` is the bar in real tokens at the plan mix ("19.6M of ~62M").
+- `gpt6Bonus`: `{"usdPerWeek": 2, "usedUsd": 0.8, "leftUsd": 1.2, "resetsAt",
+  "until": "2027-01-31", "label": "launch bonus, through 31 Jan 2027", "line"}` (part B's
+  `bonusAccountView`) or null: the bonus is off, or the account doesn't hold it.
+- The plan the account's requests are held to is this one: part B's `AccountObject.planState()`
+  reads `paidPlan()` (billing's tier, from the webhooks and the claim). A dl Pro subscription
+  from before the launch (no tier) is held to Starter's limits (open question 4).
 - `refundableUntil`: 7 days after the first payment; null once past or refunded.
 
 ### POST /web/account/email {email} (web token) → `200 {"sent": true, "resendAfter": 30, "expiresIn": 600}`
@@ -208,8 +226,9 @@ customer's email. Errors as `/web/auth/email/verify`.
 ### GET /web/settings, PUT /web/settings {fallback} (web token)
 
 `{"fallback": true}`: at a model's weekly limit, requests move to DeepSeek V4.1 Flash while it
-has allowance (default on). `false`: a clear limit error instead. Stored on the account
-(`AccountObject.settings()`); part B reads it **[B]**.
+has allowance (default on). `false`: a clear limit error instead. One store: meta
+`plan_fallback` on the account, which `settings()`, part B's `planState()` and
+`POST /v1/plan/fallback` all read and write.
 
 ## 4. API keys (`dl_sk_`)
 
@@ -286,22 +305,28 @@ Device-code style; the CLI never sees a password or pastes a key.
               "requests": 400, "cachedInput": 0, "freshInput": 0, "output": 0,
               "realTokens": 0, "countedTokens": 0, "cachingShare": 0.957,
               "limit": null}],
-  "days": [{"day": "2026-11-30", "countedTokens": 210000, "realTokens": 3300000, "requests": 70}],
+  "days": [{"day": "2026-11-30", "countedTokens": 210000, "realTokens": 3300000}],
   "tools": [{"tool": "claude-code", "requests": 300, "countedTokens": 900000, "realTokens": 14000000}],
+  "plan": "starter", "plansEnforced": true,
+  "gpt6Bonus": null,
   "cachedTokenWeight": 0.02
 }
 ```
 
 - Counted = cached × `cachedTokenWeight` + fresh input + output (the live config's weight;
   0.02 today). `realToCounted` = counted / real.
-- `failovers`: attempts an upstream failed (rate limit, error, timeout) that were retried on
-  another provider this week.
-- `models[].limit` **[B]**: the same object as `/web/account` `limits[]`, or null.
+- `failovers`: requests a backup provider or a fallback model served (part B's meters: plan
+  fallback Kimi → DeepSeek, bonus used up → DeepSeek, provider failover).
+- `models[]`: the plan's models (always listed, with their bar) and any other model used that
+  week. `models[].limit`: the same object as `/web/account` `limits[]` (this week only), or null.
+- `gpt6Bonus`: this week's bonus `{usdPerWeek, usedUsd, leftUsd, label, line}` while the account
+  holds it, else null.
 - `tools[].tool`: `"autopilot"`, `"claude-code"`, `"opencode"`, `"pi"`, or the tool key's tool
   (`"cursor"`, `"cline"`…), `"other"` when unknown.
-- Read from the request log, which keeps `rawLogKeepDays` (35 days by default): older weeks answer
-  400 `week_unavailable`; `?week=` must be a Monday (400 `invalid_week`).
-- `models[].limit` and the bars' numbers come from part B; until then `limit` is null.
+- Read from the account's per-model meters (part B's `planUsageFor`, `plan-meter.ts`), which keep
+  this week and the four before it: older weeks answer 400 `week_unavailable`; `?week=` must be
+  a Monday (400 `invalid_week`). The request log feeds only `/web/usage/live`. `days[]` has no
+  request count (the meters count requests per model and per tool, not per day).
 
 ### GET /web/usage/live?after=<id> (web token): the connect page's live box
 
@@ -379,3 +404,33 @@ Unclaimed sessions get plan changes recorded on the session row and applied when
 5. **Email identity for legacy GitHub accounts**: a free GitHub user who later picks "Use email"
    with the same address gets a new, separate account (emails were never verified before). OK?
 6. **Max plan cost** (spec note): 450M DeepSeek alone may exceed $30/month at list. Owner. **[B]**
+
+## After both parts (the wiring PR)
+
+- **Plan identity**: `AccountObject.planState()` takes the tier from `paidPlan()` (billing's
+  tier), else part B's meta `plan_tier`, else Starter for a paying account without one (legacy
+  dl Pro). A dl.new account (number from 2^50) with no active plan gets 402 `plan_required` on
+  every request, before and after `freeEndsAt`.
+- **GPT-6 launch bonus**: no wait after the first payment (`gpt6BonusDelayHours` 0). It is
+  granted at the claim when it is on and a new subscriber fits the projection, so the welcome
+  email can name it. A request the plan serves from the bonus skips the GPT-6 trust gate (paid =
+  trusted for the bonus only); every other bonus condition stays (Autopilot only, the pre-send
+  guard on `enforce`, safety identifiers, $2/week, the output cap, the credit-based projection,
+  the end on 31 Jan 2027, never on cash). GPT-6 outside the bonus still needs trust.
+- **Welcome email** (`welcome_paid`, user-emails.ts): on claim, once per payment: where the key
+  is (dl.new/connect), `curl -fsSL dl.new | sh` then `dl claude`, other tools' base URL and
+  dl.new/keys, dl.new/signin, each plan model's weekly limit with "(95.5% caching applied)", the
+  refund policy, and the bonus line when the account holds it.
+- **Email budget** (email-budget.ts): settings `userEmailsDailyMax` (300), of it
+  `userEmailsTransactionalReserve` (100) kept for transactional mail (claim, paid welcome,
+  plan_80, access answers); bulk and lifecycle mail (welcome_*, didnt_start, week_80, gone_quiet,
+  weekly_reset, plan_reset, broadcasts) stop at 200. Codes never count against the daily max and
+  have their own ceiling `emailCodesDailyMax` (300); past it `/web/auth/email/start` answers 503
+  `email_unavailable`. Conservative: the provider's real daily quota isn't known.
+- **Lifecycle emails**: the free tier's kinds and broadcasts never go to dl.new accounts; paying
+  accounts get `plan_80` per model, never `week_80`.
+- **Monday email to paying accounts** (`plan_reset`): "Your ~62M tokens reset." (the plan's
+  first model's limit), last week per plan model (real tokens, caching, the counted math against
+  the counted limit), sessions, failovers, dl.new/usage and dl.new/billing. Same window and
+  switches as `weekly_reset` (`weeklyResetEmail`, `userEmails`), and only once `freeEndsAt` has
+  passed (the first one is Mon 14 Dec 2026).

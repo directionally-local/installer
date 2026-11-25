@@ -17,7 +17,10 @@
  *       no high-risk use label and no moderation "block" or "watch" in TRUST_CLEAN_DAYS days.
  *
  * Paying is not a trust signal: a Pro subscription or a top-up never unlocks GPT-6 (dl Pro buys
- * more open models, not GPT-6). Every signal comes from the service's own records, never from Autopilot's events alone. A
+ * more open models, not GPT-6). The one exception is the GPT-6 launch bonus (gpt6-bonus.ts): a
+ * request a paid plan serves from the bonus skips this gate (app.ts chat), because the bonus has
+ * its own conditions (Autopilot only, the pre-send guard, a $2/week meter); everything else
+ * about GPT-6 still needs trust. Every signal comes from the service's own records, never from Autopilot's events alone. A
  * blocked or suspended account is never trusted. The answer is cached per person for an hour
  * (`gpt6_trust`); a high-risk label or a block/watch verdict newer than the cached answer
  * drops a cached trust at once.

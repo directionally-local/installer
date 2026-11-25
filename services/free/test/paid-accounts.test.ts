@@ -4,7 +4,8 @@ import { ADMIN_ID, createService, errorCode, type Service } from "./harness.js";
 import { buy, DL, emailSignIn, FakeStripe, githubRoundTrip, lastCode, PAGE_STATE, PAID_VARS, PRICES, type SessionResponse } from "./paid-fixtures.js";
 import { accountIdOf, formatApiKey, isPaidAccountNumber, PAID_ACCOUNT_BASE, parseAccountId, parseApiKey } from "../src/accounts.js";
 import { isDisposableDomain } from "../src/email-guard.js";
-import { countedTokens, planDescription, PLANS, realToCounted } from "../src/plan-prices.js";
+import { countedTokens, planDescription, realToCounted } from "../src/plan-prices.js";
+import { PLAN_DEFAULTS, planLimits } from "../src/plans.js";
 
 /**
  * dl.new's paid launch, accounts (docs/web-api-paid.md): plans and Checkout before any account,
@@ -38,7 +39,7 @@ describe("accounts: ids and keys", () => {
   it("converts real tokens to counted at the cached weight (0.0641 at 0.02)", () => {
     assert.equal(Math.round(realToCounted(0.02) * 10_000) / 10_000, 0.0641);
     assert.equal(countedTokens(62_000_000, 0.02), 3_974_200);
-    assert.equal(planDescription(PLANS.plus), "DeepSeek V4.1 Flash ~150M/week + Kimi K3.1 ~1.5M/week (95.5% caching applied). Weekly limits reset Mon 00:00 UTC.");
+    assert.equal(planDescription(planLimits("plus", { ...PLAN_DEFAULTS, cachedTokenWeight: 0.02 })), "DeepSeek V4.1 Flash ~150M/week + Kimi K3.1 ~1.5M/week (95.5% caching applied). Weekly limits reset Mon 00:00 UTC.");
   });
 });
 
