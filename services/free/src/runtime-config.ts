@@ -236,6 +236,39 @@ export const RUNTIME_SETTINGS = {
   moderationCooldownMinutes: { kind: "count", env: "MODERATION_COOLDOWN_MINUTES" },
   /** Reviews a UTC day across everyone; past it, the plain high-risk email; 0 stops reviews. */
   moderationDailyCap: { kind: "count", env: "MODERATION_DAILY_CAP" },
+  // Paid plans (plans.ts): each plan's weekly limit per model in REAL tokens at the plan mix
+  // (95.5% cached, 3.8% fresh, 0.7% output); enforced in counted tokens (x 0.0641 at
+  // cachedTokenWeight 0.02). 0 takes the model out of the plan.
+  /**
+   * Paid plans on: paying accounts are held to their plan's per-model limits, with the fallback,
+   * the 80% warning and the GPT-6 launch bonus. Off (the default until launch): subscriptions get
+   * dl Pro's old rules.
+   */
+  paidPlans: { kind: "flag", env: "PAID_PLANS" },
+  /** Starter's DeepSeek V4.1 Flash a week (default 62M). */
+  "planTokens.starter.deepseek": { kind: "tokens", env: "PLAN_TOKENS_STARTER_DEEPSEEK" },
+  /** Plus's DeepSeek V4.1 Flash a week (default 150M). */
+  "planTokens.plus.deepseek": { kind: "tokens", env: "PLAN_TOKENS_PLUS_DEEPSEEK" },
+  /** Plus's Kimi K3.1 a week (default 1.5M). */
+  "planTokens.plus.kimi": { kind: "tokens", env: "PLAN_TOKENS_PLUS_KIMI" },
+  /** Max's DeepSeek V4.1 Flash a week (default 450M). */
+  "planTokens.max.deepseek": { kind: "tokens", env: "PLAN_TOKENS_MAX_DEEPSEEK" },
+  /** Max's Kimi K3.1 a week (default 4M). */
+  "planTokens.max.kimi": { kind: "tokens", env: "PLAN_TOKENS_MAX_KIMI" },
+  /** When free tokens end for non-paying accounts (default 2026-12-08T00:00:00Z); "none": never. */
+  freeEndsAt: { kind: "instant", env: "FREE_ENDS_AT" },
+  /** The GPT-6 launch bonus for paying accounts (gpt6-bonus.ts); default off. */
+  gpt6Bonus: { kind: "flag", env: "GPT6_BONUS" },
+  /** The bonus a paying account gets a week, USD of GPT-6.1 Sol usage (default 2). */
+  gpt6BonusWeeklyUsd: { kind: "amount", env: "GPT6_BONUS_WEEKLY_USD" },
+  /** When the bonus ends for everyone (default 2027-02-01T00:00:00Z, i.e. through 31 Jan). */
+  gpt6BonusEndsAt: { kind: "instant", env: "GPT6_BONUS_ENDS_AT" },
+  /** Hours after the first payment before the bonus starts (default 0). */
+  gpt6BonusDelayHours: { kind: "count", env: "GPT6_BONUS_DELAY_HOURS" },
+  /** The most output tokens one bonus request may ask for (default 16384). */
+  gpt6BonusMaxOutputTokens: { kind: "tokens", env: "GPT6_BONUS_MAX_OUTPUT_TOKENS" },
+  /** Projected Autopilot GPT-6 spend a week for the bonus grant check, USD; "none": this week's measured OpenAI run rate. */
+  gpt6BonusRunRateUsdPerWeek: { kind: "usd", env: "GPT6_BONUS_RUN_RATE_USD_PER_WEEK" },
   /** The token allocator (allocator.ts): "on" or "off". */
   allocator: { kind: "allocatorMode", env: "ALLOCATOR" },
   /** Every account's weekly start grant while the allocator is on; never lowers a higher allowance. */

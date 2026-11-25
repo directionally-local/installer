@@ -1,6 +1,6 @@
 import { base64urlDecode, base64urlEncode } from "../../shared/src/auth.js";
 import type { FreeConfig } from "./config.js";
-import { renderUserEmail, resetsText, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
+import { renderUserEmail, resetsText, type PlanWarningValues, type UserEmailKind, type WeeklyResetValues } from "./user-emails.js";
 import { DAY_MS, weekEnd, weekStart } from "./week.js";
 
 /**
@@ -11,6 +11,7 @@ import { DAY_MS, weekEnd, weekStart } from "./week.js";
  *
  *   welcome      right after a new sign-up gives their email on the details step (app.ts)
  *   didnt_start  daily cron: admitted 24 to 72 hours ago, no request yet
+ *   plan_80      a paid plan's model at 80% of its weekly limit, once per model per week (app.ts chat)
  *   week_80      when a request's settlement takes the week's usage to 80% of a pool's tokens
  *                or of the weekly dollar cap (once per week)
  *   gone_quiet   daily cron: requests on 2 or more days, none in the last 7 days
@@ -228,6 +229,8 @@ export async function deliverUserEmail(input: {
   retry?: boolean;
   /** weekly_reset's values (its {tokens}, {grows} and {login}). */
   weeklyReset?: WeeklyResetValues;
+  /** plan_80's values (the model and its numbers). */
+  planWarning?: PlanWarningValues;
   /** Claim only while fewer than this many emails to users were claimed today (every kind). */
   dailyLimit?: number;
 }): Promise<"sent" | "failed" | "skipped"> {
@@ -250,7 +253,7 @@ export async function deliverUserEmail(input: {
   }
   if (!claim) return "skipped";
   const unsubscribeUrl = await stopUrl(input.base, input.signingKey, claim.githubId);
-  const email = renderUserEmail(claim.kind, { resets: resetsText(weekEnd(input.now)), unsubscribeUrl, proOffered: config.proOffered, ...(input.weeklyReset ? { weeklyReset: input.weeklyReset } : {}) });
+  const email = renderUserEmail(claim.kind, { resets: resetsText(weekEnd(input.now)), unsubscribeUrl, proOffered: config.proOffered, ...(input.weeklyReset ? { weeklyReset: input.weeklyReset } : {}), ...(input.planWarning ? { planWarning: input.planWarning } : {}) });
   const { ok } = await sendPlainEmail(transport, config, {
     to: claim.email,
     subject: email.subject,

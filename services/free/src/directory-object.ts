@@ -59,6 +59,7 @@ import {
 } from "./paid-store.js";
 import { paidLogin, type IdentityKind } from "./accounts.js";
 import type { PlanId } from "./plan-prices.js";
+import { BONUS_SCHEMA, bonusHolders, canGrantOneMore, grantBonus, type BonusProjectionInput } from "./gpt6-bonus.js";
 
 /**
  * Who is in, and what they used. One object (`getByName("directory")`): admissions, invite
@@ -237,6 +238,8 @@ export interface RequestRecord {
    * Unset: "error" with `upstreamError`, else "ok".
    */
   upstreamOutcome?: UpstreamOutcome;
+  /** A backup provider or a fallback model served it (a plan fallback, or a provider failover). */
+  failover?: boolean;
   /** Sent with a server key (dlk_, dl's server mode) rather than a sign-in's access token. */
   viaKey?: boolean;
   /**
@@ -1031,6 +1034,8 @@ const ADDED_COLUMNS: Array<[table: string, column: string, definition: string]> 
   ["requests", "ttft_ms", "INTEGER"],
   ["requests", "upstream_error", "INTEGER NOT NULL DEFAULT 0"],
   ["requests", "upstream_outcome", "TEXT"],
+  // A backup provider or a fallback model served the request (plan fallback, provider failover).
+  ["requests", "failover", "INTEGER NOT NULL DEFAULT 0"],
   ["spend_weeks", "credit_usd", "REAL NOT NULL DEFAULT 0"],
   ["spend_weeks", "free_credit_usd", "REAL NOT NULL DEFAULT 0"],
   // OpenAI's prepaid credit, kept apart from Luminal's.
@@ -1125,7 +1130,7 @@ export class DirectoryObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA, ...EVENT_CODE_SCHEMA, ...PAID_SCHEMA]) this.ctx.storage.sql.exec(statement);
+      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA, ...EVENT_CODE_SCHEMA, ...BONUS_SCHEMA, ...PAID_SCHEMA]) this.ctx.storage.sql.exec(statement);
       ensureAllocatorSchema(this.ctx.storage.sql);
       const added = new Set<string>();
       for (const [table, column, definition] of ADDED_COLUMNS) {
@@ -1972,7 +1977,8 @@ export class DirectoryObject extends DurableObject {
       if ((WELCOME_KINDS.includes(input.kind) || input.kind === "didnt_start") && sql.exec("SELECT 1 FROM queue WHERE github_id = ? AND admitted_at IS NULL", input.githubId).toArray().length > 0) return undefined;
       // At most one a day, except the answer to an access request the person asked for.
       const today = sql.exec("SELECT 1 FROM user_emails WHERE github_id = ? AND day = ? AND status IN ('pending', 'sent') LIMIT 1", input.githubId, day).toArray();
-      if (today.length > 0 && input.kind !== "access_granted") return undefined;
+      // plan_80 too: a paying account's limit warning, at most once per model a week.
+      if (today.length > 0 && input.kind !== "access_granted" && input.kind !== "plan_80") return undefined;
       // `dailyLimit` (the weekly_reset run): at most this many emails to users claimed today, every kind.
       if (input.dailyLimit !== undefined && this.#userEmailsToday(day) >= input.dailyLimit) return undefined;
       sql.exec(
@@ -2018,8 +2024,8 @@ export class DirectoryObject extends DurableObject {
     const retries = sql
       .exec<{ github_id: number; kind: UserEmailKind; period: string }>(
         // Broadcasts are retried only by the owner calling the endpoint again.
-        // The weekly ones (week_80, weekly_reset) only within their own week.
-        "SELECT github_id, kind, period FROM user_emails WHERE status = 'failed' AND attempts < 2 AND kind != 'broadcast' AND (kind NOT IN ('week_80', 'weekly_reset') OR period = ?) ORDER BY claimed_at",
+        // The weekly ones (week_80, weekly_reset) only within their own week; plan_80 never (its numbers were the request's).
+        "SELECT github_id, kind, period FROM user_emails WHERE status = 'failed' AND attempts < 2 AND kind NOT IN ('broadcast', 'plan_80') AND (kind NOT IN ('week_80', 'weekly_reset') OR period = ?) ORDER BY claimed_at",
         week,
       )
       .toArray()
@@ -2649,6 +2655,22 @@ export class DirectoryObject extends DurableObject {
    * spend. With the env settings (`envPolicy`), Monday's queue admission runs first if it hasn't
    * this week; with `githubId` too, the caller's queue place, referral numbers and bonus.
    */
+  /**
+   * The GPT-6 launch bonus for one paying account (gpt6-bonus.ts): kept when held, granted when
+   * one more holder fits the projection under the remaining OpenAI credit, else not.
+   */
+  async gpt6BonusGrant(githubId: number, projection: Omit<BonusProjectionInput, "holders">): Promise<{ granted: boolean; holders: number; fullyClaimed: boolean }> {
+    return this.ctx.storage.transactionSync(() => grantBonus(this.ctx.storage.sql, githubId, projection));
+  }
+
+  /** Whether this account holds the bonus, how many do, and whether a new subscriber would still get it. */
+  async gpt6BonusStatus(githubId: number | undefined, projection: Omit<BonusProjectionInput, "holders">): Promise<{ granted: boolean; holders: number; fullyClaimed: boolean }> {
+    const sql = this.ctx.storage.sql;
+    const holders = bonusHolders(sql);
+    const granted = githubId !== undefined && sql.exec("SELECT 1 FROM gpt6_bonus_grants WHERE github_id = ?", githubId).toArray().length > 0;
+    return { granted, holders, fullyClaimed: !canGrantOneMore({ ...projection, holders }) };
+  }
+
   async gate(now: number, envPolicy?: Policy, githubId?: number): Promise<Gate> {
     const overrides = this.#overrides();
     const policy = envPolicy ? applyOverrides(envPolicy, overrides) : undefined;
@@ -3006,8 +3028,8 @@ export class DirectoryObject extends DurableObject {
       if (record.trustSession && !record.isAdmin && record.status !== "upstream_error") noteTrustSession(this.ctx.storage.sql, record.githubId, record.trustSession, record.at);
       this.ctx.storage.sql.exec(
         `INSERT INTO requests (github_id, is_admin, at, model, prompt_tokens, completion_tokens, cached_tokens, charged_tokens, cost_usd, status, latency_ms, paid,
-                               upstream, credit_usd, ttfb_ms, ttft_ms, upstream_error, upstream_outcome, via_key, harness, session_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                               upstream, credit_usd, ttfb_ms, ttft_ms, upstream_error, upstream_outcome, via_key, harness, session_key, failover)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         record.githubId,
         record.isAdmin ? 1 : 0,
         record.at,
@@ -3029,6 +3051,7 @@ export class DirectoryObject extends DurableObject {
         record.viaKey ? 1 : 0,
         record.harness ?? null,
         record.sessionKey ?? null,
+        record.failover ? 1 : 0,
       );
       const admin = record.isAdmin ? 1 : 0;
       // Three buckets: admins; paid usage (Pro, top-ups); and free usage, the only one the caps count.

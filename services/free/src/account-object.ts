@@ -23,6 +23,8 @@ import {
 import { weekEnd, weekStart } from "./week.js";
 import { formatApiKey } from "./accounts.js";
 import { isPlanId, type PlanId } from "./plan-prices.js";
+import { META, METER_SCHEMA, bonusUsdThisWeek, claimNotice, countedThisWeek, expectedCounted, inFlightOn, meterSnapshot, pruneMeters, readMeta, recordMeter, tierOf, writeMeta, type MeterSnapshot } from "./plan-meter.js";
+import { isPaidPlan, type PlanTier } from "./plans.js";
 
 /**
  * One person's allowance: `getByName("gh:<githubId>")`. The single serialization point for
@@ -206,8 +208,37 @@ export interface Allowance {
   trial: TrialState | null;
 }
 
+/**
+ * A paid plan's meter for one request (plans.ts, gpt6-bonus.ts): the request is held to it
+ * instead of the weekly pools and dollar budgets. "tokens": the model's counted tokens this week
+ * against `limit`; "bonus": the GPT-6 launch bonus's dollars this week against `limit`.
+ */
+export interface ReserveMeter {
+  kind: "tokens" | "bonus";
+  /** The model the meter is for (the one that serves). */
+  model: string;
+  limit: number;
+  /** Cached-token weight, for the in-flight estimate. */
+  cachedTokenWeight: number;
+}
+
+/** An account's plan state (plans.ts): its tier, since when it pays, and the fallback setting. */
+export interface PlanState {
+  tier: PlanTier;
+  /** When the account was first seen paying (Unix ms); null when not paying. */
+  paidSince: number | null;
+  /** Whether a model at its limit falls back to DeepSeek (the default) rather than refusing. */
+  fallback: boolean;
+  /** Counted tokens this week per model asked about. */
+  counted: Record<string, number>;
+  /** GPT-6 launch bonus dollars spent this week. */
+  bonusUsd: number;
+}
+
 export type ReserveResult =
   | { ok: true; reservationId: string; amount: number; maxTokens: number; source: Source; paid: boolean; allowance: Allowance }
+  /** A paid plan's meter (ReserveMeter) has no room left for this request. */
+  | { ok: false; code: "plan_limit"; meter: ReserveMeter; used: number; allowance: Allowance }
   | { ok: false; code: "not_invited" | "suspended" | "blocked"; allowance: Allowance }
   /** A trial account on the free plan used its trial, with no top-up left: Pro or a top-up from here. */
   | { ok: false; code: "trial_ended"; allowance: Allowance; trial: TrialState }
@@ -400,6 +431,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       for (const statement of SCHEMA) this.ctx.storage.sql.exec(statement);
+      for (const statement of METER_SCHEMA) this.ctx.storage.sql.exec(statement);
       // Reservations made before billing were all against the weekly allowance, unpaid.
       const columns = this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('reservations')").toArray().map((column) => column.name);
       if (!columns.includes("source")) this.ctx.storage.sql.exec("ALTER TABLE reservations ADD COLUMN source TEXT NOT NULL DEFAULT 'weekly'");
@@ -483,6 +515,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
     /** The provider and model serving the request, for the record if it is abandoned. */
     provider?: Upstream;
     model?: string;
+    /** A paid plan's meter: replaces the weekly pools, dollar budgets and top-ups for this request. */
+    meter?: ReserveMeter;
   }): Promise<ReserveResult> {
     const pool = input.pool ?? "luna";
     const row = this.#current(input.now);
@@ -490,6 +524,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
     if (!row) return { ok: false, code: "not_invited", allowance: before };
     if (row.status === "blocked") return { ok: false, code: "blocked", allowance: before };
     if (row.status === "suspended") return { ok: false, code: "suspended", allowance: before };
+    if (input.meter) return this.#reserveOnMeter(row, before, pool, input as typeof input & { meter: ReserveMeter });
     // The weekly allowance first (free or Pro), then top-ups.
     const family = familyOfPool(pool);
     const spendReached = before.usdPerWeek !== null && before.spentUsdThisWeek >= before.usdPerWeek;
@@ -556,6 +591,99 @@ export class AccountObject extends DurableObject<AccountEnv> {
   }
 
   /**
+   * A request held to a paid plan's meter. With nothing else in flight on the model it goes
+   * through while any of the limit is left (the week ends at the limit, overshooting by at most
+   * that one request, like the dollar caps); with others in flight, only when their expected
+   * counts plus its own still fit. The output cap is the model's own, never clamped by a pool.
+   */
+  async #reserveOnMeter(
+    row: AccountRow,
+    before: Allowance,
+    pool: Pool,
+    input: { promptEstimate: number; requestedMaxTokens: number | undefined; now: number; provider?: Upstream; model?: string; meter: ReserveMeter },
+  ): Promise<ReserveResult> {
+    const { meter } = input;
+    const sql = this.ctx.storage.sql;
+    const model = modelById(input.model ?? meter.model);
+    const share = this.#cachedShareOrUndefined(row.github_id);
+    const flight = inFlightOn(sql, meter.model, share, meter.cachedTokenWeight);
+    const outputCap = model?.family === "deepseek" ? Math.min(model.maxOutputTokens, DEEPSEEK_MAX_OUTPUT_TOKENS) : MAX_OUTPUT_TOKENS;
+    const plan = planReservation(input.promptEstimate, input.requestedMaxTokens, Number.MAX_SAFE_INTEGER, outputCap)!;
+    const cost = model ? estimateCostUsd(input.promptEstimate, plan.maxTokens, model.prices) : ((Math.max(0, input.promptEstimate) + plan.maxTokens) * FALLBACK_USD_PER_MILLION_TOKENS) / 1_000_000;
+    const used = meter.kind === "bonus" ? bonusUsdThisWeek(sql, input.now) : countedThisWeek(sql, meter.model, input.now);
+    const inFlight = meter.kind === "bonus" ? flight.usd : flight.counted;
+    const own = meter.kind === "bonus" ? cost : expectedCounted(input.promptEstimate, share ?? 0.9617, meter.cachedTokenWeight);
+    const fits = used < meter.limit && (flight.count === 0 || used + inFlight + own <= meter.limit);
+    if (!fits) return { ok: false, code: "plan_limit", meter, used, allowance: before };
+    const reservationId = crypto.randomUUID();
+    const expiresAt = input.now + RESERVATION_TTL_MS;
+    sql.exec(
+      "INSERT INTO reservations (id, amount, created_at, expires_at, source, paid, pool, provider, model, prompt_estimate, cost_estimate) VALUES (?, ?, ?, ?, 'weekly', 1, ?, ?, ?, ?, ?)",
+      reservationId,
+      plan.amount,
+      input.now,
+      expiresAt,
+      pool,
+      input.provider ?? null,
+      input.model ?? meter.model,
+      Math.max(0, Math.round(input.promptEstimate)),
+      cost,
+    );
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || alarm > expiresAt) await this.ctx.storage.setAlarm(expiresAt);
+    return { ok: true, reservationId, amount: plan.amount, maxTokens: plan.maxTokens, source: "weekly", paid: true, allowance: before };
+  }
+
+  // ─── Paid plans (plans.ts, plan-meter.ts) ─────────────────────────────────
+
+  /**
+   * The plan state and this week's meters for `models`. The tier is the stored one while the
+   * subscription is active (Starter for a subscription from before the three plans), else "none".
+   * The first call that sees the account paying records when (the bonus's wait counts from it).
+   */
+  async planState(now: number, models: readonly string[] = []): Promise<PlanState> {
+    const sql = this.ctx.storage.sql;
+    this.#current(now);
+    const paying = this.#row() !== undefined && this.#plan(now) === "pro";
+    const tier = tierOf(paying, readMeta(sql, META.tier));
+    let paidSince: number | null = null;
+    if (paying) {
+      const stored = Number(readMeta(sql, META.paidSince));
+      if (Number.isSafeInteger(stored) && stored > 0) paidSince = stored;
+      else {
+        paidSince = now;
+        writeMeta(sql, META.paidSince, String(now));
+      }
+    }
+    const counted: Record<string, number> = {};
+    for (const model of models) counted[model] = countedThisWeek(sql, model, now);
+    return { tier, paidSince, fallback: readMeta(sql, META.fallback) !== "off", counted, bonusUsd: bonusUsdThisWeek(sql, now) };
+  }
+
+  /** Part A's hook: the paid plan the subscription is on (from its Stripe price). Undefined clears it. */
+  async setPlanTier(tier: string | undefined): Promise<boolean> {
+    if (tier !== undefined && !isPaidPlan(tier)) return false;
+    writeMeta(this.ctx.storage.sql, META.tier, tier);
+    return true;
+  }
+
+  /** The person's setting: fall back to DeepSeek at a model's limit (true, the default) or refuse. */
+  async setPlanFallback(on: boolean): Promise<void> {
+    writeMeta(this.ctx.storage.sql, META.fallback, on ? undefined : "off");
+  }
+
+  /** Claims a once-a-week notice (the 80% warning per model): true only the first time this week. */
+  async claimPlanNotice(key: string, now: number): Promise<boolean> {
+    return claimNotice(this.ctx.storage.sql, key, now);
+  }
+
+  /** This week's per-model, per-day and per-tool meters, and the bonus dollars (dashboard). */
+  async meters(now: number): Promise<MeterSnapshot> {
+    pruneMeters(this.ctx.storage.sql, now);
+    return meterSnapshot(this.ctx.storage.sql, now);
+  }
+
+  /**
    * Replaces a reservation with what was really used. `charged` undefined means the provider
    * reported no usage: the request is charged an estimate (`noUsage`), never the reservation.
    * With no output streamed (cancelled, or failed before any output), that is nothing; with
@@ -573,6 +701,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
     usage?: Usage;
     /** With `charged` undefined: what was streamed, the serving model's prices (undefined: none known) and the cached-token weight. */
     noUsage?: { outputTokens: number; prices: TokenPrices | undefined; cachedTokenWeight: number };
+    /** For the per-model meters (plan-meter.ts): the client, whether a backup or fallback served, and whether the GPT-6 bonus paid. */
+    meter?: { tool: string; failover: boolean; bonus: boolean };
     limits: Limits;
     now: number;
   }): Promise<{ charged: number; costUsd: number; paid: boolean; allowance: Allowance; estimate?: NoUsageEstimate }> {
@@ -602,6 +732,18 @@ export class AccountObject extends DurableObject<AccountEnv> {
       this.#charge(row.github_id, input.reservationId, reservation.source, reservation.pool, finalCharged, finalCost, input.now);
       this.#addTokens(reservation.pool, finalRaw, input.now);
       if (reservation.source === "weekly" && reservation.paid !== 1) this.#addTrial(row.github_id, finalRaw);
+      if (input.meter && reservation.model) {
+        recordMeter(this.ctx.storage.sql, {
+          model: reservation.model,
+          counted: finalCharged,
+          usage: input.usage ?? estimate?.usage,
+          costUsd: finalCost,
+          tool: input.meter.tool,
+          failover: input.meter.failover,
+          bonus: input.meter.bonus,
+          now: input.now,
+        });
+      }
       if (input.usage && input.usage.promptTokens > 0) {
         this.ctx.storage.sql.exec(
           "UPDATE account SET prompt_seen = prompt_seen + ?, cached_seen = cached_seen + ? WHERE github_id = ?",
@@ -624,6 +766,13 @@ export class AccountObject extends DurableObject<AccountEnv> {
   #cachedShare(githubId: number): number {
     const seen = this.ctx.storage.sql.exec<{ prompt_seen: number; cached_seen: number }>("SELECT prompt_seen, cached_seen FROM account WHERE github_id = ?", githubId).toArray()[0];
     if (!seen || seen.prompt_seen < MIN_PROMPT_TOKENS_FOR_CACHED_SHARE) return 0;
+    return Math.min(1, seen.cached_seen / seen.prompt_seen);
+  }
+
+  /** The person's cached share, or undefined until enough has been reported to tell. */
+  #cachedShareOrUndefined(githubId: number): number | undefined {
+    const seen = this.ctx.storage.sql.exec<{ prompt_seen: number; cached_seen: number }>("SELECT prompt_seen, cached_seen FROM account WHERE github_id = ?", githubId).toArray()[0];
+    if (!seen || seen.prompt_seen < MIN_PROMPT_TOKENS_FOR_CACHED_SHARE) return undefined;
     return Math.min(1, seen.cached_seen / seen.prompt_seen);
   }
 
