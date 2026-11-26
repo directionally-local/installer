@@ -137,8 +137,8 @@ export interface RouterDeps {
   sleep?: (ms: number) => Promise<void>;
   /**
    * After the first agent run through dl that served tokens: "First tokens served. ~9.9M left
-   * this week (95.5% caching applied)." (onboarding.ts firstTokens); `done` when it's not to be
-   * tried again. Never throws.
+   * this week (95.5% caching applied)." (onboarding.ts firstTokens). It's marked as shown only
+   * when a line was printed. Never throws.
    */
   firstTokens?: (key: DlKey) => Promise<{ text?: string; done: boolean }>;
 }
@@ -163,8 +163,10 @@ export async function routerHome(deps: RouterDeps, options: { continue?: boolean
   const afterRun = async (code: number): Promise<number> => {
     if (code !== 0 || history.firstTokensShown || !deps.firstTokens) return code;
     const result = await deps.firstTokens(key).catch(() => ({ done: false } as { text?: string; done: boolean }));
-    if (result.text) io.out(`\n  ${c.green("✓")} ${result.text}\n\n`);
-    if (result.done) await markFirstTokensShown(deps.historyPath, deps.now).catch(() => undefined);
+    // Marked only once the line is printed: a `done` without a line isn't "shown".
+    if (!result.text) return code;
+    io.out(`\n  ${c.green("✓")} ${result.text}\n\n`);
+    await markFirstTokensShown(deps.historyPath, deps.now).catch(() => undefined);
     return code;
   };
 

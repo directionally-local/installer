@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, statSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
-  firstTokens, firstTokensText, imageProtocol, inlineImage, introBlock, mascotPng, MASCOT_COLS, MASCOT_ROWS, rockFrame, ROCK_FRAMES, weekFromMe, welcomeHandle, welcomeText,
+  firstTokens, firstTokensText, imageProtocol, servedFromMe, inlineImage, introBlock, mascotPng, MASCOT_COLS, MASCOT_ROWS, rockFrame, ROCK_FRAMES, weekFromMe, welcomeHandle, welcomeText,
 } from "./onboarding.js";
 import { isHeadless } from "./open-browser.js";
 
@@ -99,9 +99,24 @@ describe("first tokens served", () => {
     assert.equal(firstTokensText(800_000), "First tokens served. ~800k left this week (95.5% caching applied).");
   });
 
-  it("falls back to the DeepSeek pool when it has a cap; nothing to show for good when there's neither", async () => {
+  it("falls back to the DeepSeek pool when it has a cap", async () => {
     assert.deepEqual(weekFromMe({ pools: { deepseek: { realTokensPerWeek: 50_000_000, realUsedThisWeek: 1_000 } } }), { left: 49_999_000, used: 1_000 });
-    assert.deepEqual(await firstTokens(KEY, { fetch: async () => json(200, { pools: { deepseek: { realTokensPerWeek: null, realUsedThisWeek: 10 } } }) }), { done: true });
+  });
+
+  it("without a weekly figure (week null, no capped pool): the line without the amount left, once tokens were served", async () => {
+    const old = (used: number) => ({
+      week: null,
+      allowance: { tokensPerWeek: null, usedThisWeek: used },
+      budgets: { gpt6: { usdPerWeek: 2, spentUsd: 0, tokensThisWeek: 0 }, deepseek: { usdPerWeek: null, spentUsd: 0, tokensThisWeek: used * 3 } },
+      pools: { deepseek: { tokensPerWeek: null, usedThisWeek: used, realTokensPerWeek: null, realUsedThisWeek: used * 3 } },
+    });
+    assert.equal(weekFromMe(old(10)), undefined);
+    assert.equal(servedFromMe(old(10)), 30);
+    assert.equal(servedFromMe({ week: null }), undefined);
+    assert.deepEqual(await firstTokens(KEY, { fetch: async () => json(200, old(10)) }), { text: "First tokens served.", done: true });
+    assert.equal(firstTokensText(), "First tokens served.");
+    assert.deepEqual(await firstTokens(KEY, { fetch: async () => json(200, old(0)) }), { done: false }, "nothing served yet: next time");
+    assert.deepEqual(await firstTokens(KEY, { fetch: async () => json(200, { week: null }) }), { done: false }, "no counts at all: never marked without a line");
   });
 
   it("waits for real tokens, and skips silently on any error", async () => {

@@ -1,10 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { autopilotSetUp, findAutopilot, installedAutopilotVersion, ownAutopilot, parseAuthStatus } from "./autopilot.js";
+import { autopilotSetUp, downloadedAutopilotVersion, findAutopilot, installedAutopilotVersion, ownAutopilot, parseAuthStatus, pathAutopilotVersion } from "./autopilot.js";
 import { laptopReady, NOT_SIGNED_IN, type LaptopIO } from "./commands.js";
 
 /** `autopilot auth status` as Autopilot 3.5 prints it (a few of its rows). */
@@ -107,6 +107,29 @@ describe("which Autopilot dl runs as its own", () => {
       const found = await findAutopilot(t.env);
       assert.ok(found && found.args.length === 1);
       assert.ok(installedAutopilotVersion(t.env));
+    } finally {
+      t.done();
+    }
+  });
+
+  it("tells the downloaded copy's version and the PATH one's apart (dl update checks the downloaded one)", async () => {
+    const t = setup();
+    try {
+      const globalBin = pkg(t.globalDir, "3.32.0");
+      pkg(t.downloadedDir, "3.33.0");
+      // An old dl (pinning 3.32.0) ranks the global copy first; the new pin ranks dl's own.
+      assert.equal(ownAutopilot({ env: t.env, pin: "3.32.0", resolve: t.resolveGlobal })?.version, "3.32.0");
+      assert.equal(ownAutopilot({ env: t.env, pin: "3.33.0", resolve: t.resolveGlobal })?.version, "3.33.0");
+      assert.equal(downloadedAutopilotVersion(t.env), "3.33.0");
+      // /usr/bin/autopilot links to the global package's bin script, as npm -g makes it.
+      const binDir = join(t.root, "usr", "bin");
+      mkdirSync(binDir, { recursive: true });
+      chmodSync(globalBin, 0o755);
+      symlinkSync(globalBin, join(binDir, "autopilot"));
+      assert.equal(await pathAutopilotVersion({ ...t.env, PATH: binDir }), "3.32.0");
+      assert.equal(await pathAutopilotVersion({ ...t.env, PATH: "" }), undefined);
+      rmSync(t.downloadedDir, { recursive: true });
+      assert.equal(downloadedAutopilotVersion(t.env), undefined);
     } finally {
       t.done();
     }

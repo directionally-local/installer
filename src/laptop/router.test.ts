@@ -190,6 +190,15 @@ describe("the first run's touches", () => {
     await routerHome(w.deps);
     assert.match(w.text(), /First tokens served\. ~1M left/);
 
+    // `done` without a line (e.g. the service said no for good) isn't "shown": asked again next run.
+    let asked = 0;
+    const silent = await world([CLAUDE], { [FIRST_QUESTION]: "Claude Code", [AGAIN_QUESTION]: "" }, { firstTokens: async () => (asked++, { done: true }) });
+    await routerHome(silent.deps);
+    await routerHome(silent.deps);
+    assert.equal(asked, 2);
+    assert.equal((await readAgentHistory(silent.path)).firstTokensShown, undefined, "not marked without the line");
+    assert.doesNotMatch(silent.text(), /First tokens/);
+
     const failed = await world([CLAUDE], { [FIRST_QUESTION]: "Claude Code" }, { launchCode: 1, firstTokens: async () => assert.fail("asked after a failed run") });
     assert.equal(await routerHome(failed.deps), 1);
   });

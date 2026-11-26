@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { constants, existsSync, readFileSync } from "node:fs";
-import { access } from "node:fs/promises";
+import { access, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,7 +61,7 @@ export function installedAutopilotVersion(env: NodeJS.ProcessEnv = process.env):
 }
 
 /** The downloaded Autopilot's version, from its manifest; undefined when it isn't there. */
-function downloadedAutopilotVersion(env: NodeJS.ProcessEnv): string | undefined {
+export function downloadedAutopilotVersion(env: NodeJS.ProcessEnv = process.env): string | undefined {
   try {
     const pkg = JSON.parse(readFileSync(join(downloadedAutopilotPackage(env), "package.json"), "utf8")) as { version?: unknown };
     return typeof pkg.version === "string" ? pkg.version : undefined;
@@ -141,8 +141,26 @@ export function bundledAutopilot(resolve: (specifier: string) => string = (speci
 /** The bundled Autopilot's version, from its manifest; undefined when it isn't installed. */
 export function bundledAutopilotVersion(resolve?: (specifier: string) => string): string | undefined {
   const bin = bundledAutopilot(resolve);
-  if (!bin) return undefined;
-  for (let dir = dirname(bin); ; dir = dirname(dir)) {
+  return bin ? manifestVersionAbove(bin) : undefined;
+}
+
+/**
+ * The version of the `autopilot` on PATH (an npm global's bin links to its package), from the
+ * autopilot-ai manifest above where it really is; undefined when there's none or it can't be told.
+ */
+export async function pathAutopilotVersion(env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+  const onPath = await autopilotOnPath(env);
+  if (!onPath) return undefined;
+  try {
+    return manifestVersionAbove(await realpath(onPath));
+  } catch {
+    return undefined;
+  }
+}
+
+/** The version in the nearest autopilot-ai package.json at or above `file`'s directory. */
+function manifestVersionAbove(file: string): string | undefined {
+  for (let dir = dirname(file); ; dir = dirname(dir)) {
     const manifest = join(dir, "package.json");
     if (existsSync(manifest)) {
       try {
