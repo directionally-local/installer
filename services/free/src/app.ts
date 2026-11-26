@@ -3754,7 +3754,15 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   }
   // dl.new's Free plan (free-plan.ts): no plan, on Free, and the switch on. With the switch off a
   // Free account is refused below like any account without a plan.
-  const onFree = !isAdmin && !trialMeter && planState !== undefined && planState.tier === "none" && planState.freePlan && freePlanOn(gate.config);
+  let onFree = !isAdmin && !trialMeter && planState !== undefined && planState.tier === "none" && planState.freePlan && freePlanOn(gate.config);
+  // The old free tier's accounts (any level; GitHub ids below the paid sign-up's numbers) become
+  // Free accounts at `freeEndsAt` while the switch is on, instead of being refused: the same
+  // week's cap, DeepSeek only, the same 80%/100% prompts. Marked once, so /web/account shows it.
+  // Blocked accounts were refused above; admins skip plans; paying accounts have a tier.
+  if (!onFree && !isAdmin && !trialMeter && planState && planState.tier === "none" && freePlanOn(gate.config) && identity.githubId < PAID_ACCOUNTS_FROM && freeEndedFor(gate.config, identity.githubId, c.now())) {
+    await person.startFreePlan(c.now());
+    onFree = true;
+  }
   // Accounts made by the paid sign-up (part A's account numbers, from 2^50) never had free tokens.
   if (!trialMeter && !onFree && planState && planState.tier === "none" && (freeEndedFor(gate.config, identity.githubId, c.now()) || identity.githubId >= PAID_ACCOUNTS_FROM)) {
     return apiError(402, FREE_ENDED_CODE, FREE_ENDED_MESSAGE, { reason: "free_ended", plansUrl: "https://dl.new" }, await headers());
@@ -3785,7 +3793,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   }
   // Below the bar with no free tokens: say who free tokens are for and how to ask anyway. The
   // refusal is counted per day for the sign-up funnel (ids and days only).
-  if (!isAdmin && fullLimits.level === "starter" && (fullLimits.levelTokens ?? 0) <= 0) {
+  if (!isAdmin && !onFree && fullLimits.level === "starter" && (fullLimits.levelTokens ?? 0) <= 0) {
     await directory(c).recordRefusal(identity.githubId, c.now());
     return apiError(403, "below_bar", belowBarLine(levelThresholds(gate.config)), { contact: CREDITS_REQUEST_EMAIL, request: ACCESS_REQUEST_PATH }, await headers());
   }

@@ -295,3 +295,67 @@ describe("the Free plan: switched on", () => {
     assert.equal((await chat(service, key)).status, 200);
   });
 });
+
+describe("the Free plan: the old free tier's accounts at freeEndsAt", () => {
+  const ENDS = Date.UTC(2026, 11, 4);
+  const legacy = { FREE_ENDS_AT: new Date(ENDS).toISOString() };
+
+  async function legacyWorld(vars: Record<string, string> = {}) {
+    const service = await world({ ...legacy, ...vars });
+    const users = { full: { id: 9001, login: "fulllevel" }, starter: { id: 9002, login: "starterlevel", createdAt: "2026-06-01T00:00:00Z", publicRepos: 0, contributions: 10, social: 0 } as any, paying: { id: 9004, login: "paying" } };
+    for (const user of Object.values(users)) await service.signIn(user);
+    const blocked = (await service.signIn({ id: 9003, login: "blocked" })).access_token;
+    await service.account(9004).applySubscription({ subscriptionId: "sub_9004", state: "active", periodEnd: ENDS + 60 * 86_400_000, eventAt: 1 });
+    assert.equal(await service.account(9004).setPlanTier("starter"), true);
+    assert.equal((await service.request("POST", "/admin/people/9003/block", { token: await admin(service) })).status, 200);
+    // Past freeEndsAt: fresh access tokens (they expire).
+    const at = async (now: number) => {
+      service.clock.now = now;
+      return { full: (await service.signIn(users.full)).access_token, starter: (await service.signIn(users.starter)).access_token, paying: (await service.signIn(users.paying)).access_token };
+    };
+    return { service, blocked, at };
+  }
+
+  it("with the switch on, become Free accounts instead of being cut off: any level, the week's cap, DeepSeek only, 80%/100% prompts", async () => {
+    const { service, blocked, at } = await legacyWorld(SMALL);
+    await setConfig(service, { freePlan: "on" });
+    // Before freeEndsAt they keep the old free tier as it was.
+    assert.equal((await service.account(9001).planState(service.clock.now, [MODEL])).freePlan, false);
+    const { full, starter, paying } = await at(ENDS + 60_000);
+
+    const kimi = await chat(service, full, KIMI);
+    assert.equal(kimi.status, 200, await kimi.clone().text());
+    assert.match(kimi.headers.get("x-dl-notice") ?? "", /isn't on the Free plan\. Now using DeepSeek V4\.1 Flash\./);
+    const second = await chat(service, full);
+    assert.equal(second.status, 200);
+    assert.match(second.headers.get("x-dl-notice") ?? "", /Free plan: \d+% of this week used .* Upgrade at https:\/\/dl\.new/);
+    const third = await chat(service, full);
+    assert.equal(third.status, 402);
+    const error = ((await third.json()) as any).error;
+    assert.equal(error.code, "free_plan_limit");
+    assert.equal(error.upgrade.line, STARTER);
+    assert.equal((await service.account(9001).planState(service.clock.now, [MODEL])).freePlan, true);
+
+    // A Starter-level account with no free tokens gets the Free plan too, not below_bar.
+    assert.equal((await chat(service, starter)).status, 200);
+    // Blocked stays blocked; paying and admins as before.
+    const refused = await chat(service, blocked);
+    assert.notEqual(refused.status, 200);
+    assert.notEqual(((await refused.json()) as any).error?.code, "free_plan_limit");
+    assert.equal(await service.account(9003).freePlan(), false);
+    assert.equal((await chat(service, paying)).status, 200);
+    assert.equal(await service.account(9004).freePlan(), false);
+    const owner = await admin(service);
+    for (let i = 0; i < 3; i++) assert.equal((await chat(service, owner)).status, 200, "admins have no Free cap");
+    assert.equal(await service.account(ADMIN_ID).freePlan(), false);
+  });
+
+  it("with the switch off, are cut off at freeEndsAt as before", async () => {
+    const { service, at } = await legacyWorld();
+    const { full } = await at(ENDS + 60_000);
+    const refused = await chat(service, full);
+    assert.equal(refused.status, 402);
+    assert.equal(((await refused.json()) as any).error.code, "plan_required");
+    assert.equal(await service.account(9001).freePlan(), false);
+  });
+});
