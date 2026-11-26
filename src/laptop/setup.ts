@@ -18,7 +18,7 @@ import { confirm, githubToken, type KeyPlace, type KeySources, type Need } from 
 import { applyOnServer, ensureServerDl, INSTALL_URL, installOnServer, pairLaptop, serverNeeds, type DlRegistry, type ServerAnswers, type UiFactory } from "./remote-install.js";
 import { openSession } from "./session.js";
 import { loadSettings, saveModel, saveSettings } from "./settings.js";
-import { checkServer, describeHost, discoverKeys, hostOf, parseSshConfig, parseTarget, realSshExec, SshAuthError, type ServerFacts, type SshExec, type SshHost } from "./ssh.js";
+import { checkServer, describeHost, discoverKeys, hostOf, parseSshConfig, parseTarget, realHostKeys, realSshExec, SshAuthError, type HostKeys, type ServerFacts, type SshExec, type SshHost } from "./ssh.js";
 import { openRemote, withConnections, type RemoteOpener } from "./tunnel.js";
 
 /**
@@ -44,6 +44,8 @@ export interface SetupDeps {
   write: (text: string) => void;
   color: boolean;
   ssh: SshExec;
+  /** Reads (and on a "no", forgets) a new server's host key in known_hosts; ssh-keygen unless replaced. */
+  hostKeys?: HostKeys;
   /** Opens the API endpoint for a saved server (an SSH tunnel), for the final check. */
   open: RemoteOpener;
   sources: KeySources & { listDir: (path: string) => Promise<string[]> };
@@ -441,8 +443,38 @@ async function reachServer(deps: SetupDeps, sshDir: string, first: SshAccess, ta
   const display = `${facts.user}@${target.replace(/^[^@]*@/, "")}`;
   ui.done("ssh", access.identityFile ? `${display} with ${tilde(access.identityFile, home)} · ${facts.os} · ${facts.arch}` : `${display}  ${facts.os} · ${facts.arch}`);
   ui.finish();
-  if (facts.newHostKey || newHostKey) deps.newUi().line("info", "New server", "first connection: trusted its host key (accept-new)");
+  if (facts.newHostKey || newHostKey) await confirmNewHostKey(deps, access, display);
   return { access, facts };
+}
+
+/**
+ * ssh trusted a server it had never seen (accept-new), and nothing secret has gone to it yet.
+ * At a terminal, show the key's fingerprint and continue only on a yes; a no takes the key out
+ * of known_hosts again and stops. Without a terminal, keep going and print the fingerprint.
+ */
+async function confirmNewHostKey(deps: SetupDeps, access: SshAccess, display: string): Promise<void> {
+  const hostKeys = deps.hostKeys ?? realHostKeys;
+  const prints = await hostKeys.fingerprints(access).catch(() => [] as string[]);
+  const key = prints.length > 0 ? prints.join(", ") : "its fingerprint couldn't be read";
+  const ui = deps.newUi();
+  if (deps.interactive === false) {
+    ui.line("info", "New server", `first connection: trusted its host key (accept-new) · ${key}`);
+    return;
+  }
+  ui.line("info", "New server", `first connection to ${display}; its SSH host key is ${key}`);
+  const answer = (await deps.prompter.text(ui.prompt("Is that the server's host key? Continue and send it your keys", "y/N"))).trim().toLowerCase();
+  if (answer === "y" || answer === "yes") {
+    ui.line("done", "Host key", "trusted");
+    return;
+  }
+  await hostKeys.forget(access).catch(() => undefined);
+  ui.line("failed", "Host key", "not trusted; nothing was sent");
+  throw new Error([
+    `Stopped before sending anything to ${display}: its host key wasn't confirmed, so dl took it out of known_hosts again.`,
+    "  Compare it with the server's own, from its console or your provider's dashboard:",
+    "     ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub",
+    "  then run dl setup again.",
+  ].join("\n"));
 }
 
 /** Every key was refused: what to do next, with this server and this laptop's own key filled in. */

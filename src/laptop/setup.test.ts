@@ -8,7 +8,7 @@ import { FakeSshServer } from "../test-support/fake-ssh.js";
 import { fakeTunnels } from "../test-support/fake-tunnel.js";
 import { ScriptedPrompter } from "../prompt.js";
 import { RecordingUi } from "../ui.js";
-import { loadRemotes, loadRemotesFile, saveRemote, type RemoteServer } from "./config.js";
+import { loadRemotes, loadRemotesFile, saveRemote, type RemoteServer, type SshAccess } from "./config.js";
 import { ConnectCancelled } from "./connect.js";
 import { PromptCancelled } from "../prompt.js";
 import type { ConnectResult } from "../provider.js";
@@ -23,6 +23,7 @@ const TOKEN = `aster_laptop_token_${"0".repeat(34)}`;
 /** What Autopilot's picker chose, as `autopilot connect --state-file` writes it. */
 const DEEPSEEK: ConnectResult = { provider: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com", apiKey: "sk-deepseek-secretsecret", apiKeyEnv: "DEEPSEEK_API_KEY", keyRequired: true, model: "deepseek-v4-pro" };
 const OLLAMA: ConnectResult = { provider: "ollama", name: "Ollama", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null, apiKeyEnv: null, keyRequired: false, model: "qwen3:32b" };
+const HOST_KEY = "ED25519 SHA256:4er7fTPpU8cVFYvwlpUUkw1UK9Z1I14SS7PH26m+sbo";
 const WIRE_DEEPSEEK = { id: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: DEEPSEEK.apiKey, apiKeyEnv: "DEEPSEEK_API_KEY" };
 
 let root: string;
@@ -53,7 +54,8 @@ afterEach(async () => {
 
 function deps(server: FakeSshServer, answers: Record<string, string>, extra: Partial<SetupDeps> = {}) {
   const ui = new RecordingUi();
-  const prompter = new ScriptedPrompter({ "Use your GitHub CLI login": "", ...answers });
+  const prompter = new ScriptedPrompter({ "Use your GitHub CLI login": "", "server's host key": "y", ...answers });
+  const forgotten: SshAccess[] = [];
   let text = "";
   const tunnels = fakeTunnels(apiPort, { delayMs: 5 });
   const connects: Array<{ modelOnly?: boolean }> = [];
@@ -64,6 +66,7 @@ function deps(server: FakeSshServer, answers: Record<string, string>, extra: Par
     write: (chunk) => { text += chunk; },
     color: false,
     ssh: server.exec,
+    hostKeys: { fingerprints: async () => [HOST_KEY], forget: async (access) => { forgotten.push(access); } },
     open: createOpener({ spawn: tunnels.spawn, pollMs: 5 }),
     sources: {
       env: {},
@@ -89,7 +92,7 @@ function deps(server: FakeSshServer, answers: Record<string, string>, extra: Par
     now: () => new Date("2026-10-28T09:00:00.000Z"),
     ...extra,
   };
-  return { deps: value, ui, prompter, text: () => text, tunnels, connects, sessions };
+  return { deps: value, ui, prompter, text: () => text, tunnels, connects, sessions, forgotten };
 }
 
 /** "On this computer" as the wizard sees it: installs (recording what it was given), then stores what the wizard gathered. */
@@ -111,7 +114,9 @@ describe("dl setup on a laptop", () => {
     const events = first.ui.events;
     assert.ok(events.includes("answered Where | On my own server"));
     assert.ok(events.includes("done ssh | root@203.0.113.10  Ubuntu 24.04 · arm64"), events.join("\n"));
-    assert.ok(events.some((event) => /^line info New server \| first connection: trusted its host key/.test(event)));
+    assert.ok(events.includes(`line info New server | first connection to root@203.0.113.10; its SSH host key is ${HOST_KEY}`), events.join("\n"));
+    assert.ok(first.prompter.asked.some((question) => question.includes("server's host key")), "asked before anything was sent");
+    assert.ok(events.includes("line done Host key | trusted"));
     assert.ok(events.includes("done Installing dl | 0.2.0"));
     assert.ok(events.includes("done image | built"));
     assert.ok(events.includes("done access | private · reached over SSH"));
@@ -125,7 +130,7 @@ describe("dl setup on a laptop", () => {
     assert.ok(!events.some((event) => event.startsWith("ready") || event.startsWith("item") || event.includes("Model")), "no Ready screen and no model list of dl's own");
     assert.match(first.text(), /\n {2}✓ Ready · fits ~6 agents at once\n$/, "one line, then the session");
     assert.deepEqual(first.sessions, [remote], "a session opens right away, on the new place");
-    assert.deepEqual(first.prompter.asked, ["Where", "Server", "Use your GitHub CLI login (sinameraji)? It stays on your server."]);
+    assert.deepEqual(first.prompter.asked, ["Where", "Server", "Is that the server's host key? Continue and send it your keys", "Use your GitHub CLI login (sinameraji)? It stays on your server."]);
 
     // The server was installed without keys, then got them in a second pass, on stdin; never in a command line.
     const passes = server.calls.filter((call) => call.command.includes("--answers-stdin"));
@@ -162,7 +167,7 @@ describe("dl setup on a laptop", () => {
     server.keys.add("github");
     const run = deps(server, { Where: "2", Server: "1" }, { connect: async () => OLLAMA });
     await setupWizard(run.deps);
-    assert.deepEqual(run.prompter.asked, ["Where", "Server"], "GitHub is already there");
+    assert.deepEqual(run.prompter.asked, ["Where", "Server", "Is that the server's host key? Continue and send it your keys"], "GitHub is already there");
     assert.deepEqual(server.answers.at(-1), { provider: { id: "ollama", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null, apiKeyEnv: null } });
     assert.ok(run.ui.events.includes("line done Provider | Ollama · qwen3:32b · key stays on your server"));
     assert.ok(run.ui.events.includes("done keys | Ollama"));
@@ -199,6 +204,33 @@ describe("dl setup on a laptop", () => {
     const again = deps(server, { Where: "2", Server: "1" });
     await setupWizard(again.deps);
     assert.deepEqual(again.connects, [{}], "asked again, since the server still lacks it");
+  });
+
+  it("stops before sending anything when the new server's host key isn't confirmed, and forgets the key", async () => {
+    const server = new FakeSshServer();
+    const run = deps(server, { Where: "2", Server: "1", "server's host key": "" });
+    await assert.rejects(() => setupWizard(run.deps), /Stopped before sending anything to root@203\.0\.113\.10[\s\S]*ssh-keygen -lf/);
+    assert.deepEqual(run.forgotten.map((access) => access.target), ["box"]);
+    assert.ok(!server.installed, "nothing installed");
+    assert.ok(!server.calls.some((call) => call.input), "no secret went over stdin");
+    assert.deepEqual(run.connects, [], "not even the provider picker ran");
+  });
+
+  it("without a terminal, keeps going on a new host key and prints its fingerprint", async () => {
+    const server = new FakeSshServer();
+    const run = deps(server, { Where: "2", Server: "1", "Use your GitHub CLI login (sinameraji)? It stays on your server.": "" }, { interactive: false });
+    await setupWizard(run.deps);
+    assert.ok(run.ui.events.includes(`line info New server | first connection: trusted its host key (accept-new) · ${HOST_KEY}`), run.ui.events.join("\n"));
+    assert.ok(!run.prompter.asked.some((question) => question.includes("host key")));
+  });
+
+  it("doesn't ask about a server ssh already knows", async () => {
+    const server = new FakeSshServer();
+    server.newHost = false;
+    const run = deps(server, { Where: "2", Server: "1", "Use your GitHub CLI login (sinameraji)? It stays on your server.": "" });
+    await setupWizard(run.deps);
+    assert.ok(!run.prompter.asked.some((question) => question.includes("host key")));
+    assert.ok(!run.ui.events.some((event) => event.startsWith("line info New server")));
   });
 
   it("tries the keys in ~/.ssh without asking when the server refuses the default ones", async () => {

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { checkServer, describeHost, discoverKeys, parseSshConfig, parseTarget, SshAuthError, sshOptions, type SshExec, type SshResult } from "./ssh.js";
+import { checkServer, describeHost, discoverKeys, knownHostsEntry, parseFingerprints, parseSshConfig, parseTarget, SshAuthError, sshOptions, type SshExec, type SshResult } from "./ssh.js";
 
 const CONFIG = `
 # defaults first, as many people write them
@@ -117,5 +117,21 @@ describe("checking the server", () => {
       () => checkServer({ target: "root@h" }, fakeSsh({ code: 255, stderr: "Host key verification failed.\n" }), "root@h"),
       /host key changed[\s\S]*ssh-keygen -R h/,
     );
+  });
+});
+
+describe("a new server's host key", () => {
+  it("finds where ssh saved it, from ssh -G", () => {
+    const g = "user root\nhostname 203.0.113.10\nport 2222\nuserknownhostsfile ~/.ssh/known_hosts ~/.ssh/known_hosts2\n";
+    assert.deepEqual(knownHostsEntry(g, "/home/me"), { name: "[203.0.113.10]:2222", file: "/home/me/.ssh/known_hosts" });
+    assert.deepEqual(knownHostsEntry("hostname box.example\nport 22\nuserknownhostsfile /k\n", "/h"), { name: "box.example", file: "/k" });
+    assert.deepEqual(knownHostsEntry("hostname box.example\nport 22\nhostkeyalias boxy\nuserknownhostsfile /k\n", "/h"), { name: "boxy", file: "/k" });
+    assert.equal(knownHostsEntry("port 22\n", "/h"), undefined);
+  });
+
+  it("reads its fingerprints from ssh-keygen -l -F", () => {
+    const out = "# Host [box.example]:2222 found: line 1 \n[box.example]:2222 ED25519 SHA256:4er7fTPpU8cVFYvwlpUUkw1UK9Z1I14SS7PH26m+sbo\n# Host [box.example]:2222 found: line 2 \n|1|abc=|def= 3072 SHA256:rsaPrint (RSA)\n";
+    assert.deepEqual(parseFingerprints(out), ["ED25519 SHA256:4er7fTPpU8cVFYvwlpUUkw1UK9Z1I14SS7PH26m+sbo", "RSA SHA256:rsaPrint"]);
+    assert.deepEqual(parseFingerprints(""), []);
   });
 });
