@@ -38,4 +38,13 @@ describe("name service config", () => {
     assert.equal(readNameServiceConfig({ ZONE: "z.example", DNS_PROVIDER: "manual" }).adminToken, undefined);
     assert.equal(readNameServiceConfig({ ZONE: "z.example", DNS_PROVIDER: "manual", ADMIN_TOKEN: "a" }).adminToken, "a");
   });
+
+  it("trusts x-forwarded-for only when told to", () => {
+    const base = { ZONE: "z.example", DNS_PROVIDER: "manual" };
+    assert.equal(readNameServiceConfig(base).trustForwardedFor, false);
+    assert.equal(readNameServiceConfig({ ...base, TRUST_FORWARDED_FOR: "false" }).trustForwardedFor, false);
+    assert.equal(readNameServiceConfig({ ...base, TRUST_FORWARDED_FOR: "true" }).trustForwardedFor, true);
+    assert.equal(readNameServiceConfig({ ...base, TRUST_FORWARDED_FOR: "1" }).trustForwardedFor, true);
+    assert.throws(() => readNameServiceConfig({ ...base, TRUST_FORWARDED_FOR: "yes" }), /TRUST_FORWARDED_FOR/);
+  });
 });

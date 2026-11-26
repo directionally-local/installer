@@ -18,6 +18,12 @@ export interface NameServiceConfig {
   leaseDays: number;
   graceDays: number;
   quarantineDays: number;
+  /**
+   * Whether to take the client IP from `x-forwarded-for` when `cf-connecting-ip` is absent.
+   * Off unless `TRUST_FORWARDED_FOR` is `true`: set it only when a proxy you run sits in
+   * front of the service and overwrites the header, or every client can choose its own IP.
+   */
+  trustForwardedFor: boolean;
 }
 
 export class ConfigError extends Error {}
@@ -49,11 +55,19 @@ export function readNameServiceConfig(env: Record<string, unknown>): NameService
     leaseDays: days(env.LEASE_DAYS, DEFAULTS.leaseDays, "LEASE_DAYS"),
     graceDays: days(env.GRACE_DAYS, DEFAULTS.graceDays, "GRACE_DAYS"),
     quarantineDays: days(env.QUARANTINE_DAYS, DEFAULTS.quarantineDays, "QUARANTINE_DAYS"),
+    trustForwardedFor: flag(env.TRUST_FORWARDED_FOR, "TRUST_FORWARDED_FOR"),
   };
 }
 
 function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function flag(value: unknown, name: string): boolean {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined || raw === "false" || raw === "0") return false;
+  if (raw === "true" || raw === "1") return true;
+  throw new ConfigError(`${name} must be true or false (got "${raw}").`);
 }
 
 function days(value: unknown, fallback: number, name: string): number {
