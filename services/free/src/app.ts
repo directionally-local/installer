@@ -4484,10 +4484,13 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     else await task;
   }
   const response = notices.length > 0 ? await withNotices(answered, notices, serving.model.id) : answered;
-  const fellBackTo = serving.fallback ? serving.model.id : effective !== requested ? effective.id : undefined;
+  // Compared with what the client asked for (`asked`), not `requested`, which a plan's fallback
+  // (Kimi used up → DeepSeek), a trial or the Free plan has already moved to the model that serves.
+  const fellBackTo = serving.fallback ? serving.model.id : effective.id !== asked.id ? effective.id : undefined;
   if (!fellBackTo) return response;
-  // The requested model's provider couldn't serve it, so its fallback did: say which, and why
-  // when it was a limit (a header value: printable ASCII only).
+  // Another model than the one asked for answered (its provider couldn't serve it, or the plan
+  // moved the request): say which, and why when it was a provider's limit (a header value:
+  // printable ASCII only; a plan's reason is in x-dl-notice already).
   const outHeaders = new Headers(response.headers);
   outHeaders.set("x-dl-fallback", fellBackTo);
   if (fallbackNotice) outHeaders.set("x-dl-notice", fallbackNotice.replace(/[^\x20-\x7e]/g, ""));
