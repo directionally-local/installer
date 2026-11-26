@@ -474,6 +474,8 @@ export interface ProLimitContext {
   upgradeUrl?: string | null;
   /** The week's end, ISO. */
   resetsAt?: string | null;
+  /** A paying plan's request (dl.new plans, a trial): the lines say nothing about free tokens. */
+  paid?: boolean;
 }
 
 /** "Monday 30 Nov, 00:00 UTC": when a week ending at `iso` resets. */
@@ -500,21 +502,23 @@ export function formatRationTokens(n: number): string {
 /**
  * The 402 a blocked registry model gets: the same shape as `gpt_limit`, with DeepSeek as the
  * alternative. `plans` "pro" changes two lines: a free account's (`pro_only`) names the Pro perk
- * and its Upgrade link, and Pro's used-up ration (`person_cap`) says when it resets.
+ * and its Upgrade link, and Pro's used-up ration (`person_cap`) says when it resets. `paid` (a
+ * plan's request) drops the free-token wording from the provider's own blocks.
  */
 export function providerLimitMessage(model: FreeModel, block: ProviderBlock, providerName: string, plans: ProviderPlans = "all", pro: ProLimitContext = {}): string {
   const use = `Use ${DEEPSEEK_MODEL} instead: /model.`;
   // Plain "DeepSeek": the alternative's id is in the error's `alternative`.
   const deepseek = "DeepSeek";
+  const free = pro.paid ? "" : "free ";
   switch (block) {
     case "no_key":
     case "paused":
-      return `${model.name} on ${providerName} is paused for free tokens right now. ${use}`;
+      return `${model.name} on ${providerName} is paused${pro.paid ? "" : " for free tokens"} right now. ${use}`;
     case "out_of_credit":
-      return `${model.name} on ${providerName} is out of free credit for now. ${use}`;
+      return `${model.name} on ${providerName} is out of ${free}credit for now. ${use}`;
     case "weekly_budget": {
       const resets = pro.resetsAt ? ` It resets on ${resetDay(pro.resetsAt)}.` : "";
-      return `${model.name} on ${providerName} has used its free budget for this week.${resets} ${use}`;
+      return `${model.name} on ${providerName} has used its ${free}budget for this week.${resets} ${use}`;
     }
     case "pro_only": {
       const ration = rationPhrase(pro.approxTokensPerWeek);
@@ -540,14 +544,15 @@ export function providerLimitMessage(model: FreeModel, block: ProviderBlock, pro
  * instead, and when the requested one is back. `resetsAt` (ISO) is the week's end, for the weekly
  * blocks; out of credit has no reset day.
  */
-export function providerFallbackNotice(model: FreeModel, block: ProviderBlock, providerName: string, fallbackName: string, input: { resetsAt?: string | null; approxTokensPerWeek?: number } = {}): string {
+export function providerFallbackNotice(model: FreeModel, block: ProviderBlock, providerName: string, fallbackName: string, input: { resetsAt?: string | null; approxTokensPerWeek?: number; paid?: boolean } = {}): string {
   const until = input.resetsAt ? ` until it resets on ${resetDay(input.resetsAt)}` : " for now";
+  const free = input.paid ? "" : "free ";
   if (block === "person_cap") {
     const ration = rationPhrase(input.approxTokensPerWeek);
     return `You've used this week's free ${model.name}${ration ? ` (${ration})` : ""}; ${fallbackName} serves${until}.`;
   }
-  if (block === "weekly_budget") return `${model.name} on ${providerName} has used its free budget for this week; ${fallbackName} serves${until}.`;
-  return `${model.name} on ${providerName} is out of free credit; ${fallbackName} serves for now.`;
+  if (block === "weekly_budget") return `${model.name} on ${providerName} has used its ${free}budget for this week; ${fallbackName} serves${until}.`;
+  return `${model.name} on ${providerName} is out of ${free}credit; ${fallbackName} serves for now.`;
 }
 
 /** The 80% credit warning for a registry provider: sent once per balance. */
