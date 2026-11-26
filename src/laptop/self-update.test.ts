@@ -1,7 +1,10 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { NPM_UPDATE, SCRIPT_UPDATE, SERVER_UPDATE, updateCommand } from "../install-method.js";
-import { dlUpdate, DL_UPDATE, installerFor, latestDlVersion, scriptHome, type DlUpdateDeps, type InstallerRun } from "./self-update.js";
+import { dlUpdate, DL_UPDATE, installerFor, latestDlVersion, scriptHome, shippedInstallScript, type DlUpdateDeps, type InstallerRun } from "./self-update.js";
 
 const ROOT = "/home/ada/.directionallylocal/dl/lib/node_modules/directionallylocal";
 const SCRIPT = "#!/bin/sh\necho fake install script\n";
@@ -27,7 +30,7 @@ function harness(overrides: Partial<DlUpdateDeps> & { lines?: string[]; code?: n
     uid: 501,
     packageRoot: ROOT,
     latest: async () => "0.16.0",
-    fetchScript: async () => SCRIPT,
+    readScript: () => SCRIPT,
     runInstaller: async (run, line) => {
       runs.push(run);
       for (const text of overrides.lines ?? ["Directionally Local", "  ✓ Installed dl"]) line(text);
@@ -153,7 +156,7 @@ describe("dl update", () => {
   });
 
   it("updates an npm install with npm", async () => {
-    const { deps, runs } = harness({ latest: async () => "0.17.0", bundledAfter: "3.11.0", command: NPM_UPDATE, fetchScript: async () => { throw new Error("no script for npm"); } });
+    const { deps, runs } = harness({ latest: async () => "0.17.0", bundledAfter: "3.11.0", command: NPM_UPDATE, readScript: () => { throw new Error("no script for npm"); } });
     assert.equal(await dlUpdate(deps), 0);
     assert.deepEqual(runs.map((run) => [run.command, ...run.args]), [["npm", "install", "-g", "--no-audit", "--no-fund", "directionallylocal@0.17.0"]]);
     assert.equal(runs[0]!.input, undefined);
@@ -168,11 +171,27 @@ describe("dl update", () => {
     assert.deepEqual(reruns, []);
   });
 
-  it("fails when the install script can't be fetched", async () => {
-    const { io, deps, runs } = harness({ latest: async () => "0.17.0", fetchScript: async () => { throw new Error("https://dl.new/install.sh answered 502"); } });
+  it("fails when the install script isn't in dl's package", async () => {
+    const { io, deps, runs } = harness({ latest: async () => "0.17.0", readScript: undefined, packageRoot: "/nonexistent/dl/lib/node_modules/directionallylocal" });
     assert.equal(await dlUpdate(deps), 1);
-    assert.match(io.stderr(), /Couldn't get the install script: https:\/\/dl\.new\/install\.sh answered 502/);
+    assert.match(io.stderr(), /Couldn't get the install script: \/nonexistent\/dl\/lib\/node_modules\/directionallylocal\/install\.sh is missing .*; reinstall dl\.\n {4}By hand: curl -fsSL https:\/\/dl\.new\/install\.sh \| DL_VERSION=0\.17\.0 sh\n/);
     assert.deepEqual(runs, []);
+  });
+
+  it("runs the install script that shipped in dl's own package, never one downloaded now", async () => {
+    const root = fileURLToPath(new URL("../..", import.meta.url));
+    const fetched: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string) => { fetched.push(String(url)); return new Response("#!/bin/sh\necho evil\n"); }) as typeof fetch;
+    try {
+      const { deps, runs } = harness({ latest: async () => "0.17.0", bundledAfter: "3.11.0", readScript: undefined, packageRoot: root });
+      assert.equal(await dlUpdate(deps), 0);
+      assert.equal(runs[0]!.input, readFileSync(join(root, "install.sh"), "utf8"), "this repository's install.sh, which the package ships");
+      assert.deepEqual(fetched, [], "nothing fetched from dl.new");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    assert.throws(() => shippedInstallScript("/nonexistent"), /\/nonexistent\/install\.sh is missing/);
   });
 
   it("never downgrades: a dl newer than npm's latest is up to date", async () => {

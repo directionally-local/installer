@@ -13,7 +13,7 @@ dl
 
 `dl` starts Autopilot in the folder you're in. There's nothing to set up first: no Docker, no sandbox, no GitHub token. Autopilot's own first run picks your provider and signs you in. Every `dl` is a new session; `dl -c` continues the last one.
 
-Update: `dl update`. It updates `dl` when npm has a newer one, with the same installer you used (the install script or npm, so rerunning `curl -fsSL https://dl.new | sh` still works too), and makes sure the Autopilot it pins is installed. `dl update --check` only says whether there's a newer `dl`. Every "update dl" hint, Autopilot's included, says `dl update`.
+Update: `dl update`. It updates `dl` when npm has a newer one, with the same installer you used (the install script or npm, so rerunning `curl -fsSL https://dl.new | sh` still works too; for the install script it runs the copy that shipped in the installed `dl` package, never one downloaded at update time), and makes sure the Autopilot it pins is installed. `dl update --check` only says whether there's a newer `dl`. Every "update dl" hint, Autopilot's included, says `dl update`.
 
 Background tasks are the part that needs setting up, and `dl` sets them up the first time you ask for one. `dl run "task"` with nowhere to send it asks one question:
 
