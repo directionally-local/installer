@@ -38,7 +38,7 @@ import {
   type TrialKind,
   type TrialMeter,
 } from "./trials.js";
-import { isPaidPlan, type PlanTier } from "./plans.js";
+import { isPaidPlan, PLAN_CACHED_SHARE, type PlanTier } from "./plans.js";
 
 /**
  * One person's allowance: `getByName("gh:<githubId>")`. The single serialization point for
@@ -639,7 +639,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const cost = model ? estimateCostUsd(input.promptEstimate, plan.maxTokens, model.prices) : ((Math.max(0, input.promptEstimate) + plan.maxTokens) * FALLBACK_USD_PER_MILLION_TOKENS) / 1_000_000;
     const used = meter.kind === "bonus" ? bonusUsdThisWeek(sql, input.now) : meter.kind === "trial" ? (readAccountTrial(sql, input.now)?.counted ?? Number.MAX_SAFE_INTEGER) : countedThisWeek(sql, meter.model, input.now);
     const inFlight = meter.kind === "bonus" ? flight.usd : flight.counted;
-    const own = meter.kind === "bonus" ? cost : expectedCounted(input.promptEstimate, share ?? 0.9617, meter.cachedTokenWeight);
+    const own = meter.kind === "bonus" ? cost : expectedCounted(input.promptEstimate, share ?? PLAN_CACHED_SHARE, meter.cachedTokenWeight);
     const fits = used < meter.limit && (flight.count === 0 || used + inFlight + own <= meter.limit);
     if (!fits) return { ok: false, code: "plan_limit", meter, used, allowance: before };
     const reservationId = crypto.randomUUID();
@@ -872,11 +872,13 @@ export class AccountObject extends DurableObject<AccountEnv> {
     };
   }
 
-  /** The person's cached share of prompt tokens so far; 0 until enough has been reported to tell. */
+  /**
+   * The person's cached share of prompt tokens so far; the plan mix's (PLAN_CACHED_SHARE) until
+   * enough has been reported to tell, so a new account's cut-off agent turn isn't counted as a
+   * wholly uncached prompt (20-50x what such a turn really counts).
+   */
   #cachedShare(githubId: number): number {
-    const seen = this.ctx.storage.sql.exec<{ prompt_seen: number; cached_seen: number }>("SELECT prompt_seen, cached_seen FROM account WHERE github_id = ?", githubId).toArray()[0];
-    if (!seen || seen.prompt_seen < MIN_PROMPT_TOKENS_FOR_CACHED_SHARE) return 0;
-    return Math.min(1, seen.cached_seen / seen.prompt_seen);
+    return this.#cachedShareOrUndefined(githubId) ?? PLAN_CACHED_SHARE;
   }
 
   /** The person's cached share, or undefined until enough has been reported to tell. */
@@ -886,11 +888,17 @@ export class AccountObject extends DurableObject<AccountEnv> {
     return Math.min(1, seen.cached_seen / seen.prompt_seen);
   }
 
-  /** A request without usage: the estimate charged (undefined with no output), and the realistic prompt alone, for the provider's credit. */
+  /**
+   * A request without usage: the estimate charged (undefined with no output), at the person's
+   * cached share or the plan mix's, and the realistic prompt alone, for the provider's credit on
+   * a request that never answered (cancelled, abandoned): at the person's own share, uncached
+   * until it is known, since the provider's books are better over than under.
+   */
   #estimate(row: { github_id: number }, promptEstimate: number, outputTokens: number): NoUsageEstimate {
     const share = this.#cachedShare(row.github_id);
+    const creditShare = this.#cachedShareOrUndefined(row.github_id) ?? 0;
     const promptTokens = realisticPromptTokens(promptEstimate);
-    return { usage: estimatedUsage(promptEstimate, outputTokens, share), prompt: { promptTokens, completionTokens: 0, cachedTokens: Math.floor(promptTokens * share), costUsd: undefined } };
+    return { usage: estimatedUsage(promptEstimate, outputTokens, share), prompt: { promptTokens, completionTokens: 0, cachedTokens: Math.floor(promptTokens * creditShare), costUsd: undefined } };
   }
 
   /** Replaces a reservation with its charge: to the week's counters, or to top-ups, earliest expiry first. */

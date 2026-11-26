@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, createInvite, createService, luminalUsage, MODEL, openaiResponse, openRelayCompletion, openRelayUsage, responsesUsage, type Service } from "./harness.js";
 import { modelById } from "../src/models.js";
+import { PLAN_CACHED_SHARE } from "../src/plans.js";
 import { chargedTokens, costAtPrices, costAtPricesOrFallback, DEEPSEEK_MAX_OUTPUT_TOKENS, estimatedUsage, FALLBACK_USD_PER_MILLION_TOKENS, realisticPromptTokens, streamedOutputTokens, type Usage } from "../src/quota.js";
 
 /**
@@ -166,15 +167,20 @@ describe("requests that end without usage", () => {
     assert.ok(after.usd - start.usd >= (1000 * DEEPSEEK.prices.output) / 1_000_000);
   });
 
-  it("uses an uncached prompt when the person's cached share isn't known yet", async () => {
+  it("uses the plan mix's cached share when the person's own isn't known yet, not an uncached prompt", async () => {
     const { service, token } = await member();
     service.setLuminal(() => upstream([chunk("abc")], "error"));
     await assert.rejects((await chat(service, token, agentBody())).text());
     const promptTokens = realisticPromptTokens(Math.ceil(bytesOf(agentBody()) / 2));
-    const usage: Usage = { promptTokens, cachedTokens: 0, completionTokens: 1, costUsd: undefined };
+    const usage: Usage = { promptTokens, cachedTokens: Math.floor(promptTokens * PLAN_CACHED_SHARE), completionTokens: 1, costUsd: undefined };
     const after = await week(service, token);
     assert.equal(after.tokens, chargedTokens(usage, WEIGHT));
     assert.ok(Math.abs(after.usd - costAtPrices(usage, DEEPSEEK.prices)) < 1e-6, "DeepSeek's own prices, never the $1/M fallback");
+    // A new account's cut-off ~100k-token agent turn: before, ~100k counted (all fresh); now ~4%+ of that.
+    const uncached = chargedTokens({ ...usage, cachedTokens: 0 }, WEIGHT);
+    assert.ok(uncached / after.tokens > 15, `uncached ${uncached}, now ${after.tokens}`);
+    const row = lastRow(service);
+    assert.equal(row.cached_tokens, usage.cachedTokens);
   });
 
   it("charges the abandoned reservation the alarm sweeps nothing", async () => {
