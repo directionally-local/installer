@@ -1674,16 +1674,16 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
     case "invoice.payment_failed": {
       const { subscriptionId } = invoiceSubscription(object);
       if (!subscriptionId) return "ignored";
-      if (owner === undefined) {
-        // Money taken on a subscription whose Checkout can't be claimed any more (a renewal, or a
-        // card trial's first charge): refunded, and the subscription cancelled.
+      // Money taken on a subscription whose Checkout can't be claimed any more (a renewal, or a
+      // card trial's first charge): refunded, and the subscription cancelled.
+      if (owner === undefined && event.type === "invoice.paid" && invoiceAmount(object) > 0 && typeof object.id === "string") {
         const row = await dir.paidCheckoutBySubscription(subscriptionId);
-        if (event.type === "invoice.paid" && row && row.claimed_by === null && !claimable(row, c.now(), CLAIM_DAYS) && invoiceAmount(object) > 0 && typeof object.id === "string") {
+        if (row && row.claimed_by === null && !claimable(row, c.now(), CLAIM_DAYS)) {
           const done = await cancelOrphan(c, { subscriptionId, sessionId: row.session_id, reason: "renewal", email: row.email, refundInvoice: object.id });
-          return done ? "plan_orphan_canceled" : "plan_unclaimed";
+          if (done) return "plan_orphan_canceled";
         }
-        return "plan_unclaimed";
       }
+      if (owner === undefined) return "plan_unclaimed";
       const person = account(c, owner);
       const tier = invoicePrices(object).map((price) => planOfPrice(prices, price)).find((plan): plan is PlanId => plan !== undefined);
       if (event.type === "invoice.payment_failed") {
