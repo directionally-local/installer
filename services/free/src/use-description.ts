@@ -30,6 +30,7 @@
  */
 
 import { DEFAULT_DETECTION_RULES, type DetectionRules } from "./detection-rules.js";
+import { cleanReason } from "./moderation.js";
 
 export const USE_INPUT_CHARS = 1_500;
 /** What joins the head and tail of a latest message longer than USE_INPUT_CHARS. */
@@ -179,8 +180,13 @@ export function useMessages(input: UseInput, rules: DetectionRules = DEFAULT_DET
  * The model's answer as a label, or undefined when it isn't one: the first JSON object in the
  * text (a code fence around it is fine), `use` trimmed to one line of at most USE_MAX_CHARS
  * characters, `risk` and `category` from their lists (an unknown category is "other").
+ *
+ * `use` never carries the person's words: quoted spans are cut out (moderation.ts `cleanReason`,
+ * as for reviewer reasons), and with `input`, every run of USE_QUOTE_RUN_WORDS or more words it
+ * shares with the text the labeller was shown is cut too (`cutSharedRuns`). When too little is
+ * left to read, `use` is USE_WITHHELD; the risk and category are kept either way.
  */
-export function parseUseLabel(text: unknown): UseLabel | undefined {
+export function parseUseLabel(text: unknown, input?: UseInput): UseLabel | undefined {
   if (typeof text !== "string") return undefined;
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
@@ -194,12 +200,52 @@ export function parseUseLabel(text: unknown): UseLabel | undefined {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
   const { use, risk, category } = parsed as Record<string, unknown>;
   if (typeof use !== "string" || !isUseRisk(risk)) return undefined;
-  // eslint-disable-next-line no-control-regex
-  const oneLine = use.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
-  const clamped = [...oneLine].slice(0, USE_MAX_CHARS).join("").trim();
+  const clamped = cleanReason(use, USE_MAX_CHARS);
   if (!clamped) return undefined;
+  const unquoted = input ? cutSharedRuns(clamped, `${input.previous ?? ""}\n${input.text}`) : clamped;
+  const readable = !unquoted.includes(QUOTE_CUT) || labelWords(unquoted.replaceAll(QUOTE_CUT, " ")).length >= 2;
   const cat = typeof category === "string" && (USE_CATEGORIES as readonly string[]).includes(category) ? (category as UseCategory) : "other";
-  return { use: clamped, risk, category: cat };
+  return { use: readable ? unquoted : USE_WITHHELD, risk, category: cat };
+}
+
+/** A run of this many words in a row shared with the input means a description quotes it. */
+export const USE_QUOTE_RUN_WORDS = 4;
+/** `use` when what is left of a description, after cutting what it quoted, is under two words. */
+export const USE_WITHHELD = "Description withheld: it quoted the request";
+/** What a cut quote becomes (as in moderation.ts `stripQuotes`). */
+const QUOTE_CUT = "[…]";
+const WORD = /[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu;
+
+function labelWords(text: string): Array<{ word: string; start: number; end: number }> {
+  return [...text.matchAll(WORD)].map((match) => ({ word: match[0].toLowerCase().replaceAll("’", "'"), start: match.index, end: match.index + match[0].length }));
+}
+
+/**
+ * `label` with every run of `run` or more words in a row that also appears, in that order, in
+ * `source` replaced by "[…]". Words are compared ignoring case and punctuation.
+ */
+export function cutSharedRuns(label: string, source: string, run = USE_QUOTE_RUN_WORDS): string {
+  const sourceWords = labelWords(source).map((entry) => entry.word);
+  const grams = new Set<string>();
+  for (let index = 0; index + run <= sourceWords.length; index++) grams.add(sourceWords.slice(index, index + run).join(" "));
+  const words = labelWords(label);
+  const cut = words.map(() => false);
+  for (let index = 0; index + run <= words.length; index++) {
+    if (!grams.has(words.slice(index, index + run).map((entry) => entry.word).join(" "))) continue;
+    for (let offset = 0; offset < run; offset++) cut[index + offset] = true;
+  }
+  if (!cut.includes(true)) return label;
+  let out = "";
+  let at = 0;
+  for (let index = 0; index < words.length; index++) {
+    if (!cut[index] || cut[index - 1]) continue;
+    let last = index;
+    while (cut[last + 1]) last++;
+    out += `${label.slice(at, words[index]!.start)}${QUOTE_CUT}`;
+    at = words[last]!.end;
+  }
+  out += label.slice(at);
+  return out.replace(/\[…\](\s*\[…\])+/g, QUOTE_CUT).replace(/\s+/g, " ").trim();
 }
 
 /** The assistant text of a chat completion, if it has one. */

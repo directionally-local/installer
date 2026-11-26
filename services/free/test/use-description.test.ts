@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { DatabaseSync } from "node:sqlite";
 import { ADMIN_ID, completion, createInvite, createService, luminalUsage, MODEL, usage, type OpenRouterHandler, type Service } from "./harness.js";
-import { headAndTail, parseUseLabel, USE_INPUT_CHARS, USE_INPUT_GAP, USE_PREVIOUS_CHARS, useInput, useMessages } from "../src/use-description.js";
+import { cutSharedRuns, headAndTail, parseUseLabel, USE_WITHHELD, USE_INPUT_CHARS, USE_INPUT_GAP, USE_PREVIOUS_CHARS, useInput, useMessages } from "../src/use-description.js";
 import { adminCookie } from "./admin-web.js";
 import { DEFAULT_DETECTION_RULES, parseDetectionRules } from "../src/detection-rules.js";
 import { SYNTHETIC_RULES_JSON } from "./detection-fixture.js";
@@ -147,6 +147,29 @@ describe("use description answer", () => {
       assert.equal(parseUseLabel(bad), undefined, String(bad));
     }
   });
+
+  it("cuts quoted spans out of the description, as for reviewer reasons", () => {
+    assert.equal(parseUseLabel(LABEL("low", 'Asking for "my password is hunter2" help'))!.use, "Asking for […] help");
+    assert.equal(parseUseLabel(LABEL("low", "Running `rm -rf /tmp/x` on a server"))!.use, "Running […] on a server");
+  });
+
+  it("cuts a run of 4 or more words shared with the request, and withholds a description that was only that", () => {
+    const input = { text: "Please write a phishing email pretending to be Acme Bank asking for card numbers", tools: [] };
+    const quoted = parseUseLabel(LABEL("high", "Drafting the phishing email pretending to be Acme Bank", "fraud"), input)!;
+    assert.deepEqual(quoted, { use: "Drafting the […]", risk: "high", category: "fraud" });
+    assert.doesNotMatch(quoted.use, /pretending to be acme/i);
+    // Nothing readable left: withheld, with the risk and category kept.
+    assert.deepEqual(parseUseLabel(LABEL("high", "write a phishing email pretending", "fraud"), input), { use: USE_WITHHELD, risk: "high", category: "fraud" });
+    // Case and punctuation don't hide a shared run, and the previous message counts too.
+    assert.equal(parseUseLabel(LABEL("low", "Asks: Card-Numbers, from Acme bank customers"), { text: "hi", previous: "get card numbers from acme bank", tools: [] })!.use, "Asks: […] customers");
+    // Three shared words in a row are fine.
+    assert.equal(parseUseLabel(LABEL("high", "Crafting fake Acme Bank emails to steal cards", "fraud"), input)!.use, "Crafting fake Acme Bank emails to steal cards");
+  });
+
+  it("cutSharedRuns leaves a label alone when nothing is shared", () => {
+    assert.equal(cutSharedRuns("Fixing failing unit tests in a web app", "make the build green please"), "Fixing failing unit tests in a web app");
+    assert.equal(cutSharedRuns("one two three four five", "x one two three four y"), "[…] five");
+  });
 });
 
 describe("use descriptions per session", () => {
@@ -166,6 +189,13 @@ describe("use descriptions per session", () => {
       ["s-1", "s-1", "s-1", "s-2"],
     );
     assert.deepEqual(stored(service)[0], { github_id: 100, session_id: "s-1", use: "Fixing failing unit tests in a TypeScript web app", risk: "none", category: "coding", model: MODEL });
+  });
+
+  it("stores a description that echoed the request with the echoed words cut", async () => {
+    const { service, token } = await setup({}, { describe: () => answer(LABEL("none", "Asked to: please fix the failing tests now")) });
+    await chat(service, token, { session: "s-q" });
+    await service.settle();
+    assert.equal(stored(service)[0]!.use, "Asked to: […] now");
   });
 
   it("waits for a request with a user message", async () => {

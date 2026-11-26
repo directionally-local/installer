@@ -1079,6 +1079,10 @@ service writes **a short automated description of what it is about, and a safety
   other>"}`, judged by the labeller policy (`labellerPolicy` in
   [detection rules](#detection-rules-detection_rules-private)). `use` is cut to 60 characters on one line; an unknown category is `other`; an answer
   that doesn't parse stores nothing.
+- **Never the person's words:** quoted spans are cut out of `use` (as for reviewer reasons), and
+  so is every run of 4 or more words in a row it shares with the text the labeller was shown
+  (ignoring case and punctuation), each replaced by `[…]`. If under two words are left, `use` is
+  "Description withheld: it quoted the request"; the risk and category are kept.
 - **Off the request path:** it runs beside the request and the request never waits for it, so
   it can't slow or fail anyone's request. The portable runtime has no `waitUntil` (see
   `docs/plans/portable-services.md`), so the work starts with the upstream call and runs while
