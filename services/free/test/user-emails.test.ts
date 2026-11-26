@@ -80,7 +80,7 @@ describe("emails to users: the copy", () => {
         planWarning: { model: "DeepSeek V4.1 Flash", share: "80", used: "~50M", limit: "~62M", left: "~12M" },
         planWelcome: { plan: "dl.new Starter", limits: "- DeepSeek V4.1 Flash ~62M/week (95.5% caching applied)", bonus: "", promo: " Your first month was 50% off. It renews at $7/mo." },
         planReset: { tokens: "~62M", plan: "dl.new Starter", models: "- DeepSeek V4.1 Flash", cachedpct: "2%", sessions: "3", failovers: "0" },
-        trial: { plan: "dl.new Starter", price: "$7/mo", promo: " (first month 50% off)", tokens: "20M", ends: "26 dec", limits: "- DeepSeek V4.1 Flash ~62M/week (95.5% caching applied)", share: "81", used: "~16.2M", left: "~3.8M", reason: "you used your 20M free trial tokens.", bonus: "" },
+        trial: { plan: "dl.new Starter", price: "$7/mo", promo: " (first month 50% off)", tokens: "20M", ends: "26 dec", limits: "- DeepSeek V4.1 Flash ~62M/week (95.5% caching applied)", share: "81", used: "~16.2M", left: "~3.8M", reason: "you used your 20M free trial tokens.", bonus: "", upgrade: "Starter $7/mo, ~269M tokens/month (~62M/week) (95.5% caching applied)" },
       });
       assert.match(rendered.body, /\n\ndon't want these\? https:\/\/free\.directionallylocal\.com\/email\/stop\?u=1&t=x\n$/);
       assert.doesNotMatch(rendered.body, /\{\w+\}/, `${kind} has a placeholder left`);

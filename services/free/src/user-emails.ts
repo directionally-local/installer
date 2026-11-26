@@ -14,7 +14,8 @@
  *
  * dl.new's paid plans have their own: welcome_paid (on claiming a payment), plan_80 and
  * plan_reset (Mondays, paying accounts only). Its free trials (trials.ts): welcome_trial_card,
- * welcome_trial_nocard, trial_card_80 and trial_converted. The one capitalised line is plan_reset's subject,
+ * welcome_trial_nocard, trial_card_80 and trial_converted. Its Free plan (free-plan.ts): welcome_free,
+ * free_80 and free_100 (once per week each). The one capitalised line is plan_reset's subject,
  * "Your ~62M tokens reset.", as the owner wrote it.
  *
  * When each one goes out is in user-email-send.ts.
@@ -39,7 +40,10 @@ export type UserEmailKind =
   | "welcome_trial_card"
   | "welcome_trial_nocard"
   | "trial_card_80"
-  | "trial_converted";
+  | "trial_converted"
+  | "welcome_free"
+  | "free_80"
+  | "free_100";
 
 /** The welcome kinds: held back while the person waits in line for free tokens. */
 export const WELCOME_KINDS: readonly UserEmailKind[] = ["welcome", "welcome_basic", "welcome_starter", "welcome_starter_small", "welcome_trial"];
@@ -297,6 +301,64 @@ if anything breaks or feels off, just reply. it comes straight to me.
 sina`,
   },
 
+  // 3h. dl.new's Free plan (free-plan.ts): right after the GitHub sign-in that made the account.
+  // {tokens} "10M" (real tokens a week at 95.5% caching), {upgrade} the cheapest plan's line.
+  welcome_free: {
+    subject: "your dl.new key is ready",
+    body: `hey,
+
+sina here, i build dl.new. you're on the free plan: {tokens} tokens of deepseek v4.1 flash every week (95.5% caching applied), no card needed. it resets every monday at 00:00 utc.
+
+your key is waiting at https://dl.new/connect
+
+with claude code, run this once:
+    curl -fsSL dl.new | sh
+then start it with:
+    dl claude
+
+other tools (opencode, cline, cursor, any openai sdk): use the base url https://api.dl.new/v1 and a key from https://dl.new/keys
+
+want more every week, or kimi? https://dl.new
+{upgrade}
+
+your usage: https://dl.new/usage
+
+if anything breaks or feels off, just reply. it comes straight to me.
+
+sina`,
+  },
+
+  // 3i. The Free plan at 80% of the week (once per week). {share} the percent, {used} "~8.1M",
+  // {tokens} "10M", {left} "~1.9M", {upgrade} the cheapest plan's line.
+  free_80: {
+    subject: "your free plan is {share}% used this week",
+    body: `hey,
+
+your dl.new free plan: {share}% of this week used ({used} of {tokens} at 95.5% caching). {left} left until mon 00:00 utc.
+
+need more room every week? upgrade at https://dl.new
+{upgrade}
+
+your usage: https://dl.new/usage
+
+sina`,
+  },
+
+  // 3j. The Free plan's week used up (once per week, at the first refused request).
+  free_100: {
+    subject: "your free plan tokens are used for this week",
+    body: `hey,
+
+you've used this week's {tokens} free plan tokens (95.5% caching applied). they come back mon 00:00 utc.
+
+to keep going now, upgrade at https://dl.new
+{upgrade}
+
+your usage: https://dl.new/usage
+
+sina`,
+  },
+
   // 3e. dl.new's no-card trial (trials.ts): right after the GitHub sign-in that started it.
   // {tokens} "10M" (real tokens at 95.5% caching).
   welcome_trial_nocard: {
@@ -449,7 +511,7 @@ export interface PlanWelcomeValues {
 }
 
 /** The trial emails' values (paid-web.ts trialEmailValues): every placeholder they use, as text. */
-export type TrialEmailValues = Partial<Record<"plan" | "price" | "promo" | "tokens" | "ends" | "limits" | "share" | "used" | "left" | "reason" | "bonus", string>>;
+export type TrialEmailValues = Partial<Record<"plan" | "price" | "promo" | "tokens" | "ends" | "limits" | "share" | "used" | "left" | "reason" | "bonus" | "upgrade", string>>;
 
 /** plan_reset's values (plan-reset.ts planResetValues). */
 export interface PlanResetValues {

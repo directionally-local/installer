@@ -30,6 +30,7 @@ import {
 } from "./trials.js";
 import type { TrialEmailValues } from "./user-emails.js";
 import { DAY_MS } from "./week.js";
+import { FREE_PLAN_EMAIL_USED_MESSAGE, FREE_PLAN_NOT_ELIGIBLE_MESSAGE, FREE_PLAN_URL, oldEnough, starterLine, type FreePlanRefusal } from "./free-plan.js";
 
 type TrialConfig = TrialSettingsConfig & PlanSettingsConfig & { cachedTokenWeight: number; promoPercentOff: number };
 
@@ -266,13 +267,16 @@ export interface TrialCheck {
   level: string;
   batchFlagged: boolean;
   networkLimited: boolean;
+  /** The GitHub account's age in days (the Free plan's minimum), when GitHub said. */
+  accountAgeDays?: number;
 }
 
 export function parseTrialCheck(details: string | null): TrialCheck | undefined {
   if (!details) return undefined;
   try {
     const parsed = JSON.parse(details) as Partial<TrialCheck>;
-    return parsed.trial === true && typeof parsed.level === "string" ? { trial: true, level: parsed.level, batchFlagged: parsed.batchFlagged === true, networkLimited: parsed.networkLimited === true } : undefined;
+    if (parsed.trial !== true || typeof parsed.level !== "string") return undefined;
+    return { trial: true, level: parsed.level, batchFlagged: parsed.batchFlagged === true, networkLimited: parsed.networkLimited === true, ...(typeof parsed.accountAgeDays === "number" ? { accountAgeDays: parsed.accountAgeDays } : {}) };
   } catch {
     return undefined;
   }
@@ -322,4 +326,41 @@ export async function noCardTrialSignIn(c: Ctx, input: { githubId: number; login
   if (c.background) c.background(welcome);
   else await welcome;
   return { account: started.account, created: true };
+}
+
+// ─── The Free plan (free-plan.ts) ───────────────────────────────────────────
+
+/**
+ * A Free account for a new GitHub sign-in, while `freePlan` is on: the no-card trial's account
+ * checks (the level from the GitHub signals, the creation-batch check, the per-network and
+ * per-domain sign-up limits, blocked and disposable emails, one account per verified email) plus
+ * the GitHub account's age (`freePlanMinAccountAgeDays`). Returns the new account, the existing
+ * one for a GitHub account that has one (signed in as usual), or the refusal (403
+ * free_plan_unavailable with `reason` and `plansUrl`). Moderation and blocks apply to its requests
+ * as to everyone's.
+ */
+export async function freePlanSignIn(c: Ctx, input: { githubId: number; login: string; email: string; check: TrialCheck | undefined }): Promise<{ account: number; created: boolean } | Response> {
+  const { config } = await runtime(c);
+  const refuse = (reason: FreePlanRefusal, message: string) => apiError(403, "free_plan_unavailable", message, { reason, plansUrl: FREE_PLAN_URL });
+  const dir = directory(c);
+  const existing = await dir.resolveIdentity("github", String(input.githubId), c.now());
+  if (existing !== undefined) return { account: existing, created: false };
+  const norm = normalizeEmail(input.email);
+  const check = input.check;
+  if (!check || check.level === "starter" || check.batchFlagged || check.networkLimited || !oldEnough(check.accountAgeDays, config)) return refuse("not_eligible", FREE_PLAN_NOT_ELIGIBLE_MESSAGE);
+  if (isDisposableDomain(emailDomain(norm)) || emailBlocked(norm, config.blockedEmails)) return refuse("not_eligible", FREE_PLAN_NOT_ELIGIBLE_MESSAGE);
+  if (await dir.emailInUse(norm, 0)) return refuse("used", FREE_PLAN_EMAIL_USED_MESSAGE);
+  const domain = emailDomain(norm);
+  if (!PUBLIC_EMAIL_DOMAINS.has(domain) && check.level !== "full" && (await dir.domainSignupsSince(domain, c.now() - DAY_MS)) >= config.domainSignupsPerDay) return refuse("not_eligible", FREE_PLAN_NOT_ELIGIBLE_MESSAGE);
+  const started = await dir.startFreePlan({ githubId: input.githubId, login: input.login, email: input.email, emailNorm: norm, now: c.now() });
+  if (!started.created) return started;
+  const person = account(c, started.account);
+  const stored = await dir.getPerson(started.account);
+  await person.activate({ githubId: started.account, login: stored?.login ?? input.login, isAdmin: false, now: c.now() });
+  await person.startFreePlan(c.now());
+  await spendTrialSignup(c);
+  const welcome = userEmail(c, config, "welcome_free", started.account, "", { trial: { tokens: countedText(config.freePlanWeeklyRealTokens), upgrade: starterLine(config) } }).catch(() => "failed");
+  if (c.background) c.background(welcome);
+  else await welcome;
+  return started;
 }

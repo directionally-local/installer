@@ -3,6 +3,7 @@ import { ACCESS_REQUEST_ALERT_MODES, COUPON_ID, GPT6_CLIENTS, GUARD_MODES, isAll
 import { isEmailBlocklistEntry } from "./email-guard.js";
 import { BROADCAST_EMAIL_PROVIDERS } from "./email-budget.js";
 import { MAX_TRIAL_DAYS } from "./trials.js";
+import { FREE_PLAN_MODES } from "./free-plan.js";
 import { isPriceList, isRegistryModelList, isSellerList, PROVIDER_PLANS, PROVIDER_STATUSES } from "./providers.js";
 import { isProviderSlugList, isQuantizationList } from "./routing.js";
 
@@ -309,6 +310,14 @@ export const RUNTIME_SETTINGS = {
   noCardTrialBudgetUsd: { kind: "amount", env: "NO_CARD_TRIAL_BUDGET_USD" },
   /** USD per million counted trial tokens for the projection until trials have used 20M counted (default 0.30). */
   trialUsdPerMillionCounted: { kind: "amount", env: "TRIAL_USD_PER_MILLION_COUNTED" },
+  /** dl.new's Free plan (free-plan.ts): "on" offers it and makes a Free account at a new GitHub sign-in; default "off". */
+  freePlan: { kind: "freePlanMode", env: "FREE_PLAN" },
+  /** Real tokens a week (95.5% caching applied) of DeepSeek V4.1 Flash on Free (default 10M; enforced as counted). */
+  freePlanWeeklyRealTokens: { kind: "tokens", env: "FREE_PLAN_WEEKLY_REAL_TOKENS" },
+  /** What every Free account together may cost a week, USD (default 150); past it new Free requests are refused. */
+  freePlanWeeklyUsdCap: { kind: "amount", env: "FREE_PLAN_WEEKLY_USD_CAP" },
+  /** A GitHub account at least this many days old gets the Free plan (default 90). */
+  freePlanMinAccountAgeDays: { kind: "count", env: "FREE_PLAN_MIN_ACCOUNT_AGE_DAYS" },
   /** The GPT-6 launch bonus for paying accounts (gpt6-bonus.ts); default off. */
   gpt6Bonus: { kind: "flag", env: "GPT6_BONUS" },
   /** The bonus a paying account gets a week, USD of GPT-6.1 Sol usage (default 2). */
@@ -409,6 +418,8 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
       return typeof value === "string" && (MODERATION_MODES as readonly string[]).includes(value) ? value : "invalid";
     case "emailProvider":
       return typeof value === "string" && (BROADCAST_EMAIL_PROVIDERS as readonly string[]).includes(value) ? value : "invalid";
+    case "freePlanMode":
+      return typeof value === "string" && (FREE_PLAN_MODES as readonly string[]).includes(value) ? value : "invalid";
     case "allocatorMode":
       return typeof value === "string" && (ALLOCATOR_MODES as readonly string[]).includes(value) ? value : "invalid";
     case "people":
@@ -466,6 +477,7 @@ const RULES: Record<Kind, string> = {
   gpt6Clients: '"autopilot" (GPT-6 in Autopilot only) or "all" (every coding agent)',
   moderationMode: '"enforce", "shadow" or "off"',
   allocatorMode: '"on" or "off"',
+  freePlanMode: '"on" or "off"',
   emailProvider: '"resend" or "cloudflare"',
   people: 'a list of up to 500 GitHub logins or numeric ids, e.g. ["octocat", "12345"], or [] for none',
   providerStatus: '"on" or "paused"',

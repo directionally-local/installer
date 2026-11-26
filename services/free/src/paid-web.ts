@@ -53,7 +53,9 @@ import { emailBudgetOf } from "./email-budget.js";
 import { claimable, type CheckoutPromo, type PaidCheckoutRow, type UsageRow } from "./paid-store.js";
 import { CLI_LOGIN_INTERVAL_S, EMAIL_CODE_RESEND_MS, EMAIL_CODE_TTL_MS } from "./paid-auth.js";
 import { normalizeUserCode } from "./codes.js";
-import { endNoCardTrialForPlan, noCardTrialSignIn, parseTrialCheck, startCardTrialOnClaim, trialFromInvoice, trialFromSubscription, trialWillEnd } from "./trial-web.js";
+import { DEEPSEEK_MODEL } from "./models.js";
+import { capacityFull, freePlanOffer, freePlanOn, freePlanView } from "./free-plan.js";
+import { endNoCardTrialForPlan, freePlanSignIn, noCardTrialSignIn, parseTrialCheck, startCardTrialOnClaim, trialFromInvoice, trialFromSubscription, trialWillEnd } from "./trial-web.js";
 import { trialCountedLimit, trialsOffer, trialView } from "./trials.js";
 import { CHECKOUT_SESSION_ID, checkoutPromo, createPlanCheckout, invoiceAmount, isTrialCheckout, promoEligible, subscriptionTrial, isCouponRefusal, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, isTermsConsentRefusal, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, termsAccepted, type StripeEvent } from "./stripe.js";
 import { sendPlainEmail } from "./user-email-send.js";
@@ -212,9 +214,19 @@ async function webPlans(c: Ctx): Promise<Response> {
   return json({
     ...plansView({ catalog, available: billingOn(c) && PLAN_IDS.every((plan) => planPrice(c, plan) !== undefined), promo: promoView(config, c.now()) }),
     trials: trialsOffer(config, budgets),
+    // dl.new's Free plan (free-plan.ts), only while its switch is on: the plan step's one no-card option.
+    ...(freePlanOn(config) ? { freePlan: freePlanOffer(config, capacityFull((await directory(c).freePlanWeek(c.now())).usd, config)) } : {}),
     // Which optional sign-ins are on: the pages show "Continue with Google" only when `google` is true.
     signIn: { google: c.config.google !== undefined },
   });
+}
+
+/** /web/usage `freePlan`: this week's Free meter for a Free account with no paid plan, else null. */
+async function freePlanUsage(c: Ctx, accountNumber: number, thisWeek: boolean) {
+  if (!thisWeek) return null;
+  const [{ config }, bars] = await Promise.all([runtime(c), planAccountFor(c, accountNumber)]);
+  if (!bars.state.freePlan || bars.state.tier !== "none") return null;
+  return freePlanView({ on: freePlanOn(config), counted: bars.state.counted[DEEPSEEK_MODEL] ?? 0, config, now: c.now() });
 }
 
 /** A plan's line ("DeepSeek V4.1 Flash ~62M/week (95.5% caching applied). ...") at the live settings. */
@@ -782,8 +794,11 @@ export async function githubCallback(c: Ctx): Promise<Response> {
   if (!signedIn) return back("error=github_failed");
   const email = await githubPrimaryEmail(signedIn.accessToken, c.fetch, GITHUB_USER_AGENT, GITHUB_CHECK_TIMEOUT_MS);
   if (!email) return back("error=github_no_verified_email");
-  // dl.new/trial: the free tier's account check, read now while the GitHub token is at hand.
-  const details = new URL(claimed.returnUrl).pathname === "/trial" ? JSON.stringify({ trial: true, ...(await trialAccountCheck(c, signedIn.user, signedIn.accessToken)) }) : null;
+  // dl.new/trial, and any GitHub sign-in with no account while the Free plan is on (free-plan.ts):
+  // the free tier's account check, read now while the GitHub token is at hand.
+  const forTrial = new URL(claimed.returnUrl).pathname === "/trial";
+  const forFree = !forTrial && freePlanOn((await runtime(c)).config) && (await directory(c).resolveIdentity("github", String(signedIn.user.id), c.now())) === undefined;
+  const details = forTrial || forFree ? JSON.stringify({ trial: true, ...(await trialAccountCheck(c, signedIn.user, signedIn.accessToken)) }) : null;
   const handoff = await auth(c).issueAccountHandoff({ pageStateHash: claimed.pageStateHash, githubId: signedIn.user.id, login: signedIn.user.login, email, details, now: c.now() });
   return back(`signin=${handoff}`);
 }
@@ -797,6 +812,23 @@ async function githubSession(c: Ctx): Promise<Response> {
   if (typeof body.code !== "string" || !HANDOFF_CODE.test(body.code) || typeof body.state !== "string" || !PAGE_STATE.test(body.state)) return invalid();
   const handoff = await auth(c).claimAccountHandoff({ code: body.code, state: body.state, now: c.now() });
   if (!handoff) return invalid();
+  // The Free plan (free-plan.ts), while it is on: a GitHub sign-in with no account and no payment
+  // makes a Free account instead of the pending "pick a plan" sign-in (and instead of the no-card
+  // trial on dl.new/trial: one no-card option). Refused there, dl.new/trial says why; the other
+  // pages hold the sign-in for a plan as before.
+  if (!body.sessionId && freePlanOn((await runtime(c)).config) && (await directory(c).resolveIdentity("github", String(handoff.githubId), c.now())) === undefined) {
+    const identity = { githubId: handoff.githubId, login: handoff.login, email: handoff.email, check: parseTrialCheck(handoff.details) };
+    const started = await freePlanSignIn(c, identity);
+    if (started instanceof Response) {
+      if (body.trial === true) return started;
+      return signIn(c, { kind: "github", subject: String(handoff.githubId), label: handoff.login, email: handoff.email }, body.sessionId);
+    }
+    const person = await directory(c).getPerson(started.account);
+    if (!person) return apiError(403, "no_account", NO_ACCOUNT_MESSAGE);
+    if (person.status === "blocked") return blockedError();
+    const session = await issueWebSession(c, started.account, person.login);
+    return json({ ...session, account: await accountView(c, started.account), created: started.created, claimed: null, freePlanStarted: started.created });
+  }
   // dl.new/trial: the no-card trial (trial-web.ts). A GitHub account with an account already signs in as usual.
   if (body.trial === true && !body.sessionId) {
     const started = await noCardTrialSignIn(c, { githubId: handoff.githubId, login: handoff.login, email: handoff.email, check: parseTrialCheck(handoff.details) });
@@ -936,6 +968,8 @@ async function accountView(c: Ctx, accountNumber: number) {
     gpt6Bonus: bars.gpt6Bonus,
     // The free trial's meter (trials.ts), or null: counted used of its limit, and as real tokens at 95.5% caching.
     trial,
+    // The Free plan's week (free-plan.ts), or null for an account not on it (or with a paid plan).
+    freePlan: tier === null && bars.state.freePlan ? freePlanView({ on: freePlanOn(gate.config), counted: bars.state.counted[DEEPSEEK_MODEL] ?? 0, config: gate.config, now: c.now() }) : null,
     upgrade: PLAN_IDS.filter((id) => tier === null || isUpgrade(tier, id)).map((id) => ({ plan: id, name: PLANS[id].name, priceUsd: PLANS[id].priceUsd })),
   };
 }
@@ -1305,6 +1339,8 @@ async function usage(c: Ctx): Promise<Response> {
     days: view.days.map((day) => ({ day: day.date, countedTokens: day.counted, realTokens: day.real })),
     tools: view.tools.map((tool) => ({ tool: meterTool(tool.tool), requests: tool.requests, realTokens: tool.real, countedTokens: tool.counted })).sort((a, b) => b.countedTokens - a.countedTokens),
     trial: trialView((await planAccountFor(c, caller.account)).state.trial, config, now),
+    // The Free plan's week (free-plan.ts): used of the weekly cap, the upgrade line; null when not on Free.
+    freePlan: await freePlanUsage(c, caller.account, thisWeek),
     gpt6Bonus: thisWeek && view.bonus.enabled && view.bonus.granted ? { usdPerWeek: view.bonus.weeklyUsd, usedUsd: view.bonus.spentUsd, leftUsd: view.bonus.leftUsd, label: view.bonus.label, line: view.bonus.line } : null,
     cachedTokenWeight: weight,
   });

@@ -434,7 +434,7 @@ describe("notices in a JSON answer", () => {
 
 describe("the dashboard's plan data (CONTRACT.md part B)", () => {
   const meters = { weekStart: Date.UTC(2026, 10, 2), models: [{ model: MODEL, counted: 3_200_000, prompt: 50_000_000, cached: 47_800_000, output: 300_000, requests: 40, failovers: 1, costUsd: 0.5, trialCounted: 0 }], days: [], tools: [], bonusUsd: 0.8 };
-  const state = { tier: "starter" as const, paidSince: NOW, fallback: true, counted: {}, bonusUsd: 0.8, trial: null, converting: false };
+  const state = { tier: "starter" as const, paidSince: NOW, fallback: true, counted: {}, bonusUsd: 0.8, trial: null, converting: false, freePlan: false };
   it("gives one bar per plan model with its state", () => {
     const [bar] = planLimitsView({ state, meters, config: config(), now: NOW })!;
     assert.deepEqual(

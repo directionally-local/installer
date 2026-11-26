@@ -105,6 +105,7 @@ import { DAY_MS, isoDay, weekEnd, weekStart, WEEK_MS } from "./week.js";
 import { planResetValues } from "./plan-reset.js";
 import { FREE_ENDED_CODE, FREE_ENDED_MESSAGE, PLAN_MIX_LABEL, freeEnded, freeEndedFor, limitRefusal, meterFor, realFromCounted, warningEmailValues, withNotices } from "./plan-limits.js";
 import { convertTrial, sendTrial80 } from "./trial-web.js";
+import { capacityFull, freeCapacityFullMessage, FREE_PLAN_URL, FREE_PLAN_WARN_SHARE, freePlanCountedLimit, freePlanEmailValues, freePlanLimitMessage, freePlanOn, freePlanWarning, notOnFreeNotice, starterLine as freeStarterLine } from "./free-plan.js";
 import { noCardUsedUpMessage, notInTrialNotice, trialsOffer, startsWithPlanNotice, TRIAL_CONVERTING_MESSAGE, TRIAL_PAYMENT_FAILED_MESSAGE, TRIAL_WARN_SHARE, trialWarningNotice, type TrialMeter } from "./trials.js";
 import { displayName as planDisplayName, isPaidPlan, planLimitFor, planName as planTitle } from "./plans.js";
 import { PLAN_METER_MODELS, afterMeterFull, anthropicModelFor, bonusProjection, dueWarning, planRoute, tokenMeter, type PlanServe } from "./plan-route.js";
@@ -2254,17 +2255,19 @@ async function readSignals(c: Ctx, user: { id: number; createdAt: number | undef
  * activity, the creation-batch check), the per-network sign-up limit (past it, only an account
  * that is Full on its own signals), and whether GitHub failed open. Never throws.
  */
-export async function trialAccountCheck(c: Ctx, user: { id: number; createdAt: number | undefined; publicRepos: number | undefined }, accessToken: string): Promise<{ level: Level; levelReason: string; batchFlagged: boolean; networkLimited: boolean }> {
+export async function trialAccountCheck(c: Ctx, user: { id: number; createdAt: number | undefined; publicRepos: number | undefined }, accessToken: string): Promise<{ level: Level; levelReason: string; batchFlagged: boolean; networkLimited: boolean; accountAgeDays: number | null }> {
+  // The GitHub account's age, for the Free plan's minimum (free-plan.ts); null when GitHub didn't say.
+  const accountAgeDays = user.createdAt === undefined ? null : Math.max(0, Math.floor((c.now() - user.createdAt) / DAY_MS));
   try {
     const signIn = await readSignals(c, user, accessToken);
     const { config } = await runtime(c);
     const signupKey = `signup:ip:${c.ipNet}`;
     const signupLimit = { capacity: config.networkSignupsPerDay, perHour: config.networkSignupsPerDay / 24 };
     const left = (await c.env.RATE_LIMITER.getByName(signupKey).check(signupKey, signupLimit, 1, c.now())).allowed;
-    return { level: signIn.level, levelReason: signIn.levelReason, batchFlagged: signIn.batchFlagged === true, networkLimited: !left && signIn.level !== "full" };
+    return { level: signIn.level, levelReason: signIn.levelReason, batchFlagged: signIn.batchFlagged === true, networkLimited: !left && signIn.level !== "full", accountAgeDays };
   } catch (error) {
     console.warn("trial account check failed open:", error instanceof Error ? error.message : "error");
-    return { level: "full", levelReason: "qualifies", batchFlagged: false, networkLimited: false };
+    return { level: "full", levelReason: "qualifies", batchFlagged: false, networkLimited: false, accountAgeDays };
   }
 }
 
@@ -3746,9 +3749,32 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     paidPlan = gate.config.paidPlans && planState.tier !== "none" ? planState.tier : undefined;
     trialMeter = undefined;
   }
+  // dl.new's Free plan (free-plan.ts): no plan, on Free, and the switch on. With the switch off a
+  // Free account is refused below like any account without a plan.
+  const onFree = !isAdmin && !trialMeter && planState !== undefined && planState.tier === "none" && planState.freePlan && freePlanOn(gate.config);
   // Accounts made by the paid sign-up (part A's account numbers, from 2^50) never had free tokens.
-  if (!trialMeter && planState && planState.tier === "none" && (freeEndedFor(gate.config, identity.githubId, c.now()) || identity.githubId >= PAID_ACCOUNTS_FROM)) {
+  if (!trialMeter && !onFree && planState && planState.tier === "none" && (freeEndedFor(gate.config, identity.githubId, c.now()) || identity.githubId >= PAID_ACCOUNTS_FROM)) {
     return apiError(402, FREE_ENDED_CODE, FREE_ENDED_MESSAGE, { reason: "free_ended", plansUrl: "https://dl.new" }, await headers());
+  }
+  // The Free plan's week used up (the 402 with the upgrade line, and free_100 once a week), then
+  // its global weekly dollar cap (every Free account together).
+  const freeRefusal = async (extraHeaders: Record<string, string>) => {
+    if (await person.claimPlanNotice("free:100", c.now())) {
+      const task = userEmail(c, gate.config, "free_100", identity.githubId, String(weekStart(c.now())), { trial: freePlanEmailValues({ counted: freePlanCountedLimit(gate.config), config: gate.config }) }).catch(() => "failed");
+      if (c.background) c.background(task);
+      else await task;
+    }
+    return apiError(402, "free_plan_limit", freePlanLimitMessage(gate.config.freePlanWeeklyRealTokens, gate.config), { reason: "free_plan_limit", plansUrl: FREE_PLAN_URL, upgrade: { url: FREE_PLAN_URL, line: freeStarterLine(gate.config) }, resetsAt: new Date(weekEnd(c.now())).toISOString() }, extraHeaders);
+  };
+  let freeMeter: { limit: number; counted: number } | undefined;
+  if (onFree && planState) {
+    const limit = freePlanCountedLimit(gate.config);
+    const counted = planState.counted[DEEPSEEK_MODEL] ?? 0;
+    if (counted >= limit) return freeRefusal(await headers());
+    if (capacityFull((await directory(c).freePlanWeek(c.now())).usd, gate.config)) {
+      return apiError(402, "free_capacity_full", freeCapacityFullMessage(gate.config), { reason: "free_capacity_full", plansUrl: FREE_PLAN_URL, upgrade: { url: FREE_PLAN_URL, line: freeStarterLine(gate.config) }, resetsAt: new Date(weekEnd(c.now())).toISOString() }, await headers());
+    }
+    freeMeter = { limit, counted };
   }
   if (tool && identity.keyId) {
     const retry = await limited(c, `api:key:${identity.githubId}:${identity.keyId}`, perMinute(Math.max(1, gate.config.toolKeyRequestsPerMinute)));
@@ -3825,6 +3851,19 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       meter: { kind: "trial", model: DEEPSEEK_MODEL, limit: trialMeter.limit, cachedTokenWeight: gate.config.cachedTokenWeight },
       view: undefined,
       notices,
+      fellBack: requested.id !== DEEPSEEK_MODEL,
+      bonus: false,
+    };
+    requested = modelById(DEEPSEEK_MODEL)!;
+  } else if (freeMeter) {
+    // The Free plan serves DeepSeek V4.1 Flash only: any other model falls back to it with a
+    // notice ("Kimi K3.1 isn't on the Free plan."), held to the week's counted cap.
+    planServe = {
+      kind: "serve",
+      model: DEEPSEEK_MODEL,
+      meter: { kind: "tokens", model: DEEPSEEK_MODEL, limit: freeMeter.limit, cachedTokenWeight: gate.config.cachedTokenWeight },
+      view: undefined,
+      notices: requested.id !== DEEPSEEK_MODEL ? [notOnFreeNotice(planDisplayName(requested))] : [],
       fellBack: requested.id !== DEEPSEEK_MODEL,
       bonus: false,
     };
@@ -4020,6 +4059,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   const meterOf = (modelId: string) => {
     // A trial: its own meter for DeepSeek, nothing for any other model.
     if (planServe && trialMeter) return modelId === planServe.model ? planServe.meter : { kind: "trial" as const, model: modelId, limit: 0, cachedTokenWeight: gate.config.cachedTokenWeight };
+    // The Free plan: the week's meter for DeepSeek, nothing for any other model.
+    if (planServe && freeMeter) return modelId === planServe.model ? planServe.meter : { kind: "tokens" as const, model: modelId, limit: 0, cachedTokenWeight: gate.config.cachedTokenWeight };
     if (!planServe || !paidPlan || !planState) return undefined;
     if (modelId === planServe.model) return planServe.meter;
     const view = meterFor(paidPlan, modelId, planState.counted[modelId] ?? 0, gate.config);
@@ -4046,6 +4087,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     if (c.background) c.background(task);
     return apiError(503, "trial_converting", TRIAL_CONVERTING_MESSAGE, { retryable: true }, { ...quotaHeaders(reservation.allowance), "retry-after": "30" });
   }
+  // The Free plan's week filled up between the read and the reservation (requests in parallel).
+  if (!reservation.ok && reservation.code === "plan_limit" && freeMeter) return freeRefusal(quotaHeaders(reservation.allowance));
   // The meter filled up between the plan's read and the reservation (requests in parallel):
   // DeepSeek in its place when allowed, else the plan's refusal.
   if (!reservation.ok && reservation.code === "plan_limit" && planServe && paidPlan && planState) {
@@ -4247,6 +4290,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       // Multi-turn use for GPT-6's trust gate, from any agent: the session id, or the harness key of a dl opencode run.
       ...(trustSession ? { trustSession } : {}),
       ...(trialMeter ? { trial: trialMeter.kind } : {}),
+      ...(freeMeter ? { freePlan: true } : {}),
     };
     await alert(c, await directory(c).recordRequest(record, policyOf(gate.config), servingContext(c, gate.config)));
     // Most of the week's free tokens used: one email a week, on the settlement that crossed 80%.
@@ -4348,6 +4392,13 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       if (c.background) c.background(task);
       else await task;
     }
+  }
+  // The Free plan's 80% notice in the tool and free_80, once per week, each with the upgrade line.
+  if (freeMeter && answered.status === 200 && freeMeter.counted >= freeMeter.limit * FREE_PLAN_WARN_SHARE && freeMeter.counted < freeMeter.limit && (await person.claimPlanNotice("free:80", c.now()))) {
+    notices.push(freePlanWarning({ counted: freeMeter.counted, limit: freeMeter.limit, realLimit: gate.config.freePlanWeeklyRealTokens, config: gate.config }));
+    const task = userEmail(c, gate.config, "free_80", identity.githubId, String(weekStart(c.now())), { trial: freePlanEmailValues({ counted: freeMeter.counted, config: gate.config }) }).catch(() => "failed");
+    if (c.background) c.background(task);
+    else await task;
   }
   const response = notices.length > 0 ? await withNotices(answered, notices, serving.model.id) : answered;
   const fellBackTo = serving.fallback ? serving.model.id : effective !== requested ? effective.id : undefined;
