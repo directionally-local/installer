@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { networkOf, rateLimitNetwork } from "../src/network.js";
-import { createService, startBrowserFlow, type Service } from "./harness.js";
+import { createService, FakeState, startBrowserFlow, type Service } from "./harness.js";
 
 describe("networkOf (units)", () => {
   it("keeps an IPv4 address as it is", () => {
@@ -93,5 +93,62 @@ describe("per-network limits", () => {
     for (let i = 0; i < 60; i++) assert.equal(await codes(`2001:db8:9:9::${(i + 1).toString(16)}`), 200);
     assert.equal(await codes("2001:db8:9:9:1234::1"), 429);
     assert.equal(await codes("2001:db8:9:a::1"), 200);
+  });
+});
+
+describe("rate-limit keys", () => {
+  it("never name or store the network, only a keyed hash of it", async () => {
+    const service = await createService();
+    assert.equal((await service.request("POST", "/v1/device/code", { body: {}, ip: "198.51.100.77" })).status, 200);
+    assert.equal((await service.request("POST", "/v1/device/code", { body: {}, ip: "2001:db8:5:6::1" })).status, 200);
+    const limiter = service.namespaces.RATE_LIMITER!;
+    const names = [...limiter.instances.keys()];
+    const rows = [...limiter.instances.values()].flatMap((entry) => entry.state.db.prepare("SELECT key FROM buckets").all() as Array<{ key: string }>).map((row) => row.key);
+    assert.ok(names.some((name) => /^device:ip:h[0-9a-f]{32}$/.test(name)), names.join(", "));
+    for (const value of [...names, ...rows]) assert.doesNotMatch(value, /198\.51\.100\.77|2001:db8:5:6/);
+    // Another address in the same /64 is the same bucket.
+    const deviceBuckets = () => [...limiter.instances.keys()].filter((name) => name.startsWith("device:ip:")).length;
+    const before = deviceBuckets();
+    assert.equal((await service.request("POST", "/v1/device/code", { body: {}, ip: "2001:db8:5:6::2" })).status, 200);
+    assert.equal(deviceBuckets(), before);
+  });
+});
+
+describe("RateLimiterObject pruning", () => {
+  async function limiterWithState() {
+    const { RateLimiterObject } = await import("../src/rate-limit-object.js");
+    const state = new FakeState("test");
+    const limiter = new RateLimiterObject(state as never, {} as never);
+    const keys = () => (state.db.prepare("SELECT key FROM buckets ORDER BY key").all() as Array<{ key: string }>).map((row) => row.key);
+    return { state, limiter, keys };
+  }
+
+  it("deletes a bucket's row once it has refilled, by the next spend or the alarm", async () => {
+    const { state, limiter, keys } = await limiterWithState();
+    const limit = { capacity: 2, perHour: 1 };
+    const start = Date.now() - 10 * 3_600_000;
+    await limiter.spend("a", limit, 1, start);
+    assert.deepEqual(keys(), ["a"]);
+    assert.equal(state.alarm, start + 3_600_000, "wakes when the bucket is full again");
+    // Spending another key after "a" refilled drops "a".
+    await limiter.spend("b", limit, 1, start + 2 * 3_600_000);
+    assert.deepEqual(keys(), ["b"]);
+    // The alarm drops what is full by now and stops once nothing is left.
+    state.alarm = null;
+    await limiter.alarm();
+    assert.deepEqual(keys(), []);
+    assert.equal(state.alarm, null);
+    // A pruned bucket starts full again, as it would have been.
+    assert.equal((await limiter.spend("a", limit, 2, start + 3 * 3_600_000)).allowed, true);
+  });
+
+  it("keeps an emptied bucket until it refills", async () => {
+    const { state, limiter, keys } = await limiterWithState();
+    const now = Date.now();
+    await limiter.spend("a", { capacity: 1, perHour: 1 }, 1, now);
+    await limiter.alarm();
+    assert.deepEqual(keys(), ["a"]);
+    assert.equal((await limiter.spend("a", { capacity: 1, perHour: 1 }, 1, now + 1000)).allowed, false);
+    assert.ok(state.alarm !== null && state.alarm > now);
   });
 });

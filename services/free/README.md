@@ -396,6 +396,11 @@ There is one account per GitHub user, keyed on the numeric GitHub id.
   refresh, invite attempts, the API, referral lookups, telemetry, admin sign-in) keys an IPv6
   address by its /64, since one host can rotate through its whole /64; an IPv4 address (and an
   IPv4-mapped IPv6 address, `::ffff:1.2.3.4`) is its own network. `src/network.ts`.
+- **Rate-limit buckets don't hold addresses.** `rateKey` (app.ts) replaces the network at the
+  end of a bucket key with an HMAC of it under the signing key (`device:ip:h<32 hex>`), before
+  it names the Durable Object or its row, so every per-network limit goes through it. A bucket's
+  row is deleted once it has refilled, by the next spend or the object's alarm; a missing row is
+  a full bucket, so the limits behave the same.
 - **Per-network limits are generous for shared networks** (an office, a classroom, a meetup):
   the API 600 requests a minute, refresh 600 an hour, device codes 60 an hour and their polling
   720 a minute, since each signed-in person is limited too (60 requests a minute). Sign-ups (3 a

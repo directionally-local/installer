@@ -609,8 +609,33 @@ function clientIp(request: Request): string {
 }
 
 export async function limited(c: Ctx, key: string, limit: Limit): Promise<number | undefined> {
-  const outcome = await c.env.RATE_LIMITER.getByName(key).spend(key, limit, 1, c.now());
+  const stored = await rateKey(c, key);
+  const outcome = await c.env.RATE_LIMITER.getByName(stored).spend(stored, limit, 1, c.now());
   return outcome.allowed ? undefined : outcome.retryAfterSeconds;
+}
+
+/** Each request's network hash, worked out once. */
+const bucketNetworks = new WeakMap<Ctx, Promise<string>>();
+
+/**
+ * `key` as the rate limiter stores it. A key ending in the caller's network (`<kind>:ip:<ipNet>`)
+ * has the network replaced by a keyed hash, so neither the Durable Object's name nor its row
+ * holds an address; the kind prefix stays readable. Every bucket key goes through here.
+ */
+export async function rateKey(c: Ctx, key: string): Promise<string> {
+  if (!key.endsWith(`:${c.ipNet}`)) return key;
+  let hash = bucketNetworks.get(c);
+  if (!hash) {
+    hash = bucketNetworkHash(c.config.tokenSigningKey, c.ipNet);
+    bucketNetworks.set(c, hash);
+  }
+  return `${key.slice(0, key.length - c.ipNet.length)}h${await hash}`;
+}
+
+/** HMAC-SHA256 of the network under the signing key, as 32 hex characters (128 bits). */
+async function bucketNetworkHash(secret: string, ipNet: string): Promise<string> {
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", await hmacKey(secret), new TextEncoder().encode(`rate-limit-network:${ipNet}`)));
+  return [...mac.slice(0, 16)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 export function rateLimited(retryAfter: number, headers: Record<string, string> = {}): Response {
@@ -2073,7 +2098,7 @@ async function deviceDetails(c: Ctx): Promise<Response> {
   if (eventCode !== undefined) {
     if (person) return again(EVENT_CODE_EXISTING_MESSAGE);
     // Only wrong codes count against the network: a whole class enters the same code from one network.
-    const attemptKey = `event:ip:${c.ipNet}`;
+    const attemptKey = await rateKey(c, `event:ip:${c.ipNet}`);
     const attempts = await c.env.RATE_LIMITER.getByName(attemptKey).check(attemptKey, LIMITS.inviteAttemptIp, 1, c.now());
     if (!attempts.allowed) {
       await countRefusal(c, "invite_rate_limited", found.githubId);
@@ -2261,7 +2286,7 @@ export async function trialAccountCheck(c: Ctx, user: { id: number; createdAt: n
   try {
     const signIn = await readSignals(c, user, accessToken);
     const { config } = await runtime(c);
-    const signupKey = `signup:ip:${c.ipNet}`;
+    const signupKey = await rateKey(c, `signup:ip:${c.ipNet}`);
     const signupLimit = { capacity: config.networkSignupsPerDay, perHour: config.networkSignupsPerDay / 24 };
     const left = (await c.env.RATE_LIMITER.getByName(signupKey).check(signupKey, signupLimit, 1, c.now())).allowed;
     return { level: signIn.level, levelReason: signIn.levelReason, batchFlagged: signIn.batchFlagged === true, networkLimited: !left && signIn.level !== "full", accountAgeDays };
@@ -2273,7 +2298,7 @@ export async function trialAccountCheck(c: Ctx, user: { id: number; createdAt: n
 
 /** Counts a no-card trial against the network's daily sign-ups, as an admission does. */
 export async function spendTrialSignup(c: Ctx): Promise<void> {
-  const signupKey = `signup:ip:${c.ipNet}`;
+  const signupKey = await rateKey(c, `signup:ip:${c.ipNet}`);
   await c.env.RATE_LIMITER.getByName(signupKey).spend(signupKey, LIMITS.signupIp, 1, c.now());
 }
 
@@ -2297,7 +2322,7 @@ async function admitAndFinish(
 ): Promise<Response> {
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
   const { config } = await runtime(c);
-  const signupKey = `signup:ip:${c.ipNet}`;
+  const signupKey = await rateKey(c, `signup:ip:${c.ipNet}`);
   const openEligible = config.openAdmission && inviteCode === undefined;
   // An event code's group signs up from one network: the network limit neither applies nor counts them.
   const withEvent = options.eventCodeId !== undefined;
@@ -2409,7 +2434,8 @@ async function deviceInvite(c: Ctx): Promise<Response> {
     await countRefusal(c, "invite_rate_limited", found.githubId);
     return invitePage(ticket, found.login, `Too many attempts. Try again in ${Math.ceil(retry / 60)} minutes.`);
   }
-  const signups = await c.env.RATE_LIMITER.getByName(`signup:ip:${c.ipNet}`).check(`signup:ip:${c.ipNet}`, LIMITS.signupIp, 1, c.now());
+  const signupKey = await rateKey(c, `signup:ip:${c.ipNet}`);
+  const signups = await c.env.RATE_LIMITER.getByName(signupKey).check(signupKey, LIMITS.signupIp, 1, c.now());
   if (!signups.allowed) {
     await countRefusal(c, "network_signup_limit", found.githubId);
     return invitePage(ticket, found.login, "Too many new accounts from this network today. Try again tomorrow.");
