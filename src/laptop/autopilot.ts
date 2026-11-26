@@ -1,9 +1,11 @@
 import { execFile } from "node:child_process";
 import { constants, existsSync, readFileSync } from "node:fs";
 import { access } from "node:fs/promises";
+import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { packageRoot, scriptHomeOf } from "../install-method.js";
 
 /** Finding the Autopilot dl runs for sessions and its provider picker: the one it bundles, else one on PATH. */
 
@@ -15,12 +17,55 @@ export interface AutopilotCommand {
   args: string[];
 }
 
-/** The Autopilot installed with dl (run with this Node), else an `autopilot` on PATH. */
-export async function findAutopilot(): Promise<AutopilotCommand | undefined> {
-  const bundled = bundledAutopilot();
+/**
+ * The Autopilot dl runs (run with this Node): one inside dl's own package (a development
+ * checkout, or a dl from before Autopilot became optional), else the one dl downloaded when it
+ * was first picked (autopilot-install.ts: ~/.directionallylocal/autopilot), else an `autopilot`
+ * on PATH. Undefined when there's none: Autopilot is optional, and `ensureAutopilot` gets it.
+ */
+export async function findAutopilot(env: NodeJS.ProcessEnv = process.env): Promise<AutopilotCommand | undefined> {
+  const bundled = bundledAutopilot() ?? downloadedAutopilot(env);
   if (bundled) return { command: process.execPath, args: [bundled] };
-  const onPath = await autopilotOnPath();
+  const onPath = await autopilotOnPath(env);
   return onPath ? { command: onPath, args: [] } : undefined;
+}
+
+/** Where dl downloads Autopilot when it's picked: <dl's home>/autopilot (an npm --prefix). */
+export function autopilotHome(env: NodeJS.ProcessEnv = process.env, root: string = packageRoot()): string {
+  return join(env.DL_HOME?.trim() || scriptHomeOf(root) || join(env.HOME || homedir(), ".directionallylocal"), "autopilot");
+}
+
+/** The downloaded Autopilot's package directory inside autopilotHome. */
+export function downloadedAutopilotPackage(env: NodeJS.ProcessEnv = process.env): string {
+  return join(autopilotHome(env), "lib", "node_modules", "autopilot-ai");
+}
+
+/** The downloaded Autopilot's bin script, when it's there. */
+export function downloadedAutopilot(env: NodeJS.ProcessEnv = process.env, exists: (path: string) => boolean = existsSync): string | undefined {
+  const dir = downloadedAutopilotPackage(env);
+  const manifest = join(dir, "package.json");
+  if (!exists(manifest)) return undefined;
+  try {
+    const pkg = JSON.parse(readFileSync(manifest, "utf8")) as { bin?: unknown };
+    const bin = typeof pkg.bin === "string" ? pkg.bin : (pkg.bin as Record<string, unknown> | undefined)?.autopilot;
+    const path = typeof bin === "string" ? resolvePath(dir, bin) : undefined;
+    return path && exists(path) ? path : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The version of the Autopilot dl runs from its own files (bundled or downloaded); undefined when neither is there. */
+export function installedAutopilotVersion(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const bundled = bundledAutopilotVersion();
+  if (bundled) return bundled;
+  if (!downloadedAutopilot(env)) return undefined;
+  try {
+    const pkg = JSON.parse(readFileSync(join(downloadedAutopilotPackage(env), "package.json"), "utf8")) as { version?: unknown };
+    return typeof pkg.version === "string" ? pkg.version : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

@@ -175,14 +175,14 @@ describe("cli", () => {
     const io = { out: (text: string) => { out += text; }, err: (text: string) => { err += text; } };
     assert.equal(await main(["--help"], io), 0);
     assert.match(out, /dl up \[--dry-run\]/);
-    assert.match(out, /^Directionally Local: coding agents that run on this computer or on your own server\./);
-    assert.match(out, /dl +talk to an agent: a new session each time\. With nothing set up,\n +plain autopilot here[\s\S]*dl setup +set up or repair where background tasks run[\s\S]*The first time, it asks where tasks run/);
+    assert.match(out, /^Directionally Local: dl gives your coding agent open models \(DeepSeek, Kimi\) on one\nflat plan\./);
+    assert.match(out, /dl +the first time: sign in or sign up at dl\.new[\s\S]*dl setup +set up or repair where background tasks run[\s\S]*The first time, it asks where tasks run/);
     assert.match(out, /dl provider +the provider and GitHub token on each place \(dl keys is the same\)/);
     assert.match(out, /--autopilot-version <x\.y\.z> +default: the version this dl ships with \(\d+\.\d+\.\d+\)/);
     assert.match(out, /dl use \[NAME\] +where tasks and bare dl go without --server/);
-    assert.match(out, /dl api-key \[NAME\] +use free tokens in any other tool \(Cursor, Cline/);
-    assert.match(out, /dl  \(on this computer\)  plain autopilot in this folder/);
-    assert.match(out, /dl -c, --continue +this computer: autopilot -c; a server: reopen the latest session/);
+    assert.match(out, /dl api-key +your dl key and base URLs for any other tool \(Cursor, Cline/);
+    assert.match(out, /dl autopilot \[ARGS\] +Autopilot here, downloaded the first time/);
+    assert.match(out, /dl -c, --continue +this computer: the last agent's latest session in this folder; a server:\n +reopen the latest session/);
     assert.match(out, /-m\/--model MODEL/);
     assert.match(out, /dl local status[\s\S]*dl local uninstall[\s\S]*On the server:/);
     assert.doesNotMatch(out, /background coding agents on your own server/i);
@@ -220,21 +220,21 @@ describe("cli", () => {
     let out = "";
     const io = { out: (text: string) => { out += text; }, err: () => {} };
     // Stubs: never the real Autopilot, its config or the network.
-    const laptop = { root: false, serverState: async () => undefined, autopilotAuth: async () => ({ active: "openrouter", setUp: true }), freeTierAccount: async () => { throw new Error("not on the free tier: not asked"); }, freeModel: async () => { throw new Error("not on the free tier: not asked"); } };
+    const laptop = { root: false, serverState: async () => undefined, dlKey: async () => undefined, detectAgents: async () => [], autopilotAuth: async () => ({ active: "openrouter", setUp: true }), freeTierAccount: async () => { throw new Error("not on the free tier: not asked"); }, freeModel: async () => { throw new Error("not on the free tier: not asked"); } };
     // Right after the install script: no places yet, but plain dl works, so say what's installed and how to start.
     assert.equal(await main(["status"], io, laptop), 0);
     assert.doesNotMatch(out, /isn't set up/);
-    assert.doesNotMatch(out, /Not signed in/);
+    assert.doesNotMatch(out, /no provider yet/);
     assert.doesNotMatch(out, /Free tier/);
-    assert.match(out, /Directionally Local {2}on this computer\n\n {2}dl {9}\d+\.\d+\.\d+ · installed in \S+\n {2}Autopilot {2}\d+\.\d+\.\d+ · comes with dl\n/);
-    assert.match(out, /Start, in a project folder:\n {5}dl {10}a new session with Autopilot in that folder\n {5}dl -c {7}continue the last session there\n/);
+    assert.match(out, /Directionally Local {2}on this computer\n\n {2}dl {9}\d+\.\d+\.\d+ · installed in \S+\n {2}Account {4}not signed in {3}run dl to sign in or sign up\n {2}Agents {5}none found yet\n {2}Autopilot {2}(\d+\.\d+\.\d+ · installed by dl|not installed · optional: dl autopilot downloads it)\n/);
+    assert.match(out, /Start, in a project folder:\n {5}dl {10}open your coding agent \(the last one you used is first\)\n {5}dl claude {3}open one directly[^\n]*\n {5}dl -c {7}continue the last agent's latest session there\n/);
     assert.match(out, /Next steps\n {5}dl run "fix the flaky checkout test" {3}a background task that ends in a pull request\n {5}dl setup {4}set up where background tasks run/);
     assert.match(out, /curl -fsSL https:\/\/dl\.new\/install\.sh \| sudo DL_MODE=server sh\n/);
     assert.match(out, /dl connect https:\/\/your-server/);
     // Before Autopilot has a provider (first run not finished): one line says so.
     out = "";
     assert.equal(await main(["status"], io, { ...laptop, autopilotAuth: async () => ({ active: "directionally-local", setUp: false }) }), 0);
-    assert.match(out, /comes with dl\n {2}! Not signed in yet: run dl in a project folder and choose Free, or use your own API key\.\n/);
+    assert.match(out, /installed by dl\n {2}! Autopilot has no provider yet: run dl autopilot in a project folder and choose one\.\n/);
     assert.doesNotMatch(out, /Free tier/);
     // Signed in to the free tier: who, what's left this week and when it comes back, in local time.
     const free = { ...laptop, autopilotAuth: async () => ({ active: "directionally-local", setUp: true }), freeModel: async () => undefined };
@@ -242,10 +242,10 @@ describe("cli", () => {
     const reset = new Date(resetsAt).toLocaleDateString("en-US", { weekday: "short" }) + " " + new Date(resetsAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
     out = "";
     assert.equal(await main(["status"], io, { ...free, freeTierAccount: async () => ({ login: "octo", remaining: 49_900_000, tokensPerWeek: 50_000_000, resetsAt }) }), 0);
-    assert.ok(out.includes(`comes with dl\n  Free tier  @octo · 49.9M of 50M tokens left this week · resets ${reset}\n`), out);
+    assert.ok(out.includes(`installed by dl\n  Free tier  @octo · 49.9M of 50M tokens left this week · resets ${reset}\n`), out);
     out = "";
     assert.equal(await main(["status"], io, { ...free, freeTierAccount: async () => ({ login: "octo" }) }), 0);
-    assert.match(out, /comes with dl\n {2}Free tier {2}@octo\n\n/, "the service couldn't be asked: the login only");
+    assert.match(out, /installed by dl\n {2}Free tier {2}@octo\n\n/, "the service couldn't be asked: the login only");
     // dl Pro's prompt, when the service sends one, under the account line; dl status asks it to count as seen.
     out = "";
     let asked: { showsProPrompt?: boolean } | undefined;
@@ -256,12 +256,12 @@ describe("cli", () => {
     // The chosen free model, with its provider and measured speed.
     out = "";
     assert.equal(await main(["status"], io, { ...free, freeTierAccount: async () => ({ login: "octo" }), freeModel: async () => "DeepSeek V4.1 Flash · Luminal · ~85 tok/s" }), 0);
-    assert.match(out, /comes with dl\n {2}Free tier {2}@octo\n {2}Free model DeepSeek V4\.1 Flash · Luminal · ~85 tok\/s {3}dl models\n\n/);
+    assert.match(out, /installed by dl\n {2}Free tier {2}@octo\n {2}Free model DeepSeek V4\.1 Flash · Luminal · ~85 tok\/s {3}dl models\n\n/);
     for (const account of [async () => undefined, async () => { throw new Error("offline"); }]) {
       out = "";
       assert.equal(await main(["status"], io, { ...free, freeTierAccount: account }), 0);
       assert.doesNotMatch(out, /Free tier/);
-      assert.match(out, /comes with dl\n\n/);
+      assert.match(out, /installed by dl\n\n/);
     }
     // As root, with no server install: the same overview, as the install script gives root the plain install too.
     out = "";

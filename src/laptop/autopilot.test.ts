@@ -35,9 +35,9 @@ describe("whether Autopilot is set up (dl status)", () => {
       laptopReady({ dl: "0.11.0", autopilot: "3.5.0", bundled: true, installedIn: "~/.directionallylocal", ...(setUp === undefined ? {} : { setUp }) }, io);
       return out;
     };
-    assert.equal(NOT_SIGNED_IN, "Not signed in yet: run dl in a project folder and choose Free, or use your own API key.");
-    assert.match(shown(false), /\n {2}Autopilot {2}3\.5\.0 · comes with dl\n {2}! Not signed in yet: run dl in a project folder and choose Free, or use your own API key\.\n\n {2}Start, in a project folder:/);
-    assert.doesNotMatch(shown(true), /Not signed in/);
-    assert.doesNotMatch(shown(undefined), /Not signed in/);
+    assert.equal(NOT_SIGNED_IN, "Autopilot has no provider yet: run dl autopilot in a project folder and choose one.");
+    assert.match(shown(false), /\n {2}Autopilot {2}3\.5\.0 · installed by dl\n {2}! Autopilot has no provider yet: run dl autopilot in a project folder and choose one\.\n\n {2}Start, in a project folder:/);
+    assert.doesNotMatch(shown(true), /no provider yet/);
+    assert.doesNotMatch(shown(undefined), /no provider yet/);
   });
 });

@@ -36,12 +36,12 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "autopilot-ai": "3.32.0",
     "hotcell": "0.1.40",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "autopilot-ai": "3.31.0",
     "yaml": "^2.9.1"
   }
 }

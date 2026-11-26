@@ -4,7 +4,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { autopilotAuth, findAutopilot, type AutopilotAuth, type AutopilotCommand } from "./autopilot.js";
+import { autopilotAuth, type AutopilotAuth, type AutopilotCommand } from "./autopilot.js";
+import { ensureAutopilot } from "./autopilot-install.js";
 import { referralForAutopilot, withReferral } from "./referral.js";
 import { DL_UPDATE } from "./self-update.js";
 import { dlVersion } from "../versions.js";
@@ -65,9 +66,10 @@ async function autopilotEnv(env: Env): Promise<Env> {
 
 /** `dl acp [ARGS]`: `autopilot acp [ARGS]` on stdio. */
 export async function acpCommand(args: string[], io: LaptopIO, deps: AcpDeps = {}): Promise<number> {
-  const autopilot = await (deps.autopilot ?? findAutopilot)();
+  // Autopilot is optional: downloaded the first time it's needed (autopilot-install.ts).
+  const autopilot = await (deps.autopilot ?? (() => ensureAutopilot(io)))();
   if (!autopilot) {
-    io.err(`The Autopilot that comes with dl isn't installed. Update: ${DL_UPDATE}\n`);
+    if (deps.autopilot) io.err("Autopilot isn't installed: dl autopilot downloads it.\n");
     return 1;
   }
   // An older Autopilot would take "acp" as a task to run: refuse instead.
@@ -186,9 +188,10 @@ export async function zedCommand(args: string[], io: LaptopIO, deps: ZedDeps = {
   }
 
   // Autopilot must be able to start a session, or Zed's first thread asks to sign in.
-  const autopilot = await (deps.autopilot ?? findAutopilot)();
+  // Autopilot is optional: downloaded the first time it's needed (autopilot-install.ts).
+  const autopilot = await (deps.autopilot ?? (() => ensureAutopilot(io)))();
   if (!autopilot) {
-    io.err(`The Autopilot that comes with dl isn't installed. Update: ${DL_UPDATE}\n`);
+    if (deps.autopilot) io.err("Autopilot isn't installed: dl autopilot downloads it.\n");
     return 1;
   }
   if (!(await (deps.supportsAcp ?? supportsAcp)(autopilot))) {

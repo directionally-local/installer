@@ -53,10 +53,13 @@ find "$pkg/node_modules" -maxdepth 3 -type f -name '*.tgz' -exec rm -f {} +
 # npm's links in bin/: the install script writes its own wrappers.
 rm -rf "${stage:?}/bin"
 
-# It works: dl answers, the Autopilot it runs starts, and Code Mode's sandbox (isolated-vm,
-# built above where there's no prebuilt binary) loads on this Node.
+# It works: dl answers. (Autopilot isn't in the bundle: dl downloads it when it's picked. A
+# native module still bundled, such as isolated-vm, must load on this Node.)
 node "$pkg/bin/directionallylocal.mjs" --version
-node "$pkg/node_modules/autopilot-ai/bin/autopilot.mjs" --version
+if [ -d "$pkg/node_modules/autopilot-ai" ]; then
+  echo "autopilot-ai is in the bundle; it's meant to be optional (a devDependency)" >&2
+  exit 1
+fi
 if [ -d "$pkg/node_modules/isolated-vm" ]; then
   node -e 'require(process.argv[1]); console.log("isolated-vm loads")' "$pkg/node_modules/isolated-vm"
 fi

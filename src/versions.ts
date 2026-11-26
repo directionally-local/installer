@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 /**
  * One Autopilot version and one Hotcell version everywhere. The laptop's session client is
- * the autopilot-ai dl bundles (package.json pins it exactly), and every place dl sets up
+ * the autopilot-ai dl downloads when it's first needed (package.json pins it exactly), and every place dl sets up
  * (this computer, a server, the sandbox image) installs that same version, so the client and
  * server never drift. Hotcell is pinned the same way: two people installing the same dl get
  * the same sandboxes, and a broken Hotcell release can't reach anyone without a dl release.
@@ -43,8 +43,12 @@ function pinnedVersion(name: string, deps: Record<string, string> | undefined): 
   return pinned;
 }
 
-/** The exact autopilot-ai version dl ships with and installs on places. */
-export function pinnedAutopilotVersion(deps: Record<string, string> | undefined = readManifest().dependencies): string {
+/**
+ * The exact autopilot-ai version dl installs: on places, and on this computer when Autopilot is
+ * picked (autopilot-install.ts). A devDependency, like Hotcell's: installing dl doesn't download
+ * Autopilot, which is optional on a laptop (dl routes the person's own coding agent).
+ */
+export function pinnedAutopilotVersion(deps: Record<string, string> | undefined = readManifest().devDependencies): string {
   return pinnedVersion("autopilot-ai", deps);
 }
 

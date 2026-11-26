@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { updateCommand } from "../install-method.js";
 import { palette } from "../ui.js";
 import { compareSemver, dlVersion, pinnedAutopilotVersion } from "../versions.js";
-import { bundledAutopilotVersion } from "./autopilot.js";
+import { autopilotHome, installedAutopilotVersion } from "./autopilot.js";
+import { autopilotSpec, npmInstall } from "./autopilot-install.js";
 import type { UpdateIO } from "./update.js";
 
 /**
@@ -206,8 +207,10 @@ export interface DlUpdateDeps {
   rerun?: (args: string[]) => Promise<number>;
   /** The installed dl's version and pinned Autopilot, read from disk after an update. */
   installedPins?: () => { version: string; autopilot: string | undefined } | undefined;
-  /** The Autopilot this dl bundles, and the one it pins. */
+  /** The Autopilot installed for dl (bundled or downloaded; undefined when none), and the one dl pins. */
   bundledAutopilot?: () => string | undefined;
+  /** Downloads this Autopilot version into dl's home; resolves to an error message, or undefined. */
+  downloadAutopilot?: (version: string) => Promise<string | undefined>;
   pinnedAutopilot?: () => string;
   /** The place `dl update` with no NAME updates, and updating it (today's `dl update [NAME]`). */
   defaultPlace?: () => Promise<DefaultPlace>;
@@ -271,9 +274,10 @@ const noPlace = async (): Promise<DefaultPlace> => ({ kind: "none" });
 /** dl's version and pinned Autopilot, read from its package.json now (after an update, the new one's). */
 function installedPins(packageRoot: string): { version: string; autopilot: string | undefined } | undefined {
   try {
-    const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as { version?: unknown; dependencies?: Record<string, unknown> };
+    const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as { version?: unknown; dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> };
     if (typeof pkg.version !== "string") return undefined;
-    const pin = pkg.dependencies?.["autopilot-ai"];
+    // A devDependency since Autopilot became optional; a dependency before.
+    const pin = pkg.devDependencies?.["autopilot-ai"] ?? pkg.dependencies?.["autopilot-ai"];
     return { version: pkg.version, autopilot: typeof pin === "string" ? pin : undefined };
   } catch {
     return undefined;
@@ -281,33 +285,31 @@ function installedPins(packageRoot: string): { version: string; autopilot: strin
 }
 
 /**
- * The Autopilot dl pins (which plain `dl` runs) is the one installed, reinstalling dl at its
- * own version when it isn't and that's allowed; then the default place, as `dl update` always did.
+ * Autopilot is optional: when it isn't installed, that's fine (`dl autopilot` downloads it).
+ * When it is, it's brought to the version dl pins (downloaded again into dl's home,
+ * autopilot-install.ts); then the default place, as `dl update` always did.
  */
 async function afterDl(
   current: string,
   pinned: string | undefined,
-  reinstall: boolean,
+  _reinstall: boolean,
   place: DefaultPlace,
   deps: DlUpdateDeps,
   c: ReturnType<typeof palette>,
 ): Promise<number> {
-  const bundledNow = deps.bundledAutopilot ?? (() => bundledAutopilotVersion());
-  const bundled = bundledNow();
-  if (pinned === undefined) {
-    if (bundled) deps.io.out(`  ${c.green("✓")} Autopilot ${bundled} is installed.\n`);
-  } else if (bundled === pinned) {
-    deps.io.out(`  ${c.green("✓")} Autopilot ${pinned} is installed ${c.dim(`(the one dl ${current} pins)`)}.\n`);
-  } else if (!reinstall) {
-    deps.io.err(`  ${c.red("✗")} dl ${current} pins Autopilot ${pinned}, but ${bundled ? `${bundled} is installed` : "it isn't installed"}.\n`);
-    return 1;
+  const installedNow = deps.bundledAutopilot ?? (() => installedAutopilotVersion());
+  const installed = installedNow();
+  if (!installed) {
+    deps.io.out(`  ${c.dim("· Autopilot isn't installed. It's optional: dl autopilot downloads it.")}\n`);
+  } else if (pinned === undefined || installed === pinned) {
+    deps.io.out(`  ${c.green("✓")} Autopilot ${installed} is installed${pinned === undefined ? "" : ` ${c.dim(`(the one dl ${current} pins)`)}`}.\n`);
   } else {
-    deps.io.out(`  ${c.yellow("!")} dl ${current} pins Autopilot ${pinned}, but ${bundled ? `${bundled} is installed` : "it isn't installed"}. Reinstalling dl ${current}.\n`);
-    const code = await install(current, deps, c);
-    if (code !== 0) return code;
-    const after = bundledNow();
-    if (after !== pinned) {
-      deps.io.err(`  ${c.red("✗")} Reinstalled dl ${current}, and Autopilot ${pinned} still isn't there${after ? ` (found ${after})` : ""}.\n`);
+    deps.io.out(`  ${c.yellow("!")} dl ${current} pins Autopilot ${pinned}, and ${installed} is installed. Downloading ${pinned}.\n`);
+    const env = process.env;
+    const failure = await (deps.downloadAutopilot ?? ((version: string) => npmInstall(autopilotSpec(env, version), autopilotHome(env), env)))(pinned);
+    const after = installedNow();
+    if (failure || after !== pinned) {
+      deps.io.err(`  ${c.red("✗")} Couldn't update Autopilot to ${pinned}${failure ? `: ${failure}` : after ? ` (found ${after})` : ""}.\n`);
       return 1;
     }
     deps.io.out(`  ${c.green("✓")} Autopilot ${pinned} is installed.\n`);

@@ -224,7 +224,7 @@ describe("install.sh on a laptop", () => {
     assert.ok(existsSync(join(root, "bin", "directionallylocal")));
     assert.equal(result.read(join(result.home, ".zshrc")), `\n# Directionally Local (dl)\nexport PATH="${root}/bin:$PATH"\n`);
     assert.match(result.stdout, /ok Installing dl: dl 0\.10\.0 · in .*\.directionallylocal · 0:0\d\n\.\. Adding dl to your PATH\nok Adding dl to your PATH: in .*\/\.zshrc\n/);
-    assert.match(result.stdout, /\n\n {2}Then run: source ~\/\.zshrc && dl\n {2}Already use Claude Code or OpenCode\? Run dl claude or dl opencode to use your free dl tokens there\.\n$/, "no terminal: dl isn't started; this shell's PATH can't change: the one line that fixes it");
+    assert.match(result.stdout, /\n\n {2}Then run: source ~\/\.zshrc && dl\n {2}dl signs you in at dl\.new, then opens your own coding agent \(Claude Code, OpenCode, Cursor…\) on your plan\.\n$/, "no terminal: dl isn't started; this shell's PATH can't change: the one line that fixes it");
     assert.doesNotMatch(result.stdout, /Next time/, "not also the same advice a second way");
     assert.doesNotMatch(result.stdout, /sudo sh/, "the server hint is for Linux");
   });
@@ -299,7 +299,7 @@ describe("install.sh on a laptop", () => {
     const onPath = run({ env: { DL_NO_MODIFY_PATH: "1", DL_HOME: join(home, "dl-there") }, extraPath: join(home, "dl-there", "bin") });
     assert.equal(onPath.status, 0, onPath.stderr);
     assert.doesNotMatch(onPath.stdout, /new terminal|PATH|source/);
-    assert.match(onPath.stdout, /Then type: dl\n {2}Already use Claude Code or OpenCode\? Run dl claude or dl opencode to use your free dl tokens there\.\n$/);
+    assert.match(onPath.stdout, /Then type: dl\n {2}dl signs you in at dl\.new, then opens your own coding agent \(Claude Code, OpenCode, Cursor…\) on your plan\.\n$/);
   });
 
   it("with a startup file it can't write (read-only, Nix, home-manager), still installs and says the line to add", () => {
@@ -328,7 +328,7 @@ describe("install.sh on a laptop", () => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.read(join(result.dir, "started.log")) ?? "", new RegExp(`^dl .*directionallylocal\\.mjs in ${result.home}\n$`));
     assert.doesNotMatch(result.stdout, /Then type: dl/);
-    assert.doesNotMatch(result.stdout, /dl claude or dl opencode/, "dl starts here; Autopilot gives that tip after sign-in");
+    assert.doesNotMatch(result.stdout, /opens your own coding agent/, "dl starts here and says it itself");
     // Back at the shell it was piped from, whose PATH it couldn't change: the line that fixes it, last.
     assert.match(result.stdout, /To use dl in this terminal, run: source ~\/\.zshrc\n$/);
     assert.match(result.stdout, /\n {2}Next time, open a new terminal or run: source ~\/\.zshrc\n/, "for later terminals, before dl starts");
@@ -337,7 +337,7 @@ describe("install.sh on a laptop", () => {
     cleanup.push(skipped.dir);
     assert.equal(skipped.read(join(skipped.dir, "started.log")), undefined);
     // DL_NO_START=1 (as dl.new/continue does before starting dl itself): one line, not two saying the same.
-    assert.match(skipped.stdout, /\n\n {2}Then run: source ~\/\.zshrc && dl\n {2}Already use Claude Code or OpenCode\? Run dl claude or dl opencode to use your free dl tokens there\.\n$/);
+    assert.match(skipped.stdout, /\n\n {2}Then run: source ~\/\.zshrc && dl\n {2}dl signs you in at dl\.new, then opens your own coding agent \(Claude Code, OpenCode, Cursor…\) on your plan\.\n$/);
     assert.doesNotMatch(skipped.stdout, /Next time/);
   });
 
@@ -417,13 +417,13 @@ describe("install.sh on a laptop", () => {
     const taken = run({ os: "Linux", shell: "/bin/bash", home: (home) => { mkdirSync(localBin(home), { recursive: true }); writeFileSync(join(localBin(home), "dl"), "#!/bin/sh\n"); }, extraPath: localBin });
     assert.equal(taken.status, 0, taken.stderr);
     assert.equal(readFileSync(join(localBin(taken.home), "dl"), "utf8"), "#!/bin/sh\n");
-    assert.match(taken.stdout, /Then run: source ~\/\.bashrc && dl\n {2}Already use Claude Code or OpenCode\? Run dl claude or dl opencode to use your free dl tokens there\.\n$/);
+    assert.match(taken.stdout, /Then run: source ~\/\.bashrc && dl\n {2}dl signs you in at dl\.new, then opens your own coding agent \(Claude Code, OpenCode, Cursor…\) on your plan\.\n$/);
   });
 
   it("for sh, says . ~/.profile (sh has no source)", () => {
     const result = run({ os: "Linux", shell: "/bin/sh" });
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Then run: \. ~\/\.profile && dl\n {2}Already use Claude Code or OpenCode\? Run dl claude or dl opencode to use your free dl tokens there\.\n$/);
+    assert.match(result.stdout, /Then run: \. ~\/\.profile && dl\n {2}dl signs you in at dl\.new, then opens your own coding agent \(Claude Code, OpenCode, Cursor…\) on your plan\.\n$/);
   });
 
   it("passes on dl's exit code, after the reminder", () => {
@@ -451,7 +451,7 @@ describe("install.sh on a laptop", () => {
     assert.deepEqual(readdirSync(root).sort(), ["bin", "dl", "node"]);
   });
 
-  it("shows what the install is doing: downloading, setting up Autopilot, building native parts, and a hint on a slow network", () => {
+  it("shows what the install is doing: downloading, setting up dl, building native parts, and a hint on a slow network", () => {
     // npm's --loglevel=info lines, as the install reads them; a phase lasts long enough to be seen.
     const npmOutput = [
       'echo "npm http fetch GET 200 https://registry.npmjs.org/autopilot-ai 80ms (cache miss)" >&2',
@@ -465,14 +465,14 @@ describe("install.sh on a laptop", () => {
     ].join("\n");
     const result = run({ npmOutput, env: { DL_SLOW_AFTER: "1" } });
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /\.\. Installing dl\n {3}Downloading dl(: \S.*)? \(0:00\)\n {3}Slow network\? This downloads about 40 MB\. It keeps going; press Ctrl\+C to stop\.\n {3}Setting up Autopilot \(0:0\d\)\n {3}Building native parts \(one time, ~1 min\) \(0:0\d\)\nok Installing dl: /);
+    assert.match(result.stdout, /\.\. Installing dl\n {3}Downloading dl(: \S.*)? \(0:00\)\n {3}Slow network\? This downloads about 5 MB\. It keeps going; press Ctrl\+C to stop\.\n {3}Setting up dl \(0:0\d\)\n {3}Building native parts \(one time, ~1 min\) \(0:0\d\)\nok Installing dl: /);
     assert.equal(result.stdout.match(/Slow network/g)?.length, 1, "the hint once");
 
     // A quick install: no hint, and no build step when nothing is compiled.
     const quick = run({ npmOutput: npmOutput.replace(/^echo "gyp.*$/m, "").replace(/sleep \S+/g, "sleep 1.1") });
     assert.equal(quick.status, 0, quick.stderr);
     assert.doesNotMatch(quick.stdout, /Slow network|Building native parts/);
-    assert.match(quick.stdout, /Setting up Autopilot/);
+    assert.match(quick.stdout, /Setting up dl/);
   });
 
   it("installs dl from the prebuilt bundle for this computer: one download, its size shown, checked against its SHA-256", () => {
@@ -484,7 +484,7 @@ describe("install.sh on a laptop", () => {
     assert.equal(result.read(join(root, "dl", "lib", "node_modules", "directionallylocal", "bin", "directionallylocal.mjs")), "// dl from the bundle\n");
     assert.match(result.read(join(root, "bin", "dl")) ?? "", /directionallylocal\.mjs" "\$@"/);
     assert.deepEqual(readdirSync(root).sort(), ["bin", "dl"], "no download or unpacking directory left");
-    assert.match(result.stdout, /\.\. Installing dl\n\.\. Downloading dl \(1 MB\)\n(.*\n)*\.\. Setting up Autopilot\nok Installing dl: dl 0\.10\.0 · in .*\.directionallylocal · 0:0\d\n/);
+    assert.match(result.stdout, /\.\. Installing dl\n\.\. Downloading dl \(1 MB\)\n(.*\n)*\.\. Unpacking dl\nok Installing dl: dl 0\.10\.0 · in .*\.directionallylocal · 0:0\d\n/);
 
     // DL_VERSION picks that version's list.
     const pinned = run({ dist: (dist) => bundleDist(dist), env: { DL_VERSION: "0.14.0" } });
