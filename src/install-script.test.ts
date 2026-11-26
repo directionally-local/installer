@@ -21,24 +21,29 @@ function supportedHost(): boolean {
  * server state file: being root alone isn't a server, so the server path needs DL_MODE=server
  * or DL_INSTALL_ONLY=1 (or DL_SERVER_STATE naming a file that's there).
  */
-function install(env: Record<string, string>, options: { npmFails?: boolean; dlUpFails?: boolean; counts?: boolean } = {}) {
+function install(env: Record<string, string>, options: { npmFails?: boolean; dlUpFails?: boolean; counts?: boolean; uid?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dl-install-"));
   const stub = (name: string, body: string) => {
     writeFileSync(join(dir, name), `#!/bin/sh\n${body}\n`);
     chmodSync(join(dir, name), 0o755);
   };
-  stub("id", 'echo 0');
+  stub("id", `echo ${options.uid ?? 0}`);
   stub("uname", 'case "$1" in -m) echo x86_64 ;; *) echo Linux ;; esac');
+  // sudo: notes its arguments and runs the command, as root would (id says 0 inside it).
+  stub("sudo", `echo "sudo $*" >> "${dir}/sudo.log"; [ "\${1#--preserve-env=}" != "$1" ] && shift; exec env PATH="${dir}/root:$PATH" "$@"`);
+  mkdirSync(join(dir, "root"));
+  writeFileSync(join(dir, "root", "id"), "#!/bin/sh\necho 0\n");
+  chmodSync(join(dir, "root", "id"), 0o755);
   stub("node", 'exit 0');
   stub("curl", `echo "$*" >> "${dir}/curl.log"`);
-  stub("npm", options.npmFails ? 'echo "npm ERR! 404 Not Found"; exit 1' : `echo "$*" >> "${dir}/npm.log"`);
+  stub("npm", options.npmFails ? 'echo "npm ERR! 404 Not Found"; exit 1' : `echo "$*" >> "${dir}/npm.log"; env | grep '^DL_' | sort >> "${dir}/npm.env"`);
   stub("dl", 'echo 0.1.2');
-  stub("directionallylocal", `echo "$*" >> "${dir}/up.log"${options.dlUpFails ? "; exit 3" : ""}`);
+  stub("directionallylocal", `echo "$*" >> "${dir}/up.log"; env | grep '^DL_' | sort >> "${dir}/up.env"${options.dlUpFails ? "; exit 3" : ""}`);
   try {
     // The anonymous count is off unless a test turns it on (DL_NO_TELEMETRY: "").
     const result = spawnSync("sh", [SCRIPT], { env: { PATH: `${dir}:/usr/bin:/bin`, DL_NO_TELEMETRY: "1", DL_SERVER_STATE: join(dir, "no-server-state"), ...env }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     const read = (name: string) => existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : undefined;
-    return { ...result, npm: read("npm.log"), up: read("up.log"), counts: options.counts ? installCounts(join(dir, "curl.log")) : [] };
+    return { ...result, npm: read("npm.log"), up: read("up.log"), npmEnv: read("npm.env"), upEnv: read("up.env"), sudo: read("sudo.log"), counts: options.counts ? installCounts(join(dir, "curl.log")) : [] };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -95,7 +100,7 @@ describe("install.sh", () => {
  * Node that is patched or not, npm installing a fake dl into --prefix, and curl serving a
  * Node.js download from `dist`. DL_TTY names a missing file, so there's no terminal to start dl in.
  */
-function laptopInstall(options: { os?: "Darwin" | "Linux"; machine?: string; android?: boolean; getconf?: { LONG_BIT?: string; GNU_LIBC_VERSION?: string }; uid?: number; nodePatched?: boolean; shell?: string; env?: Record<string, string>; dist?: (dir: string) => void; npmFails?: boolean; npmOutput?: string; terminal?: boolean; extraPath?: string | ((home: string) => string); home?: (home: string) => void; dlExit?: number } = {}) {
+function laptopInstall(options: { os?: "Darwin" | "Linux"; machine?: string; android?: boolean; getconf?: { LONG_BIT?: string; GNU_LIBC_VERSION?: string }; uid?: number; nodePatched?: boolean; shell?: string; env?: Record<string, string>; dist?: (dir: string) => void; npmFails?: boolean; npmOutput?: string; terminal?: boolean; ttyInput?: string; ivm?: "loads" | "builds"; extraPath?: string | ((home: string) => string); home?: (home: string) => void; dlExit?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dl-install-laptop-"));
   const bin = join(dir, "stubs");
   const home = join(dir, "home");
@@ -111,13 +116,16 @@ function laptopInstall(options: { os?: "Darwin" | "Linux"; machine?: string; and
   const getconf = { LONG_BIT: "64", GNU_LIBC_VERSION: "glibc 2.39", ...options.getconf };
   stub("getconf", `case "$1" in LONG_BIT) echo ${getconf.LONG_BIT} ;; GNU_LIBC_VERSION) echo "${getconf.GNU_LIBC_VERSION}" ;; *) exit 1 ;; esac`);
   // A Node: -e is the CVE check; anything else runs dl's entry, which answers --version.
-  const node = (patched: boolean) => `case "$1" in -e) exit ${patched ? 0 : 1} ;; -v) echo v24.22.1 ;; *) [ "$2" = --version ] && echo 0.10.0 || { echo "dl $* in $(pwd)" >> "${dir}/started.log"; echo "\${DL_REFERRAL-unset}" >> "${dir}/referral.log"; echo "\${DL_INSTALL_CODE-unset}" >> "${dir}/install-code.log"; exit ${options.dlExit ?? 0}; } ;; esac`;
+  // With options.ivm, npm installs an isolated-vm that loads only after its own install script ran.
+  const node = (patched: boolean) => `case "$1" in -e) case "$3" in *isolated-vm) [ -f "$3/built" ] || ${options.ivm === "loads" ? "true" : "false"}; exit $? ;; esac; exit ${patched ? 0 : 1} ;; -v) echo v24.22.1 ;; *) [ "$2" = --version ] && echo 0.10.0 || { echo "dl $* in $(pwd)" >> "${dir}/started.log"; echo "\${DL_REFERRAL-unset}" >> "${dir}/referral.log"; echo "\${DL_INSTALL_CODE-unset}" >> "${dir}/install-code.log"; exit ${options.dlExit ?? 0}; } ;; esac`;
   stub("node", node(options.nodePatched ?? true));
   // npm: records its arguments and installs a dl entry point under --prefix.
   const npm = options.npmFails ? 'echo "npm http fetch GET 404 https://registry.npmjs.org/directionallylocal 80ms"; echo "npm ERR! 404"; exit 1' : `echo "$*" >> "${dir}/npm.log"
 ${options.npmOutput ?? ""}
+[ "$1 $2" = "run install" ] && { echo "in $(pwd)" >> "${dir}/npm.log"; touch built; exit 0; }
 prefix=""; while [ $# -gt 0 ]; do [ "$1" = --prefix ] && prefix=$2; shift; done
-mkdir -p "$prefix/lib/node_modules/directionallylocal/bin" && echo '// dl' > "$prefix/lib/node_modules/directionallylocal/bin/directionallylocal.mjs"`;
+mkdir -p "$prefix/lib/node_modules/directionallylocal/bin" && echo '// dl' > "$prefix/lib/node_modules/directionallylocal/bin/directionallylocal.mjs"
+${options.ivm ? 'mkdir -p "$prefix/lib/node_modules/directionallylocal/node_modules/isolated-vm"' : ""}`;
   stub("npm", npm);
   stub("curl", `echo "$*" >> "${dir}/curl.log"
 out=""; url=""; head=""; while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift ;; -*I*) head=1 ;; -*) ;; *) url=$1 ;; esac; shift; done
@@ -129,7 +137,7 @@ if [ -n "$head" ]; then printf 'HTTP/2 200\\r\\ncontent-length: %s\\r\\n\\r\\n' 
   const extraPath = typeof options.extraPath === "function" ? options.extraPath(home) : options.extraPath;
   // An empty file stands in for the terminal: opening it works, as /dev/tty does at one.
   const tty = join(dir, "terminal");
-  if (options.terminal) writeFileSync(tty, "");
+  if (options.terminal) writeFileSync(tty, options.ttyInput ?? "");
   {
     const result = spawnSync("sh", [SCRIPT], {
       cwd: home,
@@ -205,7 +213,7 @@ describe("install.sh on a laptop", () => {
     const result = run();
     assert.equal(result.status, 0, result.stderr);
     const root = join(result.home, ".directionallylocal");
-    assert.match(result.npm ?? "", new RegExp(`^install -g --prefix ${root}/dl --cache ${root}/npm-cache --no-audit --no-fund --no-update-notifier --loglevel=info --foreground-scripts directionallylocal@latest$`, "m"));
+    assert.match(result.npm ?? "", new RegExp(`^install -g --prefix ${root}/dl --cache ${root}/npm-cache --no-audit --no-fund --no-update-notifier --loglevel=info --ignore-scripts directionallylocal@latest$`, "m"), "no dependency's install script runs");
     assert.ok(!existsSync(join(root, "npm-cache")), "npm's cache for the install is removed afterwards");
     assert.equal(result.sudo, undefined, "no sudo");
     assert.doesNotMatch(result.curl ?? "", /nodejs/, "no Node download");
@@ -219,6 +227,20 @@ describe("install.sh on a laptop", () => {
     assert.match(result.stdout, /\n\n {2}Then run: source ~\/\.zshrc && dl\n {2}Already use Claude Code or OpenCode\? Run dl claude or dl opencode to use your free dl tokens there\.\n$/, "no terminal: dl isn't started; this shell's PATH can't change: the one line that fixes it");
     assert.doesNotMatch(result.stdout, /Next time/, "not also the same advice a second way");
     assert.doesNotMatch(result.stdout, /sudo sh/, "the server hint is for Linux");
+  });
+
+  it("with npm, runs isolated-vm's install script alone, and only when its prebuilt binary doesn't load", () => {
+    const prebuilt = run({ ivm: "loads" });
+    assert.equal(prebuilt.status, 0, prebuilt.stderr);
+    assert.doesNotMatch(prebuilt.npm ?? "", /run install|^in /m, "a prebuilt binary: nothing to build");
+    assert.doesNotMatch(prebuilt.stdout, /Building native parts/);
+    const built = run({ ivm: "builds" });
+    assert.equal(built.status, 0, built.stderr);
+    const root = join(built.home, ".directionallylocal");
+    assert.match(built.npm ?? "", new RegExp(`^run install --cache ${root}/npm-cache --no-update-notifier --foreground-scripts\nin ${root}/dl/lib/node_modules/directionallylocal/node_modules/isolated-vm$`, "m"), "its own script, in its own folder");
+    assert.match(built.stdout, /\.\. Building native parts \(one time, ~1 min\)\n/);
+    assert.match(built.stdout, /ok Installing dl: dl 0\.10\.0/);
+    assert.ok(!existsSync(join(root, "npm-cache")));
   });
 
   it("is safe to run again: one PATH line, DL_VERSION pins the version", () => {
@@ -681,7 +703,74 @@ describe("install.sh: the anonymous install count", () => {
   });
 });
 
+describe("install.sh: a server's secrets", () => {
+  const SECRETS = { DL_TAILSCALE_AUTH_KEY: "tskey-auth-s3cret", DL_PROVIDER_API_KEY: "sk-s3cret", DL_OPENROUTER_API_KEY: "sk-or-s3cret", DL_GITHUB_TOKEN: "ghp_s3cret" };
+
+  it("as root: only dl up gets the keys; npm (and NodeSource's script and apt) never do", { skip: !supportedHost() && "needs Ubuntu or Debian" }, () => {
+    const result = install({ DL_MODE: "server", DL_PROVIDER: "openrouter", ...SECRETS });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.npmEnv ?? "", /s3cret/, "npm install -g, whose packages' scripts run as root");
+    assert.match(result.npmEnv ?? "", /^DL_PROVIDER=openrouter$/m, "the non-secret answers stay");
+    for (const [name, value] of Object.entries(SECRETS)) assert.match(result.upEnv ?? "", new RegExp(`^${name}=${value}$`, "m"), `dl up gets ${name}`);
+  });
+
+  it("through sudo: an explicit list of non-secret variables, and the keys only to dl up, by name", { skip: !supportedHost() && "needs Ubuntu or Debian" }, () => {
+    const result = install({ DL_MODE: "server", DL_PROVIDER: "openrouter", OTHER: "kept-out", ...SECRETS }, { uid: 501 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.sudo ?? "", /s3cret/, "no secret value on a command line");
+    assert.doesNotMatch(result.sudo ?? "", /OTHER|-E /);
+    assert.match(result.sudo ?? "", /^sudo env DEBIAN_FRONTEND=noninteractive DL_MODE=server DL_PROVIDER=openrouter DL_NO_TELEMETRY=1 npm install -g /m);
+    assert.match(result.sudo ?? "", /^sudo --preserve-env=DL_TAILSCALE_AUTH_KEY,DL_PROVIDER_API_KEY,DL_OPENROUTER_API_KEY,DL_GITHUB_TOKEN env DEBIAN_FRONTEND=noninteractive DL_MODE=server DL_TITLE_SHOWN=1 DL_PROVIDER=openrouter DL_NO_TELEMETRY=1 directionallylocal up$/m);
+    assert.doesNotMatch(result.npmEnv ?? "", /s3cret/);
+    for (const [name, value] of Object.entries(SECRETS)) assert.match(result.upEnv ?? "", new RegExp(`^${name}=${value}$`, "m"), `dl up gets ${name}`);
+  });
+});
+
 describe("install.sh: server or laptop", () => {
+  it("root through sudo without DL_MODE: says it's the coding agent, not a server, and goes on without a terminal", () => {
+    const result = laptopInstall({ os: "Linux", uid: 0, env: { SUDO_USER: "alice" } });
+    try {
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /Running as root through sudo: this installs the coding agent for root, in .*\.directionallylocal, not a server\.\n {2}For a server, run: curl -fsSL https:\/\/dl\.new\/install\.sh \| sudo DL_MODE=server sh\n/);
+      assert.doesNotMatch(result.stdout, /\[y\/N\]/, "no terminal: no question");
+      assert.match(result.npm ?? "", /^install -g --prefix /m, "the laptop install");
+    } finally {
+      rmSync(result.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("root through sudo without DL_MODE, at a terminal: asks, and no (the default) is the coding agent", () => {
+    const result = laptopInstall({ os: "Linux", uid: 0, terminal: true, ttyInput: "\n", env: { SUDO_USER: "alice", DL_NO_START: "1" } });
+    try {
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /Set up this machine as a server instead\? \[y\/N\] /);
+      assert.match(result.npm ?? "", /^install -g --prefix /m);
+      assert.equal(result.sudo, undefined);
+    } finally {
+      rmSync(result.dir, { recursive: true, force: true });
+    }
+    // Asked for, or not under sudo: no warning.
+    for (const env of [{ SUDO_USER: "alice", DL_MODE: "laptop" }, {}] as Array<Record<string, string>>) {
+      const quiet = laptopInstall({ os: "Linux", uid: 0, env });
+      try {
+        assert.equal(quiet.status, 0, quiet.stderr);
+        assert.doesNotMatch(quiet.stdout, /Running as root through sudo/);
+      } finally {
+        rmSync(quiet.dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("root through sudo without DL_MODE, at a terminal: yes sets up a server", { skip: !supportedHost() && "needs Ubuntu or Debian" }, () => {
+    const result = laptopInstall({ os: "Linux", uid: 0, terminal: true, ttyInput: "y\n", env: { SUDO_USER: "alice" } });
+    try {
+      assert.match(result.stdout, /Set up this machine as a server instead\? \[y\/N\] /);
+      assert.match(result.npm ?? "", /^install -g --no-audit/m, "the server's global install");
+    } finally {
+      rmSync(result.dir, { recursive: true, force: true });
+    }
+  });
+
   it("root on Linux with no server install gets the coding agent like anyone: into its home, no sudo, counted as a laptop", () => {
     const result = laptopInstall({ os: "Linux", uid: 0, shell: "/bin/bash", terminal: true, env: { DL_NO_TELEMETRY: "" } });
     try {
@@ -719,20 +808,20 @@ describe("install.sh: server or laptop", () => {
       const user = laptopInstall({ os: "Linux", env: { DL_MODE: "server" } });
       try {
         assert.equal(user.status, 1, "the stub sudo fails");
-        assert.match(user.sudo ?? "", /^sudo -E npm install -g/m, "the server path, through sudo");
+        assert.match(user.sudo ?? "", /^sudo env DEBIAN_FRONTEND=noninteractive DL_MODE=server DL_NO_TELEMETRY=1 npm install -g/m, "the server path, through sudo, with the non-secret variables by name");
       } finally {
         rmSync(user.dir, { recursive: true, force: true });
       }
       const viaSetup = laptopInstall({ os: "Linux", env: { DL_INSTALL_ONLY: "1" } });
       try {
-        assert.match(viaSetup.sudo ?? "", /^sudo -E npm install -g/m, "DL_INSTALL_ONLY=1 (the laptop's setup, over SSH) is always a server");
+        assert.match(viaSetup.sudo ?? "", /^sudo env DEBIAN_FRONTEND=noninteractive DL_INSTALL_ONLY=1 DL_NO_TELEMETRY=1 npm install -g/m, "DL_INSTALL_ONLY=1 (the laptop's setup, over SSH) is always a server");
       } finally {
         rmSync(viaSetup.dir, { recursive: true, force: true });
       }
       // A user on a Linux machine dl up already set up as a server: the server path too.
       const serverUser = laptopInstall({ os: "Linux", env: { DL_SERVER_STATE: join(state, "state.json") } });
       try {
-        assert.match(serverUser.sudo ?? "", /^sudo -E npm install -g/m);
+        assert.match(serverUser.sudo ?? "", /^sudo env DEBIAN_FRONTEND=noninteractive DL_NO_TELEMETRY=1 npm install -g/m);
       } finally {
         rmSync(serverUser.dir, { recursive: true, force: true });
       }
