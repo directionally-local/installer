@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.48.0](https://github.com/directionally-local/installer/compare/v0.47.0...v0.48.0) (2026-11-26)
+
+
+### Features
+
+* **free:** POST /v1/agent-request for coding agents dl doesn't support yet ([#450](https://github.com/directionally-local/installer/issues/450)) ([10b474f](https://github.com/directionally-local/installer/commit/10b474fd705774b0541f4e5393428a44cab9ce7b))
+* **laptop:** dl routes your own coding agent; Autopilot becomes optional ([#452](https://github.com/directionally-local/installer/issues/452)) ([b1b3571](https://github.com/directionally-local/installer/commit/b1b35717546f8f475ee1c40a2900ddc1f5ed365e))
+
 ## [0.47.0](https://github.com/directionally-local/installer/compare/v0.46.0...v0.47.0) (2026-11-26)
 
 
