@@ -2,6 +2,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { networkOf, rateLimitNetwork } from "../src/network.js";
 import { createService, FakeState, startBrowserFlow, type Service } from "./harness.js";
+import { readFreeConfig } from "../src/config.js";
+
+const { clientIp } = await import("../src/app.js");
 
 describe("networkOf (units)", () => {
   it("keeps an IPv4 address as it is", () => {
@@ -150,5 +153,30 @@ describe("RateLimiterObject pruning", () => {
     assert.deepEqual(keys(), ["a"]);
     assert.equal((await limiter.spend("a", { capacity: 1, perHour: 1 }, 1, now + 1000)).allowed, false);
     assert.ok(state.alarm !== null && state.alarm > now);
+  });
+});
+
+describe("the client's address", () => {
+  const request = (headers: Record<string, string>) => new Request("https://free.test/", { headers });
+
+  it("comes from cf-connecting-ip, never from x-forwarded-for unless a trusted proxy is configured", () => {
+    assert.equal(clientIp(request({ "cf-connecting-ip": "203.0.113.7", "x-forwarded-for": "198.51.100.1" }), false), "203.0.113.7");
+    assert.equal(clientIp(request({ "x-forwarded-for": "198.51.100.1" }), false), "unknown");
+    assert.equal(clientIp(request({}), false), "unknown");
+  });
+
+  it("with TRUST_X_FORWARDED_FOR, takes the last x-forwarded-for address, the one the proxy saw", () => {
+    // The client sent "1.1.1.1" itself; the proxy appended the address it connected from.
+    assert.equal(clientIp(request({ "x-forwarded-for": "1.1.1.1, 198.51.100.1" }), true), "198.51.100.1");
+    assert.equal(clientIp(request({ "x-forwarded-for": "198.51.100.1" }), true), "198.51.100.1");
+    assert.equal(clientIp(request({ "x-forwarded-for": " , " }), true), "unknown");
+    assert.equal(clientIp(request({ "cf-connecting-ip": "203.0.113.7", "x-forwarded-for": "198.51.100.1" }), true), "203.0.113.7");
+  });
+
+  it("reads TRUST_X_FORWARDED_FOR, off by default", () => {
+    const env = { OPENROUTER_API_KEY: "k", GITHUB_CLIENT_ID: "c", GITHUB_CLIENT_SECRET: "s", TOKEN_SIGNING_KEY: "x".repeat(32) };
+    assert.equal(readFreeConfig(env).trustForwardedFor, false);
+    assert.equal(readFreeConfig({ ...env, TRUST_X_FORWARDED_FOR: "true" }).trustForwardedFor, true);
+    assert.throws(() => readFreeConfig({ ...env, TRUST_X_FORWARDED_FOR: "maybe" }), /TRUST_X_FORWARDED_FOR/);
   });
 });

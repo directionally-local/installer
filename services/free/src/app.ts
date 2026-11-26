@@ -530,7 +530,7 @@ export function createHandler(options: HandlerOptions = {}): {
         throw error;
       }
       const url = new URL(request.url);
-      const ip = clientIp(request);
+      const ip = clientIp(request, config.trustForwardedFor);
       const background = options.background ?? backgroundOf(execution);
       // api.dl.new serves only the API (Cloudflare routes its /v1/* and /anthropic/* here; its
       // other paths are dl.new's key page), so links made from a request there use the service's own address.
@@ -609,8 +609,17 @@ async function route(c: Ctx): Promise<Response> {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function clientIp(request: Request): string {
-  return request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+/**
+ * The caller's address: `cf-connecting-ip`, set by Cloudflare. `x-forwarded-for` only with
+ * `trustForwardedFor` (a trusted proxy in front), and then its last address, the one that proxy
+ * saw: earlier entries are whatever the client sent. Otherwise "unknown".
+ */
+export function clientIp(request: Request, trustForwardedFor: boolean): string {
+  const cf = request.headers.get("cf-connecting-ip")?.trim();
+  if (cf) return cf;
+  if (!trustForwardedFor) return "unknown";
+  const forwarded = request.headers.get("x-forwarded-for")?.split(",").map((part) => part.trim()).filter(Boolean);
+  return forwarded?.at(-1) ?? "unknown";
 }
 
 export async function limited(c: Ctx, key: string, limit: Limit): Promise<number | undefined> {

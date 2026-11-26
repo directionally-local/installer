@@ -436,6 +436,12 @@ There is one account per GitHub user, keyed on the numeric GitHub id.
   it names the Durable Object or its row, so every per-network limit goes through it. A bucket's
   row is deleted once it has refilled, by the next spend or the object's alarm; a missing row is
   a full bucket, so the limits behave the same.
+- **The address comes from `cf-connecting-ip`.** `x-forwarded-for` is read only with
+  `TRUST_X_FORWARDED_FOR=true` (env only, default false), for a self-hosted service behind a
+  proxy that appends the client's address to it, and then only its last entry (the one the proxy
+  saw; earlier entries are whatever the client sent). Without either header every caller is
+  `unknown` and shares one network's limits. Behind a proxy that isn't Cloudflare, make sure the
+  proxy also drops any `cf-connecting-ip` a client sends.
 - **Per-network limits are generous for shared networks** (an office, a classroom, a meetup):
   the API 600 requests a minute, refresh 600 an hour, device codes 60 an hour and their polling
   720 a minute, since each signed-in person is limited too (60 requests a minute). Sign-ups (3 a
@@ -1591,7 +1597,7 @@ Env only: `REFERRAL_LINK_BASE` (`https://dl.new/r/`), the offers above, `ALERT_E
 `ALERT_EMAIL_FROM` (`alerts@dl.new`), `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_KIND`,
 `ALERT_TELEGRAM_CHAT_ID`, the prices `LUMINAL_PRICE_INPUT`, `LUMINAL_PRICE_CACHED`,
 `LUMINAL_PRICE_OUTPUT`, `OPENROUTER_PRICE_INPUT`, `OPENROUTER_PRICE_CACHED`,
-`OPENROUTER_PRICE_OUTPUT`, `EMAIL_FROM`, `EMAIL_REPLY_TO`, `USER_EMAILS_TO_ADMINS`, and the
+`OPENROUTER_PRICE_OUTPUT`, `EMAIL_FROM`, `EMAIL_REPLY_TO`, `USER_EMAILS_TO_ADMINS`, `TRUST_X_FORWARDED_FOR`, and the
 secrets `OPENAI_API_KEY`, `LUMINAL_API_KEY`, `RESEND_API_KEY` and `DETECTION_RULES` (below).
 
 The farm-detection settings (`humanSignalsNeeded`, `minActiveWeeks`, `minRepoAgeDays`,

@@ -308,6 +308,13 @@ export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, 
    */
   weeklyResetEmail: boolean;
   /**
+   * Whether a trusted proxy in front sets `x-forwarded-for` (TRUST_X_FORWARDED_FOR, default off).
+   * Off, only `cf-connecting-ip` names the client; on, without it, the header's last address (the
+   * one the proxy saw) does. Without such a proxy the client writes the header itself, so every
+   * per-network limit would be keyed on a value it chose.
+   */
+  trustForwardedFor: boolean;
+  /**
    * Free tokens work inside dl (Autopilot) only (DL_ONLY, default on); also a runtime setting.
    * A free-plan account that sends chat requests but no session events is refused (app.ts).
    */
@@ -783,6 +790,7 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     userEmails: flag(env.USER_EMAILS, true, "USER_EMAILS"),
     userEmailsToAdmins: flag(env.USER_EMAILS_TO_ADMINS, false, "USER_EMAILS_TO_ADMINS"),
     weeklyResetEmail: flag(env.WEEKLY_RESET_EMAIL, true, "WEEKLY_RESET_EMAIL"),
+    trustForwardedFor: flag(env.TRUST_X_FORWARDED_FOR, false, "TRUST_X_FORWARDED_FOR"),
     dlOnly: flag(env.DL_ONLY, DEFAULTS.dlOnly, "DL_ONLY"),
     allowOtherHarnesses: flag(env.ALLOW_OTHER_HARNESSES, DEFAULTS.allowOtherHarnesses, "ALLOW_OTHER_HARNESSES"),
     otherHarnessShare: share(env.OTHER_HARNESS_SHARE, DEFAULTS.otherHarnessShare, "OTHER_HARNESS_SHARE"),
