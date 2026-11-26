@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SshAccess } from "./config.js";
 
@@ -153,6 +154,63 @@ export const realSshExec: SshExec = (access, command, options = {}) => new Promi
   child.stdin.on("error", () => { /* the command exited without reading it */ });
   child.stdin.end(options.input ?? "");
 });
+
+/**
+ * The server's host key as ssh saved it in known_hosts. With accept-new, ssh trusts a server's key
+ * on the first connection without asking; setup shows these fingerprints and asks before it sends
+ * the server any secret, and forgets the key when the person says no.
+ */
+export interface HostKeys {
+  /** Fingerprints of the saved key, e.g. "ED25519 SHA256:…"; empty when it can't be read. */
+  fingerprints(access: SshAccess): Promise<string[]>;
+  /** Takes the server's saved key back out of known_hosts (ssh-keygen -R). */
+  forget(access: SshAccess): Promise<void>;
+}
+
+/** How ssh names a server in known_hosts, and which file it keeps them in, from `ssh -G` output. */
+export function knownHostsEntry(sshG: string, home: string): { name: string; file: string } | undefined {
+  const settings = new Map<string, string>();
+  for (const line of sshG.split("\n")) {
+    const match = /^(\S+)\s+(.*)$/.exec(line.trim());
+    if (match && !settings.has(match[1]!.toLowerCase())) settings.set(match[1]!.toLowerCase(), match[2]!.trim());
+  }
+  const host = settings.get("hostkeyalias") || settings.get("hostname");
+  const file = settings.get("userknownhostsfile")?.split(/\s+/)[0];
+  if (!host || !file) return undefined;
+  const port = settings.get("port");
+  return { name: port && port !== "22" ? `[${host}]:${port}` : host, file: file.replace(/^~(?=$|\/)/, home) };
+}
+
+/** "ED25519 SHA256:…" for each key `ssh-keygen -l -F` printed. */
+export function parseFingerprints(text: string): string[] {
+  const prints: string[] = [];
+  for (const line of text.split("\n")) {
+    if (line.startsWith("#")) continue;
+    const hash = /\b((?:SHA256|MD5):\S+)/.exec(line)?.[1];
+    if (!hash) continue;
+    const type = /\b(ED25519|ECDSA|RSA|DSA)(?:-[A-Z0-9-]+)?\b/.exec(line.replace(hash, ""))?.[0];
+    prints.push(type ? `${type} ${hash}` : hash);
+  }
+  return [...new Set(prints)];
+}
+
+function run(command: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { timeout: 10_000 }, (error, stdout) => (error ? reject(error) : resolve(String(stdout))));
+  });
+}
+
+export const realHostKeys: HostKeys = {
+  async fingerprints(access) {
+    const entry = knownHostsEntry(await run("ssh", ["-G", ...sshOptions(access), access.target]), homedir());
+    if (!entry) return [];
+    return parseFingerprints(await run("ssh-keygen", ["-l", "-F", entry.name, "-f", entry.file]));
+  },
+  async forget(access) {
+    const entry = knownHostsEntry(await run("ssh", ["-G", ...sshOptions(access), access.target]), homedir());
+    if (entry) await run("ssh-keygen", ["-R", entry.name, "-f", entry.file]);
+  },
+};
 
 /** Collects a stream's text and calls back once per complete line. */
 export function lines(collect: (chunk: string) => void, onLine?: (line: string) => void): (chunk: Buffer | string) => void {
