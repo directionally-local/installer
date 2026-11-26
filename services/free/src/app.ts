@@ -90,6 +90,7 @@ import {
 } from "./admission.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
 import { chooseUpstream, providerConfigured } from "./upstream-choice.js";
+import { upstreamRefusal } from "./upstream-errors.js";
 import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
@@ -3407,7 +3408,8 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
   }
   const completion = parseJson(await answer.text()) as Record<string, unknown> | undefined;
   if (!completion || typeof completion !== "object" || completion.error) {
-    const message = typeof (completion?.error as { message?: unknown } | undefined)?.message === "string" ? String((completion!.error as { message: string }).message) : "The model provider sent an answer that couldn't be read. Try again.";
+    // dl's own words for an error body, never the provider's message (upstream-errors.ts).
+    const message = completion?.error ? upstreamRefusal(JSON.stringify(completion)).message : "The model provider sent an answer that couldn't be read. Try again.";
     return anthropicErrorResponse(502, message, "upstream_error", headers);
   }
   const message = toAnthropicMessage(completion, options);
@@ -4787,7 +4789,8 @@ async function openRouterChat(
       const retryAfter = Math.max(1, Number(response.headers.get("retry-after")) || 10);
       return rateLimited(retryAfter, quota);
     }
-    return apiError(response.status >= 500 ? 502 : response.status === 402 ? 503 : 400, response.status === 402 ? "service_paused" : "upstream_error", upstreamMessage(text), { upstreamStatus: response.status }, quota);
+    if (response.status === 402) return apiError(503, "service_paused", "The model provider paused the service's account. Try again later.", { upstreamStatus: response.status }, quota);
+    return apiError(response.status >= 500 ? 502 : 400, "upstream_error", upstreamRefusal(text).message, upstreamDetails(response.status, text), quota);
   }
 
   const contentType = response.headers.get("content-type") ?? "";
@@ -4979,7 +4982,7 @@ async function compatibleChat(
       return input.retry();
     }
     const allowance = await settle(undefined, "upstream_error", { chargeNothing: true, ttfbMs, ...(ours ? { upstreamError: true } : {}) });
-    return apiError(ours ? 502 : 400, "upstream_error", ours ? "The model provider refused the service's key. Try again later." : upstreamMessage(text), { upstreamStatus: response.status }, quotaHeaders(allowance));
+    return apiError(ours ? 502 : 400, "upstream_error", ours ? "The model provider refused the service's key. Try again later." : upstreamRefusal(text).message, ours ? { upstreamStatus: response.status } : upstreamDetails(response.status, text), quotaHeaders(allowance));
   }
 
   const contentType = response.headers.get("content-type") ?? "";
@@ -5082,7 +5085,7 @@ async function openaiChat(
     // 401/403: the service's key or account.
     const ours = response.status === 401 || response.status === 403;
     const allowance = await settle(undefined, "upstream_error", { chargeNothing: true, ttfbMs, ...(ours ? { upstreamError: true } : {}) });
-    return apiError(ours ? 502 : 400, "upstream_error", ours ? "The model provider refused the service's key. Try again later." : upstreamMessage(text), { upstreamStatus: response.status }, quotaHeaders(allowance));
+    return apiError(ours ? 502 : 400, "upstream_error", ours ? "The model provider refused the service's key. Try again later." : upstreamRefusal(text).message, ours ? { upstreamStatus: response.status } : upstreamDetails(response.status, text), quotaHeaders(allowance));
   }
 
   const contentType = response.headers.get("content-type") ?? "";
@@ -5155,14 +5158,13 @@ function numberOrUndefined(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
-function upstreamMessage(text: string): string {
-  try {
-    const parsed = JSON.parse(text) as { error?: { message?: unknown } };
-    if (typeof parsed.error?.message === "string") return `The model provider refused the request: ${parsed.error.message.slice(0, 300)}`;
-  } catch {
-    // not JSON
-  }
-  return "The model provider refused the request.";
+/**
+ * A provider refusal's details: its HTTP status and, when it gave a plain identifier as its code
+ * or type, that as `upstreamReason`. Never the provider's message (upstream-errors.ts).
+ */
+function upstreamDetails(status: number, text: string): Record<string, unknown> {
+  const { reason } = upstreamRefusal(text);
+  return { upstreamStatus: status, ...(reason ? { upstreamReason: reason } : {}) };
 }
 
 // ─── Admin ──────────────────────────────────────────────────────────────────

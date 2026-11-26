@@ -294,6 +294,21 @@ describe("chat completions", () => {
     assert.equal((await me(service, token)).usedThisWeek, 0);
   });
 
+  it("never echoes a provider's 4xx message: dl's own words and a sanitised reason", async () => {
+    const { service, token } = await member();
+    const leaked = "Invalid schema for function 'read_secrets': SECRET-PROMPT-TEXT in messages[3] (org org-internal-123)";
+    service.setOpenRouter(() => Response.json({ error: { code: "invalid_request_error", message: leaked } }, { status: 400 }));
+    const response = await chat(service, token);
+    assert.equal(response.status, 400);
+    const text = await response.text();
+    assert.doesNotMatch(text, /SECRET-PROMPT-TEXT|read_secrets|org-internal/);
+    const error = (JSON.parse(text) as { error: Record<string, unknown> }).error;
+    assert.equal(error.code, "upstream_error");
+    assert.equal(error.upstreamStatus, 400);
+    assert.equal(error.upstreamReason, "invalid_request_error");
+    assert.match(String(error.message), /^The model provider refused the request's tools/);
+  });
+
   it("charges reservations whose request never came back nothing", async () => {
     const { service, token } = await member();
     const person = service.account(100);
