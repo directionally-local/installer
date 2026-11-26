@@ -57,7 +57,7 @@ import { DEEPSEEK_MODEL } from "./models.js";
 import { capacityFull, freePlanOffer, freePlanOn, freePlanView } from "./free-plan.js";
 import { endNoCardTrialForPlan, freePlanSignIn, noCardTrialSignIn, parseTrialCheck, startCardTrialOnClaim, trialFromInvoice, trialFromSubscription, trialWillEnd } from "./trial-web.js";
 import { trialCountedLimit, trialsOffer, trialView } from "./trials.js";
-import { CHECKOUT_SESSION_ID, checkoutPromo, createPlanCheckout, invoiceAmount, isTrialCheckout, promoEligible, subscriptionTrial, isCouponRefusal, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, isTermsConsentRefusal, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, termsAccepted, type StripeEvent } from "./stripe.js";
+import { CHECKOUT_SESSION_ID, checkoutPromo, createPlanCheckout, invoiceAmount, isTrialCheckout, promoEligible, subscriptionTrial, isCouponRefusal, idOf, invoicePayment, invoiceChargedPrices, invoicePeriodEnd, invoicePrices, invoiceSubscription, isTermsConsentRefusal, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, termsAccepted, type StripeEvent } from "./stripe.js";
 import { sendPlainEmail } from "./user-email-send.js";
 import { newAddressCodeEmail, noAccountWelcomeEmail, type NoAccountOffer } from "./no-account-emails.js";
 import { DAY_MS, weekEnd, weekStart, WEEK_MS } from "./week.js";
@@ -1608,7 +1608,8 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
       if (!subscriptionId) return "ignored";
       if (owner === undefined) return "plan_unclaimed";
       const person = account(c, owner);
-      const tier = invoicePrices(object).map((price) => planOfPrice(prices, price)).find((plan): plan is PlanId => plan !== undefined);
+      // The plan the invoice charges for: a prorated change's credit line for the old plan doesn't count.
+      const tier = invoiceChargedPrices(object).map((price) => planOfPrice(prices, price)).find((plan): plan is PlanId => plan !== undefined);
       if (event.type === "invoice.payment_failed") {
         await person.applySubscription({ subscriptionId, state: "past_due", periodEnd: undefined, eventAt: event.created, paymentFailed: true });
         return "plan_past_due";

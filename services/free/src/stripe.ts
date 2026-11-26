@@ -405,7 +405,24 @@ export function subscriptionPrice(subscription: Record<string, any>): string | u
 /** The price ids on an invoice's lines, across API versions. */
 export function invoicePrices(invoice: Record<string, any>): string[] {
   const lines = (invoice.lines?.data ?? []) as Array<Record<string, any>>;
-  return lines.map((line) => idOf(line.price) ?? idOf(line.pricing?.price_details?.price)).filter((id): id is string => typeof id === "string");
+  return lines.map(linePrice).filter((id): id is string => typeof id === "string");
+}
+
+/**
+ * The price ids the invoice charges for: its lines but credits. A prorated plan change's invoice
+ * has a negative line for the unused time on the old price (often first) and a positive one for
+ * the new price; only the new one is the plan. A line without an amount counts.
+ */
+export function invoiceChargedPrices(invoice: Record<string, any>): string[] {
+  const lines = (invoice.lines?.data ?? []) as Array<Record<string, any>>;
+  return lines
+    .filter((line) => typeof line.amount !== "number" || line.amount > 0)
+    .map(linePrice)
+    .filter((id): id is string => typeof id === "string");
+}
+
+function linePrice(line: Record<string, any>): string | undefined {
+  return idOf(line.price) ?? idOf(line.pricing?.price_details?.price);
 }
 
 /**

@@ -210,6 +210,37 @@ describe("billing", () => {
     assert.equal(await accountObject(service, account).paidPlan(service.clock.now), "plus");
   });
 
+  it("keeps the upgraded plan when the prorated invoice lists the old plan's credit first", async () => {
+    const { service, stripe } = await world({ ALERT_EMAIL_TO: "owner@example.com" });
+    const { session, account, token } = await paidAccount(service, stripe);
+    const subscription = stripe.subscriptions.get(session.subscription!)!;
+    service.clock.now += 60_000;
+    assert.equal((await service.request("POST", "/web/billing/upgrade", { token, body: { plan: "plus" }, headers: DL })).status, 200);
+    assert.equal((await webhook(service, "customer.subscription.updated", stripe.subscriptionObject(subscription))).body.outcome, "plan_active");
+    // always_invoice: a credit for the unused Starter time, then the Plus charge for the rest of the period.
+    const proration = {
+      id: "in_upgrade",
+      customer: session.customer,
+      billing_reason: "subscription_update",
+      amount_paid: 1300,
+      total: 1300,
+      subtotal: 1300,
+      parent: { subscription_details: { subscription: subscription.id, metadata: subscription.metadata } },
+      lines: {
+        data: [
+          { price: { id: PRICES.starter }, amount: -700, proration: true, period: { end: subscription.current_period_end } },
+          { price: { id: PRICES.plus }, amount: 2000, proration: true, period: { end: subscription.current_period_end } },
+        ],
+      },
+    };
+    assert.equal((await webhook(service, "invoice.paid", proration)).body.outcome, "plan_active");
+    assert.equal(await accountObject(service, account).paidPlan(service.clock.now), "plus");
+    assert.equal(((await (await service.request("GET", "/web/account", { token })).json()) as any).plan.id, "plus");
+    const owner = service.calls.emails.filter((message) => message.raw.includes("dl.new: payment ("));
+    assert.equal(owner.length, 1);
+    assert.match(owner[0]!.raw, /Plus plan change/);
+  });
+
   it("opens the portal back to dl.new/billing", async () => {
     const { service, stripe } = await world();
     const { session, token } = await paidAccount(service, stripe);
