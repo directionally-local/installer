@@ -120,7 +120,13 @@ name it in `backups` (a model with more than one upstream; see "GLM 5.3 Flash" b
   `{"error": {"code": "provider_limit", "reason": "paused"|"out_of_credit"|"weekly_budget"|"pro_only"|"person_cap", "provider": "liquid", "family": "deepseek", "resetsAt": <ISO or null>, "alternative": "deepseek/deepseek-v4.1-flash-1017"}}`.
   Without its key, or with a model off, the model is unknown (`model_not_allowed`), as if it
   weren't defined. `/v1/models` carries each model's `access`: `free`, `trusted` or `opt-in`.
-  With plans `"all"`, the `person_cap` and `weekly_budget` messages say when it resets.
+  With plans `"all"`, the `person_cap` and `weekly_budget` messages say when it resets. For a
+  paying dl.new plan the messages (and the fallback's `x-dl-notice`) leave out the free-token
+  wording ("Kimi K3.1 on Liquid is paused right now.", not "… paused for free tokens …").
+- **A plan's meter full on a retry or fallback.** When a backup upstream or a model's fallback
+  can't reserve because the plan's meter for the model it would use is full, the answer is that
+  plan's own refusal (402 `plan_limit`, the Free plan's `free_plan_limit`, a no-card trial's
+  `trial_used_up`), not 503 `upstream_unavailable`.
 - **A model with a `fallback`** (GLM 5.3 Flash → DeepSeek V4.1 Flash) past its provider's credit
   or weekly budget, or the person's cap: Autopilot still gets the 402 above (it switches to the
   `alternative` and resends the turn itself, with its own line); another coding agent launched by

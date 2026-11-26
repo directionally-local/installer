@@ -3984,6 +3984,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   const block = route.block;
   let effective = requested;
   let fallbackNotice: string | undefined;
+  // A paying plan's request: the provider's block is worded without "free tokens" (#388).
+  const paidRequest = paidPlan !== undefined && !trialMeter && !freeMeter;
   if (block) {
     const spec = providerSpec(route.blockProvider ?? (requested.provider as RegistryProviderId));
     const cap = personCapUsd(gate.config, requested);
@@ -3992,7 +3994,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     if (agent && backup && FALLBACK_BLOCKS.includes(block) && modelAvailable(backup, gate.config, gate)) {
       effective = backup;
       const approx = cap !== undefined ? approxTokens(requested, cap) : undefined;
-      fallbackNotice = providerFallbackNotice(requested, block, spec.name, backup.name, { resetsAt, ...(approx !== undefined ? { approxTokensPerWeek: approx } : {}) });
+      fallbackNotice = providerFallbackNotice(requested, block, spec.name, backup.name, { resetsAt, ...(approx !== undefined ? { approxTokensPerWeek: approx } : {}), ...(paidRequest ? { paid: true } : {}) });
     }
   }
   if (block && effective === requested) {
@@ -4003,7 +4005,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     const pro = plans === "pro" && (block === "pro_only" || block === "person_cap");
     const upgrade = block === "pro_only" && gate.config.proOffered ? upgradeUrl(c) : null;
     const approxTokensPerWeek = cap !== undefined ? approxTokens(requested, cap) : undefined;
-    const message = providerLimitMessage(requested, block, spec.name, plans, { ...(approxTokensPerWeek !== undefined ? { approxTokensPerWeek } : {}), upgradeUrl: upgrade, resetsAt });
+    const message = providerLimitMessage(requested, block, spec.name, plans, { ...(approxTokensPerWeek !== undefined ? { approxTokensPerWeek } : {}), upgradeUrl: upgrade, resetsAt, ...(paidRequest ? { paid: true } : {}) });
     // The Pro-only refusal is a Pro prompt: counted as seen in Pro's funnel (once a person a day).
     if (upgrade) await countPro(c, "seen", identity.githubId);
     return apiError(
@@ -4163,6 +4165,23 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       ...(meter ? { meter } : {}),
     });
   };
+  /**
+   * The refusal for a reservation a plan's meter turned away (plan_limit) where nothing else
+   * answers it (a retry's or a fallback's reservation, a meter that filled up in parallel): the
+   * Free plan's, a no-card trial's used-up, or the paid plan's own 402 plan_limit for that meter's
+   * model. Undefined when none fits (a model outside the plan, the GPT-6 bonus, a card trial):
+   * the caller's 503 stands.
+   */
+  const planLimitError = async (failed: Extract<Awaited<ReturnType<typeof reserveFor>>, { code: "plan_limit" }>): Promise<Response | undefined> => {
+    const quota = quotaHeaders(failed.allowance);
+    if (freeMeter) return freeRefusal(quota);
+    if (trialMeter?.kind === "nocard") return apiError(402, "trial_used_up", noCardUsedUpMessage(trialMeter.realLimit), { reason: "trial_used_up", plansUrl: "https://dl.new" }, quota);
+    if (!paidPlan || !planState || failed.meter.kind !== "tokens") return undefined;
+    const view = meterFor(paidPlan, failed.meter.model, Math.max(failed.used, failed.meter.limit), gate.config);
+    if (!view) return undefined;
+    const refusal = limitRefusal(paidPlan, view, c.now(), gate.config, planState.fallback);
+    return apiError(refusal.status, refusal.code, refusal.message, refusal.details, quota);
+  };
   let reservation = await reserveFor(pool, serving);
   // The trial filled up between the read and the reservation (requests in parallel).
   if (!reservation.ok && reservation.code === "plan_limit" && trialMeter) {
@@ -4226,7 +4245,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   }
   if (!reservation.ok) {
     const quota = quotaHeaders(reservation.allowance);
-    if (reservation.code === "plan_limit") return apiError(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, { retryable: true }, quota);
+    if (reservation.code === "plan_limit") return (await planLimitError(reservation)) ?? apiError(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, { retryable: true }, quota);
     // Another coding agent's share is used up while the whole allowance isn't: say so, and that
     // Autopilot can still use the rest.
     if (agent && (reservation.code === "quota_exceeded" || reservation.code === "trial_ended") && !(freeBlock && reservation.allowance.plan === "free")) {
@@ -4418,7 +4437,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     if (!next) return undefined;
     return async (): Promise<Response> => {
       const again = await reserveFor(pool, next);
-      if (!again.ok) return apiError(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, { retryable: true }, quotaHeaders(again.allowance));
+      if (!again.ok) return (again.code === "plan_limit" ? await planLimitError(again) : undefined) ?? apiError(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, { retryable: true }, quotaHeaders(again.allowance));
       const response = await attempt(next.model, next.provider, again, rest);
       if (!next.fallback) return response;
       // Tell the client which model actually answered, so it can say so.

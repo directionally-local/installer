@@ -175,6 +175,18 @@ describe("paid plans: through the API", () => {
     assert.equal(service.calls.liquid.length, 0);
   });
 
+  it("words a paused provider for a paying plan without free-tier language", async () => {
+    const { service, token } = await world({ LIQUID_STATUS: "paused" });
+    await subscribe(service, "plus");
+    const refused = await chat(service, token, KIMI);
+    assert.equal(refused.status, 402);
+    const error = await errorOf(refused);
+    assert.equal(error.code, "provider_limit");
+    assert.equal(error.reason, "paused");
+    assert.doesNotMatch(error.message, /free/i, error.message);
+    assert.match(error.message, /Kimi K3\.1 .*is paused right now\./);
+  });
+
   it("serves Plus its Kimi past the old Pro ration, then falls back to DeepSeek with the notice in the answer", async () => {
     const { service, token } = await world();
     await subscribe(service, "plus");
@@ -387,6 +399,22 @@ describe("the GPT-6 launch bonus: through the API", () => {
     assert.equal(fell.status, 200);
     assert.equal(fell.headers.get("x-dl-notice"), "GPT-6 launch bonus used up until Mon 00:00 UTC, now using DeepSeek V4.1 Flash.");
     assert.equal(service.calls.luminal.length, 1);
+  });
+
+  it("answers a failover onto a used-up DeepSeek with the plan's limit, not upstream_unavailable", async () => {
+    const { service, token } = await bonusWorld();
+    await subscribe(service, "starter");
+    // DeepSeek's week used up (Starter: 3,974,200 counted).
+    service.setLuminal(() => completion(luminalUsage(4_000_000, 10)));
+    assert.equal((await chat(service, token, MODEL)).status, 200);
+    // OpenAI fails before any output: the failover to DeepSeek (Sol's fallback) can't reserve.
+    service.setOpenAI(() => Response.json({ error: { message: "overloaded" } }, { status: 500 }));
+    const refused = await chat(service, token, SOL);
+    const error = await errorOf(refused);
+    assert.equal(refused.status, 402, JSON.stringify(error));
+    assert.equal(error.code, "plan_limit");
+    assert.equal(error.model, MODEL);
+    assert.match(error.message, /^DeepSeek V4\.1 Flash weekly limit reached/);
   });
 
   it("refuses Sol to tool keys and to non-paying accounts, and Astra to everyone", async () => {
