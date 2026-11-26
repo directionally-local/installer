@@ -1087,6 +1087,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
     subscriptionId: string;
     state: "active" | "past_due" | "canceled";
     periodEnd: number | null | undefined;
+    /** Stripe's cancel_at_period_end; undefined keeps the stored one (false for another subscription). */
     cancelAtPeriodEnd?: boolean;
     customerId?: string;
     eventAt: number;
@@ -1109,7 +1110,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
       input.subscriptionId,
       input.state,
       input.periodEnd === undefined ? null : input.periodEnd,
-      input.cancelAtPeriodEnd ? 1 : 0,
+      (input.cancelAtPeriodEnd ?? (current.subscriptionId === input.subscriptionId && current.cancelAtPeriodEnd)) ? 1 : 0,
       input.eventAt,
     );
     if (input.tier !== undefined) this.ctx.storage.sql.exec("UPDATE billing SET tier = ? WHERE k = 1", input.tier);
