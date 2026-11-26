@@ -100,7 +100,10 @@ On your laptop:
                           Autopilot. dl api-key list · dl api-key revoke ID
   dl t3 [ARGS]            your own T3 Code server (t3; dl t3 serve for no browser) with its Claude
                           Code and OpenCode on free tokens while dl t3 runs; ARGS go to t3. Needs
-                          t3 installed; the T3 Code desktop app doesn't get free tokens yet
+                          t3 installed; the T3 Code desktop app doesn't get free tokens yet.
+                          Asks before turning on OpenCode in T3 Code's settings
+                          (~/.t3/userdata/settings.json; backs it up); --dl-enable-opencode
+                          turns it on without asking
   dl zed                  add dl to Zed as an agent (Autopilot over ACP, your own provider or the free
                           tier, signs in first if needed); edits Zed's settings.json after a backup,
                           nothing else in it changes. dl zed remove takes it out

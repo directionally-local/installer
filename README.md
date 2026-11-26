@@ -324,7 +324,8 @@ exit code is dl's.
 
 `dl t3` starts the [T3 Code](https://github.com/pingdotgg/t3code) server you already have (the
 `t3` command) with its Claude Code and OpenCode agents on the free tier, the same way `dl claude`
-and `dl opencode` set them up. Every argument after `t3` goes to it unchanged, and its exit code is
+and `dl opencode` set them up. Every argument after `t3` goes to it unchanged (except dl's own
+`--dl-enable-opencode`, below), and its exit code is
 dl's: `dl t3` opens the web app in your browser, `dl t3 serve` runs it without a browser (for a
 server or tmux), `dl t3 ./my-project` starts in that folder.
 
@@ -338,11 +339,15 @@ server or tmux), `dl t3 ./my-project` starts in that folder.
 - **Picking the model:** for OpenCode, pick a `dl/…` model in T3 Code's model picker
   (`dl/deepseek/deepseek-v4.1-flash-1017`). For Claude Code, T3 Code still shows Claude models;
   whichever you pick, the free tier serves it with DeepSeek.
-- **OpenCode is off in new T3 Code installs:** turn it on once in **Settings → Providers**. Leave
-  its **Server URL** empty, so T3 Code starts OpenCode itself with dl's settings.
-- **Your settings stay yours:** no T3 Code, Claude Code or OpenCode file is read or changed. T3
-  Code gets the environment variables `dl claude` and `dl opencode` give those agents, for this
-  run only. Environment variables you set on a provider instance in T3 Code's settings win over
+- **OpenCode is off in new T3 Code installs:** at a terminal, `dl t3` asks before turning it on in
+  `~/.t3/userdata/settings.json` (only `providerInstances.opencode` changes, and the first change
+  keeps a `.dl-backup`). Without a terminal it leaves the file alone unless you pass
+  `--dl-enable-opencode` (dl takes that flag out; `t3` never sees it). Or turn it on yourself in
+  **Settings → Providers**. Leave its **Server URL** empty, so T3 Code starts OpenCode itself with
+  dl's settings.
+- **Your settings stay yours:** apart from that one setting, no T3 Code, Claude Code or OpenCode
+  file is changed. T3 Code gets the environment variables `dl claude` and `dl opencode` give those
+  agents, for this run only. Environment variables you set on a provider instance in T3 Code's settings win over
   dl's for that instance.
 - **The web app and phone, not the desktop app (yet):** only the server `dl t3` starts has free
   tokens. The T3 Code desktop app opened from the Dock or Start menu, and the background service
