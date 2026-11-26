@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.49.0](https://github.com/directionally-local/installer/compare/v0.48.0...v0.49.0) (2026-11-26)
+
+
+### Features
+
+* **laptop:** small touches on dl's first run, and honest sign-in wording on a headless box ([#458](https://github.com/directionally-local/installer/issues/458)) ([a3fa73d](https://github.com/directionally-local/installer/commit/a3fa73dd1992165d5fe31aeebe1d4176f113a66a))
+
+
+### Bug Fixes
+
+* **autopilot:** run dl's own Autopilot at the pin, and install 3.33.0 ([#457](https://github.com/directionally-local/installer/issues/457)) ([b80110e](https://github.com/directionally-local/installer/commit/b80110eb1b99934be7be5655240ca6fd06fed344))
+* **free:** treat every coding agent the same on the free tier ([#449](https://github.com/directionally-local/installer/issues/449)) ([484d762](https://github.com/directionally-local/installer/commit/484d76272debb362a38d3f1133c70b63f43ae1f4))
+
 ## [0.48.0](https://github.com/directionally-local/installer/compare/v0.47.0...v0.48.0) (2026-11-26)
 
 
