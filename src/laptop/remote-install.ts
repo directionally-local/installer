@@ -42,12 +42,16 @@ function sudo(facts: Pick<ServerFacts, "root">): string {
  * installs, so the same dl on both ends means the same Autopilot as the laptop's session client.
  * `null` leaves DL_VERSION out (npm's latest): only when this laptop's version isn't on npm and
  * npm's latest couldn't be looked up either (see planServerDl).
+ * The script is downloaded into a fresh private directory (mktemp -d, mode 0700), never a fixed
+ * path another user on the server could create first, and removed once it has run. It all runs
+ * in `sh -c`, whatever the login shell; the URL is its $1.
  */
 export function bootstrapCommand(facts: Pick<ServerFacts, "root">, installUrl = INSTALL_URL, version: string | null = dlVersion()): string {
   if (version !== null && !EXACT_VERSION.test(version)) throw new Error(`Not a dl version: ${JSON.stringify(version)}`);
   const env = `DL_INSTALL_ONLY=1${version === null ? "" : ` DL_VERSION=${version}`}`;
-  const run = facts.root ? `${env} sh /tmp/dl-install.sh` : `sudo -n env ${env} sh /tmp/dl-install.sh`;
-  return `curl -fsSL ${shellQuote(installUrl)} -o /tmp/dl-install.sh && ${run}`;
+  const run = facts.root ? `${env} sh "$d/dl-install.sh"` : `sudo -n env ${env} sh "$d/dl-install.sh"`;
+  const script = `d=$(mktemp -d) || exit 1; curl -fsSL "$1" -o "$d/dl-install.sh" && ${run}; s=$?; rm -rf "$d"; exit $s`;
+  return `sh -c ${shellQuote(script)} sh ${shellQuote(installUrl)}`;
 }
 
 const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;

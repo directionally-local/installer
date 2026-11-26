@@ -13,12 +13,13 @@ const box = { target: "box" };
 
 describe("installing over SSH", () => {
   it("bootstraps with install.sh, under sudo -n when not root", () => {
-    assert.equal(bootstrapCommand(root, undefined, "0.10.1"), "curl -fsSL 'https://dl.new/install.sh' -o /tmp/dl-install.sh && DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh /tmp/dl-install.sh");
-    assert.equal(bootstrapCommand(sudoer, undefined, "0.10.1"), "curl -fsSL 'https://dl.new/install.sh' -o /tmp/dl-install.sh && sudo -n env DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh /tmp/dl-install.sh");
+    assert.equal(bootstrapCommand(root, undefined, "0.10.1"), `sh -c 'd=$(mktemp -d) || exit 1; curl -fsSL "$1" -o "$d/dl-install.sh" && DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh "$d/dl-install.sh"; s=$?; rm -rf "$d"; exit $s' sh 'https://dl.new/install.sh'`);
+    assert.equal(bootstrapCommand(sudoer, undefined, "0.10.1"), `sh -c 'd=$(mktemp -d) || exit 1; curl -fsSL "$1" -o "$d/dl-install.sh" && sudo -n env DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh "$d/dl-install.sh"; s=$?; rm -rf "$d"; exit $s' sh 'https://dl.new/install.sh'`);
+    assert.doesNotMatch(bootstrapCommand(sudoer), /\/tmp\/dl-install/, "no fixed path in /tmp");
   });
 
   it("installs this laptop's own dl version on the server, never npm's latest", async () => {
-    assert.match(bootstrapCommand(root), new RegExp(`DL_INSTALL_ONLY=1 DL_VERSION=${dlVersion().replace(/\./g, "\\.")} sh /tmp/dl-install\\.sh$`));
+    assert.match(bootstrapCommand(root), new RegExp(`DL_INSTALL_ONLY=1 DL_VERSION=${dlVersion().replace(/\./g, "\\.")} sh "\\$d/dl-install\\.sh";`));
     assert.doesNotMatch(bootstrapCommand(sudoer), /latest/);
     assert.match(bootstrapCommand(root, undefined, "1.0.0-rc.1"), /DL_VERSION=1\.0\.0-rc\.1 /);
     for (const bad of ["latest", "1.0", "1.0.0; rm -rf /", "$(id)"]) assert.throws(() => bootstrapCommand(root, undefined, bad), /Not a dl version/);
@@ -28,7 +29,7 @@ describe("installing over SSH", () => {
   });
 
   it("installs npm's latest only when told to, with no DL_VERSION", () => {
-    assert.equal(bootstrapCommand(root, undefined, null), "curl -fsSL 'https://dl.new/install.sh' -o /tmp/dl-install.sh && DL_INSTALL_ONLY=1 sh /tmp/dl-install.sh");
+    assert.match(bootstrapCommand(root, undefined, null), / && DL_INSTALL_ONLY=1 sh "\$d\/dl-install\.sh";/);
   });
 
   it("reads the server's dl version, and nothing when it has no dl", async () => {
