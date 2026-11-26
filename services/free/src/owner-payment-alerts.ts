@@ -2,7 +2,7 @@ import { accountIdOf, isPaidAccountNumber } from "./accounts.js";
 import { emailBody, sendEmail, type Alert } from "./alerts.js";
 import { directory, type Ctx } from "./app.js";
 import { isPlanId, PLANS, planOfPrice, type PlanId } from "./plan-prices.js";
-import { checkoutPromo, idOf, invoiceAmount, invoicePrices, invoiceSubscription, isTrialCheckout, periodEnd, promoEligible, subscriptionPrice, type StripeEvent } from "./stripe.js";
+import { checkoutPromo, idOf, invoiceAmount, invoiceChargedPrices, invoiceSubscription, isTrialCheckout, periodEnd, promoEligible, subscriptionPrice, type StripeEvent } from "./stripe.js";
 
 /**
  * The owner's email about dl.new plan money, one per Stripe event (webhooks retry; each event id
@@ -76,7 +76,7 @@ export function ownerPaymentAlert(event: StripeEvent, prices: Partial<Record<Pla
       ]);
     }
     case "invoice.paid": {
-      const plan = invoicePrices(object).map((price) => planOfPrice(prices, price)).find((id): id is PlanId => id !== undefined) ?? planOf(invoiceSubscription(object).metadata.plan);
+      const plan = invoiceChargedPrices(object).map((price) => planOfPrice(prices, price)).find((id): id is PlanId => id !== undefined) ?? planOf(invoiceSubscription(object).metadata.plan);
       if (!plan) return undefined;
       const paid = invoiceAmount(object);
       // The first invoice of a Checkout is that Checkout's email; a $0 invoice is no payment.
