@@ -17,13 +17,21 @@ describe("directionallylocal.run", () => {
     assert.match(script, /^#!\/bin\/sh/);
   });
 
-  it("sends browsers to the marketing site and never sets cookies", () => {
+  it("sends browsers at the bare domain to the marketing site and never sets cookies", () => {
     const response = get("https://directionallylocal.run/", { Accept: "text/html,application/xhtml+xml" });
     assert.equal(response.status, 302);
     assert.equal(response.headers.get("location"), MARKETING_SITE);
-    for (const r of [response, get("https://directionallylocal.run/"), get("https://directionallylocal.run/x")]) {
+    for (const r of [response, get("https://directionallylocal.run/"), get("https://directionallylocal.run/x"), get("https://directionallylocal.run/install.sh", { Accept: "text/html" })]) {
       assert.equal(r.headers.get("set-cookie"), null);
     }
+  });
+
+  it("shows browsers the script itself at /install.sh, as plain text, to read before running it", async () => {
+    const response = get("https://directionallylocal.run/install.sh", { Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8");
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff", "never rendered as HTML");
+    assert.equal(await response.text(), script);
   });
 
   it("upgrades plain HTTP and serves nothing else", () => {
@@ -46,6 +54,7 @@ describe("directionallylocal.run download counts", () => {
     const curl = { "User-Agent": "curl/8.5.0", Accept: "*/*" };
     for (const request of [
       new Request("https://directionallylocal.run/", { headers: { ...curl, Accept: "text/html" } }),
+      new Request("https://directionallylocal.run/install.sh", { headers: { "User-Agent": "Mozilla/5.0", Accept: "text/html" } }),
       new Request("http://directionallylocal.run/", { headers: curl }),
       new Request("https://directionallylocal.run/x", { headers: curl }),
       new Request("https://directionallylocal.run/", { method: "HEAD", headers: curl }),
