@@ -498,6 +498,17 @@ describe("cli-login", () => {
     assert.deepEqual(((await (await service.request("GET", "/web/api-keys", { token })).json()) as any).keys.map((key: any) => key.name).sort(), ["dl claude on box", "dl claude on box (2)"]);
   });
 
+  it("names dl's own key 'dl on <computer>' (tool: dl)", async () => {
+    const { service, stripe } = await world();
+    const { token } = await paidAccount(service, stripe);
+    const started = (await (await service.request("POST", "/v1/cli-login/start", { body: { tool: "dl", deviceName: "mac" } })).json()) as any;
+    const view = (await (await service.request("GET", `/web/cli-login/${started.userCode}`, { token, headers: DL })).json()) as any;
+    assert.equal(view.tool, "dl");
+    assert.equal((await service.request("POST", `/web/cli-login/${started.userCode}/approve`, { token, headers: DL })).status, 200);
+    assert.equal((await service.request("POST", "/v1/cli-login/poll", { body: { loginId: started.loginId } })).status, 200);
+    assert.deepEqual(((await (await service.request("GET", "/web/api-keys", { token })).json()) as any).keys.map((key: any) => key.name), ["dl on mac"]);
+  });
+
   it("tells the CLI about a denial, an expiry, and an account with no plan", async () => {
     const { service, stripe } = await world();
     const { token, session } = await paidAccount(service, stripe);

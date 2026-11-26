@@ -1,4 +1,5 @@
 import { DurableObject, type DurableObjectState } from "cloudflare:workers";
+import { AGENT_REQUEST_SCHEMA, listAgentRequests, saveAgentRequest, type AgentRequest, type AgentRequestAccount, type AgentRequestInput } from "./agent-request.js";
 import { listProviderInquiries, PROVIDER_INQUIRY_SCHEMA, saveProviderInquiry, type ProviderInquiry, type ProviderInquiryInput } from "./provider-inquiry.js";
 import { NO_GITHUB_SCHEMA, noGithubDays, noGithubDigestLine, noGithubReport, recordNoGithubClick, saveNoGithubLead, withNoGithubLine, type NoGithubAlerts, type NoGithubDay, type NoGithubReport, type NoGithubSource } from "./no-github.js";
 import { normalizeEmail } from "./email-guard.js";
@@ -509,6 +510,8 @@ const SCHEMA = [
   ...NO_GITHUB_SCHEMA,
   // Provider inquiries from dl.new/providers (provider-inquiry.ts).
   ...PROVIDER_INQUIRY_SCHEMA,
+  // Coding agents people asked dl to support (agent-request.ts).
+  ...AGENT_REQUEST_SCHEMA,
   `CREATE TABLE IF NOT EXISTS people (
      github_id    INTEGER PRIMARY KEY,
      login        TEXT NOT NULL,
@@ -4605,6 +4608,18 @@ export class DirectoryObject extends DurableObject {
   /** The newest inquiries and the total kept (admins). */
   async providerInquiries(limit?: number): Promise<{ inquiries: ProviderInquiry[]; total: number }> {
     return listProviderInquiries(this.ctx.storage.sql, limit);
+  }
+
+  // ─── Agent requests (agent-request.ts) ─────────────────────────────────────
+
+  /** Keeps a request to support a coding agent, unless today's cap is reached; `email`: whether to email the owner. */
+  async saveAgentRequest(input: { now: number; request: AgentRequestInput; account: AgentRequestAccount | null }): Promise<ReturnType<typeof saveAgentRequest>> {
+    return saveAgentRequest(this.ctx.storage.sql, input);
+  }
+
+  /** The newest agent requests and the total kept (admins). */
+  async agentRequests(limit?: number): Promise<{ requests: AgentRequest[]; total: number }> {
+    return listAgentRequests(this.ctx.storage.sql, limit);
   }
 
   // ─── "Don't have GitHub?" (no-github.ts) ─────────────────────────────────

@@ -1302,7 +1302,11 @@ async function limitsReached(c: Ctx, accountNumber: number, plan: PlanId, config
 
 // ─── cli-login ──────────────────────────────────────────────────────────────
 
-/** POST /v1/cli-login/start {tool?, deviceName?}: the CLI's half of a browser sign-in. */
+/**
+ * POST /v1/cli-login/start {tool?, deviceName?}: the CLI's half of a browser sign-in. `tool`: "dl"
+ * for dl itself (the page names no agent), or the agent a per-agent command runs ("claude-code",
+ * the default, "pi" …).
+ */
 async function cliStart(c: Ctx): Promise<Response> {
   const retry = await limited(c, `paid:cli:ip:${c.ipNet}`, PAID_LIMITS.cliStartIp);
   if (retry !== undefined) return rateLimited(retry);
@@ -1337,7 +1341,8 @@ async function cliPoll(c: Ctx): Promise<Response> {
     case "expired":
       return apiError(410, "expired_token", "This sign-in expired. Run the command again.");
   }
-  const toolName = polled.tool === "claude-code" ? "dl claude" : `dl ${polled.tool}`;
+  // The key's name: "dl" for dl itself (tool "dl"), "dl claude" for dl claude (the default), else `dl <tool>`.
+  const toolName = polled.tool === "claude-code" ? "dl claude" : polled.tool === "dl" ? "dl" : `dl ${polled.tool}`;
   const base = `${toolName}${polled.deviceName ? ` on ${polled.deviceName}` : ""}`.slice(0, 56);
   let made: Response | undefined;
   for (let attempt = 1; attempt <= 5; attempt++) {

@@ -201,6 +201,26 @@ describe("the Free plan: switched on", () => {
     assert.deepEqual(usage.models.map((m: any) => m.model), ["deepseek/deepseek-v4.1-flash-1017"]);
   });
 
+  it("signs up from the terminal: dl's cli-login, a GitHub sign-in that makes a Free account, approve, and dl gets its key", async () => {
+    const service = await world();
+    await setConfig(service, { freePlan: "on" });
+    const started = (await (await service.request("POST", "/v1/cli-login/start", { body: { tool: "dl", deviceName: "laptop" } })).json()) as any;
+    assert.equal(started.verificationUri, `https://dl.new/cli-login?code=${started.userCode}`);
+    // dl.new/cli-login → /signin?next=/cli-login… → GitHub, no account yet: a Free account.
+    const response = await github(service, { id: 8020, login: "fromcli", email: "fromcli@example.com" });
+    assert.equal(response.status, 200, await response.clone().text());
+    const body = (await response.json()) as any;
+    assert.equal(body.created, true);
+    const approved = await service.request("POST", `/web/cli-login/${started.userCode}/approve`, { token: body.token, headers: DL });
+    assert.equal(approved.status, 200, await approved.clone().text());
+    const poll = await service.request("POST", "/v1/cli-login/poll", { body: { loginId: started.loginId } });
+    assert.equal(poll.status, 200, await poll.clone().text());
+    const got = (await poll.json()) as any;
+    assert.match(got.key, /^dl_sk_/);
+    assert.equal(got.plan, null);
+    assert.equal((await chat(service, got.key)).status, 200);
+  });
+
   it("signs an existing account in as usual, and keeps Google and email sign-ins on pick a plan", async () => {
     const service = await world();
     await setConfig(service, { freePlan: "on" });

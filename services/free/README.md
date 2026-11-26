@@ -2283,6 +2283,15 @@ Inference companies that want dl to route traffic to them fill the form on dl.ne
 - Kept in the Directory's `provider_inquiries` table (the fields and the time; no IP). The owner gets a plain-text email (`ALERT_EMAIL` to `ALERT_EMAIL_TO`, from "dl providers", Reply-To the sender), subject `Provider inquiry: <company>`, listing every field, for the first 50 a UTC day; past that they are only kept.
 - `GET /v1/admin/provider-inquiries` (admins) returns `{total, inquiries: [{id, at, company, name, email, website, models, regions, credits, notes}]}`, newest 500 first; the admin Tools tab has a "Provider inquiries" card (escaped).
 
+## Agent requests
+
+When dl's first run finds no coding agent it supports, the person can name theirs, and dl posts `POST /v1/agent-request` with JSON `{name, os?, arch?, dlVersion?, found?}` (`found`: the agents dl did find). Sign-in is optional: a valid `Authorization: Bearer` (access token, `dlk_`/`dl_` key, harness key) attaches the GitHub login and account id; a missing or invalid one is ignored, never refused.
+
+- Strings are trimmed and control characters removed (line breaks become spaces). Longest, in characters: `name` 80 (required), `os` 40, `arch` 20, `dlVersion` 40; `found` at most 40 strings of at most 40 characters (blanks and repeats dropped). Unknown fields are ignored.
+- `200 {ok: true}` when kept. `400 invalid_request` with the field in the message (or a body over 16 KB); `429 rate_limited` past 10 an hour per network or 500 a UTC day in all.
+- Kept in the Directory's `agent_requests` table (the fields, the time and the account if any; no IP). The owner gets a plain-text email (`ALERT_EMAIL` to `ALERT_EMAIL_TO`, from "dl agents"), subject `dl: unsupported coding agent "<name>"` (CR/LF removed), with the agent, os/arch, dl version, the agents dl found and the account, for the first 50 a UTC day. A failed email never fails the request.
+- `GET /admin/agent-requests` (or `/v1/admin/agent-requests`; admins) returns `{total, requests: [{id, at, name, os, arch, dlVersion, found, githubId, login}]}`, newest 500 first.
+
 ## Install counts
 
 Two public endpoints count the top of the funnel, anonymously. No sign-in; each adds one to a
