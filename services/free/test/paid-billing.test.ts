@@ -158,6 +158,29 @@ describe("plan webhooks", () => {
     assert.equal(((await (await service.request("GET", "/web/account", { token })).json()) as any).plan.status, "canceled");
   });
 
+  it("keeps cancel-at-period-end through later invoice events that don't carry it", async () => {
+    const { service, stripe } = await world();
+    const { session, token } = await paidAccount(service, stripe);
+    const subscription = stripe.subscriptions.get(session.subscription!)!;
+    service.clock.now += 60_000;
+    subscription.cancel_at_period_end = true;
+    assert.equal((await webhook(service, "customer.subscription.updated", stripe.subscriptionObject(subscription))).body.outcome, "plan_active");
+    const cancelling = async () => ((await (await service.request("GET", "/web/account", { token })).json()) as any).plan.cancelAtPeriodEnd;
+    assert.equal(await cancelling(), true);
+    const invoice = { id: "in_retry", customer: session.customer, billing_reason: "subscription_cycle", total_excluding_tax: 700, parent: { subscription_details: { subscription: subscription.id, metadata: subscription.metadata } }, lines: { data: [{ price: { id: PRICES.starter }, amount: 700, period: { end: subscription.current_period_end } }] } };
+    service.clock.now += 60_000;
+    assert.equal((await webhook(service, "invoice.payment_failed", invoice)).body.outcome, "plan_past_due");
+    assert.equal(await cancelling(), true, "a failed payment doesn't know the flag");
+    service.clock.now += 60_000;
+    assert.equal((await webhook(service, "invoice.paid", invoice)).body.outcome, "plan_active");
+    assert.equal(await cancelling(), true, "nor does a paid invoice");
+    // The person resumes in the portal: Stripe's update sets it back.
+    service.clock.now += 60_000;
+    subscription.cancel_at_period_end = false;
+    await webhook(service, "customer.subscription.updated", stripe.subscriptionObject(subscription));
+    assert.equal(await cancelling(), false);
+  });
+
   it("leaves dl Pro's events to the old handling", async () => {
     const { service } = await world();
     await service.signIn({ id: 300, login: "pro" });
