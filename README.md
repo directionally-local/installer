@@ -1,17 +1,28 @@
 # Directionally Local installer
 
-Coding agents that run on your own computer or on your own server. Send a task; it runs in its own [Hotcell](https://github.com/directionally-local/hotcell) sandbox, driven by [Autopilot](https://github.com/directionally-local/autopilot), and comes back as a pull request, even with your laptop closed. Start one at [dl.new](https://dl.new). On an Nvidia GPU you own, `dl model` sets up an open model, tests it, and connects dl to it; see [On your own GPUs](#on-your-own-gpus).
+dl gives your coding agent open models (DeepSeek, Kimi) on one flat plan. It's a router: run `dl`, sign in through the browser, and it opens the coding agent you already use (Claude Code, OpenCode, Pi, T3 Code, Cursor, Cline, Zed, Codex CLI, Aider, Goose…) on your [dl.new](https://dl.new) plan. [Autopilot](https://github.com/directionally-local/autopilot), dl's own open-source agent, is optional.
+
+On your own server, dl also runs background tasks: each runs in its own [Hotcell](https://github.com/directionally-local/hotcell) sandbox, driven by Autopilot, and comes back as a pull request, even with your laptop closed. On an Nvidia GPU you own, `dl model` sets up an open model, tests it, and connects dl to it; see [On your own GPUs](#on-your-own-gpus).
 
 Where this is going: [the roadmap](docs/ROADMAP.md). Come talk to us on [Discord](https://discord.gg/zeBnJTgcRK).
 
 ## Start on your laptop
 
 ```sh
-npm install -g directionallylocal
+curl -fsSL https://dl.new | sh     # or: npm install -g directionallylocal
 dl
 ```
 
-`dl` starts Autopilot in the folder you're in. There's nothing to set up first: no Docker, no sandbox, no GitHub token. Autopilot's own first run picks your provider and signs you in. Every `dl` is a new session; `dl -c` continues the last one.
+`dl` is the router for your own coding agent. There's nothing to set up first: no Docker, no sandbox, no GitHub token.
+
+1. **Sign in.** The first `dl` signs you in (or up) at dl.new in your browser and keeps your `dl_sk_` key on this computer.
+2. **Pick your agent.** dl looks for the coding agents installed on this computer (it only reads directory listings and runs nothing) and asks which one to use: *"I found these on your computer. Which one do you want to use?"*
+3. **It opens on your plan.** Claude Code, OpenCode, Pi and T3 Code open straight on your key. For any other agent (Cursor, Cline, Zed, Roo Code, Kilo Code, Continue, Aider…), dl prints the exact setup: your key and the base URLs `https://api.dl.new/v1` (OpenAI-style) and `https://api.dl.new/anthropic` (Anthropic-style).
+4. **It remembers.** The last agent you used is on top next time, so Enter opens it. `dl -c` continues that agent's latest session.
+
+Open one directly with `dl claude`, `dl opencode`, `dl pi` or `dl t3`. `dl api-key` prints your key and both base URLs again. No agent installed? dl asks which one you use, and offers Autopilot.
+
+**Autopilot is optional.** It's dl's own open-source agent, listed last. dl downloads it the first time you pick it (or run `dl autopilot`) into `~/.directionallylocal/autopilot`, and `dl update` keeps it on the version dl pins. Background tasks, servers and GPU boxes still use Autopilot, as below.
 
 Update: `dl update`. It updates `dl` when npm has a newer one, with the same installer you used (the install script or npm, so rerunning `curl -fsSL https://dl.new | sh` still works too; for the install script it runs the copy that shipped in the installed `dl` package, never one downloaded at update time), and makes sure the Autopilot it pins is installed. `dl update --check` only says whether there's a newer `dl`. Every "update dl" hint, Autopilot's included, says `dl update`.
 
@@ -64,18 +75,18 @@ Background tasks push branches and open pull requests through GitHub, so each pl
 
 ### Then a session
 
-`dl setup` ends with one line, `✓ Ready · fits ~6 agents at once`, and opens a session at once. What bare `dl` opens depends on where your agents run (the default place, `dl use`; `--server NAME` picks another). With nothing set up, it's plain Autopilot, as for this computer:
+`dl setup` ends with one line, `✓ Ready · fits ~6 agents at once`, and opens a session at once. What bare `dl` opens depends on where your agents run (the default place, `dl use`; `--server NAME` picks another). With nothing set up, it's the router, as for this computer:
 
-**On this computer, `dl` is plain Autopilot.** It starts `autopilot` in the terminal, in the folder you ran it from, exactly as if you had typed `autopilot`: every Autopilot feature works (`/resume`, `/clear`, `!` shell commands, MCP servers), with your own Autopilot config and the provider `autopilot connect` set up. Any folder works, git or not, and nothing is sent anywhere: the agent edits the folder directly and stops when the terminal closes. Every `dl` is a new session; `dl -c` is `autopilot -c`, and anything after `--` goes to Autopilot as is (`dl -- --session ID`).
+**On this computer, `dl` is the router.** It opens the coding agent you pick (the last used is on top) in the terminal, in the folder you ran it from, on your dl plan, with that agent's own config. Any folder works, git or not, and the agent edits the folder directly. Every `dl` is a new session; `dl -c` continues the last used agent's latest session. If you pick Autopilot, `dl` is plain `autopilot`: every Autopilot feature works (`/resume`, `/clear`, `!` shell commands, MCP servers), and anything after `--` goes to it as is (`dl -- --session ID`).
 
 **On a server, `dl` is a session that keeps running.** Autopilot's screen attaches to a conversation on the server (`autopilot attach-remote`) that carries on after you close the terminal. Inside a GitHub repository it's that repository's code session (your uncommitted changes go along; `--no-local-changes` sends none); anywhere else, a chat. Every `dl` starts a new conversation; `dl -c` reopens the latest one started from this folder on that server. When an earlier one from this folder is still working or waiting for you, `dl` says so in one line before connecting (`1 earlier session here is still working · dl -c to rejoin`). In a git repository whose origin isn't on GitHub, it says so in one line and opens a chat instead.
 
 **Either way, `dl run "task"` is the background, sandboxed path.** It sends the task to the place, where it runs in a Hotcell sandbox, keeps going after the terminal closes, and ends in a pull request.
 
 ```sh
-dl                                  # this computer: autopilot here. A server: its session (repository or chat)
-dl -c                               # this computer: autopilot -c. A server: the latest session from this folder
-dl -- --session <id>                # this computer: pass flags through to autopilot
+dl                                  # this computer: the agent you pick. A server: its session (repository or chat)
+dl -c                               # this computer: continue that agent. A server: the latest session from this folder
+dl -- --session <id>                # this computer: pass flags through to Autopilot
 dl --server box                     # a session on the server named box, whatever the default
 dl new                              # the same as bare dl (kept as an alias for a release)
 dl run "fix the flaky checkout test"  # background task in a sandbox; your uncommitted changes go along
@@ -102,13 +113,15 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 
 | Command | What it does |
 | --- | --- |
-| `dl` | Talk to an agent: a new session each time. With nothing set up, plain `autopilot` in this folder (its first run picks the provider); nothing is installed. On this computer: plain `autopilot` in this folder, any folder, with your own Autopilot config (`dl -- ARGS` passes ARGS to it). On a server: inside a GitHub repository, that repository's agent session; anywhere else, a chat; it keeps running when you leave. |
-| `dl -c`, `dl --continue` | On this computer, `autopilot -c`. On a server, reopen the latest conversation started from this folder there. |
+| `dl` | On this computer: the router. Signs in through the browser the first time, finds the coding agents installed here and opens the one you pick on your dl plan (the last one used is on top). On a server: inside a GitHub repository, that repository's Autopilot session; anywhere else, a chat; it keeps running when you leave. |
+| `dl -c`, `dl --continue` | On this computer, continue the last used agent's latest session. On a server, reopen the latest conversation started from this folder there. |
+| `dl autopilot [ARGS]` | Autopilot, dl's own open-source agent (optional): downloaded the first time, then kept on the version dl pins. `dl -- ARGS` and `-m` also go to Autopilot. |
+| `dl login` / `dl logout` | Sign in to dl.new in the browser (the key is kept in `~/.config/directionallylocal/dl-key.json`), or sign out. |
 | `dl --from-claude-code` | Continue this folder's latest Claude Code conversation in a new Autopilot session on this computer (`autopilot --from-claude-code`): it asks first, then sends your last request, the files changed, commands run and Claude's last message as the first message. The transcript is read here and goes only to your model. |
-| `dl claude [ARGS]` | Your own Claude Code on dl's free tokens, served by DeepSeek. See [Claude Code with free tokens: dl claude](#claude-code-with-free-tokens-dl-claude). |
-| `dl opencode [ARGS]` | Your own OpenCode on dl's free tokens, served by DeepSeek V4.1 Flash (free GPT-6 is in Autopilot only for now; plain `dl`). See [OpenCode with free tokens: dl opencode](#opencode-with-free-tokens-dl-opencode). |
-| `dl pi [ARGS]` | Your own Pi on dl's free tokens, DeepSeek V4.1 Flash by default. See [Pi with free tokens: dl pi](#pi-with-free-tokens-dl-pi). |
-| `dl api-key [NAME]` | Use dl's free tokens in any other tool (Cursor, Cline, Roo, Kilo, Continue, Zed, Aider, OpenCode…): makes an API key and prints it once with the base URLs. `dl api-key list`, `dl api-key revoke ID`. See [Use dl's free tokens in other tools](#use-dls-free-tokens-in-other-tools-dl-api-key). |
+| `dl claude [ARGS]` | Your own Claude Code on your dl plan. See [Claude Code with free tokens: dl claude](#claude-code-with-free-tokens-dl-claude). |
+| `dl opencode [ARGS]` | Your own OpenCode on your dl plan. See [OpenCode with free tokens: dl opencode](#opencode-with-free-tokens-dl-opencode). |
+| `dl pi [ARGS]` | Your own Pi on your dl plan. See [Pi with free tokens: dl pi](#pi-with-free-tokens-dl-pi). |
+| `dl api-key [NAME]` | Your dl key for any other tool (Cursor, Cline, Roo, Kilo, Continue, Zed, Aider, OpenCode…), with the base URLs `https://api.dl.new/v1` and `https://api.dl.new/anthropic`. More keys at [dl.new/keys](https://dl.new/keys). `dl api-key list`, `dl api-key revoke ID`. See [Use dl's free tokens in other tools](#use-dls-free-tokens-in-other-tools-dl-api-key). |
 | `dl conductor` | [Conductor](https://conductor.build) (and Zed, Cline and other desktop apps) on dl's free tokens: starts `dl proxy` if it isn't running and prints the settings to paste into the app. See [Desktop apps with free tokens: dl proxy and dl conductor](#desktop-apps-with-free-tokens-dl-proxy-and-dl-conductor). |
 | `dl proxy start` / `stop` / `status` | A local proxy on `127.0.0.1:4789` that desktop apps use for the free tier, with a local token as their API key. `dl proxy run` runs it in the terminal; `dl proxy install` / `uninstall` start it at login (macOS LaunchAgent, Linux systemd user service). |
 | `dl zed` | Add dl (Autopilot) to [Zed](https://zed.dev) as an external agent: signs in to the free tier first if Autopilot has no provider, backs up Zed's `settings.json` and adds one `agent_servers` entry, changing nothing else. `dl zed remove` takes it out; `dl zed --print` shows the entry. See [Editors: dl zed and dl acp](#editors-dl-zed-and-dl-acp). |
@@ -640,7 +653,7 @@ curl -fsSL https://dl.new/install.sh | sudo DL_MODE=server sh
 
 Any glibc Linux works for the coding agent (Ubuntu, Debian, Fedora, Arch, Amazon Linux; minimal images need `tar` and `gzip`). Alpine and other musl Linux can't run Autopilot's terminal renderer, so the script stops there with a one-line message.
 
-**On a laptop** (macOS as yourself; Linux as anyone, root included: root's install goes into `/root/.directionallylocal`, and `dl` opens plain Autopilot as it does for everyone), it installs `dl` into `~/.directionallylocal` with no sudo: it uses your Node.js when it's new enough (22.23.4+, 24.22.1+ or 26.12.1+), and otherwise downloads Node.js 24 from nodejs.org into the same folder, checked against its published SHA-256, for `dl` alone (your shell's `node` stays as it is). It adds `~/.directionallylocal/bin` to your PATH in your shell's startup file (`.zshrc`, `.bashrc` or `.bash_profile`, fish's `conf.d`, else `.profile`) and starts `dl` in the folder you ran it from. A piped script can't change the PATH of the shell you ran it from, so when `~/.local/bin` or `~/bin` is already on that PATH it also links `dl` there, and `dl` works in the same terminal; otherwise it says the one line to run (for example `source ~/.bashrc`), again when you leave that first `dl`. New terminals always have it. `dl` itself comes as one prebuilt bundle for your platform (macOS or Linux, Apple Silicon/arm64 or x64; dl, its exact dependencies and that platform's binaries, built by the release workflow from the npm package) from `https://dl.new/dl/`, checked against its SHA-256; when there's none for your computer, or it fails, the script installs with npm instead. While it runs, the script shows what it's downloading, how big it is and how far along. `DL_NO_START=1` skips starting `dl`, `DL_NO_MODIFY_PATH=1` leaves your startup file alone, `DL_NO_BUNDLE=1` uses npm, and `DL_HOME=DIR` installs somewhere else. `DL_REFERRAL=CODE` (set by invite links, `curl -fsSL https://dl.new/r/CODE | sh`) is a GitHub username: it's passed to `dl`, which passes it to Autopilot for the free tier sign-in, and it's kept in `~/.config/directionallylocal/pending-referral` until that sign-in succeeds, so signing in on a later run still credits the invite. `dl local uninstall --purge` keeps `dl` itself. When the startup file can't be written (read-only, or managed by Nix or home-manager), the install still succeeds and prints the line to add yourself.
+**On a laptop** (macOS as yourself; Linux as anyone, root included: root's install goes into `/root/.directionallylocal`, and `dl` is the router as it is for everyone), it installs `dl` into `~/.directionallylocal` with no sudo: it uses your Node.js when it's new enough (22.23.4+, 24.22.1+ or 26.12.1+), and otherwise downloads Node.js 24 from nodejs.org into the same folder, checked against its published SHA-256, for `dl` alone (your shell's `node` stays as it is). It adds `~/.directionallylocal/bin` to your PATH in your shell's startup file (`.zshrc`, `.bashrc` or `.bash_profile`, fish's `conf.d`, else `.profile`) and starts `dl` in the folder you ran it from. A piped script can't change the PATH of the shell you ran it from, so when `~/.local/bin` or `~/bin` is already on that PATH it also links `dl` there, and `dl` works in the same terminal; otherwise it says the one line to run (for example `source ~/.bashrc`), again when you leave that first `dl`. New terminals always have it. `dl` itself comes as one prebuilt bundle for your platform (macOS or Linux, Apple Silicon/arm64 or x64; dl, its exact dependencies and that platform's binaries, built by the release workflow from the npm package) from `https://dl.new/dl/`, checked against its SHA-256; when there's none for your computer, or it fails, the script installs with npm instead. While it runs, the script shows what it's downloading, how big it is and how far along. `DL_NO_START=1` skips starting `dl`, `DL_NO_MODIFY_PATH=1` leaves your startup file alone, `DL_NO_BUNDLE=1` uses npm, and `DL_HOME=DIR` installs somewhere else. `DL_REFERRAL=CODE` (set by invite links, `curl -fsSL https://dl.new/r/CODE | sh`) is a GitHub username: it's passed to `dl`, which passes it to Autopilot for the free tier sign-in, and it's kept in `~/.config/directionallylocal/pending-referral` until that sign-in succeeds, so signing in on a later run still credits the invite. `dl local uninstall --purge` keeps `dl` itself. When the startup file can't be written (read-only, or managed by Nix or home-manager), the install still succeeds and prints the line to add yourself.
 
 Uninstall: `dl uninstall` (add `--purge` to also remove your settings and sign-in).
 

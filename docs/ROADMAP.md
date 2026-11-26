@@ -200,7 +200,7 @@ Nothing further is planned; Hotcell's roadmap follows what Autopilot needs.
 
 ## Principles
 
-- **dl installs, Autopilot is the product.** dl sets up Hotcell and Autopilot and then gets out of the way. Provider, model and sessions are Autopilot's job. Since 10 November dl also runs open models on your GPUs (`dl model`), and that is what companies pay for. Autopilot still chooses which provider and model a session uses; a `dl model` deployment is one more provider.
+- **dl is a router; the agent is yours.** Since 26 November dl gives the coding agent you already use open models (DeepSeek, Kimi) on one flat plan, and Autopilot is optional. On servers, dl sets up Hotcell and Autopilot and then gets out of the way; there, provider, model and sessions are Autopilot's job. Since 10 November dl also runs open models on your GPUs (`dl model`), and that is what companies pay for. Autopilot still chooses which provider and model a session uses; a `dl model` deployment is one more provider.
 - **Never cripple Autopilot.** Whatever works in plain `autopilot` must work through dl, or dl should just run plain Autopilot.
 - **Every `dl` is a new session,** like `autopilot` and Claude Code. Old sessions come back through Autopilot's `/resume`, not through dl.
 - **The sandbox is the safety model.** Agents that run unattended run in a Hotcell sandbox, end in a pull request, and never hold your real keys.
@@ -212,7 +212,7 @@ Nothing further is planned; Hotcell's roadmap follows what Autopilot needs.
 
 ### Phase 0 — One person, one laptop, every day
 
-You use dl as your daily coding agent, and a stranger can install it from the website without help.
+dl routes your own coding agent to open models, and a stranger can install it from the website without help. Since 26 November 2026 dl is a router: the first `dl` signs in at dl.new in the browser, finds the coding agents installed on the computer (Claude Code, OpenCode, Pi, T3 Code, Cursor, Cline, Zed and more), opens the one picked on the person's plan and remembers it. Autopilot is optional, downloaded the first time it's picked.
 
 **Gate:** two weeks of daily use, and a wiped-laptop install that passes with no surprises.
 
@@ -221,7 +221,8 @@ You use dl as your daily coding agent, and a stranger can install it from the we
 | Done | Any provider, chosen in Autopilot's own picker | hotcell#63, autopilot#1056, #1057, installer#55 |
 | Done | Setup ends in a session, picker shows once, chats reopen; role labels on the install step | installer#62, #68 |
 | Done | No `kimiflare` folders for new users; old installs moved once | autopilot#1081, installer#65 |
-| Decided | On a laptop, dl runs plain Autopilot; servers keep the sandboxed remote mode | installer#72, [decision](decisions/laptop-mode.md) |
+| Decided | On a laptop, dl runs plain Autopilot; servers keep the sandboxed remote mode (on laptops, superseded on 26 Nov by the router) | installer#72, [decision](decisions/laptop-mode.md) |
+| In review | dl is a router: browser sign-in, detects installed agents, remembers the last used; Autopilot optional, downloaded on demand | installer#452 |
 | Filed | Every `dl` starts a new session; `dl -c` continues | installer#71 |
 | Filed | Remote sessions match plain Autopilot: `/resume`, `/clear` | autopilot#1092 |
 | Filed | Your own messages appear when you reopen a session | autopilot#1093 |
@@ -393,6 +394,7 @@ These never block a phase.
 8. **What is the pricing unit for the paid self-hosted update plan?** Per GPU, per machine, or per company. Still open on 13 Nov.
 9. **Which models get "tested" status first?** Partly answered on 13 Nov: the Qwen pair is tested on one RTX PRO 5000. DeepSeek V4.1 Flash 1017 FP8 and GLM 5.3 Flash are in the catalog, untested. DeepSeek is next, from the gate run on a 4x RTX PRO 6000 ([procedure](gpu-test-4x6000.md)).
 10. **Does the free tier's spend cap need lowering, given recent sign-ups?** Partly answered on 12 Nov: separate weekly budgets for DeepSeek and GPT-6, and dl Pro and top-ups when free usage runs out (Autopilot 3.21.0 and 3.22.0). Whether the global cap changes is still open.
+11. ~~**Is dl an installer for Autopilot, or a router for any coding agent?**~~ **Decided 26 Nov 2026:** dl is a router; Autopilot optional, downloaded on demand. On a laptop, `dl` signs in through the browser, detects the installed agents and opens the one picked (the last used first); servers and GPU boxes keep Autopilot. [installer#452](https://github.com/directionally-local/installer/pull/452)
 
 ## Every open issue, placed on the roadmap
 

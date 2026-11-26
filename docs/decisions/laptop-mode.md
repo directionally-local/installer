@@ -2,6 +2,8 @@
 
 **Status:** decided, 2 November 2026. Resolves [installer#72](https://github.com/directionally-local/installer/issues/72).
 
+**Update, 26 November 2026:** on laptops this is superseded. dl is now a router: bare `dl` signs in through the browser, finds the coding agents installed on the computer and opens the one picked (the last used first); Autopilot is optional and downloaded the first time it's picked (`dl autopilot`). Servers keep the sandboxed remote mode below. [installer#452](https://github.com/directionally-local/installer/pull/452)
+
 ## The decision
 
 **On a laptop, `dl` runs plain Autopilot. On a server, `dl` keeps the sandboxed remote mode.**
