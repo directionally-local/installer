@@ -1351,9 +1351,16 @@ async function cliPoll(c: Ctx): Promise<Response> {
   }
   if (!made || made.status !== 201) return made ?? apiError(500, "key_failed", "The key couldn't be made. Run the command again.");
   const key = (await made.json()) as { id: string; key: string };
-  const plan = await account(c, polled.account).paidPlan(c.now());
+  const [plan, person, identities] = await Promise.all([
+    account(c, polled.account).paidPlan(c.now()),
+    directory(c).getPerson(polled.account),
+    directory(c).identities(polled.account),
+  ]);
   const apiBase = new URL(c.config.webApiUrl).origin;
-  return json({ key: key.key, keyId: key.id, accountId: accountIdOf(polled.account), plan, baseUrl: apiBase, anthropicBaseUrl: `${apiBase}/anthropic` });
+  // Who signed in, for dl's welcome line: the GitHub login when the account has one, and the email.
+  const github = identities.find((identity) => identity.kind === "github");
+  const login = github ? (github.label ?? (github.subject === String(polled.account) ? (person?.login ?? null) : null)) : null;
+  return json({ key: key.key, keyId: key.id, accountId: accountIdOf(polled.account), plan, baseUrl: apiBase, anthropicBaseUrl: `${apiBase}/anthropic`, login, email: person?.email ?? null });
 }
 
 async function cliView(c: Ctx, raw: string): Promise<Response> {

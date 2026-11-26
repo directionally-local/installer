@@ -108,7 +108,7 @@ import { DAY_MS, isoDay, weekEnd, weekStart, WEEK_MS } from "./week.js";
 import { planResetValues } from "./plan-reset.js";
 import { FREE_ENDED_CODE, FREE_ENDED_MESSAGE, PLAN_MIX_LABEL, freeEnded, freeEndedFor, limitRefusal, meterFor, realFromCounted, warningEmailValues, withNotices } from "./plan-limits.js";
 import { convertTrial, sendTrial80 } from "./trial-web.js";
-import { capacityFull, freeCapacityFullMessage, FREE_PLAN_URL, FREE_PLAN_WARN_SHARE, freePlanCountedLimit, freePlanEmailValues, freePlanLimitMessage, freePlanOn, freePlanWarning, notOnFreeNotice, starterLine as freeStarterLine } from "./free-plan.js";
+import { capacityFull, freeCapacityFullMessage, FREE_PLAN_URL, FREE_PLAN_WARN_SHARE, freePlanCountedLimit, freePlanEmailValues, freePlanLimitMessage, freePlanOn, freePlanView, freePlanWarning, notOnFreeNotice, starterLine as freeStarterLine } from "./free-plan.js";
 import { noCardUsedUpMessage, notInTrialNotice, trialsOffer, startsWithPlanNotice, TRIAL_CONVERTING_MESSAGE, TRIAL_PAYMENT_FAILED_MESSAGE, TRIAL_WARN_SHARE, trialWarningNotice, type TrialMeter } from "./trials.js";
 import { displayName as planDisplayName, isPaidPlan, planLimitFor, planName as planTitle } from "./plans.js";
 import { PLAN_METER_MODELS, afterMeterFull, anthropicModelFor, bonusProjection, dueWarning, planRoute, tokenMeter, type PlanServe } from "./plan-route.js";
@@ -3035,7 +3035,27 @@ async function me(c: Ctx): Promise<Response> {
       if (prompt && c.url.searchParams.get("prompt") === "shown") await countPro(c, "seen", identity.githubId);
       return prompt?.view ?? null;
     })(),
+    /** Only with `?week=1` (dl's first-tokens line): the plan's week of DeepSeek, see planWeek. */
+    ...(c.url.searchParams.get("week") === "1" ? { week: await planWeek(c, identity.githubId) } : {}),
   });
+}
+
+/**
+ * /v1/me `week` (asked for with `?week=1`): this week of the default model on the account's plan
+ * (a paid plan's DeepSeek limit, or dl.new's Free plan) in real tokens at the plan mix (95.5%
+ * caching applied): `{tokensPerWeek, usedAtMix, leftAtMix, label, resetsAt}`, or null without one.
+ */
+async function planWeek(c: Ctx, githubId: number) {
+  const [{ config }, bars] = await Promise.all([runtime(c), planAccountFor(c, githubId)]);
+  const paid = bars.limits?.find((limit) => limit.model === DEEPSEEK_MODEL);
+  if (paid) {
+    return { tokensPerWeek: paid.tokensPerWeek, usedAtMix: paid.usedAtPlanMix, leftAtMix: Math.max(0, paid.tokensPerWeek - paid.usedAtPlanMix), label: PLAN_MIX_LABEL, resetsAt: paid.resetsAt };
+  }
+  if (bars.state.tier === "none" && bars.state.freePlan) {
+    const free = freePlanView({ on: freePlanOn(config), counted: bars.state.counted[DEEPSEEK_MODEL] ?? 0, config, now: c.now() });
+    return { tokensPerWeek: free.tokensPerWeek, usedAtMix: free.usedAtMix, leftAtMix: free.leftAtMix, label: PLAN_MIX_LABEL, resetsAt: free.resetsAt };
+  }
+  return null;
 }
 
 /** /v1/me `proModels`: every offered Pro-only model, with this person's ration. */

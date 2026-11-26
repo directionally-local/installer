@@ -451,6 +451,18 @@ describe("install.sh on a laptop", () => {
     assert.deepEqual(readdirSync(root).sort(), ["bin", "dl", "node"]);
   });
 
+  it("at a terminal, a download's spinner says \"Pulling up a chair…\" with the size and time after it; plain lines keep the step's name", () => {
+    const script = readFileSync(SCRIPT, "utf8");
+    assert.match(script, /^CHAIR="Pulling up a chair…"$/m);
+    // Both kinds of download: a curl download (Node.js, the dl bundle) and npm's.
+    assert.match(script, /watch_download\(\) \{\n {2}if \[ -n "\$FANCY" \]; then LABEL=\$CHAIR; fi\n/);
+    assert.match(script, /if \[ -n "\$FANCY" \]; then LABEL=\$CHAIR; else LABEL="Downloading dl"; fi/);
+    // The spinner's line: the label, then the detail ("45% · 14 of 31 MB") and the clock.
+    assert.ok(script.includes(`printf '\\r\\033[2K  \\033[36m%s\\033[0m %-33s\\033[2m%s%s\\033[0m' "$(frame "$tick")" "$LABEL" "\${DETAIL:+$DETAIL · }" "$(clock "$elapsed")"`));
+    // A failure names the download, not the spinner's words.
+    assert.match(script, /if \[ "\$LABEL" = "\$CHAIR" \]; then LABEL=\$STEP; fi/);
+  });
+
   it("shows what the install is doing: downloading, setting up dl, building native parts, and a hint on a slow network", () => {
     // npm's --loglevel=info lines, as the install reads them; a phase lasts long enough to be seen.
     const npmOutput = [

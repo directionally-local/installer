@@ -7,7 +7,7 @@ import { ScriptedPrompter, type Prompter, type SelectOption } from "../prompt.js
 import { AGENT_CATALOG, type DetectedAgent } from "./agent-catalog.js";
 import type { AgentRequest, DlKey } from "./dl-key.js";
 import {
-  AGAIN_QUESTION, AUTOPILOT_ROW, autopilotKeyEnv, FIRST_QUESTION, INSTALL_AUTOPILOT, NOTHING_FOUND, orderAgents, pickerOptions, readAgentHistory, recordAgentUse, routerHome, setupSteps, THANKS,
+  AGAIN_QUESTION, AUTOPILOT_ROW, autopilotKeyEnv, FIRST_QUESTION, INSTALL_AUTOPILOT, markFirstTokensShown, NOTHING_FOUND, orderAgents, pickerOptions, readAgentHistory, recordAgentUse, routerHome, setupSteps, THANKS,
   type RouterDeps,
 } from "./router.js";
 
@@ -31,7 +31,7 @@ class Recording implements Prompter {
   }
 }
 
-async function world(found: DetectedAgent[], answers: Record<string, string>, options: { signedIn?: boolean } = {}) {
+async function world(found: DetectedAgent[], answers: Record<string, string>, options: { signedIn?: boolean; firstTokens?: RouterDeps["firstTokens"]; launchCode?: number } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "dl-router-"));
   let out = "";
   const launched: Array<[string, string[]]> = [];
@@ -45,12 +45,13 @@ async function world(found: DetectedAgent[], answers: Record<string, string>, op
     signIn: async () => options.signedIn === false ? undefined : KEY,
     detect: async () => found,
     autopilotInstalled: async () => false,
-    launch: async (command, args) => (launched.push([command, args]), 0),
+    launch: async (command, args) => (launched.push([command, args]), options.launchCode ?? 0),
     autopilot: async (_key, run) => (autopilot.push(run), 0),
     report: async (request) => void reports.push(request),
     dlVersion: "0.48.0",
     historyPath: join(dir, "agents.json"),
     now: () => new Date(clock += 1000),
+    ...(options.firstTokens ? { firstTokens: options.firstTokens } : {}),
   };
   return { deps, prompter, launched, autopilot, reports, text: () => out, path: deps.historyPath! };
 }
@@ -70,13 +71,13 @@ describe("bare dl: the router", () => {
     assert.equal((await readAgentHistory(w.path)).lastUsed, "claude-code");
   });
 
-  it("remembers: the last one used is on top, marked, and Enter opens it", async () => {
+  it("remembers: the last one used is on top as \"Back to <Agent>?\", and Enter opens it", async () => {
     const w = await world([CLAUDE, OPENCODE, CURSOR], { [FIRST_QUESTION]: "OpenCode", [AGAIN_QUESTION]: "" });
     await routerHome(w.deps);
     await routerHome(w.deps);
     const again = w.prompter.shown[1]!;
     assert.match(again.question, /Which coding agent\?/);
-    assert.deepEqual(again.options.map((o) => [o.label, o.accent ?? ""]), [["OpenCode", "last used"], ["Claude Code", ""], ["Cursor", ""], [AUTOPILOT_ROW, ""]]);
+    assert.deepEqual(again.options.map((o) => [o.label, o.accent ?? ""]), [["Back to OpenCode?", ""], ["Claude Code", ""], ["Cursor", ""], [AUTOPILOT_ROW, ""]]);
     assert.deepEqual(w.launched, [["opencode", []], ["opencode", []]]);
   });
 
@@ -84,7 +85,7 @@ describe("bare dl: the router", () => {
     const history = { lastUsed: "autopilot", used: { cursor: "2026-11-20T00:00:00Z", autopilot: "2026-11-25T00:00:00Z" } };
     assert.deepEqual(orderAgents([CLAUDE, OPENCODE, CURSOR], history).map((a) => a.id), ["cursor", "claude-code", "opencode"]);
     const options = pickerOptions([CLAUDE, CURSOR], history, true);
-    assert.deepEqual(options.map((o) => [o.value, o.accent ?? ""]), [["autopilot", "last used"], ["cursor", ""], ["claude-code", ""]]);
+    assert.deepEqual(options.map((o) => [o.value, o.label, o.accent ?? ""]), [["autopilot", "Back to Autopilot?", ""], ["cursor", "Cursor", ""], ["claude-code", "Claude Code", ""]]);
     assert.equal(options[0]!.detail, undefined, "installed: nothing to download");
   });
 
@@ -128,17 +129,93 @@ describe("bare dl: the router", () => {
   });
 });
 
+describe("the first run's touches", () => {
+  const many: DetectedAgent[] = [CLAUDE, OPENCODE, CURSOR, WINDSURF, { id: "aider", name: "Aider", how: ["aider"] }];
+
+  it("lists each agent as it's found, then the picker; five or more is a collection", async () => {
+    const w = await world(many, { [FIRST_QUESTION]: "Claude Code" });
+    const pauses: number[] = [];
+    w.deps.sleep = async (ms) => void pauses.push(ms);
+    await routerHome(w.deps);
+    const text = w.text();
+    assert.match(text, /\n {2}✓ Claude Code {3}claude\n {2}✓ OpenCode {6}opencode\n {2}✓ Cursor {8}app\n {2}✓ Windsurf {6}app\n {2}✓ Aider {9}aider\n {2}You've got a collection\.\n/);
+    assert.deepEqual(pauses, [80, 80, 80, 80], "≤ 80 ms apart, ≤ 400 ms in all");
+    assert.ok(text.indexOf("You've got a collection.") < text.length, "before the picker");
+
+    const two = await world([CLAUDE, CURSOR], { [FIRST_QUESTION]: "Cursor" });
+    await routerHome(two.deps);
+    assert.match(two.text(), /✓ Claude Code {3}claude\n {2}✓ Cursor {8}app\n/);
+    assert.doesNotMatch(two.text(), /collection/);
+  });
+
+  it("keeps the scan within 400 ms however many are found, and skips it once an agent was used", async () => {
+    const { scanStep } = await import("./onboarding.js");
+    assert.equal(scanStep(1), 0);
+    assert.equal(scanStep(5), 80);
+    assert.equal(scanStep(12), 36);
+    assert.ok(scanStep(30) * 29 <= 400);
+    const w = await world([CLAUDE, CURSOR], { [FIRST_QUESTION]: "Claude Code", [AGAIN_QUESTION]: "" });
+    await routerHome(w.deps);
+    const before = w.text().length;
+    await routerHome(w.deps);
+    assert.doesNotMatch(w.text().slice(before), /✓ Claude Code/, "no scan the second time");
+  });
+
+  it("after the first agent run that served tokens: the first-tokens line, once per install", async () => {
+    let asked = 0;
+    const w = await world([CLAUDE], { [FIRST_QUESTION]: "Claude Code", [AGAIN_QUESTION]: "" }, {
+      firstTokens: async (key) => (asked++, assert.equal(key.key, KEY.key), { text: "First tokens served. ~9.9M left this week (95.5% caching applied).", done: true }),
+    });
+    await routerHome(w.deps);
+    assert.match(w.text(), /\n {2}✓ First tokens served\. ~9\.9M left this week \(95\.5% caching applied\)\.\n/);
+    assert.ok((await readAgentHistory(w.path)).firstTokensShown, "marked in dl's config");
+    const before = w.text().length;
+    await routerHome(w.deps);
+    assert.equal(asked, 1, "never asked again");
+    assert.doesNotMatch(w.text().slice(before), /First tokens/);
+    // recordAgentUse keeps the mark.
+    assert.equal((await readAgentHistory(w.path)).lastUsed, "claude-code");
+    assert.ok((await readAgentHistory(w.path)).firstTokensShown);
+  });
+
+  it("skips the first-tokens line silently on an error, nothing served yet, or a failed run, and tries again later", async () => {
+    const results: Array<{ text?: string; done: boolean } | Error> = [new Error("offline"), { done: false }, { text: "First tokens served. ~1M left this week (95.5% caching applied).", done: true }];
+    const w = await world([CLAUDE], { [FIRST_QUESTION]: "Claude Code", [AGAIN_QUESTION]: "" }, {
+      firstTokens: async () => { const next = results.shift()!; if (next instanceof Error) throw next; return next; },
+    });
+    await routerHome(w.deps);
+    await routerHome(w.deps);
+    assert.doesNotMatch(w.text(), /First tokens|offline|Error/);
+    assert.equal((await readAgentHistory(w.path)).firstTokensShown, undefined);
+    await routerHome(w.deps);
+    assert.match(w.text(), /First tokens served\. ~1M left/);
+
+    const failed = await world([CLAUDE], { [FIRST_QUESTION]: "Claude Code" }, { launchCode: 1, firstTokens: async () => assert.fail("asked after a failed run") });
+    assert.equal(await routerHome(failed.deps), 1);
+  });
+
+  it("an already-marked install never asks", async () => {
+    const w = await world([CLAUDE], { [AGAIN_QUESTION]: "" }, { firstTokens: async () => assert.fail("asked") });
+    await recordAgentUse("claude-code", w.path);
+    await markFirstTokensShown(w.path);
+    await routerHome(w.deps);
+    assert.deepEqual(w.launched, [["claude", []]]);
+  });
+});
+
 describe("bare dl with no agent found", () => {
   const question = "Which agent do you use?";
 
   it("asks for the agent's name; an unknown one is reported, with thanks and the key to set it up", async () => {
     const w = await world([], { [question]: "Supercoder 9000" });
     assert.equal(await routerHome(w.deps), 0);
-    assert.match(w.text(), new RegExp(NOTHING_FOUND.replace(".", "\\.")));
+    assert.equal(NOTHING_FOUND, "No agents here yet. Everyone starts somewhere.");
+    assert.ok(w.text().includes(NOTHING_FOUND));
     assert.deepEqual(w.prompter.shown[0]!.options.map((o) => o.label), ["Type the name of the agent you use", INSTALL_AUTOPILOT]);
     assert.equal(w.prompter.shown[0]!.options[0]!.input?.inline, true);
     assert.deepEqual(w.reports.map((r) => [r.name, r.dlVersion, r.found]), [["Supercoder 9000", "0.48.0", []]]);
-    assert.ok(w.text().includes(THANKS));
+    assert.equal(THANKS, "Never heard of it — telling Sina.");
+    assert.match(w.text(), /\n {2}Never heard of it — telling Sina\.\n[\s\S]*Key/, "then the key and base URLs");
     assert.match(w.text(), /dl_sk_0123456789abcdef[\s\S]*https:\/\/api\.dl\.new\/v1/);
   });
 
@@ -166,6 +243,9 @@ describe("agent history and Autopilot's key", () => {
     await recordAgentUse("pi", path, () => new Date("2026-11-01T00:00:00Z"));
     await recordAgentUse("cursor", path, () => new Date("2026-11-02T00:00:00Z"));
     assert.deepEqual(await readAgentHistory(path), { lastUsed: "cursor", used: { pi: "2026-11-01T00:00:00.000Z", cursor: "2026-11-02T00:00:00.000Z" } });
+    await markFirstTokensShown(path, () => new Date("2026-11-03T00:00:00Z"));
+    await recordAgentUse("pi", path, () => new Date("2026-11-04T00:00:00Z"));
+    assert.deepEqual(await readAgentHistory(path), { lastUsed: "pi", used: { pi: "2026-11-04T00:00:00.000Z", cursor: "2026-11-02T00:00:00.000Z" }, firstTokensShown: "2026-11-03T00:00:00.000Z" });
   });
 
   it("gives Autopilot the key, and dl's plan as its provider only when it has none", () => {

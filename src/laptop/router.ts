@@ -5,6 +5,7 @@ import { PromptCancelled, type Prompter, type SelectOption } from "../prompt.js"
 import { palette } from "../ui.js";
 import { AGENT_CATALOG, AUTOPILOT_ID, findSpec, type AgentSpec, type DetectedAgent, type LaunchCommand } from "./agent-catalog.js";
 import { agentRequest, DL_DEFAULT_MODEL, keyUrls, type AgentRequest, type DlKey } from "./dl-key.js";
+import { COLLECTION_AT, COLLECTION_TEXT, scanStep } from "./onboarding.js";
 import { oneLine } from "./printable.js";
 
 /**
@@ -33,6 +34,8 @@ export interface AgentHistory {
   lastUsed?: string;
   /** Agent id → when it was last opened through dl (ISO time). */
   used: Record<string, string>;
+  /** When the one-time "First tokens served" line was shown (ISO time). */
+  firstTokensShown?: string;
 }
 
 export function agentHistoryPath(env: Env = process.env): string {
@@ -42,10 +45,10 @@ export function agentHistoryPath(env: Env = process.env): string {
 
 export async function readAgentHistory(path: string = agentHistoryPath()): Promise<AgentHistory> {
   try {
-    const value = JSON.parse(await readFile(path, "utf8")) as { version?: unknown; lastUsed?: unknown; used?: unknown };
+    const value = JSON.parse(await readFile(path, "utf8")) as { version?: unknown; lastUsed?: unknown; used?: unknown; firstTokensShown?: unknown };
     if (value.version !== 1) return { used: {} };
     const used = Object.fromEntries(Object.entries(value.used && typeof value.used === "object" ? value.used as Record<string, unknown> : {}).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
-    return { ...(typeof value.lastUsed === "string" ? { lastUsed: value.lastUsed } : {}), used };
+    return { ...(typeof value.lastUsed === "string" ? { lastUsed: value.lastUsed } : {}), used, ...(typeof value.firstTokensShown === "string" ? { firstTokensShown: value.firstTokensShown } : {}) };
   } catch {
     return { used: {} };
   }
@@ -54,7 +57,17 @@ export async function readAgentHistory(path: string = agentHistoryPath()): Promi
 /** Marks `id` as the agent last opened through dl. */
 export async function recordAgentUse(id: string, path: string = agentHistoryPath(), now: () => Date = () => new Date()): Promise<void> {
   const history = await readAgentHistory(path);
-  const next = { version: 1, lastUsed: id, used: { ...history.used, [id]: now().toISOString() } };
+  await writeAgentHistory(path, { ...history, lastUsed: id, used: { ...history.used, [id]: now().toISOString() } });
+}
+
+/** Marks the one-time "First tokens served" line as shown, so it's never shown again. */
+export async function markFirstTokensShown(path: string = agentHistoryPath(), now: () => Date = () => new Date()): Promise<void> {
+  const history = await readAgentHistory(path);
+  await writeAgentHistory(path, { ...history, firstTokensShown: now().toISOString() });
+}
+
+async function writeAgentHistory(path: string, history: AgentHistory): Promise<void> {
+  const next = { version: 1, ...(history.lastUsed ? { lastUsed: history.lastUsed } : {}), used: history.used, ...(history.firstTokensShown ? { firstTokensShown: history.firstTokensShown } : {}) };
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${process.pid}.tmp`;
   await writeFile(temp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
@@ -73,23 +86,24 @@ export function orderAgents(found: readonly DetectedAgent[], history: AgentHisto
 
 export const FIRST_QUESTION = "I found these on your computer. Which one do you want to use?";
 export const AGAIN_QUESTION = "Which coding agent?";
-export const NOTHING_FOUND = "No coding agent found.";
+export const NOTHING_FOUND = "No agents here yet. Everyone starts somewhere.";
 export const TYPE_NAME = "Type the name of the agent you use";
 export const INSTALL_AUTOPILOT = "Install Autopilot — the agent we recommend. It's included in your plan.";
 export const AUTOPILOT_ROW = "Autopilot — dl's own agent";
-export const THANKS = "Thanks — we'll add support. Meanwhile here's your key and base URL to set it up yourself:";
+export const THANKS = "Never heard of it — telling Sina.";
+/** The first row when an agent was used before: "Back to Claude Code?". */
+export const backTo = (name: string) => `Back to ${name}?`;
 
-/** The picker's rows: found agents (last used first, marked), then Autopilot (or Autopilot first, when it was last used). */
+/** The picker's rows: found agents (last used first, as "Back to <Agent>?"), then Autopilot (or Autopilot first, when it was last used). */
 export function pickerOptions(found: readonly DetectedAgent[], history: AgentHistory, autopilotInstalled: boolean): SelectOption[] {
   const ordered = orderAgents(found, history);
   const rows: SelectOption[] = ordered.map((agent) => ({
     value: agent.id,
-    label: agent.name,
+    label: agent.id === history.lastUsed ? backTo(agent.name) : agent.name,
     detail: describe(agent),
-    ...(agent.id === history.lastUsed ? { accent: "last used" } : {}),
   }));
   const autopilot: SelectOption = history.lastUsed === AUTOPILOT_ID
-    ? { value: AUTOPILOT_ID, label: AUTOPILOT_ROW, accent: "last used", detail: autopilotInstalled ? "" : "downloads when picked" }
+    ? { value: AUTOPILOT_ID, label: backTo("Autopilot"), detail: autopilotInstalled ? "" : "downloads when picked" }
     : { value: AUTOPILOT_ID, label: AUTOPILOT_ROW, quiet: true, detail: autopilotInstalled ? "" : "downloads when picked" };
   if (!autopilot.detail) delete autopilot.detail;
   return history.lastUsed === AUTOPILOT_ID ? [autopilot, ...rows] : [...rows, autopilot];
@@ -119,6 +133,14 @@ export interface RouterDeps {
   dlVersion: string;
   historyPath?: string;
   now?: () => Date;
+  /** The pause between the scan's lines (a terminal only); none unless given. */
+  sleep?: (ms: number) => Promise<void>;
+  /**
+   * After the first agent run through dl that served tokens: "First tokens served. ~9.9M left
+   * this week (95.5% caching applied)." (onboarding.ts firstTokens); `done` when it's not to be
+   * tried again. Never throws.
+   */
+  firstTokens?: (key: DlKey) => Promise<{ text?: string; done: boolean }>;
 }
 
 /** `dl -c`: what continuing means for each CLI (its own latest session in this folder). */
@@ -137,16 +159,25 @@ export async function routerHome(deps: RouterDeps, options: { continue?: boolean
   ]);
   const record = (id: string) => recordAgentUse(id, deps.historyPath, deps.now).catch(() => undefined);
 
+  // Back at the shell after an agent run: the first tokens served, once per install.
+  const afterRun = async (code: number): Promise<number> => {
+    if (code !== 0 || history.firstTokensShown || !deps.firstTokens) return code;
+    const result = await deps.firstTokens(key).catch(() => ({ done: false } as { text?: string; done: boolean }));
+    if (result.text) io.out(`\n  ${c.green("✓")} ${result.text}\n\n`);
+    if (result.done) await markFirstTokensShown(deps.historyPath, deps.now).catch(() => undefined);
+    return code;
+  };
+
   const open = async (id: string, args: string[] = [], resume = false): Promise<number> => {
     if (id === AUTOPILOT_ID) {
       await record(id);
-      return deps.autopilot(key, resume ? { continue: true } : {});
+      return afterRun(await deps.autopilot(key, resume ? { continue: true } : {}));
     }
     const agent = found.find((one) => one.id === id);
     const spec = AGENT_CATALOG.find((one) => one.id === id);
     if (agent?.dl) {
       await record(id);
-      return deps.launch(agent.dl, args);
+      return afterRun(await deps.launch(agent.dl, args));
     }
     if (!spec) return 1;
     if (agent?.noCustomModels || spec.noCustomModels) {
@@ -172,6 +203,8 @@ export async function routerHome(deps: RouterDeps, options: { continue?: boolean
   const agents = found.filter((one) => one.id !== AUTOPILOT_ID);
   if (agents.length === 0 && history.lastUsed !== AUTOPILOT_ID) return nothingFound(deps, key, found, open);
 
+  // The first time: each agent found, one line at a time (≤ 400 ms in all), then the picker.
+  if (!history.lastUsed) await scanLines(deps, agents);
   const question = history.lastUsed ? AGAIN_QUESTION : FIRST_QUESTION;
   let picked;
   try {
@@ -181,6 +214,21 @@ export async function routerHome(deps: RouterDeps, options: { continue?: boolean
     throw error;
   }
   return open(picked.value);
+}
+
+/** "✓ Claude Code   claude" per agent found, a beat apart at a terminal; "You've got a collection." with five or more. */
+async function scanLines(deps: RouterDeps, agents: readonly DetectedAgent[]): Promise<void> {
+  const { io } = deps;
+  const c = palette(io.color === true);
+  if (agents.length === 0) return;
+  const width = Math.max(...agents.map((agent) => agent.name.length)) + 3;
+  const step = deps.sleep ? scanStep(agents.length) : 0;
+  io.out("\n");
+  for (const [index, agent] of agents.entries()) {
+    if (index > 0 && step > 0) await deps.sleep!(step);
+    io.out(`  ${c.green("✓")} ${agent.name.padEnd(width)}${c.dim(agent.how.join(" · "))}\n`);
+  }
+  if (agents.length >= COLLECTION_AT) io.out(`  ${c.dim(COLLECTION_TEXT)}\n`);
 }
 
 async function nothingFound(
@@ -218,7 +266,7 @@ async function nothingFound(
     return 0;
   }
   await deps.report(agentRequest(name, found.map((one) => one.id), deps.dlVersion), key);
-  io.out(`\n  ${c.green("✓")} ${THANKS}\n`);
+  io.out(`\n  ${THANKS}\n`);
   io.out(keyCard(key, c));
   io.out(`  ${c.dim("In its settings, add an OpenAI-compatible (or Anthropic-compatible) provider with these.")}\n\n`);
   return 0;

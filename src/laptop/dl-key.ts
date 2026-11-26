@@ -3,7 +3,8 @@ import { arch, homedir, hostname, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { palette } from "../ui.js";
 import { FREE_TIER_DEFAULT_URL } from "./free-tier.js";
-import { openBrowser } from "./open-browser.js";
+import { imageProtocol, introBlock, mascotPng, rockFrame, WAITING_TEXT, welcomeHandle, welcomeText, type ImageProtocol } from "./onboarding.js";
+import { isHeadless, openBrowser } from "./open-browser.js";
 import { oneLine } from "./printable.js";
 
 /**
@@ -140,6 +141,19 @@ export interface SignInDeps {
   path?: string;
   /** The one line about what dl is, printed first (the first run); omitted on a re-sign-in. */
   intro?: boolean;
+  /** No browser here (an SSH session, Linux with no display): the link is shown, not opened. isHeadless(env) unless replaced. */
+  headless?: boolean;
+  /** The mascot beside the intro line (null: none); detected from the terminal unless replaced. */
+  image?: { protocol: ImageProtocol; png: Buffer } | null;
+  /** Animate the wait for the browser (a terminal); on with colour unless replaced. */
+  spin?: boolean;
+}
+
+/** The mascot to draw beside the intro, when this terminal draws inline images. */
+function detectImage(env: Env): { protocol: ImageProtocol; png: Buffer } | undefined {
+  const protocol = imageProtocol(env, process.stdout.isTTY === true);
+  const png = protocol ? mascotPng() : undefined;
+  return protocol && png ? { protocol, png } : undefined;
 }
 
 /** The first run's line: what dl is, in the product's words. */
@@ -172,7 +186,7 @@ export async function browserSignIn(io: SignInIO, deps: SignInDeps = {}): Promis
   const c = palette(io.color === true);
   const service = dlSignInOrigin(env);
 
-  if (deps.intro !== false) io.out(`\n  ${c.bold(DL_PITCH)}\n`);
+  if (deps.intro !== false) io.out(introBlock(c.bold(DL_PITCH), (deps.image === undefined ? detectImage(env) : deps.image) ?? undefined));
   let started: { status: number; body: Record<string, any> | undefined };
   try {
     started = await post(call, `${service}/v1/cli-login/start`, { tool: "dl", deviceName: deps.deviceName ?? deviceName() });
@@ -187,63 +201,91 @@ export async function browserSignIn(io: SignInIO, deps: SignInDeps = {}): Promis
     return undefined;
   }
   const url: string = login.verificationUri;
-  const opened = (deps.open ?? openBrowser)(url);
-  io.out(`\n  ${opened ? "Opening dl.new in your browser to sign in or sign up." : "Open this link to sign in or sign up:"}\n`);
+  // A headless box (SSH, no display): never claim a browser is opening; the link is the way in.
+  const opened = !(deps.headless ?? isHeadless(env)) && (deps.open ?? openBrowser)(url);
+  io.out(`\n  ${opened ? "Opening dl.new in your browser to sign in or sign up." : "Open this link in a browser to sign in or sign up:"}\n`);
   io.out(`    ${c.dim("Code")}   ${c.bold(login.userCode)}   ${c.dim("(check it matches the page)")}\n`);
   io.out(`    ${c.dim("Link")}   ${c.cyan(url)}${opened ? c.dim("   (if it didn't open)") : ""}\n\n`);
-  io.out(`  ${c.dim("Waiting for you to approve in the browser… (Ctrl-C to stop)")}\n`);
 
-  let interval = Math.max(1, typeof login.interval === "number" ? login.interval : 2) * 1000;
-  const deadline = now() + Math.max(60, typeof login.expiresIn === "number" ? login.expiresIn : 600) * 1000;
-  let failures = 0;
-  while (now() < deadline) {
-    await sleep(interval);
-    let polled: { status: number; body: Record<string, any> | undefined };
-    try {
-      polled = await post(call, `${service}/v1/cli-login/poll`, { loginId: login.loginId });
-      failures = 0;
-    } catch {
-      // A blip while waiting: keep waiting, unless the service stays away.
-      if (++failures >= 5) {
-        io.err(`  ${c.red("✗")} Lost the connection to dl.new while waiting. Run dl again to sign in.\n`);
+  // The wait: a rocking spinner at a terminal (the line is redrawn in place), else one plain line.
+  const spin = deps.spin ?? io.color === true;
+  const waiting = (frame: string) => `\r\x1b[2K  ${c.cyan(frame)} ${WAITING_TEXT} ${c.dim("(Ctrl-C to stop)")}`;
+  let tick = 0;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  if (spin) {
+    io.out(waiting(rockFrame(tick++)));
+    timer = setInterval(() => io.out(waiting(rockFrame(tick++))), 120);
+    timer.unref?.();
+  } else {
+    io.out(`  ${c.dim(`${WAITING_TEXT}… (Ctrl-C to stop)`)}\n`);
+  }
+  // Stops the spinner and clears its line, before anything else is printed.
+  const settle = () => {
+    if (!timer) return;
+    clearInterval(timer);
+    timer = undefined;
+    io.out("\r\x1b[2K");
+  };
+
+  try {
+    let interval = Math.max(1, typeof login.interval === "number" ? login.interval : 2) * 1000;
+    const deadline = now() + Math.max(60, typeof login.expiresIn === "number" ? login.expiresIn : 600) * 1000;
+    let failures = 0;
+    while (now() < deadline) {
+      await sleep(interval);
+      let polled: { status: number; body: Record<string, any> | undefined };
+      try {
+        polled = await post(call, `${service}/v1/cli-login/poll`, { loginId: login.loginId });
+        failures = 0;
+      } catch {
+        // A blip while waiting: keep waiting, unless the service stays away.
+        if (++failures >= 5) {
+          settle();
+          io.err(`  ${c.red("✗")} Lost the connection to dl.new while waiting. Run dl again to sign in.\n`);
+          return undefined;
+        }
+        continue;
+      }
+      if (polled.status === 200 && typeof polled.body?.key === "string") {
+        const body = polled.body;
+        const baseUrl = typeof body.baseUrl === "string" && /^https?:\/\/[^\s/]+\/?$/.test(body.baseUrl) ? body.baseUrl.replace(/\/+$/, "") : DL_API_URL;
+        const key: DlKey = {
+          key: body.key,
+          ...(typeof body.keyId === "string" ? { keyId: body.keyId } : {}),
+          ...(typeof body.accountId === "string" ? { accountId: body.accountId } : {}),
+          plan: typeof body.plan === "string" ? body.plan : null,
+          baseUrl,
+          anthropicBaseUrl: typeof body.anthropicBaseUrl === "string" && body.anthropicBaseUrl.startsWith("http") ? body.anthropicBaseUrl : `${baseUrl}/anthropic`,
+          savedAt: new Date(now()).toISOString(),
+        };
+        await saveDlKey(key, env, deps.path);
+        // The waiting line becomes the welcome.
+        settle();
+        io.out(`${!spin && io.color === true ? "\x1b[1F\x1b[2K" : ""}  ${c.green("✓")} ${welcomeText(welcomeHandle(body.login, body.email))} ${c.dim(`${planName(key.plan)} plan`)}\n`);
+        return key;
+      }
+      const code = polled.body?.error?.code;
+      if (code === "authorization_pending") continue;
+      if (code === "slow_down") {
+        interval += 1000;
+        continue;
+      }
+      settle();
+      if (code === "access_denied") {
+        io.err(`  ${c.red("✗")} The sign-in was denied in the browser. Run dl to try again.\n`);
         return undefined;
       }
-      continue;
-    }
-    if (polled.status === 200 && typeof polled.body?.key === "string") {
-      const body = polled.body;
-      const baseUrl = typeof body.baseUrl === "string" && /^https?:\/\/[^\s/]+\/?$/.test(body.baseUrl) ? body.baseUrl.replace(/\/+$/, "") : DL_API_URL;
-      const key: DlKey = {
-        key: body.key,
-        ...(typeof body.keyId === "string" ? { keyId: body.keyId } : {}),
-        ...(typeof body.accountId === "string" ? { accountId: body.accountId } : {}),
-        plan: typeof body.plan === "string" ? body.plan : null,
-        baseUrl,
-        anthropicBaseUrl: typeof body.anthropicBaseUrl === "string" && body.anthropicBaseUrl.startsWith("http") ? body.anthropicBaseUrl : `${baseUrl}/anthropic`,
-        savedAt: new Date(now()).toISOString(),
-      };
-      await saveDlKey(key, env, deps.path);
-      // The waiting line becomes the result.
-      io.out(`${io.color === true ? "\x1b[1F\x1b[2K" : ""}  ${c.green("✓")} Signed in ${c.dim(`· ${planName(key.plan)} plan`)}\n`);
-      return key;
-    }
-    const code = polled.body?.error?.code;
-    if (code === "authorization_pending") continue;
-    if (code === "slow_down") {
-      interval += 1000;
-      continue;
-    }
-    if (code === "access_denied") {
-      io.err(`  ${c.red("✗")} The sign-in was denied in the browser. Run dl to try again.\n`);
+      if (code === "expired_token") break;
+      const message = typeof polled.body?.error?.message === "string" ? oneLine(polled.body.error.message, 300) : `dl.new answered HTTP ${polled.status}.`;
+      io.err(`  ${c.red("✗")} The sign-in didn't finish: ${message}\n`);
       return undefined;
     }
-    if (code === "expired_token") break;
-    const message = typeof polled.body?.error?.message === "string" ? oneLine(polled.body.error.message, 300) : `dl.new answered HTTP ${polled.status}.`;
-    io.err(`  ${c.red("✗")} The sign-in didn't finish: ${message}\n`);
+    settle();
+    io.err(`  ${c.red("✗")} The sign-in expired before it was approved. Run dl to try again.\n`);
     return undefined;
+  } finally {
+    settle();
   }
-  io.err(`  ${c.red("✗")} The sign-in expired before it was approved. Run dl to try again.\n`);
-  return undefined;
 }
 
 /**

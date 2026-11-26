@@ -218,7 +218,16 @@ describe("the Free plan: switched on", () => {
     const got = (await poll.json()) as any;
     assert.match(got.key, /^dl_sk_/);
     assert.equal(got.plan, null);
+    // Who signed in, for dl's welcome line.
+    assert.equal(got.login, "fromcli");
+    assert.equal(got.email, "fromcli@example.com");
     assert.equal((await chat(service, got.key)).status, 200);
+    await service.settle();
+    // dl's first-tokens line: the Free plan's week in real tokens, only when asked for.
+    const plain = (await (await service.request("GET", "/v1/me", { token: got.key })).json()) as any;
+    assert.equal("week" in plain, false);
+    const me = (await (await service.request("GET", "/v1/me?week=1", { token: got.key })).json()) as any;
+    assert.deepEqual(me.week, { tokensPerWeek: 10_000_000, usedAtMix: 4462, leftAtMix: 9_995_538, label: "95.5% caching applied", resetsAt: "2026-11-30T00:00:00.000Z" });
   });
 
   it("signs an existing account in as usual, and keeps Google and email sign-ins on pick a plan", async () => {
