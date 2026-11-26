@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelUpErrorType, ModelUpResult } from "../model-first-run.js";
 import { AGENT_IDS, agentSupport, type AgentId, type LocalModel } from "./local-agents.js";
+import { oneLine } from "./printable.js";
 
 /**
  * The GPU first run's contract between dl and Autopilot (Autopilot's src/gpu/handoff.ts is the
@@ -164,12 +165,6 @@ export async function takeHandoff(path: string): Promise<HandoffRequest | undefi
   if (text === undefined) return undefined;
   await rm(path, { force: true });
   return parseHandoff(text);
-}
-
-/** One printable line of at most `max` characters: no control characters, no line breaks. */
-function oneLine(text: string, max: number): string {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
 /** The environment for the relaunch after a model-up request. */

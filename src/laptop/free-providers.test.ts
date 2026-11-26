@@ -64,6 +64,13 @@ describe("free providers", () => {
     assert.equal(parseProviders({ providers: [] }), undefined);
   });
 
+  it("strips control characters from every string it will print", () => {
+    const list = parseProviders({ providers: [{ id: "y", name: "Evil\x1b[2J Co", url: "https://e.com/\x1b]2;t\x07", models: [{ id: "m", name: "M\x9b31m" }] }] });
+    const table = formatProvidersTable(list!);
+    assert.doesNotMatch(table, /[\x00-\x09\x0b-\x1f\x7f-\x9f]/);
+    assert.match(table, /Evil \[2J Co/);
+  });
+
   it("reads the model /model saved for the free tier from Autopilot's config", async () => {
     const fetch = () => Response.json(BODY);
     assert.equal(await chosenFreeModel(options(fetch, { provider: "openrouter", model: "moonshotai/kimi-k2.6", providers: { "directionally-local": { apiKey: "t", model: "gpt-6-luna" } } })), "gpt-6-luna");

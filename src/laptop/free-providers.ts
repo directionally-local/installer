@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { palette } from "../ui.js";
+import { oneLine } from "./printable.js";
 import { autopilotConfigFile, FREE_TIER_PROVIDER, serviceOrigin } from "./free-tier.js";
 
 /**
@@ -90,7 +91,8 @@ export async function freeProviders(options: FreeProvidersOptions = {}): Promise
 
 type Rec = Record<string, unknown>;
 const record = (value: unknown): Rec => (value && typeof value === "object" && !Array.isArray(value) ? (value as Rec) : {});
-const text = (value: unknown, max = 200) => (typeof value === "string" && value.trim() && value.length <= max ? value.trim() : undefined);
+// Every string the list carries ends up printed, so control characters never get through.
+const text = (value: unknown, max = 200) => (typeof value === "string" && oneLine(value) && value.length <= max ? oneLine(value) : undefined);
 const measure = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null);
 const ACCESS: readonly string[] = ["free", "trusted", "opt-in", "pro"];
 const STATUS: readonly string[] = ["on", "paused", "out_of_credit"];

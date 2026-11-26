@@ -7,6 +7,7 @@ import { delimiter, join } from "node:path";
 import { findAutopilot, type AutopilotCommand } from "./autopilot.js";
 import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
 import { palette } from "../ui.js";
+import { oneLine } from "./printable.js";
 
 /**
  * Another coding agent on the free tier, launched by dl (`dl claude`, `dl opencode`, `dl pi`, `dl t3`). The flow is
@@ -369,7 +370,7 @@ async function mintKey(call: Fetch, origin: string, accessToken: string, harness
   }
   const body = await json(response);
   if (response.status !== 201 || typeof body?.key !== "string" || typeof body.id !== "string") {
-    return { error: typeof body?.error?.message === "string" ? body.error.message : `The free tier refused ${command} (HTTP ${response.status}).` };
+    return { error: typeof body?.error?.message === "string" ? oneLine(body.error.message, 500) : `The free tier refused ${command} (HTTP ${response.status}).` };
   }
   const key: string = body.key;
   const id: string = body.id;

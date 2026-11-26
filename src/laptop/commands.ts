@@ -15,6 +15,7 @@ import { detectGitHubRepository, snapshotWorkingTree } from "./git.js";
 import { DEFAULT_MODEL, laptopModel } from "./settings.js";
 import { sshCommandLine } from "./ssh.js";
 import { openBrowser } from "./open-browser.js";
+import { oneLine, printable } from "./printable.js";
 import { withConnections, type Connections, type RemoteOpener } from "./tunnel.js";
 import { outdatedServers, placeVersions, type ServerVersions } from "./update.js";
 import type { SshExec } from "./ssh.js";
@@ -130,7 +131,7 @@ async function runOn(client: RemoteClient, remote: RemoteServer, reason: TargetR
   // Only a fallback (a default, or the only place, always wins), so failing to write it is harmless.
   await recordLastUsed(remote.name).catch(() => undefined);
   const id = conversation.conversationId.slice(0, 8);
-  io.err(`${rewrite(io)}  ${c.green("✓")} Started ${c.bold(id)} on ${remote.name}  ${c.dim(`branch ${conversation.branch ?? "?"}`)}\n`);
+  io.err(`${rewrite(io)}  ${c.green("✓")} Started ${c.bold(id)} on ${remote.name}  ${c.dim(`branch ${oneLine(conversation.branch ?? "?")}`)}\n`);
   if (input.detach) {
     io.err(`\n  ${c.dim("It runs on its own. Follow it:")} dl watch ${id}\n\n`);
     return 0;
@@ -172,7 +173,7 @@ async function listRuns(remotes: RemoteServer[], connections: Connections, json:
     const running = entry.activeRunId !== null;
     const glyph = running ? c.cyan("◐") : entry.status === "completed" || entry.status === "merged" ? c.green("✓") : ["failed", "interrupted"].includes(entry.status) ? c.red("✗") : c.dim("○");
     const multi = remotes.length > 1 ? `${entry.server}  ` : "";
-    io.out(`  ${glyph} ${entry.conversationId.slice(0, 8)}  ${multi}${(running ? "running" : entry.status).padEnd(11)} ${(entry.repository ?? "").padEnd(26)} ${c.dim(entry.pullRequestURL ?? entry.branch ?? "")}\n`);
+    io.out(`  ${glyph} ${entry.conversationId.slice(0, 8)}  ${multi}${oneLine(running ? "running" : entry.status).padEnd(11)} ${oneLine(entry.repository ?? "").padEnd(26)} ${c.dim(oneLine(entry.pullRequestURL ?? entry.branch ?? ""))}\n`);
     const reason = reasons.get(entry.conversationId);
     if (reason) io.out(`      ${c.dim(oneLine(reason, 100))}\n`);
   }
@@ -219,7 +220,7 @@ export async function pull(input: { id: string; server?: string; cwd: string; op
   } else {
     await git(["switch", "-c", branch, "--track", `origin/${branch}`]);
   }
-  io.out(`  ${c.green("✓")} On ${c.bold(branch)}${found.pullRequestURL ? `  ${c.dim(found.pullRequestURL)}` : ""}\n`);
+  io.out(`  ${c.green("✓")} On ${c.bold(branch)}${found.pullRequestURL ? `  ${c.dim(oneLine(found.pullRequestURL))}` : ""}\n`);
 }
 
 /** `dl servers [remove NAME | rename OLD NEW]`: the servers this laptop is connected to. */
@@ -461,7 +462,7 @@ async function follow(
   }
   const final = await client.getConversation(conversationId);
   if (outcome === "completed") {
-    io.err(`\n  ${c.green("✓")} ${c.bold(id)} done${final.pullRequestURL ? `  ${final.pullRequestURL}` : c.dim("  (no changes, so no pull request)")}\n`);
+    io.err(`\n  ${c.green("✓")} ${c.bold(id)} done${final.pullRequestURL ? `  ${oneLine(final.pullRequestURL)}` : c.dim("  (no changes, so no pull request)")}\n`);
     if (final.pullRequestURL) io.err(`  ${c.dim("Check it out here:")} dl pull ${id}\n`);
     io.err("\n");
     return 0;
@@ -491,7 +492,7 @@ class EventRenderer {
     const data = event.data;
     if (event.type !== "assistant.delta" && !this.unpriced && isModelNotPriced(JSON.stringify(data))) this.unpriced = true;
     if (event.type === "assistant.delta") {
-      const text = typeof data.text === "string" ? data.text : typeof data.delta === "string" ? data.delta : "";
+      const text = printable(typeof data.text === "string" ? data.text : typeof data.delta === "string" ? data.delta : "");
       if (!text) return;
       this.io.out(text);
       this.midLine = !text.endsWith("\n");
@@ -499,11 +500,11 @@ class EventRenderer {
     }
     if (event.type === "tool.activity" && data.activity === "started") {
       const input = typeof data.input === "string" ? ` ${oneLine(data.input, 110)}` : "";
-      this.line(`  ${this.c.dim(`› ${String(data.tool ?? "tool")}${input}`)}`);
+      this.line(`  ${this.c.dim(`› ${oneLine(String(data.tool ?? "tool"), 60)}${input}`)}`);
       return;
     }
     if (event.type === "tool.activity" && data.activity === "failed") {
-      this.line(`  ${this.c.red(`✗ ${String(data.tool ?? "tool")} failed`)}`);
+      this.line(`  ${this.c.red(`✗ ${oneLine(String(data.tool ?? "tool"), 60)} failed`)}`);
       return;
     }
     if (event.type === "checkpoint.created" && typeof data.message === "string") {
@@ -579,17 +580,12 @@ function rewrite(io: LaptopIO): string {
   return io.color === true ? "\x1b[1F\x1b[2K" : "";
 }
 
-function oneLine(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
-}
-
 /** The reason a run ended, from its final event. Servers have used `reason`, `error` and `message`. */
 export function failureReason(event: RemoteEvent | undefined): string | undefined {
   if (!event) return undefined;
   for (const key of ["reason", "error", "message", "detail"]) {
     const value = event.data[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "string" && printable(value).trim()) return printable(value).trim();
   }
   return undefined;
 }
@@ -607,7 +603,7 @@ export function failureHint(reason: string): string | undefined {
 
 /** `text` broken into at most `maxLines` lines of `width`, with an ellipsis when it was cut. */
 export function wrap(text: string, width: number, maxLines: number): string[] {
-  const words = text.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  const words = oneLine(text).split(" ").filter(Boolean);
   const lines: string[] = [];
   let line = "";
   for (const word of words) {
@@ -652,6 +648,6 @@ async function failureReasons(
 }
 
 export function describeError(error: unknown): string {
-  if (error instanceof RemoteApiError) return `${error.message} (${error.code})`;
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof RemoteApiError) return `${oneLine(error.message)} (${oneLine(error.code)})`;
+  return oneLine(error instanceof Error ? error.message : String(error));
 }
