@@ -5,5 +5,6 @@ export * from "./dns.js";
 export * from "./github.js";
 export * from "./html.js";
 export * from "./jwt.js";
+export * from "./keys.js";
 export * from "./problem.js";
 export * from "./rate-limit.js";

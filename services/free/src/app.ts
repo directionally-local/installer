@@ -4,6 +4,7 @@ import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.j
 import { githubAuthorizeUrl, githubPrimaryEmail, githubPublicProfile, githubSignInFromCode, githubUserByLogin, githubUserFromCode, type Fetch, type GitHubAppCredentials } from "../../shared/src/github.js";
 import { githubSignals } from "../../shared/src/github-signals.js";
 import { hmacKey, signJwt, verifyJwt } from "../../shared/src/jwt.js";
+import { hmacHex, subkey } from "../../shared/src/keys.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
 import { HARNESSES, HARNESS_KEY_TTL_MS, MAX_HARNESS_KEYS, MAX_SERVER_KEYS, parseHarnessKey, parseServerKey, type AccountObject, type Harness, type KeyKind, type Allowance, type Limits, type Plan, type ServerKeyView } from "./account-object.js";
 import { TOOL_KEYS_OFF_MESSAGE, TOOL_KEYS_UNAVAILABLE_MESSAGE, TOOL_KEY_NOT_HERE_MESSAGE, forTool, toolClient, toolLimitMessage, toolName } from "./tool-keys.js";
@@ -833,14 +834,65 @@ function peopleChecks(people: LevelSignalRow[], config: FreeConfig, now: number,
   return out;
 }
 
-const signingKeys = new Map<string, Promise<CryptoKey>>();
-export function signingKey(config: FreeConfig): Promise<CryptoKey> {
-  let key = signingKeys.get(config.tokenSigningKey);
-  if (!key) {
-    key = hmacKey(config.tokenSigningKey);
-    signingKeys.set(config.tokenSigningKey, key);
+/**
+ * TOKEN_SIGNING_KEY's per-purpose subkeys (HKDF, shared/src/keys.ts), worked out once per key.
+ * `legacy` is the raw key everything was signed with before the split: it still verifies JWTs
+ * (until the longest session made before the split, 7 days, has expired), unsubscribe links (in
+ * emails already sent, so for as long as the key itself is kept) and admin CSRF tokens (forms
+ * open at deploy time). Nothing is signed with it any more.
+ */
+interface ServiceKeys {
+  jwt: CryptoKey;
+  ipHash: CryptoKey;
+  csrf: CryptoKey;
+  unsubscribe: CryptoKey;
+  broadcast: CryptoKey;
+  legacy: CryptoKey;
+}
+
+const serviceKeyCache = new Map<string, Promise<ServiceKeys>>();
+export function serviceKeys(config: FreeConfig): Promise<ServiceKeys> {
+  let keys = serviceKeyCache.get(config.tokenSigningKey);
+  if (!keys) {
+    const secret = config.tokenSigningKey;
+    keys = (async () => ({
+      jwt: await subkey(secret, "jwt"),
+      ipHash: await subkey(secret, "ip-hash"),
+      csrf: await subkey(secret, "csrf"),
+      unsubscribe: await subkey(secret, "unsubscribe"),
+      broadcast: await subkey(secret, "broadcast"),
+      legacy: await hmacKey(secret),
+    }))();
+    serviceKeyCache.set(secret, keys);
   }
-  return key;
+  return keys;
+}
+
+/** The key new JWTs (access, admin, web and paid sessions) are signed with. */
+export async function signingKey(config: FreeConfig): Promise<CryptoKey> {
+  return (await serviceKeys(config)).jwt;
+}
+
+/** The keys a JWT may be signed with: the JWT subkey, then the legacy key (see ServiceKeys). */
+export async function jwtVerifyKeys(config: FreeConfig): Promise<CryptoKey[]> {
+  const keys = await serviceKeys(config);
+  return [keys.jwt, keys.legacy];
+}
+
+/** The key new unsubscribe links are signed with. */
+export async function unsubscribeKey(config: FreeConfig): Promise<CryptoKey> {
+  return (await serviceKeys(config)).unsubscribe;
+}
+
+/** The keys an unsubscribe link may be signed with: the unsubscribe subkey, then the legacy key. */
+export async function unsubscribeVerifyKeys(config: FreeConfig): Promise<CryptoKey[]> {
+  const keys = await serviceKeys(config);
+  return [keys.unsubscribe, keys.legacy];
+}
+
+/** A keyed hash of a network (`label` keeps each use apart), under the ip-hash subkey. */
+async function hashNetwork(config: FreeConfig, label: string, network: string): Promise<string> {
+  return hmacHex((await serviceKeys(config)).ipHash, `${label}:${network}`);
 }
 
 /** `sid` is the refresh-token family: the sign-in session the access token belongs to. */
@@ -949,7 +1001,7 @@ async function authenticate(
     if (!paid && !applyOverrides(c.config, await directory(c).overrides()).toolKeys) return apiError(403, "tool_keys_off", TOOL_KEYS_OFF_MESSAGE);
     return { ...owner, via: "key", keyKind: "tool", keyId: parsed.id };
   }
-  const claims = await verifyJwt(bearer, await signingKey(c.config), Math.floor(c.now() / 1000));
+  const claims = await verifyJwt(bearer, await jwtVerifyKeys(c.config), Math.floor(c.now() / 1000));
   if (!claims || claims.typ !== "access" || claims.iss !== ISSUER || typeof claims.login !== "string") return invalid();
   const githubId = Number(claims.sub);
   if (!Number.isSafeInteger(githubId) || githubId <= 0) return invalid();
@@ -1360,7 +1412,7 @@ async function noGithub(c: Ctx, method: string): Promise<Response> {
   if (retry !== undefined) return donePage("Too many tries", `Too many answers from this network. Try again in ${Math.ceil(retry / 60)} minutes.`, 429);
   const now = c.now();
   // Never the IP: a keyed hash of the network, only to drop the same anonymous answer twice.
-  const ipHash = await sha256Hex(`nogithub:${c.config.tokenSigningKey}:${networkOf(c.ip) ?? c.ipNet}`);
+  const ipHash = await hashNetwork(c.config, "nogithub", networkOf(c.ip) ?? c.ipNet);
   const lead = await bestEffort("no-github: answer not saved", () => directory(c).noGithubLead({ ...parsed, now, source, ipHash, mode }));
   if (!lead) return donePage("Try again", "We couldn't save that just now. Please try again in a minute.", 503);
   if (lead.email) await bestEffort("no-github: answer email failed", () => alert(c, [noGithubLeadAlert(source, now, parsed, lead.repeat, lead)]));
@@ -1379,7 +1431,13 @@ async function bestEffort<T>(label: string, work: () => Promise<T>): Promise<T |
   }
 }
 
-/** A keyed hash of the caller's network (IPv4 address or IPv6 /64), for referral anti-abuse. */
+/**
+ * A keyed hash of the caller's network (IPv4 address or IPv6 /64), for referral anti-abuse.
+ * Still keyed with the raw signing key, not the ip-hash subkey: these hashes are kept for good in
+ * `person_networks` and matched against each other, and the networks behind them aren't stored,
+ * so changing the derivation would stop new sign-ins matching every existing referrer's
+ * networks. Moving it needs both hashes kept side by side for a while (see the README).
+ */
 async function networkHash(c: Ctx): Promise<string | undefined> {
   const network = networkOf(c.ip);
   return network ? sha256Hex(`net:${c.config.tokenSigningKey}:${network}`) : undefined;
@@ -1428,7 +1486,7 @@ export async function userEmail(
     store: directory(c) as unknown as UserEmailStore,
     routes,
     config,
-    signingKey: await signingKey(c.config),
+    unsubscribeKey: await unsubscribeKey(c.config),
     base: c.config.publicUrl ?? EMAIL_STOP_BASE,
     kind,
     githubId,
@@ -1459,7 +1517,7 @@ async function scheduledUserEmails(env: Env, envConfig: FreeConfig, fetcher: Fet
     ...candidates.didntStart.map((githubId) => ({ kind: "didnt_start" as const, githubId, period: "" })),
     ...candidates.goneQuiet.map((githubId) => ({ kind: "gone_quiet" as const, githubId, period: "" })),
   ];
-  const key = await signingKey(config);
+  const key = await unsubscribeKey(config);
   const outcomes: Array<"sent" | "failed" | "skipped"> = [];
   // The day's budget (email-budget.ts) stops bulk mail short of the transactional reserve.
   for (const job of jobs.slice(0, config.userEmailsDailyMax)) {
@@ -1467,7 +1525,7 @@ async function scheduledUserEmails(env: Env, envConfig: FreeConfig, fetcher: Fet
       store: store as unknown as UserEmailStore,
       routes,
       config,
-      signingKey: key,
+      unsubscribeKey: key,
       base: config.publicUrl ?? EMAIL_STOP_BASE,
       ...job,
       now,
@@ -1525,7 +1583,7 @@ async function scheduledWeeklyReset(env: Env, envConfig: FreeConfig, fetcher: Fe
   let after = saved && saved.day === day ? saved.after : 0;
   let room = Math.min(WEEKLY_RESET_BATCH, (await store.emailBudgetToday(now, emailBudgetOf(config))).room[routes.bulkClass]);
   if (room <= 0) return;
-  const key = await signingKey(config);
+  const key = await unsubscribeKey(config);
   const policy = policyOf(config);
   const period = String(weekStart(now));
   const outcomes: Array<"sent" | "failed" | "skipped"> = [];
@@ -1544,7 +1602,7 @@ async function scheduledWeeklyReset(env: Env, envConfig: FreeConfig, fetcher: Fe
           store: store as unknown as UserEmailStore,
           routes,
           config,
-          signingKey: key,
+          unsubscribeKey: key,
           base: config.publicUrl ?? EMAIL_STOP_BASE,
           kind: "weekly_reset",
           githubId: candidate.githubId,
@@ -1590,7 +1648,7 @@ async function scheduledPlanReset(env: Env, envConfig: FreeConfig, fetcher: Fetc
   const routes = userEmailRoutes(env.USER_EMAIL, config, fetcher);
   let room = (await store.emailBudgetToday(now, emailBudgetOf(config))).room[routes.bulkClass];
   if (room <= 0) return;
-  const key = await signingKey(config);
+  const key = await unsubscribeKey(config);
   const period = String(weekStart(now));
   const lastWeekStart = weekStart(now) - WEEK_MS;
   const outcomes: Array<"sent" | "failed" | "skipped"> = [];
@@ -1608,7 +1666,7 @@ async function scheduledPlanReset(env: Env, envConfig: FreeConfig, fetcher: Fetc
         store: store as unknown as UserEmailStore,
         routes,
         config,
-        signingKey: key,
+        unsubscribeKey: key,
         base: config.publicUrl ?? EMAIL_STOP_BASE,
         kind: "plan_reset",
         githubId,
@@ -1637,7 +1695,7 @@ async function adminWeeklyResetPreview(c: Ctx, config: FreeConfig, adminId: numb
   const now = c.now();
   const week = weekStart(now);
   const policy = policyOf(config);
-  const unsubscribeUrl = await stopUrl(config.publicUrl ?? EMAIL_STOP_BASE, await signingKey(config), adminId);
+  const unsubscribeUrl = await stopUrl(config.publicUrl ?? EMAIL_STOP_BASE, await unsubscribeKey(config), adminId);
   const skipped: Record<WeeklyResetSkip, number> = { trial: 0, pro: 0, no_allowance: 0, not_active: 0 };
   const samples: Array<{ githubId: number; login: string; tokens: number; belowFull: boolean; subject: string; body: string }> = [];
   let count = 0;
@@ -1687,7 +1745,7 @@ async function emailStop(c: Ctx, method: string): Promise<Response> {
   const raw = c.url.searchParams.get("u") ?? "";
   const githubId = /^[1-9][0-9]{0,15}$/.test(raw) ? Number(raw) : NaN;
   const token = c.url.searchParams.get("t") ?? "";
-  if (!Number.isSafeInteger(githubId) || !(await verifyStopToken(await signingKey(c.config), githubId, token))) {
+  if (!Number.isSafeInteger(githubId) || !(await verifyStopToken(await unsubscribeVerifyKeys(c.config), githubId, token))) {
     return donePage("Link not valid", "This link isn't valid. Use the link at the bottom of the email.", 400);
   }
   if (method === "GET") return emailStopPage(`/email/stop?u=${githubId}&t=${encodeURIComponent(token)}`);
@@ -3605,7 +3663,7 @@ async function feedback(c: Ctx): Promise<Response> {
   if (!binding || !alertEmailTo) return apiError(503, "feedback_unavailable", "Feedback can't be sent from this service right now.");
 
   // The network's key is a salted hash, so the address isn't kept even in the rate limiter.
-  const net = await sha256Hex(`feedback:${c.config.tokenSigningKey}:${c.ipNet}`);
+  const net = await hashNetwork(c.config, "feedback", c.ipNet);
   const buckets: Array<[string, Limit]> = [[`feedback:ip:${net}`, LIMITS.feedbackIp]];
   if (sender) buckets.push([`feedback:gh:${sender.githubId}:hour`, LIMITS.feedbackPersonHour], [`feedback:gh:${sender.githubId}:day`, LIMITS.feedbackPersonDay]);
   // Check every bucket before spending any, so a refusal by one doesn't use up the others.
@@ -3667,7 +3725,7 @@ async function feedbackReplyAddress(c: Ctx): Promise<Response> {
  */
 async function telemetry(c: Ctx, kind: "download" | "install" | "gpu"): Promise<Response> {
   const day = Math.floor(c.now() / DAY_MS);
-  const ipKey = await sha256Hex(`telemetry:${c.config.tokenSigningKey}:${day}:${c.ipNet}`);
+  const ipKey = await hashNetwork(c.config, `telemetry:${day}`, c.ipNet);
   const retry = await limited(c, `telemetry:${kind}:${ipKey}`, kind === "download" ? LIMITS.telemetryDownloadIp : kind === "gpu" ? LIMITS.telemetryGpuIp : LIMITS.telemetryInstallIp);
   if (retry !== undefined) return rateLimited(retry);
   if (Number(c.request.headers.get("content-length") ?? 0) > MAX_TELEMETRY_BYTES) return apiError(413, "too_large", "A telemetry body is under 1 KB.");
@@ -5716,7 +5774,7 @@ async function sendTestEmail(c: Ctx, adminId: number, body: Record<string, unkno
   // The provider the real email would use: typed copy as a broadcast (bulk), a kind by its class.
   const transport = userEmailRoute(userEmailRoutesVia(c, (await runtime(c)).config), copy ? "broadcast" : kind).transport;
   if (!transport) return NO_EMAIL_PROVIDER;
-  const unsubscribeUrl = await stopUrl(c.config.publicUrl ?? EMAIL_STOP_BASE, await signingKey(c.config), adminId);
+  const unsubscribeUrl = await stopUrl(c.config.publicUrl ?? EMAIL_STOP_BASE, await unsubscribeKey(c.config), adminId);
   const email = copy?.ok
     ? { subject: copy.subject, body: broadcastBody(copy.text, unsubscribeUrl) }
     : renderUserEmail(kind, {
@@ -5774,7 +5832,7 @@ async function runBroadcast(c: Ctx, config: FreeConfig, request: BroadcastReques
       sample: ready.slice(0, 3).map((person) => ({ githubId: person.githubId, login: person.login, address: person.email })),
     };
   }
-  const key = await signingKey(c.config);
+  const key = await unsubscribeKey(c.config);
   const base = c.config.publicUrl ?? EMAIL_STOP_BASE;
   let sent = 0;
   let failedCount = 0;
@@ -6078,7 +6136,7 @@ interface AdminSession extends Identity {
 async function adminSession(c: Ctx): Promise<AdminSession | undefined> {
   const token = readCookie(c.request, ADMIN_COOKIE);
   if (!token) return undefined;
-  const claims = await verifyJwt(token, await signingKey(c.config), Math.floor(c.now() / 1000), 0);
+  const claims = await verifyJwt(token, await jwtVerifyKeys(c.config), Math.floor(c.now() / 1000), 0);
   if (!claims || claims.typ !== "admin" || claims.iss !== ISSUER || typeof claims.login !== "string" || typeof claims.sid !== "string") return undefined;
   const githubId = Number(claims.sub);
   if (!Number.isSafeInteger(githubId) || !c.config.adminGithubIds.has(githubId)) return undefined;
@@ -6096,9 +6154,18 @@ function sameOrigin(c: Ctx): boolean {
   return c.request.headers.get("sec-fetch-site") === "same-origin";
 }
 
-/** The CSRF token for the dashboard's forms: a keyed hash of the admin session's id. */
-function adminCsrf(c: Ctx, session: AdminSession): Promise<string> {
-  return sha256Hex(`admin-csrf:${c.config.tokenSigningKey}:${session.sid}`);
+/** The CSRF token for the dashboard's forms: an HMAC of the admin session's id under the csrf subkey. */
+async function adminCsrf(c: Ctx, session: AdminSession): Promise<string> {
+  return hmacHex((await serviceKeys(c.config)).csrf, `admin-csrf:${session.sid}`);
+}
+
+/**
+ * Whether a form's `csrf` is this session's token. The token from before the subkeys (a hash with
+ * the raw signing key) is still taken, so a dashboard left open across that deploy keeps working.
+ */
+async function adminCsrfOk(c: Ctx, session: AdminSession, given: string): Promise<boolean> {
+  if (timingSafeEqual(given, await adminCsrf(c, session))) return true;
+  return timingSafeEqual(given, await sha256Hex(`admin-csrf:${c.config.tokenSigningKey}:${session.sid}`));
 }
 
 /** POST /admin/dashboard/people/:id/(block|unblock): a form on the dashboard, then back to it. */
@@ -6106,7 +6173,7 @@ async function adminWebPersonAction(c: Ctx, githubId: number, action: "block" | 
   const session = await adminSession(c);
   if (!session) return deniedPage("Signed out", "Sign in to the dashboard again, then retry.", 401);
   const form = await readForm(c);
-  if (!sameOrigin(c) || !timingSafeEqual(form.get("csrf") ?? "", await adminCsrf(c, session))) {
+  if (!sameOrigin(c) || !(await adminCsrfOk(c, session, form.get("csrf") ?? ""))) {
     return deniedPage("Not changed", "Block and unblock only from the dashboard itself.", 403);
   }
   const retry = await limited(c, `admin:gh:${session.githubId}`, LIMITS.apiPerson);
@@ -6125,7 +6192,7 @@ async function adminWebUpstream(c: Ctx): Promise<Response> {
   const session = await adminSession(c);
   if (!session) return deniedPage("Signed out", "Sign in to the dashboard again, then retry.", 401);
   const form = await readForm(c);
-  if (!sameOrigin(c) || !timingSafeEqual(form.get("csrf") ?? "", await adminCsrf(c, session))) {
+  if (!sameOrigin(c) || !(await adminCsrfOk(c, session, form.get("csrf") ?? ""))) {
     return deniedPage("Not changed", "Switch the upstream only from the dashboard itself.", 403);
   }
   const retry = await limited(c, `admin:gh:${session.githubId}`, LIMITS.apiPerson);
@@ -6347,9 +6414,12 @@ async function toolsState(
   };
 }
 
-/** Binds the in-page "yes, send" to exactly the copy and audience that were counted. */
-function confirmToken(csrf: string, form: ToolsState["compose"]): Promise<string> {
-  return sha256Hex(`broadcast-confirm:${csrf}:${JSON.stringify([form.subject, form.text, form.audience, form.from, form.to])}`);
+/**
+ * Binds the in-page "yes, send" to exactly the copy and audience that were counted: an HMAC under
+ * the broadcast subkey. A token from before a deploy that changes it just asks to confirm again.
+ */
+async function confirmToken(c: Ctx, csrf: string, form: ToolsState["compose"]): Promise<string> {
+  return hmacHex((await serviceKeys(c.config)).broadcast, `broadcast-confirm:${csrf}:${JSON.stringify([form.subject, form.text, form.audience, form.from, form.to])}`);
 }
 
 /**
@@ -6365,7 +6435,7 @@ async function adminWebTools(c: Ctx): Promise<Response> {
   if (!session) return deniedPage("Signed out", "Sign in to the dashboard again, then retry.", 401);
   const form = await readForm(c);
   const csrf = await adminCsrf(c, session);
-  if (!sameOrigin(c) || !timingSafeEqual(form.get("csrf") ?? "", csrf)) return deniedPage("Not changed", "Use the tools only from the dashboard itself.", 403);
+  if (!sameOrigin(c) || !(await adminCsrfOk(c, session, form.get("csrf") ?? ""))) return deniedPage("Not changed", "Use the tools only from the dashboard itself.", 403);
   const retry = await limited(c, `admin:gh:${session.githubId}`, LIMITS.apiPerson);
   if (retry !== undefined) return rateLimited(retry);
   const { config } = await runtime(c);
@@ -6454,7 +6524,7 @@ async function adminWebTools(c: Ctx): Promise<Response> {
 
   const parsed = parseBroadcast({ subject: draft.subject, text: draft.text, audience: draft.audience, signedUpFrom: draft.from || undefined, signedUpTo: draft.to || undefined, dryRun: action !== "send" });
   if (!parsed.ok) return state({ grant: { text: "" }, compose: { ...draft, notice: { error: true, text: parsed.message } } });
-  const token = await confirmToken(csrf, draft);
+  const token = await confirmToken(c, csrf, draft);
   const sending = action === "send" && timingSafeEqual(form.get("confirm") ?? "", token);
   const result = await runBroadcast(c, config, { ...parsed.value, dryRun: !sending });
   if ("status" in result) return state({ grant: { text: "" }, compose: { ...draft, notice: { error: true, text: result.message } } });
@@ -6571,7 +6641,7 @@ async function countedChat(c: Ctx, identity: Caller, response: Response): Promis
 /** POST /v1/telemetry/web {step: "visited"}: the dl.new Worker counts each /start page it serves. */
 async function webTelemetry(c: Ctx): Promise<Response> {
   const day = Math.floor(c.now() / DAY_MS);
-  const ipKey = await sha256Hex(`telemetry:${c.config.tokenSigningKey}:${day}:${c.ipNet}`);
+  const ipKey = await hashNetwork(c.config, `telemetry:${day}`, c.ipNet);
   const retry = await limited(c, `telemetry:web:${ipKey}`, LIMITS.telemetryWebIp);
   if (retry !== undefined) return rateLimited(retry);
   if (Number(c.request.headers.get("content-length") ?? 0) > MAX_TELEMETRY_BYTES) return apiError(413, "too_large", "A telemetry body is under 1 KB.");
@@ -6632,7 +6702,7 @@ async function webCaller(c: Ctx): Promise<Identity | Response> {
   const match = /^Bearer\s+(\S+)$/i.exec(c.request.headers.get("authorization") ?? "");
   const invalid = () => apiError(401, "invalid_token", "Your dl.new sign-in expired. Sign in with GitHub again.");
   if (!match) return invalid();
-  const claims = await verifyJwt(match[1]!, await signingKey(c.config), Math.floor(c.now() / 1000));
+  const claims = await verifyJwt(match[1]!, await jwtVerifyKeys(c.config), Math.floor(c.now() / 1000));
   if (!claims || claims.typ !== "web" || claims.iss !== ISSUER || typeof claims.login !== "string") return invalid();
   const githubId = Number(claims.sub);
   if (!Number.isSafeInteger(githubId) || githubId <= 0) return invalid();

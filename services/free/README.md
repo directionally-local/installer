@@ -1807,7 +1807,7 @@ crash between the send and the mark could, rarely, repeat one email on the retry
 failures are logged as counts only.
 
 Each email ends with a stop link, `/email/stop?u=<github id>&t=<hmac>` (an HMAC of the id with
-`TOKEN_SIGNING_KEY`), and carries `List-Unsubscribe` and `List-Unsubscribe-Post` headers for the
+`TOKEN_SIGNING_KEY`'s `unsubscribe` subkey; see [signing keys](#signing-keys)), and carries `List-Unsubscribe` and `List-Unsubscribe-Post` headers for the
 same URL. GET shows a page with one button; POST (the button, or a mail app's one-click) sets
 `people.email_stop`.
 
@@ -2105,6 +2105,43 @@ and each failure adds a row to `host_failures` (time, host, `http_5xx` | `error_
 `stream`, upstream status). Counts only, never content. `GET /admin/metrics` returns
 `hosts: [{host, requests, failures, failureRate}]` for its date range.
 
+## Signing keys
+
+`TOKEN_SIGNING_KEY` is never used directly. Each purpose gets its own 32-byte subkey,
+HKDF-SHA256 (RFC 5869) of the key with salt `directionally-local subkey v1` and the purpose as
+`info` (`services/shared/src/keys.ts`, `serviceKeys` in app.ts):
+
+| info | signs or keys |
+|---|---|
+| `jwt` | access tokens, admin dashboard sessions, web sessions, dl.new paid sessions and handoffs |
+| `unsubscribe` | the `t` of `/email/stop` links |
+| `ip-hash` | network hashes: feedback and telemetry rate limits, "Don't have GitHub?" leads |
+| `csrf` | the admin dashboard's form token |
+| `broadcast` | the Tools tab's "yes, send" confirmation |
+
+**Transition (the deploy that introduced subkeys).** Everything new is signed with the subkey.
+What was signed with the raw key before that deploy still verifies, so nobody is signed out and
+no link breaks:
+
+- JWTs are verified with the `jwt` subkey, then the raw key (`jwtVerifyKeys`). The longest-lived
+  one is a dl.new paid session (7 days), so the raw-key fallback for JWTs can be removed 7 days
+  after the deploy.
+- Unsubscribe links are verified with the `unsubscribe` subkey, then the raw key
+  (`unsubscribeVerifyKeys`). Links sit in emails already sent, so keep this fallback for as long
+  as the key itself is kept.
+- An admin form's CSRF token from before the deploy is still taken (`adminCsrfOk`); sessions
+  last an hour, so this can go with the JWT fallback.
+- Network hashes, the broadcast confirmation and rate-limit buckets keyed on them just start
+  over: a confirm page open across the deploy asks to confirm again.
+- The referral anti-abuse network hash (`person_networks`) stays on the old derivation
+  (`sha256("net:" + key + network)`) for now: those hashes are kept and matched for good, and the
+  networks behind them aren't stored, so switching would stop new sign-ins matching existing
+  referrers. Moving it means storing both hashes side by side for a while.
+
+Rotating `TOKEN_SIGNING_KEY` still changes every subkey at once: it signs everyone out, breaks
+every unsubscribe link already sent and resets every network hash. The subkeys keep one purpose's
+values from being used for another, and leave room to give one purpose a key of its own later.
+
 ## Sign-out and server keys
 
 - **Sign out:** `POST /v1/token/revoke`. Send the access token as the bearer, `{"refresh_token"}`
@@ -2259,7 +2296,7 @@ lists, `413` over 1 KB, `429` when rate-limited.
   `DL_INSTALL_VIA`, which the dl.new scripts set).
 - install.sh skips it with `DL_NO_TELEMETRY=1`, `DO_NOT_TRACK=1` or `CI` set.
 - Rate limits per IP (per /64 for IPv6): 600 downloads a minute (they come from a few Cloudflare addresses) and 20
-  installs an hour. The limiter's key is a SHA-256 of the IP salted with `TOKEN_SIGNING_KEY` and
+  installs an hour. The limiter's key is an HMAC of the IP under `TOKEN_SIGNING_KEY`'s `ip-hash` subkey and
   the day, so the address isn't stored there either.
 - Stored in the Directory's `download_daily` and `install_daily`. The counts are best effort:
   anyone can post one, so read them as trends, not exact numbers.
