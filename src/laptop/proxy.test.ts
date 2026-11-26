@@ -117,6 +117,7 @@ describe("dl proxy server", () => {
       log: (line) => logs.push(line),
       setInterval: () => 0,
       clearInterval: () => undefined,
+      env: {},
     });
     await new Promise<void>((resolve) => proxy.server.listen(port, "127.0.0.1", resolve));
   });
@@ -249,8 +250,22 @@ describe("dl proxy server", () => {
     assert.equal(end.at(-1).props.harness, "opencode");
   });
 
+  it("opted out (DO_NOT_TRACK): only a bare session.start per key, no session.end", async () => {
+    const quiet = createProxyServer({ localToken: TOKEN, port, token: async () => ({ ok: true, origin: service.origin, accessToken: "access" }), fetch, now: Date.now, log: () => undefined, setInterval: () => 0, clearInterval: () => undefined, env: { DO_NOT_TRACK: "1" } });
+    await proxy.close();
+    const before = service.seen.length;
+    await new Promise<void>((resolve) => quiet.server.listen(port, "127.0.0.1", resolve));
+    proxy = quiet;
+    assert.equal((await call(port, "/v1/models", { method: "GET", headers: auth })).status, 200);
+    await proxy.close();
+    const events = service.seen.slice(before).filter((s) => s.path === "/v1/events").map((s) => JSON.parse(s.body).events[0]);
+    assert.deepEqual(events.map((event) => event.type), ["session.start"]);
+    assert.deepEqual(events[0].props, {});
+    assert.ok(service.seen.slice(before).some((s) => s.method === "DELETE"), "the key is still revoked");
+  });
+
   it("says what's wrong in the app's own format when the sign-in is missing", async () => {
-    const signedOut = createProxyServer({ localToken: TOKEN, port, token: async () => ({ ok: false, reason: "signed_out" }), fetch, now: Date.now, log: () => undefined, setInterval: () => 0, clearInterval: () => undefined });
+    const signedOut = createProxyServer({ localToken: TOKEN, port, token: async () => ({ ok: false, reason: "signed_out" }), fetch, now: Date.now, log: () => undefined, setInterval: () => 0, clearInterval: () => undefined, env: {} });
     await proxy.close();
     await new Promise<void>((resolve) => signedOut.server.listen(port, "127.0.0.1", resolve));
     proxy = signedOut;
@@ -360,5 +375,13 @@ describe("dl proxy commands", () => {
     assert.equal(mac.path, "/Users/a/Library/LaunchAgents/com.directionallylocal.proxy.plist");
     assert.match(mac.text, /<string>proxy<\/string>\n    <string>run<\/string>/);
     assert.equal(serviceFiles({ platform: "win32", home: "C:/", node: "n", script: "s", port: 1, log: "l", env: {} }), undefined);
+    assert.doesNotMatch(linux.text + mac.text, /DL_NO_TELEMETRY/);
+  });
+
+  it("carries a telemetry opt-out in force at install into the login service", () => {
+    const linux = serviceFiles({ platform: "linux", home: "/home/a", node: "/usr/bin/node", script: "/s", port: 4789, log: "/l", env: { DO_NOT_TRACK: "1" } })!;
+    assert.match(linux.text, /^Environment=DL_NO_TELEMETRY=1$/m);
+    const mac = serviceFiles({ platform: "darwin", home: "/Users/a", node: "/n", script: "/s", port: 4789, log: "/l", env: { CI: "true" } })!;
+    assert.match(mac.text, /<key>DL_NO_TELEMETRY<\/key><string>1<\/string>/);
   });
 });

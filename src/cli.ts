@@ -215,6 +215,12 @@ Unattended installs answer the questions with environment variables:
   DL_PROVIDER_BASE_URL    its address, for a provider Hotcell has no built-in route for
   DL_GITHUB_TOKEN         GitHub token for cloning, pushing, and opening PRs
 
+Usage counts:
+  DL_NO_TELEMETRY=1, DO_NOT_TRACK=1 or CI   no install count, no session end (duration, exit),
+                          OS or Pro-offer counts from dl. A bare session start (id and time) still
+                          goes with dl claude/opencode/pi/t3/proxy: the free tier needs it to keep
+                          free tokens inside dl
+
 Advanced:
   DL_ACCESS=loopback          don't expose the server; reach it over an SSH tunnel
                               (or --access tailscale|loopback|ssh; ssh is the laptop's setup)

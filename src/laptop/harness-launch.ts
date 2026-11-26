@@ -8,6 +8,7 @@ import { findAutopilot, type AutopilotCommand } from "./autopilot.js";
 import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
 import { palette } from "../ui.js";
 import { oneLine } from "./printable.js";
+import { telemetryOff } from "./telemetry.js";
 
 /**
  * Another coding agent on the free tier, launched by dl (`dl claude`, `dl opencode`, `dl pi`, `dl t3`). The flow is
@@ -25,7 +26,8 @@ import { oneLine } from "./printable.js";
  *    on a command line, never logged or printed).
  * 4. Session events, as Autopilot sends them (POST /v1/events): session.start before the agent
  *    starts (so the dl-only check covers its requests), again every few hours for long sessions,
- *    and session.end when it exits. Counts only.
+ *    and session.end when it exits. Counts only. With DL_NO_TELEMETRY, DO_NOT_TRACK or CI
+ *    (telemetry.ts), only the bare session.start the dl-only check needs: no props, no session.end.
  * 5. In a terminal, one dim line says Autopilot gets more of the free allowance (the service's
  *    `otherHarnessShare`, from the harness key's response).
  * 6. The agent runs with the person's arguments and the terminal passed through, with the
@@ -259,14 +261,16 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
   }
 
   const started = now();
+  const optedOut = telemetryOff(env);
   const sendEvents = async (type: "session.start" | "session.end", props: Record<string, unknown> = {}) => {
+    if (optedOut && type === "session.end") return;
     await Promise.all(
       sessions.map(async (session) => {
         try {
           await call(`${origin}/v1/events`, {
             method: "POST",
             headers: session.headers({ "content-type": "application/json" }),
-            body: JSON.stringify({ events: [{ id: `${session.id}-${++session.count}`, type, sessionId: session.id, at: new Date(now()).toISOString(), props: { harness: session.harness, os: platform(), ...props } }] }),
+            body: JSON.stringify({ events: [{ id: `${session.id}-${++session.count}`, type, sessionId: session.id, at: new Date(now()).toISOString(), props: optedOut ? {} : { harness: session.harness, os: platform(), ...props } }] }),
             redirect: "error",
             signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
           });

@@ -102,6 +102,22 @@ describe("dl claude", () => {
     }
   });
 
+  it("opted out (DL_NO_TELEMETRY, DO_NOT_TRACK or CI): only the bare session.start the dl-only check needs", async () => {
+    for (const optOut of [{ DL_NO_TELEMETRY: "1" }, { DO_NOT_TRACK: "yes" }, { CI: "true" }]) {
+      const service = fakeService();
+      const code = await claudeCommand(["-p", "hi"], capture().io, deps({ fetch: service.fetch, spawn: fakeSpawn({ code: 0 }).spawn, env: { PATH: "/usr/bin", HOME: "/home/alice", ...optOut } }));
+      assert.equal(code, 0);
+      const events = service.calls.filter((call) => call.url.endsWith("/v1/events")).map((call) => call.body.events[0]);
+      assert.deepEqual(events.map((event) => event.type), ["session.start"], JSON.stringify(optOut));
+      assert.deepEqual(events[0].props, {});
+      assert.ok(service.calls.some((call) => call.method === "DELETE"), "the key is still revoked");
+    }
+    // Not an opt-out: empty, 0 or false.
+    const service = fakeService();
+    await claudeCommand(["-p", "hi"], capture().io, deps({ fetch: service.fetch, spawn: fakeSpawn({ code: 0 }).spawn, env: { PATH: "/usr/bin", HOME: "/home/alice", DL_NO_TELEMETRY: "0", DO_NOT_TRACK: "false", CI: "" } }));
+    assert.deepEqual(service.calls.filter((call) => call.url.endsWith("/v1/events")).map((call) => call.body.events[0].type), ["session.start", "session.end"]);
+  });
+
   it("mints a harness key, sends session.start before Claude Code starts, runs claude with every argument and the free tier env, then ends the session", async () => {
     const service = fakeService();
     const child = fakeSpawn({ code: 0 });

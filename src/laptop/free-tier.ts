@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { hasControl, oneLine } from "./printable.js";
+import { telemetryOff } from "./telemetry.js";
 
 /**
  * The free tier account `dl status` shows when Autopilot's active provider is the free tier:
@@ -116,7 +117,7 @@ export async function freeTierAccount(options: FreeTierOptions = {}): Promise<Fr
   const expired = typeof saved?.expiresAt === "number" && saved.expiresAt <= now;
   const origin = serviceOrigin(env, saved?.baseUrl);
   if (expired || !origin) return login ? { login } : undefined;
-  const me = await readMe(`${origin}/v1/me${options.showsProPrompt ? "?prompt=shown" : ""}`, token, options).catch(() => undefined);
+  const me = await readMe(`${origin}/v1/me${options.showsProPrompt && !telemetryOff(env) ? "?prompt=shown" : ""}`, token, options).catch(() => undefined);
   if (!me) return login ? { login } : undefined;
   return me.login || login ? { ...me, login: me.login ?? login! } : undefined;
 }

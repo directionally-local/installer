@@ -176,7 +176,9 @@ account. Every argument after `claude` goes to it unchanged (`dl claude -p "fix 
   free tier. Remove it to use `dl claude`, or set `DL_ALLOW_CLAUDE_SETTINGS_KEY=1` to start anyway.
   `dl t3`, and Claude Code opened on a box's own model, check the same.
 - **What dl sends:** a session start and end (counts only, as Autopilot does), and a refresh every
-  few minutes. Prompts and code go to the model, never into dl's logs. To prevent abuse, the free
+  few minutes. With `DL_NO_TELEMETRY=1`, `DO_NOT_TRACK=1` or a `CI` variable, only a bare session
+  start (its id and time, again every 6 hours), which the free tier needs to tell dl's use of free
+  tokens from another tool's; no session end, OS or duration. Prompts and code go to the model, never into dl's logs. To prevent abuse, the free
   tier keeps a short automated description of each session and a safety label, made from your
   latest message and kept for 90 days.
 - **Not supported:** images and PDFs (DeepSeek can't read them; Claude Code is told they were left
@@ -641,7 +643,14 @@ Uninstall: `dl uninstall` (add `--purge` to also remove your settings and sign-i
 
 Which one it is: a server only with `DL_MODE=server`, when the laptop's setup runs it (`DL_INSTALL_ONLY=1`), or on a Linux machine `dl up` has already set up (so re-running the plain line there updates that server, as before); anything else, root included, gets the coding agent. The one exception to never asking: root through `sudo` on Linux with no `DL_MODE` (`curl … | sudo sh`, often the server line without its `DL_MODE=server`) says it is installing the coding agent for root, not a server, and at a terminal asks whether to set up a server instead (no by default; with no terminal it only says so and goes on). That's the line `dl` itself draws: with no server install, bare `dl` is plain Autopilot for root too. `DL_MODE=laptop` gives the plain install even on a server.
 
-When it ends, either way, it sends one anonymous count to the free tier service, in the background: OS (`darwin` or `linux`), chip (`arm64` or `x64`), laptop or server, the `dl` version, ok or the step that failed, and which page it came from (`DL_INSTALL_VIA`, set by dl.new's scripts). No IP address or identity is kept. `DL_NO_TELEMETRY=1`, `DO_NOT_TRACK=1` or a `CI` variable turns it off. The install pages count scripts served the same way (see `services/free/README.md`, "Install counts").
+When it ends, either way, it sends one anonymous count to the free tier service, in the background: OS (`darwin` or `linux`), chip (`arm64` or `x64`), laptop or server, the `dl` version, ok or the step that failed, and which page it came from (`DL_INSTALL_VIA`, set by dl.new's scripts). No IP address or identity is kept. `DL_NO_TELEMETRY=1`, `DO_NOT_TRACK=1` or a `CI` variable turns it off.
+The same variables, set when you run `dl`, also turn off what `dl` itself would count: the
+session end (duration, how it ended) and OS that `dl claude`, `dl opencode`, `dl pi`, `dl t3` and
+`dl proxy` send, and `dl status` marking dl Pro's offer as seen. A bare session start (an id and a
+time, sent with the session's own short-lived key when it starts and every 6 hours) still goes:
+the free tier refuses free tokens from a sign-in that sends none ("works inside dl only"), so
+without it those commands would stop working. `dl proxy install` writes the opt-out into the
+login service when it's set. The install pages count scripts served the same way (see `services/free/README.md`, "Install counts").
 
 ## What it sets up on a server
 
