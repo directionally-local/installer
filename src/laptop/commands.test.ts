@@ -402,6 +402,9 @@ describe("dl on a laptop", () => {
     assert.equal(failureReason({ id: 1, type: "failed", data: { error: "boom" } }), "boom");
     assert.equal(failureReason({ id: 1, type: "failed", data: { message: "boom" } }), "boom");
     assert.equal(failureReason({ id: 1, type: "failed", data: { reason: 42 } }), undefined);
+    assert.equal(failureReason({ id: 1, type: "failed", data: { reason: "\x1b]2;owned\x07boom\x1b[0m" } }), "]2;ownedboom[0m");
+    assert.equal(failureReason({ id: 1, type: "failed", data: { reason: "\x1b\x07", error: "real" } }), "real");
+    assert.deepEqual(wrap("a\x1b[2Jb \x9bc", 100, 3), ["a [2Jb c"]);
 
     assert.equal(failureHint("context window exceeded (~104,215 tokens needed)"), "pick a model with a bigger window: dl model");
     assert.equal(failureHint("HTTP 403: model not priced: openai/gpt-6-luna"), "pick another model: dl model");

@@ -130,7 +130,9 @@ describe("the free tier account in dl status", () => {
     const quiet = stubs({ apiKey: ACCESS }, () => Response.json(body));
     await freeTierAccount(quiet.options);
     assert.match(quiet.calls[0]!.url, /\/v1\/me$/);
-    for (const proPrompt of [null, { text }, { text, upgradeUrl: "javascript:alert(1)" }, { text: 42, upgradeUrl: "https://dl.new/account" }]) {
+    const escaped = stubs({ apiKey: ACCESS }, () => Response.json({ login: "octo", proPrompt: { text: "Limit\x1b]2;x\x07 hit.", upgradeUrl: "https://dl.new/account" } }));
+    assert.equal((await freeTierAccount(escaped.options))?.proPrompt?.text, "Limit ]2;x hit.");
+    for (const proPrompt of [null, { text }, { text, upgradeUrl: "javascript:alert(1)" }, { text, upgradeUrl: "https://dl.new/\x1b[2J" }, { text: 42, upgradeUrl: "https://dl.new/account" }]) {
       const { options } = stubs({ apiKey: ACCESS }, () => Response.json({ login: "octo", proPrompt }));
       const read = await freeTierAccount(options);
       assert.equal(read?.proPrompt, undefined);

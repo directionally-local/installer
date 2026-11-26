@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { hasControl, oneLine } from "./printable.js";
 
 /**
  * The free tier account `dl status` shows when Autopilot's active provider is the free tier:
@@ -144,14 +145,14 @@ async function readMe(url: string, token: string, options: FreeTierOptions): Pro
   const perModel = body.pools !== undefined || body.budgets !== undefined || allowance.budgets !== undefined;
   const prompt = record(body.proPrompt);
   const proPrompt =
-    typeof prompt.text === "string" && prompt.text.trim() && prompt.text.length <= 300 && typeof prompt.upgradeUrl === "string" && /^https:\/\/[^\s]+$/.test(prompt.upgradeUrl) && prompt.upgradeUrl.length <= 200
-      ? { text: prompt.text.trim(), upgradeUrl: prompt.upgradeUrl }
+    typeof prompt.text === "string" && oneLine(prompt.text) && prompt.text.length <= 300 && typeof prompt.upgradeUrl === "string" && /^https:\/\/[^\s]+$/.test(prompt.upgradeUrl) && !hasControl(prompt.upgradeUrl) && prompt.upgradeUrl.length <= 200
+      ? { text: oneLine(prompt.text), upgradeUrl: prompt.upgradeUrl }
       : undefined;
   return {
     ...(typeof body.login === "string" && GITHUB_LOGIN.test(body.login) ? { login: body.login } : {}),
     ...(perModel ? { ...(deepseek ? { deepseek } : {}), ...(gpt6 ? { gpt6 } : {}) } : remaining !== undefined && tokensPerWeek !== undefined ? { remaining, tokensPerWeek } : {}),
     ...(resetsAt ? { resetsAt } : {}),
-    ...(typeof body.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email) && body.email.length <= 254 ? { email: body.email } : {}),
+    ...(typeof body.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email) && !hasControl(body.email) && body.email.length <= 254 ? { email: body.email } : {}),
     ...(proPrompt ? { proPrompt } : {}),
   };
 }

@@ -1,4 +1,5 @@
 import { palette } from "../ui.js";
+import { oneLine } from "./printable.js";
 import { FREE_TIER_DEFAULT_URL } from "./free-tier.js";
 import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
 import { autopilotSignIn, type LaunchIO } from "./harness-launch.js";
@@ -130,7 +131,7 @@ async function call(deps: ApiKeyDeps, url: string, accessToken: string, init: { 
 
 function refusal(result: { status: number; body: Record<string, any> | undefined }): string {
   const message = result.body?.error?.message;
-  return typeof message === "string" ? message : `The free tier answered HTTP ${result.status}.`;
+  return typeof message === "string" ? oneLine(message, 500) : `The free tier answered HTTP ${result.status}.`;
 }
 
 /** A name no key of the account has yet: `base`, else `base-2`, `base-3`… */

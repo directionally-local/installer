@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { modelStatePath } from "../state.js";
 import { palette } from "../ui.js";
+import { oneLine } from "./printable.js";
 import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
 import { autopilotNudge, autopilotSignIn, REFRESH_EVERY_MS, SESSION_EVENT_EVERY_MS, type Harness, type LaunchIO } from "./harness-launch.js";
 
@@ -209,9 +210,9 @@ export class HarnessKeys {
     }
     const body = (await response.json().catch(() => undefined)) as Record<string, any> | undefined;
     if (response.status !== 201 || typeof body?.key !== "string" || typeof body.id !== "string") {
-      const message = typeof body?.error?.message === "string" ? body.error.message : `The free tier refused dl proxy (HTTP ${response.status}).`;
+      const message = typeof body?.error?.message === "string" ? oneLine(body.error.message, 500) : `The free tier refused dl proxy (HTTP ${response.status}).`;
       this.lastError = message;
-      return { ok: false, status: response.status >= 400 && response.status < 600 ? response.status : 502, code: typeof body?.error?.code === "string" ? body.error.code : "refused", message };
+      return { ok: false, status: response.status >= 400 && response.status < 600 ? response.status : 502, code: typeof body?.error?.code === "string" ? oneLine(body.error.code, 80) : "refused", message };
     }
     const now = this.deps.now();
     const expires = Date.parse(String(body.expiresAt));
