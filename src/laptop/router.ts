@@ -249,41 +249,45 @@ export function setupSteps(spec: AgentSpec, key: DlKey, model: string = DL_DEFAU
         "Under API Keys, turn on OpenAI API Key and paste your key (below).",
         `Turn on Override OpenAI Base URL and enter ${openai}`,
         `Add a custom model named ${model} and pick it in the chat.`,
+        "(Your key works in Cursor's chat and agent; Tab completion stays on Cursor's own models. The cursor-agent CLI runs only Cursor's models.)",
       ];
     case "cline":
       return [...compatible("In VS Code, open Cline's settings (the gear)"), "From a terminal with the Cline CLI: cline auth, then the same provider settings."];
     case "roo":
       return compatible("In VS Code, open Roo Code's settings (the gear)");
     case "kilo":
-      return compatible("In VS Code, open Kilo Code's settings (the gear)");
+      return [
+        "In Kilo Code, open Settings (the gear) → Providers, scroll down and click Custom provider.",
+        "Provider ID: dl · Provider API: OpenAI Compatible",
+        `Base URL: ${openai}`,
+        "API key: your key (below).",
+        `Models: add ${model} (or Fetch models), then Submit and pick it in the model list.`,
+      ];
     case "zed":
       return [
-        "Open Zed's settings (zed: open settings) and add:",
-        `  "language_models": { "openai_compatible": { "dl": { "api_url": "${openai}",`,
-        `    "available_models": [{ "name": "${model}", "max_tokens": 128000 }] } } }`,
-        "Then in the Agent panel's settings, paste your key (below) for dl and pick the model.",
+        "Run agent: open settings, and under LLM Providers click Add Provider:",
+        `  name dl, API URL ${openai}, model ${model}, context window 1000000`,
+        "Paste your key (below) for dl there (or export DL_API_KEY=<your key>), then pick the model in the Agent panel.",
       ];
     case "continue":
       return [
-        "Add a model to ~/.continue/config.yaml:",
+        "Put this in ~/.continue/config.yaml (or add the model to your models list):",
+        "  name: dl",
+        "  version: 0.0.1",
+        "  schema: v1",
         "  models:",
         "    - name: dl",
         "      provider: openai",
         `      model: ${model}`,
         `      apiBase: ${openai}`,
         `      apiKey: ${key.key}`,
+        "      capabilities: [tool_use]",
+        "The Continue CLI reads it too: cn --config ~/.continue/config.yaml",
       ];
     case "codex":
       return [
-        "Add to ~/.codex/config.toml:",
-        `  model = "${model}"`,
-        '  model_provider = "dl"',
-        "  [model_providers.dl]",
-        '  name = "dl"',
-        `  base_url = "${openai}"`,
-        '  env_key = "DL_API_KEY"',
-        '  wire_api = "chat"',
-        "Then: export DL_API_KEY=<your key> and run codex.",
+        "Codex CLI now talks only to the OpenAI Responses API (wire_api = \"responses\"; \"chat\" was removed), which dl doesn't serve yet, so Codex can't run on your plan today.",
+        "Meanwhile pick another agent in dl (Claude Code, OpenCode, Pi), or use the key below in any tool that takes an OpenAI- or Anthropic-style base URL.",
       ];
     case "aider":
       return ["Run:", `  aider --openai-api-base ${openai} --openai-api-key ${key.key} --model openai/${model}`];
@@ -291,14 +295,32 @@ export function setupSteps(spec: AgentSpec, key: DlKey, model: string = DL_DEFAU
       return ["Run:", `  OPENAI_BASE_URL=${openai} OPENAI_API_KEY=${key.key} OPENAI_MODEL=${model} qwen`];
     case "goose":
       return [
-        "Run goose configure → Configure Providers → OpenAI, with:",
-        `  host ${key.baseUrl}, base path v1/chat/completions, your key, model ${model}.`,
+        "Run goose configure → Custom Providers → Add A Custom Provider → OpenAI Compatible:",
+        `  name dl, Provider API URL ${openai}, authentication Yes → Static API key → your key,`,
+        `  models ${model}; Enter through the rest.`,
+        "Then goose configure → Configure Providers → dl, and pick the model.",
       ];
     case "crush":
       return [
-        "Add a provider to ~/.config/crush/crush.json:",
-        `  "providers": { "dl": { "type": "openai-compat", "base_url": "${openai}", "api_key": "<your key>",`,
-        `    "models": [{ "id": "${model}", "name": "DeepSeek V4.1 Flash" }] } }`,
+        "Add to ~/.config/crush/crushrc:",
+        `  provider add dl --type completions --base-url ${openai} --api-key "$DL_API_KEY"`,
+        `  model add dl/${model} --name "DeepSeek V4.1 Flash" --context-window 1000000 --default-max-tokens 32000`,
+        `  model large dl/${model}`,
+        "Then: export DL_API_KEY=<your key> and run crush.",
+      ];
+    case "amp":
+      return [
+        "In Amp's settings → Model Routing, click Add Provider → Custom URL:",
+        `  base URL ${openai}, API format chat-completions, API key: your key (below)`,
+        `  Model Mapping: ${model}`,
+        "In the connection's Model Metadata Overrides, add the same model with Input Tokens 1000000, Output Tokens 32000, Tools: Yes.",
+        "Pick it under Other Models in Amp's model selector.",
+      ];
+    case "warp":
+      return [
+        "Open Warp's Settings and search for inference endpoint.",
+        `Endpoint URL: ${openai} · API key: your key (below) · model: ${model}`,
+        "Save, then pick that model (not Auto) in the model picker. Works for local agent runs.",
       ];
     case "openhands":
       return ["Settings → LLM → Advanced:", `  Custom Model: openai/${model}`, `  Base URL: ${openai}`, "  API Key: your key (below)."];
