@@ -191,7 +191,7 @@ export const HARNESS_NOT_ALLOWED_MESSAGE = harnessNotAllowedMessage("claude-code
 
 /**
  * Another agent's share of the week (or of the trial) is used up while the account still has
- * free usage left for Autopilot (402 harness_limit). `share` is 0 to 1. A free account is pointed
+ * free usage left (402 harness_limit; only when `otherHarnessShare` is below 1, which it isn't by default). `share` is 0 to 1. A free account is pointed
  * at dl Pro only while Pro is offered (`proOffered`).
  */
 export function harnessLimitMessage(share: number, resetsAt: string | undefined, plan: "free" | "pro" = "free", harness: Harness = "claude-code", proOffered = true): string {
@@ -199,8 +199,8 @@ export function harnessLimitMessage(share: number, resetsAt: string | undefined,
   const when = resetsAt ? ` It resets at ${resetsAt}.` : "";
   const { product } = HARNESS_WORDS[harness];
   return plan === "pro"
-    ? `${product} through dl gets ${part} of your Pro allowance, and that part is used up.${when} The rest works in Autopilot: type dl.`
-    : `${product} through dl gets ${part} of your free allowance, and that part is used up.${when} Your remaining free usage works in Autopilot: type dl.${proOffered ? " Or get dl Pro: run dl and type /upgrade." : ""}`;
+    ? `${product} through dl gets ${part} of your Pro allowance, and that part is used up.${when}`
+    : `${product} through dl gets ${part} of your free allowance, and that part is used up.${when}${proOffered ? " For more, get dl Pro: run dl and type /upgrade." : ""}`;
 }
 
 /**

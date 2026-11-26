@@ -11,7 +11,7 @@ import { palette } from "../ui.js";
 import { oneLine } from "./printable.js";
 import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
 import { telemetryOff } from "./telemetry.js";
-import { autopilotNudge, REFRESH_EVERY_MS, SESSION_EVENT_EVERY_MS, type Harness, type LaunchIO } from "./harness-launch.js";
+import { allowanceNote, REFRESH_EVERY_MS, SESSION_EVENT_EVERY_MS, type Harness, type LaunchIO } from "./harness-launch.js";
 import { readDlKey } from "./dl-key.js";
 
 /**
@@ -26,7 +26,7 @@ import { readDlKey } from "./dl-key.js";
  * 15-minute harness key it mints when first needed, refreshes every few minutes while the app
  * uses it, and revokes after 20 idle minutes and when the proxy stops; session events go with
  * each key, as `dl claude` sends them. So requests are counted as Claude Code's or OpenCode's,
- * on their share of the allowance. Bodies go through untouched (streams too); nothing is logged
+ * on their share of the allowance (the whole allowance by default). Bodies go through untouched (streams too); nothing is logged
  * but method, path, status and timing.
  *
  * Security: only this computer, and only programs that know the local token.
@@ -938,7 +938,7 @@ export async function proxyCommand(args: string[], io: LaunchIO, deps: ProxyComm
       const status = await startProxy(rest, io, deps);
       if (!status) return 1;
       io.out(describeStatus(status, color));
-      const nudge = autopilotNudge(status.detail?.otherHarnessShare);
+      const nudge = allowanceNote(status.detail?.otherHarnessShare);
       if (nudge) io.out(`  ${color.dim(nudge)}\n`);
       io.out(`  ${color.dim("Settings for Conductor and other apps: dl conductor")}\n`);
       return 0;
@@ -972,7 +972,7 @@ export async function proxyCommand(args: string[], io: LaunchIO, deps: ProxyComm
 /** What `dl conductor` prints once the proxy runs. */
 export function conductorText(input: { url: string; token: string; share?: number | null | undefined; color: ReturnType<typeof palette> }): string {
   const { url, token, color } = input;
-  const nudge = autopilotNudge(input.share);
+  const nudge = allowanceNote(input.share);
   return `
   ${color.bold("Conductor on dl's free tier")}
   Claude Code in Conductor, answered by DeepSeek V4.1 Flash through dl proxy at ${url}.

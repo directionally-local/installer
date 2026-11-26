@@ -364,7 +364,8 @@ describe("dl proxy commands", () => {
     assert.match(text, /take out ANTHROPIC_API_KEY/);
     assert.match(text, /base URL  http:\/\/127\.0\.0\.1:4789\/v1/);
     assert.match(text, /Cursor won't work/);
-    assert.match(text, /2× the allowance/);
+    assert.match(text, /this agent gets 50% of your weekly free allowance/);
+    assert.doesNotMatch(conductorText({ url: "http://127.0.0.1:4789", token: TOKEN, share: 1, color: palette(false) }), /allowance\./);
   });
 
   it("writes a systemd user unit and a LaunchAgent", () => {

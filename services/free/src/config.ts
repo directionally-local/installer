@@ -315,8 +315,9 @@ export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, 
    */
   trustForwardedFor: boolean;
   /**
-   * Free tokens work inside dl (Autopilot) only (DL_ONLY, default on); also a runtime setting.
-   * A free-plan account that sends chat requests but no session events is refused (app.ts).
+   * Free tokens only with dl's session events (DL_ONLY, default off); also a runtime setting.
+   * On: a free-plan account that sends chat requests but no session events is refused (app.ts).
+   * Off (the default): free tokens work in any coding agent, not only Autopilot.
    */
   dlOnly: boolean;
   /**
@@ -326,8 +327,9 @@ export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, 
   allowOtherHarnesses: boolean;
   /**
    * The share (0 to 1) of a person's weekly free allowance, trial included, that other coding
-   * agents (`dl claude`, `dl opencode`) may use: their requests are held to the allowance scaled by it, counted
-   * against everything the week has used. Pro is exempt. OTHER_HARNESS_SHARE, default 0.5; also a runtime setting.
+   * agents (`dl claude`, `dl opencode`, API keys for other tools) may use: their requests are held to the allowance
+   * scaled by it, counted against everything the week has used. Pro is exempt. OTHER_HARNESS_SHARE, default 1
+   * (every agent gets the full allowance, the same as Autopilot); also a runtime setting.
    */
   otherHarnessShare: number;
   /**
@@ -545,9 +547,9 @@ export const DEFAULTS = {
   domainLimitRefuse: false,
   openAdmission: false,
   requireGithubActivity: true,
-  dlOnly: true,
+  dlOnly: false,
   allowOtherHarnesses: true,
-  otherHarnessShare: 0.5,
+  otherHarnessShare: 1,
   toolKeys: true,
   toolKeysMax: 3,
   toolKeyRequestsPerMinute: 30,

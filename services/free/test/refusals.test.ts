@@ -233,7 +233,7 @@ describe("refusal counts: sign-in", () => {
 
 describe("refusal counts: requests", () => {
   it("counts dl_only", async () => {
-    const { service, token } = await member();
+    const { service, token } = await member({ DL_ONLY: "true" });
     for (let i = 0; i < 20; i++) {
       assert.equal((await chat(service, token)).status, 200);
       service.clock.now += 1000;

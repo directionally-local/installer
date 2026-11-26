@@ -4,7 +4,7 @@ import { ADMIN_ID, createService, MODEL, NOW, type Service } from "./harness.js"
 import { readFreeConfig, ConfigError } from "../src/config.js";
 import { parseSettingsUpdate } from "../src/runtime-config.js";
 import { requestRefusalReason } from "../src/refusals.js";
-import { AUTOPILOT_ONLY_MESSAGE, gpt6ServedTo, modelClients } from "../src/gpt6-clients.js";
+import { autopilotOnlyMessage, gpt6ServedTo, modelClients } from "../src/gpt6-clients.js";
 import { FREE_MODELS } from "../src/models.js";
 
 /**
@@ -60,7 +60,7 @@ describe("GPT-6 in Autopilot only (gpt6Clients)", () => {
         const error = await errorOf(refused);
         assert.deepEqual(
           { code: error.code, reason: error.reason, family: error.family, provider: error.provider, alternative: error.alternative, resetsAt: error.resetsAt, clients: error.clients, message: error.message },
-          { code: "provider_limit", reason: "autopilot_only", family: "gpt6", provider: "openai", alternative: MODEL, resetsAt: null, clients: ["autopilot"], message: AUTOPILOT_ONLY_MESSAGE },
+          { code: "provider_limit", reason: "autopilot_only", family: "gpt6", provider: "openai", alternative: MODEL, resetsAt: null, clients: ["autopilot"], message: autopilotOnlyMessage(FREE_MODELS.find((m) => m.id === model)!.name) },
         );
       }
       assert.equal(service.calls.openai.length, 0, "nothing reached OpenAI");

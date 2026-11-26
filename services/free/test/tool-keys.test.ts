@@ -119,8 +119,8 @@ describe("tool keys: making and managing them", () => {
 });
 
 describe("tool keys: using them", () => {
-  it("is never refused as dl_only, and doesn't push the person's sign-in over it", async () => {
-    const { service, token } = await world();
+  it("is never refused as dl_only (even with dlOnly on), and doesn't push the person's sign-in over it", async () => {
+    const { service, token } = await world({ DL_ONLY: "true" });
     const { key } = await makeKey(service, token);
     for (let index = 0; index < 25; index++) {
       assert.equal((await chat(service, key)).status, 200, `request ${index + 1}`);
@@ -191,8 +191,8 @@ describe("tool keys: using them", () => {
     assert.equal((await chat(service, other.key)).status, 200);
   });
 
-  it("gets the other agents' share of the week, in words for a tool, while Autopilot keeps the rest", async () => {
-    const { service, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
+  it("gets the other agents' share of the week, in words for a tool, when it is set below 1", async () => {
+    const { service, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1", OTHER_HARNESS_SHARE: "0.5" });
     const { key } = await makeKey(service, token);
     service.setLuminal(() => completion(luminalUsage(10_000_000, 0)));
     assert.equal((await chat(service, key)).status, 200);
@@ -202,6 +202,7 @@ describe("tool keys: using them", () => {
     const error = await errorOf(refused);
     assert.equal(error.code, "harness_limit");
     assert.match(error.message, /^Other tools on a dl API key get half of your free allowance, and that part is used up\./);
+    assert.doesNotMatch(error.message, /Autopilot/);
     assert.equal((await service.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [{ role: "user", content: "x" }] } })).status, 200);
   });
 

@@ -96,7 +96,7 @@ import { upstreamRefusal } from "./upstream-errors.js";
 import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
-import { AUTOPILOT_ONLY_MESSAGE, AUTOPILOT_ONLY_REASON, heldFromClient, modelClients, type ModelClient } from "./gpt6-clients.js";
+import { autopilotOnlyMessage, AUTOPILOT_ONLY_REASON, heldFromClient, modelClients, type ModelClient } from "./gpt6-clients.js";
 import { meterStream, outputChars } from "./sse.js";
 import type { RegistryProviderId, RegistryRoute } from "./providers.js";
 import { accessOf, approxTokens, configuredUpstreams, contextTooLong, firstChoiceUpstreams, offeredModels, exchangeUsage, mergedUsage, exchangeRules, FALLBACK_BLOCKS, isRegistryProvider, formatRationTokens, listedUpstream, liquidPayload, modelPlans, openRelayPayload, personCapUsd, personSpendKey, proOnly, providerFallbackNotice, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, registryRoute, reportedCharge, resetDay, upstreamBlock, type ProviderBlock, type ProviderSpend } from "./providers.js";
@@ -2993,7 +2993,7 @@ async function me(c: Ctx): Promise<Response> {
      * serves past it, and one line to show as it is.
      */
     cappedModels: await cappedModelsView(c, config, identity.githubId),
-    /** The part of the allowance (0 to 1) other agents launched by dl (dl claude, dl opencode) get; Autopilot gets all of it. */
+    /** The part of the allowance (0 to 1) other agents launched by dl (dl claude, dl opencode) get: 1 by default, the same as Autopilot. */
     otherHarnessShare: config.otherHarnessShare,
     plan: allowance.plan,
     topupTokensLeft: allowance.topupTokensLeft,
@@ -3450,7 +3450,7 @@ async function harnessKeys(c: Ctx, rest: string, method: string): Promise<Respon
     }
     const created = await person.createHarnessKey({ harness: harness as Harness, sid: identity.sid, now: c.now() });
     if (created.ok) {
-      // otherHarnessShare: this agent's part of the allowance (Autopilot gets all of it); dl says so at start.
+      // otherHarnessShare: this agent's part of the allowance (1 by default, as Autopilot); dl says so at start when it is less.
       const { otherHarnessShare } = (await runtime(c)).config;
       return json({ id: created.id, key: created.key, harness, expiresAt: new Date(created.expiresAt).toISOString(), ttlSeconds: HARNESS_KEY_TTL_MS / 1000, otherHarnessShare }, 201);
     }
@@ -3854,8 +3854,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   c.callerId = identity.githubId;
   const gate = await runtime(c);
   if (gate.person?.blocked) return blockedError();
-  // Another coding agent launched by dl (`dl claude`, `dl opencode`): the kill switch, then a smaller share of
-  // the allowance (`otherHarnessShare`, applied to the limits below). Admins too: it's a switch.
+  // Another coding agent launched by dl (`dl claude`, `dl opencode`): the kill switch, then its share of
+  // the allowance (`otherHarnessShare`, 1 by default, applied to the limits below). Admins too: it's a switch.
   const harness = identity.via === "harness" ? identity.harness : undefined;
   if (harness && !gate.config.allowOtherHarnesses) return apiError(403, "harness_not_allowed", harnessNotAllowedMessage(harness));
   // A tool key (tool-keys.ts): any tool, served like another coding agent (`agent` "tool"): GPT-6
@@ -3986,7 +3986,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     return apiError(
       402,
       "provider_limit",
-      AUTOPILOT_ONLY_MESSAGE,
+      autopilotOnlyMessage(requested.name),
       { family: requested.family, provider: requested.provider, reason: AUTOPILOT_ONLY_REASON, resetsAt: null, alternative: DEEPSEEK_MODEL, clients: ["autopilot"] },
       await headers(),
     );
@@ -4298,7 +4298,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     !freeBlock &&
     allocatorOn &&
     limitedLevel(fullLimits) &&
-    // Another agent's smaller share (otherHarnessShare) used up while the whole allowance isn't: that refusal stands.
+    // Another agent's share (otherHarnessShare, when below 1) used up while the whole allowance isn't: that refusal stands.
     (!agent || gate.config.otherHarnessShare >= 1 || ((await person.allowance(c.now(), fullLimits, pool)).remaining ?? Infinity) < promptEstimate + MIN_OUTPUT_TOKENS)
   ) {
     const state = gate.person?.allocator ?? null;

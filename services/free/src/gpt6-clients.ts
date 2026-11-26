@@ -16,7 +16,14 @@ import type { Gpt6Clients } from "./config.js";
 import { DEEPSEEK_MODEL, type FreeModel } from "./models.js";
 
 export const AUTOPILOT_ONLY_REASON = "autopilot_only";
-export const AUTOPILOT_ONLY_MESSAGE = "GPT-6 is available only in Autopilot (dl) for now; other agents use DeepSeek V4.1 Flash. Run dl to use GPT-6.";
+/**
+ * The refusal's wording: a plain statement of where the model is served, no push to switch agents.
+ * The restriction comes from the model provider's approval, not from a preference for Autopilot.
+ */
+export function autopilotOnlyMessage(modelName = "GPT-6.1 Sol"): string {
+  return `${modelName} is available in Autopilot for now; other agents use DeepSeek V4.1 Flash.`;
+}
+export const AUTOPILOT_ONLY_MESSAGE = autopilotOnlyMessage();
 
 /** The agents a model can be used in, as /v1/providers lists them. */
 export type ModelClient = "autopilot" | "claude-code" | "opencode" | "pi";

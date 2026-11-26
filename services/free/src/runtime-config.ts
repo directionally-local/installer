@@ -206,7 +206,7 @@ export const RUNTIME_SETTINGS = {
   broadcastEmailProvider: { kind: "emailProvider", env: "BROADCAST_EMAIL_PROVIDER" },
   /** Bulk mail through Resend a UTC day at most, outside the binding's userEmailsDailyMax (default 2000). */
   resendBulkDailyMax: { kind: "count", env: "RESEND_BULK_DAILY_MAX" },
-  /** Free tokens inside dl only: chat requests without session events are refused (app.ts). */
+  /** Free tokens only with dl session events (default off): chat requests without them are refused (app.ts). */
   dlOnly: { kind: "flag", env: "DL_ONLY" },
   /** Free tokens in other coding agents launched by dl (`dl claude`); false refuses them (harness_not_allowed). */
   allowOtherHarnesses: { kind: "flag", env: "ALLOW_OTHER_HARNESSES" },
@@ -246,7 +246,7 @@ export const RUNTIME_SETTINGS = {
   gpt6GuardTimeoutMs: { kind: "count", env: "GPT6_GUARD_TIMEOUT_MS" },
   /** A trusted free-plan person's weekly GPT-6 budget, USD (gpt6-trust.ts); 0 turns the trust gate off. */
   gpt6TrustedWeeklyUsdCap: { kind: "amount", env: "GPT6_TRUSTED_WEEKLY_USD_CAP" },
-  /** Which coding agents get GPT-6: "autopilot" (Autopilot only; other agents dl launches get DeepSeek) or "all". */
+  /** Which coding agents get GPT-6: "autopilot" (Autopilot only, per the model provider's approval; other agents get DeepSeek) or "all". */
   gpt6Clients: { kind: "gpt6Clients", env: "GPT6_CLIENTS" },
   /** Automated moderation review of high-risk labels (moderation.ts): "enforce", "shadow" (never blocks) or "off" (the plain high-risk email). */
   moderation: { kind: "moderationMode", env: "MODERATION" },

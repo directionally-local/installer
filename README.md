@@ -168,12 +168,9 @@ account. Every argument after `claude` goes to it unchanged (`dl claude -p "fix 
   Code runs and ends it when Claude Code exits. It's in Claude Code's environment only, never on a
   command line. Free tokens don't work in Claude Code started any other way, except through
   `dl proxy` (below).
-- **Half the free allowance:** Claude Code gets half of your weekly free allowance (and of the
-  new-user trial), counting everything you used that week; Autopilot (plain `dl`) gets the full
-  amount. In a terminal, `dl claude` says so
-  in one dim line before Claude Code starts. When Claude Code's half is used up, the rest still
-  works in Autopilot: type `dl`. With dl Pro, Claude Code gets your whole Pro allowance; top-ups
-  work as in Autopilot.
+- **The full free allowance:** Claude Code gets your whole weekly free allowance (and the
+  new-user trial), the same as Autopilot, counting everything you used that week. With dl Pro,
+  Claude Code gets your whole Pro allowance; top-ups work as in any other agent.
 - **Your settings stay yours:** nothing under `~/.claude` is read or changed. For this run only,
   Claude Code gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`,
   `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
@@ -228,7 +225,7 @@ asks for, the free tier answers with DeepSeek V4.1 Flash.
 - **What it serves:** `POST /v1/messages` and `/v1/messages/count_tokens` (Anthropic format,
   counted as Claude Code) and `POST /v1/chat/completions` and `GET /v1/models` (OpenAI format,
   counted as OpenCode). Streams pass through as they come. Like `dl claude` and `dl opencode`,
-  these get half of the weekly free allowance; Autopilot (plain `dl`) gets all of it.
+  these get the full weekly free allowance, the same as any other agent.
 - **Keys:** for each format, a 15-minute key from the free tier made on first use, refreshed every
   few minutes while the app uses it, ended after 20 idle minutes and when the proxy stops, with
   session start and end events as `dl claude` sends. The key never leaves the proxy.
@@ -270,16 +267,15 @@ curl https://api.dl.new/v1/chat/completions -H "Authorization: Bearer $DL_API_KE
 ```
 
 - **Models:** DeepSeek V4.1 Flash, and the free tier's other models except GPT-6
-  (`GET /v1/models` lists them). GPT-6 stays in Autopilot: run plain `dl` for it.
-- **Allowance:** the same weekly free allowance as dl, on the share other tools get (half, the
-  same as `dl claude` and `dl opencode`); Autopilot keeps the rest.
+  (`GET /v1/models` lists them). GPT-6.1 Sol is available in Autopilot for now.
+- **Allowance:** the same full weekly free allowance as every other agent.
 - **Managing keys:** `dl api-key list` shows your keys (never their secrets), `dl api-key revoke
   ID` deletes one and it stops working at once. At most 3. Unlike `dl proxy`, nothing has to run
   on your computer, so Cursor works too.
 - **Who can make one:** anyone whose account has free tokens; not for blocked accounts. The usual
   rules hold: no account-pooling routers, and the same automated abuse checks as in dl.
-- **Your dl sign-in stays dl's:** the sign-in token Autopilot keeps works inside dl only; other
-  tools get an API key instead.
+- **Your dl sign-in stays dl's:** the sign-in token Autopilot keeps is for Autopilot; other
+  tools get their own API key instead, so each can be revoked on its own.
 
 ### OpenCode with free tokens: dl opencode
 
@@ -293,8 +289,8 @@ Every argument after `opencode` goes to it unchanged (`dl opencode run "fix the 
   `npm install -g @opencode/cli`) and stops.
 - **The models:** the free tier serves DeepSeek V4.1 Flash, as provider "dl" in OpenCode's
   `/models` (the default, with its context and output limits); session titles use it too.
-  Free GPT-6 (Luna, Sol, Astra) is available only in Autopilot for now: run plain `dl` for it. In
-  OpenCode, use GPT-6 with your own OpenAI or OpenRouter key, as one of your own providers. Your
+  Free GPT-6 (Luna, Sol, Astra) is available in Autopilot for now. In OpenCode, you can use
+  GPT-6 with your own OpenAI or OpenRouter key, as one of your own providers. Your
   own providers stay in `/models`, on your own keys.
   Only listed models can be picked: `dl opencode -m dl/<a model the free tier doesn't serve>` fails
   inside OpenCode ("Model unavailable", or "UnknownError … Unexpected server error" in older
@@ -302,8 +298,8 @@ Every argument after `opencode` goes to it unchanged (`dl opencode run "fix the 
   provider, so use one of the `dl/…` models in `/models`, or your own provider for anything else.
 - **Only while dl opencode runs:** the same 15-minute key as `dl claude`, refreshed while OpenCode
   runs and ended when it exits; free tokens don't work in OpenCode started any other way.
-- **Half the free allowance:** OpenCode, like Claude Code, gets half of your weekly free allowance
-  (see `dl claude` above); Autopilot (plain `dl`) gets the full amount, and dl Pro is exempt.
+- **The full free allowance:** OpenCode, like Claude Code and Autopilot, gets your whole weekly
+  free allowance (see `dl claude` above).
 - **Your settings stay yours:** no OpenCode file is read or changed. For this run only, OpenCode
   gets `OPENCODE_CONFIG_CONTENT` (inline config that adds the "dl" provider and makes
   `dl/deepseek/deepseek-v4.1-flash-1017` the model, merged above your global and project config) and the key in
@@ -325,10 +321,10 @@ exit code is dl's.
 
 - **Pi itself:** dl never installs it. Without `pi` on your PATH it prints
   `npm install -g @earendil-works/pi-coding-agent` and stops.
-- **The models:** provider "dl" in Pi's `/model`, DeepSeek V4.1 Flash (free GPT-6 is in Autopilot
-  only for now). Pass your own `--model`, `--models` or `--provider` and
+- **The models:** provider "dl" in Pi's `/model`, DeepSeek V4.1 Flash (GPT-6.1 Sol is available in
+  Autopilot for now). Pass your own `--model`, `--models` or `--provider` and
   dl leaves the choice to you; your own providers stay in `/model`, on your own keys.
-- **Only while dl pi runs, on half the free allowance:** the same 15-minute key, share and rules
+- **Only while dl pi runs, on the full free allowance:** the same 15-minute key, allowance and rules
   as `dl opencode`.
 - **Your settings stay yours:** nothing under `~/.pi` is read or changed. For this run only, Pi
   loads a small extension (`pi -e`, a temporary file removed when Pi exits) that adds the "dl"
@@ -349,7 +345,7 @@ server or tmux), `dl t3 ./my-project` starts in that folder.
   stops. Claude Code and OpenCode must be installed too, as T3 Code needs them.
 - **Both agents, each counted as itself:** dl gets two short-lived keys, one for Claude Code and
   one for OpenCode, refreshed while `dl t3` runs and ended when it stops, so each agent's requests
-  count as that agent's, on the same half share of the weekly allowance as `dl claude` and
+  count as that agent's, on the same full weekly allowance as `dl claude` and
   `dl opencode`. Free tokens stop working in T3 Code when `dl t3` stops.
 - **Picking the model:** for OpenCode, pick a `dl/…` model in T3 Code's model picker
   (`dl/deepseek/deepseek-v4.1-flash-1017`). For Claude Code, T3 Code still shows Claude models;
@@ -666,8 +662,8 @@ The same variables, set when you run `dl`, also turn off what `dl` itself would 
 session end (duration, how it ended) and OS that `dl claude`, `dl opencode`, `dl pi`, `dl t3` and
 `dl proxy` send, and `dl status` marking dl Pro's offer as seen. A bare session start (an id and a
 time, sent with the session's own short-lived key when it starts and every 6 hours) still goes:
-the free tier refuses free tokens from a sign-in that sends none ("works inside dl only"), so
-without it those commands would stop working. `dl proxy install` writes the opt-out into the
+the free tier can be set to refuse free tokens from a sign-in that sends none (`dlOnly`, off by
+default), so it stays to keep those commands working if that is ever switched on. `dl proxy install` writes the opt-out into the
 login service when it's set. The install pages count scripts served the same way (see `services/free/README.md`, "Install counts").
 
 ## What it sets up on a server
