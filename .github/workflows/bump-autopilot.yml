@@ -39,7 +39,9 @@ jobs:
         run: |
           set -euo pipefail
           latest=$(npm view --prefer-online autopilot-ai version)
-          current=$(node -p "require('./package.json').dependencies['autopilot-ai']")
+          # The pin is a devDependency (dl downloads Autopilot when it's first picked); versions.ts reads it there.
+          current=$(node -p "require('./package.json').devDependencies['autopilot-ai']")
+          case "$current" in [0-9]*.[0-9]*.[0-9]*) ;; *) echo "package.json has no exact autopilot-ai pin in devDependencies (got $current)"; exit 1 ;; esac
           echo "npm: $latest, pinned: $current"
           newer=$(node -e "const [a,b]=process.argv.slice(1).map(v=>v.split('.').map(Number));for(let i=0;i<3;i++){if(a[i]!==b[i]){console.log(a[i]>b[i]?'yes':'no');process.exit(0)}}console.log('no')" "$latest" "$current")
           if [ "$newer" != "yes" ]; then echo "Nothing to do."; exit 0; fi

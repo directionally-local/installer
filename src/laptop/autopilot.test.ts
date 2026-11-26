@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { autopilotSetUp, parseAuthStatus } from "./autopilot.js";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { autopilotSetUp, findAutopilot, installedAutopilotVersion, ownAutopilot, parseAuthStatus } from "./autopilot.js";
 import { laptopReady, NOT_SIGNED_IN, type LaptopIO } from "./commands.js";
 
 /** `autopilot auth status` as Autopilot 3.5 prints it (a few of its rows). */
@@ -39,5 +43,72 @@ describe("whether Autopilot is set up (dl status)", () => {
     assert.match(shown(false), /\n {2}Autopilot {2}3\.5\.0 · installed by dl\n {2}! Autopilot has no provider yet: run dl autopilot in a project folder and choose one\.\n\n {2}Start, in a project folder:/);
     assert.doesNotMatch(shown(true), /no provider yet/);
     assert.doesNotMatch(shown(undefined), /no provider yet/);
+  });
+});
+
+describe("which Autopilot dl runs as its own", () => {
+  /** An autopilot-ai package at `dir` with this version; returns its bin script. */
+  const pkg = (dir: string, version: string) => {
+    mkdirSync(join(dir, "bin"), { recursive: true });
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "autopilot-ai", version, bin: { autopilot: "bin/autopilot.mjs" }, main: "bin/autopilot.mjs" }));
+    writeFileSync(join(dir, "bin", "autopilot.mjs"), "");
+    return join(dir, "bin", "autopilot.mjs");
+  };
+  const setup = () => {
+    const root = mkdtempSync(join(tmpdir(), "dl-own-autopilot-"));
+    const env = { DL_HOME: join(root, "home"), PATH: "" };
+    const downloadedDir = join(root, "home", "autopilot", "lib", "node_modules", "autopilot-ai");
+    const globalDir = join(root, "usr", "lib", "node_modules", "autopilot-ai");
+    // What import.meta.resolve gives a global dl when a global autopilot-ai sits beside it.
+    const resolveGlobal = (specifier: string) => {
+      if (specifier === "autopilot-ai") return pathToFileURL(join(globalDir, "bin", "autopilot.mjs")).href;
+      throw new Error("not exported");
+    };
+    return { root, env, downloadedDir, globalDir, resolveGlobal, done: () => rmSync(root, { recursive: true, force: true }) };
+  };
+  const noResolve = () => { throw new Error("not found"); };
+
+  it("runs dl's downloaded copy at the pin over a separately installed global autopilot-ai", () => {
+    const t = setup();
+    try {
+      const global = pkg(t.globalDir, "3.32.0");
+      const downloaded = pkg(t.downloadedDir, "3.33.0");
+      assert.deepEqual(ownAutopilot({ env: t.env, pin: "3.33.0", resolve: t.resolveGlobal }), { bin: downloaded, version: "3.33.0" });
+      // Before dl update downloads the pin, the old downloaded copy still outranks the global one.
+      pkg(t.downloadedDir, "3.31.0");
+      assert.deepEqual(ownAutopilot({ env: t.env, pin: "3.33.0", resolve: t.resolveGlobal }), { bin: downloaded, version: "3.31.0" });
+      // A resolved copy at the pin (a development checkout) wins over a stale download.
+      pkg(t.globalDir, "3.33.0");
+      assert.deepEqual(ownAutopilot({ env: t.env, pin: "3.33.0", resolve: t.resolveGlobal }), { bin: global, version: "3.33.0" });
+    } finally {
+      t.done();
+    }
+  });
+
+  it("falls back to a resolved autopilot-ai at another version only when dl downloaded none", () => {
+    const t = setup();
+    try {
+      const global = pkg(t.globalDir, "3.32.0");
+      assert.deepEqual(ownAutopilot({ env: t.env, pin: "3.33.0", resolve: t.resolveGlobal }), { bin: global, version: "3.32.0" });
+      assert.equal(ownAutopilot({ env: t.env, pin: "3.33.0", resolve: noResolve }), undefined);
+    } finally {
+      t.done();
+    }
+  });
+
+  it("findAutopilot and the installed version use the downloaded copy when nothing at the pin resolves", async () => {
+    const t = setup();
+    try {
+      const downloaded = pkg(t.downloadedDir, "0.0.1");
+      // Whatever this checkout's node_modules holds, a 0.0.1 download is what's reported only
+      // when nothing resolves; with a resolvable copy at the pin, that one is.
+      const own = ownAutopilot({ env: t.env, pin: "0.0.1", resolve: noResolve });
+      assert.deepEqual(own, { bin: downloaded, version: "0.0.1" });
+      const found = await findAutopilot(t.env);
+      assert.ok(found && found.args.length === 1);
+      assert.ok(installedAutopilotVersion(t.env));
+    } finally {
+      t.done();
+    }
   });
 });
