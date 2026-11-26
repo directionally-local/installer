@@ -72,7 +72,7 @@ describe("autopilot connect from dl", () => {
     await assert.rejects(() => runAutopilotConnect({}, { autopilot: async () => AUTOPILOT, spawn: cancelled.spawn, tmp: root }), ConnectCancelled);
     const old = fakeConnect(DEEPSEEK, 2);
     await assert.rejects(() => runAutopilotConnect({}, { autopilot: async () => AUTOPILOT, spawn: old.spawn, tmp: root }), new RegExp(`too old to pick a provider[\\s\\S]*${UPDATE}`));
-    await assert.rejects(() => runAutopilotConnect({}, { autopilot: async () => undefined, spawn: old.spawn, tmp: root }), /isn't installed/);
+    await assert.rejects(() => runAutopilotConnect({}, { autopilot: async () => undefined, spawn: old.spawn, tmp: root }), /Autopilot couldn't be downloaded/);
     assert.deepEqual(await readdir(root), []);
   });
 

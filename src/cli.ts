@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
@@ -10,7 +10,7 @@ import { doctor, formatChecks } from "./doctor.js";
 import { serverKeysCommand } from "./keys.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
 import { cancel, connect, describeError, laptopHome, laptopReady, pull, run, runs, servers, use, watch, type ReadyHere } from "./laptop/commands.js";
-import { autopilotAuth, autopilotOnPath, bundledAutopilotVersion, findAutopilot, type AutopilotAuth } from "./laptop/autopilot.js";
+import { autopilotAuth, autopilotOnPath, findAutopilot, installedAutopilotVersion, type AutopilotAuth } from "./laptop/autopilot.js";
 import { FREE_TIER_PROVIDER, freeTierAccount, freeTierLine, freeTierProPrompt, type FreeTierAccount } from "./laptop/free-tier.js";
 import { freeModelStatus, modelsCommand } from "./laptop/free-providers.js";
 import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
@@ -34,6 +34,12 @@ import { agentCommand } from "./laptop/agent-choice.js";
 import { readLocalModel } from "./laptop/local-agents.js";
 import { chatUiCommand } from "./chat-ui.js";
 import { openSession, startHere, type SessionInput } from "./laptop/session.js";
+import { AUTOPILOT_ID, detectAgents, type DetectedAgent } from "./laptop/agent-catalog.js";
+import { ensureAutopilot } from "./laptop/autopilot-install.js";
+import { browserSignIn, dlKeyOrSignIn, forgetDlKey, maskKey, planName, readDlKey, reportAgentRequest, type AgentRequest, type DlKey } from "./laptop/dl-key.js";
+import { autopilotKeyEnv, autopilotProvider, orderAgents, readAgentHistory, recordAgentUse, routerHome, type RouterDeps } from "./laptop/router.js";
+import { autopilotConfigFile } from "./laptop/free-tier.js";
+import { readAgentChoice } from "./laptop/agent-choice.js";
 import { detectGitHubRepository } from "./laptop/git.js";
 import { preview as laptopPreview } from "./laptop/preview.js";
 import { setup, setupForTasks, type SetupOptions } from "./laptop/setup.js";
@@ -53,21 +59,25 @@ import { needs, parseAccessMode, parseProvidedAnswers, up } from "./up.js";
 
 const execFileAsync = promisify(execFile);
 
-const HELP = () => `Directionally Local: coding agents that run on this computer or on your own server.
-Send a task; it runs in its own sandbox and comes back as a pull request.
+const HELP = () => `Directionally Local: dl gives your coding agent open models (DeepSeek, Kimi) on one
+flat plan. It finds the coding agents on this computer and opens the one you pick on your plan.
 (dl is short for directionallylocal; both work.)
 
 On your laptop:
-  dl                      talk to an agent: a new session each time. With nothing set up,
-                          plain autopilot here (its first run picks a provider); nothing to install
-  dl  (on this computer)  plain autopilot in this folder, any folder: every Autopilot feature,
-                          your own Autopilot config; the agent edits this folder and stops
-                          when the terminal closes (dl -- ARGS passes ARGS to autopilot)
+  dl                      the first time: sign in or sign up at dl.new (in your browser), then the
+                          coding agents found on this computer to pick from. After that, the same
+                          list with the last one you used on top: Enter opens it. A CLI dl knows
+                          (Claude Code, OpenCode, Pi, T3 Code) opens on your plan; for an app
+                          (Cursor, Zed, Cline…) dl shows where to put your key and base URLs.
+                          Autopilot, dl's own agent, is optional: downloaded when you pick it
+  dl -c, --continue       this computer: the last agent's latest session in this folder; a server:
+                          reopen the latest session started from this folder there
   dl  (on a server)       talk to an agent on the server; it keeps running when you leave.
                           In a GitHub repo, the repository's agent (--no-local-changes: start
                           from the pushed commit, send no patch); anywhere else, a chat
-  dl -c, --continue       this computer: autopilot -c; a server: reopen the latest session
-                          started from this folder there
+  dl autopilot [ARGS]     Autopilot here, downloaded the first time (dl -- ARGS also passes ARGS
+                          to it); on your plan unless you've given it a provider of your own
+  dl login                sign in to dl.new again (dl logout forgets the key on this computer)
   dl agent                the coding agent plain dl opens on a GPU box, on its own model, and a
                           menu to change it: Autopilot (default), Claude Code, OpenCode or Pi.
                           The others are your own CLIs (install them yourself), started for one
@@ -75,31 +85,25 @@ On your laptop:
   dl agent set NAME       change it: autopilot, claude-code, opencode or pi
   dl --from-claude-code   continue this folder's latest Claude Code conversation here, in a new
                           Autopilot session (read on this computer; asks first)
-  dl claude [ARGS]        your own Claude Code on free tokens (DeepSeek), through dl's free tier
-                          sign-in; ARGS go to claude as they are. Needs claude installed; free
-                          tokens work in it only while dl claude runs, on a smaller share of the
-                          weekly allowance than Autopilot. Your ~/.claude settings aren't touched;
+  dl claude [ARGS]        your own Claude Code on your dl plan (DeepSeek), with your dl sign-in;
+                          ARGS go to claude as they are. Needs claude installed. Your ~/.claude settings aren't touched;
                           it won't start if they set an Anthropic key or apiKeyHelper
                           (DL_ALLOW_CLAUDE_SETTINGS_KEY=1 starts anyway)
-  dl opencode [ARGS]      your own OpenCode on free tokens (DeepSeek V4.1 Flash; GPT-6 is in
-                          Autopilot only), through dl's free tier sign-in; ARGS go to opencode
-                          as they are. Needs opencode installed; free tokens work in it only while
-                          dl opencode runs. Your OpenCode config files aren't touched
-  dl pi [ARGS]            your own Pi on free tokens (DeepSeek V4.1 Flash; GPT-6 is in Autopilot
-                          only), through dl's free tier sign-in; ARGS go to pi as they are.
-                          Needs pi installed (npm i -g @earendil-works/pi-coding-agent); free
-                          tokens work in it only while dl pi runs. Nothing under ~/.pi is touched
+  dl opencode [ARGS]      your own OpenCode on your dl plan, with your dl sign-in; ARGS go to
+                          opencode as they are. Needs opencode installed. Your OpenCode config
+                          files aren't touched
+  dl pi [ARGS]            your own Pi on your dl plan, with your dl sign-in; ARGS go to pi as they
+                          are. Needs pi installed (npm i -g @earendil-works/pi-coding-agent).
+                          Nothing under ~/.pi is touched
   dl conductor            Conductor (and Zed, Cline and other desktop apps) on free tokens: starts
                           dl proxy and prints the settings to paste into the app
   dl proxy start|stop|status   a local proxy on 127.0.0.1:4789 that desktop apps use for the free
                           tier, with a local token as their API key (dl proxy install: at login)
-  dl api-key [NAME]       use free tokens in any other tool (Cursor, Cline, Roo, Kilo, Continue,
-                          Zed, Aider, OpenCode…): makes an API key and prints it once, with the
-                          base URLs (OpenAI-style: <free tier>/v1, Anthropic-style: <free tier>/anthropic).
-                          Same weekly allowance, on the share other tools get; GPT-6 stays in
-                          Autopilot. dl api-key list · dl api-key revoke ID
+  dl api-key              your dl key and base URLs for any other tool (Cursor, Cline, Roo, Kilo,
+                          Continue, Zed, Aider, OpenCode…): OpenAI-style https://api.dl.new/v1,
+                          Anthropic-style https://api.dl.new/anthropic. More keys: dl.new/keys
   dl t3 [ARGS]            your own T3 Code server (t3; dl t3 serve for no browser) with its Claude
-                          Code and OpenCode on free tokens while dl t3 runs; ARGS go to t3. Needs
+                          Code and OpenCode on your dl plan while dl t3 runs; ARGS go to t3. Needs
                           t3 installed; the T3 Code desktop app doesn't get free tokens yet.
                           Asks before turning on OpenCode in T3 Code's settings
                           (~/.t3/userdata/settings.json; backs it up); --dl-enable-opencode
@@ -112,7 +116,7 @@ On your laptop:
                           in dl (adds a hook to ~/.claude/settings.json after asking; backs it up)
   dl claude-code hook remove    take that hook out again
   dl setup                set up or repair where background tasks run (safe to re-run)
-  dl new                  the same as bare dl (a new session)
+  dl new                  the same as bare dl
   dl status               where your agents run, their provider, model and versions, and what they're doing
                           (on a GPU box, first: models, coding agent, team chat, agent server and Tailscale)
   dl connect URL          connect to a server someone else set up (approve the code it shows)
@@ -281,6 +285,20 @@ export interface MainOptions {
   uninstall?: { server?: typeof uninstall; laptop?: typeof laptopUninstall };
   /** `dl agent`; the real one unless replaced. */
   agentCommand?: typeof agentCommand;
+  /** Bare `dl` on a laptop (router.ts); the real one unless replaced. */
+  router?: typeof routerHome;
+  /** Whether this is a GPU box whose plain dl opens its own agent on its own model; looked up unless replaced. */
+  gpuBox?: () => Promise<boolean>;
+  /** Marks an agent as the one last opened through dl; agents.json unless replaced. */
+  recordAgentUse?: (id: string) => Promise<void>;
+  /** `dl login`; the browser sign-in unless replaced. */
+  signIn?: (io: { out: (text: string) => void; err: (text: string) => void; color?: boolean }) => Promise<DlKey | undefined>;
+  /** The dl key (`dl status`); dl's config unless replaced. */
+  dlKey?: () => Promise<DlKey | undefined>;
+  /** The agents found here (`dl status`, the router); detected unless replaced. */
+  detectAgents?: () => Promise<DetectedAgent[]>;
+  /** Tells the service about an agent dl doesn't know (the router); POST /v1/agent-request unless replaced. */
+  reportAgent?: (request: AgentRequest, key: DlKey) => Promise<unknown>;
 }
 
 export async function main(
@@ -291,19 +309,37 @@ export async function main(
   },
   options: MainOptions = {},
 ): Promise<number> {
-  // `dl claude ARGS`: every argument after `claude` is Claude Code's, flags included.
-  if (argv[0] === "claude") return await (options.claude ?? claudeCommand)(argv.slice(1), io);
+  // `dl claude ARGS`: every argument after `claude` is Claude Code's, flags included. Each of these
+  // becomes the agent bare dl offers first ("last used").
+  const used = (id: string) => (options.recordAgentUse ?? recordAgentUse)(id).catch(() => undefined);
+  if (argv[0] === "claude") return (await used("claude-code"), await (options.claude ?? claudeCommand)(argv.slice(1), io));
   // `dl opencode ARGS`: the same for OpenCode.
-  if (argv[0] === "opencode") return await (options.opencode ?? opencodeCommand)(argv.slice(1), io);
+  if (argv[0] === "opencode") return (await used("opencode"), await (options.opencode ?? opencodeCommand)(argv.slice(1), io));
   // `dl pi ARGS`: the same for Pi.
-  if (argv[0] === "pi") return await (options.pi ?? piCommand)(argv.slice(1), io);
+  if (argv[0] === "pi") return (await used("pi"), await (options.pi ?? piCommand)(argv.slice(1), io));
+  // `dl autopilot ARGS`: dl's own agent, downloaded the first time; ARGS go to autopilot.
+  if (argv[0] === "autopilot") {
+    await used(AUTOPILOT_ID);
+    const color = (options.terminal ?? process.stdout.isTTY === true) && !process.env.NO_COLOR && process.env.TERM !== "dumb";
+    return await autopilotOnKey({ cwd: process.cwd(), ...(argv.length > 1 ? { args: argv.slice(1) } : {}), forceAutopilot: true, ...options.session }, { out: io.out, err: io.err, color });
+  }
+  // `dl login`: sign in to dl.new again (another account, or a new key); `dl logout` forgets the key here.
+  if (argv[0] === "login" && argv.length === 1) {
+    const color = (options.terminal ?? process.stdout.isTTY === true) && !process.env.NO_COLOR && process.env.TERM !== "dumb";
+    return (await (options.signIn ?? ((signInIO) => browserSignIn(signInIO, { intro: false })))({ out: io.out, err: io.err, color })) ? 0 : 1;
+  }
+  if (argv[0] === "logout" && argv.length === 1) {
+    await forgetDlKey();
+    io.out("  Signed out on this computer: dl's key is gone from here. It still works where you've pasted it; revoke it at dl.new/keys.\n");
+    return 0;
+  }
   // `dl proxy start|stop|status|run|install|uninstall` and `dl conductor`: desktop apps on the free tier.
   if (argv[0] === "proxy") return await proxyCommand(argv.slice(1), io);
   if (argv[0] === "conductor") return await conductorCommand(argv.slice(1), io);
   // `dl api-key [NAME|list|revoke ID]`: an API key for the free tier in any other tool.
   if (argv[0] === "api-key") return await (options.apiKey ?? apiKeyCommand)(argv.slice(1), io);
   // `dl t3 ARGS`: like `dl opencode`, for T3 Code's server, whose Claude Code and OpenCode get free tokens.
-  if (argv[0] === "t3") return await (options.t3 ?? t3Command)(argv.slice(1), io);
+  if (argv[0] === "t3") return (await used("t3"), await (options.t3 ?? t3Command)(argv.slice(1), io));
   // `dl acp ARGS`: Autopilot as an ACP agent on stdio (editors run it); stdout is the protocol's.
   if (argv[0] === "acp") return await (options.acp ?? acpCommand)(argv.slice(1), { out: io.err, err: io.err });
   // `dl zed [remove|--print]`: add dl to Zed's external agents.
@@ -437,7 +473,7 @@ export async function main(
         io.err("  dl --from-claude-code needs a terminal.\n");
         return 2;
       }
-      return await startHere({ ...sessionInput(values, ["--from-claude-code", ...passthrough], { continue: false }), forceAutopilot: true }, laptopIO);
+      return await autopilotOnKey({ ...sessionInput(values, ["--from-claude-code", ...passthrough], { continue: false }), forceAutopilot: true }, laptopIO);
     }
     switch (command) {
       case "agent": {
@@ -522,9 +558,14 @@ export async function main(
               if (code !== undefined) return code;
             } else {
               // A laptop with nothing set up (or root on a Linux machine with no server install,
-              // which is the same plain install): plain Autopilot, with nothing to install or
-              // answer first. The sandbox stack waits until background tasks are asked for (dl run).
-              return await startHere(input, laptopIO);
+              // which is the same plain install): dl routes the person's own coding agent
+              // (router.ts): sign in, pick an agent found here, open it. `dl -- ARGS` and -m are
+              // Autopilot's, and a GPU box keeps its own agent on its own model (dl agent).
+              const toAutopilot = passthrough.length > 0 || values.model !== undefined;
+              if (terminal && !toAutopilot && !(await (options.gpuBox ?? gpuBox)())) {
+                return await (options.router ?? routerHome)(routerDeps(options, laptopIO), { continue: values.continue === true });
+              }
+              return await autopilotOnKey(input, laptopIO);
             }
           }
           // A laptop connected to places gets its own overview (`dl status` shows it from anywhere);
@@ -537,7 +578,7 @@ export async function main(
           // script gives it the plain install too, and a server only with DL_MODE=server.
           if (local) {
             const { setUp, freeTier, freeModel } = await local;
-            laptopReady({ ...(await readyHere()), ...(setUp === undefined ? {} : { setUp }), ...(freeTier ? { freeTier } : {}), ...(freeModel ? { freeModel } : {}) }, laptopIO);
+            laptopReady({ ...(await readyHere(options)), ...(setUp === undefined ? {} : { setUp }), ...(freeTier ? { freeTier } : {}), ...(freeModel ? { freeModel } : {}) }, laptopIO);
             return 0;
           }
           io.out(NOT_A_SERVER(colors));
@@ -643,7 +684,10 @@ export async function main(
       case "new": {
         // An alias of bare dl for a release: a new conversation, the old one keeps running.
         if ((await loadRemotes()).length === 0) {
-          if ((terminal || passthrough.length > 0) && !values.server) return await startHere(sessionInput(values, passthrough, { continue: false }), laptopIO);
+          if (terminal && passthrough.length === 0 && values.model === undefined && !values.server && !(await (options.gpuBox ?? gpuBox)())) {
+            return await (options.router ?? routerHome)(routerDeps(options, laptopIO), {});
+          }
+          if ((terminal || passthrough.length > 0) && !values.server) return await autopilotOnKey(sessionInput(values, passthrough, { continue: false }), laptopIO);
           io.err(`  dl new starts a new session in a terminal: dl\n`);
           return 1;
         }
@@ -815,7 +859,7 @@ const NOT_A_SERVER = (c: ReturnType<typeof palette>) => `
 
   Coding agents that run on this computer or on your own server.
 
-  ${c.dim("Talk to an agent in this folder (plain Autopilot, nothing to set up):")}
+  ${c.dim("Open your coding agent in this folder, on your dl plan (signs in the first time):")}
      dl
 
   ${c.dim("Background tasks that end in a pull request (asks where they run):")}
@@ -908,18 +952,28 @@ async function localAutopilot(options: MainOptions): Promise<{ setUp?: boolean; 
  * (the install script's ~/.directionallylocal, else the package's own directory), and the
  * Autopilot plain dl runs.
  */
-async function readyHere(): Promise<ReadyHere> {
+async function readyHere(options: MainOptions): Promise<ReadyHere> {
   const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
   const home = homedir();
   const installed = root.match(/^(.*)\/dl\/lib\/node_modules\/directionallylocal$/)?.[1] ?? root;
   const installedIn = home && (installed === home || installed.startsWith(`${home}/`)) ? `~${installed.slice(home.length)}` : installed;
-  const bundled = bundledAutopilotVersion();
-  if (bundled) return { dl: packageVersion(), autopilot: bundled, bundled: true, installedIn };
+  const [key, found, history] = await Promise.all([
+    (options.dlKey ?? (() => readDlKey()))().catch(() => undefined),
+    (options.detectAgents ?? (() => detectAgents()))().catch(() => [] as DetectedAgent[]),
+    readAgentHistory(),
+  ]);
+  const ordered = orderAgents(found, history);
+  const signedIn = {
+    ...(key ? { account: `${planName(key.plan)} plan · key ${maskKey(key.key)}` } : {}),
+    agents: ordered.map((agent) => agent.id === history.lastUsed ? `${agent.name} (last used)` : agent.name).join(", "),
+  };
+  const ours = installedAutopilotVersion();
+  if (ours) return { dl: packageVersion(), autopilot: ours, bundled: true, installedIn, ...signedIn };
   const onPath = await autopilotOnPath();
   const version = onPath
     ? await execFileAsync(onPath, ["--version"], { timeout: 5_000 }).then(({ stdout }) => stdout.match(/\d+\.\d+\.\d+\S*/)?.[0]).catch(() => undefined)
     : undefined;
-  return { dl: packageVersion(), ...(onPath ? { autopilot: version ?? "installed", bundled: false } : {}), installedIn };
+  return { dl: packageVersion(), ...(onPath ? { autopilot: version ?? "installed", bundled: false } : {}), installedIn, ...signedIn };
 }
 
 /** From package.json, which sits one level above both src/ and dist/. */
@@ -966,4 +1020,50 @@ export function bareListen(argv: string[]): string[] {
 export function splitPassthrough(argv: string[]): { argv: string[]; passthrough: string[] } {
   const dashes = argv.indexOf("--");
   return dashes === -1 ? { argv, passthrough: [] } : { argv: argv.slice(0, dashes), passthrough: argv.slice(dashes + 1) };
+}
+
+/**
+ * A GPU box: Nvidia GPUs here, dl model up has a model here, or `dl agent` chose its agent. Plain
+ * dl keeps its GPU first run there (Autopilot offers to serve a model on the GPUs) and then opens
+ * the box's agent on the box's model; the router is for everyone else.
+ */
+async function gpuBox(): Promise<boolean> {
+  if (existsSync("/dev/nvidia0") || existsSync("/proc/driver/nvidia/version")) return true;
+  if (await readAgentChoice().catch(() => undefined)) return true;
+  return Boolean(await readLocalModel(new RealSystem()).catch(() => undefined));
+}
+
+/** The router's real parts (router.ts), with MainOptions' replacements. */
+function routerDeps(options: MainOptions, io: { out: (text: string) => void; err: (text: string) => void; color?: boolean }): RouterDeps {
+  const launchIO = { out: io.out, err: io.err };
+  const commands = {
+    claude: options.claude ?? claudeCommand,
+    opencode: options.opencode ?? opencodeCommand,
+    pi: options.pi ?? piCommand,
+    t3: options.t3 ?? t3Command,
+  };
+  return {
+    io,
+    prompter: options.prompter ?? new TtyPrompter({ color: io.color === true }),
+    signIn: () => options.dlKey
+      ? options.dlKey().then(async (key) => key ?? (options.signIn ? options.signIn(io) : undefined))
+      : dlKeyOrSignIn(io),
+    detect: options.detectAgents ?? (() => detectAgents()),
+    autopilotInstalled: async () => Boolean(await (options.session?.autopilot ?? findAutopilot)()),
+    launch: (command, args) => commands[command](args, launchIO),
+    autopilot: (_key, run) => autopilotOnKey({ cwd: process.cwd(), forceAutopilot: true, ...(run.continue ? { continue: true } : {}), ...options.session }, io),
+    report: options.reportAgent ?? ((request, key) => reportAgentRequest(request, { key: key.key })),
+    dlVersion: packageVersion(),
+  };
+}
+
+/**
+ * Plain Autopilot here (startHere), downloaded first when it isn't installed, and on the dl key
+ * when there is one: AUTOPILOT_DL_FREE_TOKEN always, and dl's plan as its provider only when
+ * Autopilot has no provider of its own yet.
+ */
+async function autopilotOnKey(input: SessionInput, io: { out: (text: string) => void; err: (text: string) => void; color?: boolean }): Promise<number> {
+  const key = await readDlKey().catch(() => undefined);
+  if (key) Object.assign(process.env, autopilotKeyEnv(key, await autopilotProvider(autopilotConfigFile())));
+  return await startHere({ ...(input.autopilot ? {} : { autopilot: () => ensureAutopilot(io) }), ...input }, io);
 }

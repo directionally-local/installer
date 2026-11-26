@@ -11,7 +11,8 @@ import { palette } from "../ui.js";
 import { oneLine } from "./printable.js";
 import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
 import { telemetryOff } from "./telemetry.js";
-import { autopilotNudge, autopilotSignIn, REFRESH_EVERY_MS, SESSION_EVENT_EVERY_MS, type Harness, type LaunchIO } from "./harness-launch.js";
+import { autopilotNudge, REFRESH_EVERY_MS, SESSION_EVENT_EVERY_MS, type Harness, type LaunchIO } from "./harness-launch.js";
+import { readDlKey } from "./dl-key.js";
 
 /**
  * `dl proxy`: dl's free tier for desktop coding apps (Conductor, Zed, Cline in VS Code) that dl
@@ -688,12 +689,21 @@ async function ensureSignedIn(io: LaunchIO, deps: ProxyCommandDeps, env: Env, co
   const getToken = deps.token ?? (() => freeTierAccessToken({ env }));
   let token = await getToken();
   if (!token.ok && token.reason === "signed_out") {
+    // The proxy is for the older free tier sign-in (Autopilot's). A dl key needs no proxy: the
+    // app takes the key and base URL directly.
+    if (!deps.signIn) {
+      const key = deps.token ? undefined : await readDlKey(env);
+      io.err(key
+        ? `  ${command} is for the older free tier sign-in. With your dl key, desktop apps don't need it: put the key and base URL in the app's settings (dl api-key shows them).\n`
+        : `  ${command} needs a sign-in. Run dl to sign in; then dl api-key shows the key and base URL to put in the app's settings.\n`);
+      return false;
+    }
     if (!(deps.terminal ?? process.stdin.isTTY === true)) {
       io.err(`  ${command} uses your free tier sign-in, and you aren't signed in. Run dl once to sign in, then ${command} again.\n`);
       return false;
     }
     io.out(`  ${command} uses your free tier sign-in. Signing in first.\n`);
-    if (!(await (deps.signIn ?? (() => autopilotSignIn(io, command)))())) {
+    if (!(await deps.signIn())) {
       io.err(`  Not signed in to the free tier, so ${command} can't start.\n`);
       return false;
     }

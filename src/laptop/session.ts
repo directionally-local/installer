@@ -9,7 +9,8 @@ import { dlVersion } from "../versions.js";
 import { nodeAdvisory } from "../node-advisory.js";
 import { PromptCancelled, TtyPrompter, type Prompter, type SelectOption } from "../prompt.js";
 import { palette } from "../ui.js";
-import { findAutopilot, supportsAttachRemote, type AutopilotCommand } from "./autopilot.js";
+import { supportsAttachRemote, type AutopilotCommand } from "./autopilot.js";
+import { ensureAutopilot } from "./autopilot-install.js";
 import { RemoteApiError, type RemoteClient, type RemoteConversation } from "./client.js";
 import { describeError, pickModel, type LaptopIO } from "./commands.js";
 import { referralForAutopilot, settleReferral, withReferral, type ReferralOptions } from "./referral.js";
@@ -218,9 +219,11 @@ async function runPlainAutopilot(input: SessionInput, io: LaptopIO): Promise<num
     }
     return launch(agent, model, {}, io);
   };
-  const autopilot = await (input.autopilot ?? findAutopilot)();
+  // Autopilot is optional: downloaded here the first time it's needed (autopilot-install.ts).
+  const autopilot = await (input.autopilot ?? (() => ensureAutopilot(io)))();
   if (!autopilot) {
-    io.err(`  ${c.red("✗")} The Autopilot that comes with dl isn't installed. Update: ${c.bold(DL_UPDATE)}\n`);
+    // ensureAutopilot says why itself; a finder that was handed in just found none.
+    if (input.autopilot) io.err(`  ${c.red("✗")} Autopilot isn't installed: dl autopilot downloads it.\n`);
     return 1;
   }
   const args = [
@@ -375,7 +378,7 @@ async function startSession(plan: SessionPlan, target: { remote: RemoteServer; r
     : { place: remote.name, root: plan.root, kind: "chat" };
   const subject = plan.kind === "code" ? plan.repository! : "chat";
   const file = input.sessionsFile ?? sessionsPath();
-  const autopilot = await (input.autopilot ?? findAutopilot)();
+  const autopilot = await (input.autopilot ?? (() => ensureAutopilot(io)))();
   // Asked while the tunnel opens; it only matters right before launching.
   const ready = autopilot ? (input.probe ?? supportsAttachRemote)(autopilot).catch(() => false) : Promise.resolve(false);
   const missing = () => {

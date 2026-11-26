@@ -387,10 +387,14 @@ export interface ReadyHere {
   freeTier?: string;
   /** The chosen free model with its provider and speed ("DeepSeek V4.1 Flash · Luminal · ~85 tok/s"), when Autopilot uses the free tier. */
   freeModel?: string;
+  /** dl's own sign-in ("Starter plan · key dl_sk_…ab12"); undefined when not signed in. */
+  account?: string;
+  /** The coding agents found here, the last used first ("Claude Code (last used), Cursor"). */
+  agents?: string;
 }
 
 /** `dl status`'s line when Autopilot can't start a session yet. */
-export const NOT_SIGNED_IN = "Not signed in yet: run dl in a project folder and choose Free, or use your own API key.";
+export const NOT_SIGNED_IN = "Autopilot has no provider yet: run dl autopilot in a project folder and choose one.";
 
 /**
  * `dl status` on a laptop where nothing else is set up: plain `dl` works already (it runs
@@ -401,18 +405,22 @@ export function laptopReady(info: ReadyHere, io: LaptopIO = processIO): void {
   const row = (label: string, text: string) => io.out(`  ${c.dim(label.padEnd(11))}${text}\n`);
   io.out(`\n  ${c.bold("Directionally Local")}  ${c.dim("on this computer")}\n\n`);
   row("dl", `${info.dl} ${c.dim(`· installed in ${info.installedIn}`)}`);
+  row("Account", info.account ?? `${c.yellow("not signed in")}   ${c.dim("run dl to sign in or sign up")}`);
+  if (info.agents !== undefined) row("Agents", info.agents || c.dim("none found yet"));
   row("Autopilot", info.autopilot
-    ? `${info.autopilot} ${c.dim(info.bundled === false ? "· the one on your PATH" : "· comes with dl")}`
-    : `${c.yellow("not installed")}   ${c.dim(DL_UPDATE)}`);
-  if (info.autopilot && info.setUp === false) io.out(`  ${c.yellow("!")} ${NOT_SIGNED_IN}\n`);
+    ? `${info.autopilot} ${c.dim(info.bundled === false ? "· the one on your PATH" : "· installed by dl")}`
+    : c.dim("not installed · optional: dl autopilot downloads it"));
+  if (info.autopilot && info.setUp === false && !info.account) io.out(`  ${c.yellow("!")} ${NOT_SIGNED_IN}\n`);
   else if (info.autopilot) {
     if (info.freeTier) row("Free tier", info.freeTier);
     if (info.freeModel) row("Free model", `${info.freeModel}   ${c.dim("dl models")}`);
   }
   io.out("\n");
   io.out(`  ${c.dim("Start, in a project folder:")}\n`);
-  io.out(`     ${c.bold("dl")}          ${c.dim("a new session with Autopilot in that folder")}\n`);
-  io.out(`     ${c.bold("dl -c")}       ${c.dim("continue the last session there")}\n\n`);
+  io.out(`     ${c.bold("dl")}          ${c.dim("open your coding agent (the last one you used is first)")}\n`);
+  io.out(`     ${c.bold("dl claude")}   ${c.dim("open one directly: dl claude, dl opencode, dl pi, dl t3, dl autopilot")}\n`);
+  io.out(`     ${c.bold("dl -c")}       ${c.dim("continue the last agent's latest session there")}\n`);
+  io.out(`     ${c.bold("dl api-key")}  ${c.dim("your key and base URLs, for any other tool")}\n\n`);
   io.out(`  ${c.dim("Next steps")}\n`);
   io.out(`     ${c.bold('dl run "fix the flaky checkout test"')}   ${c.dim("a background task that ends in a pull request")}\n`);
   io.out(`     ${c.bold("dl setup")}    ${c.dim("set up where background tasks run: your own server, or this computer")}\n\n`);

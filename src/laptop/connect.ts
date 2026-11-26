@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DL_UPDATE } from "./self-update.js";
 import { parseConnectState, type ConnectResult } from "../provider.js";
-import { findAutopilot, type AutopilotCommand } from "./autopilot.js";
+import { type AutopilotCommand } from "./autopilot.js";
+import { ensureAutopilot } from "./autopilot-install.js";
 
 /**
  * Autopilot's own provider and model choice, run in this terminal: `autopilot connect
@@ -48,8 +49,10 @@ const realSpawn: ConnectSpawner = (command, args, env) => new Promise((resolve, 
  * and asks only for the model (`dl model`). Throws ConnectCancelled when the user backs out.
  */
 export async function runAutopilotConnect(options: { modelOnly?: boolean } = {}, deps: ConnectDeps = {}): Promise<ConnectResult> {
-  const autopilot = await (deps.autopilot ?? findAutopilot)();
-  if (!autopilot) throw new Error(`The Autopilot that comes with dl isn't installed. Update: ${DL_UPDATE}`);
+  // Autopilot is optional: downloaded the first time it's needed (autopilot-install.ts).
+  const stderr = (text: string) => void process.stderr.write(text);
+  const autopilot = await (deps.autopilot ?? (() => ensureAutopilot({ out: stderr, err: stderr, color: process.stderr.isTTY === true })))();
+  if (!autopilot) throw new Error("Autopilot couldn't be downloaded (see above). Try again with dl autopilot.");
   // mkdtemp makes the directory 0700: the file inside is private even before Autopilot sets its mode.
   const dir = await mkdtemp(join(deps.tmp ?? tmpdir(), "dl-connect-"));
   try {

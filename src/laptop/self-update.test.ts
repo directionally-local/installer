@@ -142,10 +142,19 @@ describe("dl update", () => {
     assert.equal(runs[0]!.env.DL_NO_START, "1");
     assert.deepEqual(reruns, [], "nothing else to update: no need for the new dl");
 
-    const missing = harness({ latest: async () => "0.17.0" });
-    assert.equal(await dlUpdate(missing.deps), 1, "the new dl came without its Autopilot");
-    assert.match(missing.io.stderr(), /✗ dl 0\.17\.0 pins Autopilot 3\.11\.0, but 3\.10\.1 is installed/);
-    assert.equal(missing.runs.length, 1, "not reinstalled in a loop");
+    // The new dl pins a newer Autopilot than the one downloaded earlier: that one is downloaded.
+    const downloads: string[] = [];
+    let installedAp = "3.10.1";
+    const older = harness({ latest: async () => "0.17.0", downloadAutopilot: async (version) => { downloads.push(version); installedAp = version; return undefined; } });
+    older.deps.bundledAutopilot = () => installedAp;
+    assert.equal(await dlUpdate(older.deps), 0);
+    assert.deepEqual(downloads, ["3.11.0"]);
+    assert.match(older.io.text(), /! dl 0\.17\.0 pins Autopilot 3\.11\.0, and 3\.10\.1 is installed\. Downloading 3\.11\.0\.\n  ✓ Autopilot 3\.11\.0 is installed\./);
+    assert.equal(older.runs.length, 1, "dl isn't reinstalled for it");
+
+    const failing = harness({ latest: async () => "0.17.0", downloadAutopilot: async () => "npm exited with 1" });
+    assert.equal(await dlUpdate(failing.deps), 1);
+    assert.match(failing.io.stderr(), /✗ Couldn't update Autopilot to 3\.11\.0: npm exited with 1/);
   });
 
   it("with a place to update, hands over to the new dl", async () => {
@@ -209,11 +218,11 @@ describe("dl update", () => {
     assert.deepEqual(runs, []);
   });
 
-  it("reinstalls this dl when its pinned Autopilot is missing", async () => {
-    const { io, deps, runs } = harness({ bundledAutopilot: () => undefined, bundledAfter: "3.10.1" });
+  it("leaves Autopilot alone when it isn't installed: it's optional", async () => {
+    const { io, deps, runs } = harness({ bundledAutopilot: () => undefined, downloadAutopilot: async () => { throw new Error("not downloaded"); } });
     assert.equal(await dlUpdate(deps), 0);
-    assert.match(io.text(), /! dl 0\.16\.0 pins Autopilot 3\.10\.1, but it isn't installed\. Reinstalling dl 0\.16\.0\.[\s\S]*✓ Autopilot 3\.10\.1 is installed\./);
-    assert.equal(runs[0]!.env.DL_VERSION, "0.16.0", "the same dl again");
+    assert.match(io.text(), /Autopilot isn't installed\. It's optional: dl autopilot downloads it\./);
+    assert.deepEqual(runs, [], "dl isn't reinstalled for it");
   });
 
   it("goes on to the default place, as dl update always did", async () => {

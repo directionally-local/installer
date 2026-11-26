@@ -2,7 +2,8 @@ import { palette } from "../ui.js";
 import { oneLine } from "./printable.js";
 import { FREE_TIER_DEFAULT_URL } from "./free-tier.js";
 import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
-import { autopilotSignIn, type LaunchIO } from "./harness-launch.js";
+import { type LaunchIO } from "./harness-launch.js";
+import { browserSignIn, DL_DEFAULT_MODEL, keyUrls, planName, readDlKey, type DlKey } from "./dl-key.js";
 import { PROXY_MODEL } from "./proxy.js";
 
 /**
@@ -26,6 +27,8 @@ type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
 export interface ApiKeyDeps {
   env?: Env;
+  /** dl's own sign-in (dl-key.ts); read from dl's config unless replaced. */
+  dlKey?: () => Promise<DlKey | undefined>;
   token?: () => Promise<FreeTierToken>;
   signIn?: () => Promise<boolean>;
   fetch?: Fetch;
@@ -101,7 +104,7 @@ async function signedIn(io: LaunchIO, deps: ApiKeyDeps, env: Env): Promise<{ ori
       return undefined;
     }
     io.out("  dl api-key uses your free tier sign-in. Signing in first.\n");
-    if (!(await (deps.signIn ?? (() => autopilotSignIn(io, "dl api-key")))())) {
+    if (!(await (deps.signIn ?? (async () => Boolean(await browserSignIn(io, { env, intro: false }))))())) {
       io.err("  Not signed in to the free tier, so no API key was made.\n");
       return undefined;
     }
@@ -144,11 +147,56 @@ function since(iso: string | null): string {
   return iso ? iso.slice(0, 16).replace("T", " ") : "never";
 }
 
+/** What `dl api-key` prints for a dl key: the key itself, the base URLs and the model. */
+export function dlKeyText(key: DlKey, color: ReturnType<typeof palette>): string {
+  const urls = keyUrls(key);
+  return `
+  ${color.bold("Your dl key")} ${color.dim(`· ${planName(key.plan)} plan`)}
+
+    ${key.key}
+
+  ${color.bold("OpenAI-compatible tools")} (Cursor, Cline, Roo Code, Kilo Code, Continue, Zed, Aider, OpenCode…)
+    base URL  ${urls.openai}
+    API key   the key above
+    model     ${DL_DEFAULT_MODEL}   (GET ${urls.openai}/models lists the others)
+
+  ${color.bold("Anthropic-compatible tools")}
+    base URL  ${urls.anthropic}
+    API key   the key above (as x-api-key or a Bearer token)
+
+  ${color.dim("More keys, or revoke one: dl.new/keys")}
+
+`;
+}
+
 export async function apiKeyCommand(args: string[], io: LaunchIO, deps: ApiKeyDeps = {}): Promise<number> {
   const env = deps.env ?? process.env;
   const color = palette(!env.NO_COLOR && env.TERM !== "dumb" && (deps.terminal ?? process.stdout.isTTY === true));
   if (args.includes("--help") || args.includes("-h") || args[0] === "help") {
     io.out(API_KEY_USAGE);
+    return 0;
+  }
+  // dl's own sign-in: its key is already an API key for any tool. (A test that replaces `token`
+  // tests the older free tier path alone.)
+  const readKey = deps.dlKey ?? (deps.token ? async () => undefined : () => readDlKey(env));
+  let dlKey = await readKey();
+  if (!dlKey && !deps.token) {
+    const legacy = await freeTierAccessToken({ env });
+    if (!legacy.ok && legacy.reason === "signed_out") {
+      if (!(deps.terminal ?? process.stdin.isTTY === true)) {
+        io.err("  dl api-key needs you signed in. Run dl once to sign in, then dl api-key again.\n");
+        return 1;
+      }
+      dlKey = await browserSignIn(io, { env, intro: false });
+      if (!dlKey) return 1;
+    }
+  }
+  if (dlKey) {
+    if (args[0] === "list" || args[0] === "revoke") {
+      io.out(`  Your keys are on dl.new/keys: see, make and revoke them there.\n`);
+      return 0;
+    }
+    io.out(dlKeyText(dlKey, color));
     return 0;
   }
   const [sub, ...rest] = args;

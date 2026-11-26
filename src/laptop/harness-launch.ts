@@ -6,6 +6,7 @@ import { platform } from "node:os";
 import { delimiter, join } from "node:path";
 import { findAutopilot, type AutopilotCommand } from "./autopilot.js";
 import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
+import { browserSignIn, readDlKey, type DlKey } from "./dl-key.js";
 import { palette } from "../ui.js";
 import { oneLine } from "./printable.js";
 import { telemetryOff } from "./telemetry.js";
@@ -15,8 +16,10 @@ import { telemetryOff } from "./telemetry.js";
  * the same for each; what differs (the binary, how it is told where the free tier is) is the
  * agent's `HarnessLaunch`.
  *
- * 1. Free tier sign-in: Autopilot's (refreshed when it has expired). Not signed in: Autopilot's
- *    sign-in runs first (`autopilot auth directionally-local`), as on dl's first run.
+ * 1. Sign-in: dl's own (a dl key from dl.new, dl-key.ts), which every agent uses as its key
+ *    directly (steps 3 and 4 are then skipped). Without one, an older Autopilot free tier
+ *    sign-in (refreshed when it has expired) still works; with neither, dl's browser sign-in
+ *    runs first. Autopilot isn't needed for any of it.
  * 2. The agent must be on PATH: dl never installs it, it prints the official install command.
  * 3. A short-lived harness key from the service (POST /v1/harness-keys {harness}), one per agent
  *    (`dl t3` runs two: Claude Code and OpenCode, each counted as itself): good for 15
@@ -89,7 +92,9 @@ export interface LaunchDeps {
   env?: Env;
   /** A fresh free tier access token; Autopilot's sign-in, refreshed, unless replaced. */
   token?: () => Promise<FreeTierToken>;
-  /** Runs the free tier sign-in in the terminal; Autopilot's unless replaced. True when it finished. */
+  /** dl's own sign-in (dl-key.ts); read from dl's config unless replaced. */
+  dlKey?: () => Promise<DlKey | undefined>;
+  /** Runs the sign-in in the terminal; dl's browser sign-in (dl.new) unless replaced. True when it finished. */
   signIn?: () => Promise<boolean>;
   /** Where the agent's binary is; looked up on PATH unless replaced. */
   find?: (env: Env) => Promise<string | undefined>;
@@ -218,42 +223,57 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
     return 1;
   }
 
+  // dl's own sign-in (a dl key from dl.new) first; an older Autopilot free tier sign-in still
+  // works where there's no dl key; with neither, dl's browser sign-in runs now.
+  // (A test that replaces `token` tests that older path alone.)
+  const readKey = deps.dlKey ?? (deps.token ? async () => undefined : () => readDlKey(env));
   const getToken = deps.token ?? (() => freeTierAccessToken({ env }));
-  let token = await getToken();
-  if (!token.ok && token.reason === "signed_out") {
-    io.out(`  ${command} uses your free tier sign-in. Signing in first (this also makes the free tier Autopilot's provider; change it with /provider).\n`);
-    if (!(await (deps.signIn ?? (() => autopilotSignIn(io, command)))())) {
-      io.err(`  Not signed in to the free tier, so ${command} can't start. Run ${command} again to retry.\n`);
+  let dlKey = await readKey();
+  let token: FreeTierToken | undefined;
+  if (!dlKey) {
+    token = await getToken();
+    if (!token.ok && token.reason === "signed_out") {
+      io.out(`  ${command} uses your dl sign-in. Signing in first.\n`);
+      if (!(await (deps.signIn ?? (() => browserSignIn(io, { env, intro: false }).then(Boolean)))())) {
+        io.err(`  Not signed in, so ${command} can't start. Run ${command} again to retry.\n`);
+        return 1;
+      }
+      dlKey = await readKey();
+      if (!dlKey) token = await getToken();
+    }
+    if (!dlKey && token && !token.ok) {
+      io.err(`  ${token.reason === "signed_out" ? `Not signed in. Run ${command} again to sign in.` : token.message}\n`);
       return 1;
     }
-    token = await getToken();
   }
-  if (!token.ok) {
-    io.err(`  ${token.reason === "signed_out" ? `Not signed in to the free tier. Run ${command} again to sign in.` : token.message}\n`);
-    return 1;
-  }
-  const { origin, accessToken } = token;
+  const origin = dlKey ? dlKey.baseUrl : (token as Extract<FreeTierToken, { ok: true }>).origin;
 
-  // The harness keys: the agent's, then one for each agent it starts itself.
+  // The harness keys: the agent's, then one for each agent it starts itself. A dl key is a key
+  // already: every agent uses it, with nothing to make, refresh or revoke.
   const minted: MintedKey[] = [];
   const revokeAll = () => Promise.all(minted.map((one) => one.revoke()));
   const cleanup = (work: Promise<unknown>) => Promise.race([work, new Promise((resolve) => setTimeout(resolve, CLEANUP_DEADLINE_MS).unref?.())]);
-  for (const harness of [spec.harness, ...(spec.alsoHarnesses ?? []).filter((other) => other !== spec.harness)]) {
-    const one = await mintKey(call, origin, accessToken, harness, command);
-    if ("error" in one) {
-      io.err(`  ${one.error}\n`);
-      await cleanup(revokeAll());
-      return 1;
+  const harnesses = [spec.harness, ...(spec.alsoHarnesses ?? []).filter((other) => other !== spec.harness)];
+  if (!dlKey) {
+    const accessToken = (token as Extract<FreeTierToken, { ok: true }>).accessToken;
+    for (const harness of harnesses) {
+      const one = await mintKey(call, origin, accessToken, harness, command);
+      if ("error" in one) {
+        io.err(`  ${one.error}\n`);
+        await cleanup(revokeAll());
+        return 1;
+      }
+      minted.push(one);
     }
-    minted.push(one);
   }
-  const primary = minted[0]!;
-  const key = primary.key;
-  const keys: Partial<Record<Harness, string>> = Object.fromEntries(minted.map((one) => [one.harness, one.key]));
+  const primary = minted[0];
+  const key = dlKey ? dlKey.key : primary!.key;
+  const keys: Partial<Record<Harness, string>> = dlKey ? Object.fromEntries(harnesses.map((harness) => [harness, dlKey!.key])) : Object.fromEntries(minted.map((one) => [one.harness, one.key]));
 
-  // One session per key (so per agent): `dl claude` has one, `dl t3` one for each agent T3 runs.
+  // One session per harness key (so per agent): `dl claude` has one, `dl t3` one for each agent
+  // T3 runs. A dl key's requests are the account's own: no session events.
   const sessions = minted.map((one) => ({ ...one, id: minted.length === 1 ? `${spec.sessionPrefix}-${randomUUID()}` : `${spec.sessionPrefix}-${one.harness}-${randomUUID()}`, count: 0 }));
-  const prepared = await spec.prepare({ env, args, origin, key, keys, binary, sessionId: sessions[0]!.id });
+  const prepared = await spec.prepare({ env, args, origin, key, keys, binary, sessionId: sessions[0]?.id ?? `${spec.sessionPrefix}-${randomUUID()}` });
   if ("error" in prepared) {
     io.err(`  ${prepared.error}\n`);
     await cleanup(revokeAll());
@@ -285,7 +305,7 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
 
   if (prepared.removed.length > 0) io.err(`  ${command}: not passing ${prepared.removed.join(", ")} to ${product} for this session (it runs on dl's free tier).\n`);
   for (const note of prepared.notes ?? []) io.err(`  ${command}: ${note}\n`);
-  const nudge = autopilotNudge(primary.otherHarnessShare);
+  const nudge = primary ? autopilotNudge(primary.otherHarnessShare) : undefined;
   if (nudge && (deps.terminal ?? process.stderr.isTTY === true)) {
     io.err(`  ${palette(!env.NO_COLOR && env.TERM !== "dumb").dim(nudge)}\n`);
   }

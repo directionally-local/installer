@@ -12,12 +12,24 @@ export interface SelectOption {
   accent?: string;
   /** Show `detail` on its own line under the label (a list of a few options with longer notes). */
   detailBelow?: boolean;
+  /** A quieter row (a fallback below the main choices): its label is dim until it's selected. */
+  quiet?: boolean;
   /**
    * Picking this option asks for text instead (e.g. "Another server" → user@host).
    * `prompt` is the styled prompt for the numbered fallback (ui.prompt(…)); `placeholder`
    * is the dim hint shown in the empty input on a terminal.
    */
-  input?: { prompt: string; placeholder: string };
+  input?: {
+    prompt: string;
+    placeholder: string;
+    /**
+     * The option is a text field in the list itself: with the cursor on it, typing goes straight
+     * in (no Enter first), ↑/↓ still move, and Enter answers with what was typed.
+     */
+    inline?: boolean;
+    /** Enter on an empty field answers with "" (e.g. "Enter to skip"). */
+    allowEmpty?: boolean;
+  };
 }
 
 export interface SelectResult {
@@ -323,7 +335,8 @@ class ArrowSelect {
             if (result) {
               // Leave what an answered text prompt leaves: the question and `› choice`.
               this.erase(false);
-              output.write(`${this.marker}${result.text ?? this.options.find((option) => option.value === result.value)!.label}\n`);
+              const picked = this.options.find((option) => option.value === result.value)!;
+              output.write(`${this.marker}${result.text === "" ? this.c.dim("skipped") : result.text ?? picked.label}\n`);
               end(() => resolve(result));
               return;
             }
@@ -356,6 +369,15 @@ class ArrowSelect {
       return undefined;
     }
     if (key === "escape") return "cancel";
+    const inline = this.options[this.cursor]!.input?.inline === true;
+    if (inline && key === "enter") {
+      const option = this.options[this.cursor]!;
+      const text = this.text.trim();
+      return text || option.input!.allowEmpty ? { value: option.value, text } : undefined;
+    }
+    if (inline && typeof key === "object") { this.text += key.text; return undefined; }
+    if (inline && key === "backspace") { this.text = [...this.text].slice(0, -1).join(""); return undefined; }
+    if (inline && key === "clear") { this.text = ""; return undefined; }
     if (key === "up") this.move(-1);
     else if (key === "down") this.move(1);
     else if (key === "enter") {
@@ -401,7 +423,12 @@ class ArrowSelect {
     const width = Math.max(...this.options.map((option) => full(option).length)) + 2;
     return this.options.flatMap((option, index) => {
       const selected = index === this.cursor;
-      const label = selected ? this.c.bold(option.label) : option.label;
+      if (option.input?.inline) {
+        // The field itself: what's typed so far, or the dim placeholder.
+        const shown = this.text ? (selected ? `${this.text}${this.caret}` : this.text) : selected ? `${this.caret}${this.c.dim(option.input.placeholder)}` : this.c.dim(option.label);
+        return [`  ${selected ? this.c.cyan("›") : " "} ${shown}`];
+      }
+      const label = selected ? this.c.bold(option.label) : option.quiet ? this.c.dim(option.label) : option.label;
       const accent = option.accent ? ` ${this.c.accent(option.accent)}` : "";
       const pad = option.detail && !option.detailBelow ? " ".repeat(width - full(option).length) : "";
       const line = `  ${selected ? this.c.cyan("›") : " "} ${label}${accent}${pad}`;
@@ -547,6 +574,7 @@ export class ScriptedPrompter implements Prompter {
     const answer = this.answer(question).trim();
     const index = answer === "" ? initial : /^\d+$/.test(answer) ? Number(answer) - 1 : options.findIndex((option) => option.value === answer || option.label === answer);
     const option = options[index];
+    if (option?.input?.inline) return { value: option.value, text: "" };
     if (option?.input) return { value: option.value, text: this.answer(option.input.prompt).trim() };
     if (option) return { value: option.value };
     const typed = options.find((entry) => entry.input);

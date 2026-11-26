@@ -58,7 +58,7 @@ describe("dl acp", () => {
   it("says so (on stderr) when the bundled Autopilot is missing", async () => {
     const t = io();
     assert.equal(await acpCommand([], t.io, { autopilot: async () => undefined }), 1);
-    assert.match(t.err.join(""), /dl update/);
+    assert.match(t.err.join(""), /dl autopilot downloads it/);
   });
 });
 

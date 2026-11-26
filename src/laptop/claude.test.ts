@@ -447,3 +447,37 @@ describe("the free tier access token for dl claude", () => {
     assert.deepEqual(refused, { ok: false, reason: "signed_out" });
   });
 });
+
+describe("dl claude on a dl key (dl's own sign-in)", () => {
+  it("gives Claude Code the dl key and api.dl.new/anthropic directly: no harness key, no events, no Autopilot", async () => {
+    const service = fakeService();
+    const child = fakeSpawn({ code: 0 });
+    const code = await claudeCommand([], capture().io, deps({
+      dlKey: async () => ({ key: "dl_sk_0123456789abcdef", plan: "starter", baseUrl: "https://api.dl.new", anthropicBaseUrl: "https://api.dl.new/anthropic", savedAt: "" }),
+      token: async () => { throw new Error("the older sign-in isn't read"); },
+      fetch: service.fetch,
+      spawn: child.spawn,
+    }));
+    assert.equal(code, 0);
+    assert.deepEqual(service.calls, [], "nothing to mint, refresh, revoke or count");
+    const env = child.started[0]!.options.env as Record<string, string>;
+    assert.equal(env.ANTHROPIC_BASE_URL, "https://api.dl.new/anthropic");
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, "dl_sk_0123456789abcdef");
+  });
+
+  it("signs in in the browser (not through Autopilot) when there's no key, then uses it", async () => {
+    let key: { key: string; plan: null; baseUrl: string; anthropicBaseUrl: string; savedAt: string } | undefined;
+    const child = fakeSpawn({ code: 0 });
+    const { io, out } = capture();
+    const code = await claudeCommand([], io, deps({
+      dlKey: async () => key,
+      token: async () => ({ ok: false, reason: "signed_out" }),
+      signIn: async () => { key = { key: "dl_sk_new0123456789", plan: null, baseUrl: "https://api.dl.new", anthropicBaseUrl: "https://api.dl.new/anthropic", savedAt: "" }; return true; },
+      fetch: fakeService().fetch,
+      spawn: child.spawn,
+    }));
+    assert.equal(code, 0);
+    assert.match(out(), /uses your dl sign-in\. Signing in first\./);
+    assert.equal((child.started[0]!.options.env as Record<string, string>).ANTHROPIC_AUTH_TOKEN, "dl_sk_new0123456789");
+  });
+});

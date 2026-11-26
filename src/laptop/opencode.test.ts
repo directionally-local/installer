@@ -187,7 +187,7 @@ describe("dl opencode", () => {
       spawn: child.spawn,
     }));
     assert.equal(code, 0);
-    assert.match(out(), /dl opencode uses your free tier sign-in\. Signing in first/);
+    assert.match(out(), /dl opencode uses your dl sign-in\. Signing in first/);
     assert.equal(child.started.length, 1);
 
     const failed = capture();

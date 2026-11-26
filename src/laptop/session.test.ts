@@ -713,7 +713,7 @@ describe("dl on this computer", () => {
     assert.equal(await local({ cwd: dir }, capture()), 7);
     const missing = capture();
     assert.equal(await local({ cwd: dir, autopilot: async () => undefined }, missing), 1);
-    assert.match(missing.text(), new RegExp(`✗ The Autopilot that comes with dl isn't installed\\. Update: ${UPDATE}`));
+    assert.match(missing.text(), /✗ Autopilot isn't installed: dl autopilot downloads it\./);
   });
 
   it("leaves Ctrl-C to Autopilot and passes SIGTERM and SIGHUP on", async () => {
@@ -837,6 +837,10 @@ describe("dl the first time on a laptop", () => {
     session: { nodeVersion: PATCHED_NODE, autopilot: async () => AUTOPILOT, probe: async () => true, placeModel: async () => undefined, spawn: plain.spawn, signals: new EventEmitter() },
     setup: async (options) => { setups.push(options); return 0; },
     autopilotAuth: async () => undefined,
+    // A GPU box (or `dl -- ARGS`): plain dl is Autopilot there. A laptop's bare dl is the router (router.test.ts, and below).
+    gpuBox: async () => true,
+    detectAgents: async () => [],
+    dlKey: async () => undefined,
     ...(prompter ? { prompter } : {}),
     ...extra,
   });
@@ -851,7 +855,7 @@ describe("dl the first time on a laptop", () => {
     }
   }
 
-  it("bare dl is plain autopilot in this folder, with nothing set up, installed or asked first", async () => {
+  it("bare dl on a GPU box is plain autopilot in this folder, with nothing set up, installed or asked first", async () => {
     const dir = join(root, "fresh");
     await mkdir(dir);
     const io = capture();
@@ -874,6 +878,29 @@ describe("dl the first time on a laptop", () => {
     assert.equal(await inside(dir, () => main(["new", "--", "--verbose"], capture(), laptop())), 0);
     assert.deepEqual(plain.launches[2]!.args, [...AUTOPILOT.args, "--verbose"]);
     assert.equal(api.requests.length, 0);
+  });
+
+  it("bare dl on a laptop is the router: dl -c continues there; dl -- ARGS and -m stay Autopilot's", async () => {
+    const dir = join(root, "router");
+    await mkdir(dir);
+    const routed: Array<{ continue?: boolean }> = [];
+    const options = laptop(undefined, { gpuBox: async () => false, router: async (_deps, run) => (routed.push(run ?? {}), 0) });
+    assert.equal(await inside(dir, () => main([], capture(), options)), 0);
+    assert.equal(await inside(dir, () => main(["-c"], capture(), options)), 0);
+    assert.equal(await inside(dir, () => main(["new"], capture(), options)), 0);
+    assert.deepEqual(routed, [{ continue: false }, { continue: true }, {}]);
+    assert.equal(plain.launches.length, 0);
+    assert.equal(await inside(dir, () => main(["--", "--verbose"], capture(), options)), 0);
+    assert.equal(await inside(dir, () => main(["-m", "kimi-k2"], capture(), options)), 0);
+    assert.equal(plain.launches.length, 2, "Autopilot's own flags go to Autopilot");
+  });
+
+  it("dl claude, opencode, pi and t3 become the last used agent", async () => {
+    const used: string[] = [];
+    const run = async () => 0;
+    const options = laptop(undefined, { recordAgentUse: async (id) => void used.push(id), claude: run, opencode: run, pi: run, t3: run });
+    for (const name of ["claude", "opencode", "pi", "t3"]) assert.equal(await main([name], capture(), options), 0);
+    assert.deepEqual(used, ["claude-code", "opencode", "pi", "t3"]);
   });
 
   it("dl -- ARGS runs Autopilot with them without a terminal too (scripts, CI); bare dl there is the overview", async () => {
@@ -1261,7 +1288,7 @@ describe("dl the first time on a laptop", () => {
     for (const extra of [{ terminal: false }, { terminal: false, root: true }]) {
       const io = capture();
       assert.equal(await main([], io, laptop(undefined, extra)), 0);
-      assert.match(io.text(), /on this computer[\s\S]*dl -c {7}continue the last session there/);
+      assert.match(io.text(), /on this computer[\s\S]*dl -c {7}continue the last agent's latest session there/);
       assert.doesNotMatch(io.text(), /isn't set up on this machine/);
       assert.equal(plain.launches.length, 0);
       assert.deepEqual(setups, []);

@@ -6,7 +6,8 @@
 # On a laptop or any Linux machine (macOS as yourself; Linux as anyone, root included):
 # installs dl into ~/.directionallylocal with no sudo, and Node.js there too when this one is missing or too old, puts dl on your PATH for
 # new shells (and links it into ~/.local/bin or ~/bin when one is already on this shell's
-# PATH, so dl works in this terminal too), and starts dl in the folder you ran it from.
+# PATH, so dl works in this terminal too), and starts dl in the folder you ran it from: it signs
+# you in at dl.new and opens the coding agent you pick from the ones on this computer.
 # Nothing else is set up until you ask for background tasks (dl run, dl setup).
 #
 # A server, only when asked (Ubuntu or Debian):
@@ -33,7 +34,8 @@
 # root's other commands get only the non-secret variables in ROOT_ENV.
 # Install only (the laptop's setup, which then runs `dl up` itself over SSH): DL_INSTALL_ONLY=1.
 # Pin a version: DL_VERSION=0.1.0. Install from a local tarball: DL_PACKAGE=/path/to.tgz.
-# Laptop: DL_HOME=DIR installs somewhere else; DL_NO_START=1 doesn't start dl at the end;
+# Laptop: Autopilot isn't installed with dl: dl downloads it into $DL_HOME/autopilot only when
+# it's picked. DL_HOME=DIR installs somewhere else; DL_NO_START=1 doesn't start dl at the end;
 # DL_NO_MODIFY_PATH=1 leaves your shell's startup file alone; DL_NO_BUNDLE=1 installs dl with
 # npm instead of the prebuilt bundle (one download from dl.new/dl/, checked
 # against its SHA-256; npm is also what's used when there's no bundle for this computer).
@@ -316,9 +318,9 @@ download() {
   quietly "downloading $1" curl -fsSL "$1" -o "$2"
 }
 
-# About how much the npm install downloads (dl, Autopilot and their packages), for the
-# slow-network hint; npm doesn't say in advance.
-NPM_DOWNLOAD_MB=40
+# About how much the npm install downloads (dl and its packages; Autopilot is optional and
+# downloaded by dl only when it's picked), for the slow-network hint; npm doesn't say in advance.
+NPM_DOWNLOAD_MB=5
 
 # WATCH for `npm install --loglevel=info`: which phase it's in, read from its log.
 watch_npm() {
@@ -329,7 +331,7 @@ watch_npm() {
     DETAIL=""
     SLOW_MB=""
   elif printf '%s\n' "$steplog" | grep -q '^npm info run '; then
-    LABEL="Setting up Autopilot"
+    LABEL="Setting up dl"
     DETAIL=""
     SLOW_MB=""
   else
@@ -624,7 +626,7 @@ install_bundle() {
     bundle_failed "it didn't match its checksum"
     return 1
   fi
-  step "Setting up Autopilot"
+  step "Unpacking dl"
   staging="$DL_HOME/dl.unpacking"
   rm -rf "$staging"
   mkdir -p "$staging"
@@ -757,7 +759,8 @@ laptop_main() {
       case $rc in */.profile) fix=". $(tilde "$rc")" ;; *) fix="source $(tilde "$rc")" ;; esac
     fi
   fi
-  # Interactive: go straight into dl in this folder (plain Autopilot the first time).
+  # Interactive: go straight into dl in this folder: sign in at dl.new, then pick the coding
+  # agent dl found on this computer (Autopilot only when it's picked).
   # (DL_TTY stands in for the terminal in tests.)
   tty="${DL_TTY:-/dev/tty}"
   start=""
@@ -789,7 +792,7 @@ laptop_main() {
     return "$code"
   fi
   if [ -n "$fix" ]; then remind "Then run: $fix && dl"; else say "  Then type: dl"; fi
-  tip "Already use Claude Code or OpenCode? Run dl claude or dl opencode to use your free dl tokens there."
+  tip "dl signs you in at dl.new, then opens your own coding agent (Claude Code, OpenCode, Cursor…) on your plan."
 }
 
 # dl from npm (no bundle for this computer, or it didn't work). Uses $package, $npm, $node and
