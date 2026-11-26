@@ -441,7 +441,8 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
   "pro": null,                          // or { "periodEnd": ISO string | null, "cancelAtPeriodEnd": false }
   "queue": null,                        // or { "position": 214, "etaAt": "2026-11-16T00:00:00.000Z", "waiting": 300 }
   "referral": { "code": "alice", "link": "https://dl.new/r/alice", "joined": 2, "activeThisWeek": 1,
-                "bonusTokensPerWeek": 10000000, "bonusCapPerWeek": 50000000 },
+                "bonusTokensPerWeek": 10000000, "bonusCapPerWeek": 50000000,
+                "bonusApplies": true },        // false: the bonus isn't added to this allowance (Pro, or a smaller level); hide it
   "offers": { "pro": { "priceUsdMonthly": 7, "price": "$7/month", "tokensPerWeek": 300000000, "usdPerWeek": 2,
                        "deepseekUsdPerWeek": 32, "openModelsMultiplier": 4, "valueLine": "Higher limits and early access to new models." },
               "topup": { "unitPriceUsd": 1, "minQuantity": 2, "maxQuantity": 20, "usageMultiplier": 1.25, "validDays": 90, "fromPrice": "$2" } },

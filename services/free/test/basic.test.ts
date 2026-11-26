@@ -71,6 +71,7 @@ describe("the basic level", () => {
     assert.equal(await storedLevel(service, 100), "basic");
     assert.equal(mine.level, undefined, "no level in /v1/me");
     assert.doesNotMatch(JSON.stringify(mine), LEVEL_NAMES);
+    assert.equal(mine.referral.bonusApplies, false, "the referral bonus is Full-only, so clients hide it");
     // By default every free level gets the same as Full: 50M Luna tokens, $2 of GPT-6 and $8 of DeepSeek.
     assert.equal(mine.allowance.tokensPerWeek, 50_000_000);
     assert.equal(mine.allowance.usdPerWeek, 2);

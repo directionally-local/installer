@@ -2786,10 +2786,8 @@ async function me(c: Ctx): Promise<Response> {
   if (guarded) return guarded;
   c.callerId = identity.githubId;
   const { config, person } = await runtime(c);
-  const allowance = await account(c, identity.githubId).allowance(
-    c.now(),
-    allocated(config, limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens), identity.githubId, person, c.now()),
-  );
+  const limits = allocated(config, limitsFor(config, person?.bonusTokens, person?.level ?? "full", person?.batchFlagged === true, onTrial(config, identity.githubId, person?.admittedAt), person?.trialBonusTokens), identity.githubId, person, c.now());
+  const allowance = await account(c, identity.githubId).allowance(c.now(), limits);
   if (!allowance.exists) return apiError(403, "not_invited", "This GitHub account isn't on the free tier.");
   // A Pro subscriber isn't waiting for anything; their place is kept if Pro ends.
   const queue = allowance.plan === "pro" ? null : (person?.queue ?? null);
@@ -2868,6 +2866,11 @@ async function me(c: Ctx): Promise<Response> {
           activeThisWeek: person.referral.activeThisWeek,
           bonusTokensPerWeek: person.bonusTokens,
           bonusCapPerWeek: config.referralBonusCap,
+          /**
+           * Whether the referral bonus is added to this account's allowance: only Full-level free
+           * accounts get it (levelLimits), never Pro. Clients hide the bonus line when false.
+           */
+          bonusApplies: allowance.plan !== "pro" && (limits.level ?? "full") === "full",
         }
       : null,
     offers: offers(config),

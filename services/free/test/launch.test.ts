@@ -327,6 +327,7 @@ describe("referrals", () => {
       activeThisWeek: 0,
       bonusTokensPerWeek: 0,
       bonusCapPerWeek: 50_000_000,
+      bonusApplies: true,
     });
     const renamed = await signUp(service, { id: 100, login: "alice-new" });
     assert.equal((await me(service, renamed.tokens.access_token)).referral.code, "alice");
