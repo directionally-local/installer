@@ -180,7 +180,16 @@ export const RUNTIME_SETTINGS = {
   /** Who gets Open Relay's models: "all" (the default) or "pro". */
   "providerPlans.openrelay": { kind: "providerPlans", env: "OPENRELAY_PLANS" },
   /** The Open Relay models that are on, by id; [] for none. */
+  /**
+   * The Open Relay models that are on, by id; [] for none. DeepSeek (deepseek/deepseek-v4.1-flash-1017)
+   * and Kimi K3.1 Pro (moonshotai/kimi-k3.1-pro) listed here are served by Open Relay first, then by
+   * their own provider (models.ts `firstChoice`).
+   */
   "providerModels.openrelay": { kind: "models", env: "OPENRELAY_MODELS" },
+  /** The most of Open Relay's weekly budget DeepSeek may use (everyone but admins), USD; past it Luminal serves DeepSeek. "none": no share of its own. */
+  "modelWeeklyCredit.openrelay.deepseek-v4.1-flash-1017": { kind: "usd", env: "OPENRELAY_WEEKLY_CREDIT_DEEPSEEK_V4_1_FLASH" },
+  /** The most of Open Relay's weekly budget Kimi K3.1 Pro may use (everyone but admins), USD; past it Liquid serves Kimi. "none": no share of its own. */
+  "modelWeeklyCredit.openrelay.kimi-k3.1-pro": { kind: "usd", env: "OPENRELAY_WEEKLY_CREDIT_KIMI_K3_1_PRO" },
   /** The speed probes (probes.ts): one tiny request per model every 10 minutes; false stops them. */
   speedProbes: { kind: "flag", env: "SPEED_PROBES" },
   /** Emails to users (user-emails.ts) on or off; they also need the USER_EMAIL binding or RESEND_API_KEY. */

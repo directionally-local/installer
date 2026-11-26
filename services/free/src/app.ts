@@ -96,7 +96,7 @@ import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-con
 import { AUTOPILOT_ONLY_MESSAGE, AUTOPILOT_ONLY_REASON, heldFromClient, modelClients, type ModelClient } from "./gpt6-clients.js";
 import { meterStream, outputChars } from "./sse.js";
 import type { RegistryProviderId, RegistryRoute } from "./providers.js";
-import { accessOf, approxTokens, configuredUpstreams, offeredModels, exchangeUsage, mergedUsage, exchangeRules, FALLBACK_BLOCKS, isRegistryProvider, formatRationTokens, listedUpstream, liquidPayload, modelPlans, openRelayPayload, personCapUsd, personSpendKey, proOnly, providerFallbackNotice, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, registryRoute, reportedCharge, resetDay, upstreamBlock, type ProviderBlock, type ProviderSpend } from "./providers.js";
+import { accessOf, approxTokens, configuredUpstreams, contextTooLong, firstChoiceUpstreams, offeredModels, exchangeUsage, mergedUsage, exchangeRules, FALLBACK_BLOCKS, isRegistryProvider, formatRationTokens, listedUpstream, liquidPayload, modelPlans, openRelayPayload, personCapUsd, personSpendKey, proOnly, providerFallbackNotice, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, registryRoute, reportedCharge, resetDay, upstreamBlock, type ProviderBlock, type ProviderSpend } from "./providers.js";
 import { PROBE_CRON, probeOnce, probeTargets } from "./probes.js";
 import { measureKey } from "./provider-store.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
@@ -1079,13 +1079,34 @@ function providerCredit(provider: Upstream, config: FreeConfig): number {
  * be served by OpenRouter, the old upstream, when Luminal has no key. Undefined when nothing can.
  * A registry model is served by the first of its upstreams that can (GLM 5.3 Flash: Liquid, then
  * Open Relay), `model` being it as that upstream serves it (models.ts onUpstream); `backups` are
- * the others that can, in order, for a failure before anything reaches the client.
+ * the others that can, in order, for a failure before anything reaches the client. A model with
+ * `firstChoice` upstreams is served by the first that can (DeepSeek: Open Relay, when on), with
+ * its usual provider as the backup.
  */
 function servingModel(
   requested: FreeModel,
   gate: ProviderGate,
   config: FreeConfig,
-): { model: FreeModel; provider: Upstream; fallback: boolean; backups?: RegistryProviderId[] } | undefined {
+): { model: FreeModel; provider: Upstream; fallback: boolean; backups?: Upstream[] } | undefined {
+  if (!isRegistryProvider(requested.provider) && requested.firstChoice) {
+    const [first, ...others] = firstChoiceUpstreams(config, requested, gate.providerSpend ?? { usedUsd: {}, weekUsd: {} });
+    const usual = usualServing(requested, gate, config);
+    if (first) {
+      // The usual provider is the last backup, unless it is the model's fallback (another model).
+      const backups: Upstream[] = [...others, ...(usual && !usual.fallback ? [usual.provider] : [])];
+      return { model: onUpstream(requested, first), provider: first, fallback: false, backups };
+    }
+    return usual;
+  }
+  return usualServing(requested, gate, config);
+}
+
+/** servingModel without `firstChoice` upstreams for a model whose own provider isn't a registry one. */
+function usualServing(
+  requested: FreeModel,
+  gate: ProviderGate,
+  config: FreeConfig,
+): { model: FreeModel; provider: Upstream; fallback: boolean; backups?: Upstream[] } | undefined {
   const primary = config.primaryUpstream;
   if (isRegistryProvider(requested.provider)) {
     const [first, ...backups] = registryRoute(config, requested, gate.providerSpend ?? { usedUsd: {}, weekUsd: {} }).upstreams;
@@ -2580,7 +2601,8 @@ function publicProviders(gate: Runtime, measures: Record<string, { tokensPerSeco
     if (providerKey(config, spec.id) === undefined) continue;
     const settings = providerSettings(config, spec.id);
     // A registry model is listed under the first upstream it's configured on (listedUpstream).
-    const models = providerModels(spec.id).filter((model) => (isRegistryProvider(model.provider) ? listedUpstream(config, model) === spec.id : settings.models.includes(model.id)));
+    // Any other model only under its own provider (DeepSeek under Luminal, whoever serves it first).
+    const models = providerModels(spec.id).filter((model) => (isRegistryProvider(model.provider) ? listedUpstream(config, model) === spec.id : model.provider === spec.id && settings.models.includes(model.id)));
     if (models.length === 0) continue;
     providers.push({
       id: spec.id,
@@ -2590,7 +2612,7 @@ function publicProviders(gate: Runtime, measures: Record<string, { tokensPerSeco
       logo: `/logos/${spec.id}.svg`,
       models: models.map((model) => {
         const measure = measures[measureKey(model.id, spec.id, model.provider)];
-        const backups = isRegistryProvider(model.provider) ? configuredUpstreams(config, model).filter((provider) => provider !== spec.id) : [];
+        const backups = configuredUpstreams(config, model).filter((provider) => provider !== spec.id);
         return {
           id: model.id,
           name: model.name,
@@ -4318,11 +4340,12 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
 
   /**
    * What to try next when an attempt fails before anything reaches the client (429, 5xx, a
-   * timeout, Liquid's "no eligible offer"): a registry model's other upstreams that can serve, in
-   * order (GLM 5.3 Flash: Open Relay after Liquid), then the model's fallback (DeepSeek) when its
-   * provider is ready. OpenAI's models have only the fallback.
+   * timeout, Liquid's "no eligible offer"): a model's other upstreams that can serve, in order
+   * (GLM 5.3 Flash: Open Relay after Liquid; DeepSeek and Kimi: their own provider after Open
+   * Relay), then the model's fallback (DeepSeek) when its provider is ready. OpenAI's models have
+   * only the fallback.
    */
-  const nextSteps = (model: FreeModel, backups: readonly RegistryProviderId[]): Step[] => {
+  const nextSteps = (model: FreeModel, backups: readonly Upstream[]): Step[] => {
     const requestedModel = modelById(model.id)!;
     const steps: Step[] = backups.map((provider) => ({ model: onUpstream(requestedModel, provider), provider, fallback: false }));
     const backup = fallbackOf(model.id);
@@ -4972,6 +4995,12 @@ async function compatibleChat(
     if (response.status >= 500) return transient(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, retryAfter, { status: "upstream_error", outcome: "error", ttfbMs });
     // Liquid: no seller's offer passes the rules right now (live: 400, code `no_eligible_offer`).
     if (target.upstream === "liquid" && noEligibleOffer(text)) return transient(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, retryAfter, { status: "upstream_no_offer", outcome: "error", ttfbMs });
+    // Open Relay first for a model with a longer context elsewhere (DeepSeek: 384K there, 1M on
+    // Luminal): a prompt it can't take goes on to the next upstream. Without one, the 400 goes back.
+    if (target.upstream === "openrelay" && input.retry && contextTooLong(text)) {
+      await settle(undefined, "upstream_context", { chargeNothing: true, ttfbMs });
+      return input.retry();
+    }
     // A 4xx: the request itself (400), or the service's key or account (401, 402, 403).
     const ours = response.status === 401 || response.status === 402 || response.status === 403;
     if (ours && input.retry) {
@@ -5197,13 +5226,20 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     // Each provider's credit (balance, used, left, this week, the probes' share) and the speed
     // probes over ?hours= (1 to 360, default 24), newest first. Admins only: amounts live here,
     // never in the public /v1/providers.
+    // `usage`: per upstream and model over the last ?days= UTC days (1 to 60, default 7, today
+    // included): requests, fresh, cached and output tokens, the cache hit rate and the credit.
     const raw = c.url.searchParams.get("hours");
     const hours = raw === null ? 24 : Number(raw);
     if (!Number.isInteger(hours) || hours < 1 || hours > 360) return apiError(400, "invalid_request", "Use ?hours=1 to 360.");
-    const view = await directory(c).providersAdmin(now, policyOf(c.config), now - hours * 3_600_000);
+    const rawDays = c.url.searchParams.get("days");
+    const days = rawDays === null ? 7 : Number(rawDays);
+    if (!Number.isInteger(days) || days < 1 || days > 60) return apiError(400, "invalid_request", "Use ?days=1 to 60.");
+    const view = await directory(c).providersAdmin(now, policyOf(c.config), now - hours * 3_600_000, days);
     return json({
       hours,
+      days,
       providers: view.providers,
+      usage: view.usage,
       probes: view.probes.map((probe) => ({ ...probe, at: new Date(probe.at).toISOString() })),
     });
   }

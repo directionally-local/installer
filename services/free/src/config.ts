@@ -889,6 +889,8 @@ function registrySettings(env: Record<string, unknown>): RegistrySettingsConfig 
     "providerOptIn.openrelay": flag(env.OPENRELAY_OPT_IN, d["providerOptIn.openrelay"], "OPENRELAY_OPT_IN"),
     "providerPlans.openrelay": plans("OPENRELAY_PLANS", d["providerPlans.openrelay"]),
     "providerModels.openrelay": list("OPENRELAY_MODELS", d["providerModels.openrelay"], isRegistryModelList, "a comma-separated list of Open Relay model ids"),
+    "modelWeeklyCredit.openrelay.deepseek-v4.1-flash-1017": usd(env.OPENRELAY_WEEKLY_CREDIT_DEEPSEEK_V4_1_FLASH, d["modelWeeklyCredit.openrelay.deepseek-v4.1-flash-1017"]!, "OPENRELAY_WEEKLY_CREDIT_DEEPSEEK_V4_1_FLASH"),
+    "modelWeeklyCredit.openrelay.kimi-k3.1-pro": usd(env.OPENRELAY_WEEKLY_CREDIT_KIMI_K3_1_PRO, d["modelWeeklyCredit.openrelay.kimi-k3.1-pro"]!, "OPENRELAY_WEEKLY_CREDIT_KIMI_K3_1_PRO"),
   };
 }
 
