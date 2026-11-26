@@ -1736,7 +1736,10 @@ check and refusals. The answer comes back as an Anthropic `message`, or streamed
 `input_json_delta`, `thinking_delta`) / `content_block_stop`, `message_delta` (stop reason and
 usage, cache reads as `cache_read_input_tokens`) and `message_stop`. Stop reasons: `end_turn`,
 `tool_use`, `max_tokens`, `stop_sequence` (when the upstream says which stop string matched),
-`refusal`.
+`refusal`. The answer's `model` (the message's, and `message_start`'s when streamed) is the model
+that answered (`deepseek/deepseek-v4.1-flash-1017`), not the `claude-*` name the request asked
+for, and the response carries it in `x-dl-served-model` too, so logs, evals and cost
+attribution downstream name the model that produced the output.
 
 - **Supported:** `system` (string or text blocks), text, `tool_use`, `tool_result` (string or
   nested blocks, `is_error`), `tools` with `input_schema`, `tool_choice` (`auto`, `any`, `tool`,

@@ -227,7 +227,7 @@ export function messageId(): string {
 }
 
 export interface AnswerOptions {
-  /** The model name the request asked for: echoed back, as Claude Code expects its own name. */
+  /** The free tier model id that answered (DeepSeek), whatever claude-* name the request asked for. */
   model: string;
   /** Whether the request asked for thinking: reasoning comes back as thinking blocks only then. */
   thinking: boolean;

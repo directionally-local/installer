@@ -3540,8 +3540,11 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
   const hint = anthropicSessionHint(request);
   const answer = await countedChat(c, identity, await chat(c, { identity, body: translated.body, bodyBytes, ...(hint ? { sessionHint: hint } : {}) }));
   if (answer.status !== 200) return toAnthropicErrorResponse(answer, tool);
-  const options = { model: translated.model, thinking: translated.thinking, stopSequences: Array.isArray(translated.body.stop) ? (translated.body.stop as string[]) : [] };
-  const headers = passHeaders(answer);
+  // The model that answered, not the claude-* name asked for: reported as the message's `model`
+  // and in `x-dl-served-model`, so logs, evals and cost attribution name what produced the output.
+  const served = answer.headers.get("x-dl-fallback") ?? model.id;
+  const options = { model: served, thinking: translated.thinking, stopSequences: Array.isArray(translated.body.stop) ? (translated.body.stop as string[]) : [] };
+  const headers = { ...passHeaders(answer), "x-dl-served-model": served };
   const contentType = answer.headers.get("content-type") ?? "";
   if (translated.stream && answer.body && contentType.includes("text/event-stream")) {
     return new Response(toAnthropicStream(answer.body, options), { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", ...headers } });

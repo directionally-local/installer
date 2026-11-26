@@ -157,7 +157,8 @@ describe("POST /anthropic/v1/messages", () => {
       assert.ok(response.headers.get("x-dl-quota-resets-at"));
       const body = (await response.json()) as Record<string, any>;
       assert.equal(body.type, "message");
-      assert.equal(body.model, "claude-opus-4-5");
+      assert.equal(body.model, MODEL, "the model that answered, not the claude-* name asked for");
+      assert.equal(response.headers.get("x-dl-served-model"), MODEL);
       assert.deepEqual(body.content, [{ type: "text", text: "Hi there" }]);
       assert.equal(body.stop_reason, "end_turn");
       assert.deepEqual(body.usage, { input_tokens: 20, output_tokens: 4, cache_read_input_tokens: 100, cache_creation_input_tokens: 0 });
@@ -214,6 +215,10 @@ describe("POST /anthropic/v1/messages", () => {
     ]);
     assert.match(text, /"stop_reason":"tool_use"/);
     assert.match(text, /"output_tokens":25/);
+    // message_start names the model that answered, not the claude-* name asked for.
+    const start = JSON.parse(/^event: message_start\ndata: (.+)$/m.exec(text)![1]!) as { message: { model: string } };
+    assert.equal(start.message.model, MODEL);
+    assert.equal(response.headers.get("x-dl-served-model"), MODEL);
     const sent = service.calls.luminal.at(-1)!.body;
     assert.deepEqual(sent.tools, [{ type: "function", function: { name: "Read", description: "Read a file", parameters: { type: "object", properties: { file_path: { type: "string" } } } } }]);
     // Settled: DeepSeek's week counts the tokens.

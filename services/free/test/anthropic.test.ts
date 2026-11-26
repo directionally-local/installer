@@ -77,7 +77,7 @@ describe("Anthropic requests → chat completions", () => {
       tool_choice: { type: "any", disable_parallel_tool_use: true },
       stream: true,
     });
-    assert.equal(out.model, "claude-sonnet-4-5", "the asked name is echoed back");
+    assert.equal(out.model, "claude-sonnet-4-5", "toChatRequest keeps the asked name; the answer reports the served model (app.ts)");
     assert.equal(out.thinking, true);
     assert.equal(out.stream, true);
     assert.deepEqual(out.body, {
