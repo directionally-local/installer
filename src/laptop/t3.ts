@@ -6,6 +6,7 @@ import { claudeEnv } from "./claude.js";
 import { claudeSettingsRefusal } from "./claude-settings.js";
 import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
 import { freeTierModels, opencodeEnv, PROVIDER_ID, DEFAULT_MODEL } from "./opencode.js";
+import { TtyPrompter } from "../prompt.js";
 
 /**
  * `dl t3 [t3 args...]`: the person's own T3 Code (github.com/pingdotgg/t3code, the `t3` command)
@@ -25,9 +26,10 @@ import { freeTierModels, opencodeEnv, PROVIDER_ID, DEFAULT_MODEL } from "./openc
  *    this environment (unless the person set a Server URL in its settings).
  * Two keys, so each agent's requests are counted as that agent's (and get the other agents'
  * share of the allowance). Both are refreshed while `dl t3` runs and revoked when it exits.
- * One T3 Code file is changed: its settings (~/.t3/userdata/settings.json) get the OpenCode
- * provider instance enabled, which T3 Code ships disabled (enableT3OpenCode). No other key in it
- * is touched, and the first change keeps a backup. No Claude Code or OpenCode file is touched.
+ * One T3 Code file may be changed, only after asking at a terminal (or with --dl-enable-opencode
+ * when there's none): its settings (~/.t3/userdata/settings.json) get the OpenCode provider
+ * instance enabled, which T3 Code ships disabled (enableT3OpenCode). No other key in it is
+ * touched, and the first change keeps a backup. No Claude Code or OpenCode file is touched.
  *
  * Only a server started by dl t3 has this: the desktop app opened from the Dock or Start menu,
  * the background service (`t3 service`, `t3 up`) and a server already running don't. Commands
@@ -69,7 +71,15 @@ type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 export interface T3Deps extends LaunchDeps {
   /** T3 Code's settings file; ~/.t3/userdata/settings.json (HOME from the environment) unless replaced. */
   t3Settings?: string;
+  /**
+   * Asks a yes/no question; resolves true for yes. Asked on the terminal when stdin and stderr are
+   * one, unless replaced; null when there's no terminal to ask on.
+   */
+  confirm?: ((question: string) => Promise<boolean>) | null;
 }
+
+/** dl t3's own flag (taken out before t3 sees the arguments): turn on OpenCode in T3 Code's settings without asking. */
+export const ENABLE_OPENCODE_FLAG = "--dl-enable-opencode";
 
 /** What dl t3 merges into T3 Code's settings: OpenCode, which T3 Code ships disabled, turned on. */
 export const OPENCODE_INSTANCE = { driver: "opencode", enabled: true } as const;
@@ -84,9 +94,13 @@ export function t3SettingsPath(env: Env): string {
  * dl t3 gives it can be picked. Creates the file when missing; keeps every other key, including
  * the instance's own; writes nothing when it's already on. The first time it changes an existing
  * file it copies it to settings.json.dl-backup. A file that isn't a JSON object is left alone.
- * Returns what happened: "enabled", "unchanged", or why it couldn't.
+ * `allow`, when given, is asked only when a write is needed, before it; false leaves the file
+ * alone ("declined"). Returns what happened: "enabled", "unchanged", "declined", or why it couldn't.
  */
-export async function enableT3OpenCode(path: string): Promise<{ result: "enabled" | "unchanged" } | { error: string }> {
+export async function enableT3OpenCode(
+  path: string,
+  options: { allow?: () => Promise<boolean> } = {},
+): Promise<{ result: "enabled" | "unchanged" | "declined" } | { error: string }> {
   let text: string | undefined;
   try {
     text = await readFile(path, "utf8");
@@ -110,6 +124,7 @@ export async function enableT3OpenCode(path: string): Promise<{ result: "enabled
   if (current !== undefined && !isObject(current)) return { error: `providerInstances.opencode in ${path} isn't an object, so dl left it alone` };
   if (current?.driver === OPENCODE_INSTANCE.driver && current.enabled === true) return { result: "unchanged" };
   const next = { ...settings, providerInstances: { ...instances, opencode: { ...current, ...OPENCODE_INSTANCE } } };
+  if (options.allow && !(await options.allow())) return { result: "declined" };
   try {
     await mkdir(dirname(path), { recursive: true });
     if (text !== undefined) await copyFile(path, `${path}.dl-backup`, fsConstants.COPYFILE_EXCL /* only the first time */).catch((error) => {
@@ -167,23 +182,25 @@ export function t3Launch(deps: T3Deps = {}): HarnessLaunch {
     sessionPrefix: "dl-t3",
     missing: `${T3_INSTALL}\n\n  or with npm: ${T3_INSTALL_NPM}`,
     binaries: { posix: ["t3"], win32: ["t3.exe", "t3.cmd", "t3"] },
-    check: async (args, { env, cwd }) => t3Refusal(args) ?? (await claudeSettingsRefusal("dl t3", "dl's free tier", { env, cwd })),
+    check: async (args, { env, cwd }) => t3Refusal(withoutDlFlags(args)) ?? (await claudeSettingsRefusal("dl t3", "dl's free tier", { env, cwd })),
     prepare: async ({ env, args, origin, keys }) => {
       const claudeKey = keys["claude-code"];
       const opencodeKey = keys.opencode;
       if (!claudeKey || !opencodeKey) return { error: "The free tier didn't give dl t3 a key for each agent. Try again." };
       const models = await freeTierModels(call, origin, opencodeKey);
       const settingsPath = deps.t3Settings ?? t3SettingsPath(env);
-      const enabled = await enableT3OpenCode(settingsPath);
+      const enabled = await enableT3OpenCode(settingsPath, { allow: openCodeConsent(args, settingsPath, deps.confirm) });
       return {
         ...t3Env(env, { origin, claudeKey, opencodeKey, models }),
-        args,
+        args: withoutDlFlags(args),
         notes: [
           ...("error" in enabled
             ? [`OpenCode is off in T3 Code by default and dl couldn't turn it on (${enabled.error}). Turn it on in T3 Code's settings.`]
             : enabled.result === "enabled"
               ? [`Turned on OpenCode in T3 Code's settings (${settingsPath}); it's off by default.`]
-              : []),
+              : enabled.result === "declined"
+                ? [`OpenCode is off in T3 Code (it ships that way) and dl left its settings alone. Turn it on in T3 Code's settings, or run dl t3 ${ENABLE_OPENCODE_FLAG} to let dl do it.`]
+                : []),
           `Claude Code and OpenCode in this T3 Code server use free tokens until you stop it. In OpenCode pick a ${PROVIDER_ID}/… model (${PROVIDER_ID}/${DEFAULT_MODEL}); Claude Code is served by DeepSeek whatever model T3 Code shows.`,
           "The T3 Code desktop app and t3 service don't get free tokens; use this server's web page. If T3 Code says a server is already running, quit it first (or add --base-dir DIR).",
         ],
@@ -192,6 +209,27 @@ export function t3Launch(deps: T3Deps = {}): HarnessLaunch {
   };
 }
 
+/** `args` without dl t3's own flags, which t3 doesn't know. */
+function withoutDlFlags(args: string[]): string[] {
+  return args.filter((arg) => arg !== ENABLE_OPENCODE_FLAG);
+}
+
+/**
+ * Whether dl may write T3 Code's settings: yes with --dl-enable-opencode; else the person's answer
+ * at a terminal; else no.
+ */
+function openCodeConsent(args: string[], path: string, confirm: ((question: string) => Promise<boolean>) | null | undefined): () => Promise<boolean> {
+  if (args.includes(ENABLE_OPENCODE_FLAG)) return async () => true;
+  if (!confirm) return async () => false;
+  return () => confirm(`\n  T3 Code ships its OpenCode agent turned off. dl t3 can turn it on in ${path}\n  (providerInstances.opencode.enabled; nothing else changes, and a backup is kept). Turn it on? [Y/n] `);
+}
+
 export async function t3Command(args: string[], io: LaunchIO, deps: T3Deps = {}): Promise<number> {
-  return launchHarness(t3Launch(deps), args, io, deps);
+  const confirm = deps.confirm !== undefined ? deps.confirm : process.stdin.isTTY === true && process.stderr.isTTY === true ? ttyConfirm() : null;
+  return launchHarness(t3Launch({ ...deps, confirm }), args, io, deps);
+}
+
+function ttyConfirm(): (question: string) => Promise<boolean> {
+  const prompter = new TtyPrompter();
+  return async (question) => !/^n/i.test((await prompter.text(question)).trim());
 }

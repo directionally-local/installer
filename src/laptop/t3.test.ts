@@ -93,6 +93,7 @@ function deps(overrides: Partial<T3Deps> = {}): T3Deps {
     clearInterval: () => undefined,
     terminal: false,
     onSignal: () => () => undefined,
+    confirm: null,
     ...overrides,
   };
 }
@@ -276,7 +277,11 @@ describe("dl t3 turns on T3 Code's OpenCode", () => {
     assert.equal(path, join(home, ".t3", "userdata", "settings.json"));
     const service = fakeService();
     const { io, err } = capture();
-    assert.equal(await t3Command(["serve"], io, deps({ fetch: service.fetch, spawn: fakeSpawn().spawn, t3Settings: undefined, env: { PATH: "/usr/bin", HOME: home } })), 0);
+    const asked: string[] = [];
+    const confirm = async (question: string) => { asked.push(question); return true; };
+    assert.equal(await t3Command(["serve"], io, deps({ fetch: service.fetch, spawn: fakeSpawn().spawn, t3Settings: undefined, env: { PATH: "/usr/bin", HOME: home }, confirm })), 0);
+    assert.equal(asked.length, 1);
+    assert.match(asked[0]!, new RegExp(`${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*Turn it on\\? \\[Y/n\\]`));
     assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { providerInstances: { opencode: { driver: "opencode", enabled: true } } });
     assert.match(err(), /Turned on OpenCode in T3 Code's settings/);
     assert.match(err(), /In OpenCode pick a dl\/… model/);
@@ -317,5 +322,54 @@ describe("dl t3 turns on T3 Code's OpenCode", () => {
     assert.match(err(), /couldn't turn it on \(.*isn't valid JSON/);
     await writeFile(path, JSON.stringify({ providerInstances: [] }));
     assert.match((await enableT3OpenCode(path) as { error: string }).error, /providerInstances .* isn't an object/);
+  });
+
+  it("without a terminal or --dl-enable-opencode, leaves the file alone and says how to turn it on", async () => {
+    const dir = join(HOME, "no-tty");
+    const path = join(dir, "settings.json");
+    const child = fakeSpawn();
+    const { io, err } = capture();
+    assert.equal(await t3Command(["serve"], io, deps({ fetch: fakeService().fetch, spawn: child.spawn, t3Settings: path })), 0);
+    assert.equal(child.started.length, 1, "T3 Code still starts");
+    await assert.rejects(readFile(path, "utf8"), { code: "ENOENT" });
+    assert.match(err(), /dl left its settings alone[\s\S]*dl t3 --dl-enable-opencode/);
+  });
+
+  it("a declined question leaves the file alone", async () => {
+    const dir = join(HOME, "declined");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "settings.json");
+    const original = JSON.stringify({ theme: "dark" });
+    await writeFile(path, original);
+    const { io, err } = capture();
+    assert.equal(await t3Command([], io, deps({ fetch: fakeService().fetch, spawn: fakeSpawn().spawn, t3Settings: path, confirm: async () => false })), 0);
+    assert.equal(await readFile(path, "utf8"), original);
+    assert.deepEqual(await readdir(dir), ["settings.json"], "no backup either");
+    assert.match(err(), /dl left its settings alone/);
+  });
+
+  it("--dl-enable-opencode turns it on without asking, and t3 never sees the flag", async () => {
+    const path = join(HOME, "flag", "settings.json");
+    const child = fakeSpawn();
+    const { io, err } = capture();
+    const confirm = async () => assert.fail("no question expected");
+    assert.equal(await t3Command(["--dl-enable-opencode", "serve", "--port", "3773"], io, deps({ fetch: fakeService().fetch, spawn: child.spawn, t3Settings: path, confirm })), 0);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { providerInstances: { opencode: { driver: "opencode", enabled: true } } });
+    assert.deepEqual(child.started[0]!.args, ["serve", "--port", "3773"]);
+    assert.match(err(), /Turned on OpenCode/);
+    // A refused command is still refused with the flag in front of it.
+    const refused = capture();
+    assert.equal(await t3Command(["--dl-enable-opencode", "app"], refused.io, deps({ fetch: fakeService().fetch, token: async () => assert.fail("no token expected") })), 1);
+  });
+
+  it("doesn't ask when OpenCode is already on", async () => {
+    const dir = join(HOME, "already");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "settings.json");
+    await writeFile(path, JSON.stringify({ providerInstances: { opencode: { driver: "opencode", enabled: true } } }));
+    const { io, err } = capture();
+    const confirm = async () => assert.fail("no question expected");
+    assert.equal(await t3Command([], io, deps({ fetch: fakeService().fetch, spawn: fakeSpawn().spawn, t3Settings: path, confirm })), 0);
+    assert.doesNotMatch(err(), /OpenCode is off|Turned on OpenCode/);
   });
 });
