@@ -310,8 +310,9 @@ customer's email. Errors as `/web/auth/email/verify`.
 ### GET /web/settings, PUT /web/settings {fallback} (web token)
 
 `{"fallback": true}`: at a model's weekly limit, requests move to DeepSeek V4.1 Flash while it
-has allowance (default on). `false`: a clear limit error instead. One store: meta
-`plan_fallback` on the account, which `settings()`, part B's `planState()` and
+has allowance (default on), with the notice at the start of the answer and in `x-dl-notice`, and
+`x-dl-fallback: <the model that answered>` (as for a provider failover). `false`: a clear limit
+error instead. One store: meta `plan_fallback` on the account, which `settings()`, part B's `planState()` and
 `POST /v1/plan/fallback` all read and write.
 
 ## 4. API keys (`dl_sk_`)
@@ -464,7 +465,7 @@ tokens with the plans' factor: 20M real = **1,282,000 counted**, 10M = **641,000
 `cachedTokenWeight` 0.02). Both trials serve **DeepSeek V4.1 Flash only**; any other model
 falls back to it with a notice (`[dl.new] Kimi K3.1 starts when your plan starts. Now using
 DeepSeek V4.1 Flash.` on a card trial whose plan has the model; `… isn't in the free trial.`
-otherwise). Trial usage is shown in the week's usage but never counts against the plan's weekly
+otherwise; `x-dl-fallback` names DeepSeek, as for any request another model answered). Trial usage is shown in the week's usage but never counts against the plan's weekly
 limits (`model_usage.trial_counted`).
 
 **`GET /web/plans` and `/v1/plans`** add:

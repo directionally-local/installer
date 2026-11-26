@@ -188,7 +188,7 @@ describe("paid plans: through the API", () => {
     assert.equal(service.calls.liquid.length, 1, "DeepSeek served");
     assert.equal(service.calls.luminal.length, 1);
     assert.equal(second.headers.get("x-dl-notice"), "Kimi K3.1 used up until Mon 00:00 UTC, now using DeepSeek V4.1 Flash.");
-    assert.equal(second.headers.get("x-dl-fallback"), null, "not Autopilot's provider-failure line");
+    assert.equal(second.headers.get("x-dl-fallback"), MODEL, "the model that answered, not the Kimi asked for");
     assert.equal(await contentOf(second), "[dl.new] Kimi K3.1 used up until Mon 00:00 UTC, now using DeepSeek V4.1 Flash.\n\nhi");
     const view = await usageOf(service, token);
     assert.equal(view.models.find((model: Record<string, unknown>) => model.model === MODEL).failovers, 1);

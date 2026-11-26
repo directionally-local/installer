@@ -224,7 +224,7 @@ describe("trials: a card trial in use", () => {
     assert.equal(kimi.status, 200, await kimi.clone().text());
     assert.match(kimi.headers.get("x-dl-notice") ?? "", /Kimi K3\.1 starts when your plan starts\. Now using DeepSeek V4\.1 Flash\./);
     assert.match(await content(kimi), /^\[dl\.new\] Kimi K3\.1 starts when your plan starts\./);
-    assert.equal(kimi.headers.get("x-dl-fallback"), null);
+    assert.equal(kimi.headers.get("x-dl-fallback"), MODEL, "DeepSeek answered, not the Kimi asked for");
     const me = await account(service, token);
     assert.equal(me.trial.countedUsed, 286);
     assert.equal(me.limits[0].countedUsed, 0, "trial usage never counts against the plan's week");
