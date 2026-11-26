@@ -1168,11 +1168,16 @@ async function refundRequest(c: Ctx): Promise<Response> {
 /**
  * The names of the plan's models whose weekly meter is at 100% this week (counted tokens at or
  * over the limit, as plan-limits.ts refuses them): any one makes the first payment non-refundable.
+ * A free trial's tokens are left out, as the plan meter leaves them out (plan-meter.ts).
  */
 async function limitsReached(c: Ctx, accountNumber: number, plan: PlanId, config: PlanSettingsConfig & { cachedTokenWeight: number }): Promise<string[]> {
   const meters = await account(c, accountNumber).meters(c.now());
+  const planCounted = (model: string) => {
+    const row = meters.models.find((entry) => entry.model === model);
+    return Math.max(0, (row?.counted ?? 0) - (row?.trialCounted ?? 0));
+  };
   return planLimits(plan, config)
-    .filter((limit) => limit.countedTokens > 0 && (meters.models.find((row) => row.model === limit.model)?.counted ?? 0) >= limit.countedTokens)
+    .filter((limit) => limit.countedTokens > 0 && planCounted(limit.model) >= limit.countedTokens)
     .map((limit) => limit.name);
 }
 
