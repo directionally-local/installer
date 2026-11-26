@@ -1,14 +1,15 @@
 /**
  * directionallylocal.run: the install script at the bare domain, for
  * `curl -fsSL https://directionallylocal.run | sh`, and dl's prebuilt bundles under /dl/
- * for it to download. Browsers go to the marketing site. The zone's subdomains are users'
- * instant addresses (and the domain is on the Public Suffix List), so this serves nothing
- * else and never sets a cookie.
+ * for it to download. A browser at the bare domain goes to the marketing site; at /install.sh
+ * it gets the script as plain text, to read before piping it to sh. The zone's subdomains are
+ * users' instant addresses (and the domain is on the Public Suffix List), so this serves
+ * nothing else and never sets a cookie.
  *
  * Each script served is counted, anonymously, at the free tier service (`downloadCount`,
  * `sendCount`): only that it was served, from here, to curl, wget or something else, and the
- * day it arrives. No IP address, no user agent, nothing from the URL. Bundle downloads aren't
- * counted here.
+ * day it arrives. No IP address, no user agent, nothing from the URL. Bundle downloads and
+ * browsers reading the script aren't counted here.
  */
 
 export const MARKETING_SITE = "https://directionallylocal.com/";
@@ -85,14 +86,20 @@ export function respond(request: Request, script: string): Response {
   if (url.pathname !== "/" && url.pathname !== "/install.sh") {
     return new Response("Not found\n", { status: 404, headers: textHeaders() });
   }
-  // curl sends `Accept: */*`; a browser asks for HTML first.
-  if ((request.headers.get("Accept") ?? "").includes("text/html")) {
+  // curl sends `Accept: */*`; a browser asks for HTML first. At the bare domain a browser gets
+  // the marketing site; /install.sh is the same text curl gets, readable before it's run.
+  if (url.pathname === "/" && wantsHtml(request)) {
     return new Response(null, { status: 302, headers: { Location: MARKETING_SITE, ...SECURITY_HEADERS } });
   }
   return new Response(request.method === "HEAD" ? null : script, {
     status: 200,
     headers: { ...textHeaders(), "Cache-Control": "public, max-age=300" },
   });
+}
+
+/** A browser's request: it asks for HTML first (curl and wget send `Accept: *\/*`). */
+function wantsHtml(request: Request): boolean {
+  return (request.headers.get("Accept") ?? "").includes("text/html");
 }
 
 const SECURITY_HEADERS = {
@@ -115,11 +122,11 @@ export interface DownloadCount {
 
 /**
  * The count for a response, or undefined when it isn't a script served: a redirect, a 404, a
- * HEAD. dl.new's scripts fetch this one with `?via=<page>` after counting it there, so those
- * aren't counted twice.
+ * HEAD, or a browser reading /install.sh (not an install). dl.new's scripts fetch this one with
+ * `?via=<page>` after counting it there, so those aren't counted twice.
  */
 export function downloadCount(request: Request, response: Response): DownloadCount | undefined {
-  if (request.method !== "GET" || response.status !== 200) return undefined;
+  if (request.method !== "GET" || response.status !== 200 || wantsHtml(request)) return undefined;
   if (new URL(request.url).searchParams.has("via")) return undefined;
   const agent = request.headers.get("User-Agent") ?? "";
   const client = /^curl\//i.test(agent) ? "curl" : /^wget\//i.test(agent) ? "wget" : "other";
