@@ -3391,8 +3391,10 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
     if (guarded) return toAnthropicErrorResponse(guarded, tool);
     return json({ input_tokens: estimateInputTokens(request) });
   }
-  // Claude Code's own model names (claude-*) go to the plan's default model (DeepSeek); an exact
-  // open-model id it names (ANTHROPIC_MODEL=moonshotai/kimi-k3.1-pro) is served when the plan has it.
+  // Every request here is served by DeepSeek: Claude Code's own model names (claude-*) and any
+  // other id it names, Kimi included even on a plan that has it (anthropicModelFor; `chat` also
+  // refuses non-DeepSeek models for the claude-code harness). Kimi is reachable only on the
+  // OpenAI-shaped /v1/chat/completions, e.g. with a dl_sk_ key (#387).
   const model = anthropicModelFor(request.model);
   const translated = toChatRequest(request, { model: model.id, vision: model.vision });
   if (!translated.ok) return anthropicErrorResponse(400, translated.message, "invalid_request");
