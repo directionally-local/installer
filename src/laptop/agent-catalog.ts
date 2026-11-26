@@ -1,5 +1,6 @@
+import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { access, readdir } from "node:fs/promises";
+import { access, readdir, stat } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -8,7 +9,9 @@ import { delimiter, join } from "node:path";
  * the usual places installers put them when PATH doesn't have them yet), macOS app bundles in
  * /Applications and ~/Applications, Linux .desktop entries (including Flatpak and Snap exports),
  * and VS Code-family extensions (VS Code, Insiders, VSCodium, Cursor, Windsurf, Kiro, Trae, and
- * VS Code Server on a remote box). Reads directory listings only; runs nothing.
+ * VS Code Server on a remote box). Reads directory listings only; runs nothing, except
+ * `<cli> --version` for a CLI whose name an unrelated tool shares (`confirm`), and only when
+ * the agent's own config folder isn't there to say so.
  *
  * What dl does with each, once picked (router.ts):
  *  - `dl`: a CLI dl starts itself on the person's dl key (dl claude, dl opencode, dl pi, dl t3).
@@ -37,7 +40,27 @@ export interface AgentSpec {
   dl?: LaunchCommand;
   /** It only uses its own vendor's models: no custom endpoint to give it. */
   noCustomModels?: boolean;
+  /**
+   * The CLI's name is shared with an unrelated tool (Block's Goose and the `goose` database
+   * migration tool): a CLI found counts only when one of `configDirs` (home-relative) exists, or
+   * else its `--version` output passes `version`. Apps and extensions don't need this.
+   */
+  confirm?: { configDirs: string[]; version: (output: string) => boolean };
 }
+
+/**
+ * Block's Goose, not pressly's `goose` database migration tool (also a `goose` on PATH, from
+ * `go install` or Homebrew), whose --version prints "goose version: v3.26.0". Block's prints its
+ * bare version ("1.15.0", or with a name in front); its config is in ~/.config/goose.
+ */
+export const GOOSE_CONFIRM: NonNullable<AgentSpec["confirm"]> = {
+  configDirs: [".config/goose", ".local/share/goose", "Library/Application Support/Goose"],
+  version: (output) => {
+    const text = output.trim();
+    if (!text || /version:\s*v?\d/i.test(text) || /DRIVER|DBSTRING|migration/i.test(text)) return false;
+    return /^(?:goose\s+)?v?\d+\.\d+\.\d+/i.test(text);
+  },
+};
 
 /** dl's own agent; never in the found list, always offered last (or first, when it was last used). */
 export const AUTOPILOT_ID = "autopilot";
@@ -56,7 +79,7 @@ export const AGENT_CATALOG: readonly AgentSpec[] = [
   { id: "zed", name: "Zed", bins: ["zed", "zeditor", "zedit"], macApps: ["Zed"], desktop: /^(zed|dev\.zed\.zed)/ },
   { id: "codex", name: "Codex CLI", bins: ["codex"], extensions: ["openai.chatgpt"] },
   { id: "aider", name: "Aider", bins: ["aider"] },
-  { id: "goose", name: "Goose", bins: ["goose"], homeBins: [".local/bin/goose"], macApps: ["Goose"], desktop: /^goose/ },
+  { id: "goose", name: "Goose", bins: ["goose"], homeBins: [".local/bin/goose"], macApps: ["Goose"], desktop: /^goose/, confirm: GOOSE_CONFIRM },
   { id: "continue", name: "Continue", bins: ["cn"], extensions: ["continue.continue"] },
   { id: "roo", name: "Roo Code", extensions: ["rooveterinaryinc.roo-cline"] },
   { id: "kilo", name: "Kilo Code", bins: ["kilocode", "kilo"], extensions: ["kilocode.kilo-code"] },
@@ -122,11 +145,23 @@ export interface DetectDeps {
   executable?: (path: string) => Promise<boolean>;
   /** A directory's entry names; [] when it can't be read. */
   list?: (dir: string) => Promise<string[]>;
+  /** Whether `path` is a directory (an agent's config folder, for `confirm`). */
+  isDir?: (path: string) => Promise<boolean>;
+  /** `path --version`'s output (stdout and stderr), or undefined when it didn't run in time (for `confirm`). */
+  version?: (path: string) => Promise<string | undefined>;
   catalog?: readonly AgentSpec[];
 }
 
 const realExecutable = (path: string) => access(path, constants.X_OK).then(() => true, () => false);
 const realList = (dir: string) => readdir(dir).catch(() => [] as string[]);
+const realIsDir = (path: string) => stat(path).then((info) => info.isDirectory(), () => false);
+/** `path --version`, no shell, 3 seconds at most. */
+const realVersion = (path: string) => new Promise<string | undefined>((resolve) => {
+  execFile(path, ["--version"], { timeout: 3_000, maxBuffer: 64 * 1024 }, (error, stdout, stderr) => {
+    const output = `${stdout ?? ""}${stderr ?? ""}`;
+    resolve(error && !output.trim() ? undefined : output);
+  });
+});
 
 /** Every catalog agent found on this computer, in catalog order. */
 export async function detectAgents(deps: DetectDeps = {}): Promise<DetectedAgent[]> {
@@ -145,13 +180,20 @@ export async function detectAgents(deps: DetectDeps = {}): Promise<DetectedAgent
   // nvm keeps each Node's global CLIs in its own bin; every one counts.
   const nvm = (await list(join(env.NVM_DIR || join(home, ".nvm"), "versions", "node"))).map((version) => join(env.NVM_DIR || join(home, ".nvm"), "versions", "node", version, "bin"));
   const binDirs = [...new Set([...(env.PATH ?? "").split(delimiter).filter(Boolean), ...COMMON_BIN_DIRS.map(abs), ...nvm])];
-  const findBin = async (names: string[]): Promise<{ name: string; path: string } | undefined> => {
+  // A CLI whose name an unrelated tool shares: its config folder, else its --version, says which it is.
+  const confirmed = async (spec: AgentSpec, path: string): Promise<boolean> => {
+    if (!spec.confirm) return true;
+    for (const dir of spec.confirm.configDirs) if (await (deps.isDir ?? realIsDir)(join(home, dir))) return true;
+    const output = await (deps.version ?? realVersion)(path).catch(() => undefined);
+    return output !== undefined && spec.confirm.version(output);
+  };
+  const findBin = async (spec: AgentSpec, names: string[]): Promise<{ name: string; path: string } | undefined> => {
     for (const name of names) {
       for (const dir of binDirs) {
         // Only what's there: a listing per directory, then one access check for a match.
         if (!(await list(dir)).includes(name)) continue;
         const path = join(dir, name);
-        if (await executable(path)) return { name, path };
+        if ((await executable(path)) && (await confirmed(spec, path))) return { name, path };
       }
     }
     return undefined;
@@ -166,13 +208,13 @@ export async function detectAgents(deps: DetectDeps = {}): Promise<DetectedAgent
   for (const spec of deps.catalog ?? AGENT_CATALOG) {
     const how: string[] = [];
     let path: string | undefined;
-    const bin = spec.bins ? await findBin(spec.bins) : undefined;
+    const bin = spec.bins ? await findBin(spec, spec.bins) : undefined;
     if (bin) {
       how.push(bin.name);
       path = bin.path;
     } else {
       for (const relative of spec.homeBins ?? []) {
-        if (await executable(join(home, relative))) {
+        if ((await executable(join(home, relative))) && (await confirmed(spec, join(home, relative)))) {
           how.push(relative.split("/").pop()!);
           path = join(home, relative);
           break;

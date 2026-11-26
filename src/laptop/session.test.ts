@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { main, splitPassthrough, type MainOptions } from "../cli.js";
+import { GPU_FIRST_RUN_HINT, main, splitPassthrough, type MainOptions } from "../cli.js";
 import { PATHS } from "../layout.js";
 import { PAIRED_NAME } from "../local/layout.js";
 import { ScriptedPrompter } from "../prompt.js";
@@ -878,6 +878,18 @@ describe("dl the first time on a laptop", () => {
     assert.equal(await inside(dir, () => main(["new", "--", "--verbose"], capture(), laptop())), 0);
     assert.deepEqual(plain.launches[2]!.args, [...AUTOPILOT.args, "--verbose"]);
     assert.equal(api.requests.length, 0);
+  });
+
+  it("a GPU box's first run stays Autopilot's GPU first run, with one line on dl agent first", async () => {
+    const dir = join(root, "gpu-first");
+    await mkdir(dir);
+    const io = capture();
+    const routed: unknown[] = [];
+    assert.equal(await inside(dir, () => main([], io, laptop(undefined, { gpuBox: async () => "first-run", router: async () => (routed.push(1), 0) }))), 0);
+    assert.equal(plain.launches.length, 1, "Autopilot, which offers to serve a model on the GPUs");
+    assert.deepEqual(routed, [], "not the router");
+    assert.equal(plainText(io.text()), `  ${GPU_FIRST_RUN_HINT}\n`);
+    assert.match(GPU_FIRST_RUN_HINT, /dl agent picks the coding agent/);
   });
 
   it("bare dl on a laptop is the router: dl -c continues there; dl -- ARGS and -m stay Autopilot's", async () => {

@@ -84,6 +84,17 @@ describe("dl's own sign-in", () => {
     assert.equal(await dlKeyOrSignIn(io, { env: {}, path: join(dir, "none.json"), interactive: false }), undefined);
   });
 
+  it("with no dl key, takes one made from an older Autopilot free tier sign-in before any browser sign-in", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dl-key-"));
+    const migrated: DlKey = { ...KEY, source: "free-tier" };
+    const got = await dlKeyOrSignIn(capture(), { env: {}, path: join(dir, "none.json"), migrate: async () => migrated, fetch: async () => { throw new Error("no browser sign-in"); } });
+    assert.equal(got?.source, "free-tier");
+    // A saved key comes first: nothing is made.
+    const path = join(dir, "dl-key.json");
+    await saveDlKey(KEY, {}, path);
+    assert.equal((await dlKeyOrSignIn(capture(), { env: {}, path, migrate: async () => assert.fail("made a key") }))?.key, KEY.key);
+  });
+
   it("shows keys and plans briefly", () => {
     assert.equal(maskKey(KEY.key), "dl_sk_…cdef");
     assert.equal(planName("starter"), "Starter");

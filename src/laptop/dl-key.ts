@@ -38,6 +38,11 @@ export interface DlKey {
   /** https://api.dl.new/anthropic */
   anthropicBaseUrl: string;
   savedAt: string;
+  /**
+   * "free-tier": a key dl made for itself from an Autopilot free tier sign-in kept from before
+   * dl had its own (api-key.ts, dlKeyFromFreeTier). Autopilot keeps its own sign-in then.
+   */
+  source?: "free-tier";
 }
 
 /** The public API address the keys work against. */
@@ -82,6 +87,7 @@ export async function readDlKey(env: Env = process.env, path: string = dlKeyPath
       baseUrl,
       anthropicBaseUrl: typeof value.anthropicBaseUrl === "string" && value.anthropicBaseUrl.startsWith("http") ? value.anthropicBaseUrl : `${baseUrl}/anthropic`,
       savedAt: typeof value.savedAt === "string" ? value.savedAt : "",
+      ...(value.source === "free-tier" ? { source: "free-tier" as const } : {}),
     };
   } catch {
     return undefined;
@@ -240,10 +246,15 @@ export async function browserSignIn(io: SignInIO, deps: SignInDeps = {}): Promis
   return undefined;
 }
 
-/** The saved key, or (in a terminal) a browser sign-in now. */
-export async function dlKeyOrSignIn(io: SignInIO, deps: SignInDeps & { interactive?: boolean; read?: () => Promise<DlKey | undefined> } = {}): Promise<DlKey | undefined> {
+/**
+ * The saved key; else one made from an older Autopilot free tier sign-in (`migrate`, so an update
+ * doesn't sign anyone out); else (in a terminal) a browser sign-in now.
+ */
+export async function dlKeyOrSignIn(io: SignInIO, deps: SignInDeps & { interactive?: boolean; read?: () => Promise<DlKey | undefined>; migrate?: () => Promise<DlKey | undefined> } = {}): Promise<DlKey | undefined> {
   const saved = await (deps.read ?? (() => readDlKey(deps.env ?? process.env, deps.path)))();
   if (saved) return saved;
+  const migrated = await deps.migrate?.().catch(() => undefined);
+  if (migrated) return migrated;
   if (deps.interactive === false) return undefined;
   return browserSignIn(io, deps);
 }

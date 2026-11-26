@@ -20,7 +20,7 @@ import { piCommand } from "./laptop/pi.js";
 import { conductorCommand, proxyCommand } from "./laptop/proxy.js";
 import { t3Command } from "./laptop/t3.js";
 import { acpCommand, zedCommand } from "./laptop/zed.js";
-import { apiKeyCommand } from "./laptop/api-key.js";
+import { apiKeyCommand, dlKeyFromFreeTier } from "./laptop/api-key.js";
 import { loadRemotes, resolveTarget } from "./laptop/config.js";
 import { dlUpdate } from "./laptop/self-update.js";
 import { PAIRED_NAME } from "./local/layout.js";
@@ -287,8 +287,11 @@ export interface MainOptions {
   agentCommand?: typeof agentCommand;
   /** Bare `dl` on a laptop (router.ts); the real one unless replaced. */
   router?: typeof routerHome;
-  /** Whether this is a GPU box whose plain dl opens its own agent on its own model; looked up unless replaced. */
-  gpuBox?: () => Promise<boolean>;
+  /**
+   * Whether this is a GPU box whose plain dl opens its own agent on its own model ("first-run":
+   * GPUs, and nothing set up on them yet); looked up unless replaced.
+   */
+  gpuBox?: () => Promise<boolean | "first-run">;
   /** Marks an agent as the one last opened through dl; agents.json unless replaced. */
   recordAgentUse?: (id: string) => Promise<void>;
   /** `dl login`; the browser sign-in unless replaced. */
@@ -562,9 +565,12 @@ export async function main(
               // (router.ts): sign in, pick an agent found here, open it. `dl -- ARGS` and -m are
               // Autopilot's, and a GPU box keeps its own agent on its own model (dl agent).
               const toAutopilot = passthrough.length > 0 || values.model !== undefined;
-              if (terminal && !toAutopilot && !(await (options.gpuBox ?? gpuBox)())) {
+              const gpu = terminal && !toAutopilot ? await (options.gpuBox ?? gpuBox)() : false;
+              if (terminal && !toAutopilot && !gpu) {
                 return await (options.router ?? routerHome)(routerDeps(options, laptopIO), { continue: values.continue === true });
               }
+              // The GPU first run, as before; one line on where the agent picker is once it's done.
+              if (gpu === "first-run") io.err(`  ${colors.dim(GPU_FIRST_RUN_HINT)}\n`);
               return await autopilotOnKey(input, laptopIO);
             }
           }
@@ -1027,11 +1033,14 @@ export function splitPassthrough(argv: string[]): { argv: string[]; passthrough:
  * dl keeps its GPU first run there (Autopilot offers to serve a model on the GPUs) and then opens
  * the box's agent on the box's model; the router is for everyone else.
  */
-async function gpuBox(): Promise<boolean> {
-  if (existsSync("/dev/nvidia0") || existsSync("/proc/driver/nvidia/version")) return true;
-  if (await readAgentChoice().catch(() => undefined)) return true;
-  return Boolean(await readLocalModel(new RealSystem()).catch(() => undefined));
+async function gpuBox(): Promise<boolean | "first-run"> {
+  const [choice, model] = await Promise.all([readAgentChoice().catch(() => undefined), readLocalModel(new RealSystem()).catch(() => undefined)]);
+  if (choice || model) return true;
+  return existsSync("/dev/nvidia0") || existsSync("/proc/driver/nvidia/version") ? "first-run" : false;
 }
+
+/** Shown before a GPU box's first run: the picker for the agent plain dl opens is `dl agent`. */
+export const GPU_FIRST_RUN_HINT = "· GPU box: dl sets up a model on your GPUs first. Afterwards, dl agent picks the coding agent plain dl opens (Claude Code, OpenCode, Pi or Autopilot).";
 
 /** The router's real parts (router.ts), with MainOptions' replacements. */
 function routerDeps(options: MainOptions, io: { out: (text: string) => void; err: (text: string) => void; color?: boolean }): RouterDeps {
@@ -1047,7 +1056,7 @@ function routerDeps(options: MainOptions, io: { out: (text: string) => void; err
     prompter: options.prompter ?? new TtyPrompter({ color: io.color === true }),
     signIn: () => options.dlKey
       ? options.dlKey().then(async (key) => key ?? (options.signIn ? options.signIn(io) : undefined))
-      : dlKeyOrSignIn(io),
+      : dlKeyOrSignIn(io, { migrate: () => dlKeyFromFreeTier(io) }),
     detect: options.detectAgents ?? (() => detectAgents()),
     autopilotInstalled: async () => Boolean(await (options.session?.autopilot ?? findAutopilot)()),
     launch: (command, args) => commands[command](args, launchIO),
@@ -1064,6 +1073,7 @@ function routerDeps(options: MainOptions, io: { out: (text: string) => void; err
  */
 async function autopilotOnKey(input: SessionInput, io: { out: (text: string) => void; err: (text: string) => void; color?: boolean }): Promise<number> {
   const key = await readDlKey().catch(() => undefined);
-  if (key) Object.assign(process.env, autopilotKeyEnv(key, await autopilotProvider(autopilotConfigFile())));
+  // A key made from Autopilot's own free tier sign-in (an update from dl 0.47): Autopilot keeps that sign-in.
+  if (key && key.source !== "free-tier") Object.assign(process.env, autopilotKeyEnv(key, await autopilotProvider(autopilotConfigFile())));
   return await startHere({ ...(input.autopilot ? {} : { autopilot: () => ensureAutopilot(io) }), ...input }, io);
 }

@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { apiKeyCommand, apiKeyText, freeName, toolUrls, type ApiKeyDeps } from "./api-key.js";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { apiKeyCommand, apiKeyText, dlKeyFromFreeTier, freeName, toolUrls, type ApiKeyDeps } from "./api-key.js";
+import { readDlKey } from "./dl-key.js";
 import { palette } from "../ui.js";
 
 const ORIGIN = "https://free.example.test";
@@ -139,5 +143,48 @@ describe("api-key helpers", () => {
     assert.deepEqual(toolUrls("https://free.directionallylocal.com"), { openai: "https://api.dl.new/v1", anthropic: "https://api.dl.new/anthropic" });
     assert.deepEqual(toolUrls("https://free.directionallylocal.com/"), { openai: "https://api.dl.new/v1", anthropic: "https://api.dl.new/anthropic" });
     assert.match(apiKeyText({ origin: ORIGIN, key: KEY, name: "x", max: 3, color: palette(false) }), /At most 3 keys/);
+  });
+});
+
+describe("an update from dl 0.47: the Autopilot free tier sign-in becomes dl's key", () => {
+  const io = () => {
+    const text: string[] = [];
+    return { out: (t: string) => void text.push(t), err: (t: string) => void text.push(t), text: () => text.join("") };
+  };
+
+  it("makes a key named after this computer from that sign-in and keeps it as the dl key, with no browser", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dl-migrate-"));
+    try {
+      const path = join(dir, "dl-key.json");
+      const fake = fakeFetch({
+        "GET /v1/keys": listing([{ id: "aaaaaaaaaaaa", name: "dl on laptop", kind: "tool", createdAt: "2026-11-20T00:00:00.000Z", lastUsedAt: null }]),
+        "POST /v1/keys": { status: 201, body: { id: "abcdefabcdef", name: "dl on laptop-2", kind: "tool", key: KEY } },
+      });
+      const out = io();
+      const key = await dlKeyFromFreeTier(out, { fetch: fake.fetch, path, deviceName: "laptop.local", token: async () => ({ ok: true, origin: "https://free.directionallylocal.com", accessToken: "access-1" }) });
+      assert.equal(key?.key, KEY);
+      assert.deepEqual(fake.calls.find((call) => call.method === "POST")?.body, { name: "dl on laptop-2", kind: "tool" });
+      assert.equal(fake.calls[0]!.url, "https://free.directionallylocal.com/v1/keys", "made at the sign-in's own service");
+      const saved = await readDlKey({}, path);
+      assert.equal(saved?.key, KEY);
+      assert.equal(saved?.source, "free-tier");
+      assert.equal(saved?.baseUrl, "https://api.dl.new");
+      assert.equal(saved?.anthropicBaseUrl, "https://api.dl.new/anthropic");
+      assert.equal((await stat(path)).mode & 0o777, 0o600);
+      assert.match(out.text(), /Signed in with your free tier sign-in/);
+      assert.doesNotMatch(out.text(), new RegExp(KEY), "the key isn't printed");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does nothing without that sign-in, and says why when the key can't be made (the browser sign-in is next)", async () => {
+    const fake = fakeFetch({});
+    assert.equal(await dlKeyFromFreeTier(io(), { fetch: fake.fetch, token: async () => ({ ok: false, reason: "signed_out" }) }), undefined);
+    assert.equal(fake.calls.length, 0);
+    const full = fakeFetch({ "GET /v1/keys": listing(), "POST /v1/keys": { status: 409, body: { error: { code: "key_limit_reached", message: "You have 3 keys already." } } } });
+    const out = io();
+    assert.equal(await dlKeyFromFreeTier(out, { fetch: full.fetch, path: "/nonexistent/never-written.json", token: async () => ({ ok: true, origin: ORIGIN, accessToken: "a" }) }), undefined);
+    assert.match(out.text(), /Couldn't make dl a key from your free tier sign-in: You have 3 keys already\./);
   });
 });
