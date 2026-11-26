@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
 import type { RunResult, System } from "./system.js";
+import { scrubbedScript } from "./vendor-script.js";
 
 /**
  * Tailscale, as dl uses it: `tailscale serve` publishes a local port as HTTPS on this machine's
@@ -12,12 +13,17 @@ export const HTTPS_CERTS_URL = "https://login.tailscale.com/admin/dns";
 /** Tailscale's own install script, as server mode (dl up) runs it. */
 export const TAILSCALE_INSTALL = "curl -fsSL https://tailscale.com/install.sh | sh";
 
-/** Installs Tailscale unless it's there; returns whether it installed it. `sudo` when not root. */
+/**
+ * Installs Tailscale unless it's there; returns whether it installed it. `sudo` when not root.
+ * The script runs with a scrubbed environment (vendor-script.ts): dl up's auth key and the
+ * other answers in dl's environment never reach it.
+ */
 export async function installTailscale(system: System, options: { sudo?: boolean } = {}): Promise<boolean> {
   if ((await system.probe("tailscale", ["version"])).code === 0) return false;
   const describe = "install Tailscale (tailscale.com/install.sh)";
-  if (options.sudo) await system.run("sudo", ["sh", "-c", TAILSCALE_INSTALL], { inherit: true, describe });
-  else await system.run("sh", ["-c", TAILSCALE_INSTALL], { inherit: true, describe });
+  const script = scrubbedScript(TAILSCALE_INSTALL);
+  if (options.sudo) await system.run("sudo", ["sh", "-c", script], { inherit: true, describe });
+  else await system.run("sh", ["-c", script], { inherit: true, describe });
   return true;
 }
 

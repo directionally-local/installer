@@ -16,6 +16,12 @@
 # installs Node.js 24 if needed and the directionallylocal CLI (also `dl`), then runs `dl up`,
 # which asks how to reach this server and for the model key, and sets up Hotcell + Autopilot
 # as services. Safe to run again.
+# A server runs vendors' own install scripts as root, as they publish them (not pinned or
+# checked by this script): NodeSource's (deb.nodesource.com/setup_24.x, here, when Node.js is
+# missing or unpatched), and, from `dl up`, Docker's (get.docker.com, when Docker isn't
+# installed) and Tailscale's (tailscale.com/install.sh, when it's reached over Tailscale and
+# Tailscale isn't installed). None of them gets the secrets below: they're held back from
+# every command but `dl up` (and its vendor scripts run with a scrubbed environment).
 #
 # Which one: DL_MODE=server or DL_MODE=laptop decides. Otherwise it's a server only when the
 # laptop's setup runs it (DL_INSTALL_ONLY=1) or when dl up already set this Linux machine up
@@ -23,7 +29,8 @@
 # included, gets the coding agent. That's the same line `dl` itself draws.
 #
 # Unattended server: export DL_TAILSCALE_AUTH_KEY, DL_PROVIDER + DL_PROVIDER_API_KEY (or DL_OPENROUTER_API_KEY)
-# and DL_GITHUB_TOKEN first.
+# and DL_GITHUB_TOKEN first. Only `dl up` gets those four (and DL_INSTALL_CODE); through sudo,
+# root's other commands get only the non-secret variables in ROOT_ENV.
 # Install only (the laptop's setup, which then runs `dl up` itself over SSH): DL_INSTALL_ONLY=1.
 # Pin a version: DL_VERSION=0.1.0. Install from a local tarball: DL_PACKAGE=/path/to.tgz.
 # Laptop: DL_HOME=DIR installs somewhere else; DL_NO_START=1 doesn't start dl at the end;
@@ -115,13 +122,67 @@ count_install() {
   c_body="$c_body\"via\":\"$c_via\"}"
   (curl -fsS -m 3 -X POST -H 'Content-Type: application/json' -d "$c_body" https://free.directionallylocal.com/v1/telemetry/install >/dev/null 2>&1 &) 2>/dev/null || true
 }
-# Runs a command as root, through sudo when needed (keeping DL_* answers in the environment).
+# What root's commands keep from this environment when this runs through sudo (which starts
+# them with a clean one): the non-secret answers dl up reads, and what apt and the downloads
+# need. Never the secrets (SECRET_VARS): only dl up gets those, see hold_secrets and dl_up.
+ROOT_ENV="DEBIAN_FRONTEND DL_MODE DL_VERSION DL_INSTALL_ONLY DL_TITLE_SHOWN DL_ACCESS DL_PROVIDER DL_PROVIDER_BASE_URL DL_SKIP_CREDENTIAL_CHECK DL_REFERRAL DL_AUTOPILOT_SPEC DL_HOTCELL_SPEC DL_PREVIEWS_BUCKET DL_NO_TELEMETRY DO_NOT_TRACK CI NO_COLOR http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY"
+# The answers that are secrets: dl up's alone, never in the environment of NodeSource's script,
+# apt or npm (whose packages' install scripts run as root).
+SECRET_VARS="DL_TAILSCALE_AUTH_KEY DL_PROVIDER_API_KEY DL_OPENROUTER_API_KEY DL_GITHUB_TOKEN DL_INSTALL_CODE"
+# Names (comma-separated) sudo also passes through by name, set only for dl up (see dl_up).
+SUDO_KEEP=""
+
+# Runs a command as root: as it is when this is root; otherwise `sudo env NAME=VALUE… COMMAND`
+# with the ROOT_ENV variables that are set (an explicit list, not sudo -E).
 as_root() {
   if [ "$(id -u)" -eq 0 ]; then
     "$@"
-  else
-    sudo -E "$@"
+    return
   fi
+  ar_n=$#
+  for ar_name in $ROOT_ENV; do
+    eval "ar_set=\${$ar_name+1}"
+    if [ -n "$ar_set" ]; then eval "set -- \"\$@\" \"$ar_name=\${$ar_name}\""; fi
+  done
+  # The command first, the variables after it: move the command (the first ar_n) to the end.
+  while [ "$ar_n" -gt 0 ]; do
+    set -- "$@" "$1"
+    shift
+    ar_n=$((ar_n - 1))
+  done
+  if [ -n "$SUDO_KEEP" ]; then
+    sudo --preserve-env="$SUDO_KEEP" env "$@"
+  else
+    sudo env "$@"
+  fi
+}
+
+# Server mode, first thing: the secrets set in the environment go into shell variables of this
+# script (HELD_NAME, not exported) and out of the environment, so nothing started from here
+# (NodeSource's script, apt, npm and its packages' install scripts) sees them. HELD lists them.
+HELD=""
+hold_secrets() {
+  for hs_name in $SECRET_VARS; do
+    eval "hs_set=\${$hs_name+1}"
+    [ -n "$hs_set" ] || continue
+    eval "HELD_$hs_name=\$$hs_name"
+    unset "$hs_name"
+    HELD="$HELD $hs_name"
+  done
+}
+
+# dl up as root, the one command that gets the held secrets back: exported in a subshell, for
+# it alone. Through sudo they go by name (--preserve-env), so their values are never on a
+# command line other users could see.
+dl_up() {
+  (
+    for du_name in $HELD; do
+      eval "$du_name=\$HELD_$du_name"
+      export "${du_name?}"
+      SUDO_KEEP="$SUDO_KEEP${SUDO_KEEP:+,}$du_name"
+    done
+    as_root directionallylocal up
+  )
 }
 
 # The spinner frame for tick $1 (POSIX sh has no arrays, and multibyte cut isn't portable).
@@ -731,20 +792,40 @@ laptop_main() {
   tip "Already use Claude Code or OpenCode? Run dl claude or dl opencode to use your free dl tokens there."
 }
 
-# dl from npm (no bundle for this computer, or it didn't work). Uses $package, $npm and
+# dl from npm (no bundle for this computer, or it didn't work). Uses $package, $npm, $node and
 # $node_dir from laptop_main.
 install_with_npm() {
   STEP="Installing dl"
   # npm's download cache, and the Node.js headers node-gyp fetches to build a native module,
   # go in a folder of their own that's removed afterwards: dl's packages are installed once,
   # and kept in ~/.npm and ~/.cache/node-gyp they'd take another 190 MB.
-  # --loglevel=info and --foreground-scripts put each download and install script in the log,
-  # which is where watch_npm reads the progress from.
+  # --loglevel=info puts each download in the log, which is where watch_npm reads the progress from.
+  # --ignore-scripts: no dependency's install script runs. dl needs none of them but
+  # isolated-vm's, and that one only without a prebuilt binary (build_isolated_vm).
   NPM_CACHE="$DL_HOME/npm-cache"
   rm -rf "$NPM_CACHE"
   WATCH=watch_npm
-  quietly "installing $package" env PATH="$node_dir:$PATH" npm_config_devdir="$NPM_CACHE/node-gyp" "$npm" install -g --prefix "$DL_HOME/dl" --cache "$NPM_CACHE" --no-audit --no-fund --no-update-notifier --loglevel=info --foreground-scripts "$package"
+  quietly "installing $package" env PATH="$node_dir:$PATH" npm_config_devdir="$NPM_CACHE/node-gyp" "$npm" install -g --prefix "$DL_HOME/dl" --cache "$NPM_CACHE" --no-audit --no-fund --no-update-notifier --loglevel=info --ignore-scripts "$package"
+  build_isolated_vm
   rm -rf "$NPM_CACHE"
+}
+
+# isolated-vm, Autopilot's sandbox for Code Mode (an optional dependency), loads a prebuilt
+# binary for Linux x64 and arm64 and Apple Silicon on Node.js 22 and 24. Anywhere else (an
+# Intel Mac, another Node.js) it has to be compiled: then its own install script runs, and no
+# other package's. When that fails, dl still installs: Autopilot calls tools directly instead.
+build_isolated_vm() {
+  ivm=$(find "$DL_HOME/dl/lib/node_modules/directionallylocal" -type d -path '*/node_modules/isolated-vm' 2>/dev/null | head -n 1)
+  [ -n "$ivm" ] || return 0
+  if "$node" -e 'require(require("path").resolve(process.argv[1]))' "$ivm" >/dev/null 2>&1; then return 0; fi
+  step "Building native parts (one time, ~1 min)"
+  SOFT=1
+  # shellcheck disable=SC2016 # $1 and $@ are for that sh -c to expand
+  if ! quietly "building isolated-vm" sh -c 'cd "$1" && shift && exec "$@"' sh "$ivm" env PATH="$node_dir:$PATH" npm_config_devdir="$NPM_CACHE/node-gyp" "$npm" run install --cache "$NPM_CACHE" --no-update-notifier --foreground-scripts; then
+    hint "Couldn't build isolated-vm for Code Mode; Autopilot calls tools directly instead."
+  fi
+  STEP="Installing dl"
+  step "$STEP"
 }
 
 # A line the person needs to act on: bold, so it stands out from the steps above.
@@ -764,7 +845,7 @@ main() {
     ""|server|laptop) ;;
     *) fail "DL_MODE is server or laptop (got ${DL_MODE})" ;;
   esac
-  # An invite link's code stays in the environment of dl (and of dl up, through sudo -E).
+  # An invite link's code stays in the environment of dl (and of dl up, through sudo: ROOT_ENV).
   if [ -n "${DL_REFERRAL:-}" ]; then
     if DL_REFERRAL=$(normalize_referral "$DL_REFERRAL"); then
       export DL_REFERRAL
@@ -783,10 +864,18 @@ main() {
     fi
   fi
   COUNT_MODE=$(install_mode)
+  if [ "$COUNT_MODE" = laptop ] && sudo_without_mode && wants_server; then
+    COUNT_MODE=server
+    DL_MODE=server
+    export DL_MODE
+  fi
   if [ "$COUNT_MODE" = laptop ]; then
     laptop_main
     return
   fi
+
+  # Before anything else runs: the secrets go to dl up alone.
+  hold_secrets
 
   if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
     fail "run as root (or install sudo)"
@@ -843,11 +932,37 @@ main() {
   STAGE=dl_up
   REASON=""
   if (exec </dev/tty) 2>/dev/null; then
-    as_root directionallylocal up </dev/tty
+    dl_up </dev/tty
   else
-    as_root directionallylocal up
+    dl_up
   fi
   count_install ok
+}
+
+# Root through sudo on Linux (`curl … | sudo sh`) with no DL_MODE: that's the coding agent for
+# root, which is what this does, but often the server line without its DL_MODE=server.
+sudo_without_mode() {
+  [ -z "${DL_MODE:-}" ] && [ "$(id -u)" -eq 0 ] && [ "$(uname -s)" = Linux ] || return 1
+  case ${SUDO_USER:-root} in root) return 1 ;; esac
+}
+
+# Says what this install is and how to get a server instead; at a terminal, asks whether to set
+# up a server (no by default). Without one (piped, unattended), it's only the warning and the
+# install goes on. (DL_TTY stands in for the terminal in tests.)
+wants_server() {
+  ws_tty="${DL_TTY:-/dev/tty}"
+  say "  Running as root through sudo: this installs the coding agent for root, in $DL_HOME, not a server."
+  say "  For a server, run: curl -fsSL https://dl.new/install.sh | sudo DL_MODE=server sh"
+  if ! (exec <"$ws_tty") 2>/dev/null; then
+    say ""
+    return 1
+  fi
+  printf '  Set up this machine as a server instead? [y/N] '
+  ws_answer=""
+  read -r ws_answer <"$ws_tty" || ws_answer=""
+  say ""
+  case $ws_answer in y|Y|yes|Yes|YES) return 0 ;; esac
+  return 1
 }
 
 main "$@"
