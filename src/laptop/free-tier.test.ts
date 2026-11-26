@@ -132,6 +132,13 @@ describe("the free tier account in dl status", () => {
     assert.match(quiet.calls[0]!.url, /\/v1\/me$/);
     const escaped = stubs({ apiKey: ACCESS }, () => Response.json({ login: "octo", proPrompt: { text: "Limit\x1b]2;x\x07 hit.", upgradeUrl: "https://dl.new/account" } }));
     assert.equal((await freeTierAccount(escaped.options))?.proPrompt?.text, "Limit ]2;x hit.");
+    // Opted out of telemetry: the prompt still shows, but isn't counted as seen.
+    for (const optOut of [{ DL_NO_TELEMETRY: "1" }, { DO_NOT_TRACK: "1" }, { CI: "1" }]) {
+      const optedOut = stubs({ apiKey: ACCESS }, () => Response.json(body));
+      const read = await freeTierAccount({ ...optedOut.options, env: { ...optedOut.options.env, ...optOut }, showsProPrompt: true });
+      assert.match(optedOut.calls[0]!.url, /\/v1\/me$/);
+      assert.equal(read?.proPrompt?.text, text);
+    }
     for (const proPrompt of [null, { text }, { text, upgradeUrl: "javascript:alert(1)" }, { text, upgradeUrl: "https://dl.new/\x1b[2J" }, { text: 42, upgradeUrl: "https://dl.new/account" }]) {
       const { options } = stubs({ apiKey: ACCESS }, () => Response.json({ login: "octo", proPrompt }));
       const read = await freeTierAccount(options);

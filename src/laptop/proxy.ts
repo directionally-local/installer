@@ -10,6 +10,7 @@ import { modelStatePath } from "../state.js";
 import { palette } from "../ui.js";
 import { oneLine } from "./printable.js";
 import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
+import { telemetryOff } from "./telemetry.js";
 import { autopilotNudge, autopilotSignIn, REFRESH_EVERY_MS, SESSION_EVENT_EVERY_MS, type Harness, type LaunchIO } from "./harness-launch.js";
 
 /**
@@ -125,6 +126,8 @@ export interface KeyDeps {
   fetch: Fetch;
   now: () => number;
   log: (line: string) => void;
+  /** Read for the telemetry opt-out (telemetry.ts); process.env unless replaced. */
+  env?: Record<string, string | undefined>;
 }
 
 /**
@@ -274,11 +277,14 @@ export class HarnessKeys {
 
   private async event(live: LiveKey, type: "session.start" | "session.end", props: Record<string, unknown> = {}): Promise<void> {
     live.lastEventAt = this.deps.now();
+    // Opted out (telemetry.ts): only the bare session.start the dl-only check needs.
+    const optedOut = telemetryOff(this.deps.env ?? process.env);
+    if (optedOut && type === "session.end") return;
     try {
       await this.deps.fetch(`${live.origin}/v1/events`, {
         method: "POST",
         headers: { accept: "application/json", "content-type": "application/json", authorization: `Bearer ${live.key}` },
-        body: JSON.stringify({ events: [{ id: `${live.sessionId}-${++live.events}`, type, sessionId: live.sessionId, at: new Date(this.deps.now()).toISOString(), props: { harness: this.harness, os: platform(), ...props } }] }),
+        body: JSON.stringify({ events: [{ id: `${live.sessionId}-${++live.events}`, type, sessionId: live.sessionId, at: new Date(this.deps.now()).toISOString(), props: optedOut ? {} : { harness: this.harness, os: platform(), ...props } }] }),
         redirect: "error",
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
@@ -775,6 +781,8 @@ export const LAUNCH_AGENT = "com.directionallylocal.proxy";
 
 export function serviceFiles(input: { platform: NodeJS.Platform; home: string; node: string; script: string; port: number; log: string; env: Env }): { path: string; text: string } | undefined {
   const args = [input.node, input.script, "proxy", "run", "--port", String(input.port)];
+  // A login service doesn't see the shell's variables: an opt-out in force at install goes with it.
+  const optedOut = telemetryOff(input.env);
   if (input.platform === "linux") {
     const configHome = input.env.XDG_CONFIG_HOME?.trim() || join(input.home, ".config");
     const quote = (arg: string) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(arg) ? arg : `"${arg.replace(/(["\\$`])/g, "\\$1")}"`);
@@ -788,6 +796,7 @@ export function serviceFiles(input: { platform: NodeJS.Platform; home: string; n
         "[Service]",
         `ExecStart=${args.map(quote).join(" ")}`,
         "Environment=DL_PROXY_SERVICE=systemd",
+        ...(optedOut ? ["Environment=DL_NO_TELEMETRY=1"] : []),
         "Restart=on-failure",
         "RestartSec=5",
         "",
@@ -812,7 +821,7 @@ export function serviceFiles(input: { platform: NodeJS.Platform; home: string; n
 ${args.map((arg) => `    <string>${xml(arg)}</string>`).join("\n")}
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>DL_PROXY_SERVICE</key><string>launchd</string></dict>
+  <dict><key>DL_PROXY_SERVICE</key><string>launchd</string>${optedOut ? "<key>DL_NO_TELEMETRY</key><string>1</string>" : ""}</dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>StandardOutPath</key><string>${xml(input.log)}</string>
