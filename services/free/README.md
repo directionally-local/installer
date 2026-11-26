@@ -1872,7 +1872,12 @@ reservation. When it reports none, the reservation is **never** charged. Instead
   the reservation's estimate.
 - **Cached share**: the person's own share of cached prompt tokens over everything providers
   reported for them (`account.prompt_seen`, `cached_seen`), once at least 50,000 prompt tokens
-  were; until then, uncached. The tokens charged use `cachedTokenWeight` as usual.
+  were; until then, the plan mix's share (`PLAN_CACHED_SHARE`, 95.5 / (95.5 + 3.8), about 96%),
+  the same default the plan meters use for requests in flight. Assuming an uncached prompt would
+  count a new account's cut-off agent turn at 20-50x what it really used. The tokens charged use
+  `cachedTokenWeight` as usual. The prompt recorded against a provider's credit alone (cancelled
+  before output, abandoned) stays uncached until the person's share is known: our own books
+  are better over than under.
 - **Output streamed**: counted as the stream passes through, never kept: the content chunks
   (text, reasoning, tool calls) or the characters at 3 a token, whichever says more. So a client
   can't avoid the charge by aborting after a long answer. The stream reads from the upstream

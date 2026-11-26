@@ -164,7 +164,7 @@ export function streamedOutputTokens(chars: number, chunks: number): number {
 
 /**
  * A request's usage when the provider reported none: a realistic prompt from the reservation's
- * estimate, `cachedShare` of it cached (the person's own share so far; 0 when unknown), and the
+ * estimate, `cachedShare` of it cached (the person's own share so far, or the plan mix's when unknown), and the
  * output tokens that were actually streamed. No output means nothing is estimated: a request
  * that failed or was cancelled before any output is charged nothing.
  */

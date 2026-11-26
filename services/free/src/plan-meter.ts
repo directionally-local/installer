@@ -9,7 +9,7 @@
 
 import { DAY_MS, dayStart, weekStart } from "./week.js";
 import { realisticPromptTokens, type Usage } from "./quota.js";
-import { PLAN_MIX, type PlanTier, isPaidPlan } from "./plans.js";
+import { PLAN_CACHED_SHARE, type PlanTier, isPaidPlan } from "./plans.js";
 
 /** What the meters need of `ctx.storage.sql`. */
 export interface MeterSql {
@@ -164,7 +164,7 @@ export function bonusUsdThisWeek(sql: MeterSql, now: number): number {
  */
 export function inFlightOn(sql: MeterSql, model: string, cachedShare: number | undefined, cachedTokenWeight: number): { count: number; counted: number; usd: number } {
   const rows = sql.exec<{ prompt_estimate: number | null; cost_estimate: number | null }>("SELECT prompt_estimate, cost_estimate FROM reservations WHERE model = ?", model).toArray();
-  const share = cachedShare ?? PLAN_MIX.cached / (PLAN_MIX.cached + PLAN_MIX.fresh);
+  const share = cachedShare ?? PLAN_CACHED_SHARE;
   let counted = 0;
   let usd = 0;
   for (const row of rows) {

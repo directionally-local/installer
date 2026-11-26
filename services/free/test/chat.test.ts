@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADMIN_ID, completion, createInvite, createService, errorCode, MODEL, openaiResponse, responsesUsage, sse, usage, type Service } from "./harness.js";
+import { chargedTokens, estimatedUsage } from "../src/quota.js";
+import { PLAN_CACHED_SHARE } from "../src/plans.js";
 
 async function member(vars: Record<string, string> = {}): Promise<{ service: Service; token: string; adminToken: string }> {
   const service = await createService(vars);
@@ -164,8 +166,11 @@ describe("chat completions", () => {
     const forwarded = service.calls.openRouter[0]!.body;
     const bodyBytes = new TextEncoder().encode(JSON.stringify({ model: MODEL, messages: [{ role: "user", content: "hello" }], stream: true, max_tokens: 1000 })).length;
     assert.equal(forwarded.max_tokens, 1000);
-    // The prompt at ~4 bytes a token (not the reservation's 2), plus the one token streamed.
-    assert.equal((await me(service, token)).usedThisWeek, Math.ceil(Math.ceil(bodyBytes / 2) / 2) + 1);
+    // The prompt at ~4 bytes a token (not the reservation's 2), at the plan mix's cached share (no
+    // history yet), plus the one token streamed.
+    const estimate = estimatedUsage(Math.ceil(bodyBytes / 2), 1, PLAN_CACHED_SHARE)!;
+    assert.equal(estimate.promptTokens, Math.ceil(Math.ceil(bodyBytes / 2) / 2));
+    assert.equal((await me(service, token)).usedThisWeek, chargedTokens(estimate, 0.02));
   });
 
   it("settles a stream the client abandons", async () => {

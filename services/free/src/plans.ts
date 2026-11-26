@@ -34,6 +34,11 @@ export type PlanModelKey = keyof typeof PLAN_MODEL_KEYS;
 
 /** The caching mix the plan numbers are quoted at: share of real tokens that are cached input, fresh input and output. */
 export const PLAN_MIX = { cached: 0.955, fresh: 0.038, output: 0.007 } as const;
+/**
+ * The cached share of prompt tokens at the plan mix (about 0.9617): what an estimate assumes for a
+ * person whose own share isn't known yet (too little usage reported to tell).
+ */
+export const PLAN_CACHED_SHARE = PLAN_MIX.cached / (PLAN_MIX.cached + PLAN_MIX.fresh);
 /** How the plan numbers are labelled wherever they are shown. */
 export const PLAN_MIX_LABEL = "95.5% caching applied";
 
