@@ -135,14 +135,26 @@ ${DISCLOSURE}`,
   );
 }
 
-export function confirmPage(userCode: string, ref?: string): Response {
+/** When a code was asked for, as the confirm page says it: "just now", "1 minute ago", "12 minutes ago". */
+export function codeAge(createdAt: number, now: number): string {
+  const minutes = Math.max(0, Math.floor((now - createdAt) / 60_000));
+  return minutes === 0 ? "just now" : minutes === 1 ? "1 minute ago" : `${minutes} minutes ago`;
+}
+
+/**
+ * The confirm step. `requested`: when the terminal asked for the code (`codeAge`), so a person
+ * can tell a code someone else sent them from the one their own terminal just made.
+ */
+export function confirmPage(userCode: string, ref?: string, requested?: string): Response {
   const code = escapeHtml(userCode);
   const authorize = `/device/authorize?user_code=${encodeURIComponent(userCode)}${ref ? `&ref=${encodeURIComponent(ref)}` : ""}`;
+  const when = requested ? `<p class="fine">This code was requested ${escapeHtml(requested)}. Only continue if you started <code>dl</code> sign-in yourself, on your own computer, just now.</p>\n` : "";
   return shell(
     "Confirm sign-in",
     `<h1>Sign in to dl</h1>
 <p class="lede">Check that your terminal shows</p>
 <p class="chip"><code>${code}</code></p>
+${when}
 <div class="actions">
   <a class="btn" href="${escapeHtml(authorize)}">${GITHUB_MARK}Continue with GitHub</a>
   <a class="link" href="/no-github?from=device">Don't have GitHub?</a>

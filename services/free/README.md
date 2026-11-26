@@ -400,6 +400,12 @@ There is one account per GitHub user, keyed on the numeric GitHub id.
   the API 600 requests a minute, refresh 600 an hour, device codes 60 an hour and their polling
   720 a minute, since each signed-in person is limited too (60 requests a minute). Sign-ups (3 a
   day) and invite attempts (10 an hour) stay tight.
+- **The browser steps on a user code** (`GET /device?user_code=`, `GET /device/authorize`,
+  `POST /device/deny`) share one bucket of 120 an hour per network (a 429 page with
+  `retry-after`), so codes can't be guessed or cancelled in bulk. `POST /device/deny` ("This
+  isn't my code") is refused (403) unless it comes from this site's own page (`Origin`, or
+  `Sec-Fetch-Site: same-origin` when the Origin is hidden). The confirm page says how long ago
+  the code was requested.
 
 ## API contract for the open launch
 

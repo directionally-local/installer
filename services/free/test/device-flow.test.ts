@@ -153,9 +153,43 @@ describe("browser sign-in", () => {
   it("reports access_denied when the person cancels", async () => {
     const service = await createService();
     const issued = (await (await service.request("POST", "/v1/device/code", { body: {} })).json()) as { user_code: string; device_code: string };
-    const page = await service.request("POST", "/device/deny", { form: { user_code: issued.user_code } });
+    const page = await service.request("POST", "/device/deny", { form: { user_code: issued.user_code }, headers: { origin: "https://free.test" } });
     assert.match(await page.text(), /cancelled/);
     assert.equal(await errorCode(await service.request("POST", "/v1/device/token", { body: { device_code: issued.device_code } })), "access_denied");
+  });
+
+  it("refuses a cancel posted from another site, or with no sign it came from the page", async () => {
+    const service = await createService();
+    const issued = (await (await service.request("POST", "/v1/device/code", { body: {} })).json()) as { user_code: string; device_code: string };
+    for (const headers of [{ origin: "https://evil.example" }, { "sec-fetch-site": "cross-site" }, {}] as Array<Record<string, string>>) {
+      assert.equal((await service.request("POST", "/device/deny", { form: { user_code: issued.user_code }, headers })).status, 403, JSON.stringify(headers));
+    }
+    assert.equal(await errorCode(await service.request("POST", "/v1/device/token", { body: { device_code: issued.device_code } })), "authorization_pending");
+    // Fetch Metadata alone is enough when the Origin is hidden.
+    const ok = await service.request("POST", "/device/deny", { form: { user_code: issued.user_code }, headers: { origin: "null", "sec-fetch-site": "same-origin" } });
+    assert.equal(ok.status, 200);
+  });
+
+  it("says when the code was requested on the confirm page", async () => {
+    const service = await createService();
+    const issued = (await (await service.request("POST", "/v1/device/code", { body: {} })).json()) as { user_code: string };
+    assert.match(await (await service.request("GET", `/device?user_code=${issued.user_code}`)).text(), /requested just now/);
+    service.clock.now += 7 * 60_000;
+    assert.match(await (await service.request("GET", `/device?user_code=${issued.user_code}`)).text(), /requested 7 minutes ago/);
+  });
+
+  it("rate-limits the browser steps on a user code per network", async () => {
+    const service = await createService();
+    // An unknown code is a 400 (the enter-code page again) until the bucket is empty.
+    for (let index = 0; index < 120; index++) assert.equal((await service.request("GET", "/device?user_code=ABCD-1234", { ip: "198.51.100.9" })).status, 400);
+    const page = await service.request("GET", "/device?user_code=ABCD-1235", { ip: "198.51.100.9" });
+    assert.equal(page.status, 429);
+    assert.ok(Number(page.headers.get("retry-after")) > 0);
+    assert.equal((await service.request("GET", "/device/authorize?user_code=ABCD-1235", { ip: "198.51.100.9" })).status, 429);
+    assert.equal((await service.request("POST", "/device/deny", { form: { user_code: "ABCD-1235" }, headers: { origin: "https://free.test" }, ip: "198.51.100.9" })).status, 429);
+    // Another network isn't affected, and the page without a code isn't limited.
+    assert.equal((await service.request("GET", "/device?user_code=ABCD-1235", { ip: "198.51.100.10" })).status, 400);
+    assert.equal((await service.request("GET", "/device", { ip: "198.51.100.9" })).status, 200);
   });
 
   it("reports access_denied when GitHub sign-in is refused", async () => {
