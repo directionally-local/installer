@@ -4558,7 +4558,7 @@ async function describeUse(c: Ctx, gate: Runtime, input: { githubId: number; ses
       console.error(`use description call failed: ${result.failure}`);
       return;
     }
-    const label = parseUseLabel(result.text);
+    const label = parseUseLabel(result.text, input.input);
     const moderation = moderationLimits(config);
     const outcome = await directory(c).recordUseDescription({
       githubId: input.githubId,
