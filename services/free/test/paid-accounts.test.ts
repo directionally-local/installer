@@ -142,7 +142,7 @@ describe("the terms consent at Checkout", () => {
     const { sessionId } = (await response.json()) as { sessionId: string };
     assert.equal(stripe.sessions.get(sessionId)!.form.get("consent_collection[terms_of_service]"), null, "retried without the consent");
     assert.match(String(warned[0]?.[0]), /terms consent/);
-    assert.ok(service.calls.emails.some((message) => message.raw.includes("Checkout terms consent turned off")));
+    assert.ok(service.calls.emails.some((message) => message.raw.includes("Checkout terms consent turned off") && mailBody(message.raw).includes("those buyers may withdraw for 14 days")));
     const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
     const config = (await (await service.request("GET", "/admin/config", { token: admin })).json()) as any;
     assert.equal(config.effective.checkoutTermsConsent, false);
@@ -501,3 +501,8 @@ describe("the account step: GitHub", () => {
     assert.equal(body.account.accountId, accountIdOf(ADMIN_ID));
   });
 });
+
+/** A sent email's text (base64 after the headers). */
+function mailBody(raw: string): string {
+  return Buffer.from(raw.split(/\r?\n\r?\n/).slice(1).join("").replace(/\s+/g, ""), "base64").toString("utf8");
+}
