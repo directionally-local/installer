@@ -151,9 +151,9 @@ Every sign-in endpoint answers the same **session response**:
 | 403 | `no_account` | no account for this email/GitHub/Google and no `sessionId`: "Pick a plan at dl.new first." After a verified sign-in it also carries `pending: {token, email, expiresIn: 3600}` (see below) |
 | 404 | `checkout_not_found` | `sessionId` unknown or not a plan checkout |
 | 409 | `checkout_claimed` | `sessionId` already linked to another account |
-| 410 | `checkout_expired` | unclaimed for more than 7 days |
+| 410 | `checkout_expired` | unclaimed for more than 7 days; its subscription is cancelled then (no refund: the owner's call, alerted with the admin refund command) |
 | 402 | `checkout_unpaid` | Checkout not paid |
-| 409 | `already_subscribed` | the account already has an active plan; the new checkout stays unclaimed (support refunds it) |
+| 409 | `already_subscribed` | the account already has an active plan; the new checkout stays unclaimed, its subscription is cancelled and its first payment refunded at once (the owner is alerted) |
 | 403 | `blocked` | the account is blocked |
 
 ### Email (6-digit code)
@@ -454,7 +454,7 @@ Polling, every 2 seconds (no SSE: one cheap Directory read; works through every 
 | event | what happens |
 |---|---|
 | `checkout.session.completed` (metadata `product=plan`) | stores the paid session (unclaimed unless an account already claimed it), sends the "Finish setting up dl.new" email to the Checkout email with `https://dl.new/account?session_id=…` (works 7 days) |
-| `invoice.paid` | plan active until the invoice period's end; records the payment (first one starts the 24-hour refund window) |
+| `invoice.paid` | plan active until the invoice period's end; records the payment (first one starts the 24-hour refund window). Money taken on a subscription whose Checkout is unclaimed past its 7 days (a renewal, or a card trial's first charge): refunded and the subscription cancelled (outcome `plan_orphan_canceled`, the owner alerted) |
 | `invoice.payment_failed` | `paymentFailed: true`, status `past_due`; the plan keeps working while Stripe retries (Stripe's dunning) |
 | `customer.subscription.updated` | plan id from the subscription item's price; status; cancel at period end |
 | `customer.subscription.deleted` | plan ends (status `canceled`): the keys stay but requests get part B's "no plan" error |

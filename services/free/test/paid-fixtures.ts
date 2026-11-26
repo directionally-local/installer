@@ -159,6 +159,11 @@ export class FakeStripe {
     match = /^\/v1\/invoices\/(.+)$/.exec(path);
     if (method === "GET" && match) return Response.json({ id: match[1], payment_intent: `pi_for_${match[1]}` });
     if (method === "POST" && path === "/v1/refunds") {
+      // Stripe refuses to refund a payment that was refunded in full already.
+      const payment = form.get("payment_intent") ?? form.get("charge");
+      if (this.refunds.some((refund) => (refund.get("payment_intent") ?? refund.get("charge")) === payment)) {
+        return Response.json({ error: { type: "invalid_request_error", code: "charge_already_refunded", message: "Charge has already been refunded." } }, { status: 400 });
+      }
       this.refunds.push(form);
       return Response.json({ id: `re_${this.refunds.length}`, amount: 700 });
     }

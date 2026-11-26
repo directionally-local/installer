@@ -435,6 +435,17 @@ export function planState(status: unknown): "active" | "past_due" | "canceled" {
   return "canceled";
 }
 
+/**
+ * Cancels a subscription now, unless Stripe has it ended already (Stripe refuses to cancel a
+ * canceled subscription). The subscription as it is after; `canceled` is whether this call ended it.
+ */
+export async function cancelSubscription(fetcher: Fetch, secretKey: string, subscriptionId: string): Promise<{ canceled: boolean; subscription: Record<string, any> }> {
+  const path = `/v1/subscriptions/${encodeURIComponent(subscriptionId)}`;
+  const subscription = await stripeRequest(fetcher, secretKey, "GET", path);
+  if (subscription.status === "canceled" || subscription.status === "incomplete_expired") return { canceled: false, subscription };
+  return { canceled: true, subscription: await stripeRequest(fetcher, secretKey, "DELETE", path) };
+}
+
 /** The payment behind an invoice, for a refund: its PaymentIntent or charge, across API versions. */
 export async function invoicePayment(fetcher: Fetch, secretKey: string, invoiceId: string): Promise<{ payment_intent: string } | { charge: string } | undefined> {
   const invoice = await stripeRequest(fetcher, secretKey, "GET", `/v1/invoices/${encodeURIComponent(invoiceId)}`);
