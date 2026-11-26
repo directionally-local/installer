@@ -192,6 +192,25 @@ describe("trials: the card trial's Checkout", () => {
     assert.equal(body.trials.card.fullyClaimed, false);
     assert.equal((await startCheckout(service)).trial, false);
   });
+
+  it("turned off at runtime while the offer is on (the Free plan launch): the paid Checkout with the coupon, no trial", async () => {
+    const { service, stripe } = await world();
+    assert.equal((await startCheckout(service)).trial, true, "on by default");
+    const owner = await admin(service);
+    assert.equal((await service.request("POST", "/admin/config", { token: owner, body: { freePlan: "on", cardTrial: false } })).status, 200);
+    const body = await plans(service);
+    assert.equal(body.trials.card.available, false);
+    assert.equal(body.promo.active, true);
+    assert.equal(body.freePlan.available, true);
+    for (const plan of ["starter", "plus", "max"]) {
+      const { sessionId, trial } = await startCheckout(service, plan);
+      assert.equal(trial, false);
+      const form = stripe.sessions.get(sessionId)!.form;
+      assert.equal(form.get("subscription_data[trial_period_days]"), null);
+      assert.equal(form.get("subscription_data[metadata][promo_eligible]"), null);
+      assert.equal(form.get("discounts[0][coupon]"), "dlnew-bf-2026");
+    }
+  });
 });
 
 describe("trials: a card trial in use", () => {
