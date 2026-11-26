@@ -352,7 +352,7 @@ export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, 
   useDescriptionDailyCap: number;
   /**
    * Whole UTC days of the raw request log and session events the Directory keeps (RAW_LOG_KEEP_DAYS,
-   * default 35; 0 keeps everything); older rows are pruned in small batches every 10 minutes. Every
+   * default 35; 31 to 400, never "everything"); older rows are pruned in small batches every 10 minutes. Every
    * all-time number reads rollups, so pruning changes none of them. Also a runtime setting.
    */
   rawLogKeepDays: number;
@@ -928,22 +928,38 @@ function required(env: Record<string, unknown>, name: string): string {
 }
 
 /**
- * The fewest and most days of raw log RAW_LOG_KEEP_DAYS may keep (0 keeps everything): the longest
- * window read from the raw log is 30 days (the Health view, the allocator's history), plus a day.
+ * The fewest and most days of raw log RAW_LOG_KEEP_DAYS may keep. The fewest: the longest window
+ * read from the raw log is 30 days (the Health view, the allocator's history), plus a day. The
+ * most: a little over a year. There is no "keep everything".
  */
 export const RAW_LOG_MIN_KEEP_DAYS = 31;
-export const RAW_LOG_MAX_KEEP_DAYS = 3650;
+export const RAW_LOG_MAX_KEEP_DAYS = 400;
 
-/** 0 (keep everything) or RAW_LOG_MIN_KEEP_DAYS to RAW_LOG_MAX_KEEP_DAYS. */
+/** RAW_LOG_MIN_KEEP_DAYS to RAW_LOG_MAX_KEEP_DAYS. */
 export function isKeepDays(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && (value === 0 || (value >= RAW_LOG_MIN_KEEP_DAYS && value <= RAW_LOG_MAX_KEEP_DAYS));
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= RAW_LOG_MIN_KEEP_DAYS && value <= RAW_LOG_MAX_KEEP_DAYS;
+}
+
+/**
+ * A keep setting written before the cap (0 once meant "keep everything", and up to 3650 was
+ * allowed) as the days kept now: RAW_LOG_MAX_KEEP_DAYS. Never a silent "forever".
+ */
+export function legacyKeepDays(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && (value === 0 || value > RAW_LOG_MAX_KEEP_DAYS) ? RAW_LOG_MAX_KEEP_DAYS : undefined;
 }
 
 function keepDays(value: unknown): number {
   const days = whole(value, DEFAULTS.rawLogKeepDays, "RAW_LOG_KEEP_DAYS");
-  if (!isKeepDays(days)) throw new ConfigError(`RAW_LOG_KEEP_DAYS must be 0 (keep everything) or ${RAW_LOG_MIN_KEEP_DAYS} to ${RAW_LOG_MAX_KEEP_DAYS} (got "${days}").`);
-  return days;
+  if (isKeepDays(days)) return days;
+  const capped = legacyKeepDays(days);
+  if (capped === undefined) throw new ConfigError(`RAW_LOG_KEEP_DAYS must be ${RAW_LOG_MIN_KEEP_DAYS} to ${RAW_LOG_MAX_KEEP_DAYS} (got "${days}").`);
+  if (!warnedKeepDays) console.warn(`RAW_LOG_KEEP_DAYS=${days} is no longer allowed (there is no "keep everything"); keeping ${capped} days.`);
+  warnedKeepDays = true;
+  return capped;
 }
+
+/** The config is read on every request; the capped-setting warning is logged once per isolate. */
+let warnedKeepDays = false;
 
 function whole(value: unknown, fallback: number, name: string): number {
   const raw = text(value);

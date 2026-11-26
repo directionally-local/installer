@@ -1547,7 +1547,7 @@ with who made it and when.
 | `noGithubAlerts` | `NO_GITHUB_ALERTS` | `each` (an email per "Don't have GitHub?" click and answer, at most 50 a UTC day, the rest in the daily digest); `daily` (one line in the daily digest); `off` |
 | `useDescriptions` | `USE_DESCRIPTIONS` | true: a short automated description and safety label per session (see [use descriptions](#what-people-use-the-service-for-use-descriptions)) |
 | `useDescriptionDailyCap` | `USE_DESCRIPTION_DAILY_CAP` | 2000: description calls a UTC day across everyone (0 stops them) |
-| `rawLogKeepDays` | `RAW_LOG_KEEP_DAYS` | 35: whole UTC days of the raw request log and session events kept (see [raw log retention](#raw-log-retention)); 0 keeps everything; otherwise 31 to 3650 |
+| `rawLogKeepDays` | `RAW_LOG_KEEP_DAYS` | 35: whole UTC days of the raw request log and session events kept (see [raw log retention](#raw-log-retention)); 31 to 400. There is no "keep everything": 0, or a value over 400 set before the cap, keeps 400 |
 | `securityOffGpt6` | `SECURITY_OFF_GPT6` | true: security work is served by DeepSeek only, never GPT-6 (see [security work kept off GPT-6](#what-people-use-the-service-for-use-descriptions)) |
 | `gpt6PresendGuard` | `GPT6_PRESEND_GUARD` | `enforce`: GPT-6 requests are checked before they are sent (see [GPT-6: pre-send checks and the trust gate](#gpt-6-pre-send-checks-and-the-trust-gate)); `off` |
 | `gpt6GuardTimeoutMs` | `GPT6_GUARD_TIMEOUT_MS` | 4000: ms each pre-send check may take; past it the request isn't sent |
@@ -2267,7 +2267,8 @@ request from the same card. The dl.new privacy policy says this.
 
 The Directory keeps every request (`requests`: counts, cost, timings) and every session event
 (`events`) in its one SQLite database, which has a 10 GB cap. Only the last `rawLogKeepDays` whole
-UTC days (35 by default) are kept. Every 10 minutes (the speed probes' cron) older rows are deleted
+UTC days (35 by default, at most 400: there is no "keep everything", and a 0 or a larger value
+from before the cap, in the env or a stored override, keeps 400) are kept. Every 10 minutes (the speed probes' cron) older rows are deleted
 in steps of at most 2000 rows of each table, up to 10 steps, each its own short call.
 
 Nothing that reads further back reads the raw log. Rollups kept with every request and event

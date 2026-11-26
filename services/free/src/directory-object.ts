@@ -14,7 +14,7 @@ import type { CleanEvent, GpuCount } from "./events.js";
 import { healthData, type HealthData, type HealthWindow } from "./health-data.js";
 import { adminHomeData, type AdminHomeData } from "./admin-home-data.js";
 import { providerCreditAlert, flaggedUseAlert, moderationAlert, milestoneCrossed, paymentAlert, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
-import type { Upstream } from "./config.js";
+import { RAW_LOG_MAX_KEEP_DAYS, RAW_LOG_MIN_KEEP_DAYS, type Upstream } from "./config.js";
 import { addProviderCharge, addUpstreamModelUsage, upstreamModelUsage, insertProbe, modelMeasures, modelWeekSpend, modelWeeks, personProviderWeek, probeHistory, PROVIDER_SCHEMA, providerSpend, providerWeeks, type ModelMeasure, type ProbeRecord, type UpstreamModelUsage } from "./provider-store.js";
 import { isRegistryProvider, modelWeeklyCap, PROVIDERS, providerModels, providerSettings, REGISTRY_CREDIT_ALERT_SHARE, type ProviderConfig, type ProviderId, type ProviderSpend } from "./providers.js";
 import { DEEPSEEK_MODEL, familyOf, FREE_MODELS, isFirstChoice, upstreamsOf, type Family } from "./models.js";
@@ -4313,22 +4313,22 @@ export class DirectoryObject extends DurableObject {
     return accepted;
   }
 
-  /** RAW_LOG_KEEP_DAYS with the admin override applied. */
+  /** RAW_LOG_KEEP_DAYS with the admin override applied, always within the allowed range (never "everything"). */
   #keepDays(envKeepDays: number): number {
-    return applyOverrides({ rawLogKeepDays: envKeepDays }, this.#overrides()).rawLogKeepDays;
+    const days = applyOverrides({ rawLogKeepDays: envKeepDays }, this.#overrides()).rawLogKeepDays;
+    return days > 0 && days <= RAW_LOG_MAX_KEEP_DAYS ? Math.max(RAW_LOG_MIN_KEEP_DAYS, days) : RAW_LOG_MAX_KEEP_DAYS;
   }
 
   /**
    * One bounded step of the raw log's retention: deletes at most PRUNE_BATCH_ROWS of the oldest
    * `requests` and of the oldest `events` from before the kept whole UTC days (`rawLogKeepDays`,
-   * 0 keeps everything). Nothing is lost that a reader needs: every all-time number reads the
+   * at most RAW_LOG_MAX_KEEP_DAYS). Nothing is lost that a reader needs: every all-time number reads the
    * rollups `recordRequest` and `recordEvents` keep. Just before the first row of a UTC day goes,
    * that day's latency percentiles are kept (`latency_daily`), and pruned free requests no session
    * event covered are carried for the dl-only check (abuse.ts outsideDl). `more`: call again.
    */
   async pruneRawLogs(now: number, envKeepDays: number): Promise<{ keepDays: number; requests: number; events: number; more: boolean }> {
     const keepDays = this.#keepDays(envKeepDays);
-    if (keepDays <= 0) return { keepDays: 0, requests: 0, events: 0, more: false };
     const cutoff = (Math.floor(now / DAY_MS) - keepDays) * DAY_MS;
     const sql = this.ctx.storage.sql;
     return this.ctx.storage.transactionSync(() => {

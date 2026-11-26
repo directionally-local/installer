@@ -168,11 +168,15 @@ describe("raw log retention", () => {
     assert.equal(second.requests, 25);
     assert.equal(second.more, false);
 
-    // 0 keeps everything; under 31 days is refused (the Health view and the allocator read 30).
-    assert.equal(await errorCode(await service.request("POST", "/admin/config", { token: adminToken, body: { rawLogKeepDays: 10 } })), "invalid_request");
-    assert.equal((await service.request("POST", "/admin/config", { token: adminToken, body: { rawLogKeepDays: 0 } })).status, 200);
+    // Under 31 days is refused (the Health view and the allocator read 30); so are 0 and over 400: nothing keeps everything.
+    for (const bad of [10, 0, 401, 3650]) assert.equal(await errorCode(await service.request("POST", "/admin/config", { token: adminToken, body: { rawLogKeepDays: bad } })), "invalid_request", String(bad));
     await record(11, OLD + 6 * DAY);
-    assert.deepEqual(await service.directory().pruneRawLogs(TODAY, 35), { keepDays: 0, requests: 0, events: 0, more: false });
+    // An override of 0 stored before the cap keeps the most, 400 days, not everything.
+    db(service).prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('override:rawLogKeepDays', '0')").run();
+    assert.equal((await service.directory().pruneRawLogs(TODAY, 35)).keepDays, 400);
+    // So does a 0 that reaches the Directory some other way.
+    db(service).prepare("DELETE FROM settings WHERE key = 'override:rawLogKeepDays'").run();
+    assert.equal((await service.directory().pruneRawLogs(TODAY, 0)).keepDays, 400);
     assert.equal((await service.request("POST", "/admin/config", { token: adminToken, body: { rawLogKeepDays: 60 } })).status, 200);
     const metrics = (await (await service.request("GET", "/admin/metrics", { token: adminToken })).json()) as { storage: { rawLogKeepDays: number } };
     assert.equal(metrics.storage.rawLogKeepDays, 60);
@@ -180,11 +184,14 @@ describe("raw log retention", () => {
     assert.equal((await service.directory().pruneRawLogs(TODAY, 35)).requests, 0);
   });
 
-  it("reads RAW_LOG_KEEP_DAYS: 0 or 31 to 3650", () => {
+  it("reads RAW_LOG_KEEP_DAYS: 31 to 400, with 0 and older larger values capped at 400", () => {
     const env = { OPENROUTER_API_KEY: "k", GITHUB_CLIENT_ID: "c", GITHUB_CLIENT_SECRET: "s", TOKEN_SIGNING_KEY: "x".repeat(32) };
     assert.equal(readFreeConfig(env).rawLogKeepDays, 35);
-    assert.equal(readFreeConfig({ ...env, RAW_LOG_KEEP_DAYS: "0" }).rawLogKeepDays, 0);
     assert.equal(readFreeConfig({ ...env, RAW_LOG_KEEP_DAYS: "90" }).rawLogKeepDays, 90);
-    for (const bad of ["7", "30", "4000", "-1", "x"]) assert.throws(() => readFreeConfig({ ...env, RAW_LOG_KEEP_DAYS: bad }), /RAW_LOG_KEEP_DAYS/);
+    assert.equal(readFreeConfig({ ...env, RAW_LOG_KEEP_DAYS: "400" }).rawLogKeepDays, 400);
+    // 0 once meant "keep everything", and up to 3650 was allowed: a deploy that still sets them keeps 400 days.
+    assert.equal(readFreeConfig({ ...env, RAW_LOG_KEEP_DAYS: "0" }).rawLogKeepDays, 400);
+    assert.equal(readFreeConfig({ ...env, RAW_LOG_KEEP_DAYS: "3650" }).rawLogKeepDays, 400);
+    for (const bad of ["7", "30", "-1", "x"]) assert.throws(() => readFreeConfig({ ...env, RAW_LOG_KEEP_DAYS: bad }), /RAW_LOG_KEEP_DAYS/);
   });
 });
