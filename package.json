@@ -17,6 +17,7 @@
     "dl": "bin/directionallylocal.mjs"
   },
   "files": [
+    "assets/mascot.png",
     "bin",
     "dist",
     "install.sh",

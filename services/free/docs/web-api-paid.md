@@ -385,7 +385,8 @@ Device-code style; the CLI never sees a password or pastes a key.
    - `428 {"error": {"code": "authorization_pending"}}` while waiting,
    - `429 slow_down` when polled faster than the interval,
    - `403 access_denied` after Deny, `410 expired_token` after 10 minutes,
-   - `200 {"key": "dl_sk_...", "keyId", "accountId", "plan": "starter", "baseUrl": "https://api.dl.new", "anthropicBaseUrl": "https://api.dl.new/anthropic"}` once.
+   - `200 {"key": "dl_sk_...", "keyId", "accountId", "plan": "starter", "baseUrl": "https://api.dl.new", "anthropicBaseUrl": "https://api.dl.new/anthropic", "login": "octocat", "email": "o@example.com"}` once
+     (`login`: the account's GitHub login, null without one; `email` null when unknown: dl's welcome line).
    The key is a normal `dl_sk_` key named `"dl claude on <deviceName>"`, listed and revocable
    on dl.new/keys. The poll that returns it consumes the login (a second poll is `410`).
 

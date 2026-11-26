@@ -37,6 +37,7 @@ import { openSession, startHere, type SessionInput } from "./laptop/session.js";
 import { AUTOPILOT_ID, detectAgents, type DetectedAgent } from "./laptop/agent-catalog.js";
 import { ensureAutopilot } from "./laptop/autopilot-install.js";
 import { browserSignIn, dlKeyOrSignIn, forgetDlKey, maskKey, planName, readDlKey, reportAgentRequest, type AgentRequest, type DlKey } from "./laptop/dl-key.js";
+import { firstTokens } from "./laptop/onboarding.js";
 import { autopilotKeyEnv, autopilotProvider, orderAgents, readAgentHistory, recordAgentUse, routerHome, type RouterDeps } from "./laptop/router.js";
 import { autopilotConfigFile } from "./laptop/free-tier.js";
 import { readAgentChoice } from "./laptop/agent-choice.js";
@@ -302,6 +303,8 @@ export interface MainOptions {
   detectAgents?: () => Promise<DetectedAgent[]>;
   /** Tells the service about an agent dl doesn't know (the router); POST /v1/agent-request unless replaced. */
   reportAgent?: (request: AgentRequest, key: DlKey) => Promise<unknown>;
+  /** The one-time first-tokens line after the first agent run (onboarding.ts firstTokens) unless replaced. */
+  firstTokens?: (key: DlKey) => Promise<{ text?: string; done: boolean }>;
 }
 
 export async function main(
@@ -1063,6 +1066,9 @@ function routerDeps(options: MainOptions, io: { out: (text: string) => void; err
     autopilot: (_key, run) => autopilotOnKey({ cwd: process.cwd(), forceAutopilot: true, ...(run.continue ? { continue: true } : {}), ...options.session }, io),
     report: options.reportAgent ?? ((request, key) => reportAgentRequest(request, { key: key.key })),
     dlVersion: packageVersion(),
+    // The scan's beat only at a terminal with colour; tests and pipes get it all at once.
+    ...(io.color === true ? { sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)) } : {}),
+    firstTokens: options.firstTokens ?? ((key) => firstTokens(key)),
   };
 }
 

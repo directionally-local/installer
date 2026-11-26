@@ -527,6 +527,10 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
   whose week of open models (DeepSeek) is used up, while `proOffered` is on: the exact text, the
   price and where Upgrade goes (`https://dl.new/account`). `GET /v1/me?prompt=shown` (what
   `dl status` sends) also counts it as seen; a plain read doesn't.
+- `week`, only with `GET /v1/me?week=1` (dl's one-time "First tokens served" line): this week of
+  DeepSeek on the account's plan (a paid plan's limit, or dl.new's Free plan) in real tokens at the
+  plan mix, `{tokensPerWeek, usedAtMix, leftAtMix, label: "95.5% caching applied", resetsAt}`, or
+  null for an account on neither.
 
 ### Refusals for free tokens (`POST /v1/chat/completions`, HTTP 402)
 

@@ -215,6 +215,8 @@ WATCH=""
 LABEL=""
 DETAIL=""
 SLOW_MB=""
+# What the spinner says while a download runs, at a terminal (the size and time follow it).
+CHAIR="Pulling up a chair…"
 
 # m:ss
 clock() {
@@ -274,6 +276,8 @@ quietly() {
   WATCH=""
   if ! wait "$pid"; then
     if [ -n "$soft" ]; then return 1; fi
+    # A failed download names what it was downloading, not the spinner's words.
+    if [ "$LABEL" = "$CHAIR" ]; then LABEL=$STEP; fi
     if [ -n "$FANCY" ]; then printf '\r\033[2K  \033[31m✗\033[0m %s\n\n' "$LABEL"; fi
     show_step_log "$from"
     fail "$what failed"
@@ -297,6 +301,7 @@ remote_bytes() {
 
 # WATCH for a curl download (DOWNLOAD_TO, DOWNLOAD_BYTES): "45% · 14 of 31 MB".
 watch_download() {
+  if [ -n "$FANCY" ]; then LABEL=$CHAIR; fi
   got=$(file_bytes "$DOWNLOAD_TO")
   if [ -n "$DOWNLOAD_BYTES" ] && [ "$DOWNLOAD_BYTES" -gt 0 ]; then
     DETAIL="$((got * 100 / DOWNLOAD_BYTES))% · $((got / 1000000)) of $(mb "$DOWNLOAD_BYTES") MB"
@@ -307,13 +312,15 @@ watch_download() {
 }
 
 # Downloads URL $1 to $2 as step $3 (the label shown while it runs), with its progress.
-# $4: its size in bytes, when known already; otherwise it's asked for.
+# $4: its size in bytes, when known already; otherwise it's asked for. At a terminal the spinner
+# says CHAIR instead, with the size and time after it; plain lines keep the step's own name.
 download() {
   DOWNLOAD_TO=$2
   DOWNLOAD_BYTES=${4:-}
   if [ -z "$DOWNLOAD_BYTES" ]; then DOWNLOAD_BYTES=$(remote_bytes "$1") || DOWNLOAD_BYTES=""; fi
+  if [ -n "$FANCY" ]; then step "$CHAIR"; fi
   STEP="$3${DOWNLOAD_BYTES:+ ($(mb "$DOWNLOAD_BYTES") MB)}"
-  step "$STEP"
+  if [ -z "$FANCY" ]; then step "$STEP"; fi
   WATCH=watch_download
   quietly "downloading $1" curl -fsSL "$1" -o "$2"
 }
@@ -335,7 +342,7 @@ watch_npm() {
     DETAIL=""
     SLOW_MB=""
   else
-    LABEL="Downloading dl"
+    if [ -n "$FANCY" ]; then LABEL=$CHAIR; else LABEL="Downloading dl"; fi
     SLOW_MB=$NPM_DOWNLOAD_MB
     # First npm looks up each package (one request apiece), then downloads them: about as
     # many as it looked up, so that's the total.
