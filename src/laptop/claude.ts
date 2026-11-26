@@ -1,4 +1,5 @@
 import { platform } from "node:os";
+import { claudeSettingsRefusal } from "./claude-settings.js";
 import { launchHarness, onPath, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
 
 /**
@@ -16,7 +17,9 @@ import { launchHarness, onPath, type HarnessLaunch, type LaunchDeps, type Launch
  *    starts (so the dl-only check covers its requests), again every few hours for long sessions,
  *    and session.end when it exits. Counts only.
  * 5. Claude Code runs with every argument and the terminal passed through, with the environment
- *    below; its exit code is dl's. Nothing under ~/.claude is read or written.
+ *    below; its exit code is dl's. Nothing under ~/.claude is written. Its settings files are
+ *    read first (claude-settings.ts): one that sets an Anthropic key or apiKeyHelper stops dl
+ *    claude, since that key would win over dl's and go to the free tier.
  */
 
 /** The model Claude Code is told to use for every role; the service serves DeepSeek whatever it names. */
@@ -117,6 +120,7 @@ export const CLAUDE_LAUNCH: HarnessLaunch = {
   missing: `${CLAUDE_INSTALL}\n\n  or with npm: ${CLAUDE_INSTALL_NPM}`,
   binaries: BINARIES,
   stdoutDiagnostics: { prefix: UNRECOGNIZED_MODEL_PREFIX, when: claudePrintMode },
+  check: (_args, { env, cwd }) => claudeSettingsRefusal("dl claude", "dl's free tier", { env, cwd }),
   prepare: async ({ env, args, origin, key }) => ({ ...claudeEnv(env, { origin, key }), args }),
 };
 

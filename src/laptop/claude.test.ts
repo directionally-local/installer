@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -59,6 +59,7 @@ function fakeSpawn(exit: { code?: number | null; signal?: NodeJS.Signals | null 
 function deps(overrides: Partial<ClaudeDeps> = {}): ClaudeDeps {
   return {
     env: { PATH: "/usr/bin", HOME: "/home/alice" },
+    cwd: "/nonexistent/dl-claude-test",
     findClaude: async () => "/usr/local/bin/claude",
     token: async () => ({ ok: true, origin: ORIGIN, accessToken: "access-1" }),
     signIn: async () => {
@@ -73,6 +74,34 @@ function deps(overrides: Partial<ClaudeDeps> = {}): ClaudeDeps {
 }
 
 describe("dl claude", () => {
+  it("refuses to start, before signing in, when Claude Code's settings set an Anthropic key; DL_ALLOW_CLAUDE_SETTINGS_KEY=1 starts anyway", async () => {
+    const home = await mkdtemp(join(tmpdir(), "dl-claude-settings-"));
+    try {
+      await mkdir(join(home, ".claude"), { recursive: true });
+      await writeFile(join(home, ".claude", "settings.json"), JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: "sk-ant-oat-secret" } }));
+      const service = fakeService();
+      const child = fakeSpawn({ code: 0 });
+      const { io, err } = capture();
+      let asked = false;
+      const env = { PATH: "/usr/bin", HOME: home };
+      const code = await claudeCommand(["-p", "hi"], io, deps({ env, fetch: service.fetch, spawn: child.spawn, token: async () => ((asked = true), { ok: true, origin: ORIGIN, accessToken: "access-1" }) }));
+      assert.equal(code, 1);
+      assert.equal(asked, false, "no sign-in, no key minted");
+      assert.equal(service.calls.length, 0);
+      assert.equal(child.started.length, 0);
+      assert.match(err(), /dl claude won't start Claude Code/);
+      assert.match(err(), /~\/\.claude\/settings\.json: env\.ANTHROPIC_AUTH_TOKEN/);
+      assert.match(err(), /DL_ALLOW_CLAUDE_SETTINGS_KEY=1/);
+      assert.doesNotMatch(err(), /sk-ant-oat-secret/);
+
+      const allowed = await claudeCommand(["-p", "hi"], capture().io, deps({ env: { ...env, DL_ALLOW_CLAUDE_SETTINGS_KEY: "1" }, fetch: service.fetch, spawn: child.spawn }));
+      assert.equal(allowed, 0);
+      assert.equal(child.started.length, 1);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it("mints a harness key, sends session.start before Claude Code starts, runs claude with every argument and the free tier env, then ends the session", async () => {
     const service = fakeService();
     const child = fakeSpawn({ code: 0 });

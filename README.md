@@ -165,9 +165,14 @@ account. Every argument after `claude` goes to it unchanged (`dl claude -p "fix 
   `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`,
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`.
   Your own `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` and similar variables are left out of
-  Claude Code's environment for that run, and dl says which. If your `~/.claude/settings.json`
-  sets these in its `env` block or sets `apiKeyHelper`, those win in Claude Code; remove them to
-  use `dl claude`.
+  Claude Code's environment for that run, and dl says which. A settings file's `env` block or
+  `apiKeyHelper` would win over them, so before it starts, dl reads (never writes)
+  `~/.claude/settings.json`, `$CLAUDE_CONFIG_DIR/settings.json` and this folder's
+  `.claude/settings.json` and `.claude/settings.local.json`. If one sets `env.ANTHROPIC_API_KEY`,
+  `env.ANTHROPIC_AUTH_TOKEN`, `env.CLAUDE_CODE_OAUTH_TOKEN` or `apiKeyHelper`, `dl claude` doesn't
+  start and names the file and setting (never the value), so your Anthropic key isn't sent to the
+  free tier. Remove it to use `dl claude`, or set `DL_ALLOW_CLAUDE_SETTINGS_KEY=1` to start anyway.
+  `dl t3`, and Claude Code opened on a box's own model, check the same.
 - **What dl sends:** a session start and end (counts only, as Autopilot does), and a refresh every
   few minutes. Prompts and code go to the model, never into dl's logs. To prevent abuse, the free
   tier keeps a short automated description of each session and a safety label, made from your

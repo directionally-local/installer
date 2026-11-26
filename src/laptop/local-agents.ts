@@ -7,13 +7,15 @@ import { promisify } from "node:util";
 import { localFetch, modelApiBase, type FetchModel } from "../model-smoke.js";
 import { DEFAULT_DEPLOYMENT, modelStatePath, readDeployments, type ModelDeployment } from "../state.js";
 import type { System } from "../system.js";
+import { claudeSettingsRefusal } from "./claude-settings.js";
 
 /**
  * The coding agents dl can open on this box's own model (`dl model up`): Autopilot, Claude Code,
  * OpenCode and Pi. Autopilot is dl's own and is pointed at the model by `dl model up` (its vllm
  * provider). The others are the person's own CLIs, started for one run with their settings for
  * the local model injected through the environment, a flag or a temporary file. Their own config
- * files (~/.claude, ~/.config/opencode, ~/.pi) are never read or written.
+ * files (~/.claude, ~/.config/opencode, ~/.pi) are never written; Claude Code's settings are read
+ * once before it starts, to stop when they set an Anthropic key (claude-settings.ts).
  *
  * Local models only: nothing here talks to the free tier or uses its keys (dl claude and
  * dl opencode do that). The model is the box's deployment, on 127.0.0.1, with no key.
@@ -371,6 +373,13 @@ export async function launchLocalAgent(agent: Exclude<AgentId, "autopilot">, mod
   if (!support.ok) {
     io.err(`  ${info.label} can't run on ${model.model} here: it ${support.reason}.\n  Open Autopilot instead: dl agent set autopilot\n`);
     return 1;
+  }
+  if (agent === "claude-code") {
+    const refused = await claudeSettingsRefusal("dl", "this box's model", { env, cwd: deps.cwd ?? process.cwd() });
+    if (refused) {
+      io.err(`  ${refused}\n`);
+      return 1;
+    }
   }
   if (!(await answers(deps.fetch ?? localFetch, `${model.baseUrl}/models`))) {
     io.err(`  The model on this box (${model.model}, ${model.baseUrl}) isn't answering, so ${info.label} can't start. See dl model status.\n`);

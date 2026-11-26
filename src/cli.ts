@@ -77,7 +77,9 @@ On your laptop:
   dl claude [ARGS]        your own Claude Code on free tokens (DeepSeek), through dl's free tier
                           sign-in; ARGS go to claude as they are. Needs claude installed; free
                           tokens work in it only while dl claude runs, on a smaller share of the
-                          weekly allowance than Autopilot. Your ~/.claude settings aren't touched
+                          weekly allowance than Autopilot. Your ~/.claude settings aren't touched;
+                          it won't start if they set an Anthropic key or apiKeyHelper
+                          (DL_ALLOW_CLAUDE_SETTINGS_KEY=1 starts anyway)
   dl opencode [ARGS]      your own OpenCode on free tokens (DeepSeek V4.1 Flash; GPT-6 is in
                           Autopilot only), through dl's free tier sign-in; ARGS go to opencode
                           as they are. Needs opencode installed; free tokens work in it only while

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -193,7 +193,7 @@ describe("launchLocalAgent", () => {
 
   it("a signal's exit is 128 + its number", async () => {
     const fake = fakeSpawn({ signal: "SIGTERM" });
-    assert.equal(await launchLocalAgent("claude-code", MODEL, {}, io().io, { env: {}, find: async () => "/opt/bin/claude", fetch: answering, spawn: fake.spawn, onSignal: noSignals }), 143);
+    assert.equal(await launchLocalAgent("claude-code", MODEL, {}, io().io, { env: { HOME: tmp }, cwd: tmp, find: async () => "/opt/bin/claude", fetch: answering, spawn: fake.spawn, onSignal: noSignals }), 143);
   });
 
   it("OpenCode's version decides --standalone", async () => {
@@ -228,10 +228,25 @@ describe("launchLocalAgent", () => {
   it("says once which of the person's variables it left out; never the free tier's URL or key", async () => {
     const fake = fakeSpawn();
     const out = io();
-    await launchLocalAgent("claude-code", MODEL, {}, out.io, { env: FREE_TIER_ENV, find: async () => "/opt/bin/claude", fetch: answering, spawn: fake.spawn, onSignal: noSignals });
+    await launchLocalAgent("claude-code", MODEL, {}, out.io, { env: { ...FREE_TIER_ENV, HOME: tmp }, cwd: tmp, find: async () => "/opt/bin/claude", fetch: answering, spawn: fake.spawn, onSignal: noSignals });
     assert.match(out.err(), /not passing ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, CLAUDE_CODE_SUBAGENT_MODEL to Claude Code/);
     const env = fake.calls[0]!.env;
     assert.ok(!Object.values(env).some((value) => value === FREE_TIER_ENV.ANTHROPIC_AUTH_TOKEN || value?.includes("directionallylocal.com") || value?.includes("deepseek")));
+  });
+
+  it("Claude Code: stops before starting it when its settings set an Anthropic key (never printing it)", async () => {
+    await mkdir(join(tmp, ".claude"), { recursive: true });
+    await writeFile(join(tmp, ".claude", "settings.json"), JSON.stringify({ env: { ANTHROPIC_API_KEY: "sk-ant-secret" } }));
+    const fake = fakeSpawn();
+    const out = io();
+    assert.equal(await launchLocalAgent("claude-code", MODEL, {}, out.io, { env: { HOME: tmp }, cwd: join(tmp, "project"), find: async () => "/opt/bin/claude", fetch: answering, spawn: fake.spawn, onSignal: noSignals }), 1);
+    assert.match(out.err(), /~\/\.claude\/settings\.json: env\.ANTHROPIC_API_KEY/);
+    assert.match(out.err(), /this box's model/);
+    assert.doesNotMatch(out.err(), /sk-ant-secret/);
+    assert.equal(fake.calls.length, 0);
+    // The override starts it anyway; other agents aren't checked.
+    assert.equal(await launchLocalAgent("claude-code", MODEL, {}, io().io, { env: { HOME: tmp, DL_ALLOW_CLAUDE_SETTINGS_KEY: "1" }, cwd: tmp, find: async () => "/opt/bin/claude", fetch: answering, spawn: fake.spawn, onSignal: noSignals }), 0);
+    assert.equal(fake.calls.length, 1);
   });
 
   it("which CLIs are installed", async () => {

@@ -3,6 +3,7 @@ import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { claudeEnv } from "./claude.js";
+import { claudeSettingsRefusal } from "./claude-settings.js";
 import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
 import { freeTierModels, opencodeEnv, PROVIDER_ID, DEFAULT_MODEL } from "./opencode.js";
 
@@ -166,7 +167,7 @@ export function t3Launch(deps: T3Deps = {}): HarnessLaunch {
     sessionPrefix: "dl-t3",
     missing: `${T3_INSTALL}\n\n  or with npm: ${T3_INSTALL_NPM}`,
     binaries: { posix: ["t3"], win32: ["t3.exe", "t3.cmd", "t3"] },
-    check: t3Refusal,
+    check: async (args, { env, cwd }) => t3Refusal(args) ?? (await claudeSettingsRefusal("dl t3", "dl's free tier", { env, cwd })),
     prepare: async ({ env, args, origin, keys }) => {
       const claudeKey = keys["claude-code"];
       const opencodeKey = keys.opencode;
