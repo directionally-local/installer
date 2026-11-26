@@ -229,6 +229,35 @@ Open Relay (its balance or the key's spend cap) goes on to DeepSeek too.
 To turn it on after a deploy: `wrangler secret put OPENRELAY_API_KEY`, check
 `GET /v1/admin/providers`, then `POST /admin/config {"providerStatus.openrelay": "on"}`.
 
+#### Open Relay first for DeepSeek and Kimi
+
+Open Relay can also be the first-choice upstream of DeepSeek V4.1 Flash
+(`openrelay/deepseek-v4.1-flash`, 384K context; $0.035 input, $0.01 cached, $0.33 output per
+million) and Kimi K3.1 Pro (`openrelay/kimi-k3.1-pro`, 256K context; $0.24, $0.20, $7.00), in
+models.ts `firstChoice`. It is off until `providerModels.openrelay` lists them (the default list
+leaves them out) and `providerStatus.openrelay` is `"on"`:
+
+```
+POST /admin/config {"providerStatus.openrelay": "on", "providerModels.openrelay": ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3.1-pro"]}
+```
+
+(GLM 5.3 Flash stays off on Open Relay unless it is in the list too.) Then Open Relay serves them
+first; the model's usual upstream (DeepSeek: Luminal, or OpenRouter when that is the primary;
+Kimi: Liquid) serves on a failure before anything reaches the client (429, 5xx, a timeout, a 401,
+402 or 403, or a 400 `context_length_exceeded` for a prompt longer than Open Relay takes), and
+whenever Open Relay is past its credit, `providerWeeklyCredit.openrelay` or the model's own share
+of that week (`modelWeeklyCredit.openrelay.deepseek-v4.1-flash-1017`,
+`modelWeeklyCredit.openrelay.kimi-k3.1-pro`; none by default). Access, per-person caps and the
+person's allowance stay the model's own (Kimi stays a dl Pro perk with Liquid's ration), and the
+public `/v1/providers` keeps listing each under its own provider. Open Relay's credit is charged
+its reported cost, else the usage at the prices above (cached tokens at the cached price).
+
+`GET /v1/admin/providers?days=7` has `usage`: per upstream and model over the last `days` UTC days
+(1 to 60), the requests, upstream errors, `freshTokens`, `cachedTokens`, `outputTokens`,
+`cacheHitRate` (cached ÷ all prompt tokens), `creditUsd`, and `atPrices` (the same split into
+fresh, cached and output dollars at that upstream's prices, and `cacheSavedUsd`). Compare the
+`openrelay` and `luminal` rows of DeepSeek, or `openrelay` and `liquid` of Kimi.
+
 ### Adding a provider
 
 1. Add its entry to `PROVIDERS` in `src/providers.ts` (`kind: "registry"`) and its id to

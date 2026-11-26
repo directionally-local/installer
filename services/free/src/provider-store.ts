@@ -12,6 +12,9 @@
  *                           admins used. A share is one model's part of one upstream's credit,
  *                           "<provider>:<model id>" (what `modelWeeklyCredit.<p>.<key>` counts);
  *                           dollars only, read by every request's gate
+ *   upstream_model_daily    per UTC day, upstream and model: requests, upstream errors, fresh,
+ *                           cached and output tokens and the credit charged (admins included: it
+ *                           is the upstream's load), for each upstream's cache hit rate and cost
  *   provider_probes         one row per speed probe (probes.ts): the model, whether it worked,
  *                           time to first token, tokens a second and its cost, and on Liquid
  *                           the seller that served it and the exchange's own timing; 15 days kept
@@ -21,7 +24,7 @@
  */
 
 import type { Sql } from "./dashboard-data.js";
-import { FREE_MODELS, modelById, upstreamsOf } from "./models.js";
+import { creditPrices, FREE_MODELS, modelById, onUpstream, upstreamsOf, type Provider } from "./models.js";
 import { isRegistryProvider, modelSpendKey, personSpendKey, PROVIDER_IDS, type ProviderId, type ProviderSpend } from "./providers.js";
 import { DAY_MS, WEEK_MS, weekStart } from "./week.js";
 
@@ -65,6 +68,18 @@ export const PROVIDER_SCHEMA = [
      reported_tps      REAL
    )`,
   `CREATE INDEX IF NOT EXISTS provider_probes_model_at ON provider_probes (model, at)`,
+  `CREATE TABLE IF NOT EXISTS upstream_model_daily (
+     day               INTEGER NOT NULL,
+     upstream          TEXT NOT NULL,
+     model             TEXT NOT NULL,
+     requests          INTEGER NOT NULL DEFAULT 0,
+     errors            INTEGER NOT NULL DEFAULT 0,
+     prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+     cached_tokens     INTEGER NOT NULL DEFAULT 0,
+     completion_tokens INTEGER NOT NULL DEFAULT 0,
+     credit_usd        REAL NOT NULL DEFAULT 0,
+     PRIMARY KEY (day, upstream, model)
+   ) WITHOUT ROWID`,
 ];
 
 /** Probes older than this go. */
@@ -195,6 +210,82 @@ export function providerWeeks(sql: Sql, provider: ProviderId, now: number): { we
     .toArray()[0];
   const total = sql.exec<{ internal: number | null }>("SELECT SUM(internal_usd) AS internal FROM provider_credit_weeks WHERE provider = ?", provider).toArray()[0];
   return { weekUsd: round(row?.credit ?? 0), userWeekUsd: round(row?.user ?? 0), freeWeekUsd: round(row?.free ?? 0), probeWeekUsd: round(row?.internal ?? 0), probeTotalUsd: round(total?.internal ?? 0) };
+}
+
+// ─── Usage per upstream and model ────────────────────────────────────────────
+
+/** One request's tokens and credit on the upstream that served (or failed) it. */
+export function addUpstreamModelUsage(
+  sql: Sql,
+  input: { at: number; upstream: string; model: string; error: boolean; promptTokens: number; cachedTokens: number; completionTokens: number; creditUsd: number },
+): void {
+  sql.exec(
+    `INSERT INTO upstream_model_daily (day, upstream, model, requests, errors, prompt_tokens, cached_tokens, completion_tokens, credit_usd) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+     ON CONFLICT (day, upstream, model) DO UPDATE SET requests = requests + 1, errors = errors + excluded.errors,
+       prompt_tokens = prompt_tokens + excluded.prompt_tokens, cached_tokens = cached_tokens + excluded.cached_tokens,
+       completion_tokens = completion_tokens + excluded.completion_tokens, credit_usd = credit_usd + excluded.credit_usd`,
+    Math.floor(input.at / DAY_MS),
+    input.upstream,
+    input.model,
+    input.error ? 1 : 0,
+    Math.max(0, input.promptTokens),
+    Math.max(0, Math.min(input.cachedTokens, input.promptTokens)),
+    Math.max(0, input.completionTokens),
+    Math.max(0, input.creditUsd),
+  );
+}
+
+/** One upstream's use for one model over a window, as /admin/providers shows it. */
+export interface UpstreamModelUsage {
+  upstream: string;
+  model: string;
+  requests: number;
+  errors: number;
+  /** Prompt tokens not read from the cache, read from it, and output tokens. */
+  freshTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+  /** Cached ÷ all prompt tokens, 0 to 1; null with no prompt tokens. */
+  cacheHitRate: number | null;
+  /** What the upstream's credit was charged (its reported cost where it reports one). */
+  creditUsd: number;
+  /**
+   * The credit split by token kind at the upstream's prices (models.ts creditPrices): an estimate
+   * beside `creditUsd`, and what the cache saved against fresh input. Null for an unknown model.
+   */
+  atPrices: { freshUsd: number; cachedUsd: number; outputUsd: number; cacheSavedUsd: number } | null;
+}
+
+/** Use per upstream and model from UTC day `fromDay` on, busiest first. */
+export function upstreamModelUsage(sql: Sql, fromDay: number): UpstreamModelUsage[] {
+  const rows = sql
+    .exec<{ upstream: string; model: string; requests: number; errors: number; prompt: number; cached: number; completion: number; credit: number }>(
+      `SELECT upstream, model, SUM(requests) AS requests, SUM(errors) AS errors, SUM(prompt_tokens) AS prompt, SUM(cached_tokens) AS cached,
+              SUM(completion_tokens) AS completion, SUM(credit_usd) AS credit
+         FROM upstream_model_daily WHERE day >= ? GROUP BY upstream, model ORDER BY requests DESC, upstream, model`,
+      fromDay,
+    )
+    .toArray();
+  return rows.map((row) => {
+    const fresh = Math.max(0, row.prompt - row.cached);
+    const known = modelById(row.model);
+    const prices = known ? creditPrices(onUpstream(known, row.upstream as Provider)) : undefined;
+    const usd = (tokens: number, perMillion: number) => round((tokens * perMillion) / 1_000_000);
+    return {
+      upstream: row.upstream,
+      model: row.model,
+      requests: row.requests,
+      errors: row.errors,
+      freshTokens: fresh,
+      cachedTokens: row.cached,
+      outputTokens: row.completion,
+      cacheHitRate: row.prompt > 0 ? Math.round((row.cached / row.prompt) * 10_000) / 10_000 : null,
+      creditUsd: round(row.credit),
+      atPrices: prices
+        ? { freshUsd: usd(fresh, prices.input), cachedUsd: usd(row.cached, prices.cached), outputUsd: usd(row.completion, prices.output), cacheSavedUsd: usd(row.cached, Math.max(0, prices.input - prices.cached)) }
+        : null,
+    };
+  });
 }
 
 // ─── Speed probes ────────────────────────────────────────────────────────────

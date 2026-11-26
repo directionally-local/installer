@@ -19,11 +19,17 @@
  * share of its credit (`modelWeeklyCredit.<provider>.<key>`), so the models on one provider
  * can't starve each other.
  *
+ * A model can also have upstreams tried before its own provider (models.ts `firstChoice`:
+ * DeepSeek and Kimi K3.1 Pro on Open Relay). Each serves while its provider is on, lists the
+ * model and is within its budgets (upstreamBlock); otherwise, or when it fails before anything
+ * reaches the client, the model's own provider serves as before (`firstChoiceUpstreams`). Access,
+ * per-person caps and the allowance stay the model's own provider's.
+ *
  * Nothing here is secret: the keys are only named (`keyEnv`), never read.
  */
 
 import type { FreeConfig, Prices } from "./config.js";
-import { DEEPSEEK_MODEL, FREE_MODELS, servedBy, upstreamsOf, type FreeModel } from "./models.js";
+import { DEEPSEEK_MODEL, FREE_MODELS, isFirstChoice, servedBy, upstreamsOf, type FreeModel } from "./models.js";
 
 export type ProviderId = "openai" | "luminal" | "liquid" | "openrelay";
 export const PROVIDER_IDS: readonly ProviderId[] = ["openai", "luminal", "liquid", "openrelay"];
@@ -158,6 +164,9 @@ export type RegistrySettingsConfig = {
   "providerOptIn.openrelay": boolean;
   "providerPlans.openrelay": ProviderPlans;
   "providerModels.openrelay": readonly string[];
+  /** The most of Open Relay's weekly budget one model may use (everyone but admins), USD; undefined: no share of its own. */
+  "modelWeeklyCredit.openrelay.deepseek-v4.1-flash-1017": number | undefined;
+  "modelWeeklyCredit.openrelay.kimi-k3.1-pro": number | undefined;
 };
 
 /**
@@ -167,7 +176,7 @@ export type RegistrySettingsConfig = {
  * (about 300M tokens at the ration mix and munitoai's prices; it costs ~$0.0006 a coding task).
  * GLM 5.3 Flash is free for every plan (models.ts `plans`), whatever `providerPlans.liquid` says.
  * Open Relay: paused until the owner turns it on, $200 of credit, $25 a week (about 8 weeks),
- * every plan, not opt-in. GLM 5.3 Flash: $0.50 a person a week across both upstreams (about 15M
+ * every plan, not opt-in; no per-model share of its week until one is set. GLM 5.3 Flash: $0.50 a person a week across both upstreams (about 15M
  * tokens at the ration mix; about 9M if nothing is a cache read). Past it, or past both
  * upstreams' budgets, DeepSeek serves.
  */
@@ -196,9 +205,12 @@ export const REGISTRY_DEFAULTS: RegistrySettingsConfig = {
   "providerPersonWeeklyUsd.openrelay": 0.5,
   "providerOptIn.openrelay": false,
   "providerPlans.openrelay": "all",
+  // Not the models it is the first choice for (DeepSeek, Kimi): those only once listed.
   "providerModels.openrelay": providerModels("openrelay")
-    .filter((model) => model.enabledByDefault !== false)
+    .filter((model) => model.enabledByDefault !== false && !isFirstChoice(model, "openrelay"))
     .map((model) => model.id),
+  "modelWeeklyCredit.openrelay.deepseek-v4.1-flash-1017": undefined,
+  "modelWeeklyCredit.openrelay.kimi-k3.1-pro": undefined,
 };
 
 function exchangeDefaults(upstreamModel: string): { allow: readonly string[]; maxPrices: Prices } {
@@ -359,13 +371,27 @@ export function registryRoute(config: ProviderConfig & ProviderKeys, model: Free
     .map((upstream) => ({ provider: upstream.provider, block: upstreamBlock(config, model, upstream.provider, spend) }));
   const upstreams = blocks.filter((entry) => entry.block === undefined).map((entry) => entry.provider);
   if (upstreams.length === 0) {
-    const chosen = blocks.find((entry) => FALLBACK_BLOCKS.includes(entry.block!)) ?? blocks.find((entry) => entry.block !== "no_key") ?? blocks[0]!;
+    // The block named is the model's own provider's before a first-choice upstream's (Kimi:
+    // Liquid's, whatever Open Relay's is).
+    const own = [...blocks.filter((entry) => entry.provider === model.provider), ...blocks.filter((entry) => entry.provider !== model.provider)];
+    const chosen = own.find((entry) => FALLBACK_BLOCKS.includes(entry.block!)) ?? own.find((entry) => entry.block !== "no_key") ?? own[0]!;
     return { upstreams, block: chosen.block!, blockProvider: chosen.provider };
   }
   if (plan === "free" && modelPlans(config, model) === "pro") return { upstreams, block: "pro_only", blockProvider: model.provider };
   const cap = personCapUsd(config, model);
   if (personWeekUsd !== undefined && cap !== undefined && personWeekUsd >= cap) return { upstreams, block: "person_cap", blockProvider: upstreams[0]! };
   return { upstreams };
+}
+
+/**
+ * The `firstChoice` upstreams (models.ts) of a model whose own provider isn't a registry one
+ * (DeepSeek on Luminal) that can serve it now, in order; [] when none can or it has none. A
+ * registry model's are in registryRoute.
+ */
+export function firstChoiceUpstreams(config: ProviderConfig & ProviderKeys, model: FreeModel, spend: ProviderSpend): RegistryProviderId[] {
+  return (model.firstChoice ?? [])
+    .map((upstream) => upstream.provider)
+    .filter((provider): provider is RegistryProviderId => isRegistryProvider(provider) && upstreamBlock(config, model, provider, spend) === undefined);
 }
 
 /**
@@ -451,9 +477,14 @@ export function configuredUpstreams(config: ProviderConfig & ProviderKeys, model
     .filter((provider): provider is RegistryProviderId => isRegistryProvider(provider) && providerKey(config, provider) !== undefined && providerSettings(config, provider).models.includes(model.id));
 }
 
-/** The upstream a registry model is listed under (the first configured one), or undefined when none is. */
+/**
+ * The upstream a registry model is listed under, or undefined when none is configured: its own
+ * provider when that is configured (Kimi stays under Liquid while Open Relay serves it first),
+ * else the first configured one.
+ */
 export function listedUpstream(config: ProviderConfig & ProviderKeys, model: FreeModel): RegistryProviderId | undefined {
-  return configuredUpstreams(config, model)[0];
+  const configured = configuredUpstreams(config, model);
+  return configured.find((provider) => provider === model.provider) ?? configured[0];
 }
 
 /** What /v1/providers says about a model's access. */
@@ -561,9 +592,9 @@ export function isSellerList(value: readonly unknown[]): value is string[] {
   return value.length <= 10 && value.every((entry) => typeof entry === "string" && SELLER.test(entry.trim()));
 }
 
-/** Model ids of registry providers (any of them). */
+/** Model ids a registry provider serves (any of them, as its own, a backup or a first choice). */
 export function isRegistryModelList(value: readonly unknown[]): value is string[] {
-  const ids = new Set(FREE_MODELS.filter((model) => isRegistryProvider(model.provider)).map((model) => model.id));
+  const ids = new Set(FREE_MODELS.filter((model) => upstreamsOf(model).some((upstream) => isRegistryProvider(upstream.provider))).map((model) => model.id));
   return value.length <= 50 && value.every((entry) => typeof entry === "string" && ids.has(entry));
 }
 
@@ -742,6 +773,16 @@ export function openRelayCharge(parsed: unknown, header?: string | null): number
   const fromBody = typeof raw === "string" ? Number(raw) : raw;
   const nano = typeof fromBody === "number" && Number.isFinite(fromBody) ? fromBody : header ? Number(header) : NaN;
   return Number.isFinite(nano) && nano > 0 ? nano / NANO_PER_USD : undefined;
+}
+
+/** Open Relay's "the prompt doesn't fit the model's window" (400, code `context_length_exceeded`). */
+export function contextTooLong(text: string): boolean {
+  try {
+    const parsed = JSON.parse(text) as { error?: { code?: unknown } } | null;
+    return parsed?.error?.code === "context_length_exceeded";
+  } catch {
+    return false;
+  }
 }
 
 /** What a provider reported it charged for a request: Liquid's `exchange.charge`, or Open Relay's cost. */

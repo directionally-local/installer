@@ -103,6 +103,8 @@ describe("runtime settings (units)", () => {
       "providerOptIn.openrelay": false,
       "providerPlans.openrelay": "all",
       "providerModels.openrelay": ["z-ai/glm-5.3-flash"],
+      "modelWeeklyCredit.openrelay.deepseek-v4.1-flash-1017": null,
+      "modelWeeklyCredit.openrelay.kimi-k3.1-pro": null,
       speedProbes: true,
       userEmails: true,
       weeklyResetEmail: true,

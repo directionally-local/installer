@@ -3,7 +3,8 @@
  *
  * The providers (providers.ts), each on its own prepaid credit: OpenAI (the default), Luminal,
  * which serves DeepSeek, Liquid Inference, which serves Kimi, GLM 5.3 Flash (and GLM 5.3, off for
- * now), and Open Relay, GLM 5.3 Flash's backup upstream. A model's
+ * now), and Open Relay, GLM 5.3 Flash's backup upstream and, when on for them, the first-choice
+ * upstream of DeepSeek and Kimi (`firstChoice`). A model's
  * `family` is the weekly dollar budget it spends: every GPT-6 model shares the GPT-6 budget, and
  * the open models (DeepSeek, Kimi, GLM) share the "deepseek" one, much larger (DeepSeek costs a
  * fraction as much per token). A model's `pool` is its weekly token allowance inside that: Luna, Sol and
@@ -102,6 +103,14 @@ export interface FreeModel {
    */
   backups?: readonly ModelUpstream[];
   /**
+   * Upstreams tried before its own provider, in order, each only while its provider is on and
+   * lists the model (`providerModels.<id>`) and is within its budgets (providers.ts
+   * upstreamBlock). Off, or failing before anything reaches the client (429, 5xx, a timeout, a
+   * prompt longer than it takes), the request goes on to the model's own provider as before.
+   * DeepSeek and Kimi K3.1 Pro: Open Relay first, when the owner turns it on.
+   */
+  firstChoice?: readonly ModelUpstream[];
+  /**
    * Who may use it, whatever its providers' `providerPlans.<id>` and opt-in say: "all" keeps a
    * model free for everyone on a provider whose other models are Pro-only (GLM 5.3 Flash on
    * Liquid, where Kimi is a Pro perk). Unset: its provider's plans and opt-in decide.
@@ -187,6 +196,13 @@ export const FREE_MODELS: readonly FreeModel[] = [
     vision: false,
     reasoning: true,
     line: "deepseek",
+    firstChoice: [
+      // Open Relay, before Luminal while `providerModels.openrelay` lists it. Its prices
+      // (https://openrelay.inc/models/deepseek-v4.1-flash, matched against `cost_nano_usd` on
+      // live requests 2026-11-26); it reports its cost, these count only when it doesn't. Its
+      // context is 384K: a longer prompt goes on to Luminal (a 400 context_length_exceeded).
+      { provider: "openrelay", upstreamModel: "openrelay/deepseek-v4.1-flash", creditPrices: { input: 0.035, cached: 0.01, output: 0.33 } },
+    ],
   },
   // Liquid Inference (an exchange: each request goes to the cheapest seller that passes the
   // request's rules). Ids, limits and prices from https://liquidinference.ai/models/<id> and the
@@ -214,6 +230,12 @@ export const FREE_MODELS: readonly FreeModel[] = [
     // Always reasons; reasoning is billed as output.
     reasoning: true,
     line: "kimi",
+    firstChoice: [
+      // Open Relay, before Liquid while `providerModels.openrelay` lists it. Its prices
+      // (https://openrelay.inc/models/kimi-k3.1-pro, matched against `cost_nano_usd` on live
+      // requests 2026-11-26). Its context is 256K: a longer prompt goes on to Liquid.
+      { provider: "openrelay", upstreamModel: "openrelay/kimi-k3.1-pro", creditPrices: { input: 0.24, cached: 0.2, output: 7 } },
+    ],
     exchange: {
       // Sellers that declare zero retention. Unverified: the handle is as the research saw it
       // on the providers page; the public offers carry no seller names. `privacy.retention:
@@ -293,10 +315,15 @@ export const FREE_MODELS: readonly FreeModel[] = [
   },
 ];
 
-/** A model's upstreams in the order they're tried: its own provider, then its `backups`. */
+/** A model's upstreams in the order they're tried: its `firstChoice`, its own provider, then its `backups`. */
 export function upstreamsOf(model: FreeModel): ModelUpstream[] {
   const own: ModelUpstream = { provider: model.provider, upstreamModel: model.upstreamModel, ...(model.exchange ? { exchange: model.exchange } : {}), ...(model.creditPrices ? { creditPrices: model.creditPrices } : {}) };
-  return [own, ...(model.backups ?? [])];
+  return [...(model.firstChoice ?? []), own, ...(model.backups ?? [])];
+}
+
+/** The upstreams other than the model's own provider: its `firstChoice` and `backups`. */
+function otherUpstreams(model: FreeModel): ModelUpstream[] {
+  return [...(model.firstChoice ?? []), ...(model.backups ?? [])];
 }
 
 /**
@@ -305,15 +332,20 @@ export function upstreamsOf(model: FreeModel): ModelUpstream[] {
  */
 export function onUpstream(model: FreeModel, provider: Provider): FreeModel {
   if (provider === model.provider) return model;
-  const upstream = model.backups?.find((entry) => entry.provider === provider);
+  const upstream = otherUpstreams(model).find((entry) => entry.provider === provider);
   if (!upstream) return model;
   const { exchange: _exchange, creditPrices: _credit, ...rest } = model;
   return { ...rest, provider: upstream.provider, upstreamModel: upstream.upstreamModel, ...(upstream.exchange ? { exchange: upstream.exchange } : {}), ...(upstream.creditPrices ? { creditPrices: upstream.creditPrices } : {}) };
 }
 
+/** Whether `provider` is a `firstChoice` upstream of the model: tried before its own provider. */
+export function isFirstChoice(model: FreeModel, provider: string): boolean {
+  return (model.firstChoice ?? []).some((entry) => entry.provider === provider);
+}
+
 /** Whether `provider` is one of the model's upstreams. */
 export function servedBy(model: FreeModel, provider: string): boolean {
-  return model.provider === provider || (model.backups ?? []).some((entry) => entry.provider === provider);
+  return model.provider === provider || otherUpstreams(model).some((entry) => entry.provider === provider);
 }
 
 /** The model a request gets when it doesn't name one, and the one the pickers lead with. */

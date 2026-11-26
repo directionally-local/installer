@@ -15,9 +15,9 @@ import { healthData, type HealthData, type HealthWindow } from "./health-data.js
 import { adminHomeData, type AdminHomeData } from "./admin-home-data.js";
 import { providerCreditAlert, flaggedUseAlert, moderationAlert, milestoneCrossed, paymentAlert, spendMilestoneAlert, creditAlert, creditPausedAlert, crossed, dailyDigestAlert, DIGEST_MAX_LOGINS, firstSignupAlert, GITHUB_CHECK_ERROR_ALERT, githubCheckErrorAlert, HOST_FAILURE_RATE, HOST_MIN_REQUESTS, HOST_WINDOW_MS, hostFailureAlert, luminalRecoveredAlert, luminalSlow, luminalSlowAlert, queueStartedAlert, SLOW_MIN_REQUESTS, SLOW_QUIET_MS, SLOW_RECOVERED_SHARE, SLOW_REPEAT_MS, SLOW_WINDOW_MS, totalSpendAlert, weeklySpendAlert, failuresOf, type Alert, type DigestUsage, type LuminalWindow, type ServingContext, type SignupHow, type UpstreamOutcome } from "./alerts.js";
 import type { Upstream } from "./config.js";
-import { addProviderCharge, insertProbe, modelMeasures, modelWeekSpend, modelWeeks, personProviderWeek, probeHistory, PROVIDER_SCHEMA, providerSpend, providerWeeks, type ModelMeasure, type ProbeRecord } from "./provider-store.js";
+import { addProviderCharge, addUpstreamModelUsage, upstreamModelUsage, insertProbe, modelMeasures, modelWeekSpend, modelWeeks, personProviderWeek, probeHistory, PROVIDER_SCHEMA, providerSpend, providerWeeks, type ModelMeasure, type ProbeRecord, type UpstreamModelUsage } from "./provider-store.js";
 import { isRegistryProvider, modelWeeklyCap, PROVIDERS, providerModels, providerSettings, REGISTRY_CREDIT_ALERT_SHARE, type ProviderConfig, type ProviderId, type ProviderSpend } from "./providers.js";
-import { DEEPSEEK_MODEL, familyOf, FREE_MODELS, upstreamsOf, type Family } from "./models.js";
+import { DEEPSEEK_MODEL, familyOf, FREE_MODELS, isFirstChoice, upstreamsOf, type Family } from "./models.js";
 import { creditBudget, creditForecast, creditMode, etaAt, forecast, queueOrder, shouldQueue, type Forecast, type Policy, type Waiting } from "./queue.js";
 import { bonuses, codeFor, countingPairs, everActiveFriends, trialBonuses, type Pair, type ReferralOutcome } from "./referrals.js";
 import { applyOverrides, readOverrides, type Overrides, type SettingChange } from "./runtime-config.js";
@@ -403,11 +403,12 @@ export interface ProviderAdminView {
   probeWeekUsd: number | null;
   probeTotalUsd: number | null;
   /**
-   * Registry only: the models it serves, as their own upstream ("primary") or as a backup
-   * (GLM 5.3 Flash on Open Relay), whether they're on there, this week's spend on each (everyone,
+   * Registry only: the models it serves, as their own upstream ("primary"), as the upstream tried
+   * before their own ("first": DeepSeek and Kimi on Open Relay) or as a backup (GLM 5.3 Flash on
+   * Open Relay), whether they're on there, this week's spend on each (everyone,
    * and everyone but admins) and the model's weekly share of this provider (`modelWeeklyCredit`).
    */
-  models?: Array<{ id: string; name: string; role: "primary" | "backup"; on: boolean; weekUsd: number; userWeekUsd: number; weeklyShareUsd: number | null }>;
+  models?: Array<{ id: string; name: string; role: "primary" | "first" | "backup"; on: boolean; weekUsd: number; userWeekUsd: number; weeklyShareUsd: number | null }>;
 }
 
 /** One Monday's admission from the queue. */
@@ -2931,8 +2932,9 @@ export class DirectoryObject extends DurableObject {
   }
 
   /** GET /admin/providers: each provider's credit, used and left, and the probes since `since`. */
-  async providersAdmin(now: number, envPolicy: Policy, since: number): Promise<{ providers: ProviderAdminView[]; probes: ProbeRecord[] }> {
-    return { providers: this.#providersAdmin(now, this.#policy(envPolicy)), probes: probeHistory(this.ctx.storage.sql, since) };
+  async providersAdmin(now: number, envPolicy: Policy, since: number, usageDays = 7): Promise<{ providers: ProviderAdminView[]; probes: ProbeRecord[]; usage: UpstreamModelUsage[] }> {
+    const fromDay = Math.floor(now / DAY_MS) - (usageDays - 1);
+    return { providers: this.#providersAdmin(now, this.#policy(envPolicy)), probes: probeHistory(this.ctx.storage.sql, since), usage: upstreamModelUsage(this.ctx.storage.sql, fromDay) };
   }
 
   #providersAdmin(now: number, policy: Policy): ProviderAdminView[] {
@@ -2965,7 +2967,7 @@ export class DirectoryObject extends DurableObject {
               models: providerModels(spec.id).map((model) => ({
                 id: model.id,
                 name: model.name,
-                role: model.provider === spec.id ? ("primary" as const) : ("backup" as const),
+                role: model.provider === spec.id ? ("primary" as const) : isFirstChoice(model, spec.id) ? ("first" as const) : ("backup" as const),
                 on: settings.models.includes(model.id),
                 weekUsd: byModel.get(model.id)?.weekUsd ?? 0,
                 userWeekUsd: byModel.get(model.id)?.userWeekUsd ?? 0,
@@ -3334,6 +3336,16 @@ export class DirectoryObject extends DurableObject {
         // Each upstream's own credit: Luminal's, OpenAI's or a registry provider's (only one is non-zero per request).
         credit + openaiCredit + registryCredit,
       );
+      addUpstreamModelUsage(this.ctx.storage.sql, {
+        at: record.at,
+        upstream,
+        model: record.model,
+        error: record.upstreamError === true,
+        promptTokens: record.promptTokens,
+        cachedTokens: record.cachedTokens,
+        completionTokens: record.completionTokens,
+        creditUsd: credit + openaiCredit + registryCredit,
+      });
       if (!admin) {
         const day = Math.floor(record.at / DAY_MS);
         this.ctx.storage.sql.exec(
@@ -3493,7 +3505,9 @@ export class DirectoryObject extends DurableObject {
     // (GLM 5.3 Flash: Liquid ↔ Open Relay), then to its fallback; one with only a fallback hands
     // over to it; any other is hidden (402 provider_limit).
     const on = providerModels(provider).filter((model) => (isRegistryProvider(provider) ? providerSettings(policy as unknown as ProviderConfig, provider).models.includes(model.id) : true));
-    const elsewhere = (model: (typeof on)[number]) => upstreamsOf(model).filter((upstream) => upstream.provider !== provider).map((upstream) => PROVIDERS.find((entry) => entry.id === upstream.provider)?.name ?? upstream.provider);
+    // Another registry upstream counts only while it lists the model (Kimi on Open Relay once listed).
+    const listed = (other: string, id: string) => !isRegistryProvider(other) || providerSettings(policy as unknown as ProviderConfig, other).models.includes(id);
+    const elsewhere = (model: (typeof on)[number]) => upstreamsOf(model).filter((upstream) => upstream.provider !== provider && listed(upstream.provider, model.id)).map((upstream) => PROVIDERS.find((entry) => entry.id === upstream.provider)?.name ?? upstream.provider);
     if (on.some((model) => elsewhere(model).length > 0)) {
       const lines = on.map((model) => {
         const others = elsewhere(model);
