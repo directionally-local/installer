@@ -1,5 +1,5 @@
 import { ALLOCATOR_MODES } from "./allocator.js";
-import { ACCESS_REQUEST_ALERT_MODES, COUPON_ID, GPT6_CLIENTS, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, isKeepDays, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, RAW_LOG_MAX_KEEP_DAYS, RAW_LOG_MIN_KEEP_DAYS, PRO_MULTIPLIER_MAX, PRO_MULTIPLIER_MIN, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
+import { ACCESS_REQUEST_ALERT_MODES, COUPON_ID, GPT6_CLIENTS, GUARD_MODES, isAllowlistEntry, MAX_FIRST_BYTE_TIMEOUT_SECONDS, isKeepDays, legacyKeepDays, MAX_HOST_COOLDOWN_MINUTES, MODERATION_MODES, RAW_LOG_MAX_KEEP_DAYS, RAW_LOG_MIN_KEEP_DAYS, PRO_MULTIPLIER_MAX, PRO_MULTIPLIER_MIN, UPSTREAMS, parseInstant, type FreeConfig } from "./config.js";
 import { isEmailBlocklistEntry } from "./email-guard.js";
 import { BROADCAST_EMAIL_PROVIDERS } from "./email-budget.js";
 import { MAX_TRIAL_DAYS } from "./trials.js";
@@ -236,7 +236,7 @@ export const RUNTIME_SETTINGS = {
   useDescriptions: { kind: "flag", env: "USE_DESCRIPTIONS" },
   /** Description calls a UTC day across everyone; 0 stops them. */
   useDescriptionDailyCap: { kind: "count", env: "USE_DESCRIPTION_DAILY_CAP" },
-  /** Whole UTC days of raw request log and session events kept (rollups keep every all-time number); 0 keeps everything. */
+  /** Whole UTC days of raw request log and session events kept (rollups keep every all-time number); 31 to 400. */
   rawLogKeepDays: { kind: "keepDays", env: "RAW_LOG_KEEP_DAYS" },
   /** Security work (by its use description or the request's own words) served by DeepSeek only, never GPT-6 (security-route.ts); false turns it off. */
   securityOffGpt6: { kind: "flag", env: "SECURITY_OFF_GPT6" },
@@ -468,7 +468,7 @@ export function validateValue(kind: Kind, value: unknown): OverrideValue | "inva
 const RULES: Record<Kind, string> = {
   tokens: `a whole number of tokens, 0 to ${MAX_TOKENS}`,
   count: `a whole number, 0 to ${MAX_COUNT}`,
-  keepDays: `0 (keep everything) or a whole number of days, ${RAW_LOG_MIN_KEEP_DAYS} to ${RAW_LOG_MAX_KEEP_DAYS}`,
+  keepDays: `a whole number of days, ${RAW_LOG_MIN_KEEP_DAYS} to ${RAW_LOG_MAX_KEEP_DAYS}`,
   usd: `a number of dollars, 0 to ${MAX_USD}, or "none" for no cap`,
   flag: "true or false",
   weight: "a number from 0 to 1",
@@ -540,6 +540,8 @@ export function readOverrides(stored: Array<{ key: string; value: string }>): Ov
     }
     const value = validateValue(RUNTIME_SETTINGS[key].kind, parsed);
     if (value !== "invalid") out[key] = value;
+    // A keep override stored before the cap (0, "keep everything", or over the most) keeps the most.
+    else if (RUNTIME_SETTINGS[key].kind === "keepDays" && legacyKeepDays(parsed) !== undefined) out[key] = legacyKeepDays(parsed)!;
   }
   return out;
 }
