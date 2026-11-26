@@ -566,8 +566,8 @@ describe("402 quota_exceeded", () => {
     assert.equal(error.referralLink, "https://dl.new/r/alice");
     assert.equal(error.resetsAt, new Date(NEXT_MONDAY).toISOString());
     assert.equal(error.reason, "spend");
-    // dl Pro's prompt: the open models' week is used up and Pro is offered.
-    const text = "You've hit this week's free limit. dl Pro: $7/month for higher limits and early access to new models.";
+    // dl Pro's prompt, naming the limit: the open models' week is used up and Pro is offered.
+    const text = "You've hit this week's free spending limit on DeepSeek V4.1 Flash. dl Pro: $7/month for higher limits and early access to new models.";
     assert.deepEqual(error.proPrompt, { text, price: "$7/month", upgradeUrl: "https://dl.new/account" });
     assert.equal(error.message, `${text} Upgrade: https://dl.new/account`);
   });

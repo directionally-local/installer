@@ -51,6 +51,7 @@ import {
   UPSTREAM_UNAVAILABLE_MESSAGE,
   queuedMessage,
   gptLimitMessage,
+  freeLimitName,
   proPromptMessage,
   proPromptText,
   quotaMessage,
@@ -102,12 +103,12 @@ import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "
 import { anthropicError, errorStatus, estimateInputTokens, toAnthropicMessage, toAnthropicStream, toChatRequest } from "./anthropic.js";
 import { DAY_MS, isoDay, weekEnd, weekStart, WEEK_MS } from "./week.js";
 import { planResetValues } from "./plan-reset.js";
-import { FREE_ENDED_CODE, FREE_ENDED_MESSAGE, freeEnded, freeEndedFor, limitRefusal, meterFor, warningEmailValues, withNotices } from "./plan-limits.js";
+import { FREE_ENDED_CODE, FREE_ENDED_MESSAGE, PLAN_MIX_LABEL, freeEnded, freeEndedFor, limitRefusal, meterFor, realFromCounted, warningEmailValues, withNotices } from "./plan-limits.js";
 import { convertTrial, sendTrial80 } from "./trial-web.js";
 import { noCardUsedUpMessage, notInTrialNotice, trialsOffer, startsWithPlanNotice, TRIAL_CONVERTING_MESSAGE, TRIAL_PAYMENT_FAILED_MESSAGE, TRIAL_WARN_SHARE, trialWarningNotice, type TrialMeter } from "./trials.js";
 import { displayName as planDisplayName, isPaidPlan, planLimitFor, planName as planTitle } from "./plans.js";
 import { PLAN_METER_MODELS, afterMeterFull, anthropicModelFor, bonusProjection, dueWarning, planRoute, tokenMeter, type PlanServe } from "./plan-route.js";
-import { bonusAccountView, planCatalog, planLimitsView, planUsageView } from "./plan-usage.js";
+import { bonusAccountView, mixView, planCatalog, planLimitsView, planUsageView } from "./plan-usage.js";
 import { isPlanId, PLANS, promoPrice, promoView } from "./plan-prices.js";
 import { BONUS_MODEL, bonusBlock } from "./gpt6-bonus.js";
 import type { PlanState } from "./account-object.js";
@@ -1233,11 +1234,28 @@ function upgradeUrl(c: Ctx): string {
  * (`proPrompt`: the exact text, the price, and the Upgrade link), `message` the one-line version.
  * Null while Pro isn't offered (`proOffered` off).
  */
-function proPromptFor(c: Ctx, config: FreeConfig): { view: { text: string; price: string; upgradeUrl: string }; message: string } | null {
+function proPromptFor(c: Ctx, config: FreeConfig, limit?: string): { view: { text: string; price: string; upgradeUrl: string }; message: string } | null {
   if (!config.proOffered) return null;
   const price = `${usdLabel(config.offers.pro.priceUsdMonthly)}/month`;
   const url = upgradeUrl(c);
-  return { view: { text: proPromptText(price), price, upgradeUrl: url }, message: proPromptMessage(price, url) };
+  return { view: { text: proPromptText(price, limit), price, upgradeUrl: url }, message: proPromptMessage(price, url, limit) };
+}
+
+/**
+ * The limit a quota refusal hit, by name (messages.ts freeLimitName): the asked pool's weekly
+ * tokens (as real tokens at the plan mix) or its family's dollar budget. GPT-6's dollar budget
+ * is shared by every GPT-6 model, so it is named "GPT-6".
+ */
+function refusalLimitName(allowance: Allowance, reason: "tokens" | "spend", family: Family, model: FreeModel, cachedTokenWeight: number): string {
+  const modelName = reason === "spend" && family === "gpt6" ? "GPT-6" : planDisplayName(model);
+  const counted = allowance.tokensPerWeek;
+  return freeLimitName({
+    reason,
+    modelName,
+    tokens: counted === null || counted <= 0 ? null : realFromCounted(counted, cachedTokenWeight),
+    usd: allowance.usdPerWeek,
+    mixLabel: PLAN_MIX_LABEL,
+  });
 }
 
 /** Whether a free account's week of open models (DeepSeek) is used up: its dollar budget, or its tokens on a smaller level. */
@@ -2791,20 +2809,33 @@ async function me(c: Ctx): Promise<Response> {
     allowance: queue ? { ...view, remaining: 0 } : view,
     /** Both weekly dollar budgets (also in `allowance.budgets`): GPT-6 (every GPT-6 model) and DeepSeek. */
     budgets: view.budgets,
-    /** Each model's weekly allowance, so a client can show what each one has left; null tokens: no token cap. */
+    /**
+     * Each model's weekly allowance, so a client can show what each one has left; null tokens: no
+     * token cap. `tokensPerWeek`, `usedThisWeek` and `remaining` are counted tokens (cached input
+     * at `mix.cachedTokenWeight`); `realTokensPerWeek` and `realUsedThisWeek` are the same as real
+     * tokens at the plan mix (`mix.label`), the numbers to show a person.
+     */
     pools: Object.fromEntries(
-      POOLS.map((pool) => [
-        pool,
-        {
-          tokensPerWeek: allowance.pools[pool].tokensPerWeek,
-          usedThisWeek: allowance.pools[pool].usedThisWeek,
-          remaining: queue ? 0 : allowance.pools[pool].remaining,
-          family: familyOfPool(pool),
-          resetsAt: new Date(allowance.resetsAt).toISOString(),
-          models: offeredModels(config).filter((model) => model.pool === pool).map((model) => model.id),
-        },
-      ]),
+      POOLS.map((pool) => {
+        const p = allowance.pools[pool];
+        const real = (counted: number) => Math.round(realFromCounted(counted, config.cachedTokenWeight));
+        return [
+          pool,
+          {
+            tokensPerWeek: p.tokensPerWeek,
+            usedThisWeek: p.usedThisWeek,
+            remaining: queue ? 0 : p.remaining,
+            realTokensPerWeek: p.tokensPerWeek === null ? null : real(p.tokensPerWeek),
+            realUsedThisWeek: real(p.usedThisWeek),
+            family: familyOfPool(pool),
+            resetsAt: new Date(allowance.resetsAt).toISOString(),
+            models: offeredModels(config).filter((model) => model.pool === pool).map((model) => model.id),
+          },
+        ];
+      }),
     ),
+    /** How counted tokens become real ones: the plan mix, its label and the cached-token weight. */
+    mix: mixView(config.cachedTokenWeight),
     models: offeredModels(config).map((model) => model.id),
     /**
      * The models only dl Pro gets (providers.ts `plans` "pro"), stated upfront: for each, whether
@@ -4093,9 +4124,11 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
           quota,
         );
       }
+      // Which limit ran out (the token allowance or the dollar one), named in the refusal.
+      const limitName = refusalLimitName(reservation.allowance, reservation.reason, reservation.family, serving.model, gate.config.cachedTokenWeight);
       // dl Pro's prompt: a free account's week of open models (DeepSeek) is used up, Pro is offered.
       const proPrompt =
-        !isAdmin && reservation.allowance.plan === "free" && !reservation.allowance.trial && (reservation.family === "deepseek" || !reservation.deepseekLeft) ? proPromptFor(c, gate.config) : null;
+        !isAdmin && reservation.allowance.plan === "free" && !reservation.allowance.trial && (reservation.family === "deepseek" || !reservation.deepseekLeft) ? proPromptFor(c, gate.config, limitName) : null;
       if (proPrompt) await countPro(c, "seen", identity.githubId);
       // A basic or Starter week used up: what the level gets, when it resets, and the ways to more.
       if (!isAdmin && reservation.allowance.plan === "free" && (level === "basic" || level === "starter")) {
@@ -4104,8 +4137,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
           `${level}_limit`,
           proPrompt
             ? `${proPrompt.message}, or type /request in dl and tell us what you're building.`
-            : limitLine(level, limits.levelTokens ?? 0, limits.weeklyUsd, limits.deepseekWeeklyUsd ?? undefined),
-          { resetsAt, reason: reservation.reason, request: ACCESS_REQUEST_PATH, offers: offers(gate.config), referralLink: link, ...(proPrompt ? { proPrompt: proPrompt.view } : {}) },
+            : limitLine(level, limits.levelTokens ?? 0, limits.weeklyUsd, limits.deepseekWeeklyUsd ?? undefined, limitName),
+          { resetsAt, reason: reservation.reason, family: reservation.family, request: ACCESS_REQUEST_PATH, offers: offers(gate.config), referralLink: link, ...(proPrompt ? { proPrompt: proPrompt.view } : {}) },
           quota,
         );
       }
@@ -4113,7 +4146,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
         402,
         "quota_exceeded",
         proPrompt ? proPrompt.message : quotaMessage(reservation.reason, resetsAt, reservation.allowance.plan),
-        { resetsAt, reason: reservation.reason, offers: offers(gate.config), referralLink: link, ...(proPrompt ? { proPrompt: proPrompt.view } : {}) },
+        { resetsAt, reason: reservation.reason, family: reservation.family, offers: offers(gate.config), referralLink: link, ...(proPrompt ? { proPrompt: proPrompt.view } : {}) },
         quota,
       );
     }

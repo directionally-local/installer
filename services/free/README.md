@@ -425,7 +425,13 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
     "astra": { "tokensPerWeek": 3000000,  "usedThisWeek": 0, "remaining": 3000000,  "resetsAt": "…", "family": "gpt6", "models": ["gpt-6-astra"] },
     "deepseek": { "tokensPerWeek": null, "usedThisWeek": 0, "remaining": null, "resetsAt": "…", "family": "deepseek",
                   "models": ["deepseek/deepseek-v4.1-flash-1017"] }
+    // Every pool also has realTokensPerWeek and realUsedThisWeek: its counted tokens as real
+    // tokens at the plan mix (`mix`), the numbers to show a person (null realTokensPerWeek: no cap).
+    // A smaller level's DeepSeek pool has a token cap besides its dollar budget, and it usually binds first.
   },
+  // How counted tokens become real ones: counted = cached x cachedTokenWeight + fresh + output.
+  "mix": { "cached": 0.955, "fresh": 0.038, "output": 0.007, "label": "95.5% caching applied",
+           "cachedTokenWeight": 0.02, "countedFactor": 0.0641 },
   "models": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "deepseek/deepseek-v4.1-flash-1017"],
   "otherHarnessShare": 0.5,             // dl claude / dl opencode's part of the allowance; Autopilot gets all of it
   "plan": "free",                       // "free" | "pro"
@@ -485,14 +491,17 @@ prompt (phase 1), as the message with its Upgrade link and as `proPrompt` for cl
 their own [Upgrade] (Autopilot opens Checkout from `/upgrade`). Counted as seen (pro-funnel.ts).
 A basic or Starter account gets it in `basic_limit`/`starter_limit` too, with ", or type
 /request in dl and tell us what you're building." added. While Pro isn't offered, the messages
-below.
+below. The refusal's prompt names the limit that ran out: "free token limit on DeepSeek V4.1
+Flash (~18.7M tokens, 95.5% caching applied)" (the pool's tokens as real tokens at the plan
+mix) or "free $8 spending limit on DeepSeek V4.1 Flash"; `family` says which budget. /v1/me's
+`proPrompt` keeps the generic "free limit".
 
 ```json
 { "error": { "code": "quota_exceeded",
-             "message": "You've hit this week's free limit. dl Pro: $7/month for higher limits and early access to new models. Upgrade: https://dl.new/account",
-             "proPrompt": { "text": "You've hit this week's free limit. dl Pro: $7/month for higher limits and early access to new models.",
+             "message": "You've hit this week's free $8 spending limit on DeepSeek V4.1 Flash. dl Pro: $7/month for higher limits and early access to new models. Upgrade: https://dl.new/account",
+             "proPrompt": { "text": "You've hit this week's free $8 spending limit on DeepSeek V4.1 Flash. dl Pro: $7/month for higher limits and early access to new models.",
                             "price": "$7/month", "upgradeUrl": "https://dl.new/account" },
-             "reason": "spend", "resetsAt": "2026-11-09T00:00:00.000Z", "offers": { "...": "as above" }, "referralLink": "https://dl.new/r/alice" } }
+             "reason": "spend", "family": "deepseek", "resetsAt": "2026-11-09T00:00:00.000Z", "offers": { "...": "as above" }, "referralLink": "https://dl.new/r/alice" } }
 ```
 
 GPT-6's week used up while DeepSeek's isn't (free or Pro; Pro's message leaves the offer out):
@@ -518,13 +527,13 @@ Queued:
 The wait reads "about N days" under two weeks, else "about N weeks".
 
 A basic or Starter account's week used up (both budgets; a free user): `basic_limit` or
-`starter_limit`, with what the free plan gets (never the level's name), that it resets Monday,
+`starter_limit`, with the limit that ran out (never the level's name), that it resets Monday,
 and the ways on. `request` is the access-request endpoint.
 
 ```json
 { "error": { "code": "basic_limit",
-             "message": "You've used this week's free allowance (every model, up to $2 of GPT-6 and $8 of DeepSeek a week). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.",
-             "reason": "tokens", "resetsAt": "2026-11-09T00:00:00.000Z", "request": "/v1/access-request",
+             "message": "You've hit this week's free token limit on DeepSeek V4.1 Flash (~18.7M tokens, 95.5% caching applied). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.",
+             "reason": "tokens", "family": "deepseek", "resetsAt": "2026-11-09T00:00:00.000Z", "request": "/v1/access-request",
              "offers": { "...": "as above" }, "referralLink": "https://dl.new/r/alice" } }
 ```
 
@@ -1383,8 +1392,8 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `global_total_budget_reached` | chat (503) | `reason: "total_budget"`, `pausedForEveryone: true`, `resetsAt: null` |
 | `gpt_limit` | chat (402) | `family: "gpt6"`, `reason`, `resetsAt`, `alternative` (the DeepSeek model id), `offers`: GPT-6's week used up, DeepSeek's not; also `reason` `security` (security work, or the pre-send checks) and `trust` (the trust gate), without `offers` |
 | `trial_ended` | chat (402) | `trial` (`{tokens, used, remaining, ended}`), `offers`: a trial account used its one-time trial |
-| `quota_exceeded` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `offers`, `referralLink` |
-| `basic_limit`, `starter_limit` | chat (402) | `reason: "tokens" \| "spend"`, `resetsAt`, `request`, `offers`, `referralLink` |
+| `quota_exceeded` | chat (402) | `reason: "tokens" \| "spend"`, `family: "gpt6" \| "deepseek"`, `resetsAt`, `offers`, `referralLink` |
+| `basic_limit`, `starter_limit` | chat (402) | `reason: "tokens" \| "spend"`, `family: "gpt6" \| "deepseek"`, `resetsAt`, `request`, `offers`, `referralLink` |
 | `below_bar` | chat (403) | `contact`, `request` |
 | `free_tier_queued` | chat (402) | `position`, `etaAt`, `offers`, `referralLink` |
 | `upstream_credit_exhausted` | chat (503) | `reason: "credit_exhausted"`, `pausedForEveryone: true`, `resetsAt: null` |

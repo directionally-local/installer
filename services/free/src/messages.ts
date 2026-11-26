@@ -108,13 +108,28 @@ export function quotaMessage(reason: "tokens" | "spend", resetsAt: string, plan:
  * carries it as `proPrompt.text`; its `message` adds where to upgrade (`proPromptMessage`), for
  * agents that show the service's own words.
  */
-export function proPromptText(price: string): string {
-  return `You've hit this week's free limit. dl Pro: ${price} for higher limits and early access to new models.`;
+export function proPromptText(price: string, limit?: string): string {
+  return `You've hit this week's free ${limit ?? "limit"}. dl Pro: ${price} for higher limits and early access to new models.`;
 }
 
 /** The prompt with its Upgrade link, as one line: "… Upgrade: https://dl.new/account" */
-export function proPromptMessage(price: string, upgradeUrl: string): string {
-  return `${proPromptText(price)} Upgrade: ${upgradeUrl}`;
+export function proPromptMessage(price: string, upgradeUrl: string, limit?: string): string {
+  return `${proPromptText(price, limit)} Upgrade: ${upgradeUrl}`;
+}
+
+/**
+ * Which weekly limit a free refusal hit, named so a person can tell the token allowance from the
+ * dollar one: "token limit on DeepSeek V4.1 Flash (~18.7M tokens, 95.5% caching applied)" or
+ * "$8 spending limit on DeepSeek V4.1 Flash". `tokens` is the limit in real tokens at the plan
+ * mix (`mixLabel` names the mix), `usd` the family's dollar cap.
+ */
+export function freeLimitName(input: { reason: "tokens" | "spend"; modelName: string; tokens?: number | null; usd?: number | null; mixLabel: string }): string {
+  if (input.reason === "tokens") {
+    const amount = input.tokens !== undefined && input.tokens !== null && input.tokens > 0 ? ` (~${formatTokens(input.tokens).replace(/k$/, "K")} tokens, ${input.mixLabel})` : "";
+    return `token limit on ${input.modelName}${amount}`;
+  }
+  const usd = input.usd !== undefined && input.usd !== null && input.usd > 0 ? `$${Number.isInteger(input.usd) ? input.usd : input.usd.toFixed(2)} ` : "";
+  return `${usd}spending limit on ${input.modelName}`;
 }
 
 /**

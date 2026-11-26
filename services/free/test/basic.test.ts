@@ -133,7 +133,7 @@ describe("the basic level", () => {
     assert.equal(error.request, "/v1/access-request");
     assert.equal(
       error.message,
-      "You've used this week's free allowance (every model, up to $2 of GPT-6 and $8 of DeepSeek a week). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.",
+      "You've hit this week's free token limit on GPT-6 Luna (~1.6K tokens, 95.5% caching applied). It resets on Monday. Need more? Type /request in dl and tell us what you're building, or use your own API key with /provider.",
     );
     assert.doesNotMatch(error.message, HIDDEN);
     assert.doesNotMatch(error.message, LEVEL_NAMES);
@@ -142,7 +142,7 @@ describe("the basic level", () => {
     const offered = ((await (await chat(service, token, "gpt-6-luna")).json()) as { error: Record<string, any> }).error;
     assert.equal(offered.code, "basic_limit");
     assert.equal(offered.request, "/v1/access-request");
-    assert.match(offered.message, /^You've hit this week's free limit\. dl Pro: \$7\/month for higher limits and early access to new models\. Upgrade: https:\/\/dl\.new\/account, or type \/request in dl/);
+    assert.match(offered.message, /^You've hit this week's free token limit on GPT-6 Luna \(~1\.6K tokens, 95\.5% caching applied\)\. dl Pro: \$7\/month for higher limits and early access to new models\. Upgrade: https:\/\/dl\.new\/account, or type \/request in dl/);
     assert.equal(offered.proPrompt.upgradeUrl, "https://dl.new/account");
     assert.doesNotMatch(offered.message, LEVEL_NAMES);
   });
@@ -215,7 +215,33 @@ describe("the Starter allowance", () => {
     assert.equal(error.code, "starter_limit");
     assert.equal(error.reason, "tokens");
     assert.equal(error.request, "/v1/access-request");
-    assert.match(error.message, /^You've hit this week's free limit\. dl Pro: \$7\/month for higher limits and early access to new models\. Upgrade: https:\/\/dl\.new\/account, or type \/request in dl/);
+    assert.match(error.message, /^You've hit this week's free token limit on GPT-6 Luna \(~1\.6K tokens, 95\.5% caching applied\)\. dl Pro: \$7\/month for higher limits and early access to new models\. Upgrade: https:\/\/dl\.new\/account, or type \/request in dl/);
+    assert.equal(error.family, "gpt6");
+  });
+
+  it("gives /v1/me a Starter account's DeepSeek token allowance in counted and real tokens, and names it when it runs out", async () => {
+    // 64,100 counted tokens a week: 1M real at the plan mix (95.5% cached at 0.02, 3.8% fresh, 0.7% output).
+    const { service } = await open({ STARTER_WEEKLY_TOKENS: "64100", BASIC_WEEKLY_TOKENS: "0" });
+    const { access_token: token } = await service.signIn(belowBar(100, YOUNG));
+    const mine = await me(service, token);
+    assert.equal(mine.budgets.deepseek.usdPerWeek, 8, "the dollar budget alone would read as plenty left");
+    assert.equal(mine.pools.deepseek.tokensPerWeek, 64_100);
+    assert.equal(mine.pools.deepseek.realTokensPerWeek, 1_000_000);
+    assert.equal(mine.pools.deepseek.realUsedThisWeek, 0);
+    assert.equal(mine.pools.deepseek.family, "deepseek");
+    assert.deepEqual(mine.mix, { cached: 0.955, fresh: 0.038, output: 0.007, label: "95.5% caching applied", cachedTokenWeight: 0.02, countedFactor: mine.mix.countedFactor });
+    assert.ok(Math.abs(mine.mix.countedFactor - 0.0641) < 1e-9);
+    // DeepSeek's tokens too few for a request, its dollars untouched: the refusal says it was the token limit.
+    const small = await open({ STARTER_WEEKLY_TOKENS: "100", BASIC_WEEKLY_TOKENS: "0" });
+    const { access_token: other } = await small.service.signIn(belowBar(101, YOUNG));
+    await small.service.request("POST", "/admin/config", { token: small.admin, body: { proOffered: false } });
+    const refused = await chat(small.service, other, "deepseek/deepseek-v4.1-flash-1017");
+    assert.equal(refused.status, 402);
+    const error = ((await refused.json()) as { error: Record<string, any> }).error;
+    assert.equal(error.code, "starter_limit");
+    assert.equal(error.reason, "tokens");
+    assert.equal(error.family, "deepseek");
+    assert.match(error.message, /^You've hit this week's free token limit on DeepSeek V4\.1 Flash \(~1\.6K tokens, 95\.5% caching applied\)\. It resets on Monday\./);
   });
 
   it("stops at the Starter dollar cap", async () => {
