@@ -190,7 +190,7 @@ describe("dl setup on a laptop", () => {
     const server = new FakeSshServer();
     const run = deps(server, { Where: "2", Server: "1" }, { registry: { has: async () => false, latest: async () => "0.10.1" } });
     await setupWizard(run.deps);
-    assert.ok(server.calls.some((call) => call.command.endsWith("DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh /tmp/dl-install.sh")));
+    assert.ok(server.calls.some((call) => call.command.includes("DL_INSTALL_ONLY=1 DL_VERSION=0.10.1 sh \"$d/dl-install.sh\"")));
     assert.match(run.text(), new RegExp(`! This laptop's dl ${dlVersion().replace(/\./g, "\\.")} isn't on npm \\(a development build\\?\\), so box gets npm's latest dl \\(0\\.10\\.1\\) instead\\.`));
   });
 
@@ -251,7 +251,7 @@ describe("dl setup on a laptop", () => {
     assert.equal(remote?.name, "198-51-100-7", "no hostname from the server: its address");
     assert.ok(server.calls.slice(probes.length).every((call) => call.access.identityFile === "/home/me/.ssh/work"), "the working key is used from then on");
     const commands = server.calls.map((call) => call.command);
-    assert.ok(commands.some((command) => command.includes(`sudo -n env DL_INSTALL_ONLY=1 DL_VERSION=${dlVersion()} sh /tmp/dl-install.sh`)));
+    assert.ok(commands.some((command) => command.includes(`sudo -n env DL_INSTALL_ONLY=1 DL_VERSION=${dlVersion()} sh "$d/dl-install.sh"`)));
     assert.ok(commands.includes("sudo -n dl up --needs --access ssh"));
     assert.ok(commands.includes("sudo -n dl up --access ssh --answers-stdin --events json"));
     assert.ok(events.includes("done access | private · reached over SSH"));
