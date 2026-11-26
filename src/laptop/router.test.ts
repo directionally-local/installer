@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { ScriptedPrompter, type Prompter, type SelectOption } from "../prompt.js";
-import type { DetectedAgent } from "./agent-catalog.js";
+import { AGENT_CATALOG, type DetectedAgent } from "./agent-catalog.js";
 import type { AgentRequest, DlKey } from "./dl-key.js";
 import {
-  AGAIN_QUESTION, AUTOPILOT_ROW, autopilotKeyEnv, FIRST_QUESTION, INSTALL_AUTOPILOT, NOTHING_FOUND, orderAgents, pickerOptions, readAgentHistory, recordAgentUse, routerHome, THANKS,
+  AGAIN_QUESTION, AUTOPILOT_ROW, autopilotKeyEnv, FIRST_QUESTION, INSTALL_AUTOPILOT, NOTHING_FOUND, orderAgents, pickerOptions, readAgentHistory, recordAgentUse, routerHome, setupSteps, THANKS,
   type RouterDeps,
 } from "./router.js";
 
@@ -171,5 +171,22 @@ describe("agent history and Autopilot's key", () => {
   it("gives Autopilot the key, and dl's plan as its provider only when it has none", () => {
     assert.deepEqual(autopilotKeyEnv(KEY, undefined), { AUTOPILOT_DL_FREE_TOKEN: KEY.key, AUTOPILOT_PROVIDER: "directionally-local" });
     assert.deepEqual(autopilotKeyEnv(KEY, "openrouter"), { AUTOPILOT_DL_FREE_TOKEN: KEY.key });
+  });
+  it("per-agent steps match each tool's current setup", () => {
+    const steps = (id: string) => setupSteps(AGENT_CATALOG.find((spec) => spec.id === id)!, KEY).join("\n");
+    // Codex CLI dropped wire_api = "chat"; dl serves Chat Completions only, so no config to paste.
+    assert.match(steps("codex"), /Responses API/);
+    assert.doesNotMatch(steps("codex"), /wire_api = "chat"\n|\[model_providers/);
+    // Crush's config is crushrc now, with the completions provider type.
+    assert.match(steps("crush"), /provider add dl --type completions --base-url https:\/\/api\.dl\.new\/v1/);
+    // Continue's config.yaml needs name, version and schema.
+    assert.match(steps("continue"), /schema: v1/);
+    assert.match(steps("goose"), /Add A Custom Provider → OpenAI Compatible/);
+    assert.match(steps("kilo"), /Custom provider/);
+    // Amp and Warp take a custom OpenAI-style endpoint now.
+    for (const id of ["amp", "warp"]) {
+      assert.notEqual(AGENT_CATALOG.find((spec) => spec.id === id)!.noCustomModels, true, id);
+      assert.match(steps(id), /https:\/\/api\.dl\.new\/v1/, id);
+    }
   });
 });
