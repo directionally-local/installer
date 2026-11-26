@@ -61,7 +61,7 @@ import {
   weeklyBudgetMessage,
   type SignInRefusal,
 } from "./messages.js";
-import { confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, shell, signedInDonePage, tooNewIntro } from "./pages.js";
+import { codeAge, confirmPage, detailsPage, donePage, emailStopPage, enterCodePage, INVITE_ONLY_INTRO, invitePage, NO_GITHUB_ACTIVITY_INTRO, shell, signedInDonePage, tooNewIntro } from "./pages.js";
 import { chargedTokens, costAtPrices, costOf, estimatePromptTokens, isAllowedModel, MIN_OUTPUT_TOKENS, parseUsage, streamedOutputTokens, type Usage } from "./quota.js";
 import { ALLOWED_MODELS, DEEPSEEK_MODEL, DEFAULT_MODEL, FAMILIES, FREE_MODELS, POOLS, creditPrices, fallbackOf, familyOfPool, modelById, onUpstream, type Family, type FreeModel, type Pool } from "./models.js";
 import { emailBlocked, emailDomain, normalizeEmail, plausibleEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
@@ -239,6 +239,9 @@ const LIMITS = {
   apiPerson: perMinute(60),
   apiIp: perMinute(600),
   deviceCodeIp: { capacity: 60, perHour: 60 },
+  // The browser steps on a user code (/device?user_code=, /device/authorize, /device/deny):
+  // a sign-in takes two or three, so twice the device codes a network may ask for.
+  devicePageIp: { capacity: 120, perHour: 120 },
   adminSignInIp: { capacity: 10, perHour: 10 },
   // Device-code polling, every 5 s per sign-in in progress: raised with deviceCodeIp.
   pollIp: perMinute(720),
@@ -1928,13 +1931,29 @@ async function devicePage(c: Ctx): Promise<Response> {
   const ref = normalizeReferralCode(c.url.searchParams.get("ref") ?? undefined);
   if (!raw) return enterCodePage(undefined, ref);
   const userCode = normalizeUserCode(raw);
+  const throttled = await devicePageLimited(c);
+  if (throttled) return throttled;
   const found = userCode ? await auth(c).lookup(userCode, c.now()) : undefined;
   if (!userCode || !found) return enterCodePage("That code is unknown or has expired. Start sign-in again in your terminal.", ref);
   if (found.status !== "pending") return donePage("Code already used", "This code was already used. Start sign-in again in your terminal if you need to.", 409);
-  return confirmPage(userCode, ref);
+  return confirmPage(userCode, ref, codeAge(found.createdAt, c.now()));
+}
+
+/**
+ * The browser steps that look up or act on a user code (/device with a code, /device/authorize,
+ * /device/deny) share one per-network bucket, so codes can't be guessed or cancelled in bulk.
+ */
+async function devicePageLimited(c: Ctx): Promise<Response | undefined> {
+  const retry = await limited(c, `devicepage:ip:${c.ipNet}`, LIMITS.devicePageIp);
+  if (retry === undefined) return undefined;
+  const response = donePage("Too many attempts", `Too many sign-in codes from this network. Try again in ${Math.ceil(retry / 60)} minutes.`, 429);
+  response.headers.set("retry-after", String(retry));
+  return response;
 }
 
 async function deviceAuthorize(c: Ctx): Promise<Response> {
+  const throttled = await devicePageLimited(c);
+  if (throttled) return throttled;
   const userCode = normalizeUserCode(c.url.searchParams.get("user_code") ?? "");
   if (await isPaused(c)) {
     // Tell the waiting terminal too, instead of letting its code run out.
@@ -2479,6 +2498,10 @@ async function deviceNoInvite(c: Ctx): Promise<Response> {
 }
 
 async function deviceDeny(c: Ctx): Promise<Response> {
+  // Only the confirm page's own button: a form posted from another site can't cancel someone's code.
+  if (!sameOrigin(c)) return donePage("Not cancelled", "Cancel sign-in from the sign-in page itself.", 403);
+  const throttled = await devicePageLimited(c);
+  if (throttled) return throttled;
   const form = await readForm(c);
   const userCode = normalizeUserCode(form.get("user_code") ?? "");
   if (userCode) await auth(c).deny(userCode, c.now());

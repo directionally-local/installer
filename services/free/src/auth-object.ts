@@ -217,10 +217,10 @@ export class AuthObject extends DurableObject {
   }
 
   /** The status of a user code the browser page was given, or undefined when unknown or expired. */
-  async lookup(userCode: string, now: number): Promise<{ status: DeviceStatus; expiresAt: number } | undefined> {
+  async lookup(userCode: string, now: number): Promise<{ status: DeviceStatus; createdAt: number; expiresAt: number } | undefined> {
     const row = this.#byUserCode(userCode);
     if (!row || row.expires_at <= now) return undefined;
-    return { status: row.status, expiresAt: row.expires_at };
+    return { status: row.status, createdAt: row.created_at, expiresAt: row.expires_at };
   }
 
   /**
