@@ -50,6 +50,7 @@ import { activePromoCoupon, promoPrice, CLAIM_DAYS, isPlanId, promoView, welcome
 import { approxTokens, planLimits, PLAN_MIX_LABEL, type PlanSettingsConfig } from "./plans.js";
 import { BONUS_LINE } from "./gpt6-bonus.js";
 import { emailBudgetOf } from "./email-budget.js";
+import { cancelSubscription } from "./stripe.js";
 import { claimable, type CheckoutPromo, type PaidCheckoutRow, type UsageRow } from "./paid-store.js";
 import { CLI_LOGIN_INTERVAL_S, EMAIL_CODE_RESEND_MS, EMAIL_CODE_TTL_MS } from "./paid-auth.js";
 import { normalizeUserCode } from "./codes.js";
@@ -58,7 +59,6 @@ import { capacityFull, freePlanOffer, freePlanOn, freePlanView } from "./free-pl
 import { endNoCardTrialForPlan, freePlanSignIn, noCardTrialSignIn, parseTrialCheck, startCardTrialOnClaim, trialFromInvoice, trialFromSubscription, trialWillEnd } from "./trial-web.js";
 import { trialCountedLimit, trialsOffer, trialView } from "./trials.js";
 import { CHECKOUT_SESSION_ID, checkoutPromo, createPlanCheckout, invoiceAmount, isTrialCheckout, promoEligible, subscriptionTrial, isCouponRefusal, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, isTermsConsentRefusal, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, termsAccepted, type StripeEvent } from "./stripe.js";
-import { cancelSubscription } from "./stripe.js";
 import { sendPlainEmail } from "./user-email-send.js";
 import { newAddressCodeEmail, noAccountWelcomeEmail, type NoAccountOffer } from "./no-account-emails.js";
 import { DAY_MS, weekEnd, weekStart, WEEK_MS } from "./week.js";
