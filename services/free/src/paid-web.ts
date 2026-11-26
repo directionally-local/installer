@@ -57,7 +57,7 @@ import { DEEPSEEK_MODEL } from "./models.js";
 import { capacityFull, freePlanOffer, freePlanOn, freePlanView } from "./free-plan.js";
 import { endNoCardTrialForPlan, freePlanSignIn, noCardTrialSignIn, parseTrialCheck, startCardTrialOnClaim, trialFromInvoice, trialFromSubscription, trialWillEnd } from "./trial-web.js";
 import { trialCountedLimit, trialsOffer, trialView } from "./trials.js";
-import { CHECKOUT_SESSION_ID, checkoutPromo, createPlanCheckout, invoiceAmount, isTrialCheckout, promoEligible, subscriptionTrial, isCouponRefusal, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, isTermsConsentRefusal, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, termsAccepted, type StripeEvent } from "./stripe.js";
+import { cancelSubscription, CHECKOUT_SESSION_ID, checkoutPromo, createPlanCheckout, invoiceAmount, isTrialCheckout, promoEligible, subscriptionTrial, isCouponRefusal, idOf, invoicePayment, invoicePeriodEnd, invoicePrices, invoiceSubscription, isTermsConsentRefusal, periodEnd, planState, StripeError, stripeRequest, subscriptionPrice, termsAccepted, type StripeEvent } from "./stripe.js";
 import { sendPlainEmail } from "./user-email-send.js";
 import { newAddressCodeEmail, noAccountWelcomeEmail, type NoAccountOffer } from "./no-account-emails.js";
 import { DAY_MS, weekEnd, weekStart, WEEK_MS } from "./week.js";
@@ -373,7 +373,10 @@ async function verifyCheckout(c: Ctx, sessionId: unknown): Promise<VerifiedCheck
   const row = await directory(c).paidCheckout(sessionId);
   const paidAt = typeof session.created === "number" ? session.created * 1000 : c.now();
   if ((row?.claimed_by ?? null) === null && !claimable({ paid_at: paidAt }, c.now(), CLAIM_DAYS)) {
-    return apiError(410, "checkout_expired", `This payment is more than ${CLAIM_DAYS} days old and wasn't set up. Write to contact@directionallylocal.com and we'll sort it out.`);
+    // Nobody can claim it any more: its subscription must not renew (the owner decides on a refund).
+    const subscriptionId = idOf(session.subscription);
+    if (subscriptionId) await cancelOrphan(c, { subscriptionId, sessionId, reason: "unclaimed", email: session.customer_details?.email ?? null, refundInvoice: null });
+    return apiError(410, "checkout_expired", `This payment is more than ${CLAIM_DAYS} days old and wasn't set up, so its subscription is cancelled and won't renew. Write to contact@directionallylocal.com and we'll sort it out.`);
   }
   return {
     sessionId,
@@ -425,6 +428,14 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
   const billing = await person.billing();
   const hasOther = billing.subscriptionId !== null && billing.subscriptionId !== checkout.subscriptionId && (await person.plan(c.now())) === "pro";
   if (hasOther) {
+    // A second plan on an account that has one: its subscription is cancelled now and its payment refunded.
+    const done = checkout.subscriptionId
+      ? await cancelOrphan(c, { subscriptionId: checkout.subscriptionId, sessionId: checkout.sessionId, reason: "duplicate", email: checkout.email, account: accountNumber, refundInvoice: checkout.amountCents > 0 ? (idOf(checkout.subscription?.latest_invoice) ?? null) : null })
+      : undefined;
+    if (done?.ended) {
+      const refunded = done.refundedCents !== null ? " and refunded its payment (it shows on your card in 5 to 10 days)" : "";
+      return apiError(409, "already_subscribed", `This account already has a plan, so we cancelled the second subscription${refunded}. Manage your plan at dl.new/billing.`);
+    }
     return apiError(409, "already_subscribed", "This account already has a plan. Manage it at dl.new/billing; write to contact@directionallylocal.com about the second payment and we'll refund it.");
   }
   const dir = directory(c);
@@ -481,6 +492,67 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
   if (c.background) c.background(welcome);
   else await welcome;
   return { plan: checkout.plan, sessionId: checkout.sessionId };
+}
+
+/**
+ * Ends a plan subscription nobody can use: a second payment onto an account that has a plan
+ * ("duplicate"), a Checkout whose claim window lapsed ("unclaimed"), or money taken on one later
+ * ("renewal"). Cancels it now and, with
+ * `refundInvoice`, refunds that invoice's payment in full; then tells the owner. Safe to repeat:
+ * an ended subscription is left alone (no second refund or alert). A refund Stripe refuses
+ * doesn't stop the cancel (the owner's alert says so).
+ * Never throws; undefined when Stripe failed (the owner is told, the caller answers as before).
+ */
+async function cancelOrphan(
+  c: Ctx,
+  input: { subscriptionId: string; sessionId: string | null; reason: "duplicate" | "unclaimed" | "renewal"; email: string | null; account?: number; refundInvoice: string | null },
+): Promise<{ ended: boolean; refundedCents: number | null } | undefined> {
+  const key = c.config.stripe.secretKey;
+  if (!key) return undefined;
+  const what =
+    input.reason === "duplicate"
+      ? `a second plan payment onto ${input.account !== undefined ? accountIdOf(input.account) : "an account"}, which already has a plan`
+      : input.reason === "unclaimed"
+        ? `a plan Checkout nobody set up within ${CLAIM_DAYS} days`
+        : `a renewal of a plan Checkout nobody set up within ${CLAIM_DAYS} days`;
+  const ids = `Customer: ${input.email ?? "unknown"}\nStripe: subscription ${input.subscriptionId}${input.sessionId ? `, checkout ${input.sessionId}` : ""}${input.refundInvoice ? `, invoice ${input.refundInvoice}` : ""}`;
+  let refundedCents: number | null = null;
+  let refundError: string | null = null;
+  try {
+    const path = `/v1/subscriptions/${encodeURIComponent(input.subscriptionId)}`;
+    const current = await stripeRequest(c.fetch, key, "GET", path);
+    // Ended already (this ran before, or it was cancelled in Stripe): nothing more to do.
+    if (current.status === "canceled" || current.status === "incomplete_expired") return { ended: true, refundedCents: null };
+    if (input.refundInvoice) {
+      try {
+        const payment = await invoicePayment(c.fetch, key, input.refundInvoice);
+        if (payment) {
+          const refund = await stripeRequest(c.fetch, key, "POST", "/v1/refunds", { ...payment, ...(input.reason === "duplicate" ? { reason: "duplicate" } : {}), metadata: { subscription: input.subscriptionId, dl_reason: input.reason } }, `orphan-refund-${input.refundInvoice}`);
+          refundedCents = typeof refund.amount === "number" ? refund.amount : 0;
+        } else refundError = "Stripe has no payment for the invoice";
+      } catch (error) {
+        // Already refunded (a repeat), or Stripe refused: the cancel still goes ahead.
+        refundError = error instanceof Error ? error.message : "error";
+      }
+    }
+    await stripeRequest(c.fetch, key, "DELETE", path);
+    await alert(c, [
+      {
+        subject: `dl.new: orphaned plan subscription cancelled (${input.reason})`,
+        text: [
+          `Cancelled ${input.subscriptionId}: ${what}.`,
+          refundedCents !== null ? `Refunded ${usd(refundedCents / 100)} (invoice ${input.refundInvoice}).` : input.refundInvoice ? `Not refunded: ${refundError ?? "no payment"}. Refund it in the Stripe Dashboard.` : `Not refunded. To refund the first payment: POST /admin/paid/refund {${input.sessionId ? `"sessionId": "${input.sessionId}", ` : ""}"force": true}.`,
+          ids,
+        ].join("\n"),
+      },
+    ]);
+    return { ended: true, refundedCents };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "error";
+    console.error("paid: cancelling an orphaned subscription failed", error instanceof StripeError ? error.status : "error");
+    await alert(c, [{ subject: `dl.new: couldn't cancel an orphaned plan subscription (${input.reason})`, text: `Stripe refused to cancel ${input.subscriptionId} (${what}): ${message}\nCancel it in the Stripe Dashboard${input.refundInvoice && refundedCents === null ? " and refund its payment" : ""}; it is on its own Stripe customer, so the billing portal can't reach it.\n${ids}` }]);
+    return undefined;
+  }
 }
 
 /**
@@ -1483,7 +1555,7 @@ async function adminRefund(c: Ctx): Promise<Response> {
     const payment = await invoicePayment(c.fetch, key, invoiceId);
     if (!payment) return apiError(404, "no_payment", "Stripe has no payment for the first invoice.");
     const refund = await stripeRequest(c.fetch, key, "POST", "/v1/refunds", { ...payment, reason: "requested_by_customer", metadata: { subscription: subscriptionId, ...(accountNumber !== undefined ? { account_id: accountIdOf(accountNumber) } : {}) } }, `refund-${invoiceId}`);
-    await stripeRequest(c.fetch, key, "DELETE", `/v1/subscriptions/${subscriptionId}`);
+    await cancelSubscription(c.fetch, key, subscriptionId);
     if (person && accountNumber !== undefined) {
       await person.markRefunded(c.now());
       await person.applySubscription({ subscriptionId, state: "canceled", periodEnd: null, eventAt: Math.floor(c.now() / 1000) });
@@ -1601,7 +1673,16 @@ export async function applyPlanEvent(c: Ctx, event: StripeEvent): Promise<string
     case "invoice.payment_failed": {
       const { subscriptionId } = invoiceSubscription(object);
       if (!subscriptionId) return "ignored";
-      if (owner === undefined) return "plan_unclaimed";
+      if (owner === undefined) {
+        // Money taken on a subscription whose Checkout can't be claimed any more (a renewal, or a
+        // card trial's first charge): refunded, and the subscription cancelled.
+        const row = await dir.paidCheckoutBySubscription(subscriptionId);
+        if (event.type === "invoice.paid" && row && row.claimed_by === null && !claimable(row, c.now(), CLAIM_DAYS) && invoiceAmount(object) > 0 && typeof object.id === "string") {
+          const done = await cancelOrphan(c, { subscriptionId, sessionId: row.session_id, reason: "renewal", email: row.email, refundInvoice: object.id });
+          return done ? "plan_orphan_canceled" : "plan_unclaimed";
+        }
+        return "plan_unclaimed";
+      }
       const person = account(c, owner);
       const tier = invoicePrices(object).map((price) => planOfPrice(prices, price)).find((plan): plan is PlanId => plan !== undefined);
       if (event.type === "invoice.payment_failed") {

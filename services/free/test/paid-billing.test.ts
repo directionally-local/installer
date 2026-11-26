@@ -166,6 +166,71 @@ describe("plan webhooks", () => {
   });
 });
 
+describe("orphaned subscriptions", () => {
+  const orphanAlerts = (service: Service) => service.calls.emails.filter((message) => message.raw.includes("Subject: dl.new: orphaned plan subscription cancelled"));
+
+  it("cancels and refunds a second payment claimed onto an account that has a plan", async () => {
+    const { service, stripe } = await world({ ALERT_EMAIL_TO: "owner@example.com" });
+    const { token, account } = await paidAccount(service, stripe, "plus");
+    const extra = await buy(service, stripe, "starter", "pat@example.com");
+    const twice = await service.request("POST", "/web/checkout/claim", { token, body: { sessionId: extra.id }, headers: DL });
+    assert.equal(twice.status, 409);
+    const error = ((await twice.json()) as any).error;
+    assert.equal(error.code, "already_subscribed");
+    assert.match(error.message, /we cancelled the second subscription and refunded its payment/);
+    const duplicate = stripe.subscriptions.get(extra.subscription!)!;
+    assert.equal(duplicate.status, "canceled");
+    assert.equal(stripe.refunds.length, 1);
+    assert.equal(stripe.refunds[0]!.get("payment_intent"), `pi_for_${duplicate.latest_invoice}`);
+    assert.equal(stripe.refunds[0]!.get("reason"), "duplicate");
+    assert.equal(orphanAlerts(service).length, 1);
+    assert.match(orphanAlerts(service)[0]!.raw, /\(duplicate\)/);
+    // The account keeps its plan.
+    assert.equal(await accountObject(service, account).paidPlan(service.clock.now), "plus");
+    // Trying again doesn't refund, cancel or alert twice.
+    const again = await service.request("POST", "/web/checkout/claim", { token, body: { sessionId: extra.id }, headers: DL });
+    assert.equal(await errorCode(again), "already_subscribed");
+    assert.equal(service.calls.stripe.filter((call) => call.method === "DELETE").length, 1);
+    assert.equal(orphanAlerts(service).length, 1);
+  });
+
+  it("cancels the subscription of a payment nobody claimed in 7 days, without refunding it", async () => {
+    const { service, stripe } = await world({ ALERT_EMAIL_TO: "owner@example.com" });
+    const session = await buy(service, stripe, "plus", "late@example.com");
+    await webhook(service, "checkout.session.completed", stripe.sessionObject(session, false));
+    service.clock.now += 8 * 86_400_000;
+    const { signedIn } = await paidAccount(service, stripe, "starter", "late@example.com");
+    const late = await service.request("POST", "/web/checkout/claim", { token: signedIn.token, body: { sessionId: session.id }, headers: DL });
+    assert.equal(late.status, 410);
+    assert.match(((await late.json()) as any).error.message, /its subscription is cancelled and won't renew/);
+    assert.equal(stripe.subscriptions.get(session.subscription!)!.status, "canceled");
+    assert.equal(stripe.refunds.length, 0);
+    assert.equal(orphanAlerts(service).length, 1);
+    assert.match(orphanAlerts(service)[0]!.raw, /\(unclaimed\)/);
+    assert.equal(await accountObject(service, parseAccountId(signedIn.account.accountId)!).paidPlan(service.clock.now), "starter", "the other plan is untouched");
+    // The status page asking again changes nothing.
+    assert.equal(((await (await service.request("GET", `/web/checkout/${session.id}`)).json()) as any).status, "expired");
+    assert.equal(orphanAlerts(service).length, 1);
+    assert.equal(service.calls.stripe.filter((call) => call.method === "DELETE").length, 1);
+  });
+
+  it("refunds and cancels a renewal of a Checkout nobody claimed", async () => {
+    const { service, stripe } = await world({ ALERT_EMAIL_TO: "owner@example.com" });
+    const session = await buy(service, stripe, "starter", "gone@example.com");
+    await webhook(service, "checkout.session.completed", stripe.sessionObject(session, false));
+    const subscription = stripe.subscriptions.get(session.subscription!)!;
+    const renewal = (id: string) => ({ id, customer: session.customer, billing_reason: "subscription_cycle", amount_paid: 700, total: 700, parent: { subscription_details: { subscription: subscription.id, metadata: subscription.metadata } }, lines: { data: [{ price: { id: PRICES.starter }, amount: 700, period: { end: subscription.current_period_end + 30 * 86_400 } }] } });
+    // Inside the claim window a payment is left for the claim.
+    assert.equal((await webhook(service, "invoice.paid", renewal("in_early"))).body.outcome, "plan_unclaimed");
+    service.clock.now += 30 * 86_400_000;
+    assert.equal((await webhook(service, "invoice.paid", renewal("in_renew"))).body.outcome, "plan_orphan_canceled");
+    assert.equal(subscription.status, "canceled");
+    assert.equal(stripe.refunds.length, 1);
+    assert.equal(stripe.refunds[0]!.get("payment_intent"), "pi_for_in_renew");
+    assert.equal(orphanAlerts(service).length, 1);
+  });
+});
+
 describe("billing", () => {
   it("upgrades with proration now, and refuses a downgrade or a declined card", async () => {
     const { service, stripe } = await world();
