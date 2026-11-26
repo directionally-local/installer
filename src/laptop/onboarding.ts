@@ -153,8 +153,30 @@ export function weekFromMe(body: unknown): { left: number; used: number } | unde
   return undefined;
 }
 
-/** "✓ First tokens served. ~9.9M left this week (95.5% caching applied)." without the colour. */
-export function firstTokensText(left: number): string {
+/**
+ * Tokens served to this account this week by /v1/me's other counts (every pool's `usedThisWeek`,
+ * the allowance's, both budgets' `tokensThisWeek`), for accounts without a `week` (old free
+ * accounts: `week` null). Undefined when there's no count at all.
+ */
+export function servedFromMe(body: unknown): number | undefined {
+  const rec = (value: unknown): Record<string, unknown> => (value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {});
+  const counts: number[] = [];
+  const add = (value: unknown) => {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) counts.push(value);
+  };
+  const me = rec(body);
+  for (const pool of Object.values(rec(me.pools))) add(rec(pool).usedThisWeek);
+  add(rec(me.allowance).usedThisWeek);
+  for (const budget of Object.values(rec(me.budgets))) add(rec(budget).tokensThisWeek);
+  return counts.length ? Math.max(...counts) : undefined;
+}
+
+/**
+ * "✓ First tokens served. ~9.9M left this week (95.5% caching applied)." without the colour;
+ * "First tokens served." for an account without a weekly figure (`left` undefined).
+ */
+export function firstTokensText(left?: number): string {
+  if (left === undefined) return "First tokens served.";
   return `First tokens served. ~${formatTokens(left)} left this week (95.5% caching applied).`;
 }
 
@@ -172,11 +194,12 @@ export async function firstTokens(key: Pick<DlKey, "key" | "baseUrl">, deps: { f
       signal: AbortSignal.timeout(deps.timeoutMs ?? ME_TIMEOUT_MS),
     });
     if (!response.ok) return { done: response.status >= 400 && response.status < 500 && response.status !== 429 };
-    const week = weekFromMe(await response.json());
-    // No week to show for this account (it never will have): don't ask again.
-    if (!week) return { done: true };
-    if (week.used <= 0) return { done: false };
-    return { text: firstTokensText(week.left), done: true };
+    const body = await response.json();
+    const week = weekFromMe(body);
+    if (week) return week.used > 0 ? { text: firstTokensText(week.left), done: true } : { done: false };
+    // No weekly figure for this account (old free accounts): the line without "left this week",
+    // once its other counts say tokens were served; until then, ask again next time.
+    return (servedFromMe(body) ?? 0) > 0 ? { text: firstTokensText(), done: true } : { done: false };
   } catch {
     return { done: false };
   }

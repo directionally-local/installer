@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { updateCommand } from "../install-method.js";
 import { palette } from "../ui.js";
 import { compareSemver, dlVersion, pinnedAutopilotVersion } from "../versions.js";
-import { autopilotHome, installedAutopilotVersion } from "./autopilot.js";
+import { autopilotHome, downloadedAutopilotVersion, ownAutopilot, pathAutopilotVersion } from "./autopilot.js";
 import { autopilotSpec, npmInstall } from "./autopilot-install.js";
 import type { UpdateIO } from "./update.js";
 
@@ -211,6 +211,10 @@ export interface DlUpdateDeps {
   bundledAutopilot?: () => string | undefined;
   /** Downloads this Autopilot version into dl's home; resolves to an error message, or undefined. */
   downloadAutopilot?: (version: string) => Promise<string | undefined>;
+  /** The version of the Autopilot dl downloaded into its home (undefined when none): what a download is checked by. */
+  downloadedAutopilot?: () => string | undefined;
+  /** The version of an `autopilot` on PATH (undefined when none): only for a note after a download. */
+  pathAutopilot?: () => Promise<string | undefined>;
   pinnedAutopilot?: () => string;
   /** The place `dl update` with no NAME updates, and updating it (today's `dl update [NAME]`). */
   defaultPlace?: () => Promise<DefaultPlace>;
@@ -297,7 +301,10 @@ async function afterDl(
   deps: DlUpdateDeps,
   c: ReturnType<typeof palette>,
 ): Promise<number> {
-  const installedNow = deps.bundledAutopilot ?? (() => installedAutopilotVersion());
+  const env = process.env;
+  // dl's own Autopilot as the given pin ranks them: after an update, this process is the old dl,
+  // whose own pin may match an old global autopilot-ai that dl no longer runs.
+  const installedNow = deps.bundledAutopilot ?? (() => ownAutopilot(pinned === undefined ? { env } : { env, pin: pinned })?.version);
   const installed = installedNow();
   if (!installed) {
     deps.io.out(`  ${c.dim("· Autopilot isn't installed. It's optional: dl autopilot downloads it.")}\n`);
@@ -305,14 +312,25 @@ async function afterDl(
     deps.io.out(`  ${c.green("✓")} Autopilot ${installed} is installed${pinned === undefined ? "" : ` ${c.dim(`(the one dl ${current} pins)`)}`}.\n`);
   } else {
     deps.io.out(`  ${c.yellow("!")} dl ${current} pins Autopilot ${pinned}, and ${installed} is installed. Downloading ${pinned}.\n`);
-    const env = process.env;
     const failure = await (deps.downloadAutopilot ?? ((version: string) => npmInstall(autopilotSpec(env, version), autopilotHome(env), env)))(pinned);
-    const after = installedNow();
+    // Checked by the copy just downloaded into dl's home (the one dl runs), never by an
+    // `autopilot` elsewhere on PATH.
+    const after = (deps.downloadedAutopilot ?? (() => downloadedAutopilotVersion(env)))();
     if (failure || after !== pinned) {
       deps.io.err(`  ${c.red("✗")} Couldn't update Autopilot to ${pinned}${failure ? `: ${failure}` : after ? ` (found ${after})` : ""}.\n`);
       return 1;
     }
     deps.io.out(`  ${c.green("✓")} Autopilot ${pinned} is installed.\n`);
+    const onPath = await (deps.pathAutopilot ?? (() => pathAutopilotVersion(env)))().catch(() => undefined);
+    if (onPath !== undefined && onPath !== pinned) {
+      let which = "Another";
+      try {
+        if (compareSemver(onPath, pinned) < 0) which = "An older";
+      } catch {
+        // not a version: "Another"
+      }
+      deps.io.out(`  ${c.dim(`· ${which} Autopilot (${onPath}) is also on your PATH; dl uses its own copy.`)}\n`);
+    }
   }
 
   if (place.kind === "unclear") {

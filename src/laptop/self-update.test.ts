@@ -42,6 +42,8 @@ function harness(overrides: Partial<DlUpdateDeps> & { lines?: string[]; code?: n
     installedPins: () => ({ version: "0.17.0", autopilot: "3.11.0" }),
     defaultPlace: async () => ({ kind: "none" }),
     updatePlace: async (args) => { places.push(args); return 0; },
+    downloadedAutopilot: () => bundled,
+    pathAutopilot: async () => undefined,
     ...overrides,
     bundledAutopilot: () => bundled,
   };
@@ -147,10 +149,27 @@ describe("dl update", () => {
     let installedAp = "3.10.1";
     const older = harness({ latest: async () => "0.17.0", downloadAutopilot: async (version) => { downloads.push(version); installedAp = version; return undefined; } });
     older.deps.bundledAutopilot = () => installedAp;
+    older.deps.downloadedAutopilot = () => installedAp;
     assert.equal(await dlUpdate(older.deps), 0);
     assert.deepEqual(downloads, ["3.11.0"]);
-    assert.match(older.io.text(), /! dl 0\.17\.0 pins Autopilot 3\.11\.0, and 3\.10\.1 is installed\. Downloading 3\.11\.0\.\n  ✓ Autopilot 3\.11\.0 is installed\./);
+    assert.match(older.io.text(), /! dl 0\.17\.0 pins Autopilot 3\.11\.0, and 3\.10\.1 is installed\. Downloading 3\.11\.0\.\n  ✓ Autopilot 3\.11\.0 is installed\.\n$/);
     assert.equal(older.runs.length, 1, "dl isn't reinstalled for it");
+
+    // An old global autopilot-ai still on PATH (and matching the old dl's own pin): the download
+    // is checked by dl's own copy, and the old one only gets a dim note.
+    let downloaded: string | undefined;
+    const global = harness({ latest: async () => "0.17.0", downloadAutopilot: async (version) => { downloaded = version; return undefined; }, pathAutopilot: async () => "3.10.1" });
+    global.deps.bundledAutopilot = () => "3.10.1";
+    global.deps.downloadedAutopilot = () => downloaded;
+    assert.equal(await dlUpdate(global.deps), 0);
+    assert.doesNotMatch(global.io.stderr(), /Couldn't update/);
+    assert.match(global.io.text(), /✓ Autopilot 3\.11\.0 is installed\.\n  · An older Autopilot \(3\.10\.1\) is also on your PATH; dl uses its own copy\.\n$/);
+
+    // The download didn't land in dl's home: still a failure, whatever is on PATH.
+    const missing = harness({ latest: async () => "0.17.0", downloadAutopilot: async () => undefined, pathAutopilot: async () => "3.11.0" });
+    missing.deps.downloadedAutopilot = () => "3.10.1";
+    assert.equal(await dlUpdate(missing.deps), 1);
+    assert.match(missing.io.stderr(), /✗ Couldn't update Autopilot to 3\.11\.0 \(found 3\.10\.1\)\./);
 
     const failing = harness({ latest: async () => "0.17.0", downloadAutopilot: async () => "npm exited with 1" });
     assert.equal(await dlUpdate(failing.deps), 1);
