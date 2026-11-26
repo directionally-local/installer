@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { autopilotHome } from "./autopilot.js";
 import { autopilotSpec, ensureAutopilot } from "./autopilot-install.js";
@@ -45,6 +46,17 @@ describe("Autopilot, downloaded when it's picked", () => {
       install: async (spec) => { installs.push(spec); installed = true; return undefined; },
     });
     assert.deepEqual(installs, [`autopilot-ai@${pin}`]);
+  });
+
+  it("reads the pin from package.json's devDependencies, the same field the bump workflow updates", () => {
+    const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { devDependencies?: Record<string, string>; dependencies?: Record<string, string> };
+    assert.equal(pinnedAutopilotVersion(), pkg.devDependencies?.["autopilot-ai"]);
+    assert.equal(pkg.dependencies?.["autopilot-ai"], undefined, "one pin, in devDependencies");
+    // bump-autopilot.yml compares npm's latest with this pin. It once read `.dependencies`, found
+    // nothing, and never opened a bump PR, so the lazy-download pin sat behind npm.
+    const workflow = readFileSync(new URL("../../.github/workflows/bump-autopilot.yml", import.meta.url), "utf8");
+    assert.match(workflow, /require\('\.\/package\.json'\)\.devDependencies\['autopilot-ai'\]/);
+    assert.doesNotMatch(workflow, /require\('\.\/package\.json'\)\.dependencies\['autopilot-ai'\]/);
   });
 
   it("says what failed and how to retry", async () => {

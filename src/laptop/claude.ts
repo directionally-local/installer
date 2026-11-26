@@ -24,6 +24,8 @@ import { launchHarness, onPath, type HarnessLaunch, type LaunchDeps, type Launch
 
 /** The model Claude Code is told to use for every role; the service serves DeepSeek whatever it names. */
 export const CLAUDE_MODEL = "deepseek/deepseek-v4.1-flash-1017";
+/** That model's real context window (DeepSeek V4.1 Flash: 1M), declared to Claude Code, which doesn't know the model. */
+export const CLAUDE_CONTEXT_WINDOW = 1_048_576;
 export const HARNESS = "claude-code" as const;
 /** The official install command, printed when `claude` isn't on PATH. */
 export const CLAUDE_INSTALL = "curl -fsSL https://claude.ai/install.sh | bash";
@@ -46,6 +48,7 @@ export const CONFLICTING_ENV = [
   "ANTHROPIC_SMALL_FAST_MODEL",
   "ANTHROPIC_CUSTOM_HEADERS",
   "CLAUDE_CODE_SUBAGENT_MODEL",
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
@@ -92,6 +95,9 @@ export function claudeEnv(parent: Env, input: { origin: string; key: string }): 
     // Older Claude Code versions read this one for background tasks.
     ANTHROPIC_SMALL_FAST_MODEL: CLAUDE_MODEL,
     CLAUDE_CODE_SUBAGENT_MODEL: CLAUDE_MODEL,
+    // Claude Code's documented way to set an unrecognized model's window; without it, it warns
+    // "doesn't recognize the model … assumes a context window of …" on every start.
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(CLAUDE_CONTEXT_WINDOW),
     // No telemetry, error reports or update checks to Anthropic; no pre-release request fields.
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",

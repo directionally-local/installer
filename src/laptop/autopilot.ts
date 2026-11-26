@@ -6,6 +6,7 @@ import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { packageRoot, scriptHomeOf } from "../install-method.js";
+import { pinnedAutopilotVersion } from "../versions.js";
 
 /** Finding the Autopilot dl runs for sessions and its provider picker: the one it bundles, else one on PATH. */
 
@@ -18,14 +19,13 @@ export interface AutopilotCommand {
 }
 
 /**
- * The Autopilot dl runs (run with this Node): one inside dl's own package (a development
- * checkout, or a dl from before Autopilot became optional), else the one dl downloaded when it
- * was first picked (autopilot-install.ts: ~/.directionallylocal/autopilot), else an `autopilot`
- * on PATH. Undefined when there's none: Autopilot is optional, and `ensureAutopilot` gets it.
+ * The Autopilot dl runs (run with this Node): its own (ownAutopilot: the one dl downloaded, or
+ * one Node resolves for dl), else an `autopilot` on PATH. Undefined when there's none:
+ * Autopilot is optional, and `ensureAutopilot` gets it.
  */
 export async function findAutopilot(env: NodeJS.ProcessEnv = process.env): Promise<AutopilotCommand | undefined> {
-  const bundled = bundledAutopilot() ?? downloadedAutopilot(env);
-  if (bundled) return { command: process.execPath, args: [bundled] };
+  const own = ownAutopilot({ env });
+  if (own) return { command: process.execPath, args: [own.bin] };
   const onPath = await autopilotOnPath(env);
   return onPath ? { command: onPath, args: [] } : undefined;
 }
@@ -55,17 +55,53 @@ export function downloadedAutopilot(env: NodeJS.ProcessEnv = process.env, exists
   }
 }
 
-/** The version of the Autopilot dl runs from its own files (bundled or downloaded); undefined when neither is there. */
+/** The version of the Autopilot dl runs from its own files (ownAutopilot); undefined when there's none. */
 export function installedAutopilotVersion(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const bundled = bundledAutopilotVersion();
-  if (bundled) return bundled;
-  if (!downloadedAutopilot(env)) return undefined;
+  return ownAutopilot({ env })?.version;
+}
+
+/** The downloaded Autopilot's version, from its manifest; undefined when it isn't there. */
+function downloadedAutopilotVersion(env: NodeJS.ProcessEnv): string | undefined {
   try {
     const pkg = JSON.parse(readFileSync(join(downloadedAutopilotPackage(env), "package.json"), "utf8")) as { version?: unknown };
     return typeof pkg.version === "string" ? pkg.version : undefined;
   } catch {
     return undefined;
   }
+}
+
+export interface OwnAutopilot {
+  bin: string;
+  version: string | undefined;
+}
+
+/**
+ * The Autopilot dl treats as its own, in this order:
+ *  1. the one dl downloaded (~/.directionallylocal/autopilot), when it's at the pin;
+ *  2. one Node resolves for dl, when it's at the pin (a development checkout's node_modules);
+ *  3. the downloaded one at another version (`dl update` brings it to the pin);
+ *  4. a resolved one at another version, only when nothing else is there.
+ * A resolved one isn't necessarily dl's: for a global `npm install -g directionallylocal`, Node
+ * also finds a separately installed global autopilot-ai beside it. Ranking that one first made
+ * `dl update` download the pinned Autopilot and then keep running the old global one.
+ */
+export function ownAutopilot(options: { env?: NodeJS.ProcessEnv; pin?: string; resolve?: (specifier: string) => string } = {}): OwnAutopilot | undefined {
+  const env = options.env ?? process.env;
+  let pin = options.pin;
+  if (pin === undefined) {
+    try {
+      pin = pinnedAutopilotVersion();
+    } catch {
+      pin = undefined;
+    }
+  }
+  const downloadedBin = downloadedAutopilot(env);
+  const downloaded = downloadedBin ? { bin: downloadedBin, version: downloadedAutopilotVersion(env) } : undefined;
+  const resolvedBin = bundledAutopilot(options.resolve);
+  const resolved = resolvedBin ? { bin: resolvedBin, version: bundledAutopilotVersion(options.resolve) } : undefined;
+  if (downloaded && pin !== undefined && downloaded.version === pin) return downloaded;
+  if (resolved && pin !== undefined && resolved.version === pin) return resolved;
+  return downloaded ?? resolved;
 }
 
 /**
