@@ -16,7 +16,7 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         id: release
 
   # Publishes when release-please has just cut a release (its release PR was merged),
@@ -33,16 +33,17 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
           check-latest: true
           registry-url: "https://registry.npmjs.org"
 
-      # Trusted publishing needs npm >= 11.5.1.
-      - run: npm install -g npm@latest
+      # Trusted publishing needs npm >= 11.5.1. Pinned exactly (this job can publish), so
+      # raise it by hand; npm 12 needs Node.js ^24.15.0 here.
+      - run: npm install -g npm@12.2.3
 
       - run: npm ci
       - run: npm run typecheck
@@ -95,11 +96,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # The Node.js major the bundle's native parts are built for. The install script's own
       # Node.js is 24; anyone running another major gets npm.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
           check-latest: true
@@ -109,7 +110,7 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           sh scripts/build-bundle.sh "directionallylocal@$VERSION" "$VERSION" bundles
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bundle-${{ matrix.platform }}
           path: bundles/
@@ -126,9 +127,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: bundle-*
           path: bundles
@@ -168,7 +169,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Copy the release's bundles to R2
         env:
@@ -180,11 +181,11 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           gh release download "v$VERSION" -R "$GITHUB_REPOSITORY" -p 'dl-*.tar.gz' -p dl-bundles.txt -D bundles
           for file in bundles/*.tar.gz; do
-            npx --yes wrangler@4 r2 object put "$BUCKET/dl/$VERSION/$(basename "$file")" --file "$file" --content-type application/gzip --remote
+            npx --yes wrangler@4.168.0 r2 object put "$BUCKET/dl/$VERSION/$(basename "$file")" --file "$file" --content-type application/gzip --remote
           done
           # The list last: at this version, then as the latest.
           for key in "dl/$VERSION/dl-bundles.txt" "dl/latest/dl-bundles.txt"; do
-            npx --yes wrangler@4 r2 object put "$BUCKET/$key" --file bundles/dl-bundles.txt --content-type "text/plain; charset=utf-8" --remote
+            npx --yes wrangler@4.168.0 r2 object put "$BUCKET/$key" --file bundles/dl-bundles.txt --content-type "text/plain; charset=utf-8" --remote
           done
 
   # The install script at https://directionallylocal.run is part of the release: it's
@@ -200,9 +201,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
           check-latest: true
@@ -211,7 +212,7 @@ jobs:
       - run: npx tsx --test "site/**/*.test.ts"
 
       - name: Deploy the Worker
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

@@ -33,3 +33,17 @@ updates:
       prefix: fix(deps)
     labels: [dependencies]
     open-pull-requests-limit: 2
+
+  # Workflows pin every action to a commit SHA, with its version in a trailing
+  # comment; this keeps both current. These PRs are not auto-merged
+  # (deps-automerge.yml only takes npm bumps), so each one gets a review.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+    labels: [dependencies]
