@@ -180,7 +180,7 @@ describe("the Free plan: switched on", () => {
     assert.equal(body.account.freePlan.tokensPerWeek, 10_000_000);
     assert.equal(body.account.freePlan.state, "ok");
     await service.settle();
-    const welcome = emailsTo(service, "freebie@example.com").find((m) => m.subject === "your dl.new key is ready");
+    const welcome = emailsTo(service, "freebie@example.com").find((m) => m.subject === "you're all set on dl.new");
     assert.ok(welcome, JSON.stringify(emailsTo(service, "freebie@example.com")));
     assert.match(welcome!.text, /10M tokens of deepseek v4\.1 flash every week \(95\.5% caching applied\), no card needed/);
     assert.ok(welcome!.text.includes(STARTER));

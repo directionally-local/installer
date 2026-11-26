@@ -241,17 +241,16 @@ sina`,
   // applied)"), {bonus} the GPT-6 launch bonus paragraph when the account holds it, else nothing,
   // {promo} the launch offer's sentence when the first payment had it, else nothing. No refund line.
   welcome_paid: {
-    subject: "your dl.new key is ready",
+    subject: "you're all set on dl.new",
     body: `hey,
 
 sina here, i build dl.new. thanks for subscribing to {plan}.{promo}
 
-your key is waiting at https://dl.new/connect
-
-with claude code, run this once:
+you're all set. run this once:
     curl -fsSL dl.new | sh
-then start it with:
-    dl claude
+then, in a project folder:
+    dl
+it signs you in through your browser and opens the agent you pick (claude code, opencode, pi…). or go straight to claude code with dl claude. setup steps: https://dl.new/connect
 
 other tools (opencode, cline, cursor, any openai sdk): use the base url https://api.dl.new/v1 and a key from https://dl.new/keys
 
@@ -271,7 +270,7 @@ sina`,
   // offer's window, else nothing, {tokens} the trial's size ("20M", real tokens at 95.5% caching),
   // {ends} the day the plan starts at the latest ("26 dec"), {limits} the plan's weekly limits.
   welcome_trial_card: {
-    subject: "your dl.new key is ready",
+    subject: "you're all set on dl.new",
     body: `hey,
 
 sina here, i build dl.new. your free trial of {plan} has started.
@@ -282,12 +281,11 @@ how it works:
 - your plan starts, and your card is charged {price}{promo}, when you've used the {tokens} or on {ends}, whichever comes first. we email you at 80%.
 - don't want it? cancel before then at https://dl.new/billing and you won't be charged.
 
-your key is waiting at https://dl.new/connect
-
-with claude code, run this once:
+you're all set. run this once:
     curl -fsSL dl.new | sh
-then start it with:
-    dl claude
+then, in a project folder:
+    dl
+it signs you in through your browser and opens the agent you pick (claude code, opencode, pi…). or go straight to claude code with dl claude. setup steps: https://dl.new/connect
 
 other tools (opencode, cline, cursor, any openai sdk): use the base url https://api.dl.new/v1 and a key from https://dl.new/keys
 
@@ -304,17 +302,16 @@ sina`,
   // 3h. dl.new's Free plan (free-plan.ts): right after the GitHub sign-in that made the account.
   // {tokens} "10M" (real tokens a week at 95.5% caching), {upgrade} the cheapest plan's line.
   welcome_free: {
-    subject: "your dl.new key is ready",
+    subject: "you're all set on dl.new",
     body: `hey,
 
 sina here, i build dl.new. you're on the free plan: {tokens} tokens of deepseek v4.1 flash every week (95.5% caching applied), no card needed. it resets every monday at 00:00 utc.
 
-your key is waiting at https://dl.new/connect
-
-with claude code, run this once:
+you're all set. run this once:
     curl -fsSL dl.new | sh
-then start it with:
-    dl claude
+then, in a project folder:
+    dl
+it signs you in through your browser and opens the agent you pick (claude code, opencode, pi…). or go straight to claude code with dl claude. setup steps: https://dl.new/connect
 
 other tools (opencode, cline, cursor, any openai sdk): use the base url https://api.dl.new/v1 and a key from https://dl.new/keys
 
@@ -362,19 +359,18 @@ sina`,
   // 3e. dl.new's no-card trial (trials.ts): right after the GitHub sign-in that started it.
   // {tokens} "10M" (real tokens at 95.5% caching).
   welcome_trial_nocard: {
-    subject: "your dl.new key is ready",
+    subject: "you're all set on dl.new",
     body: `hey,
 
 sina here, i build dl.new. your free trial has started: {tokens} tokens of deepseek v4.1 flash (95.5% caching applied), no card needed.
 
 it's one time and doesn't reset. when it's used up, pick a plan at https://dl.new to keep going.
 
-your key is waiting at https://dl.new/connect
-
-with claude code, run this once:
+you're all set. run this once:
     curl -fsSL dl.new | sh
-then start it with:
-    dl claude
+then, in a project folder:
+    dl
+it signs you in through your browser and opens the agent you pick (claude code, opencode, pi…). or go straight to claude code with dl claude. setup steps: https://dl.new/connect
 
 other tools (opencode, cline, cursor, any openai sdk): use the base url https://api.dl.new/v1 and a key from https://dl.new/keys
 

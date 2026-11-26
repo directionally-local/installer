@@ -166,7 +166,7 @@ describe("the GPT-6 launch bonus for paying accounts", () => {
   it("is granted on claim and named in the welcome email, and shown on the account", async () => {
     const { service, stripe } = await bonusWorld();
     const { token } = await paidAccount(service, stripe, "starter", "bea@example.com");
-    const [welcome] = emailsTo(service, "bea@example.com").filter((email) => email.subject === "your dl.new key is ready");
+    const [welcome] = emailsTo(service, "bea@example.com").filter((email) => email.subject === "you're all set on dl.new");
     assert.ok(welcome);
     assert.match(welcome.text, /\nplus \$2\/week of GPT-6\.1 Sol usage in dl, launch bonus through 31 Jan 2027\.\n/);
     const me = (await (await service.request("GET", "/web/account", { token, headers: DL })).json()) as any;
@@ -176,17 +176,18 @@ describe("the GPT-6 launch bonus for paying accounts", () => {
 });
 
 describe("the welcome email", () => {
-  it("goes once on claim: the key, the commands, sign-in, each limit with its caching label, no refund promise", async () => {
+  it("goes once on claim: the commands, sign-in, each limit with its caching label, no refund promise", async () => {
     const { service, stripe } = await world();
     const { session } = await paidAccount(service, stripe, "plus", "ann@example.com");
-    const welcomes = emailsTo(service, "ann@example.com").filter((email) => email.subject === "your dl.new key is ready");
+    const welcomes = emailsTo(service, "ann@example.com").filter((email) => email.subject === "you're all set on dl.new");
     assert.equal(welcomes.length, 1);
     const text = welcomes[0]!.text;
     for (const part of [
       "thanks for subscribing to dl.new Plus.",
       "https://dl.new/connect",
       "    curl -fsSL dl.new | sh\n",
-      "    dl claude\n",
+      "    dl\n",
+      "dl claude",
       "https://api.dl.new/v1",
       "https://dl.new/keys",
       "https://dl.new/signin",
@@ -202,13 +203,13 @@ describe("the welcome email", () => {
     service.clock.now += 60_000;
     await emailSignIn(service, "ann@example.com", session.id);
     await service.settle();
-    assert.equal(emailsTo(service, "ann@example.com").filter((email) => email.subject === "your dl.new key is ready").length, 1);
+    assert.equal(emailsTo(service, "ann@example.com").filter((email) => email.subject === "you're all set on dl.new").length, 1);
   });
 
   it("goes even when the day's bulk share is used up (transactional reserve)", async () => {
     const { service, stripe } = await world({ USER_EMAILS_DAILY_MAX: "1", USER_EMAILS_TRANSACTIONAL_RESERVE: "1" });
     await paidAccount(service, stripe, "starter", "tia@example.com");
-    assert.equal(emailsTo(service, "tia@example.com").filter((email) => email.subject === "your dl.new key is ready").length, 1);
+    assert.equal(emailsTo(service, "tia@example.com").filter((email) => email.subject === "you're all set on dl.new").length, 1);
   });
 });
 

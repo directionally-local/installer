@@ -758,7 +758,7 @@ async function checkedEmail(c: Ctx, raw: unknown): Promise<{ email: string; norm
   const norm = normalizeEmail(email);
   const { config } = await runtime(c);
   if (isDisposableDomain(emailDomain(norm)) || emailBlocked(norm, config.blockedEmails)) {
-    return apiError(400, "email_disposable", "Use a permanent email address: we send your key and usage alerts there.");
+    return apiError(400, "email_disposable", "Use a permanent email address: we send your receipts and usage alerts there.");
   }
   return { email, norm };
 }
@@ -1665,7 +1665,7 @@ async function sendClaimEmail(c: Ctx, row: PaidCheckoutRow): Promise<void> {
         "",
         `One free trial per account: if your dl.new account already had one, your plan starts when you finish setting up, and your card is charged then.`,
         "",
-        "Finish setting up dl.new to get your key:",
+        "Finish setting up dl.new to get started:",
         link,
         "",
         `The link works for ${CLAIM_DAYS} days. Nothing was charged today.`,
@@ -1676,7 +1676,7 @@ async function sendClaimEmail(c: Ctx, row: PaidCheckoutRow): Promise<void> {
     : [
     `Thanks for subscribing to ${plan.name} (${row.promo_coupon === null ? `$${plan.priceUsd}/month` : `first month ${row.promo_percent_off ?? config.promoPercentOff}% off, then $${plan.priceUsd}/month`}): ${planLine(row.plan, config)}`,
     "",
-    "Finish setting up dl.new to get your key:",
+    "Finish setting up dl.new to get started:",
     link,
     "",
     `The link works for ${CLAIM_DAYS} days. Stripe sends your receipt separately.`,

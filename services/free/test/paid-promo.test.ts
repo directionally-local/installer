@@ -42,7 +42,7 @@ async function checkoutForm(service: Service, stripe: FakeStripe, plan = "plus")
 }
 
 function welcomeTo(service: Service, to: string): string {
-  const message = service.calls.userEmail.find((entry) => entry.to === to && entry.subject === "your dl.new key is ready");
+  const message = service.calls.userEmail.find((entry) => entry.to === to && entry.subject === "you're all set on dl.new");
   assert.ok(message, `no welcome to ${to}`);
   return String(message.text);
 }
