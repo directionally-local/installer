@@ -332,9 +332,68 @@ describe("trials: a card trial in use", () => {
     stripe.startTrial(sessionId, "twice@example.com");
     const claimed = await service.request("POST", "/web/checkout/claim", { token: first.token, body: { sessionId }, headers: DL });
     assert.equal(claimed.status, 200, await claimed.clone().text());
+    assert.equal(((await claimed.json()) as any).claimed.trial, "repeat", "the claim says the plan started without a trial");
     await service.settle();
     assert.equal(trialEnds(stripe).length, 1);
     assert.equal(trialEnds(stripe)[0]!.id, stripe.sessions.get(sessionId)!.subscription);
+    const started = emailsTo(service, "twice@example.com").filter((m) => m.subject === "your dl.new plan started");
+    assert.equal(started.length, 1);
+    assert.match(started[0]!.text, /your dl\.new account already had its free trial \(one per account\), so this plan started when you set it up and your card was charged\./);
+    assert.doesNotMatch(started[0]!.text, /you used your 0/);
+  });
+
+  it("offers no trial at Checkout to a signed-in account that had one", async () => {
+    const { service, stripe } = await world();
+    const first = await trialAccount(service, stripe, "starter", "again@example.com");
+    const signedIn = await service.request("POST", "/web/checkout/plan", { token: first.token, body: { plan: "plus" }, headers: DL });
+    assert.equal(signedIn.status, 200, await signedIn.clone().text());
+    const { sessionId, trial } = (await signedIn.json()) as { sessionId: string; trial: boolean };
+    assert.equal(trial, false);
+    assert.equal(stripe.sessions.get(sessionId)!.form.get("subscription_data[trial_period_days]"), null);
+    // Signed out, or a bad token: the trial is offered as before.
+    assert.equal((await startCheckout(service, "plus")).trial, true);
+    const stale = await service.request("POST", "/web/checkout/plan", { token: "not-a-token", body: { plan: "plus" }, headers: DL });
+    assert.equal(((await stale.json()) as any).trial, true);
+  });
+
+  it("promises no free tokens before the claim: the claim email says a repeat trial's plan starts at setup", async () => {
+    const { service, stripe } = await world();
+    const { sessionId } = await startCheckout(service, "starter");
+    const session = stripe.startTrial(sessionId, "anon@example.com");
+    await webhook(service, "checkout.session.completed", stripe.sessionObject(session, false));
+    const claim = emailsTo(service, "anon@example.com").find((m) => m.subject === "Finish setting up dl.new")!;
+    assert.ok(claim);
+    assert.doesNotMatch(claim.text, /has started/);
+    assert.match(claim.text, /on a first dl\.new trial, the first 20M tokens are free/);
+    assert.match(claim.text, /One free trial per account: if your dl\.new account already had one, your plan starts when you finish setting up, and your card is charged then\./);
+  });
+
+  it("tells the owner when a repeat trial's plan doesn't start, and the next request starts it", async () => {
+    const { service, stripe } = await world();
+    const first = await trialAccount(service, stripe, "starter", "retry@example.com");
+    stripe.subscriptions.get(first.subscriptionId)!.status = "canceled";
+    await webhook(service, "customer.subscription.deleted", stripe.subscriptionObject(stripe.subscriptions.get(first.subscriptionId)!));
+    const { sessionId } = await startCheckout(service, "starter");
+    stripe.startTrial(sessionId, "retry@example.com");
+    stripe.failTrialEnd = true;
+    const errors = console.error;
+    console.error = () => {};
+    try {
+      const claimed = await service.request("POST", "/web/checkout/claim", { token: first.token, body: { sessionId }, headers: DL });
+      assert.equal(claimed.status, 200, await claimed.clone().text());
+      await service.settle();
+    } finally {
+      console.error = errors;
+    }
+    assert.ok(service.calls.emails.some((message) => message.raw.includes("Subject: dl.new: a repeat card trial's plan didn't start")));
+    const subscriptionId = stripe.sessions.get(sessionId)!.subscription!;
+    assert.equal(stripe.subscriptions.get(subscriptionId)!.status, "trialing");
+    // Stripe answers again: the next request starts the plan.
+    stripe.failTrialEnd = false;
+    service.clock.now += 60_000;
+    assert.equal((await chat(service, first.key)).status, 200);
+    await service.settle();
+    assert.equal(stripe.subscriptions.get(subscriptionId)!.status, "active");
   });
 });
 

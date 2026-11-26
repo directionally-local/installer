@@ -81,7 +81,10 @@ No auth. What the plan cards show.
 
 ### POST /web/checkout/plan {plan, campaign?}
 
-No auth. Starts Stripe Checkout for a plan. → `200 {"url": "https://checkout.stripe.com/...", "sessionId": "cs_..."}`; the page sets `location = url`.
+No auth needed. Starts Stripe Checkout for a plan. → `200 {"url": "https://checkout.stripe.com/...", "sessionId": "cs_...", "trial": false}`; the page sets `location = url`.
+Optionally `Authorization: Bearer <web token>` when the person is signed in: an account that had
+a card trial gets no trial on this Checkout (`trial: false`). A missing or stale token is no
+error (treated as signed out).
 
 - Subscription mode, the plan's Stripe Price (STRIPE_PRICE_STARTER / _PLUS / _MAX), quantity 1,
   promotion codes off, Radar on (Stripe default), Stripe Tax as dl Pro has it.
@@ -143,7 +146,10 @@ Every sign-in endpoint answers the same **session response**:
 }
 ```
 
-`claimed` is null when nothing was claimed. Errors common to all of them:
+`claimed` is null when nothing was claimed. For a card trial Checkout it also has `"trial":
+"started"` (the free tokens are on), or `"trial": "repeat"`: the account had a card trial
+already, so there are no free tokens and the plan starts now (the card is charged; the page
+should say so). Errors common to all of them:
 
 | status | code | when |
 |---|---|---|
@@ -506,8 +512,12 @@ used or after 30 days." (the terms consent text stays as it is). The completed s
 
 Either way `trial_converted` is emailed once ("your plan started: dl.new Plus, $20/mo. first month
 50% off."), the GPT-6 launch bonus is granted, and Kimi/plan limits apply from then. One card
-trial per account: a second trial Checkout on the same account gets 0 trial tokens (its plan
-starts at once). A trial whose first real charge never succeeded never gets the plan while past
+trial per account: a signed-in Checkout (`Authorization`) from an account that had one gets no
+trial; a signed-out one can't be told apart, so its claim gets 0 trial tokens and its plan starts
+at once (the claim answers `trial: "repeat"`, and `trial_converted` says the account already had
+its free trial). If Stripe fails to end that trial, the owner is alerted and the account's next
+request tries again. The "Finish setting up dl.new" email for an unclaimed trial Checkout
+promises the free tokens only on a first trial and says a repeat's plan starts at setup. A trial whose first real charge never succeeded never gets the plan while past
 due.
 
 **No-card trial.** The page sends the browser to `GET /web/auth/github?return=https://dl.new/trial&state=…`
