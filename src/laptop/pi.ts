@@ -12,8 +12,8 @@ import { DEFAULT_MODEL, freeTierModels, type FreeTierModel } from "./opencode.js
  *
  * Pi speaks the OpenAI-compatible chat completions API (`openai-completions`), which the free tier
  * serves to Autopilot and OpenCode, so the models the person may use there work in Pi: DeepSeek
- * V4.1 Flash by default, and any others /v1/models lists for them, on the share for other agents
- * (not GPT-6: it is available only in Autopilot for now).
+ * V4.1 Flash by default, and any others /v1/models lists for them, on the same allowance
+ * (not GPT-6: it is available in Autopilot for now).
  *
  * How it's configured, for this run only and without touching ~/.pi:
  *  - A one-run extension file (`pi -e FILE`, in a private temporary directory removed when Pi

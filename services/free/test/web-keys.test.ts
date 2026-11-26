@@ -270,17 +270,17 @@ describe("lastTool", () => {
 });
 
 describe("/web/me toolAllowance", () => {
-  it("is the week as tool keys see it: the other agents' share applied", async () => {
+  it("is the week as tool keys see it: the other agents' share applied (all of it by default)", async () => {
     const { service, web } = await world();
     const me = (await (await service.request("GET", "/web/me", { token: web, headers: fromApi })).json()) as {
       weeklyTokens: number;
       toolAllowance: { share: number; tokensPerWeek: number | null; usedThisWeek: number; resetsAt: string };
     };
-    assert.equal(me.toolAllowance.share, 0.5);
+    assert.equal(me.toolAllowance.share, 1);
     assert.equal(me.toolAllowance.usedThisWeek, 0);
     assert.ok(Number.isFinite(Date.parse(me.toolAllowance.resetsAt)));
     assert.ok(Date.parse(me.toolAllowance.resetsAt) > service.clock.now);
-    if (me.toolAllowance.tokensPerWeek !== null && me.weeklyTokens > 0) assert.equal(me.toolAllowance.tokensPerWeek, Math.floor(me.weeklyTokens * 0.5), JSON.stringify(me));
+    if (me.toolAllowance.tokensPerWeek !== null && me.weeklyTokens > 0) assert.equal(me.toolAllowance.tokensPerWeek, me.weeklyTokens, JSON.stringify(me));
     // What a tool key used shows up.
     const made = await create(service, web, "cursor");
     service.setLuminal(() => completion(luminalUsage(1000, 200)));

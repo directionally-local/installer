@@ -62,7 +62,7 @@ export function toolClient(headers: Headers): `tool:${string}` {
   return `tool:${toolName(headers)}`;
 }
 
-export const TOOL_KEYS_OFF_MESSAGE = "API keys for other tools are turned off on the free tier for now. Use dl (Autopilot), or your own provider key in that tool.";
+export const TOOL_KEYS_OFF_MESSAGE = "API keys for other tools are turned off on the free tier for now. Use your own provider key in that tool.";
 export const TOOL_KEY_NOT_HERE_MESSAGE = "This is an API key for other tools: it works on /v1/chat/completions, /v1/models, /v1/me and /anthropic/v1/messages only.";
 export const TOOL_KEYS_UNAVAILABLE_MESSAGE =
   "API keys for other tools are for accounts with free tokens. This account has none right now: run dl to see why, or type /request in dl to ask for access.";
@@ -72,7 +72,7 @@ export function toolLimitMessage(share: number, resetsAt: string | undefined, pl
   const part = share >= 1 ? "all" : share <= 0 ? "none" : share === 0.5 ? "half" : `${Math.round(share * 100)}%`;
   const when = resetsAt ? ` It resets at ${resetsAt}.` : "";
   const allowance = plan === "pro" ? "Pro" : "free";
-  return `Other tools on a dl API key get ${part} of your ${allowance} allowance, and that part is used up.${when} The rest works in Autopilot: run dl.`;
+  return `Other tools on a dl API key get ${part} of your ${allowance} allowance, and that part is used up.${when}`;
 }
 
 /**

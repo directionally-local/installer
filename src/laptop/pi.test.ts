@@ -136,12 +136,13 @@ describe("dl pi", () => {
     assert.deepEqual(piArgs(["--", "--model"], "/tmp/x.js", FREE_TIER_MODELS).slice(2, 6), ["--provider", "dl", "--model", `dl/${DEEPSEEK}`]);
   });
 
-  it("says once in a terminal that Autopilot gets 2× the free allowance", async () => {
+  it("says once in a terminal what part of the free allowance Pi gets when that is less than all", async () => {
     const service = fakeService();
     const out = capture();
     const d = await deps({ fetch: service.fetch, spawn: fakeSpawn().spawn, terminal: true, env: { PATH: "/usr/bin", NO_COLOR: "1" } });
     assert.equal(await piCommand([], out.io, d), 0);
-    assert.match(out.err(), /Autopilot gets 2× the allowance of other agents/);
+    assert.match(out.err(), /this agent gets 50% of your weekly free allowance/);
+    assert.doesNotMatch(out.err(), /Autopilot/);
     await rm(d.tmp!, { recursive: true, force: true });
   });
 

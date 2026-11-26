@@ -123,8 +123,8 @@ describe("OpenCode harness keys", () => {
 });
 
 describe("OpenCode's share and refusals", () => {
-  it("gets otherHarnessShare of the week, in OpenCode's words, while Autopilot keeps the rest", async () => {
-    const { service, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
+  it("gets otherHarnessShare of the week, in OpenCode's words, when it is set below 1", async () => {
+    const { service, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1", OTHER_HARNESS_SHARE: "0.5" });
     const { key } = await mint(service, token);
     // 10M uncached prompt tokens at $0.035/M: $0.35 a request.
     service.setLuminal(() => completion(luminalUsage(10_000_000, 0)));
@@ -134,13 +134,12 @@ describe("OpenCode's share and refusals", () => {
     assert.equal(refused.status, 402);
     const error = await apiError(refused);
     assert.equal(error.code, "harness_limit");
-    assert.match(error.message, /^OpenCode through dl gets half of your free allowance, and that part is used up\. It resets at 2026-11-09T00:00:00\.000Z\. Your remaining free usage works in Autopilot: type dl\. Or get dl Pro: run dl and type \/upgrade\.$/);
+    assert.match(error.message, /^OpenCode through dl gets half of your free allowance, and that part is used up\. It resets at 2026-11-09T00:00:00\.000Z\. For more, get dl Pro: run dl and type \/upgrade\.$/);
     assert.equal((await service.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [{ role: "user", content: "x" }] } })).status, 200);
   });
 
-  it("follows the setting: 1 gives OpenCode the whole allowance", async () => {
-    const { service, admin, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
-    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { otherHarnessShare: 1 } })).status, 200);
+  it("gives OpenCode the whole allowance by default (otherHarnessShare 1)", async () => {
+    const { service, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
     const { key } = await mint(service, token);
     service.setLuminal(() => completion(luminalUsage(10_000_000, 0)));
     const statuses = [];
@@ -148,8 +147,8 @@ describe("OpenCode's share and refusals", () => {
     assert.deepEqual(statuses, [200, 200, 200]);
   });
 
-  it("is covered by dl's session events for the dl-only check, like Autopilot", async () => {
-    const { service, token } = await world();
+  it("is covered by dl's session events for the dl-only check (dlOnly on), like Autopilot", async () => {
+    const { service, token } = await world({ DL_ONLY: "true" });
     const { key } = await mint(service, token);
     for (let index = 0; index < 20; index++) {
       assert.equal((await chat(service, key, { model: MODEL })).status, 200);

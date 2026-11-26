@@ -7,8 +7,8 @@ import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } fro
  * harness-launch.ts's; this file is how OpenCode is told where the free tier is.
  *
  * OpenCode speaks the OpenAI-compatible chat completions API, which the free tier serves to
- * Autopilot, with the same allowance, caps and refusals as Autopilot's (on the share for other
- * tools). It gets DeepSeek V4.1 Flash: GPT-6 is available only in Autopilot for now (the service's
+ * Autopilot, with the same allowance, caps and refusals as Autopilot's (the whole allowance by
+ * default). It gets DeepSeek V4.1 Flash: GPT-6 is available in Autopilot for now (the service's
  * `gpt6Clients`), so it isn't offered here; the service's /v1/models says what a run may use.
  *
  * How it's configured, for this run only and without touching any OpenCode file:
@@ -50,7 +50,7 @@ export interface FreeTierModel {
 
 /**
  * The free tier's models other agents may use (services/free/src/models.ts), for when the
- * service's /v1/models can't be read: DeepSeek only, as GPT-6 is available only in Autopilot for
+ * service's /v1/models can't be read: DeepSeek only, as GPT-6 is available in Autopilot for
  * now. dl asks the service first, so a model opened to other agents shows up without a new dl.
  */
 export const FREE_TIER_MODELS: readonly FreeTierModel[] = [

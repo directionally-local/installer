@@ -485,7 +485,7 @@ Autopilot and dl.new build against these shapes. Fields may be added; none are r
   "mix": { "cached": 0.955, "fresh": 0.038, "output": 0.007, "label": "95.5% caching applied",
            "cachedTokenWeight": 0.02, "countedFactor": 0.0641 },
   "models": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "deepseek/deepseek-v4.1-flash-1017"],
-  "otherHarnessShare": 0.5,             // dl claude / dl opencode's part of the allowance; Autopilot gets all of it
+  "otherHarnessShare": 1,               // dl claude / dl opencode's part of the allowance (1: all of it, as Autopilot)
   "plan": "free",                       // "free" | "pro"
   "topupTokensLeft": 0,                 // unexpired tokens from old token top-ups not yet used
   "topupUsdLeft": 0,                    // unexpired dollar top-up usage not yet spent or held
@@ -1550,12 +1550,12 @@ with who made it and when.
 | `emailCodesDailyMax` | `EMAIL_CODES_DAILY_MAX` | 300: dl.new sign-in and email-change codes a UTC day; outside `userEmailsDailyMax`, never stopped by it |
 | `broadcastEmailProvider` | `BROADCAST_EMAIL_PROVIDER` | `resend`: with `RESEND_API_KEY` set beside the `USER_EMAIL` binding, bulk mail (broadcasts and lifecycle emails) goes through Resend and codes and transactional mail stay on the binding; `cloudflare` keeps everything on the binding |
 | `resendBulkDailyMax` | `RESEND_BULK_DAILY_MAX` | 2000: bulk mail through Resend a UTC day (with `broadcastEmailProvider` `resend`); its own ceiling, outside `userEmailsDailyMax` |
-| `dlOnly` | `DL_ONLY` | true (a dl sign-in token works inside dl only; tool keys are never refused by it; see below) |
+| `dlOnly` | `DL_ONLY` | false: free tokens work in any coding agent. True: a dl sign-in token works only with dl's session events (tool keys are never refused by it; see below) |
 | `toolKeys` | `TOOL_KEYS` | true: accounts in good standing may make API keys for other tools; false refuses new and existing ones (`tool_keys_off`, the keys are kept) |
 | `toolKeysMax` | `TOOL_KEYS_MAX` | 3: tool keys per account (server keys are counted apart) |
 | `toolKeyRequestsPerMinute` | `TOOL_KEY_REQUESTS_PER_MINUTE` | 30: chat requests a minute per tool key, under the person's 60 |
 | `allowOtherHarnesses` | `ALLOW_OTHER_HARNESSES` | true: Claude Code through `dl claude` and OpenCode through `dl opencode` may use free tokens; false refuses both (`harness_not_allowed`) |
-| `otherHarnessShare` | `OTHER_HARNESS_SHARE` | 0.5: the share (0 to 1) of the free weekly allowance and of the trial Claude Code and OpenCode may use; Pro is exempt (see below) |
+| `otherHarnessShare` | `OTHER_HARNESS_SHARE` | 1: the share (0 to 1) of the free weekly allowance and of the trial other agents (Claude Code, OpenCode, Pi, tool keys) may use; 1 is the full allowance, the same as Autopilot; Pro is exempt (see below) |
 | `proOffered` | `PRO_OFFERED` | true: dl Pro is offered. false hides it from everyone new: `offers` has no `pro` (the `topup` stays), free users' refusals, sign-in lines and trial emails stop naming Pro, and a new Pro checkout gets 403 `pro_not_offered`. Existing subscribers keep Pro, their Pro wording and the billing portal |
 | `accessRequestAlerts` | `ACCESS_REQUEST_ALERTS` | `each` (an email per access request, at most `accessRequestEmailsPerDay` a UTC day, the rest in the daily digest); `daily` (one line in the daily digest); `off` |
 | `accessRequestEmailsPerDay` | `ACCESS_REQUEST_EMAILS_PER_DAY` | 20: with `each`, access-request emails a UTC day at most |
@@ -1570,7 +1570,7 @@ with who made it and when.
 | `gpt6PresendGuard` | `GPT6_PRESEND_GUARD` | `enforce`: GPT-6 requests are checked before they are sent (see [GPT-6: pre-send checks and the trust gate](#gpt-6-pre-send-checks-and-the-trust-gate)); `off` |
 | `gpt6GuardTimeoutMs` | `GPT6_GUARD_TIMEOUT_MS` | 4000: ms each pre-send check may take; past it the request isn't sent |
 | `gpt6TrustedWeeklyUsdCap` | `GPT6_TRUSTED_WEEKLY_USD_CAP` | 0: the trust gate is off; above 0, GPT-6 only for trusted people, with this weekly budget on the free plan |
-| `gpt6Clients` | `GPT6_CLIENTS` | `autopilot`: GPT-6 only in Autopilot (see [GPT-6 in Autopilot only](#gpt-6-in-autopilot-only)); `all`: every coding agent dl launches |
+| `gpt6Clients` | `GPT6_CLIENTS` | `autopilot`: GPT-6 only in Autopilot, pending the model provider's approval (see [GPT-6 in Autopilot only](#gpt-6-in-autopilot-only)); `all`: every coding agent dl launches |
 | `moderation` | `MODERATION` | `enforce`: high-risk labels get an automated review that can block (see [automated moderation review](#automated-moderation-review)); `shadow` decides and emails, never blocks; `off` is the plain high-risk email |
 | `moderationBlockConfidence` | `MODERATION_BLOCK_CONFIDENCE` | 0.85: the lowest confidence (0 to 1) a block verdict needs to block |
 | `moderationAllowlist` | `MODERATION_ALLOWLIST` | []: GitHub logins or ids moderation never blocks (comma-separated in env) |
@@ -1687,7 +1687,7 @@ GPT-6 (`gpt-6-luna`, `gpt-6.1-sol`, `gpt-6-astra`) is served only inside Autopil
   gets every model as before.
 - **Other agents** are what dl launches with a harness key: `dl opencode`, `dl pi`, `dl claude`,
   `dl t3`, and `dl proxy` for Conductor and other desktop apps. Their GPT-6 request gets HTTP 402
-  `{"error": {"code": "provider_limit", "reason": "autopilot_only", "family": "gpt6", "provider": "openai", "resetsAt": null, "alternative": "deepseek/deepseek-v4.1-flash-1017", "clients": ["autopilot"], "message": "GPT-6 is available only in Autopilot (dl) for now; other agents use DeepSeek V4.1 Flash. Run dl to use GPT-6."}}`
+  `{"error": {"code": "provider_limit", "reason": "autopilot_only", "family": "gpt6", "provider": "openai", "resetsAt": null, "alternative": "deepseek/deepseek-v4.1-flash-1017", "clients": ["autopilot"], "message": "GPT-6.1 Sol is available in Autopilot for now; other agents use DeepSeek V4.1 Flash."}}` (the message names the model asked for)
   before anything is reserved or sent, counted as `provider_limit:autopilot_only` under the
   agent. Their `/v1/models` and the unknown-model refusal's `allowed` leave GPT-6 out. Claude Code
   through dl is DeepSeek only either way.
@@ -1708,7 +1708,7 @@ stored), each for one harness (`claude-code` or `opencode`):
 
 | request | response |
 |---|---|
-| `POST /v1/harness-keys {"harness": "claude-code" \| "opencode"}` (a signed-in access token only) | 201 `{id, key, harness, expiresAt, ttlSeconds: 900, otherHarnessShare}` (that tool's part of the allowance, 0 to 1; Autopilot gets all of it) |
+| `POST /v1/harness-keys {"harness": "claude-code" \| "opencode"}` (a signed-in access token only) | 201 `{id, key, harness, expiresAt, ttlSeconds: 900, otherHarnessShare}` (that tool's part of the allowance, 0 to 1; 1 by default, the same as Autopilot) |
 | `POST /v1/harness-keys/:id/refresh` (the access token, or that key) | `{id, expiresAt}`: another 15 minutes |
 | `DELETE /v1/harness-keys/:id` (the access token, or that key) | `{id, revoked: true}` |
 
@@ -1756,10 +1756,11 @@ attribution downstream name the model that produced the output.
   our message (dl's slash commands reworded as "run dl and type /upgrade"). Transient upstream
   errors keep 429/503 and `Retry-After`, which Claude Code retries; refusals a retry can't change
   (a pause for everyone, a global budget) go out as 403 so it doesn't retry them.
-- **The share** (`otherHarnessShare`, 0.5): Claude Code's and OpenCode's requests see the allowance scaled by it:
-  every token pool, both dollar budgets and the trial, while what the week (and the trial) used
-  is counted in full. So Claude Code stops once the account has used half its week, from any
-  client, and Autopilot keeps the other half (`harness_limit` says so). Past the whole allowance,
+- **The share** (`otherHarnessShare`, default 1: the full allowance, the same as Autopilot): below 1,
+  Claude Code's and OpenCode's requests see the allowance scaled by it: every token pool, both
+  dollar budgets and the trial, while what the week (and the trial) used is counted in full. So
+  at 0.5 Claude Code would stop once the account has used half its week, from any client
+  (`harness_limit` says so). Past the whole allowance,
   the usual codes. Top-ups and Pro aren't scaled: a Pro subscriber gets the whole Pro allowance in
   Claude Code.
 - **Session events:** dl sends `session.start` (before the tool starts, and every 6 hours) and
@@ -2462,7 +2463,8 @@ the admin log; an upstream without its key can't be chosen.
   account is blocked from the free tier. Contact contact@directionallylocal.com."), and sign-in
   is refused on the page and at `POST /v1/device/token` (403 `blocked`). Unblocking restores all
   of it; refresh tokens aren't used up while blocked. `suspend` stays as it was.
-- **Free tokens inside dl only (`dlOnly`, on by default):** Autopilot always sends session
+- **Free tokens only with dl's session events (`dlOnly`, off by default):** free tokens work in
+  any coding agent. When it is switched on: Autopilot always sends session
   events (`POST /v1/events`) while the free tier is its provider, so a sign-in token used from
   another tool sends requests and no events. A chat request from a free-plan account is
   refused with 403 `dl_only` ("Your dl sign-in works inside dl only. To use free tokens in another
@@ -2475,7 +2477,7 @@ the admin log; an upstream without its key can't be chosen.
   `dlk_` key (a server key, dl's server mode, or a [tool key](#use-dls-free-tokens-in-other-tools-tool-keys), which is how free tokens are used in other tools) and paid usage (Pro and top-ups; a refused free account
   with a top-up is served from it). The check reads the caller's events and request log in the
   Directory read every chat request already makes; the only new write is a `via_key` flag on the
-  request row it already inserts. Switch it off with `POST /admin/config {"dlOnly": false}`.
+  request row it already inserts. Switch it on with `POST /admin/config {"dlOnly": true}`.
   `GET /admin/people` (`dlSessionsThisWeek`) shows dl sessions this week,
   the distinct session ids in each person's events, counted in `daily_activity.sessions`.
 - **Admins are left out of every number:** anyone in `ADMIN_GITHUB_IDS` and anyone admitted as

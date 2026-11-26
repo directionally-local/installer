@@ -89,7 +89,7 @@ describe("free users' words with proOffered", () => {
     assert.equal(trialEndedMessage(10_000_000, "$3.99"), "Your 10M free trial tokens are used up. Keep going with dl Pro for $3.99 a month, or add a top-up: /upgrade");
     assert.match(gptLimitMessage("free"), /or get dl Pro\.$/);
     assert.match(gptLimitMessage("free", true), /or get dl Pro\.$/);
-    assert.match(harnessLimitMessage(0.5, undefined, "free", "claude-code", true), /Or get dl Pro: run dl and type \/upgrade\.$/);
+    assert.match(harnessLimitMessage(0.5, undefined, "free", "claude-code", true), /For more, get dl Pro: run dl and type \/upgrade\.$/);
     assert.match(starterLine(BAR, 2_000_000, 2, 8), /Want more\? Get dl Pro, type \/request/);
     assert.match(basicLine(50_000_000, 2, 8, true), /Want more\? Get dl Pro, type \/request/);
     for (const kind of TRIAL_EMAILS) assert.match(renderUserEmail(kind, { resets: "monday 10 nov", unsubscribeUrl: "u" }).body, /dl pro or a top up/);
@@ -114,7 +114,7 @@ describe("free users' words with proOffered", () => {
     assert.equal(forHarness(gptLimitMessage("free", false), "opencode"), "You've used this week's GPT-6 allowance. DeepSeek V4.1 Flash still has free usage this week: pick it in /models.");
     assert.equal(
       harnessLimitMessage(0.5, "2026-11-09T00:00:00.000Z", "free", "claude-code", false),
-      "Claude Code through dl gets half of your free allowance, and that part is used up. It resets at 2026-11-09T00:00:00.000Z. Your remaining free usage works in Autopilot: type dl.",
+      "Claude Code through dl gets half of your free allowance, and that part is used up. It resets at 2026-11-09T00:00:00.000Z.",
     );
     assert.equal(starterLine(BAR, 2_000_000, 2, 8, false), "Free: every model, up to $2 of GPT-6 and $8 of DeepSeek a week. It resets every Monday. Want more? Type /request in dl and tell us what you're building, or use your own API key with /provider.");
     for (const kind of TRIAL_EMAILS) {

@@ -39,12 +39,12 @@ const requestRows = (service: Service) =>
   service.directory().ctx.storage.sql.exec("SELECT harness, model, session_key FROM requests WHERE github_id = 100 ORDER BY id").toArray().map((row: object) => ({ ...row }));
 
 describe("Pi harness keys", () => {
-  it("are minted for \"pi\" with the share for other agents", async () => {
+  it("are minted for \"pi\" with the whole allowance by default", async () => {
     const { service, token } = await world();
     const minted = await mint(service, token);
     assert.equal(minted.harness, "pi");
     assert.match(minted.key, /^dlh_100_/);
-    assert.equal(minted.otherHarnessShare, 0.5);
+    assert.equal(minted.otherHarnessShare, 1);
   });
 
   it("serve DeepSeek (and GPT-6 with gpt6Clients \"all\") on chat completions, recorded as Pi's under dl pi's session id", async () => {
@@ -110,8 +110,8 @@ describe("Pi harness keys", () => {
 });
 
 describe("Pi's share and refusals", () => {
-  it("gets otherHarnessShare of the week, in Pi's words, while Autopilot keeps the rest", async () => {
-    const { service, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
+  it("gets otherHarnessShare of the week, in Pi's words, when it is set below 1", async () => {
+    const { service, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1", OTHER_HARNESS_SHARE: "0.5" });
     const { key } = await mint(service, token);
     // 10M uncached prompt tokens at $0.035/M: $0.35 a request.
     service.setLuminal(() => completion(luminalUsage(10_000_000, 0)));

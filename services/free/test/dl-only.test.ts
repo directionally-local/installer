@@ -5,8 +5,9 @@ import { ADMIN_ID, allowServerKeys, createInvite, createService, MODEL, type Ser
 const DL_ONLY = "Your dl sign-in works inside dl only. To use free tokens in another tool, make an API key for it: run dl api-key. Or use your own API key in that tool.";
 const HOUR = 3600_000;
 
+/** dlOnly is off by default (free tokens work in any agent); these tests switch it on (DL_ONLY). */
 async function member(vars: Record<string, string> = {}): Promise<{ service: Service; token: string; refreshToken: string; adminToken: string }> {
-  const service = await createService(vars);
+  const service = await createService({ DL_ONLY: "true", ...vars });
   const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
   const tokens = await service.signIn({ id: 100, login: "alice" }, { invite: await createInvite(service, adminToken) });
   return { service, token: tokens.access_token, refreshToken: tokens.refresh_token, adminToken };
@@ -42,6 +43,13 @@ async function errorOf(response: Response): Promise<{ code: string; message: str
 }
 
 describe("free tokens inside dl only", () => {
+  it("is off by default: an account with no session events keeps getting free tokens", async () => {
+    const service = await createService();
+    const adminToken = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
+    const token = (await service.signIn({ id: 100, login: "alice" }, { invite: await createInvite(service, adminToken) })).access_token;
+    assert.deepEqual(await chats(service, token, 25), Array(25).fill(200));
+  });
+
   it("refuses an account with no session events after 20 requests, with dl_only", async () => {
     const { service, token, refreshToken } = await member();
     assert.deepEqual(await chats(service, token, 20), Array(20).fill(200));

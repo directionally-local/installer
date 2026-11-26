@@ -5,7 +5,7 @@ import { ADMIN_ID, allowServerKeys, completion, createService, luminalUsage, MOD
 /**
  * Claude Code through `dl claude`: a short-lived harness key minted by a signed-in dl, and the
  * Anthropic Messages endpoint at /anthropic/v1/messages, served by DeepSeek through the same
- * reservation, caps, trial and refusals as Autopilot's chat requests, on a smaller share.
+ * reservation, caps, trial and refusals as Autopilot's chat requests, on the same allowance by default.
  */
 
 const MINUTE = 60_000;
@@ -72,9 +72,9 @@ describe("harness keys", () => {
     const minted = await mint(service, token);
     assert.match(minted.key, /^dlh_100_[a-z0-9]{12}_[A-Za-z0-9_-]{43}$/);
     assert.equal(minted.ttlSeconds, 900);
-    // The agent's part of the allowance, so dl can say Autopilot gets more.
-    assert.equal(minted.otherHarnessShare, 0.5);
-    assert.equal(((await (await service.request("GET", "/v1/me", { token })).json()) as { otherHarnessShare: number }).otherHarnessShare, 0.5);
+    // The agent's part of the allowance: all of it by default, the same as Autopilot.
+    assert.equal(minted.otherHarnessShare, 1);
+    assert.equal(((await (await service.request("GET", "/v1/me", { token })).json()) as { otherHarnessShare: number }).otherHarnessShare, 1);
     assert.equal(minted.expiresAt, new Date(NOW + 15 * MINUTE).toISOString());
     assert.equal((await service.request("POST", "/v1/harness-keys", { token, body: { harness: "cursor" } })).status, 400);
     // Not from a harness key or a server key.
@@ -263,8 +263,8 @@ describe("POST /anthropic/v1/messages", () => {
 });
 
 describe("Claude Code's share of the allowance", () => {
-  it("stops Claude Code at otherHarnessShare of the week while Autopilot keeps the rest", async () => {
-    const { service, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
+  it("stops Claude Code at otherHarnessShare of the week when it is set below 1", async () => {
+    const { service, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1", OTHER_HARNESS_SHARE: "0.5" });
     const { key } = await mint(service, token);
     // 10M uncached prompt tokens at $0.035/M: $0.35 a request.
     service.setLuminal(() => completion(luminalUsage(10_000_000, 0)));
@@ -274,8 +274,9 @@ describe("Claude Code's share of the allowance", () => {
     assert.equal(refused.status, 402);
     const error = await anthropicError(refused);
     assert.deepEqual([error.type, error.code], ["billing_error", "harness_limit"]);
-    assert.match(error.message, /Claude Code through dl gets half of your free allowance, and that part is used up\. It resets at 2026-11-09T00:00:00\.000Z\. Your remaining free usage works in Autopilot: type dl\./);
-    // Autopilot still has the rest of the week's DeepSeek budget.
+    assert.match(error.message, /Claude Code through dl gets half of your free allowance, and that part is used up\. It resets at 2026-11-09T00:00:00\.000Z\./);
+    assert.doesNotMatch(error.message, /Autopilot/, "no push towards another agent");
+    // The rest of the week's DeepSeek budget is still there.
     assert.equal((await service.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [{ role: "user", content: "x" }] } })).status, 200);
     // Past the whole budget, the usual refusal, worded for Claude Code.
     const spent = await messages(service, key);
@@ -297,9 +298,8 @@ describe("Claude Code's share of the allowance", () => {
     assert.equal((await anthropicError(spent)).code, "quota_exceeded");
   });
 
-  it("follows the setting: 1 gives Claude Code the whole allowance", async () => {
-    const { service, admin, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
-    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { otherHarnessShare: 1 } })).status, 200);
+  it("gives Claude Code the whole allowance by default (otherHarnessShare 1)", async () => {
+    const { service, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
     const { key, otherHarnessShare } = await mint(service, token);
     assert.equal(otherHarnessShare, 1);
     service.setLuminal(() => completion(luminalUsage(10_000_000, 0)));
@@ -307,7 +307,7 @@ describe("Claude Code's share of the allowance", () => {
   });
 
   it("scales the trial too, and refuses with trial_ended (pointing at dl's /upgrade) once the whole trial is used", async () => {
-    const service = await createService({ OPEN_ADMISSION: "true", ...LUMINAL });
+    const service = await createService({ OPEN_ADMISSION: "true", OTHER_HARNESS_SHARE: "0.5", ...LUMINAL });
     const admin = (await service.signIn({ id: ADMIN_ID, login: "owner" })).access_token;
     assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { trialCutoff: new Date(NOW + MINUTE).toISOString() } })).status, 200);
     service.clock.now = NOW + 2 * MINUTE;
@@ -332,8 +332,8 @@ describe("Claude Code's share of the allowance", () => {
 });
 
 describe("Claude Code and the dl-only check", () => {
-  it("counts its requests like Autopilot's: dl's session events cover them, and none means dl_only after 20", async () => {
-    const { service, token } = await world();
+  it("counts its requests like Autopilot's: dl's session events cover them, and none means dl_only after 20 (dlOnly on)", async () => {
+    const { service, token } = await world({ DL_ONLY: "true" });
     const { key } = await mint(service, token);
     for (let index = 0; index < 20; index++) {
       assert.equal((await messages(service, key)).status, 200);

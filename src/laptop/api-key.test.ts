@@ -53,7 +53,8 @@ describe("dl api-key", () => {
     assert.match(result.out, /base URL {2}https:\/\/free\.example\.test\/v1\n/);
     assert.match(result.out, /base URL {2}https:\/\/free\.example\.test\/anthropic\n/);
     assert.match(result.out, /curl https:\/\/free\.example\.test\/v1\/chat\/completions -H "Authorization: Bearer dlk_/);
-    assert.match(result.out, /GPT-6 is in Autopilot only/);
+    assert.match(result.out, /GPT-6.1 Sol is available in Autopilot for now/);
+    assert.doesNotMatch(result.out, /keeps the rest/);
   });
 
   it("gives the hosted free tier's keys api.dl.new's base URLs, and still makes them at the sign-in's origin", async () => {

@@ -12,7 +12,7 @@ import { PROXY_MODEL } from "./proxy.js";
  * Kilo, Continue, Zed, Aider, OpenCode…), with no dl running. It makes an API key for the free
  * tier sign-in's account (POST /v1/keys {name, kind: "tool"}, services/free/src/tool-keys.ts)
  * and prints it once, with the base URLs to paste into the tool. The key draws from the same
- * weekly allowance as Autopilot, on the share other tools get; GPT-6 stays in Autopilot.
+ * weekly allowance as Autopilot and every other agent; GPT-6 is available in Autopilot for now.
  *
  *   dl api-key [NAME]        make a key (NAME: what it's for, e.g. "cursor"; default "tools")
  *   dl api-key list          the account's keys (never their secrets)
@@ -91,7 +91,7 @@ export function apiKeyText(input: { origin: string; key: string; name: string; m
   Try it:
     curl ${urls.openai}/chat/completions -H "Authorization: Bearer ${key}" -H "content-type: application/json" -d '{"model":"${PROXY_MODEL}","messages":[{"role":"user","content":"hi"}]}'
 
-  ${color.dim(`It uses your free weekly allowance, on the share other tools get; Autopilot (dl) keeps the rest. GPT-6 is in Autopilot only.${input.max ? ` At most ${input.max} keys; dl api-key list shows them.` : ""}`)}
+  ${color.dim(`It uses your free weekly allowance, the same as any other agent. GPT-6.1 Sol is available in Autopilot for now.${input.max ? ` At most ${input.max} keys; dl api-key list shows them.` : ""}`)}
 
 `;
 }
