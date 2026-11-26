@@ -182,7 +182,7 @@ Relay rate-limited our key hard.
   before any bytes reach the client (429, 5xx, a first-byte timeout or network error, Liquid's
   `no_eligible_offer`, or the provider refusing our key) the next one is tried with a fresh
   reservation, then DeepSeek (its `fallback`, with `x-dl-fallback`). A 400 about the request
-  itself goes back as it is. A stream that has started stays where it is.
+  itself goes back as a 400 `upstream_error` in dl's own words (see "Upstreams: Luminal and OpenRouter"). A stream that has started stays where it is.
 - **Liquid's rules.** Sellers `exchangeAllow.glm-5.3-flash` (`["munitoai", "tensorx"]`: the two
   that served it in the bake-off with `privacy.retention: "none"`, checked again live;
   `LIQUID_ALLOW_GLM_5_3_FLASH`) and ceilings `exchangeMaxPrices.glm-5.3-flash` (`[0.2, 0.05,
@@ -1974,11 +1974,20 @@ Luminal fails, the client gets a transient error and retries on its own:
 | 5xx, or unreachable | 503 `upstream_unavailable`, `Retry-After` |
 | no response headers within `luminalFirstByteTimeoutSeconds` (30) | 503 `upstream_timeout`, `Retry-After: 5`; the Luminal request is aborted |
 | a stream failing part way | passed through as it is (the stream ends with an error) |
-| 400 | 400 `upstream_error` with Luminal's message |
+| 400 | 400 `upstream_error` with dl's own message (never Luminal's; see below) |
 | 401, 402, 403 | 502 `upstream_error` (the service's key or account) |
 
 None of these is charged. Autopilot's dl client retries only `rate_limited` today, so it needs to
 treat these three codes (or `retryable: true`) as retryable before Luminal goes live.
+
+**A provider's refusal is never passed on verbatim** (`src/upstream-errors.ts`, every upstream,
+and `/anthropic`'s error bodies): providers' messages often quote the request or internal
+account and policy text. Known failures get dl's own message (context window exceeded,
+`max_tokens`, content policy, an image or file the model can't read, tools or tool calls);
+anything else "The model provider refused the request." Beside it, `upstreamStatus` and, only
+when the provider's `error.code` or `error.type` is a plain identifier (letters, digits, `_.-`,
+at most 64), `upstreamReason` (e.g. `invalid_request_error`). A 402 from the provider is 503
+`service_paused`, "The model provider paused the service's account. Try again later."
 
 **Credit.** Luminal reports `usage.prompt_tokens_details.cached_tokens` but no cost, so each
 request's credit is computed from its usage at Luminal's list prices (USD per million tokens,

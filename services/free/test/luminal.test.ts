@@ -205,10 +205,12 @@ describe("Luminal errors (no automatic fallback)", () => {
 
   it("refuses a 4xx as the request's problem, and Luminal refusing the key as the service's", async () => {
     const { service, token } = await member();
-    service.setLuminal(() => Response.json({ error: { message: "bad tool schema" } }, { status: 400 }));
+    service.setLuminal(() => Response.json({ error: { message: "bad tool schema in SECRET-REQUEST-TEXT" } }, { status: 400 }));
     const bad = await chat(service, token);
     assert.equal(bad.status, 400);
-    assert.match(String((await errorOf(bad)).message), /bad tool schema/);
+    const said = await errorOf(bad);
+    assert.match(String(said.message), /tools or tool calls/, "dl's own words for a tool schema refusal");
+    assert.doesNotMatch(JSON.stringify(said), /SECRET-REQUEST-TEXT/, "never the provider's text");
     service.setLuminal(() => Response.json({ error: { message: "invalid api key" } }, { status: 401 }));
     const key = await chat(service, token);
     assert.equal(key.status, 502);
