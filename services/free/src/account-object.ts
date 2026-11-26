@@ -252,6 +252,8 @@ export interface PlanState {
   trial: TrialMeter | null;
   /** A card trial's conversion (Stripe ending the trial) is under way right now. */
   converting: boolean;
+  /** The account is on dl.new's Free plan (free-plan.ts): no card, DeepSeek only, a weekly cap. */
+  freePlan: boolean;
 }
 
 export type ReserveResult =
@@ -684,7 +686,7 @@ export class AccountObject extends DurableObject<AccountEnv> {
     }
     const counted: Record<string, number> = {};
     for (const model of models) counted[model] = countedThisWeek(sql, model, now);
-    return { tier, paidSince, fallback: readMeta(sql, META.fallback) !== "off", counted, bonusUsd: bonusUsdThisWeek(sql, now), trial: this.#trialMeter(now, tier), converting: trialConverting(sql, now) };
+    return { tier, paidSince, fallback: readMeta(sql, META.fallback) !== "off", counted, bonusUsd: bonusUsdThisWeek(sql, now), trial: this.#trialMeter(now, tier), converting: trialConverting(sql, now), freePlan: this.#onFreePlan() };
   }
 
   /**
@@ -731,9 +733,25 @@ export class AccountObject extends DurableObject<AccountEnv> {
     releaseTrialConversion(this.ctx.storage.sql, declinedAt);
   }
 
-  /** Whether the account may use its keys now without a plan: an open no-card trial (trials.ts). */
+  /** Whether the account may use its keys now without a plan: an open no-card trial (trials.ts) or the Free plan (free-plan.ts). */
   async trialAccess(now: number): Promise<boolean> {
-    return this.#noCardTrialOpen(now);
+    return this.#noCardTrialOpen(now) || this.#onFreePlan();
+  }
+
+  /** Puts the account on dl.new's Free plan (free-plan.ts); true when this call did. */
+  async startFreePlan(now: number): Promise<boolean> {
+    if (this.#onFreePlan()) return false;
+    writeMeta(this.ctx.storage.sql, META.freePlan, String(now));
+    return true;
+  }
+
+  /** Whether the account is on the Free plan (whatever the switch says; chat checks the switch). */
+  async freePlan(): Promise<boolean> {
+    return this.#onFreePlan();
+  }
+
+  #onFreePlan(): boolean {
+    return readMeta(this.ctx.storage.sql, META.freePlan) !== undefined;
   }
 
   #noCardTrialOpen(now: number): boolean {
@@ -1338,8 +1356,8 @@ export class AccountObject extends DurableObject<AccountEnv> {
       this.ctx.storage.sql.exec("UPDATE server_keys SET last_tool = ? WHERE id = ?", lastTool, id);
     }
     // `paid`: a dl.new plan is on (its keys skip the free tier's tool key switch).
-    // An open no-card trial's keys too (trials.ts): it's a dl.new account without a plan yet.
-    return { githubId: row.github_id, login: row.login, kind, paid: (this.#billing().tier !== null && this.#plan(now) === "pro") || this.#noCardTrialOpen(now) };
+    // An open no-card trial's keys too (trials.ts), and the Free plan's: dl.new accounts without a paid plan.
+    return { githubId: row.github_id, login: row.login, kind, paid: (this.#billing().tier !== null && this.#plan(now) === "pro") || this.#noCardTrialOpen(now) || this.#onFreePlan() };
   }
 
   /**

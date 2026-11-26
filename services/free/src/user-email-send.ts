@@ -20,6 +20,9 @@ import { DAY_MS, weekEnd, weekStart } from "./week.js";
  *   plan_reset   dl.new: Mondays, paying accounts, once free tokens ended (app.ts scheduledPlanReset)
  *   didnt_start  daily cron: admitted 24 to 72 hours ago, no request yet
  *   plan_80      a paid plan's model at 80% of its weekly limit, once per model per week (app.ts chat)
+ *   welcome_free dl.new: right after a GitHub sign-in made a Free plan account (trial-web.ts)
+ *   free_80      the Free plan at 80% of its week, once per week (app.ts chat)
+ *   free_100     the Free plan's week used up, once per week, at the first refused request (app.ts chat)
  *   week_80      when a request's settlement takes the week's usage to 80% of a pool's tokens
  *                or of the weekly dollar cap (once per week)
  *   gone_quiet   daily cron: requests on 2 or more days, none in the last 7 days

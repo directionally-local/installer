@@ -68,7 +68,7 @@ export function emailBudgetOf(config: EmailBudgetSettingsConfig): EmailBudget {
 }
 
 /** The user-email kinds people are waiting for; every other kind is bulk. */
-export const TRANSACTIONAL_KINDS: readonly (UserEmailKind | "claim")[] = ["welcome_paid", "plan_80", "access_granted", "access_granted_trial", "claim", "welcome_trial_card", "welcome_trial_nocard", "trial_card_80", "trial_converted"];
+export const TRANSACTIONAL_KINDS: readonly (UserEmailKind | "claim")[] = ["welcome_paid", "plan_80", "access_granted", "access_granted_trial", "claim", "welcome_trial_card", "welcome_trial_nocard", "trial_card_80", "trial_converted", "welcome_free", "free_80", "free_100"];
 
 /** Where bulk mail goes when RESEND_API_KEY is set beside the USER_EMAIL binding (runtime setting `broadcastEmailProvider`). */
 export const BROADCAST_EMAIL_PROVIDERS = ["resend", "cloudflare"] as const;

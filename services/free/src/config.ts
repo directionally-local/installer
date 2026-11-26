@@ -15,11 +15,12 @@ import { GPT6_BONUS_DEFAULTS, type Gpt6BonusSettingsConfig } from "./gpt6-bonus.
 import { FREE_ENDS_AT } from "./plan-limits.js";
 import { PROMO_DEFAULTS, REFUND_WINDOW_HOURS, type PromoSettingsConfig } from "./plan-prices.js";
 import { MAX_TRIAL_DAYS, TRIAL_DEFAULTS, type TrialSettingsConfig } from "./trials.js";
+import { FREE_PLAN_DEFAULTS, FREE_PLAN_MODES, type FreePlanMode, type FreePlanSettingsConfig } from "./free-plan.js";
 import { BROADCAST_EMAIL_PROVIDERS, EMAIL_BUDGET_DEFAULTS, type BroadcastEmailProvider, type EmailBudgetSettingsConfig } from "./email-budget.js";
 
 export class ConfigError extends Error {}
 
-export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, Gpt6BonusSettingsConfig, EmailBudgetSettingsConfig, PromoSettingsConfig, TrialSettingsConfig {
+export interface FreeConfig extends RegistrySettingsConfig, PlanSettingsConfig, Gpt6BonusSettingsConfig, EmailBudgetSettingsConfig, PromoSettingsConfig, TrialSettingsConfig, FreePlanSettingsConfig {
   /** Paid plans on (PAID_PLANS, default off until launch; also a runtime setting): see plans.ts. */
   paidPlans: boolean;
   /**
@@ -766,6 +767,11 @@ export function readFreeConfig(env: Record<string, unknown>): FreeConfig {
     noCardTrialTokens: whole(env.NO_CARD_TRIAL_TOKENS, TRIAL_DEFAULTS.noCardTrialTokens, "NO_CARD_TRIAL_TOKENS"),
     noCardTrialBudgetUsd: amount(env.NO_CARD_TRIAL_BUDGET_USD, TRIAL_DEFAULTS.noCardTrialBudgetUsd, "NO_CARD_TRIAL_BUDGET_USD"),
     trialUsdPerMillionCounted: amount(env.TRIAL_USD_PER_MILLION_COUNTED, TRIAL_DEFAULTS.trialUsdPerMillionCounted, "TRIAL_USD_PER_MILLION_COUNTED"),
+    // dl.new's Free plan (free-plan.ts): off until the owner turns it on.
+    freePlan: freePlanMode(env.FREE_PLAN),
+    freePlanWeeklyRealTokens: whole(env.FREE_PLAN_WEEKLY_REAL_TOKENS, FREE_PLAN_DEFAULTS.freePlanWeeklyRealTokens, "FREE_PLAN_WEEKLY_REAL_TOKENS"),
+    freePlanWeeklyUsdCap: amount(env.FREE_PLAN_WEEKLY_USD_CAP, FREE_PLAN_DEFAULTS.freePlanWeeklyUsdCap, "FREE_PLAN_WEEKLY_USD_CAP"),
+    freePlanMinAccountAgeDays: whole(env.FREE_PLAN_MIN_ACCOUNT_AGE_DAYS, FREE_PLAN_DEFAULTS.freePlanMinAccountAgeDays, "FREE_PLAN_MIN_ACCOUNT_AGE_DAYS"),
     paused: flag(env.PAUSED, false, "PAUSED"),
     publicUrl: text(env.PUBLIC_URL)?.replace(/\/+$/, ""),
     webSignupUrl: webSignupUrl(env.WEB_SIGNUP_URL),
@@ -1201,6 +1207,13 @@ function broadcastEmailProvider(value: unknown): BroadcastEmailProvider {
   if (raw === undefined) return "resend";
   if ((BROADCAST_EMAIL_PROVIDERS as readonly string[]).includes(raw)) return raw as BroadcastEmailProvider;
   throw new ConfigError(`BROADCAST_EMAIL_PROVIDER must be "resend" or "cloudflare" (got "${raw}").`);
+}
+
+function freePlanMode(value: unknown): FreePlanMode {
+  const raw = text(value)?.toLowerCase();
+  if (raw === undefined) return FREE_PLAN_DEFAULTS.freePlan;
+  if ((FREE_PLAN_MODES as readonly string[]).includes(raw)) return raw as FreePlanMode;
+  throw new ConfigError(`FREE_PLAN must be "on" or "off" (got "${raw}").`);
 }
 
 function allocatorMode(value: unknown): AllocatorMode {

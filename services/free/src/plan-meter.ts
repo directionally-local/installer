@@ -200,6 +200,8 @@ export const META = {
   paidSince: "plan_paid_since",
   /** "off" when the person turned the fallback to DeepSeek off. */
   fallback: "plan_fallback",
+  /** When the account started dl.new's Free plan (Unix ms; free-plan.ts). */
+  freePlan: "free_plan_since",
 } as const;
 
 export function readMeta(sql: MeterSql, key: string): string | undefined {

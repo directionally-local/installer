@@ -623,3 +623,31 @@ Settings: `cardTrial` (true), `cardTrialTokens` (20000000), `cardTrialDays` (30,
   the counted limit), sessions, failovers, dl.new/usage and dl.new/billing. Same window and
   switches as `weekly_reset` (`weeklyResetEmail`, `userEmails`), and only once `freeEndsAt` has
   passed (the first one is Mon 14 Dec 2026).
+
+## The Free plan (free-plan.ts; off by default)
+
+One switch: `POST /admin/config {"freePlan": "on"}` (`"off"` turns it off again; default `"off"`).
+Settings: `freePlanWeeklyRealTokens` (default 10M real tokens a week, 95.5% caching applied,
+enforced as counted: cached x 0.02 + fresh + output), `freePlanWeeklyUsdCap` (default $150: every
+Free account together, a week), `freePlanMinAccountAgeDays` (default 90).
+
+While on:
+
+- `GET /web/plans` has `freePlan: {enabled, available, capacityFull, tokensPerWeek,
+  countedTokensPerWeek, model, line, label, signIn: "github", upgrade: {url, line}}`. `line` is
+  "Start free (no card) — 10M tokens/week (95.5% caching applied). Sign in with GitHub.". While
+  off, `freePlan` is left out.
+- `POST /web/auth/github/session` for a GitHub account with no dl.new account and no `sessionId`
+  makes a Free account (the free tier's account checks plus the age minimum) and answers like a
+  sign-in, with `created` and `freePlanStarted`. Refused: with `trial: true` (dl.new/trial) a 403
+  `free_plan_unavailable` with `reason` ("not_eligible" | "used") and `plansUrl`; otherwise the
+  usual 403 `no_account` with `pending`. Google and email sign-ins are unchanged.
+- `/web/account` and `/web/usage` have `freePlan` (null when not on Free): `{plan: "free", state:
+  "ok" | "warning" | "used_up" | "off", tokensPerWeek, usedAtMix, leftAtMix, countedLimit,
+  countedUsed, percent, label, weekStart, resetsAt, line, upgrade: {url, line}}`.
+- Requests: DeepSeek V4.1 Flash only (other models fall back with "X isn't on the Free plan."), the
+  80% notice and `free_80` email once a week, 402 `free_plan_limit` at the cap (and `free_100` once
+  a week), 402 `free_capacity_full` past the global cap. Every message names https://dl.new and
+  "Starter $7/mo, ~269M tokens/month (~62M/week) (95.5% caching applied)".
+
+While off, a Free account is refused like any account without a plan (402 `plan_required`).

@@ -65,6 +65,7 @@ import type { PlanId } from "./plan-prices.js";
 import { BONUS_SCHEMA, bonusHolders, canGrantOneMore, grantBonus, type BonusProjectionInput } from "./gpt6-bonus.js";
 import { classOfKind, EMAIL_BUDGET_SCHEMA, emailCounts, emailRoom, takeEmailBudget, type EmailBudget, type EmailClass, type EmailCounts } from "./email-budget.js";
 import { PAID_ACCOUNT_BASE } from "./accounts.js";
+import { FREE_PLAN_SCHEMA, freePlanWeek, insertFreePlan, noteFreePlanSpend } from "./free-plan.js";
 import {
   endTrialRow,
   hadOtherCardTrial,
@@ -221,7 +222,7 @@ export interface PersonRow {
 }
 
 /** User emails exempt from the one-a-day rule: answers people wait for, and what their plan or trial does next. */
-const ANY_DAY_KINDS: readonly UserEmailKind[] = ["access_granted", "plan_80", "welcome_paid", "welcome_trial_card", "welcome_trial_nocard", "trial_card_80", "trial_converted"];
+const ANY_DAY_KINDS: readonly UserEmailKind[] = ["access_granted", "plan_80", "welcome_paid", "welcome_trial_card", "welcome_trial_nocard", "trial_card_80", "trial_converted", "welcome_free", "free_80", "free_100"];
 
 export interface RequestRecord {
   githubId: number;
@@ -275,6 +276,8 @@ export interface RequestRecord {
   family?: Family;
   /** Held to a free trial (trials.ts): its counted tokens and cost go to the trial's budget. */
   trial?: TrialKind;
+  /** Served on dl.new's Free plan (free-plan.ts): its cost goes to the Free plan's global weekly cap. */
+  freePlan?: boolean;
   /** The client's session id, when it sent one (allocator.ts sessionKeyOf): the token allocator's session counts. */
   sessionKey?: string | null;
   /** Its session for GPT-6's trust gate (gpt6-trust.ts): the session id, or "harness:<key id>". Not stored on the row. */
@@ -1177,7 +1180,7 @@ export class DirectoryObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA, ...EVENT_CODE_SCHEMA, ...BONUS_SCHEMA, ...PAID_SCHEMA, ...EMAIL_BUDGET_SCHEMA, ...TRIAL_SCHEMA]) this.ctx.storage.sql.exec(statement);
+      for (const statement of [...SCHEMA, ...GPT6_GUARD_SCHEMA, ...PRO_FUNNEL_SCHEMA, ...PROVIDER_SCHEMA, ...EVENT_CODE_SCHEMA, ...BONUS_SCHEMA, ...PAID_SCHEMA, ...EMAIL_BUDGET_SCHEMA, ...TRIAL_SCHEMA, ...FREE_PLAN_SCHEMA]) this.ctx.storage.sql.exec(statement);
       ensureAllocatorSchema(this.ctx.storage.sql);
       const added = new Set<string>();
       for (const [table, column, definition] of ADDED_COLUMNS) {
@@ -2825,6 +2828,26 @@ export class DirectoryObject extends DurableObject {
     });
   }
 
+  /**
+   * Makes a Free plan account (free-plan.ts) for a GitHub sign-in with none, in one step with its
+   * record; the existing account when the identity already has one (a race).
+   */
+  async startFreePlan(input: { githubId: number; login: string; email: string; emailNorm: string; now: number }): Promise<{ account: number; created: boolean }> {
+    const sql = this.ctx.storage.sql;
+    return this.ctx.storage.transactionSync(() => {
+      const existing = resolveIdentity(sql, "github", String(input.githubId), input.now);
+      if (existing !== undefined) return { account: existing, created: false };
+      const account = createPaidAccount(sql, { kind: "github", subject: String(input.githubId), label: input.login, email: input.email, now: input.now, login: paidLogin });
+      insertFreePlan(sql, { account, githubId: input.githubId, emailNorm: input.emailNorm, now: input.now });
+      return { account, created: true };
+    });
+  }
+
+  /** This week's Free plan totals (the global cap's spend) and how many Free accounts there are. */
+  async freePlanWeek(now: number): Promise<{ usd: number; counted: number; requests: number; accounts: number }> {
+    return freePlanWeek(this.ctx.storage.sql, now);
+  }
+
   /** Ends a trial in the Directory's record (the budgets stop projecting it). */
   async endTrial(input: { account?: number; subscriptionId?: string; kind: TrialKind; reason: TrialEndReason; at: number }): Promise<void> {
     endTrialRow(this.ctx.storage.sql, input);
@@ -3276,6 +3299,10 @@ export class DirectoryObject extends DurableObject {
       // A free trial's usage, for its global budget: what it cost us (OpenRouter's cash, else the provider's credit).
       if (record.trial && !admin) {
         noteTrialUsage(this.ctx.storage.sql, { account: record.githubId, kind: record.trial, counted: record.chargedTokens, costUsd: upstream === "openrouter" ? record.costUsd : (record.creditUsd ?? 0), at: record.at });
+      }
+      // A Free plan request (free-plan.ts): what it cost us, for the Free plan's global weekly cap.
+      if (record.freePlan && !admin) {
+        noteFreePlanSpend(this.ctx.storage.sql, { at: record.at, usd: upstream === "openrouter" ? record.costUsd : (record.creditUsd ?? 0), counted: record.chargedTokens });
       }
       if (!admin) {
         // cost_usd here is what the allowance was charged (OpenRouter prices), for cost per person.
