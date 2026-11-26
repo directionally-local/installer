@@ -1,7 +1,8 @@
 name: deps auto-merge
 
-# Merges Dependabot's autopilot-ai PR once CI has passed on the exact commit
-# that was tested. Runs on workflow_run (not pull_request) so it has a write
+# Merges autopilot-ai bump PRs (Dependabot's and bump-autopilot.yml's) once CI
+# has passed on the exact commit that was tested, and only if package.json and
+# package-lock.json change nothing but autopilot-ai and what it pulls in. Runs on workflow_run (not pull_request) so it has a write
 # token and repository secrets.
 on:
   workflow_run:
@@ -46,10 +47,72 @@ jobs:
             case "$f" in package.json|package-lock.json) ;; *) echo "PR #$pr touches $f; leaving it for review"; exit 0 ;; esac
           done
           # package.json may differ from main only in autopilot-ai's pin.
+          base_sha=$(gh pr view "$pr" -R "$REPO" --json baseRefOid --jq .baseRefOid)
           strip='del(.. | objects | ."autopilot-ai"?)'
-          base=$(gh api "repos/$REPO/contents/package.json?ref=$(gh pr view "$pr" -R "$REPO" --json baseRefOid --jq .baseRefOid)" --jq .content | base64 -d | jq -S "$strip")
+          base=$(gh api "repos/$REPO/contents/package.json?ref=$base_sha" --jq .content | base64 -d | jq -S "$strip")
           head=$(gh api "repos/$REPO/contents/package.json?ref=$SHA" --jq .content | base64 -d | jq -S "$strip")
           if [ "$base" != "$head" ]; then echo "PR #$pr changes more than autopilot-ai; leaving it for review"; exit 0; fi
+          # package-lock.json may change only node_modules/autopilot-ai, the root entry's
+          # autopilot-ai pin, and packages the bump adds or removes: no existing entry may change
+          # (version, resolved, integrity, ...) and every added package must be reachable from
+          # autopilot-ai. Anything else is left for review.
+          lock_base="$RUNNER_TEMP/lock-base.json"
+          lock_head="$RUNNER_TEMP/lock-head.json"
+          gh api -H "Accept: application/vnd.github.raw" "repos/$REPO/contents/package-lock.json?ref=$base_sha" > "$lock_base"
+          gh api -H "Accept: application/vnd.github.raw" "repos/$REPO/contents/package-lock.json?ref=$SHA" > "$lock_head"
+          if ! added=$(node - "$lock_base" "$lock_head" <<'JS'
+          const fs = require('fs');
+          const [base, head] = process.argv.slice(2).map(f => JSON.parse(fs.readFileSync(f, 'utf8')));
+          const AP = 'node_modules/autopilot-ai';
+          const fail = msg => { console.error(msg); process.exit(1); };
+          const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+          const stripAp = o => JSON.parse(JSON.stringify(o ?? {}, (k, v) => (k === 'autopilot-ai' ? undefined : v)));
+          for (const k of new Set([...Object.keys(base), ...Object.keys(head)])) {
+            if (k !== 'packages' && !same(base[k], head[k])) fail(`lockfile field "${k}" changed`);
+          }
+          const bp = base.packages ?? {}, hp = head.packages ?? {};
+          if (!hp[AP]) fail(`${AP} is missing from the new lockfile`);
+          if (!same(stripAp(bp['']), stripAp(hp['']))) fail('the root package entry changes more than autopilot-ai');
+          const added = [], removed = [];
+          for (const k of new Set([...Object.keys(bp), ...Object.keys(hp)])) {
+            if (k === '' || k === AP) continue;
+            if (!(k in bp)) added.push(k);
+            else if (!(k in hp)) removed.push(k);
+            else if (!same(bp[k], hp[k])) fail(`existing entry ${k} changed`);
+          }
+          // Reachable from autopilot-ai in the new lockfile (Node resolution: nearest node_modules up the path).
+          const resolve = (from, name) => {
+            for (let dir = from; ; ) {
+              const p = (dir ? dir + '/' : '') + 'node_modules/' + name;
+              if (hp[p]) return p;
+              if (!dir) return null;
+              const i = dir.lastIndexOf('/node_modules/');
+              dir = i < 0 ? '' : dir.slice(0, i);
+            }
+          };
+          const reach = new Set([AP]), queue = [AP];
+          while (queue.length) {
+            const p = queue.shift(), e = hp[p];
+            for (const name of Object.keys({ ...e.dependencies, ...e.optionalDependencies, ...e.peerDependencies })) {
+              const r = resolve(p, name);
+              if (r && !reach.has(r)) { reach.add(r); queue.push(r); }
+            }
+          }
+          const stray = added.filter(k => !reach.has(k));
+          if (stray.length) fail(`added packages not pulled in by autopilot-ai: ${stray.join(', ')}`);
+          for (const k of added) console.log(`- \`${k.replace(/^.*node_modules\//, '')}@${hp[k].version}\` (\`${k}\`)`);
+          console.error(`package-lock.json ok: ${added.length} added, ${removed.length} removed`);
+          JS
+          ); then
+            echo "PR #$pr's package-lock.json changes more than autopilot-ai; leaving it for review"; exit 0
+          fi
+          # List the packages the bump adds on the PR, once per tested commit.
+          if [ -n "$added" ]; then
+            marker="<!-- deps-automerge:$SHA -->"
+            if ! gh api "repos/$REPO/issues/$pr/comments" --paginate --jq '.[].body' | grep -F "$marker" > /dev/null; then
+              gh pr comment "$pr" -R "$REPO" --body "$(printf '%s\nThis bump adds these packages to package-lock.json, all pulled in by autopilot-ai:\n\n%s\n' "$marker" "$added")"
+            fi
+          fi
           if [ "$HAS_PAT" != "true" ]; then
             echo "::warning::DEPS_BOT_TOKEN is not set; merging with GITHUB_TOKEN, so release-please will not run until the next push to main."
           fi

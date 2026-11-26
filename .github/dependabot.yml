@@ -1,5 +1,7 @@
-# Keep dl on the latest Autopilot and Hotcell without manual pin bumps. Merged
-# automatically once CI passes (see .github/workflows/deps-automerge.yml); the
+# Keep dl on the latest Autopilot and Hotcell without manual pin bumps. A PR
+# that bumps only autopilot-ai is merged automatically once CI passes (see
+# .github/workflows/deps-automerge.yml); one that touches hotcell, or changes
+# anything else in package.json or package-lock.json, waits for review. The
 # `fix(deps)` commit then makes release-please cut a release.
 #
 # dl pins autopilot-ai and hotcell exactly (no range) on purpose: the session
