@@ -240,7 +240,7 @@ is signed by the old key. Nonces are stored for ten minutes; a replay returns
 | --- | --- | --- |
 | `GET` | `/health` | Liveness and version |
 | `POST` | `/names` | Claim `{name, publicKey, dnsTarget}` |
-| `GET` | `/names/:name` | Lease status |
+| `GET` | `/names/:name` | Lease status (public; no `dnsTarget`) |
 | `POST` | `/names/:name/renew` | Extend the lease |
 | `DELETE` | `/names/:name` | Release the name |
 | `POST` | `/names/:name/dns01` | Publish `{token, keyAuthorization}` |
@@ -263,6 +263,28 @@ Claim response:
 }
 ```
 
+The claim, renew and release responses go to the signed owner and include
+`dnsTarget`; the public `GET /names/:name` leaves it out, so the addresses of
+leased servers can't be enumerated by walking names.
+
+`dnsTarget` becomes a CNAME (hostname) or A/AAAA record (address) under the
+zone, so a claim checks it first and answers `422 invalid-dns-target` when it is
+not a fully qualified hostname or an IP literal. Hostnames are lowercased and
+lose a trailing dot; IPv6 is stored in canonical form. Private (RFC 1918),
+carrier-grade NAT (`100.64.0.0/10`) and unique-local IPv6 addresses are allowed,
+because a Tailscale address or MagicDNS name is the usual target and the service
+never connects to it. Refused: loopback, unspecified, link-local (including
+`169.254.169.254`), multicast and reserved addresses; IPv4-mapped IPv6;
+`localhost` and single-label names; and any name inside the service's own zone,
+which would let one lease alias another or the service's own hosts.
+
+`POST /admin/names/:name/revoke` takes `Authorization: Bearer <ADMIN_TOKEN>`,
+compared in constant time. It clears the target, marks the lease `revoked`,
+quarantines the name for 90 days and writes an audit entry with actor `admin`.
+A wrong or missing token is `401`, a name never claimed is `404`, and a name
+already revoked is `409`. With no `ADMIN_TOKEN` configured the admin routes
+answer `404`.
+
 Errors use `application/problem+json`:
 
 ```json
@@ -277,6 +299,13 @@ Idempotency: `Idempotency-Key` is accepted on `POST /names` and
 Rate limits: 5 claims per hour per key and per IP, 20 challenges per hour per
 name, 60 reads per minute per key. Exceeding a limit returns `429` with
 `Retry-After`.
+
+The per-IP limit reads the client address from `cf-connecting-ip`, which
+Cloudflare sets and clients can't forge. `x-forwarded-for` is read only when
+`TRUST_FORWARDED_FOR=true`; set that on a self-hosted deployment only when a
+proxy you run sits in front and overwrites the header. Otherwise any client
+could pick its own IP and its own rate-limit bucket. With neither header, those
+clients share one bucket and the per-key limit still applies.
 
 ### 4.4 Durable Objects
 
@@ -527,7 +556,8 @@ npx wrangler deploy -c services/name/wrangler.cloudflare.jsonc
 ```
 
 Secrets: `CF_DNS_API_TOKEN`, `ADMIN_TOKEN`. The zone ID and zone name are
-`vars`, not secrets.
+`vars`, not secrets. `TRUST_FORWARDED_FOR` is a var, off by default; leave it
+off on Cloudflare.
 
 **Serverless Objects**
 
