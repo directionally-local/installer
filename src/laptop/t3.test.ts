@@ -84,6 +84,7 @@ function deps(overrides: Partial<T3Deps> = {}): T3Deps {
     t3Settings: join(HOME, `run-${++settingsN}`, ".t3", "userdata", "settings.json"),
     env: { PATH: "/usr/bin", HOME: "/home/alice", ANTHROPIC_API_KEY: "sk-ant-mine", OPENCODE_CONFIG_CONTENT: "{}" },
     find: async () => "/home/alice/.local/bin/t3",
+    cwd: "/nonexistent/dl-t3-test",
     token: async () => ({ ok: true, origin: ORIGIN, accessToken: "access-1" }),
     signIn: async () => {
       throw new Error("no sign-in expected");
@@ -97,6 +98,20 @@ function deps(overrides: Partial<T3Deps> = {}): T3Deps {
 }
 
 describe("dl t3", () => {
+  it("stops before signing in when Claude Code's settings set an Anthropic key (T3 Code runs Claude Code)", async () => {
+    const project = join(HOME, "settings-key-project");
+    await mkdir(join(project, ".claude"), { recursive: true });
+    await writeFile(join(project, ".claude", "settings.local.json"), JSON.stringify({ apiKeyHelper: "print-my-anthropic-key" }));
+    let minted = false;
+    const errors: string[] = [];
+    const code = await t3Command([], { out: () => undefined, err: (text) => void errors.push(text) }, deps({ cwd: project, token: async () => ((minted = true), { ok: true, origin: ORIGIN, accessToken: "a" }) }));
+    assert.equal(code, 1);
+    assert.equal(minted, false);
+    assert.match(errors.join(""), /dl t3 won't start Claude Code/);
+    assert.match(errors.join(""), /settings\.local\.json: apiKeyHelper/);
+    assert.doesNotMatch(errors.join(""), /print-my-anthropic-key/);
+  });
+
   it("starts t3 with the arguments as given, Claude Code and OpenCode each on its own harness key", async () => {
     const service = fakeService();
     const child = fakeSpawn({ code: 0 });

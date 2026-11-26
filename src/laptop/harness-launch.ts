@@ -70,7 +70,7 @@ export interface HarnessLaunch {
    */
   stdoutDiagnostics?: { prefix: string; when: (args: string[], stdoutIsTerminal: boolean) => boolean };
   /** Checked before sign-in: a message stops dl here, before any key is made. */
-  check?: (args: string[]) => string | undefined;
+  check?: (args: string[], context: { env: Env; cwd: string }) => string | undefined | Promise<string | undefined>;
   /**
    * The agent's environment and arguments for this run. `removed` names the person's variables
    * left out (dl says so once); `notes` are said once too. An `error` stops before the agent
@@ -102,6 +102,8 @@ export interface LaunchDeps {
   terminal?: boolean;
   /** Whether stdout is a terminal (HarnessLaunch.stdoutDiagnostics); process.stdout's unless replaced. */
   stdoutIsTerminal?: boolean;
+  /** The folder the agent starts in (its project settings); process.cwd() unless replaced. */
+  cwd?: string;
 }
 
 /** How long dl waits, once the agent has exited, for the rest of its piped stdout (a process it left behind may hold it). */
@@ -202,7 +204,7 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
   const now = deps.now ?? Date.now;
   const { command, product } = spec;
 
-  const refused = spec.check?.(args);
+  const refused = await spec.check?.(args, { env, cwd: deps.cwd ?? process.cwd() });
   if (refused) {
     io.err(`  ${refused}\n`);
     return 1;
