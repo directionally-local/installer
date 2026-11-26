@@ -26,8 +26,8 @@ export const DL_UPDATE = "dl update";
 /** Set for the new dl after an update, so it goes straight to the Autopilot and the place. */
 export const SELF_DONE_ENV = "DL_UPDATE_SELF_DONE";
 
-/** The install script, when the command doesn't say (remote-install.ts has the same; not imported, as it imports this). */
-const INSTALL_URL = "https://dl.new/install.sh";
+/** The install script as it ships in dl's own package (package.json "files"), beside package.json. */
+const SHIPPED_SCRIPT = "install.sh";
 const REGISTRY_LATEST = "https://registry.npmjs.org/directionallylocal/latest";
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 /** How many of the installer's last lines a failure shows. */
@@ -81,7 +81,10 @@ export function scriptHome(packageRoot: string): string | undefined {
  *   `curl … | sudo sh`   the install script as root (through sudo unless already root, with
  *                        the environment on sudo's command line, as sudo drops it). On a server
  *                        it runs `dl up`, which installs the server's pinned Autopilot and Hotcell.
- * DL_VERSION pins the script to `version` either way.
+ * DL_VERSION pins the script to `version` either way. The script itself is the one this dl's
+ * package shipped with (shippedInstallScript), not one downloaded now: it came with dl from npm
+ * (with provenance) or in the bundle checked against its SHA-256, and it checks what it
+ * downloads (the bundle against dl-bundles.txt, or npm). `url` is only for the line to type by hand.
  */
 export function installerFor(command: string, version: string, facts: { uid: number | undefined; packageRoot: string }): InstallerRun {
   if (/^npm (install|i) -g directionallylocal(@\S*)?$/.test(command.trim())) {
@@ -115,11 +118,21 @@ export function installerFor(command: string, version: string, facts: { uid: num
   return { command: "sh", args: ["-s"], env, script: true, url, display: `curl -fsSL ${url} | DL_VERSION=${version} sh` };
 }
 
-async function fetchInstallScript(url = INSTALL_URL): Promise<string> {
-  const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-  if (!response.ok) throw new Error(`${url} answered ${response.status}`);
-  const text = await response.text();
-  if (!text.startsWith("#!")) throw new Error(`${url} didn't send the install script`);
+/**
+ * The install script this dl was installed with: install.sh in its own package directory.
+ * `dl update` used to fetch https://dl.new/install.sh and run it after checking only for "#!",
+ * so whoever could change that response ran code here (as root on a server). Running the copy
+ * that came with dl needs no new trust: it's as verified as dl itself.
+ */
+export function shippedInstallScript(packageRoot: string): string {
+  const path = join(packageRoot, SHIPPED_SCRIPT);
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    throw new Error(`${path} is missing (${error instanceof Error ? error.message : String(error)}); reinstall dl`);
+  }
+  if (!text.startsWith("#!")) throw new Error(`${path} isn't the install script; reinstall dl`);
   return text;
 }
 
@@ -186,7 +199,8 @@ export interface DlUpdateDeps {
   uid?: number | undefined;
   packageRoot?: string;
   latest?: () => Promise<string>;
-  fetchScript?: (url: string) => Promise<string>;
+  /** The install script to run: the one in dl's package directory (shippedInstallScript) by default. */
+  readScript?: (packageRoot: string) => string;
   runInstaller?: InstallerRunner;
   /** Runs the new dl's `dl update` (with these arguments) once dl is updated. */
   rerun?: (args: string[]) => Promise<number>;
@@ -322,7 +336,7 @@ async function install(version: string, deps: DlUpdateDeps, c: ReturnType<typeof
   let input: string | undefined;
   if (run.script) {
     try {
-      input = await (deps.fetchScript ?? fetchInstallScript)(run.url ?? INSTALL_URL);
+      input = (deps.readScript ?? shippedInstallScript)(deps.packageRoot ?? defaultPackageRoot());
     } catch (error) {
       deps.io.err(`  ${c.red("✗")} Couldn't get the install script: ${error instanceof Error ? error.message : String(error)}.\n    By hand: ${run.display}\n`);
       return 1;
