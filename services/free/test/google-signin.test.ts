@@ -91,6 +91,11 @@ describe("Continue with Google", () => {
     const refused = await session(service, await googleRoundTrip(service, google, { sub: "201", email: "new@gmail.com" }));
     const pending = ((await refused.json()) as any).error.pending;
     assert.equal(pending.email, "new@gmail.com");
+    await service.settle();
+    const welcome = service.calls.userEmail.filter((message) => message.to === "new@gmail.com");
+    assert.equal(welcome.length, 1);
+    assert.equal(welcome[0]!.subject, "Welcome to dl.new");
+    assert.match(String(welcome[0]!.text), /^Welcome to dl\.new\. You signed in with Google; /);
     const paid = await buy(service, stripe, "starter");
     const done = await service.request("POST", "/web/auth/pending/session", { body: { token: pending.token, sessionId: paid.id }, headers: DL });
     assert.equal(done.status, 200, await done.clone().text());
