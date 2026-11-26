@@ -3,6 +3,8 @@
  * future desktop app use: device pairing, code conversations as runs, resumable SSE.
  */
 
+import { webUrl } from "./open-browser.js";
+
 export interface RemoteConversation {
   conversationId: string;
   workspaceId: string;
@@ -68,8 +70,15 @@ export class RemoteClient {
     private readonly fetchImpl: FetchLike = fetch,
   ) {}
 
-  startDeviceAuthorization(clientName: string): Promise<DeviceAuthorization> {
-    return this.request("POST", "/auth/device", { body: { clientName }, auth: false });
+  /** Starts pairing. The verification links come from the server, so they must be http(s) URLs. */
+  async startDeviceAuthorization(clientName: string): Promise<DeviceAuthorization> {
+    const device = await this.request<DeviceAuthorization>("POST", "/auth/device", { body: { clientName }, auth: false });
+    const verificationUri = webUrl(device.verificationUri);
+    const verificationUriComplete = webUrl(device.verificationUriComplete);
+    if (!verificationUri || !verificationUriComplete) {
+      throw new RemoteApiError(502, "invalid_verification_uri", "The server sent a pairing link that isn't an http(s) URL.");
+    }
+    return { ...device, verificationUri, verificationUriComplete };
   }
 
   /** Polls until the owner decides; resolves with the credential, rejects on denial or expiry. */
