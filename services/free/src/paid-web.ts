@@ -235,7 +235,25 @@ function planLine(plan: PlanId, config: PlanSettingsConfig & { cachedTokenWeight
   return planDescription(planLimits(plan, config));
 }
 
-/** POST /web/checkout/plan {plan, campaign?} → {url, sessionId}: Stripe Checkout, no account yet. */
+/**
+ * The account behind an optional web session on a request that doesn't need one (the plan
+ * Checkout): undefined without a valid one. Never refuses: a stale token just counts as signed out.
+ */
+async function optionalAccount(c: Ctx): Promise<number | undefined> {
+  const match = /^Bearer\s+(\S+)$/i.exec(c.request.headers.get("authorization") ?? "");
+  if (!match) return undefined;
+  const claims = await verifyJwt(match[1]!, await signingKey(c.config), Math.floor(c.now() / 1000));
+  if (!claims || claims.typ !== "web" || claims.iss !== ISSUER) return undefined;
+  const accountNumber = Number(claims.sub);
+  if (!Number.isSafeInteger(accountNumber) || accountNumber <= 0) return undefined;
+  if (typeof claims.sid === "string" && !(await account(c, accountNumber).sessionAllowed(claims.sid, Number(claims.iat)))) return undefined;
+  return accountNumber;
+}
+
+/**
+ * POST /web/checkout/plan {plan, campaign?} → {url, sessionId, trial}: Stripe Checkout, no account
+ * needed. With a web session (Authorization: Bearer), an account that had a card trial gets none.
+ */
 async function webCheckoutPlan(c: Ctx): Promise<Response> {
   const retry = await limited(c, `paid:checkout:ip:${c.ipNet}`, PAID_LIMITS.checkoutIp);
   if (retry !== undefined) return rateLimited(retry);
@@ -252,7 +270,11 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
   // A card trial (trials.ts) while its budget has room: $0 now, and the offer's coupon goes on the
   // Checkout too (shown there, kept for the first paid invoice) and is recorded as promo_eligible
   // so trial end re-applies it if it's gone.
-  const trialOn = (await directory(c).trialBudgets(config, c.now())).card.available;
+  // One card trial per account: a signed-in account that had one isn't offered another (a signed-out
+  // one can't be told apart until the claim, which then starts the plan at once: startCardTrialOnClaim).
+  const signedIn = await optionalAccount(c);
+  const hadTrial = signedIn !== undefined && (await directory(c).hadOtherCardTrial(signedIn, ""));
+  const trialOn = !hadTrial && (await directory(c).trialBudgets(config, c.now())).card.available;
   const trial = trialOn
     ? { days: config.cardTrialDays, ...(coupon ? { promoEligible: coupon, offerText: trialOfferText(PLANS[plan].priceUsd, config.promoPercentOff, config.cardTrialTokens, config.cardTrialDays) } : {}) }
     : undefined;
@@ -419,11 +441,22 @@ async function checkoutStatus(c: Ctx, sessionId: string): Promise<Response> {
 }
 
 /**
+ * A claim: the plan and the Checkout; for a card trial Checkout, `trial` "started" (its free
+ * tokens), or "repeat" (the account had a card trial already: no free tokens, the plan started
+ * now and the card is charged; trial_converted says so).
+ */
+interface ClaimResult {
+  plan: PlanId;
+  sessionId: string;
+  trial?: "started" | "repeat";
+}
+
+/**
  * Links a verified Checkout to an account: the customer and subscription, the plan, the Stripe
  * customer's email. Idempotent for the same account; refused when another account has it or the
  * account already has a plan on another subscription.
  */
-async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCheckout, email: string | null): Promise<{ plan: PlanId; sessionId: string } | Response> {
+async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCheckout, email: string | null): Promise<ClaimResult | Response> {
   if (checkout.claimedBy !== null && checkout.claimedBy !== accountNumber) return apiError(409, "checkout_claimed", "This payment is already linked to another dl.new account. Sign in with that one.");
   const person = account(c, accountNumber);
   const billing = await person.billing();
@@ -448,6 +481,7 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
     await person.setCustomer(checkout.customerId);
   }
   const subscription = checkout.subscription;
+  let trialOutcome: "started" | "repeat" | undefined;
   if (checkout.subscriptionId) {
     const state = subscription ? planState(subscription.status) : "active";
     const end = subscription ? periodEnd(subscription) : null;
@@ -467,7 +501,7 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
     // A card trial: nothing was paid (the $0 trial invoice is no payment); the trial's meter starts.
     const trialing = checkout.trial !== null && (subscription === null || subscription.status === "trialing");
     if (trialing) {
-      await startCardTrialOnClaim(c, accountNumber, { plan: checkout.plan, subscriptionId: checkout.subscriptionId, subscription, startedAt: checkout.paidAt, ...(checkout.trial?.promoEligible ? { promoEligible: checkout.trial.promoEligible } : {}) });
+      trialOutcome = await startCardTrialOnClaim(c, accountNumber, { plan: checkout.plan, subscriptionId: checkout.subscriptionId, subscription, startedAt: checkout.paidAt, ...(checkout.trial?.promoEligible ? { promoEligible: checkout.trial.promoEligible } : {}) });
     } else await endNoCardTrialForPlan(c, accountNumber);
     if (invoiceId && !trialing && checkout.amountCents > 0) {
       await person.noteFirstPayment({ invoiceId, at: checkout.paidAt });
@@ -488,7 +522,7 @@ async function claimCheckout(c: Ctx, accountNumber: number, checkout: VerifiedCh
     }
   }
   // A trial's welcome went out with it (trial-web.ts); a plan's (once per payment): where the key is, the plan's limits, the bonus.
-  if (checkout.trial !== null) return { plan: checkout.plan, sessionId: checkout.sessionId };
+  if (checkout.trial !== null) return { plan: checkout.plan, sessionId: checkout.sessionId, ...(trialOutcome ? { trial: trialOutcome } : {}) };
   const welcome = sendPlanWelcome(c, accountNumber, checkout.plan, checkout.sessionId, checkout.promo).catch((error) => console.error("paid: welcome failed", error instanceof Error ? error.message : "error"));
   if (c.background) c.background(welcome);
   else await welcome;
@@ -1621,7 +1655,9 @@ async function sendClaimEmail(c: Ctx, row: PaidCheckoutRow): Promise<void> {
   const trialText = row.trial === 1;
   const text = trialText
     ? [
-        `Your free trial of ${plan.name} has started: the first ${config.cardTrialTokens / 1_000_000}M tokens are free (95.5% caching applied). Your plan ($${plan.priceUsd}/month${row.promo_eligible ? `, first month ${config.promoPercentOff}% off` : ""}) starts when you've used them or after ${config.cardTrialDays} days.`,
+        `You picked ${plan.name} with a free trial: on a first dl.new trial, the first ${config.cardTrialTokens / 1_000_000}M tokens are free (95.5% caching applied) and your plan ($${plan.priceUsd}/month${row.promo_eligible ? `, first month ${config.promoPercentOff}% off` : ""}) starts when you've used them or after ${config.cardTrialDays} days.`,
+        "",
+        `One free trial per account: if your dl.new account already had one, your plan starts when you finish setting up, and your card is charged then.`,
         "",
         "Finish setting up dl.new to get your key:",
         link,

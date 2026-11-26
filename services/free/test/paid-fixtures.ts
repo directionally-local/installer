@@ -65,6 +65,8 @@ export class FakeStripe {
   declineNext = false;
   /** Set to make ending a trial now (the first real charge) fail as a declined card. */
   declineTrialEnd = false;
+  /** Set to make ending a trial now fail as a Stripe error (not a decline). */
+  failTrialEnd = false;
   /** Every subscription update's form, in order. */
   updates: Array<{ id: string; form: URLSearchParams }> = [];
   /** Coupons Stripe knows, with their percent off (duration once); others are refused at Checkout as Stripe does. */
@@ -121,6 +123,7 @@ export class FakeStripe {
         this.updates.push({ id: subscription.id, form });
         if (form.get("trial_end") === "now") {
           if (this.declineTrialEnd) return Response.json({ error: { message: "Your card was declined.", code: "card_declined" } }, { status: 402 });
+          if (this.failTrialEnd) return Response.json({ error: { type: "api_error", message: "An error occurred with our connection to Stripe." } }, { status: 500 });
           const coupon = form.get("discounts[0][coupon]");
           if (coupon !== null && !this.coupons.has(coupon)) return Response.json({ error: { message: `No such coupon: '${coupon}'`, code: "resource_missing" } }, { status: 400 });
           if (coupon) subscription.discounts = [coupon];

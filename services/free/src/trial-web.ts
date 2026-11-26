@@ -12,6 +12,7 @@
  * Routed from paid-web.ts (claim, sign-in, webhooks) and app.ts (chat: conversion, 80% notice).
  */
 
+import { accountIdOf } from "./accounts.js";
 import { account, alert, directory, grantLaunchBonus, runtime, spendTrialSignup, userEmail, type Ctx } from "./app.js";
 import { emailBlocked, emailDomain, isDisposableDomain, normalizeEmail, PUBLIC_EMAIL_DOMAINS } from "./email-guard.js";
 import { apiError } from "./errors.js";
@@ -82,7 +83,7 @@ export async function sendTrial80(c: Ctx, accountNumber: number, trial: TrialMet
  * account: a second one gets a trial of 0 tokens, so its plan starts at the first request (or
  * right here, `convertTrial`). An open no-card trial ends: the plan's trial replaces it.
  */
-export async function startCardTrialOnClaim(c: Ctx, accountNumber: number, input: { plan: PlanId; subscriptionId: string; subscription: Record<string, any> | null; startedAt: number; promoEligible?: string }): Promise<void> {
+export async function startCardTrialOnClaim(c: Ctx, accountNumber: number, input: { plan: PlanId; subscriptionId: string; subscription: Record<string, any> | null; startedAt: number; promoEligible?: string }): Promise<"started" | "repeat"> {
   const { config } = await runtime(c);
   const dir = directory(c);
   const person = account(c, accountNumber);
@@ -98,11 +99,20 @@ export async function startCardTrialOnClaim(c: Ctx, accountNumber: number, input
   await dir.recordCardTrial({ subscriptionId: input.subscriptionId, plan: input.plan, limit, startedAt: input.startedAt, endsAt: trial.trialEnd, account: accountNumber });
   const started = await person.startTrial({ kind: "card", limit, realLimit, startedAt: input.startedAt, endsAt: trial.trialEnd, plan: input.plan, subscriptionId: input.subscriptionId, promoCoupon: input.promoEligible ?? null });
   if (repeat) {
-    // A second card trial on one account: the plan starts now.
-    const task = convertTrial(c, accountNumber).catch(() => "failed");
+    // A second card trial on one account: the plan starts now. A failure the owner hears about;
+    // the account's next request tries again (503 trial_converting), and Stripe's own trial end is the backstop.
+    const task = convertTrial(c, accountNumber)
+      .catch((error): ConversionResult => {
+        console.error("trial: repeat conversion failed", error instanceof Error ? error.message : "error");
+        return "failed";
+      })
+      .then(async (result) => {
+        if (result === "failed") await repeatConversionFailed(c, accountNumber, input.subscriptionId);
+        return result;
+      });
     if (c.background) c.background(task);
     else await task;
-    return;
+    return "repeat";
   }
   if (started) {
     const welcome = sendCardWelcome(c, accountNumber, input.plan, { promoEligible: input.promoEligible !== undefined, endsAt: trial.trialEnd, realLimit, subscriptionId: input.subscriptionId }).catch((error) =>
@@ -110,6 +120,21 @@ export async function startCardTrialOnClaim(c: Ctx, accountNumber: number, input
     );
     if (c.background) c.background(welcome);
     else await welcome;
+  }
+  return "started";
+}
+
+/** The owner's alert when a repeat card trial's plan didn't start at the claim. Never throws. */
+async function repeatConversionFailed(c: Ctx, accountNumber: number, subscriptionId: string): Promise<void> {
+  try {
+    await alert(c, [
+      {
+        subject: "dl.new: a repeat card trial's plan didn't start",
+        text: `Account ${accountIdOf(accountNumber)} claimed a second card trial (subscription ${subscriptionId}); its plan should start at once, but ending the Stripe trial failed.\nThe account's next request tries again (it answers 503 trial_converting meanwhile), and Stripe ends the trial itself after the trial days. To start it now: end the trial in the Stripe Dashboard.`,
+      },
+    ]);
+  } catch (error) {
+    console.error("trial: repeat conversion alert failed", error instanceof Error ? error.name : "error");
   }
 }
 
@@ -144,7 +169,12 @@ export async function finishCardTrial(c: Ctx, accountNumber: number, input: { su
       plan: PLANS[plan].name,
       price: `$${PLANS[plan].priceUsd}/mo`,
       promo: input.promoPercent ? ` first month ${input.promoPercent}% off.` : "",
-      reason: reason === "used" ? `you used your ${countedText(trial.realLimit)} free trial tokens, so your plan started and your card was charged.` : "your free trial ended, so your plan started and your card was charged.",
+      reason:
+        trial.realLimit === 0
+          ? "your dl.new account already had its free trial (one per account), so this plan started when you set it up and your card was charged."
+          : reason === "used"
+            ? `you used your ${countedText(trial.realLimit)} free trial tokens, so your plan started and your card was charged.`
+            : "your free trial ended, so your plan started and your card was charged.",
       limits: limitsText(plan, config),
       bonus: granted ? `plus ${BONUS_LINE}, launch bonus through 31 Jan 2027.\n` : "",
     },
