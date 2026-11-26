@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.49.1](https://github.com/directionally-local/installer/compare/v0.49.0...v0.49.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* **deps:** pin autopilot-ai 3.34.0 ([#460](https://github.com/directionally-local/installer/issues/460)) ([775e926](https://github.com/directionally-local/installer/commit/775e926f42a6a752329b31d1b1eac5e8aae6e45b))
+
 ## [0.49.0](https://github.com/directionally-local/installer/compare/v0.48.0...v0.49.0) (2026-11-26)
 
 
