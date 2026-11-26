@@ -228,7 +228,7 @@ describe("trials: a card trial in use", () => {
     assert.equal(me.trial.countedLimit, 1_282_000);
     assert.equal(me.trial.daysLeft, 30);
     const welcome = emailsTo(service, "tess@example.com").find((m) => m.subject !== "Your dl.new code");
-    assert.equal(welcome!.subject, "your dl.new key is ready");
+    assert.equal(welcome!.subject, "you're all set on dl.new");
     assert.match(welcome!.text, /your first 20M tokens are free \(95\.5% caching applied\)/);
     assert.match(welcome!.text, /your card is charged \$7\/mo \(first month 50% off\), when you've used the 20M or on 28 dec/);
     const checkouts = (await (await service.request("GET", "/admin/paid/checkouts?status=all", { token: await admin(service) })).json()) as any;
@@ -457,7 +457,7 @@ describe("trials: the no-card trial", () => {
     assert.equal(body.account.trial.countedLimit, 641_000);
     await service.settle();
     const welcome = emailsTo(service, "nocard@example.com").find((m) => m.subject !== "Your dl.new code");
-    assert.equal(welcome!.subject, "your dl.new key is ready");
+    assert.equal(welcome!.subject, "you're all set on dl.new");
     assert.match(welcome!.text, /10M tokens of deepseek v4\.1 flash \(95\.5% caching applied\), no card needed/);
     const made = await service.request("POST", "/web/api-keys", { token: body.token, body: { name: "cc" }, headers: DL });
     assert.equal(made.status, 201, await made.clone().text());
