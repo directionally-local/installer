@@ -134,16 +134,23 @@ function stopMessage(githubId: number): Uint8Array<ArrayBuffer> {
   return new TextEncoder().encode(`email-stop:${githubId}`);
 }
 
-/** The link's `t`: an HMAC of the person's id with the token signing key. */
+/** The link's `t`: an HMAC of the person's id with the unsubscribe key. */
 export async function stopToken(key: CryptoKey, githubId: number): Promise<string> {
   return base64urlEncode(new Uint8Array(await crypto.subtle.sign("HMAC", key, stopMessage(githubId))));
 }
 
-/** Whether `token` is the link's HMAC for `githubId` (constant-time). */
-export async function verifyStopToken(key: CryptoKey, githubId: number, token: string): Promise<boolean> {
+/**
+ * Whether `token` is the link's HMAC for `githubId` under any of `keys` (constant-time each):
+ * the current unsubscribe key, then the key links in emails already sent were signed with.
+ */
+export async function verifyStopToken(keys: CryptoKey | readonly CryptoKey[], githubId: number, token: string): Promise<boolean> {
   if (!/^[A-Za-z0-9_-]{20,100}$/.test(token)) return false;
   try {
-    return await crypto.subtle.verify("HMAC", key, base64urlDecode(token), stopMessage(githubId));
+    const mac = base64urlDecode(token);
+    for (const key of (Array.isArray(keys) ? keys : [keys]) as readonly CryptoKey[]) {
+      if (await crypto.subtle.verify("HMAC", key, mac, stopMessage(githubId))) return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -266,7 +273,8 @@ export async function deliverUserEmail(input: {
   /** The providers (userEmailRoutes): the kind's class picks one. */
   routes: UserEmailRoutes | undefined;
   config: FreeConfig;
-  signingKey: CryptoKey;
+  /** Signs the unsubscribe link (the "unsubscribe" subkey, app.ts unsubscribeKey). */
+  unsubscribeKey: CryptoKey;
   base: string;
   kind: UserEmailKind;
   githubId: number;
@@ -307,7 +315,7 @@ export async function deliverUserEmail(input: {
     return "failed";
   }
   if (!claim) return "skipped";
-  const unsubscribeUrl = await stopUrl(input.base, input.signingKey, claim.githubId);
+  const unsubscribeUrl = await stopUrl(input.base, input.unsubscribeKey, claim.githubId);
   const email = renderUserEmail(claim.kind, { resets: resetsText(weekEnd(input.now)), unsubscribeUrl, proOffered: config.proOffered, ...(input.weeklyReset ? { weeklyReset: input.weeklyReset } : {}), ...(input.planWarning ? { planWarning: input.planWarning } : {}), ...(input.planWelcome ? { planWelcome: input.planWelcome } : {}), ...(input.planReset ? { planReset: input.planReset } : {}), ...(input.trial ? { trial: input.trial } : {}) });
   const { ok } = await sendPlainEmail(transport, config, {
     to: claim.email,

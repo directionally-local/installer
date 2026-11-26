@@ -36,6 +36,7 @@ import {
   readCookie,
   readJson,
   runtime,
+  jwtVerifyKeys,
   signingKey,
   userEmail,
   userEmailVia,
@@ -133,7 +134,7 @@ async function paidCaller(c: Ctx): Promise<PaidCaller | Response> {
   const match = /^Bearer\s+(\S+)$/i.exec(c.request.headers.get("authorization") ?? "");
   const invalid = () => apiError(401, "invalid_token", "Your dl.new sign-in expired. Sign in again.");
   if (!match) return invalid();
-  const claims = await verifyJwt(match[1]!, await signingKey(c.config), Math.floor(c.now() / 1000));
+  const claims = await verifyJwt(match[1]!, await jwtVerifyKeys(c.config), Math.floor(c.now() / 1000));
   if (!claims || claims.typ !== "web" || claims.iss !== ISSUER || typeof claims.login !== "string") return invalid();
   const accountNumber = Number(claims.sub);
   if (!Number.isSafeInteger(accountNumber) || accountNumber <= 0) return invalid();
@@ -631,7 +632,7 @@ async function pendingSession(c: Ctx): Promise<Response> {
   const body = (await readJson(c)) ?? {};
   const invalid = () => apiError(400, "invalid_grant", "This sign-in expired. Sign in again.");
   if (typeof body.token !== "string" || body.token.length > 4096) return invalid();
-  const claims = await verifyJwt(body.token, await signingKey(c.config), Math.floor(c.now() / 1000), 0);
+  const claims = await verifyJwt(body.token, await jwtVerifyKeys(c.config), Math.floor(c.now() / 1000), 0);
   if (!claims || claims.typ !== "pending" || claims.iss !== ISSUER) return invalid();
   const { kind, subject, label, email } = claims;
   if (!PENDING_KINDS.includes(kind as IdentityKind) || typeof subject !== "string" || !subject || typeof label !== "string" || typeof email !== "string" || claims.sub !== `${kind}:${subject}`) return invalid();

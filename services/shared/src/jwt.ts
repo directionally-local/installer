@@ -32,16 +32,25 @@ export async function signJwt(claims: JwtClaims, key: CryptoKey): Promise<string
 
 /**
  * The claims of a valid, unexpired token, or undefined. `nowSeconds` is Unix seconds;
- * `leewaySeconds` tolerates small clock differences on `exp` and `iat`.
+ * `leewaySeconds` tolerates small clock differences on `exp` and `iat`. With a list of keys, a
+ * signature by any of them is valid (the current key first, then ones being retired).
  */
-export async function verifyJwt(token: string, key: CryptoKey, nowSeconds: number, leewaySeconds = 30): Promise<JwtClaims | undefined> {
+export async function verifyJwt(token: string, key: CryptoKey | readonly CryptoKey[], nowSeconds: number, leewaySeconds = 30): Promise<JwtClaims | undefined> {
   const parts = token.split(".");
   if (parts.length !== 3) return undefined;
   const [header, payload, signature] = parts as [string, string, string];
   try {
     const decodedHeader = JSON.parse(new TextDecoder().decode(base64urlDecode(header))) as { alg?: unknown };
     if (decodedHeader.alg !== "HS256") return undefined;
-    const valid = await crypto.subtle.verify("HMAC", key, base64urlDecode(signature), new TextEncoder().encode(`${header}.${payload}`));
+    const signed = new TextEncoder().encode(`${header}.${payload}`);
+    const mac = base64urlDecode(signature);
+    let valid = false;
+    for (const candidate of (Array.isArray(key) ? key : [key]) as readonly CryptoKey[]) {
+      if (await crypto.subtle.verify("HMAC", candidate, mac, signed)) {
+        valid = true;
+        break;
+      }
+    }
     if (!valid) return undefined;
     const claims = JSON.parse(new TextDecoder().decode(base64urlDecode(payload))) as Partial<JwtClaims>;
     if (typeof claims.sub !== "string" || typeof claims.exp !== "number" || typeof claims.iat !== "number") return undefined;
