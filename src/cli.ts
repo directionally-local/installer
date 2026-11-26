@@ -139,6 +139,14 @@ On your laptop:
                           reaches only the model (--allow-internet: the internet too; server install)
   dl model attach         open Autopilot in that sandbox (dl model attach -- -c continues)
   dl model down           stop and remove the model (and its sandbox; DIR is kept)
+  dl model endpoint       your GPU as an OpenAI-compatible API: base URL, model, API key (masked;
+                          --show-key) and setup for OpenAI-compatible tools, Autopilot, OpenCode,
+                          Cursor and Claude Code. First run: turns it on, this machine only
+                          (127.0.0.1:8800, --port PORT), a key required. --off stops it
+  dl model share --lan|--tailscale|--public   who can reach it: your network, your tailnet (HTTPS),
+                          or the internet (Cloudflare quick tunnel; testing only). Always a key.
+                          --off: this machine only again
+  dl model keys [add NAME|revoke ID]   the endpoint's API keys (--show-key: in full)
   model options: --name NAME (a separate deployment; update/rollback/status/bench target it),
                  --gpus 0,1 (only these GPUs), --port PORT, --context TOKENS,
                  --image IMAGE (up/update/--plan: this container image instead of the catalog's,
@@ -346,6 +354,10 @@ export async function main(
         listen: { type: "string" },
         "admin-email": { type: "string" },
         off: { type: "boolean" },
+        lan: { type: "boolean" },
+        tailscale: { type: "boolean" },
+        public: { type: "boolean" },
+        "show-key": { type: "boolean" },
       },
     });
   } catch (error) {
@@ -666,6 +678,13 @@ export async function main(
         return await (options.modelsCommand ?? modelsCommand)({ out: io.out, color: colorOn }, { json: Boolean(values.json) });
       case "model": {
         const [action, ...args] = parsed.positionals.slice(1);
+        if (action === "endpoint" || action === "share" || action === "keys") {
+          if (values.server) { io.err("dl model endpoint, share and keys run on this machine; omit --server.\n"); return 2; }
+          const { modelApiCommand } = await import("./model-api.js");
+          return await modelApiCommand(action, args, { system, out: io.out, color: colorOn,
+            ...(values["show-key"] ? { showKey: true } : {}), ...(values.off ? { off: true } : {}), ...(values.port !== undefined ? { port: values.port } : {}),
+            ...(values.lan ? { lan: true } : {}), ...(values.tailscale ? { tailscale: true } : {}), ...(values.public ? { public: true } : {}) });
+        }
         if (action === "up" || action === "update" || action === "rollback" || action === "status" || action === "bench" || action === "list" || action === "down" || action === "attach") {
           if (values.server) { io.err("dl model deployment commands run on this machine; omit --server.\n"); return 2; }
           if (values.plan || values.hardware !== undefined) {

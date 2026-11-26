@@ -1045,6 +1045,29 @@ describe("dl the first time on a laptop", () => {
       assert.equal(plain.launches[2]!.env.DL_CHAT_SETUP, undefined, "not asked again");
     });
 
+    it("API endpoint: offered after a model that passed (DL_API_SETUP); dl turns it on, prints it and exits", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      const calls: unknown[] = [];
+      const options = laptop(undefined, { session: { nodeVersion: PATCHED_NODE, autopilot: async () => AUTOPILOT, spawn: answering([MODEL_UP, JSON.stringify({ version: 1, action: "api-up" })]),
+        signals: new EventEmitter(), handoffTmp: root, modelUp: async () => ({ ok: true, model: "Qwen/Qwen3-Coder-30B" }),
+        chatUp: async () => { throw new Error("no team chat for the API endpoint"); },
+        apiUp: async (request) => { calls.push(request); return { ok: true }; } } });
+      assert.equal(await inside(dir, () => main([], capture(), options)), 0);
+      assert.equal(plain.launches[0]!.env.DL_API_SETUP, undefined);
+      assert.equal(plain.launches[1]!.env.DL_API_SETUP, "1");
+      assert.deepEqual(calls, [{ version: 1, action: "api-up" }]);
+      assert.equal(plain.launches.length, 2, "no third Autopilot: the endpoint screen is the last thing");
+    });
+
+    it("API endpoint that couldn't be turned on exits 1", async () => {
+      const dir = join(root, "fresh");
+      await mkdir(dir);
+      const options = laptop(undefined, { session: { nodeVersion: PATCHED_NODE, autopilot: async () => AUTOPILOT, spawn: answering([MODEL_UP, JSON.stringify({ version: 1, action: "api-up" })]),
+        signals: new EventEmitter(), handoffTmp: root, modelUp: async () => ({ ok: true, model: "Qwen/Qwen3-Coder-30B" }), apiUp: async () => ({ ok: false }) } });
+      assert.equal(await inside(dir, () => main([], capture(), options)), 1);
+    });
+
     it("Ctrl-C during the chat setup stops its waits, not dl", async () => {
       const dir = join(root, "fresh");
       await mkdir(dir);
