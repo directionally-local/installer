@@ -27,6 +27,7 @@ import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, ty
 import { apiError, json } from "./errors.js";
 import { adminHomePage } from "./admin-home-page.js";
 import { dashboardCsv, deniedPage, earlyAccessCsv, healthCsv, isCsvTable, isHealthCsvTable, noGithubCsv, signedInPage, signInPage, toolsPage, type SpendView, type ToolsState } from "./dashboard-page.js";
+import { AGENT_REQUEST_MAX_BYTES, AGENT_REQUEST_PATH, agentRequestEmail, agentRequestsJson, parseAgentRequest, type AgentRequestAccount } from "./agent-request.js";
 import { PROVIDER_INQUIRY_MAX_BYTES, parseProviderInquiry, providerInquiriesJson, providerInquiryEmail } from "./provider-inquiry.js";
 import { NO_GITHUB_PATH, noGithubBody, noGithubClickAlert, noGithubJson, noGithubLeadAlert, noGithubSource, parseNoGithubLead } from "./no-github.js";
 import { ACCESS_REQUEST_MAX_BYTES, ACCESS_REQUEST_USAGE, ACCESS_REQUESTS_PER_DAY, parseAccessRequest } from "./access-request.js";
@@ -273,6 +274,8 @@ const LIMITS = {
   noGithubLeadIp: { capacity: 5, perHour: 5 },
   // dl.new/providers' form (provider-inquiry.ts): each kept inquiry can email the owner.
   providerInquiryIp: { capacity: 5, perHour: 5 },
+  // dl's "my coding agent isn't supported" (agent-request.ts): each kept request can email the owner.
+  agentRequestIp: { capacity: 10, perHour: 10 },
 } satisfies Record<string, Limit>;
 
 export interface Env {
@@ -578,6 +581,7 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/v1/telemetry/gpu") return telemetry(c, "gpu");
   if (method === "POST" && path === "/v1/telemetry/web") return webTelemetry(c);
   if (method === "POST" && path === "/v1/install-code/exchange") return installCodeExchange(c);
+  if (method === "POST" && path === AGENT_REQUEST_PATH) return agentRequest(c);
   if (path.startsWith("/v1/cli-login/")) {
     const handled = paidV1(c, path, method);
     if (handled) return handled;
@@ -5371,6 +5375,10 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     const until = Math.floor(now / DAY_MS) * DAY_MS + DAY_MS;
     return json({ days, ...noGithubJson(await directory(c).noGithub({ from: until - days * DAY_MS, until })) });
   }
+  if (method === "GET" && rest === "agent-requests") {
+    // Coding agents people asked dl to support (agent-request.ts), newest first. User content.
+    return json(agentRequestsJson(await directory(c).agentRequests()));
+  }
   if (method === "GET" && rest === "provider-inquiries") {
     // dl.new/providers' inquiries (provider-inquiry.ts), newest first. User content.
     return json(providerInquiriesJson(await directory(c).providerInquiries()));
@@ -6954,6 +6962,54 @@ async function webProviderInquiry(c: Ctx): Promise<Response> {
     } catch (error) {
       // Kept already, and listed for admins: the error's name only, never what was sent.
       console.error("provider inquiry email failed", error instanceof Error ? error.name : "error");
+    }
+  }
+  return json({ ok: true });
+}
+
+/**
+ * POST /v1/agent-request {name, os?, arch?, dlVersion?, found?} → {ok: true}: dl's first run found
+ * no coding agent it supports and the person named theirs (agent-request.ts). Sign-in optional:
+ * a valid Bearer attaches the account, a missing or invalid one is ignored. Kept in the Directory
+ * (no IP) and emailed to the owner (ALERT_EMAIL to ALERT_EMAIL_TO) for the first
+ * AGENT_REQUEST_EMAILS_PER_DAY a UTC day; a failed email never fails the request. 10 an hour per
+ * network, AGENT_REQUESTS_PER_DAY in all a UTC day (429 past either).
+ */
+async function agentRequest(c: Ctx): Promise<Response> {
+  if (Number(c.request.headers.get("content-length") ?? 0) > AGENT_REQUEST_MAX_BYTES) return apiError(400, "invalid_request", "The request is too large.");
+  const text = await c.request.text();
+  if (new TextEncoder().encode(text).length > AGENT_REQUEST_MAX_BYTES) return apiError(400, "invalid_request", "The request is too large.");
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = undefined;
+  }
+  const parsed = parseAgentRequest(body);
+  if (!parsed.ok) return apiError(400, "invalid_request", parsed.message);
+  const retry = await limited(c, `agent-request:ip:${c.ipNet}`, LIMITS.agentRequestIp);
+  if (retry !== undefined) return rateLimited(retry);
+  const now = c.now();
+  let who: AgentRequestAccount | null = null;
+  if (c.request.headers.has("authorization")) {
+    try {
+      const caller = await authenticate(c, { keys: true, ungrantedKeys: true, toolKeys: true, harness: true });
+      if (!(caller instanceof Response)) who = { githubId: caller.githubId, login: caller.login };
+    } catch {
+      // Sign-in is optional here: a token that can't be checked just leaves the account off.
+    }
+  }
+  const saved = await directory(c).saveAgentRequest({ now, request: parsed.value, account: who });
+  if (!saved.ok) return rateLimited(Math.max(1, Math.ceil((Math.floor(now / DAY_MS) * DAY_MS + DAY_MS - now) / 1000)));
+  const binding = c.env.ALERT_EMAIL;
+  const { alertEmailTo, alertEmailFrom } = c.config;
+  if (saved.email && binding && alertEmailTo) {
+    const mail = agentRequestEmail(parsed.value, who, now, saved.today);
+    try {
+      await sendEmail(binding, { from: alertEmailFrom, to: alertEmailTo, fromName: "dl agents", subject: mail.subject, body: mail.body, now });
+    } catch (error) {
+      // Kept already, and listed for admins: the error's name only, never what was sent.
+      console.error("agent request email failed", error instanceof Error ? error.name : "error");
     }
   }
   return json({ ok: true });
