@@ -1,0 +1,17 @@
+{
+  "id": "dl-autopilot",
+  "name": "Autopilot by dl.new",
+  "version": "0.47.0",
+  "description": "Autopilot, the coding agent from dl.new: on dl's free tier or your own provider and models",
+  "repository": "https://github.com/directionally-local/installer",
+  "website": "https://dl.new",
+  "authors": ["Directionally Local"],
+  "license": "Apache-2.0",
+  "license_url": "https://github.com/directionally-local/installer/blob/main/LICENSE",
+  "distribution": {
+    "npx": {
+      "package": "directionallylocal@0.47.0",
+      "args": ["acp"]
+    }
+  }
+}
