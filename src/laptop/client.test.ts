@@ -77,4 +77,15 @@ describe("remote API client", () => {
       new Response(JSON.stringify({ error: { code: "access_denied", message: "denied" } }), { status: 400 })) as unknown as typeof fetch);
     await assert.rejects(() => denied.waitForCredential(device, { sleep: async () => {} }), /denied/);
   });
+
+  it("refuses a pairing link that isn't an http(s) URL", async () => {
+    const serving = (verificationUriComplete: string) => new RemoteClient("https://box.example.com", undefined, (async () =>
+      new Response(JSON.stringify({ deviceCode: "d", userCode: "BCDF-GHJK", verificationUri: "https://box.example.com/approve", verificationUriComplete, expiresIn: 600, interval: 5 }), { status: 200 })) as unknown as typeof fetch);
+    const ok = await serving("https://box.example.com/approve?code=BCDF-GHJK").startDeviceAuthorization("laptop");
+    assert.equal(ok.verificationUriComplete, "https://box.example.com/approve?code=BCDF-GHJK");
+    for (const bad of ["file:///C:/Windows/System32/calc.exe", "x\" & calc & \"", "javascript:alert(1)"]) {
+      await assert.rejects(() => serving(bad).startDeviceAuthorization("laptop"), (error: unknown) =>
+        error instanceof RemoteApiError && error.code === "invalid_verification_uri");
+    }
+  });
 });
