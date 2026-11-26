@@ -274,6 +274,40 @@ describe("billing", () => {
     assert.equal(stripe.refunds.length, 1);
   });
 
+  it("keeps the 14-day withdrawal right for a Checkout without the terms consent, past the window and the weekly limit", async () => {
+    const { service, stripe } = await world({ CHECKOUT_TERMS_CONSENT: "false", PLAN_TOKENS_STARTER_DEEPSEEK: "1000", ALERT_EMAIL_TO: "owner@example.com" });
+    const { session, signedIn, token } = await paidAccount(service, stripe);
+    const admin = await adminToken(service);
+    const listed = (await (await service.request("GET", "/admin/paid/checkouts?status=all", { token: admin })).json()) as any;
+    assert.equal(listed.checkouts[0].termsAcceptedAt, null);
+    const key = ((await (await service.request("POST", "/web/api-keys", { token, body: { name: "cc" } })).json()) as any).key as string;
+    service.setLuminal(() => completion(luminalUsage(1000, 50, 0)));
+    assert.equal((await service.request("POST", "/v1/chat/completions", { token: key, headers: { "user-agent": "opencode/1.2" }, body: { model: MODEL, messages: [{ role: "user", content: "hi" }] } })).status, 200);
+    await service.settle();
+    // Day 10: past the 24 hours and the weekly limit reached, still inside the withdrawal period.
+    service.clock.now += 10 * 86_400_000;
+    // The 7-day web session has expired by now: sign in again.
+    const again = (await emailSignIn(service, "pat@example.com")).token;
+    const request = (await (await service.request("POST", "/web/billing/refund-request", { token: again, body: {} })).json()) as any;
+    assert.equal(request.eligible, true);
+    assert.equal(request.notEligible, null);
+    assert.equal(request.deadline, new Date(session.created * 1000 + 14 * 86_400_000).toISOString());
+    assert.ok(service.calls.emails.some((message) => message.raw.includes("refund request") && Buffer.from(message.raw.split(/\r?\n\r?\n/).slice(1).join("").replace(/\s+/g, ""), "base64").toString("utf8").includes("inside the 14-day withdrawal period")));
+    const refund = await service.request("POST", "/admin/paid/refund", { token: await adminToken(service), body: { accountId: signedIn.account.accountId } });
+    assert.equal(refund.status, 200, await refund.clone().text());
+  });
+
+  it("closes the withdrawal right after 14 days", async () => {
+    const { service, stripe } = await world({ CHECKOUT_TERMS_CONSENT: "false" });
+    const { signedIn } = await paidAccount(service, stripe);
+    service.clock.now += 15 * 86_400_000;
+    const token = (await emailSignIn(service, "pat@example.com")).token;
+    const request = (await (await service.request("POST", "/web/billing/refund-request", { token, body: {} })).json()) as any;
+    assert.equal(request.eligible, false);
+    assert.equal(request.notEligible, "refund_not_eligible: refund window passed");
+    assert.equal(await errorCode(await service.request("POST", "/admin/paid/refund", { token: await adminToken(service), body: { accountId: signedIn.account.accountId } })), "refund_window_passed");
+  });
+
   it("changes the contact email with a code to the new address, and Stripe's customer email with it", async () => {
     const { service, stripe } = await world();
     const { session, token } = await paidAccount(service, stripe, "starter", "old@example.com");

@@ -104,7 +104,8 @@ No auth. Starts Stripe Checkout for a plan. → `200 {"url": "https://checkout.s
   Stripe requires a terms of service URL in the account's public details (Dashboard → Settings →
   Public details); without it Stripe refuses the session. Checkout never fails for that: the
   service starts it again without the consent and turns `checkoutTermsConsent` off (in the config
-  change log, a warning in the logs, an alert to the owner); the owner turns it back on with
+  change log, a warning in the logs, an alert to the owner that those buyers keep their 14-day
+  withdrawal right, which refund eligibility honours); the owner turns it back on with
   `POST /admin/config {"checkoutTermsConsent": true}` once the URL is set. The time of the
   consent is kept on the paid checkout (`termsAcceptedAt` in the admin list).
 - Errors: 400 `invalid_plan`; 503 `billing_unavailable`; 502 `billing_error`; 429 `rate_limited`
@@ -352,7 +353,10 @@ may use is the account's plan **[B]**. A bad or revoked key is 401 `invalid_key`
   then refunds it (admin endpoint below). Otherwise `eligible: false` (still recorded) and
   `notEligible` says why: `"refund_not_eligible: weekly limit reached"` (with `limitsReached`,
   the models' names), `"refund_not_eligible: refund window passed"` or
-  `"refund_not_eligible: already refunded"`. 404 `no_subscription`.
+  `"refund_not_eligible: already refunded"`. 404 `no_subscription`. A Checkout without the
+  terms consent (`termsAcceptedAt` null: `checkoutTermsConsent` was off, or the Checkout predates
+  it) carries no EU/UK withdrawal waiver: it is eligible for 14 days from the Checkout whatever
+  the refund window and the weekly limits say, and `deadline` is the later of the two.
 - `dl.new/upgrade` (the link in limit errors) is a page: signed in, it calls `/web/billing/upgrade`
   with the next plan after a confirm; signed out, it goes to sign-in first.
 
@@ -440,8 +444,9 @@ Polling, every 2 seconds (no SSE: one cheap Directory read; works through every 
   cancels the subscription now. `{"refunded": true, "amountCents", "refundId", "subscriptionCanceled": true}`.
   409 `refund_window_passed` more than `refundWindowHours` (24) after the first payment; 409
   `refund_not_eligible` (`reason: "weekly limit reached"`, `limitsReached`) once a plan model's
-  weekly limit is reached this week. `{"force": true}` refunds anyway in both cases. 404
-  `no_subscription`; 409 `already_refunded`.
+  weekly limit is reached this week. `{"force": true}` refunds anyway in both cases. Neither
+  applies within 14 days of a Checkout without the terms consent (the withdrawal right, as
+  above). 404 `no_subscription`; 409 `already_refunded`.
 - **GET /admin/paid/refund-requests** → `{"requests": [{"accountId", "email", "reason", "at", "eligible", "notEligible", "refundedAt"}]}`; `notEligible` as the refund request answered it.
 
 ## 9. Stripe webhooks (POST /v1/billing/webhook, existing endpoint)

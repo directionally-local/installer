@@ -46,7 +46,7 @@ import { accountIdOf, emailHint, isPaidAccountNumber, keyHint, parseAccountId, t
 import type { BillingState, ServerKeyView } from "./account-object.js";
 import { emailBlocked, emailDomain, isDisposableDomain, normalizeEmail, plausibleEmail } from "./email-guard.js";
 import { apiError, json } from "./errors.js";
-import { activePromoCoupon, promoPrice, CLAIM_DAYS, isPlanId, promoView, welcomePromoLine, isUpgrade, PLAN_IDS, PLANS, planDescription, planOfPrice, plansView, checkoutConsentMessage, REFUND_BLOCK_TEXT, refundBlock, refundWindowText, type PlanId } from "./plan-prices.js";
+import { activePromoCoupon, promoPrice, CLAIM_DAYS, isPlanId, promoView, welcomePromoLine, isUpgrade, PLAN_IDS, PLANS, planDescription, planOfPrice, plansView, checkoutConsentMessage, REFUND_BLOCK_TEXT, refundBlock, refundWindowText, withdrawalDeadline, withdrawalOpen, WITHDRAWAL_DAYS, type PlanId } from "./plan-prices.js";
 import { approxTokens, planLimits, PLAN_MIX_LABEL, type PlanSettingsConfig } from "./plans.js";
 import { BONUS_LINE } from "./gpt6-bonus.js";
 import { emailBudgetOf } from "./email-budget.js";
@@ -295,7 +295,7 @@ async function webCheckoutPlan(c: Ctx): Promise<Response> {
         // Consent collection turns off (the setting, logged) until the owner sets the URL and turns it back on.
         console.warn("paid: Stripe refused the terms consent at Checkout; checkoutTermsConsent turned off", error instanceof Error ? error.message : "");
         await directory(c).updateOverrides([{ key: "checkoutTermsConsent", value: false }], { githubId: 0, login: "auto: Stripe refused terms consent (set a terms URL in Stripe's public details)", now: c.now() });
-        await alert(c, [{ subject: "dl.new: Checkout terms consent turned off", text: `Stripe refused the terms-of-service consent on the plan Checkout: ${error instanceof Error ? error.message : "error"}\nSet a terms URL in the Stripe Dashboard (Settings > Public details), then POST /admin/config {"checkoutTermsConsent": true}.` }]);
+        await alert(c, [{ subject: "dl.new: Checkout terms consent turned off", text: `Stripe refused the terms-of-service consent on the plan Checkout: ${error instanceof Error ? error.message : "error"}\nUntil it's back on, plan Checkouts carry no EU/UK withdrawal waiver: those buyers may withdraw for ${WITHDRAWAL_DAYS} days, and refund eligibility allows it whatever the refund window and weekly limits say.\nSet a terms URL in the Stripe Dashboard (Settings > Public details), then POST /admin/config {"checkoutTermsConsent": true}.` }]);
         session = await start(undefined);
       }
     }
@@ -1141,10 +1141,13 @@ async function refundRequest(c: Ctx): Promise<Response> {
   if (!billing.subscriptionId || billing.tier === null) return apiError(404, "no_subscription", "This account has no plan to refund.");
   const { config } = await runtime(c);
   const hours = config.refundWindowHours;
-  const deadline = billing.firstPaidAt === null ? null : billing.firstPaidAt + hours * HOUR_MS;
+  const withdrawal = withdrawalFrom(await directory(c).paidCheckoutBySubscription(billing.subscriptionId));
+  const windowEnd = billing.firstPaidAt === null ? null : billing.firstPaidAt + hours * HOUR_MS;
+  const deadline = withdrawal === null ? windowEnd : Math.max(windowEnd ?? 0, withdrawalDeadline(withdrawal));
   const reached = await limitsReached(c, caller.account, billing.tier, config);
-  const block = billing.refundedAt !== null ? "already_refunded" : refundBlock({ firstPaidAt: billing.firstPaidAt, now: c.now(), hours, limitsReached: reached });
+  const block = billing.refundedAt !== null ? "already_refunded" : refundBlock({ firstPaidAt: billing.firstPaidAt, now: c.now(), hours, limitsReached: reached, withdrawalFrom: withdrawal });
   const eligible = block === undefined;
+  const withdrawing = eligible && withdrawalOpen(withdrawal, c.now());
   const notEligible = block === undefined ? null : block === "already_refunded" ? "already refunded" : REFUND_BLOCK_TEXT[block];
   await directory(c).recordRefundRequest({ account: caller.account, reason, eligible, notEligible, now: c.now() });
   const id = accountIdOf(caller.account);
@@ -1152,7 +1155,7 @@ async function refundRequest(c: Ctx): Promise<Response> {
   await alert(c, [
     {
       subject: `dl.new: refund request from ${caller.email ?? id}${eligible ? "" : ` (not eligible: ${notEligible})`}`,
-      text: `dl.new: ${caller.email ?? id} (${id}, ${PLANS[billing.tier].name}) asked for a refund.${reason ? `\nReason: ${reason}` : ""}\n${eligible ? `Eligible (within ${refundWindowText(hours)}, no weekly limit reached): refund with POST /admin/paid/refund {"accountId": "${id}"}.` : `Not eligible: ${why}. Refund only with {"force": true}.`}`,
+      text: `dl.new: ${caller.email ?? id} (${id}, ${PLANS[billing.tier].name}) asked for a refund.${reason ? `\nReason: ${reason}` : ""}\n${eligible ? `Eligible (${withdrawing ? `no withdrawal waiver at Checkout: inside the ${WITHDRAWAL_DAYS}-day withdrawal period, whatever was used` : `within ${refundWindowText(hours)}, no weekly limit reached`}): refund with POST /admin/paid/refund {"accountId": "${id}"}.` : `Not eligible: ${why}. Refund only with {"force": true}.`}`,
     },
   ]);
   return json({
@@ -1163,6 +1166,14 @@ async function refundRequest(c: Ctx): Promise<Response> {
     ...(block === "limit_reached" ? { limitsReached: reached } : {}),
     deadline: deadline === null ? null : new Date(deadline).toISOString(),
   });
+}
+
+/**
+ * When the 14-day withdrawal period of a Checkout without the terms consent (its EU/UK withdrawal
+ * waiver) started: its time; null when the waiver was accepted or the Checkout isn't known.
+ */
+function withdrawalFrom(row: PaidCheckoutRow | undefined): number | null {
+  return row && row.terms_accepted_at === null ? row.paid_at : null;
 }
 
 /**
@@ -1468,7 +1479,8 @@ async function adminRefund(c: Ctx): Promise<Response> {
     const hours = config.refundWindowHours;
     const tier = billing?.tier ?? (row && isPlanId(row.plan) ? row.plan : null);
     const reached = accountNumber !== undefined && tier !== null ? await limitsReached(c, accountNumber, tier, config) : [];
-    const block = refundBlock({ firstPaidAt: paidAt, now: c.now(), hours, limitsReached: reached });
+    const withdrawal = withdrawalFrom(row?.subscription_id === subscriptionId ? row : await dir.paidCheckoutBySubscription(subscriptionId));
+    const block = refundBlock({ firstPaidAt: paidAt, now: c.now(), hours, limitsReached: reached, withdrawalFrom: withdrawal });
     if (block === "window_passed") {
       return apiError(409, "refund_window_passed", `The first payment is more than ${refundWindowText(hours)} old. Send {"force": true} to refund anyway.`, { reason: REFUND_BLOCK_TEXT.window_passed });
     }

@@ -37,6 +37,12 @@ export const CACHING_LABEL = `(${PLAN_MIX_LABEL})`;
  * no page or email promises a refund.
  */
 export const REFUND_WINDOW_HOURS = 24;
+/**
+ * The EU/UK statutory right to withdraw: this many days from the Checkout. Waived by the terms
+ * consent at Checkout (`termsAcceptedAt`); a Checkout without it (consent off, or before it
+ * existed) may withdraw for this long whatever the refund window and the weekly limits say.
+ */
+export const WITHDRAWAL_DAYS = 14;
 /** An unclaimed paid Checkout can be claimed (and its email link works) this long. Separate from the refund window. */
 export const CLAIM_DAYS = 7;
 
@@ -65,12 +71,24 @@ export const REFUND_BLOCK_TEXT: Record<RefundBlock, string> = {
 
 /**
  * Whether the first payment may be refunded now: within `hours` of it, and no plan model at 100%
- * of its weekly limit (`limitsReached`, the models' names). Undefined when it may.
+ * of its weekly limit (`limitsReached`, the models' names); or, without the withdrawal waiver
+ * (`withdrawalFrom`: the Checkout's time when its terms consent is missing), within
+ * WITHDRAWAL_DAYS of the Checkout. Undefined when it may.
  */
-export function refundBlock(input: { firstPaidAt: number | null; now: number; hours: number; limitsReached: readonly string[] }): RefundBlock | undefined {
+export function refundBlock(input: { firstPaidAt: number | null; now: number; hours: number; limitsReached: readonly string[]; withdrawalFrom?: number | null }): RefundBlock | undefined {
+  if (withdrawalOpen(input.withdrawalFrom ?? null, input.now)) return undefined;
   if (input.firstPaidAt === null || input.now > input.firstPaidAt + input.hours * 3_600_000) return "window_passed";
   if (input.limitsReached.length > 0) return "limit_reached";
   return undefined;
+}
+
+/** Whether a Checkout without the withdrawal waiver (made at `from`) is still inside the 14-day withdrawal period. */
+export function withdrawalOpen(from: number | null, now: number): boolean {
+  return from !== null && now <= withdrawalDeadline(from);
+}
+
+export function withdrawalDeadline(from: number): number {
+  return from + WITHDRAWAL_DAYS * 86_400_000;
 }
 
 /** Counted tokens per real token at the assumed mix: cached × weight + fresh + output (0.0641 at weight 0.02). */
