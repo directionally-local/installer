@@ -341,6 +341,27 @@ describe("trials: a card trial in use", () => {
     assert.equal(trialEnds(stripe).length, 0, "Stripe ended it, not us");
   });
 
+  it("leaves the trial's tokens out of the refund's weekly-limit check", async () => {
+    // Starter's DeepSeek at 10,000 real tokens a week (641 counted): the trial's two requests (572)
+    // and one plan request (286) together pass it, the plan's own use doesn't.
+    const { service, stripe } = await world({ ...SMALL, PLAN_TOKENS_STARTER_DEEPSEEK: "10000" });
+    const { token, key, subscriptionId } = await trialAccount(service, stripe, "starter");
+    await chat(service, key);
+    await chat(service, key);
+    await service.settle();
+    assert.equal(trialEnds(stripe).length, 1, "the plan started");
+    const subscription = stripe.subscriptions.get(subscriptionId)!;
+    service.clock.now += 60_000;
+    await webhook(service, "invoice.paid", { id: subscription.latest_invoice, customer: subscription.customer, billing_reason: "subscription_update", amount_paid: 350, total: 350, subscription: subscriptionId, lines: { data: [{ price: { id: subscription.price }, amount: 350, period: { end: subscription.current_period_end } }] } });
+    assert.equal((await chat(service, key)).status, 200);
+    await service.settle();
+    const me = await account(service, token);
+    assert.equal(me.limits[0].countedUsed, 286, "only the plan's request is on the plan's meter");
+    const request = (await (await service.request("POST", "/web/billing/refund-request", { token, body: {} })).json()) as any;
+    assert.equal(request.notEligible, null);
+    assert.equal(request.eligible, true);
+  });
+
   it("gives a second card trial on one account no free tokens: its plan starts at once", async () => {
     const { service, stripe } = await world();
     const first = await trialAccount(service, stripe, "starter", "twice@example.com");
