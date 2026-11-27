@@ -2,5 +2,8 @@ node_modules/
 dist/
 coverage/
 *.tgz
+# Written by prepack from package-lock.json and removed by postpack; only the
+# published tarball carries it (see scripts/generate-shrinkwrap.mjs).
+npm-shrinkwrap.json
 .dev.vars
 .wrangler/
