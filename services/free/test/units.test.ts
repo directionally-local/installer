@@ -170,6 +170,17 @@ describe("codes", () => {
     assert.equal(normalizeInviteCode(code.toLowerCase().replace(/-/g, " ")), code);
     assert.equal(normalizeInviteCode(code.slice(3)), code);
   });
+
+  it("keeps invite codes whose first group starts with DL", () => {
+    for (const input of ["DL-DLQZ-ZFF3", "dl-dlqz-zff3", "DLQZ-ZFF3", "dl dlqz zff3", " DL-DLQZ-ZFF3 "]) {
+      assert.equal(normalizeInviteCode(input), "DL-DLQZ-ZFF3", input);
+    }
+    for (let index = 0; index < 5000; index++) {
+      const code = newInviteCode();
+      assert.equal(normalizeInviteCode(code), code, code);
+      assert.equal(normalizeInviteCode(code.toLowerCase()), code, code);
+    }
+  });
 });
 
 describe("weeks", () => {
