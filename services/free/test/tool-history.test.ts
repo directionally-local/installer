@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADMIN_ID, createService, MODEL, type Service } from "./harness.js";
 import { repairToolHistory, STOPPED_TOOL_RESULT } from "../src/tool-history.js";
+import { GENERIC, REJECTED_AFTER_REPAIR } from "../src/upstream-errors.js";
 
 /**
  * A history broken by an interrupted tool call is made valid before any upstream sees it, and
@@ -93,15 +94,71 @@ describe("broken histories on the free tier", () => {
     assert.equal(service.calls.luminal.length, 1);
   });
 
-  it("with no upstream after Open Relay, its 400 goes back with what to do about it, never 'refused' alone", async () => {
+  /** Runs `fn` with console.error captured; returns the structured refusal lines it logged. */
+  async function refusalLogs(fn: () => Promise<void>): Promise<Array<Record<string, unknown>>> {
+    const original = console.error;
+    const lines: Array<Record<string, unknown>> = [];
+    console.error = (...args: unknown[]) => {
+      try {
+        const parsed = JSON.parse(String(args[0])) as Record<string, unknown>;
+        if (parsed.event === "free.upstream_unknown_refusal") lines.push(parsed);
+      } catch {
+        // not a structured line
+      }
+    };
+    try {
+      await fn();
+    } finally {
+      console.error = original;
+    }
+    return lines;
+  }
+
+  it("with no upstream after Open Relay, its 400 goes back with what to do, never 'refused' alone or 'start over'", async () => {
     const { service, token } = await member({ LUMINAL_API_KEY: "", OPENROUTER_API_KEY: "" });
     service.setOpenRelay(rejected);
-    const response = await chat(service, token, [ask]);
-    assert.equal(response.status, 400);
-    const { error } = (await response.json()) as { error: { code: string; message: string; upstreamReason?: string } };
+    let error = { code: "", message: "" };
+    const logs = await refusalLogs(async () => {
+      const response = await chat(service, token, [ask]);
+      assert.equal(response.status, 400);
+      ({ error } = (await response.json()) as { error: { code: string; message: string } });
+    });
     assert.equal(error.code, "upstream_error");
-    assert.match(error.message, /interrupted step/);
-    assert.match(error.message, /dl update/);
+    assert.equal(error.message, GENERIC);
+    assert.doesNotMatch(error.message, /\/clear|new conversation/);
     assert.ok(!error.message.includes("rejected by the model"), "the provider's text isn't passed on");
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0]!.historyRepaired, false);
+  });
+
+  it("a repaired history the upstreams still reject keeps the conversation, and is logged", async () => {
+    const { service, token } = await member({ LUMINAL_API_KEY: "", OPENROUTER_API_KEY: "" });
+    service.setOpenRelay(rejected);
+    const broken = [system, ask, assistant("a", "b"), result("a", STOPPED_TOOL_RESULT), result("a", "late"), next];
+    let error = { code: "", message: "" };
+    const logs = await refusalLogs(async () => {
+      const response = await chat(service, token, broken);
+      assert.equal(response.status, 400);
+      ({ error } = (await response.json()) as { error: { code: string; message: string } });
+    });
+    assert.equal(error.code, "upstream_error");
+    assert.equal(error.message, REJECTED_AFTER_REPAIR);
+    assert.match(error.message, /Send your message again/);
+    assert.doesNotMatch(error.message, /\/clear|new conversation/);
+    assert.equal(logs.length, 1);
+    assert.deepEqual(
+      { repaired: logs[0]!.historyRepaired, added: logs[0]!.resultsAdded, dropped: logs[0]!.resultsDropped, provider: logs[0]!.provider, status: logs[0]!.upstreamStatus },
+      { repaired: true, added: 1, dropped: 1, provider: "openrelay", status: 400 },
+    );
+    assert.ok(!JSON.stringify(logs[0]).includes("late"), "no content in the log");
+  });
+
+  it("a request that succeeds logs nothing", async () => {
+    const { service, token } = await member();
+    const logs = await refusalLogs(async () => {
+      const response = await chat(service, token, [ask]);
+      assert.equal(response.status, 200);
+    });
+    assert.equal(logs.length, 0);
   });
 });

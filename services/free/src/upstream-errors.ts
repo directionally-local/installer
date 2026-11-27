@@ -13,13 +13,18 @@ export interface UpstreamRefusal {
 }
 
 /**
- * Anything unknown. The commonest unknown refusal is a conversation a client broke after an
- * interrupted step (a tool call answered twice, or not at all): the client resends it with every
- * message, so every message fails until the person starts over or updates (tool-history.ts
- * repairs the shapes known so far before any upstream sees them).
+ * Anything unknown. Never tells the person to discard the conversation: tool-history.ts repairs a
+ * history an interrupted step left broken before any upstream sees it, so resending the message
+ * is what to do, and `dl update` if it keeps happening.
  */
-export const GENERIC =
-  "The model provider refused the request. If every message in this conversation now fails, it may have got into a bad state after an interrupted step: start a new conversation (/clear in Autopilot), or update with `dl update`.";
+export const GENERIC = "The model provider couldn't take this request. Send your message again; if it keeps happening, run `dl update`.";
+
+/**
+ * An unknown refusal of a request whose history tool-history.ts had to repair (after any fallback
+ * upstreams refused it too). Should essentially never happen; app.ts logs each one.
+ */
+export const REJECTED_AFTER_REPAIR =
+  "The model couldn't take this request (it was rejected after we cleaned up an interrupted step). Send your message again; if it keeps happening, run `dl update`.";
 
 /** Known failures, by what the provider's message, code or type says: the first that matches wins. */
 const KNOWN: ReadonlyArray<{ test: RegExp; message: string }> = [

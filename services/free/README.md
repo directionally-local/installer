@@ -1998,7 +1998,14 @@ treat these three codes (or `retryable: true`) as retryable before Luminal goes 
 and `/anthropic`'s error bodies): providers' messages often quote the request or internal
 account and policy text. Known failures get dl's own message (context window exceeded,
 `max_tokens`, content policy, an image or file the model can't read, tools or tool calls);
-anything else "The model provider refused the request." Beside it, `upstreamStatus` and, only
+anything else "The model provider couldn't take this request. Send your message again; if it
+keeps happening, run `dl update`." (never advice to discard the conversation). When the history
+was repaired (`src/tool-history.ts`, an interrupted step) and every upstream still refuses it, the
+message says so and keeps the conversation: "The model couldn't take this request (it was rejected
+after we cleaned up an interrupted step). Send your message again; if it keeps happening, run
+`dl update`." Each such unknown refusal is logged as one JSON line, `event:
+"free.upstream_unknown_refusal"` (status, upstream status and reason, model, provider, message
+count, results added/dropped; never content). Beside the message, `upstreamStatus` and, only
 when the provider's `error.code` or `error.type` is a plain identifier (letters, digits, `_.-`,
 at most 64), `upstreamReason` (e.g. `invalid_request_error`). A 402 from the provider is 503
 `service_paused`, "The model provider paused the service's account. Try again later."
