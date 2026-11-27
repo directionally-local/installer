@@ -6,6 +6,7 @@ import { DAY_MS } from "./week.js";
 import { webFunnelCard, type WebFunnelRow } from "./web-signup.js";
 import type { UseRow } from "./directory-object.js";
 import { refusalsCard, type RefusalRow } from "./refusals.js";
+import { agentsCard, type AgentsReport } from "./agent-picks.js";
 
 /**
  * The admin home (GET /admin): the data the old Kimiflare Cloud admin dashboard showed, in dl's
@@ -32,6 +33,8 @@ export interface AdminHomeInput {
   flaggedUses?: UseRow[];
   /** Refusal counts per day and reason, the last 30 days (refusals.ts); the card is left out without it. */
   refusals?: RefusalRow[];
+  /** Router tracking by coding agent, the last 30 days (agent-picks.ts); the card is left out without it. */
+  agents?: AgentsReport;
 }
 
 /**
@@ -414,6 +417,7 @@ ${input.flaggedUses ? flaggedUseCard(input.flaggedUses) : ""}
 ${trial}
 ${input.webFunnel ? webFunnelCard(input.webFunnel, input.now ?? Date.now()) : ""}
 ${input.refusals ? refusalsCard(input.refusals, input.now ?? Date.now()) : ""}
+${input.agents ? agentsCard(input.agents) : ""}
 ${usage}
 ${users}
 ${grants}

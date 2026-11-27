@@ -2358,6 +2358,15 @@ When dl's first run finds no coding agent it supports, the person can name their
 - Kept in the Directory's `agent_requests` table (the fields, the time and the account if any; no IP). The owner gets a plain-text email (`ALERT_EMAIL` to `ALERT_EMAIL_TO`, from "dl agents"), subject `dl: unsupported coding agent "<name>"` (CR/LF removed), with the agent, os/arch, dl version, the agents dl found and the account, for the first 50 a UTC day. A failed email never fails the request.
 - `GET /admin/agent-requests` (or `/v1/admin/agent-requests`; admins) returns `{total, requests: [{id, at, name, os, arch, dlVersion, found, githubId, login}]}`, newest 500 first.
 
+## Router tracking (agent picks)
+
+Which coding agent people pick in dl's router, and whether they stay and pay (`src/agent-picks.ts`). Agent ids and counts only, never content.
+
+- dl posts `POST /v1/agent-pick` with JSON `{agent, firstRun, found?, dlVersion?}` when someone picks an agent in bare `dl` (including "Back to X?") or runs `dl claude|opencode|pi|t3|autopilot` (not `dl -c`). `agent` and each `found` entry are agent ids (`^[a-z0-9][a-z0-9-]{0,31}$`, dl's catalog ids and `autopilot`); `found` is what dl detected on the computer, left out when dl didn't look. Auth: the dl key (`dl_sk_`), any other key or an access token; it spends nothing, so it isn't held to grants or the tool keys switch. `202 {ok: true}`; `400 invalid_request`; `401`; `429` past 60 an hour per account. dl sends it fire-and-forget with a 1 s timeout, and not at all with `DL_NO_TELEMETRY`, `DO_NOT_TRACK` or `CI`.
+- Kept per account in `agent_pick_people` (first pick, its time and whether it was dl's first run there; latest pick; the latest `found`) and `agent_picks` (per agent: first and last pick, count).
+- Every chat request (OpenAI, Anthropic and Responses routes; not abandoned reservations) adds to `agent_daily (day, github_id, agent, requests, tokens)`, admins left out. The agent: a harness key's; else dl's `x-dl-harness` hint; else `autopilot` for an access token or server key; else, for an API key, what the User-Agent / `X-Title` names (`autopilot`, `t3`, `claude-code`, `opencode`, `crush`, `cursor`, …), `other` for a library or an unknown client.
+- `GET /admin/agents?days=30` (or `/v1/admin/agents`; admins; `days` 1 to 366) returns `{days, from, agents, cohorts, paying, found}`. Per agent: `firstRunPicks`, `firstPicks`, `pickers`, `picks`, `current` (latest pick), `activeThisWeek` (requests since Monday UTC), `activeInWindow`, `requests`, `tokens`, `payingPrimary` (paying people, subscription active or past due, whose agent with the most tokens in the last 14 days is this one) and `retention` (week 2: a request on days 7 to 13 after signing up, for people who first picked it and signed up in the window). `cohorts`: the same retention by signup week and first pick. `found`: how many people reported what dl found, and per agent how many have it. Admins left out. The admin home shows it as the "Coding agents" card (last 30 days).
+
 ## Install counts
 
 Two public endpoints count the top of the funnel, anonymously. No sign-in; each adds one to a

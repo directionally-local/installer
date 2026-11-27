@@ -243,7 +243,7 @@ describe("dl t3", () => {
   it("is reached from dl's command line with every argument after t3", async () => {
     let seen: string[] | undefined;
     const { io } = capture();
-    const code = await main(["t3", "serve", "--port", "3773", "--help"], io, { t3: async (args) => ((seen = args), 0) });
+    const code = await main(["t3", "serve", "--port", "3773", "--help"], io, { t3: async (args) => ((seen = args), 0), reportPick: () => undefined });
     assert.equal(code, 0);
     assert.deepEqual(seen, ["serve", "--port", "3773", "--help"]);
   });

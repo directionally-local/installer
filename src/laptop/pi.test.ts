@@ -177,7 +177,7 @@ describe("dl pi", () => {
 
   it("is reached from main with every argument after `pi`, flags included", async () => {
     const seen: string[][] = [];
-    const code = await main(["pi", "-c", "--thinking", "high"], capture().io, { pi: async (args) => (seen.push(args), 0) });
+    const code = await main(["pi", "-c", "--thinking", "high"], capture().io, { pi: async (args) => (seen.push(args), 0), reportPick: () => undefined });
     assert.equal(code, 0);
     assert.deepEqual(seen, [["-c", "--thinking", "high"]]);
   });

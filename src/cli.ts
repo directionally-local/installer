@@ -39,6 +39,7 @@ import { AUTOPILOT_ID, detectAgents, type DetectedAgent } from "./laptop/agent-c
 import { ensureAutopilot } from "./laptop/autopilot-install.js";
 import { browserSignIn, dlKeyOrSignIn, forgetDlKey, maskKey, planName, readDlKey, reportAgentRequest, type AgentRequest, type DlKey } from "./laptop/dl-key.js";
 import { firstTokens } from "./laptop/onboarding.js";
+import { notePick, sendAgentPick, type AgentPickReport } from "./laptop/agent-pick.js";
 import { autopilotKeyEnv, autopilotProvider, orderAgents, readAgentHistory, recordAgentUse, routerHome, type RouterDeps } from "./laptop/router.js";
 import { autopilotConfigFile } from "./laptop/free-tier.js";
 import { readAgentChoice } from "./laptop/agent-choice.js";
@@ -309,6 +310,12 @@ export interface MainOptions {
   dlKey?: () => Promise<DlKey | undefined>;
   /** The agents found here (`dl status`, the router); detected unless replaced. */
   detectAgents?: () => Promise<DetectedAgent[]>;
+  /**
+   * Tells the service which agent was picked (router tracking, agent-pick.ts): fire and forget.
+   * POST /v1/agent-pick with the dl key unless replaced; with `recordAgentUse` replaced (tests)
+   * and this not, nothing is sent.
+   */
+  reportPick?: (pick: AgentPickReport, key?: DlKey) => void;
   /** Tells the service about an agent dl doesn't know (the router); POST /v1/agent-request unless replaced. */
   reportAgent?: (request: AgentRequest, key: DlKey) => Promise<unknown>;
   /** The one-time first-tokens line after the first agent run (onboarding.ts firstTokens) unless replaced. */
@@ -325,7 +332,17 @@ export async function main(
 ): Promise<number> {
   // `dl claude ARGS`: every argument after `claude` is Claude Code's, flags included. Each of these
   // becomes the agent bare dl offers first ("last used").
-  const used = (id: string) => (options.recordAgentUse ?? recordAgentUse)(id).catch(() => undefined);
+  // Each also counts as a pick for router tracking (agent-pick.ts), sent without waiting.
+  const used = async (id: string) => {
+    const before = options.recordAgentUse ? undefined : await readAgentHistory().catch(() => undefined);
+    await (options.recordAgentUse ?? recordAgentUse)(id).catch(() => undefined);
+    const report = options.reportPick ?? (options.recordAgentUse ? undefined : (pick: AgentPickReport) => void notePick(pick));
+    try {
+      report?.({ agent: id, firstRun: before !== undefined && !before.lastUsed, dlVersion: packageVersion() });
+    } catch {
+      // Dropped.
+    }
+  };
   if (argv[0] === "claude") return (await used("claude-code"), await (options.claude ?? claudeCommand)(argv.slice(1), io));
   // `dl opencode ARGS`: the same for OpenCode.
   if (argv[0] === "opencode") return (await used("opencode"), await (options.opencode ?? opencodeCommand)(argv.slice(1), io));
@@ -1076,6 +1093,8 @@ function routerDeps(options: MainOptions, io: { out: (text: string) => void; err
     launch: (command, args) => commands[command](args, launchIO),
     autopilot: (_key, run) => autopilotOnKey({ cwd: process.cwd(), forceAutopilot: true, ...(run.continue ? { continue: true } : {}), ...options.session }, io),
     report: options.reportAgent ?? ((request, key) => reportAgentRequest(request, { key: key.key })),
+    // Router tracking: sent with the router's key, never waited on. Tests that replace the agents found get no real sends.
+    pick: options.reportPick ?? (options.detectAgents ? () => undefined : (pick, key) => void sendAgentPick(pick, key)),
     dlVersion: packageVersion(),
     // The scan's beat only at a terminal with colour; tests and pipes get it all at once.
     ...(io.color === true ? { sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)) } : {}),
