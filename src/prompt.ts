@@ -15,6 +15,11 @@ export interface SelectOption {
   /** A quieter row (a fallback below the main choices): its label is dim until it's selected. */
   quiet?: boolean;
   /**
+   * A section heading shown above this option (not an option itself: ↑/↓ and digits skip it),
+   * after a blank line. Notes line up within each section.
+   */
+  heading?: string;
+  /**
    * Picking this option asks for text instead (e.g. "Another server" → user@host).
    * `prompt` is the styled prompt for the numbered fallback (ui.prompt(…)); `placeholder`
    * is the dim hint shown in the empty input on a terminal.
@@ -36,6 +41,20 @@ export interface SelectResult {
   value: string;
   /** What was typed, when the picked option takes input. */
   text?: string;
+}
+
+/** The label column's width for each option: the widest label in its section (headings start one), plus 2. */
+export function sectionWidths(options: readonly SelectOption[], length: (option: SelectOption) => number): number[] {
+  const widths: number[] = [];
+  let start = 0;
+  for (let i = 0; i <= options.length; i++) {
+    if (i === options.length || (i > start && options[i]!.heading)) {
+      const width = Math.max(...options.slice(start, i).map(length)) + 2;
+      for (let j = start; j < i; j++) widths.push(width);
+      start = i;
+    }
+  }
+  return widths;
 }
 
 /** Thrown when someone presses Esc or Ctrl-C at a question; the terminal is already restored. */
@@ -161,10 +180,10 @@ export class TtyPrompter implements Prompter {
   private async numbered(question: string, options: SelectOption[], start: number): Promise<SelectResult> {
     const c = palette(this.color);
     const full = (option: SelectOption) => `${option.label}${option.accent ? ` ${option.accent}` : ""}`;
-    const width = Math.max(...options.map((option) => full(option).length)) + 2;
     const shown = (option: SelectOption) => `${option.label}${option.accent ? ` ${c.accent(option.accent)}` : ""}`;
-    const list = options.map((option, index) => `  ${c.cyan(String(index + 1))}  ${option.detail
-      ? option.detailBelow ? `${shown(option)}\n     ${c.dim(option.detail)}` : `${shown(option)}${" ".repeat(width - full(option).length)} ${c.dim(option.detail)}`
+    const widths = sectionWidths(options, (option) => full(option).length);
+    const list = options.map((option, index) => `${option.heading ? `${index > 0 ? "\n" : ""}  ${c.bold(option.heading)}\n` : ""}  ${c.cyan(String(index + 1))}  ${option.detail
+      ? option.detailBelow ? `${shown(option)}\n     ${c.dim(option.detail)}` : `${shown(option)}${" ".repeat(widths[index]! - full(option).length)} ${c.dim(option.detail)}`
       : shown(option)}`).join("\n");
     const typed = options.find((option) => option.input);
     const range = options.length === 2 ? "1 or 2" : `1-${options.length}`;
@@ -420,22 +439,28 @@ class ArrowSelect {
       return [this.c.dim(`  ${option.label} · Esc to go back`), `${this.marker}${this.text}${this.caret}${placeholder}`];
     }
     const full = (option: SelectOption) => `${option.label}${option.accent ? ` ${option.accent}` : ""}`;
-    const width = Math.max(...this.options.map((option) => full(option).length)) + 2;
+    const widths = sectionWidths(this.options, (option) => full(option).length);
     return this.options.flatMap((option, index) => {
-      const selected = index === this.cursor;
-      if (option.input?.inline) {
-        // The field itself: what's typed so far, or the dim placeholder.
-        const shown = this.text ? (selected ? `${this.text}${this.caret}` : this.text) : selected ? `${this.caret}${this.c.dim(option.input.placeholder)}` : this.c.dim(option.label);
-        return [`  ${selected ? this.c.cyan("›") : " "} ${shown}`];
-      }
-      const label = selected ? this.c.bold(option.label) : option.quiet ? this.c.dim(option.label) : option.label;
-      const accent = option.accent ? ` ${this.c.accent(option.accent)}` : "";
-      const pad = option.detail && !option.detailBelow ? " ".repeat(width - full(option).length) : "";
-      const line = `  ${selected ? this.c.cyan("›") : " "} ${label}${accent}${pad}`;
-      // Two-line options: the note on its own line, a blank line between options.
-      if (option.detailBelow) return [line, ...(option.detail ? [this.fit("", this.c.dim(`    ${option.detail}`))] : []), ...(index < this.options.length - 1 ? [""] : [])];
-      return [this.fit(line, option.detail ? this.c.dim(option.detail) : "")];
+      const head = option.heading ? ["", `  ${this.c.bold(option.heading)}`] : [];
+      return [...head, ...this.row(option, index, widths[index]!, full)];
     });
+  }
+
+  /** One option's lines (a heading, if any, is drawn by lines()). */
+  private row(option: SelectOption, index: number, width: number, full: (option: SelectOption) => string): string[] {
+    const selected = index === this.cursor;
+    if (option.input?.inline) {
+      // The field itself: what's typed so far, or the dim placeholder.
+      const shown = this.text ? (selected ? `${this.text}${this.caret}` : this.text) : selected ? `${this.caret}${this.c.dim(option.input.placeholder)}` : this.c.dim(option.label);
+      return [`  ${selected ? this.c.cyan("›") : " "} ${shown}`];
+    }
+    const label = selected ? this.c.bold(option.label) : option.quiet ? this.c.dim(option.label) : option.label;
+    const accent = option.accent ? ` ${this.c.accent(option.accent)}` : "";
+    const pad = option.detail && !option.detailBelow ? " ".repeat(width - full(option).length) : "";
+    const line = `  ${selected ? this.c.cyan("›") : " "} ${label}${accent}${pad}`;
+    // Two-line options: the note on its own line, a blank line between options.
+    if (option.detailBelow) return [line, ...(option.detail ? [this.fit("", this.c.dim(`    ${option.detail}`))] : []), ...(index < this.options.length - 1 ? [""] : [])];
+    return [this.fit(line, option.detail ? this.c.dim(option.detail) : "")];
   }
 
   /** Redraws the lines under the question in place; lines never wrap, so the count holds. */

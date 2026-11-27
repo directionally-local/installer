@@ -3388,6 +3388,21 @@ async function modelsByBudget(c: Ctx, config: FreeConfig, githubId: number, pers
   return gpt6 !== null && gpt6 <= 0 ? offered.filter((model) => model.family !== "gpt6") : offered;
 }
 
+/**
+ * Under paid plans, only what the account's plan serves: a paying account its plan's models
+ * (Starter DeepSeek; Plus and Max DeepSeek and Kimi), a free trial DeepSeek. A client reading the
+ * list (dl claude maps Opus to Kimi only when it's here) then never offers a model the plan
+ * refuses. Admins and accounts without a plan see the list as it was.
+ */
+async function planModels(c: Ctx, config: FreeConfig, githubId: number, isAdmin: boolean, listed: readonly FreeModel[]): Promise<readonly FreeModel[]> {
+  if (!config.paidPlans || isAdmin) return listed;
+  const state = await account(c, githubId).planState(c.now(), []);
+  if (state.trial?.active) return listed.filter((model) => model.id === DEEPSEEK_MODEL);
+  if (state.tier === "none" || !isPaidPlan(state.tier)) return listed;
+  const tier = state.tier;
+  return listed.filter((model) => planLimitFor(tier, model.id, config) !== undefined);
+}
+
 async function models(c: Ctx): Promise<Response> {
   // OpenCode's harness key may list them too (dl opencode reads the list to configure it).
   const identity = await authenticate(c, { keys: true, toolKeys: true, harness: ["opencode", "pi"] });
@@ -3398,7 +3413,8 @@ async function models(c: Ctx): Promise<Response> {
   // GPT-6 isn't offered to another agent's harness key, or a tool key, while it is Autopilot only (gpt6-clients.ts).
   const harness = otherAgent(identity);
   const isAdmin = c.config.adminGithubIds.has(identity.githubId);
-  const listed = (await modelsFor(c, config, identity.githubId, person)).filter((model) => !heldFromClient(model, config.gpt6Clients, harness, isAdmin));
+  const offered = (await modelsFor(c, config, identity.githubId, person)).filter((model) => !heldFromClient(model, config.gpt6Clients, harness, isAdmin));
+  const listed = await planModels(c, config, identity.githubId, isAdmin, offered);
   const weekUsd = listed.some((model) => capped(config, model)) ? await directory(c).personProviderWeek(identity.githubId, c.now()) : undefined;
   return json({
     object: "list",
@@ -3532,7 +3548,7 @@ async function toAnthropicErrorResponse(response: Response, tool = false): Promi
  * The Anthropic Messages endpoint for Claude Code through `dl claude` (see anthropic.ts):
  * `POST /anthropic/v1/messages` (Claude Code adds `?beta=true`) and
  * `POST /anthropic/v1/messages/count_tokens`. Auth is a harness key, or a tool key (any
- * Anthropic-style tool, tool-keys.ts), as `x-api-key` or `Authorization: Bearer`. Every request is served by DeepSeek, whatever model it names, and
+ * Anthropic-style tool, tool-keys.ts), as `x-api-key` or `Authorization: Bearer`. Served by DeepSeek unless it names Kimi exactly, and
  * goes through `chat` like any other: the same reservation, caps, trial, Pro, queue, dl-only
  * check and refusals, with the allowance scaled by `otherHarnessShare`.
  */
@@ -3555,10 +3571,9 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
     if (guarded) return toAnthropicErrorResponse(guarded, tool);
     return json({ input_tokens: estimateInputTokens(request) });
   }
-  // Every request here is served by DeepSeek: Claude Code's own model names (claude-*) and any
-  // other id it names, Kimi included even on a plan that has it (anthropicModelFor; `chat` also
-  // refuses non-DeepSeek models for the claude-code harness). Kimi is reachable only on the
-  // OpenAI-shaped /v1/chat/completions, e.g. with a dl_sk_ key (#387).
+  // Claude Code's own model names (claude-*) are served by DeepSeek; an open-model id it names
+  // exactly (Kimi K3.1 Pro, which dl claude maps Opus to on Plus and Max) goes through the plan
+  // like any other request (anthropicModelFor), so a plan without Kimi refuses it (#387).
   const model = anthropicModelFor(request.model);
   const translated = toChatRequest(request, { model: model.id, vision: model.vision });
   if (!translated.ok) return anthropicErrorResponse(400, translated.message, "invalid_request");

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
+import { planModelName, planModelsLine, planOrder } from "./plan-models.js";
 
 /**
  * `dl opencode [opencode args...]`: the person's own OpenCode (github.com/anomalyco/opencode, was
@@ -173,6 +174,11 @@ export async function freeTierModels(fetchImpl: Fetch, origin: string, key: stri
   }
 }
 
+/** The line after dl opencode sets up OpenCode: the plan's models, under the dl provider in /models. */
+export function opencodeModelsLine(models: readonly FreeTierModel[]): string {
+  return planModelsLine(planOrder(models).map(planModelName), `switch with /models (under ${PROVIDER_ID})`);
+}
+
 export interface OpencodeDeps extends LaunchDeps {
   /** `opencode --version`'s output; runs it unless replaced. */
   version?: (binary: string, env: Env) => Promise<string>;
@@ -192,7 +198,7 @@ export function opencodeLaunch(deps: OpencodeDeps = {}): HarnessLaunch {
         return { error: "dl opencode can't use --server: free tokens are set up in the OpenCode server dl opencode starts. Leave --server out, or use that server with your own provider." };
       }
       const [version, models] = await Promise.all([(deps.version ?? opencodeVersion)(binary, env), freeTierModels(call, origin, key)]);
-      return { ...opencodeEnv(env, { origin, key, models }), args: opencodeArgs(args, majorVersion(version)) };
+      return { ...opencodeEnv(env, { origin, key, models }), args: opencodeArgs(args, majorVersion(version)), models: opencodeModelsLine(models) };
     },
   };
 }

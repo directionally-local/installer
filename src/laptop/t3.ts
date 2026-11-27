@@ -2,10 +2,11 @@ import { constants as fsConstants } from "node:fs";
 import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { claudeEnv } from "./claude.js";
+import { claudeEnv, claudeModelsLine } from "./claude.js";
 import { claudeSettingsRefusal } from "./claude-settings.js";
 import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
-import { freeTierModels, opencodeEnv, PROVIDER_ID, DEFAULT_MODEL } from "./opencode.js";
+import { freeTierModels, opencodeEnv, PROVIDER_ID, DEFAULT_MODEL, type FreeTierModel } from "./opencode.js";
+import { hasKimi, KIMI_MODEL, planModelName } from "./plan-models.js";
 import { TtyPrompter } from "../prompt.js";
 
 /**
@@ -167,7 +168,7 @@ export function t3Refusal(args: string[]): string | undefined {
  * and OpenCode's (opencode key). `removed` lists the person's variables left out, once each.
  */
 export function t3Env(parent: Env, input: { origin: string; claudeKey: string; opencodeKey: string; models: Parameters<typeof opencodeEnv>[1]["models"] }): { env: Env; removed: string[] } {
-  const claude = claudeEnv(parent, { origin: input.origin, key: input.claudeKey });
+  const claude = claudeEnv(parent, { origin: input.origin, key: input.claudeKey, models: input.models });
   const opencode = opencodeEnv(claude.env, { origin: input.origin, key: input.opencodeKey, models: input.models });
   return { env: opencode.env, removed: [...claude.removed, ...opencode.removed] };
 }
@@ -193,6 +194,7 @@ export function t3Launch(deps: T3Deps = {}): HarnessLaunch {
       return {
         ...t3Env(env, { origin, claudeKey, opencodeKey, models }),
         args: withoutDlFlags(args),
+        models: t3ModelsLine(models),
         notes: [
           ...("error" in enabled
             ? [`OpenCode is off in T3 Code by default and dl couldn't turn it on (${enabled.error}). Turn it on in T3 Code's settings.`]
@@ -201,12 +203,24 @@ export function t3Launch(deps: T3Deps = {}): HarnessLaunch {
               : enabled.result === "declined"
                 ? [`OpenCode is off in T3 Code (it ships that way) and dl left its settings alone. Turn it on in T3 Code's settings, or run dl t3 ${ENABLE_OPENCODE_FLAG} to let dl do it.`]
                 : []),
-          `Claude Code and OpenCode in this T3 Code server use free tokens until you stop it. In OpenCode pick a ${PROVIDER_ID}/… model (${PROVIDER_ID}/${DEFAULT_MODEL}); Claude Code is served by DeepSeek whatever model T3 Code shows.`,
+          `Claude Code and OpenCode in this T3 Code server use your dl plan until you stop it. In OpenCode pick a ${PROVIDER_ID}/… model (${PROVIDER_ID}/${DEFAULT_MODEL}); ${t3ClaudeModels(models)}`,
           "The T3 Code desktop app and t3 service don't get free tokens; use this server's web page. If T3 Code says a server is already running, quit it first (or add --base-dir DIR).",
         ],
       };
     },
   };
+}
+
+/** What Claude Code in T3 Code is served by: Opus is Kimi K3.1 on a plan with Kimi, everything else DeepSeek. */
+function t3ClaudeModels(models: readonly FreeTierModel[]): string {
+  const deepseek = planModelName({ id: DEFAULT_MODEL });
+  if (!hasKimi(models)) return `Claude Code is served by ${deepseek} whatever model T3 Code shows.`;
+  return `in Claude Code, Opus is ${planModelName({ id: KIMI_MODEL })} and Sonnet, Haiku or a full Claude model name ${deepseek}.`;
+}
+
+/** The line after dl t3 starts: the plan's models in both agents. */
+export function t3ModelsLine(models: readonly FreeTierModel[]): string {
+  return `${claudeModelsLine(models).replace(/ — switch with \/model$/, "")}${hasKimi(models) ? " — switch in T3 Code's model picker" : ""}`;
 }
 
 /** `args` without dl t3's own flags, which t3 doesn't know. */

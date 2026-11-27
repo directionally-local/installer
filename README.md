@@ -16,13 +16,13 @@ dl
 `dl` is the router for your own coding agent. There's nothing to set up first: no Docker, no sandbox, no GitHub token.
 
 1. **Sign in.** The first `dl` signs you in (or up) at dl.new in your browser and keeps your `dl_sk_` key on this computer.
-2. **Pick your agent.** dl looks for the coding agents installed on this computer (it only reads directory listings and runs nothing) and asks which one to use: *"I found these on your computer. Which one do you want to use?"*
-3. **It opens on your plan.** Claude Code, OpenCode, Pi and T3 Code open straight on your key. For any other agent (Cursor, Cline, Zed, Roo Code, Kilo Code, Continue, Aider…), dl prints the exact setup: your key and the base URLs `https://api.dl.new/v1` (OpenAI-style) and `https://api.dl.new/anthropic` (Anthropic-style).
-4. **It remembers.** The last agent you used is on top next time, so Enter opens it. `dl -c` continues that agent's latest session.
+2. **Pick your agent.** dl looks for the coding agents installed on this computer (it only reads directory listings and runs nothing) and asks which one to use: Autopilot, our own agent, first as the recommendation (included in your plan), then *"I also found these on your computer"* with what it found.
+3. **It opens on your plan.** Claude Code, OpenCode, Pi and T3 Code open straight on your key, with your plan's models: DeepSeek V4.1 Flash on Free and Starter, plus Kimi K3.1 on Plus and Max (in Claude Code, Opus is Kimi and Sonnet is DeepSeek, so `/model` switches; in OpenCode and Pi both are under the `dl` provider). For any other agent (Cursor, Cline, Zed, Roo Code, Kilo Code, Continue, Aider…), dl prints the exact setup: your key and the base URLs `https://api.dl.new/v1` (OpenAI-style) and `https://api.dl.new/anthropic` (Anthropic-style).
+4. **It remembers.** The last agent you used is on top next time ("Back to Claude Code?"), so Enter opens it. `dl -c` continues that agent's latest session.
 
-Open one directly with `dl claude`, `dl opencode`, `dl pi` or `dl t3`. `dl api-key` prints your key and both base URLs again. No agent installed? dl asks which one you use, and offers Autopilot.
+Open one directly with `dl claude`, `dl opencode`, `dl pi` or `dl t3`. `dl api-key` prints your key and both base URLs again. No agent installed? dl offers Autopilot first, or asks which one you use.
 
-**Autopilot is optional.** It's dl's own open-source agent, listed last. dl downloads it the first time you pick it (or run `dl autopilot`) into `~/.directionallylocal/autopilot`, and `dl update` keeps it on the version dl pins. Background tasks, servers and GPU boxes still use Autopilot, as below.
+**Autopilot is optional.** It's dl's own open-source agent, listed first as the recommendation. dl downloads it the first time you pick it (or run `dl autopilot`) into `~/.directionallylocal/autopilot`, and `dl update` keeps it on the version dl pins. Background tasks, servers and GPU boxes still use Autopilot, as below.
 
 Update: `dl update`. It updates `dl` when npm has a newer one, with the same installer you used (the install script or npm, so rerunning `curl -fsSL https://dl.new | sh` still works too; for the install script it runs the copy that shipped in the installed `dl` package, never one downloaded at update time), and makes sure the Autopilot it pins is installed. `dl update --check` only says whether there's a newer `dl`. Every "update dl" hint, Autopilot's included, says `dl update`.
 
