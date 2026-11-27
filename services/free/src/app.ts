@@ -1461,7 +1461,7 @@ function refusalLimitName(allowance: Allowance, reason: "tokens" | "spend", fami
 function openModelsUsedUp(allowance: Allowance): boolean {
   const budget = allowance.budgets.deepseek;
   const pool = allowance.pools.deepseek;
-  return (budget.usdPerWeek !== null && budget.spentUsd >= budget.usdPerWeek) || (pool.tokensPerWeek !== null && (pool.remaining ?? 1) <= 0);
+  return (budget.usdPerWeek !== null && budget.usdPerWeek > 0 && budget.spentUsd >= budget.usdPerWeek) || (pool.tokensPerWeek !== null && (pool.remaining ?? 1) <= 0);
 }
 
 /** The prompt for an account page or `dl status`: free (not on the trial, not an admin), its open models used up, Pro offered. */

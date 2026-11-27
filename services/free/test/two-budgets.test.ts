@@ -268,3 +268,26 @@ describe("POST /admin/reset-week", () => {
     assert.equal((await service.request("POST", "/admin/reset-week", { token, body: {} })).status, 403, "admins only");
   });
 });
+
+describe("two weekly budgets: a zero budget is off, not spent", () => {
+  it("keeps the account's remaining and the open-models state while GPT-6 is off", async () => {
+    const { service, token } = await member({ PER_PERSON_WEEKLY_USD_CAP: "0", DEEPSEEK_WEEKLY_USD_CAP: "8" });
+    service.setOpenRouter(() => completion(usage(1000, 100, 0, 0.01)));
+    const body = (await me(service, token)) as Record<string, any>;
+    assert.equal(body.allowance.budgets.gpt6.usdPerWeek, 0);
+    assert.equal(body.allowance.budgets.deepseek.usdPerWeek, 8);
+    assert.ok((body.allowance.remaining ?? 0) > 0, "a family that is off must not zero remaining");
+    assert.equal(body.proPrompt, null, "no Pro prompt while DeepSeek has room");
+    assert.equal((await chat(service, token, DEEPSEEK)).status, 200, "DeepSeek still serves");
+    assert.ok((await chat(service, token, LUNA)).status >= 400, "GPT-6 stays refused with a zero budget");
+  });
+
+  it("still reads a spent non-zero budget as used up", async () => {
+    const { service, token } = await member({ PER_PERSON_WEEKLY_USD_CAP: "0", DEEPSEEK_WEEKLY_USD_CAP: "1" });
+    service.setOpenRouter(() => completion(usage(1000, 100, 0, 5)));
+    assert.equal((await chat(service, token, DEEPSEEK)).status, 200);
+    const body = (await me(service, token)) as Record<string, any>;
+    assert.ok(body.allowance.budgets.deepseek.spentUsd >= 1);
+    assert.ok(body.proPrompt, "a spent open-models budget still counts as used up");
+  });
+});

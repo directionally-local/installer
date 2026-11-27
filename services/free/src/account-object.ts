@@ -1626,7 +1626,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
     const family = familyOfPool(pool);
     const budgets = scaleBudgets(this.#budgets(row, now, limits, pro, bonus, unscaled.luna.tokensPerWeek), share);
     const { usdPerWeek, spentUsd: spent } = budgets[family];
-    const spendLeft = usdPerWeek === null || spent < usdPerWeek;
+    // A zero budget means the family is off, not spent: it must not zero the account's remaining
+    // (GPT-6's per-person cap is 0 while free accounts still have DeepSeek room). reserve() still
+    // refuses that family's own requests.
+    const spendLeft = usdPerWeek === null || usdPerWeek <= 0 || spent < usdPerWeek;
     const trial = scaleTrial(this.#trial(row, limits), share);
     // On the free plan the trial is a limit like the week's: `remaining` is the smaller of the two.
     const own = row && spendLeft ? mine.remaining : 0;
