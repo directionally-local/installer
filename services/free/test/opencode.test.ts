@@ -101,7 +101,7 @@ describe("OpenCode harness keys", () => {
     assert.equal(expired.status, 401);
     const error = await apiError(expired);
     assert.equal(error.code, "invalid_harness_key");
-    assert.equal(error.message, "This dl opencode session key has expired. Quit OpenCode and run dl opencode again.");
+    assert.equal(error.message, "This dl opencode session's key has expired. Quit OpenCode and run dl opencode again.");
   });
 
   it("are refused while the kill switch is off, at minting and on requests, with nothing sent upstream", async () => {
@@ -184,7 +184,7 @@ describe("Claude Code alongside OpenCode", () => {
     const messages = await service.request("POST", "/anthropic/v1/messages", { token: key, body: { model: "claude-sonnet-4-5", max_tokens: 10, messages: [{ role: "user", content: "x" }] } });
     assert.equal(messages.status, 200);
     const expired = await service.request("POST", "/anthropic/v1/messages", { token: key.replace(/.$/, (last) => (last === "a" ? "b" : "a")), body: { model: "x", max_tokens: 10, messages: [{ role: "user", content: "x" }] } });
-    assert.match(((await expired.json()) as { error: { message: string } }).error.message, /^This dl claude session key has expired\. Quit Claude Code and run dl claude again\.$/);
+    assert.match(((await expired.json()) as { error: { message: string } }).error.message, /^This dl claude session's key has expired\. Quit Claude Code and run dl claude again\.$/);
   });
 });
 

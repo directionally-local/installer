@@ -5,6 +5,7 @@ import { ADMIN_ID, completion, createInvite, createService, luminalUsage, MODEL,
 import { costAtPrices, type Usage } from "../src/quota.js";
 import { creditAlert, crossed } from "../src/alerts.js";
 import { readFreeConfig } from "../src/config.js";
+import { harnessKeyExpiredMessage } from "../src/messages.js";
 import { creditForecast, shouldQueue } from "../src/queue.js";
 import { hasContent } from "../src/sse.js";
 
@@ -160,15 +161,24 @@ describe("Luminal errors (no automatic fallback)", () => {
     assert.equal(service.calls.openRouter.length, 0);
   });
 
-  it("keeps 'free tier' out of the 503 a paid/admin key receives", async () => {
-    const { service, adminToken } = await member();
+  it("keeps paid and admin keys' upstream errors free of free-tier wording", async () => {
+    const { service, token, adminToken } = await member();
+    // Alice on Pro: a paying key, not a free one.
+    await service.account(100).applySubscription({ subscriptionId: "sub_paid", state: "active", periodEnd: Date.now() + 30 * 86_400_000, eventAt: 1 });
+
+    service.setLuminal(() => new Response(JSON.stringify({ error: { message: "rate limit" } }), { status: 429, headers: { "retry-after": "1" } }));
+    const busy = await errorOf(await chat(service, token));
+    assert.equal(busy.message, "Our model provider is busy right now; retrying…");
+
     service.setLuminal(() => new Response("bad gateway", { status: 502 }));
-    const response = await chat(service, adminToken);
-    assert.equal(response.status, 503);
-    const error = await errorOf(response);
-    assert.equal(error.code, "upstream_unavailable");
-    assert.equal(error.message, "Our model provider is having trouble right now; retrying…");
-    assert.equal(JSON.stringify(error).includes("free tier"), false);
+    const paid = await errorOf(await chat(service, token));
+    const admin = await errorOf(await chat(service, adminToken));
+    assert.equal(paid.message, "Our model provider is having trouble right now; retrying…");
+    assert.equal(admin.message, paid.message);
+
+    for (const message of [busy.message, paid.message, admin.message, harnessKeyExpiredMessage("claude-code")]) {
+      assert.doesNotMatch(message, /free tier/i, "paying users never read 'free tier'");
+    }
   });
 
   it("answers 503 upstream_timeout when nothing arrives before the first-byte timeout", async () => {

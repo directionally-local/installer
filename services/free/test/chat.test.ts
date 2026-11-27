@@ -266,7 +266,7 @@ describe("chat completions", () => {
     const listed = ((await (await service.request("GET", "/v1/models", { token })).json()) as { data: Array<{ id: string }> }).data.map((model) => model.id);
     const error = ((await (await chat(service, token, { model: "openai/gpt-5" })).json()) as { error: { message: string; allowed: string[] } }).error;
     assert.deepEqual(error.allowed, listed);
-    assert.equal(error.message, `The free tier serves ${listed.join(", ")} only.`);
+    assert.equal(error.message, `This key serves ${listed.join(", ")} only.`);
   });
 
   it("rate-limits each person to 60 requests a minute", async () => {

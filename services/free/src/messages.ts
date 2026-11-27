@@ -174,9 +174,9 @@ export const HARNESS_WORDS: Readonly<Record<Harness, { product: string; command:
 
 /** A harness key that expired, was revoked, or whose sign-in ended (401 invalid_harness_key). */
 export function harnessKeyExpiredMessage(harness?: Harness): string {
-  if (!harness) return "This dl session key has expired. Quit the tool and run it from dl again (dl claude, dl opencode, dl pi, dl codex).";
+  if (!harness) return "This dl session's key has expired. Quit the tool and run it from dl again (dl claude, dl opencode, dl pi, dl codex).";
   const { product, command } = HARNESS_WORDS[harness];
-  return `This ${command} session key has expired. Quit ${product} and run ${command} again.`;
+  return `This ${command} session's key has expired. Quit ${product} and run ${command} again.`;
 }
 
 /** Claude Code's: what `dl claude` users have always seen. */
