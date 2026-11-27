@@ -6,7 +6,7 @@ import { platform } from "node:os";
 import { delimiter, join } from "node:path";
 import { findAutopilot, type AutopilotCommand } from "./autopilot.js";
 import { freeTierAccessToken, type FreeTierToken } from "./free-tier-token.js";
-import { browserSignIn, readDlKey, type DlKey } from "./dl-key.js";
+import { browserSignIn, dlKeyPlan, readDlKey, type DlKey } from "./dl-key.js";
 import { palette } from "../ui.js";
 import { oneLine } from "./printable.js";
 import { telemetryOff } from "./telemetry.js";
@@ -82,8 +82,11 @@ export interface HarnessLaunch {
    * starts (the key is revoked). `sessionId` is the one dl's session events carry; `cleanup`
    * runs once the agent has exited (temporary files). `models` is the one line naming the plan's
    * models in this agent and how to switch (plan-models.ts), shown at a terminal before it starts.
+   * `plan()` is the account's plan for model labels (GET /v1/me, once, memoized): call it alongside
+   * the agent's own model fetch so a slow /v1/me doesn't add its timeout; agents that don't label
+   * models never call it, so no request is made for them.
    */
-  prepare: (input: { env: Env; args: string[]; origin: string; key: string; keys: Partial<Record<Harness, string>>; binary: string; sessionId: string }) => Promise<
+  prepare: (input: { env: Env; args: string[]; origin: string; key: string; keys: Partial<Record<Harness, string>>; binary: string; sessionId: string; plan: () => Promise<string | null> }) => Promise<
     | { env: Env; args: string[]; removed: string[]; notes?: string[]; models?: string; cleanup?: () => Promise<void> }
     | { error: string }
   >;
@@ -249,6 +252,12 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
   }
   const origin = dlKey ? dlKey.baseUrl : (token as Extract<FreeTierToken, { ok: true }>).origin;
 
+  // dl's own key names its plan in every picker, read fresh from /v1/me so an upgrade is followed;
+  // the saved plan is the fallback, and an older Autopilot free tier sign-in is Free. Asked for only
+  // by the agents that label models (prepare calls it next to its model fetch), at most once.
+  let planRead: Promise<string | null> | undefined;
+  const plan = () => (planRead ??= dlKey ? dlKeyPlan(dlKey, { fetch: call }).then((fresh) => fresh ?? dlKey!.plan ?? null) : Promise.resolve(null));
+
   // The harness keys: the agent's, then one for each agent it starts itself. A dl key is a key
   // already: every agent uses it, with nothing to make, refresh or revoke.
   const minted: MintedKey[] = [];
@@ -274,7 +283,7 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
   // One session per harness key (so per agent): `dl claude` has one, `dl t3` one for each agent
   // T3 runs. A dl key's requests are the account's own: no session events.
   const sessions = minted.map((one) => ({ ...one, id: minted.length === 1 ? `${spec.sessionPrefix}-${randomUUID()}` : `${spec.sessionPrefix}-${one.harness}-${randomUUID()}`, count: 0 }));
-  const prepared = await spec.prepare({ env, args, origin, key, keys, binary, sessionId: sessions[0]?.id ?? `${spec.sessionPrefix}-${randomUUID()}` });
+  const prepared = await spec.prepare({ env, args, origin, key, keys, binary, plan, sessionId: sessions[0]?.id ?? `${spec.sessionPrefix}-${randomUUID()}` });
   if ("error" in prepared) {
     io.err(`  ${prepared.error}\n`);
     await cleanup(revokeAll());

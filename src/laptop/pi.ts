@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
 import { DEFAULT_MODEL, freeTierModels, type FreeTierModel } from "./opencode.js";
-import { planModelName, planModelsLine, planOrder } from "./plan-models.js";
+import { planModelLabel, planModelsLine, planOrder } from "./plan-models.js";
 
 /**
  * `dl pi [pi args...]`: the person's own Pi (github.com/earendil-works/pi, npm
@@ -72,9 +72,9 @@ export const PI_COMPAT = {
 } as const;
 
 /** The provider Pi gets (Pi's legacy `ProviderConfig` shape for `pi.registerProvider`). */
-export function piProvider(input: { origin: string; models: readonly FreeTierModel[] }): Record<string, unknown> {
+export function piProvider(input: { origin: string; models: readonly FreeTierModel[]; plan?: string | null }): Record<string, unknown> {
   return {
-    name: "dl free tier",
+    name: PROVIDER_ID,
     baseUrl: `${input.origin}/v1`,
     apiKey: `$${KEY_ENV}`,
     api: "openai-completions",
@@ -82,7 +82,7 @@ export function piProvider(input: { origin: string; models: readonly FreeTierMod
     models: input.models.map((model) => ({
       type: "chat",
       id: model.id,
-      name: model.name,
+      name: planModelLabel(model, input.plan),
       reasoning: REASONING(model.id),
       input: model.vision ? ["text", "image"] : ["text"],
       // Free tokens: Pi shows no dollar cost.
@@ -95,7 +95,7 @@ export function piProvider(input: { origin: string; models: readonly FreeTierMod
 }
 
 /** The extension file's text: plain JavaScript, so it needs nothing imported. */
-export function piExtension(input: { origin: string; models: readonly FreeTierModel[] }): string {
+export function piExtension(input: { origin: string; models: readonly FreeTierModel[]; plan?: string | null }): string {
   return `// Written by dl pi for one run of Pi on dl's free tier; removed when Pi exits. No key in here.\nexport default function (pi) {\n  pi.registerProvider(${JSON.stringify(PROVIDER_ID)}, ${JSON.stringify(piProvider(input), null, 2).replace(/\n/g, "\n  ")});\n}\n`;
 }
 
@@ -121,8 +121,8 @@ export function piEnv(parent: Env, key: string): Env {
 }
 
 /** The line after dl pi sets up Pi: the plan's models, under the dl provider in /model. */
-export function piModelsLine(models: readonly FreeTierModel[]): string {
-  return planModelsLine(planOrder(models).map(planModelName), "switch with /model");
+export function piModelsLine(models: readonly FreeTierModel[], plan: string | null = null): string {
+  return planModelsLine(planOrder(models).map((model) => planModelLabel(model, plan)), "switch with /model");
 }
 
 export interface PiDeps extends LaunchDeps {
@@ -139,16 +139,16 @@ export function piLaunch(deps: PiDeps = {}): HarnessLaunch {
     sessionPrefix: "dl-pi",
     missing: `${PI_INSTALL_NPM}\n\n  or: ${PI_INSTALL}`,
     binaries: { posix: ["pi"], win32: ["pi.cmd", "pi.exe", "pi"] },
-    prepare: async ({ env, args, origin, key }) => {
-      const models = await freeTierModels(call, origin, key);
+    prepare: async ({ env, args, origin, key, plan: planPromise }) => {
+      const [models, plan] = await Promise.all([freeTierModels(call, origin, key), planPromise()]);
       const dir = await mkdtemp(join(deps.tmp ?? tmpdir(), "dl-pi-"));
       const file = join(dir, EXTENSION_FILE);
-      await writeFile(file, piExtension({ origin, models }), { mode: 0o600 });
+      await writeFile(file, piExtension({ origin, models, plan }), { mode: 0o600 });
       return {
         env: piEnv(env, key),
         args: piArgs(args, file, models),
         removed: [],
-        models: piModelsLine(models),
+        models: piModelsLine(models, plan),
         cleanup: () => rm(dir, { recursive: true, force: true }),
       };
     },

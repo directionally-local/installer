@@ -2,7 +2,7 @@ import { platform } from "node:os";
 import { claudeSettingsRefusal } from "./claude-settings.js";
 import { launchHarness, onPath, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
 import { FREE_TIER_MODELS, freeTierModels, type FreeTierModel } from "./opencode.js";
-import { hasKimi, KIMI_MODEL, planModelName, planModelsLine } from "./plan-models.js";
+import { hasKimi, KIMI_MODEL, planModelLabel, planModelsLine } from "./plan-models.js";
 
 /**
  * `dl claude [claude args...]`: the person's own Claude Code on the dl plan: DeepSeek, and Kimi K3.1
@@ -60,6 +60,8 @@ export const CONFLICTING_ENV = [
   "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION",
   "ANTHROPIC_DEFAULT_FABLE_MODEL",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION",
   "ANTHROPIC_SMALL_FAST_MODEL",
   "ANTHROPIC_CUSTOM_HEADERS",
   "CLAUDE_CODE_SUBAGENT_MODEL",
@@ -93,12 +95,17 @@ export async function claudeOnPath(env: Env = process.env): Promise<string | und
  * the names it left out too, so dl can say so once.
  *
  * `models` is what the key may use (its /v1/models). With Kimi K3.1 there (Plus, Max), Opus is
- * Kimi and Sonnet, Haiku and background work DeepSeek, so Claude Code's own /model picker switches
- * between them, each row named for its model (the _NAME/_DESCRIPTION variables Claude Code reads
- * when ANTHROPIC_BASE_URL is a gateway); Claude Code starts on Sonnet (DeepSeek). Without Kimi,
- * every role is DeepSeek, as before. Subagents stay on DeepSeek either way.
+ * Kimi and every other role DeepSeek, so Claude Code's own /model picker switches between them,
+ * each row named for its model (the _NAME/_DESCRIPTION variables Claude Code reads when
+ * ANTHROPIC_BASE_URL is a gateway); `plan` names the plan in those labels. Without Kimi, every
+ * role (Fable included) is DeepSeek. Claude Code's duplicate-row check compares each row's
+ * `value`, which for a family override is the role alias ("opus", "sonnet", "haiku", "fable"),
+ * not the model id: the four rows never collapse, so on Free each description says which role
+ * it is and that they are all the same model. `ANTHROPIC_DEFAULT_MODEL` is the picker's Default
+ * row: set it explicitly, or Claude Code can show the Opus (Kimi) model there. Subagents stay on
+ * DeepSeek.
  */
-export function claudeEnv(parent: Env, input: { origin: string; key: string; models?: readonly FreeTierModel[] }): { env: Env; removed: string[] } {
+export function claudeEnv(parent: Env, input: { origin: string; key: string; models?: readonly FreeTierModel[]; plan?: string | null }): { env: Env; removed: string[] } {
   const env: Env = { ...parent };
   const removed: string[] = [];
   for (const name of CONFLICTING_ENV) {
@@ -106,22 +113,34 @@ export function claudeEnv(parent: Env, input: { origin: string; key: string; mod
     delete env[name];
   }
   const kimi = hasKimi(input.models ?? FREE_TIER_MODELS);
-  const deepseek = planModelName({ id: CLAUDE_MODEL });
+  const plan = input.plan ?? null;
+  const deepseek = planModelLabel({ id: CLAUDE_MODEL }, plan);
+  const kimiLabel = planModelLabel({ id: CLAUDE_OPUS_KIMI }, plan);
+  // Claude Code keeps every family row (its duplicate check uses the role alias as the value),
+  // so each description names its role; on Free all four say they are the same DeepSeek model.
+  const sameOnFree = (role: string) => `On your dl plan · ${role}: the same DeepSeek model on every Free row`;
   Object.assign(env, {
     ANTHROPIC_BASE_URL: `${input.origin}/anthropic`,
     // Sent as `Authorization: Bearer`; unlike ANTHROPIC_API_KEY it needs no approval prompt.
     ANTHROPIC_AUTH_TOKEN: input.key,
-    // With Kimi, the alias: Claude Code starts on Sonnet (DeepSeek) and /model moves to Opus (Kimi).
-    ANTHROPIC_MODEL: kimi ? "sonnet" : CLAUDE_MODEL,
+    // DeepSeek on every plan; on Plus/Max /model moves to Opus (Kimi) explicitly.
+    ANTHROPIC_MODEL: CLAUDE_MODEL,
+    // The Default row. Without it Claude Code may show Opus's model (Kimi on Plus/Max) as the default.
+    ANTHROPIC_DEFAULT_MODEL: CLAUDE_MODEL,
     ANTHROPIC_DEFAULT_OPUS_MODEL: kimi ? CLAUDE_OPUS_KIMI : CLAUDE_MODEL,
-    ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: kimi ? planModelName({ id: CLAUDE_OPUS_KIMI }) : deepseek,
-    ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION: kimi ? "On your dl plan · the stronger model, with a smaller weekly limit" : "On your dl plan",
+    ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: kimi ? kimiLabel : deepseek,
+    ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION: kimi ? "On your dl plan · Opus: Kimi K3.1, the stronger model, with a smaller weekly limit" : sameOnFree("Opus"),
     ANTHROPIC_DEFAULT_SONNET_MODEL: CLAUDE_MODEL,
     ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: deepseek,
-    ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION: kimi ? "On your dl plan · fast, with the larger weekly limit" : "On your dl plan",
+    ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION: kimi ? "On your dl plan · Sonnet: DeepSeek V4.1 Flash, with the larger weekly limit" : sameOnFree("Sonnet"),
     ANTHROPIC_DEFAULT_HAIKU_MODEL: CLAUDE_MODEL,
     ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: deepseek,
-    ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION: "On your dl plan",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION: kimi ? "On your dl plan · Haiku: DeepSeek V4.1 Flash, same as Sonnet and Fable" : sameOnFree("Haiku"),
+    // Fable: DeepSeek like Sonnet and Haiku (only Opus is Kimi on Plus/Max). Claude Code 2.1.332
+    // reads these three names; without them its own Fable row ("Fable 5.2 · $8/$40 per Mtok") stays.
+    ANTHROPIC_DEFAULT_FABLE_MODEL: CLAUDE_MODEL,
+    ANTHROPIC_DEFAULT_FABLE_MODEL_NAME: deepseek,
+    ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION: kimi ? "On your dl plan · Fable: DeepSeek V4.1 Flash, same as Sonnet and Haiku" : sameOnFree("Fable"),
     // Older Claude Code versions read this one for background tasks.
     ANTHROPIC_SMALL_FAST_MODEL: CLAUDE_MODEL,
     CLAUDE_CODE_SUBAGENT_MODEL: CLAUDE_MODEL,
@@ -136,9 +155,10 @@ export function claudeEnv(parent: Env, input: { origin: string; key: string; mod
 }
 
 /** The line after dl claude sets up Claude Code: which plan model each /model row is. */
-export function claudeModelsLine(models: readonly FreeTierModel[]): string {
-  if (!hasKimi(models)) return planModelsLine([planModelName({ id: CLAUDE_MODEL })]);
-  return planModelsLine([`${planModelName({ id: CLAUDE_MODEL })} (Sonnet)`, `${planModelName({ id: CLAUDE_OPUS_KIMI })} (Opus)`], "switch with /model");
+export function claudeModelsLine(models: readonly FreeTierModel[], plan: string | null = null): string {
+  const deepseek = planModelLabel({ id: CLAUDE_MODEL }, plan);
+  if (!hasKimi(models)) return planModelsLine([deepseek]);
+  return planModelsLine([`${deepseek} as Sonnet`, `${planModelLabel({ id: CLAUDE_OPUS_KIMI }, plan)} as Opus`], "switch with /model");
 }
 
 /**
@@ -165,10 +185,11 @@ export function claudeLaunch(deps: LaunchDeps = {}): HarnessLaunch {
     binaries: BINARIES,
     stdoutDiagnostics: { prefix: UNRECOGNIZED_MODEL_PREFIX, when: claudePrintMode },
     check: (_args, { env, cwd }) => claudeSettingsRefusal("dl claude", "dl's free tier", { env, cwd }),
-    prepare: async ({ env, args, origin, key }) => {
+    prepare: async ({ env, args, origin, key, plan: planPromise }) => {
       // A claude-code harness key (the old free tier sign-in) can't list models: DeepSeek only then.
-      const models = key.startsWith("dlh_") ? FREE_TIER_MODELS : await freeTierModels(call, origin, key);
-      return { ...claudeEnv(env, { origin, key, models }), args, models: claudeModelsLine(models) };
+      // /v1/me's plan is already in flight; wait for both together.
+      const [models, plan] = await Promise.all([key.startsWith("dlh_") ? FREE_TIER_MODELS : freeTierModels(call, origin, key), planPromise()]);
+      return { ...claudeEnv(env, { origin, key, models, plan }), args, models: claudeModelsLine(models, plan) };
     },
   };
 }

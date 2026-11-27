@@ -174,9 +174,17 @@ account. Every argument after `claude` goes to it unchanged (`dl claude -p "fix 
   Claude Code gets your whole Pro allowance; top-ups work as in any other agent.
 - **Your settings stay yours:** nothing under `~/.claude` is read or changed. For this run only,
   Claude Code gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`,
-  `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
-  `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`,
+  `ANTHROPIC_DEFAULT_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`,
+  `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`,
+  `ANTHROPIC_DEFAULT_FABLE_MODEL` (each with its `_NAME` and `_DESCRIPTION`),
+  `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`,
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`.
+  Every `/model` row is named `dl / <Model> (<Plan>)` (for example
+  `dl / DeepSeek V4.1 Flash (Free)`); on Free all four family rows are the same DeepSeek model,
+  and each description says which role it is and that they are the same model (Claude Code keys
+  its duplicate-row check on the role alias, so they don't collapse). Claude Code orders its own
+  rows and reads no ordering variable from dl; the Default row's description is Claude Code's own
+  (it names the model dl sets there).
   Your own `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` and similar variables are left out of
   Claude Code's environment for that run, and dl says which. A settings file's `env` block or
   `apiKeyHelper` would win over them, so before it starts, dl reads (never writes)
@@ -386,15 +394,19 @@ server or tmux), `dl t3 ./my-project` starts in that folder.
   count as that agent's, on the same full weekly allowance as `dl claude` and
   `dl opencode`. Free tokens stop working in T3 Code when `dl t3` stops.
 - **Picking the model:** for OpenCode, pick a `dl/…` model in T3 Code's model picker
-  (`dl/deepseek/deepseek-v4.1-flash-1017`). For Claude Code, T3 Code still shows Claude models;
-  whichever you pick, the free tier serves it with DeepSeek.
+  (`dl/deepseek/deepseek-v4.1-flash-1017`). T3 Code's Claude picker names its rows
+  `dl / <Model> (<Plan>)` too (`dl / DeepSeek V4.1 Flash (Free)`, or `dl / Kimi K3.1 (Plus)` for
+  Opus on Plus and Max); whichever row you pick, the free tier serves it with that model.
 - **OpenCode is off in new T3 Code installs:** at a terminal, `dl t3` asks before turning it on in
-  `~/.t3/userdata/settings.json` (only `providerInstances.opencode` changes, and the first change
-  keeps a `.dl-backup`). Without a terminal it leaves the file alone unless you pass
-  `--dl-enable-opencode` (dl takes that flag out; `t3` never sees it). Or turn it on yourself in
-  **Settings → Providers**. Leave its **Server URL** empty, so T3 Code starts OpenCode itself with
-  dl's settings.
-- **Your settings stay yours:** apart from that one setting, no T3 Code, Claude Code or OpenCode
+  `~/.t3/userdata/settings.json` (the first change keeps a `.dl-backup`). Without a terminal it
+  leaves the file alone unless you pass `--dl-enable-opencode` (dl takes that flag out; `t3` never
+  sees it). Or turn it on yourself in **Settings → Providers**. Leave its **Server URL** empty, so
+  T3 Code starts OpenCode itself with dl's settings. T3 Code's picker lists its own Claude names
+  and does not read the `ANTHROPIC_DEFAULT_*_MODEL_NAME` variables, so dl renames the catalog
+  models through `providerInstances.claudeAgent.config.customModels` **for the run only**, without
+  asking (nothing permanent): it puts the person's `customModels` back when `dl t3` stops, and
+  removes names a crashed run left. Only turning OpenCode on is asked about.
+- **Your settings stay yours:** apart from those settings, no T3 Code, Claude Code or OpenCode
   file is changed. T3 Code gets the environment variables `dl claude` and `dl opencode` give those
   agents, for this run only. Environment variables you set on a provider instance in T3 Code's settings win over
   dl's for that instance.

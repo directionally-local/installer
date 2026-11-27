@@ -13,12 +13,15 @@ import {
   opencodeArgs,
   opencodeCommand,
   opencodeConfig,
+  PROVIDER_NAME,
   type OpencodeDeps,
 } from "./opencode.js";
 import { main } from "../cli.js";
+import { KIMI_MODEL } from "./plan-models.js";
 
 const ORIGIN = "https://free.test";
 const KEY = `dlh_100_abcdefabcdef_${"s".repeat(43)}`;
+const KIMI = { id: KIMI_MODEL, name: "Kimi K3.1 Pro", contextWindow: 1_048_576, maxOutputTokens: 131_072, vision: true };
 
 function capture() {
   let out = "";
@@ -119,7 +122,7 @@ describe("dl opencode", () => {
     const mintBody = { id: "abcdefabcdef", key: KEY, harness: "opencode", expiresAt: "x", ttlSeconds: 900, otherHarnessShare: 0.5 };
     const shown = capture();
     assert.equal(await opencodeCommand([], shown.io, deps({ fetch: fakeService({ mintBody }).fetch, spawn: fakeSpawn().spawn, terminal: true })), 0);
-    assert.equal(shown.err(), "  \x1b[2mModel on your plan: DeepSeek V4.1 Flash\x1b[22m\n  \x1b[2mFree tokens: this agent gets 50% of your weekly free allowance.\x1b[22m\n");
+    assert.equal(shown.err(), "  \x1b[2mModel on your plan: dl / DeepSeek V4.1 Flash (Free)\x1b[22m\n  \x1b[2mFree tokens: this agent gets 50% of your weekly free allowance.\x1b[22m\n");
     const piped = capture();
     assert.equal(await opencodeCommand([], piped.io, deps({ fetch: fakeService({ mintBody }).fetch, spawn: fakeSpawn().spawn })), 0);
     assert.equal(piped.err(), "");
@@ -163,6 +166,21 @@ describe("dl opencode", () => {
     const child = fakeSpawn();
     await opencodeCommand([], capture().io, deps({ fetch: fakeService({ models: new Response("nope", { status: 500 }) }).fetch, spawn: child.spawn }));
     assert.deepEqual(Object.keys(configOf(child.started[0]!.options).provider.dl.models), FREE_TIER_MODELS.map((model) => model.id));
+  });
+
+  it("names the dl key's plan in the provider's models", async () => {
+    const child = fakeSpawn();
+    const deepseek = FREE_TIER_MODELS[0]!;
+    const service = fakeService({ models: Response.json({ object: "list", data: [deepseek, KIMI].map((model) => ({ id: model.id, name: model.name, context_window: model.contextWindow, max_output_tokens: model.maxOutputTokens, vision: model.vision })) }) });
+    await opencodeCommand([], capture().io, deps({
+      dlKey: async () => ({ key: "dl_sk_0123456789abcdef", plan: "plus", baseUrl: ORIGIN, anthropicBaseUrl: `${ORIGIN}/anthropic`, savedAt: "" }),
+      fetch: service.fetch,
+      spawn: child.spawn,
+    }));
+    const config = configOf(child.started[0]!.options);
+    assert.equal(config.provider.dl.models[FREE_TIER_MODELS[0]!.id].name, "dl / DeepSeek V4.1 Flash (Plus)");
+    assert.equal(config.provider.dl.models[KIMI_MODEL].name, "dl / Kimi K3.1 (Plus)");
+    assert.equal(config.model, `dl/${FREE_TIER_MODELS[0]!.id}`);
   });
 
   it("prints the official install command and stops when opencode isn't on PATH", async () => {
@@ -238,11 +256,24 @@ describe("OpenCode's config for a run", () => {
     assert.equal(config.model, "dl/deepseek/deepseek-v4.1-flash-1017");
     assert.equal(config.small_model, "dl/deepseek/deepseek-v4.1-flash-1017");
     const provider = (config.provider as Record<string, any>).dl;
+    assert.equal(provider.name, PROVIDER_NAME);
+    assert.equal(provider.name.trim(), "dl", "the heading reads dl");
+    assert.ok(provider.name < "A", "OpenCode 1.19.6 sorts providers by name: dl sorts before every letter- or digit-named provider");
     assert.equal(provider.npm, "@ai-sdk/openai-compatible");
     assert.deepEqual(provider.options, { baseURL: `${ORIGIN}/v1`, apiKey: `{env:${KEY_ENV}}`, includeUsage: true });
-    assert.deepEqual(provider.models["gpt-6-luna"], { name: "GPT-6 Luna", tool_call: true, attachment: true, modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 1_050_000, output: 128_000 } });
-    assert.deepEqual(provider.models["deepseek/deepseek-v4.1-flash-1017"], { name: "DeepSeek V4.1 Flash 1017", tool_call: true, attachment: false, modalities: { input: ["text"], output: ["text"] }, limit: { context: 1_048_576, output: 65_536 } });
+    assert.deepEqual(provider.models["gpt-6-luna"], { name: "dl / GPT-6 Luna (Free)", tool_call: true, attachment: true, modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 1_050_000, output: 128_000 } });
+    assert.deepEqual(provider.models["deepseek/deepseek-v4.1-flash-1017"], { name: "dl / DeepSeek V4.1 Flash (Free)", tool_call: true, attachment: false, modalities: { input: ["text"], output: ["text"] }, limit: { context: 1_048_576, output: 65_536 } });
     assert.deepEqual(Object.keys(provider.models), ["gpt-6-luna", "deepseek/deepseek-v4.1-flash-1017"]);
+  });
+
+  it("names the plan in the provider's models, and never touches the person's own providers", () => {
+    const config = opencodeConfig({ origin: ORIGIN, models: [LUNA, ...FREE_TIER_MODELS], plan: "plus" });
+    const provider = (config.provider as Record<string, any>).dl;
+    assert.equal(provider.models[FREE_TIER_MODELS[0]!.id].name, "dl / DeepSeek V4.1 Flash (Plus)");
+    assert.equal(provider.models["gpt-6-luna"].name, "dl / GPT-6 Luna (Plus)");
+    // Only dl's provider and top-level default/small model are set; no enabled/disabled lists.
+    assert.deepEqual(Object.keys(config), ["$schema", "model", "small_model", "provider"]);
+    assert.doesNotMatch(JSON.stringify(config), /disabled_providers|enabled_providers/);
   });
 
   it("falls back to the first model when DeepSeek isn't listed", () => {

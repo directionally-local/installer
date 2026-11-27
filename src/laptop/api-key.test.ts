@@ -168,7 +168,7 @@ describe("an update from dl 0.47: the Autopilot free tier sign-in becomes dl's k
       assert.equal(fake.calls[0]!.url, "https://free.directionallylocal.com/v1/keys", "made at the sign-in's own service");
       const saved = await readDlKey({}, path);
       assert.equal(saved?.key, KEY);
-      assert.equal(saved?.source, "free-tier");
+      assert.equal(saved && "source" in saved, false, "no tag: every dl key behaves alike in Autopilot");
       assert.equal(saved?.baseUrl, "https://api.dl.new");
       assert.equal(saved?.anthropicBaseUrl, "https://api.dl.new/anthropic");
       assert.equal((await stat(path)).mode & 0o777, 0o600);

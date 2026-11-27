@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { FREE_TIER_MODELS, KEY_ENV } from "./opencode.js";
 import { REFRESH_EVERY_MS, SESSION_EVENT_EVERY_MS, type LaunchDeps } from "./harness-launch.js";
-import { T3_INSTALL, enableT3OpenCode, t3Command, t3Env, t3Refusal, t3SettingsPath, type T3Deps } from "./t3.js";
+import { T3_INSTALL, enableT3OpenCode, t3Command, t3Env, t3Refusal, t3SettingsPath, type T3Deps, type T3SettingsRun } from "./t3.js";
 import { main } from "../cli.js";
 
 const ORIGIN = "https://free.test";
@@ -16,6 +16,17 @@ const CLAUDE_KEY = `dlh_100_cccccccccccc_${"c".repeat(43)}`;
 const OPENCODE_KEY = `dlh_100_oooooooooooo_${"o".repeat(43)}`;
 const IDS = { "claude-code": "cccccccccccc", opencode: "oooooooooooo" } as const;
 const KEYS = { "claude-code": CLAUDE_KEY, opencode: OPENCODE_KEY } as const;
+const FREE_NAMES = [
+  { slug: "claude-opus-5-5", name: "dl / DeepSeek V4.1 Flash (Free)" },
+  { slug: "claude-sonnet-5-5", name: "dl / DeepSeek V4.1 Flash (Free)" },
+  { slug: "claude-fable-5-2", name: "dl / DeepSeek V4.1 Flash (Free)" },
+  { slug: "claude-haiku-5-5", name: "dl / DeepSeek V4.1 Flash (Free)" },
+];
+const claudeInstance = (customModels: unknown) => ({ driver: "claudeAgent", config: { customModels } });
+const runOf = (run: T3SettingsRun | { error: string }): T3SettingsRun => {
+  assert.ok(!("error" in run), "no settings error");
+  return run as T3SettingsRun;
+};
 
 function capture() {
   let out = "";
@@ -257,8 +268,12 @@ describe("T3 Code's environment and arguments", () => {
     assert.equal(env.ANTHROPIC_BASE_URL, `${ORIGIN}/anthropic`);
     assert.equal(env.ANTHROPIC_AUTH_TOKEN, "ck");
     assert.equal(env.ANTHROPIC_MODEL, "deepseek/deepseek-v4.1-flash-1017");
+    assert.equal(env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME, "dl / DeepSeek V4.1 Flash (Free)");
     assert.equal(env[KEY_ENV], "ok");
-    assert.equal(JSON.parse(env.OPENCODE_CONFIG_CONTENT!).model, "dl/deepseek/deepseek-v4.1-flash-1017");
+    const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT!);
+    assert.equal(config.model, "dl/deepseek/deepseek-v4.1-flash-1017");
+    assert.equal(config.provider.dl.name.trim(), "dl");
+    assert.equal(config.provider.dl.models["deepseek/deepseek-v4.1-flash-1017"].name, "dl / DeepSeek V4.1 Flash (Free)");
   });
 
   it("lets server-starting commands through and names the others", () => {
@@ -279,33 +294,105 @@ describe("dl t3 turns on T3 Code's OpenCode", () => {
     const { io, err } = capture();
     const asked: string[] = [];
     const confirm = async (question: string) => { asked.push(question); return true; };
-    assert.equal(await t3Command(["serve"], io, deps({ fetch: service.fetch, spawn: fakeSpawn().spawn, t3Settings: undefined, env: { PATH: "/usr/bin", HOME: home }, confirm })), 0);
+    let during = "";
+    const spawn = (command: string, args: string[], options: SpawnOptions) => {
+      during = readFileSync(path, "utf8");
+      return fakeSpawn().spawn(command, args, options);
+    };
+    assert.equal(await t3Command(["serve"], io, deps({ fetch: service.fetch, spawn, t3Settings: undefined, env: { PATH: "/usr/bin", HOME: home }, confirm })), 0);
     assert.equal(asked.length, 1);
+    assert.doesNotMatch(asked[0]!, /Claude models|rename/, "only the permanent change is asked about");
+    assert.match(asked[0]!, /providerInstances\.opencode/);
     assert.match(asked[0]!, new RegExp(`${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*Turn it on\\? \\[Y/n\\]`));
+    // During the run T3 Code's picker has dl's names; after it exits they are gone again.
+    assert.deepEqual(JSON.parse(during), { providerInstances: { opencode: { driver: "opencode", enabled: true }, claudeAgent: claudeInstance(FREE_NAMES) } });
     assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { providerInstances: { opencode: { driver: "opencode", enabled: true } } });
     assert.match(err(), /Turned on OpenCode in T3 Code's settings/);
+    assert.match(err(), /named its Claude models for this run without asking/);
     assert.match(err(), /In OpenCode pick a dl\/… model/);
     assert.deepEqual((await readdir(join(home, ".t3", "userdata"))).sort(), ["settings.json"], "nothing to back up");
   });
 
-  it("keeps every other key, backs the file up once, and leaves it alone when it's already on", async () => {
+  it("keeps every other key, backs the file up once, and puts the Claude names back after the run", async () => {
     const dir = join(HOME, "merge");
     await mkdir(dir, { recursive: true });
     const path = join(dir, "settings.json");
     const original = { theme: "dark", providerInstances: { claude: { driver: "claude", enabled: true }, opencode: { driver: "opencode", enabled: false, serverUrl: "" } } };
     await writeFile(path, JSON.stringify(original));
-    assert.deepEqual(await enableT3OpenCode(path), { result: "enabled" });
+    const first = runOf(await enableT3OpenCode(path, { allow: async () => true }));
+    assert.deepEqual(first.result, "enabled");
     assert.deepEqual(JSON.parse(await readFile(path, "utf8")), {
       theme: "dark",
-      providerInstances: { claude: { driver: "claude", enabled: true }, opencode: { driver: "opencode", enabled: true, serverUrl: "" } },
+      providerInstances: {
+        claude: { driver: "claude", enabled: true },
+        opencode: { driver: "opencode", enabled: true, serverUrl: "" },
+        claudeAgent: claudeInstance(FREE_NAMES),
+      },
     });
     assert.deepEqual(JSON.parse(await readFile(`${path}.dl-backup`, "utf8")), original);
-    assert.deepEqual(await enableT3OpenCode(path), { result: "unchanged" });
+    await first.cleanup!();
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), {
+      theme: "dark",
+      providerInstances: {
+        claude: { driver: "claude", enabled: true },
+        opencode: { driver: "opencode", enabled: true, serverUrl: "" },
+      },
+    });
+    // A later run names them again for its own length, then puts them back.
+    const again = runOf(await enableT3OpenCode(path));
+    assert.deepEqual(again.result, "named");
+    assert.equal(JSON.parse(await readFile(path, "utf8")).providerInstances.claudeAgent.config.customModels.length, 4);
+    await again.cleanup!();
+    assert.equal("claudeAgent" in JSON.parse(await readFile(path, "utf8")).providerInstances, false);
     // Turned off again by the person: on again, and the first backup stays.
     await writeFile(path, JSON.stringify({ providerInstances: { opencode: { driver: "opencode", enabled: false } } }));
-    assert.deepEqual(await enableT3OpenCode(path), { result: "enabled" });
+    const third = runOf(await enableT3OpenCode(path, { allow: async () => true }));
+    assert.deepEqual(third.result, "enabled");
+    await third.cleanup!();
     assert.deepEqual(JSON.parse(await readFile(`${path}.dl-backup`, "utf8")), original);
     assert.deepEqual((await readdir(dir)).sort(), ["settings.json", "settings.json.dl-backup"]);
+  });
+
+  it("names dl's Claude models in an existing claudeAgent config, then restores the person's entries exactly", async () => {
+    const dir = join(HOME, "claude-custom");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "settings.json");
+    const mine = "my-model";
+    const kept = { slug: "claude-opus-5", name: "Mine", capabilities: { optionDescriptors: [] } };
+    const original = [mine, kept, "claude-opus-5-5"];
+    await writeFile(path, JSON.stringify({ providerInstances: { claudeAgent: { driver: "claudeAgent", config: { customModels: original, homePath: "/x" } } } }));
+    const plusModels = [...FREE_TIER_MODELS, { id: "moonshotai/kimi-k3.1-pro", name: "Kimi K3.1 Pro", contextWindow: 1_048_576, maxOutputTokens: 131_072, vision: true }];
+    const run = runOf(await enableT3OpenCode(path, { allow: async () => true, models: plusModels, plan: "plus" }));
+    assert.deepEqual(run.result, "enabled");
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(saved.providerInstances.claudeAgent.config.homePath, "/x", "the rest of the instance's config stays");
+    assert.deepEqual(saved.providerInstances.claudeAgent.config.customModels, [
+      mine,
+      kept,
+      { slug: "claude-opus-5-5", name: "dl / Kimi K3.1 (Plus)" },
+      { slug: "claude-sonnet-5-5", name: "dl / DeepSeek V4.1 Flash (Plus)" },
+      { slug: "claude-fable-5-2", name: "dl / DeepSeek V4.1 Flash (Plus)" },
+      { slug: "claude-haiku-5-5", name: "dl / DeepSeek V4.1 Flash (Plus)" },
+    ]);
+    assert.equal(saved.providerInstances.opencode.enabled, true);
+    await run.cleanup!();
+    const restored = JSON.parse(await readFile(path, "utf8"));
+    assert.deepEqual(restored.providerInstances.claudeAgent.config.customModels, original, "the person's own entries come back exactly");
+    assert.equal(restored.providerInstances.claudeAgent.config.homePath, "/x");
+  });
+
+  it("removes dl entries a crashed run left before naming them for this run", async () => {
+    const dir = join(HOME, "crash");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "settings.json");
+    const mine = "my-model";
+    const leftover = { slug: "claude-sonnet-5-5", name: "dl / DeepSeek V4.1 Flash (Free)" };
+    await writeFile(path, JSON.stringify({ providerInstances: { opencode: { driver: "opencode", enabled: true }, claudeAgent: { driver: "claudeAgent", config: { customModels: [mine, leftover] } } } }));
+    const run = runOf(await enableT3OpenCode(path));
+    assert.deepEqual(run.result, "named");
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")).providerInstances.claudeAgent.config.customModels, [mine, ...FREE_NAMES]);
+    await run.cleanup!();
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")).providerInstances.claudeAgent.config.customModels, [mine]);
   });
 
   it("never clobbers a file it can't read as settings; T3 Code still starts, with a note", async () => {
@@ -319,42 +406,53 @@ describe("dl t3 turns on T3 Code's OpenCode", () => {
     assert.equal(await t3Command([], io, deps({ fetch: service.fetch, spawn: child.spawn, t3Settings: path })), 0);
     assert.equal(child.started.length, 1);
     assert.equal(await readFile(path, "utf8"), "{ not json");
-    assert.match(err(), /couldn't turn it on \(.*isn't valid JSON/);
+    assert.match(err(), /couldn't set up its agents \(.*isn't valid JSON/);
     await writeFile(path, JSON.stringify({ providerInstances: [] }));
     assert.match((await enableT3OpenCode(path) as { error: string }).error, /providerInstances .* isn't an object/);
   });
 
-  it("without a terminal or --dl-enable-opencode, leaves the file alone and says how to turn it on", async () => {
+  it("writes the run-only Claude names without a terminal, leaves OpenCode off, and says how to turn it on", async () => {
     const dir = join(HOME, "no-tty");
     const path = join(dir, "settings.json");
     const child = fakeSpawn();
+    let during = "";
+    const spawn = (command: string, args: string[], options: SpawnOptions) => {
+      during = readFileSync(path, "utf8");
+      return child.spawn(command, args, options);
+    };
     const { io, err } = capture();
-    assert.equal(await t3Command(["serve"], io, deps({ fetch: fakeService().fetch, spawn: child.spawn, t3Settings: path })), 0);
+    assert.equal(await t3Command(["serve"], io, deps({ fetch: fakeService().fetch, spawn, t3Settings: path })), 0);
     assert.equal(child.started.length, 1, "T3 Code still starts");
-    await assert.rejects(readFile(path, "utf8"), { code: "ENOENT" });
-    assert.match(err(), /dl left its settings alone[\s\S]*dl t3 --dl-enable-opencode/);
+    assert.deepEqual(JSON.parse(during), { providerInstances: { claudeAgent: claudeInstance(FREE_NAMES) } }, "the names are there for the run");
+    await assert.rejects(readFile(path, "utf8"), { code: "ENOENT" }, "dl removes the file it created for them");
+    assert.match(err(), /didn't turn it on[\s\S]*dl t3 --dl-enable-opencode/);
   });
 
-  it("a declined question leaves the file alone", async () => {
+  it("a declined OpenCode question still names the Claude models for the run, then restores the file", async () => {
     const dir = join(HOME, "declined");
     await mkdir(dir, { recursive: true });
     const path = join(dir, "settings.json");
-    const original = JSON.stringify({ theme: "dark" });
-    await writeFile(path, original);
+    const original = { theme: "dark" };
+    await writeFile(path, JSON.stringify(original));
     const { io, err } = capture();
     assert.equal(await t3Command([], io, deps({ fetch: fakeService().fetch, spawn: fakeSpawn().spawn, t3Settings: path, confirm: async () => false })), 0);
-    assert.equal(await readFile(path, "utf8"), original);
-    assert.deepEqual(await readdir(dir), ["settings.json"], "no backup either");
-    assert.match(err(), /dl left its settings alone/);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), original, "OpenCode off and no names left behind");
+    assert.match(err(), /didn't turn it on/);
   });
 
   it("--dl-enable-opencode turns it on without asking, and t3 never sees the flag", async () => {
     const path = join(HOME, "flag", "settings.json");
     const child = fakeSpawn();
+    let during = "";
+    const spawn = (command: string, args: string[], options: SpawnOptions) => {
+      during = readFileSync(path, "utf8");
+      return child.spawn(command, args, options);
+    };
     const { io, err } = capture();
     const confirm = async () => assert.fail("no question expected");
-    assert.equal(await t3Command(["--dl-enable-opencode", "serve", "--port", "3773"], io, deps({ fetch: fakeService().fetch, spawn: child.spawn, t3Settings: path, confirm })), 0);
-    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { providerInstances: { opencode: { driver: "opencode", enabled: true } } });
+    assert.equal(await t3Command(["--dl-enable-opencode", "serve", "--port", "3773"], io, deps({ fetch: fakeService().fetch, spawn, t3Settings: path, confirm })), 0);
+    assert.deepEqual(JSON.parse(during), { providerInstances: { opencode: { driver: "opencode", enabled: true }, claudeAgent: claudeInstance(FREE_NAMES) } });
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { providerInstances: { opencode: { driver: "opencode", enabled: true } } }, "the names are for the run only");
     assert.deepEqual(child.started[0]!.args, ["serve", "--port", "3773"]);
     assert.match(err(), /Turned on OpenCode/);
     // A refused command is still refused with the flag in front of it.
@@ -362,14 +460,33 @@ describe("dl t3 turns on T3 Code's OpenCode", () => {
     assert.equal(await t3Command(["--dl-enable-opencode", "app"], refused.io, deps({ fetch: fakeService().fetch, token: async () => assert.fail("no token expected") })), 1);
   });
 
-  it("doesn't ask when OpenCode is already on", async () => {
+  it("doesn't ask when OpenCode is already on and dl's Claude names are already set, and removes the leftovers after the run", async () => {
     const dir = join(HOME, "already");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "settings.json");
+    await writeFile(path, JSON.stringify({ providerInstances: { opencode: { driver: "opencode", enabled: true }, claudeAgent: claudeInstance(FREE_NAMES) } }));
+    const { io, err } = capture();
+    const confirm = async () => assert.fail("no question expected");
+    assert.equal(await t3Command([], io, deps({ fetch: fakeService().fetch, spawn: fakeSpawn().spawn, t3Settings: path, confirm })), 0);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { providerInstances: { opencode: { driver: "opencode", enabled: true } } }, "a crashed run's names don't stay");
+    assert.doesNotMatch(err(), /OpenCode is off|Turned on OpenCode/);
+  });
+
+  it("doesn't ask and names dl's Claude models when OpenCode is already on, then puts them back", async () => {
+    const dir = join(HOME, "name-only");
     await mkdir(dir, { recursive: true });
     const path = join(dir, "settings.json");
     await writeFile(path, JSON.stringify({ providerInstances: { opencode: { driver: "opencode", enabled: true } } }));
     const { io, err } = capture();
-    const confirm = async () => assert.fail("no question expected");
-    assert.equal(await t3Command([], io, deps({ fetch: fakeService().fetch, spawn: fakeSpawn().spawn, t3Settings: path, confirm })), 0);
-    assert.doesNotMatch(err(), /OpenCode is off|Turned on OpenCode/);
+    let during = "";
+    const spawn = (command: string, args: string[], options: SpawnOptions) => {
+      during = readFileSync(path, "utf8");
+      return fakeSpawn().spawn(command, args, options);
+    };
+    const confirm = async () => assert.fail("the run-only names must not require consent");
+    assert.equal(await t3Command([], io, deps({ fetch: fakeService().fetch, spawn, t3Settings: path, confirm })), 0);
+    assert.deepEqual(JSON.parse(during), { providerInstances: { opencode: { driver: "opencode", enabled: true }, claudeAgent: claudeInstance(FREE_NAMES) } });
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { providerInstances: { opencode: { driver: "opencode", enabled: true } } });
+    assert.match(err(), /Named dl's Claude models in T3 Code's settings for this run without asking/);
   });
 });

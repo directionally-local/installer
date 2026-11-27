@@ -39,11 +39,6 @@ export interface DlKey {
   /** https://api.dl.new/anthropic */
   anthropicBaseUrl: string;
   savedAt: string;
-  /**
-   * "free-tier": a key dl made for itself from an Autopilot free tier sign-in kept from before
-   * dl had its own (api-key.ts, dlKeyFromFreeTier). Autopilot keeps its own sign-in then.
-   */
-  source?: "free-tier";
 }
 
 /** The public API address the keys work against. */
@@ -53,6 +48,8 @@ export const DL_DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash-1017";
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const REPORT_TIMEOUT_MS = 4_000;
+/** /v1/me's plan, read on every agent launch: short, with the saved plan as the fallback. */
+const PLAN_TIMEOUT_MS = 2_000;
 
 /** Where the dl key lives: ${XDG_CONFIG_HOME:-~/.config}/directionallylocal/dl-key.json. */
 export function dlKeyPath(env: Env = process.env): string {
@@ -88,8 +85,29 @@ export async function readDlKey(env: Env = process.env, path: string = dlKeyPath
       baseUrl,
       anthropicBaseUrl: typeof value.anthropicBaseUrl === "string" && value.anthropicBaseUrl.startsWith("http") ? value.anthropicBaseUrl : `${baseUrl}/anthropic`,
       savedAt: typeof value.savedAt === "string" ? value.savedAt : "",
-      ...(value.source === "free-tier" ? { source: "free-tier" as const } : {}),
     };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The plan GET /v1/me reports for this key ("free", "plus", "starter", "max", …), so a picker
+ * follows an upgrade or downgrade rather than the plan saved at sign-in. Undefined when the
+ * service can't be read in time or says nothing useful: the caller falls back to the saved plan.
+ * Never throws.
+ */
+export async function dlKeyPlan(key: Pick<DlKey, "key" | "baseUrl">, deps: { fetch?: Fetch; timeoutMs?: number } = {}): Promise<string | undefined> {
+  try {
+    const response = await (deps.fetch ?? ((url: string, init: RequestInit) => fetch(url, init)))(`${key.baseUrl.replace(/\/+$/, "")}/v1/me`, {
+      headers: { accept: "application/json", authorization: `Bearer ${key.key}` },
+      redirect: "error",
+      signal: AbortSignal.timeout(deps.timeoutMs ?? PLAN_TIMEOUT_MS),
+    });
+    if (!response.ok) return undefined;
+    const body = (await response.json().catch(() => undefined)) as { plan?: unknown } | undefined;
+    const plan = typeof body?.plan === "string" ? body.plan.trim().toLowerCase() : "";
+    return plan || undefined;
   } catch {
     return undefined;
   }

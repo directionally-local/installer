@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { agentRequest, browserSignIn, dlKeyOrSignIn, keyUrls, maskKey, planName, readDlKey, reportAgentRequest, saveDlKey, type DlKey } from "./dl-key.js";
+import { agentRequest, browserSignIn, dlKeyOrSignIn, dlKeyPlan, keyUrls, maskKey, planName, readDlKey, reportAgentRequest, saveDlKey, type DlKey } from "./dl-key.js";
 
 function capture() {
   let out = "";
@@ -131,13 +131,33 @@ describe("dl's own sign-in", () => {
 
   it("with no dl key, takes one made from an older Autopilot free tier sign-in before any browser sign-in", async () => {
     const dir = await mkdtemp(join(tmpdir(), "dl-key-"));
-    const migrated: DlKey = { ...KEY, source: "free-tier" };
+    const migrated: DlKey = { ...KEY };
     const got = await dlKeyOrSignIn(capture(), { env: {}, path: join(dir, "none.json"), migrate: async () => migrated, fetch: async () => { throw new Error("no browser sign-in"); } });
-    assert.equal(got?.source, "free-tier");
+    assert.equal(got?.key, KEY.key);
     // A saved key comes first: nothing is made.
     const path = join(dir, "dl-key.json");
     await saveDlKey(KEY, {}, path);
     assert.equal((await dlKeyOrSignIn(capture(), { env: {}, path, migrate: async () => assert.fail("made a key") }))?.key, KEY.key);
+  });
+
+  it("reads a key saved by an older dl that tagged it from the free tier, and doesn't keep the tag", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dl-key-"));
+    const path = join(dir, "dl-key.json");
+    await writeFile(path, JSON.stringify({ version: 1, ...KEY, source: "free-tier" }));
+    const got = await readDlKey({}, path);
+    assert.equal(got?.key, KEY.key);
+    assert.equal(got && "source" in got, false, "the tag no longer changes how Autopilot is started");
+  });
+
+  it("reads the plan fresh from /v1/me on the key, for a picker to follow an upgrade", async () => {
+    const sent: string[] = [];
+    const key = { key: "dl_sk_0123456789abcdef", baseUrl: "https://api.dl.new" };
+    assert.equal(await dlKeyPlan(key, { fetch: async (url, init) => (sent.push(`${init.headers && (init.headers as Record<string, string>).authorization} ${url}`), json(200, { plan: "Plus" })) }), "plus");
+    assert.deepEqual(sent, ["Bearer dl_sk_0123456789abcdef https://api.dl.new/v1/me"]);
+    // Unreadable or unusable answers leave the caller on the saved plan.
+    assert.equal(await dlKeyPlan(key, { fetch: async () => json(503, { plan: "plus" }) }), undefined);
+    assert.equal(await dlKeyPlan(key, { fetch: async () => json(200, {}) }), undefined);
+    assert.equal(await dlKeyPlan(key, { fetch: async () => { throw new Error("offline"); } }), undefined);
   });
 
   it("shows keys and plans briefly", () => {

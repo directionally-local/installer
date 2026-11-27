@@ -1104,19 +1104,32 @@ function routerDeps(options: MainOptions, io: { out: (text: string) => void; err
   };
 }
 
+/** What autopilotOnKey reads and runs; the real ones unless replaced (tests). */
+export interface AutopilotOnKeyDeps {
+  readKey?: () => Promise<DlKey | undefined>;
+  provider?: (file: string) => Promise<string | undefined>;
+  start?: typeof startHere;
+  withKey?: typeof withAutopilotKey;
+}
+
 /**
  * Plain Autopilot here (startHere), downloaded first when it isn't installed, and on the dl key
  * when there is one: AUTOPILOT_DL_FREE_TOKEN always, and dl's plan as its provider only when
- * Autopilot has no provider of its own yet.
+ * Autopilot has no provider of its own yet. This holds for every saved dl key, including one made
+ * from an old Autopilot free tier sign-in (dl 0.47): without it Autopilot would run its own first
+ * run even though the person already has a key.
  */
-async function autopilotOnKey(input: SessionInput, io: { out: (text: string) => void; err: (text: string) => void; color?: boolean }): Promise<number> {
-  const key = await readDlKey().catch(() => undefined);
-  const start = () => startHere({ ...(input.autopilot ? {} : { autopilot: () => ensureAutopilot(io) }), ...input }, io);
-  // A key made from Autopilot's own free tier sign-in (an update from dl 0.47): Autopilot keeps that sign-in.
-  if (!key || key.source === "free-tier") return await start();
-  Object.assign(process.env, autopilotKeyEnv(key, await autopilotProvider(autopilotConfigFile())));
+export async function autopilotOnKey(
+  input: SessionInput,
+  io: { out: (text: string) => void; err: (text: string) => void; color?: boolean },
+  deps: AutopilotOnKeyDeps = {},
+): Promise<number> {
+  const key = await (deps.readKey ?? (() => readDlKey()))().catch(() => undefined);
+  const start = () => (deps.start ?? startHere)({ ...(input.autopilot ? {} : { autopilot: () => ensureAutopilot(io) }), ...input }, io);
+  if (!key) return await start();
+  Object.assign(process.env, autopilotKeyEnv(key, await (deps.provider ?? autopilotProvider)(autopilotConfigFile())));
   // An Autopilot-only key in place of the dl key, refreshed while Autopilot runs (autopilot-key.ts):
   // GPT-6 and the plans' launch bonus are served in Autopilot only.
   const version = input.autopilot ? undefined : (installedAutopilotVersion() ?? (await pathAutopilotVersion().catch(() => undefined)));
-  return await withAutopilotKey(key, version, process.env, start);
+  return await (deps.withKey ?? withAutopilotKey)(key, version, process.env, start);
 }
