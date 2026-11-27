@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { GENERIC, upstreamRefusal } from "../src/upstream-errors.js";
+import { GENERIC, REJECTED_AFTER_REPAIR, upstreamRefusal } from "../src/upstream-errors.js";
 
 /** A provider's refusal is never passed on verbatim (#389): dl's own message, at most an identifier. */
 describe("upstreamRefusal", () => {
@@ -39,11 +39,14 @@ describe("upstreamRefusal", () => {
     assert.deepEqual(upstreamRefusal(""), { message: GENERIC });
   });
 
-  it("tells the person what to do about an unknown refusal (Open Relay's opaque 400 for a broken history)", () => {
+  it("tells the person what to do about an unknown refusal, and never to discard the conversation", () => {
     const out = upstreamRefusal(body({ code: "invalid_request_error", message: "the request was rejected by the model", type: "invalid_request_error" }));
     assert.equal(out.message, GENERIC);
-    assert.match(out.message, /interrupted step/);
-    assert.match(out.message, /\/clear/);
+    assert.match(out.message, /Send your message again/);
     assert.match(out.message, /dl update/);
+    for (const message of [GENERIC, REJECTED_AFTER_REPAIR]) {
+      assert.doesNotMatch(message, /\/clear|new conversation|start over|start a new/i);
+    }
+    assert.match(REJECTED_AFTER_REPAIR, /interrupted step/);
   });
 });

@@ -92,7 +92,7 @@ import {
 } from "./admission.js";
 import type { RateLimiterObject } from "./rate-limit-object.js";
 import { chooseUpstream, providerConfigured } from "./upstream-choice.js";
-import { upstreamRefusal } from "./upstream-errors.js";
+import { GENERIC as GENERIC_REFUSAL, REJECTED_AFTER_REPAIR, upstreamRefusal } from "./upstream-errors.js";
 import { repairToolHistory } from "./tool-history.js";
 import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
@@ -4575,13 +4575,20 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // stray result) is made valid before any upstream sees it (tool-history.ts): strict upstreams
   // refuse it, and the client would resend it with every later message. After every check, so
   // the pre-checks and moderation still read everything the client sent.
+  let historyRepair: { added: number; dropped: number } | undefined;
   if (Array.isArray(body.messages)) {
     const repaired = repairToolHistory(body.messages);
-    if (repaired.messages !== body.messages) body = { ...body, messages: repaired.messages };
+    if (repaired.messages !== body.messages) {
+      body = { ...body, messages: repaired.messages };
+      historyRepair = { added: repaired.added, dropped: repaired.dropped };
+    }
   }
   // OpenAI's models and registry models retry on what nextSteps gives; Luminal and OpenRouter don't.
   const retries = serving.provider === "openai" || isRegistryProvider(serving.provider) ? nextSteps(serving.model, serving.backups ?? []) : [];
-  const answered = await attempt(serving.model, serving.provider, reservation, retries);
+  const answered = await unknownRefusalAfterRepair(
+    await attempt(serving.model, serving.provider, reservation, retries),
+    { model: serving.model.id, provider: serving.provider, messages: Array.isArray(body.messages) ? body.messages.length : 0, repair: historyRepair },
+  );
   // A paid plan's notices: its fallback's, and the 80% warning once per model per week (also by email).
   const notices = [...(planServe?.notices ?? [])];
   const warning = planServe ? dueWarning(planServe) : undefined;
@@ -4622,6 +4629,40 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   if (fallbackNotice) outHeaders.set("x-dl-notice", fallbackNotice.replace(/[^\x20-\x7e]/g, ""));
   return new Response(response.body, { status: response.status, headers: outHeaders });
 
+}
+
+/**
+ * Every upstream (after repair and fallback) refused the request for a reason dl doesn't know.
+ * Logged as one structured line (counts and identifiers only, never content) so it is seen, and,
+ * when tool-history.ts repaired the history, answered with a message that keeps the conversation:
+ * the person sends the message again, never discards it. Any other response passes through.
+ */
+async function unknownRefusalAfterRepair(
+  response: Response,
+  context: { model: string; provider: string; messages: number; repair: { added: number; dropped: number } | undefined },
+): Promise<Response> {
+  if (response.status !== 400 && response.status !== 502) return response;
+  if (!(response.headers.get("content-type") ?? "").includes("application/json")) return response;
+  const parsed = parseJson(await response.clone().text()) as { error?: Record<string, unknown> } | undefined;
+  const error = parsed?.error;
+  if (!error || error.code !== "upstream_error" || error.message !== GENERIC_REFUSAL) return response;
+  console.error(
+    JSON.stringify({
+      event: "free.upstream_unknown_refusal",
+      status: response.status,
+      upstreamStatus: typeof error.upstreamStatus === "number" ? error.upstreamStatus : null,
+      upstreamReason: typeof error.upstreamReason === "string" ? error.upstreamReason : null,
+      model: context.model,
+      provider: context.provider,
+      messages: context.messages,
+      historyRepaired: context.repair !== undefined,
+      resultsAdded: context.repair?.added ?? 0,
+      resultsDropped: context.repair?.dropped ?? 0,
+    }),
+  );
+  if (!context.repair) return response;
+  const headers = new Headers(response.headers);
+  return new Response(JSON.stringify({ ...parsed, error: { ...error, message: REJECTED_AFTER_REPAIR } }), { status: response.status, headers });
 }
 
 /** The per-person `safety_identifier` / `user` sent upstream: a hash, never the GitHub id itself. */
