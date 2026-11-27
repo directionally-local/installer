@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseOsRelease } from "./detect.js";
+import { assertConfined, createScriptSandbox, fakeNpm } from "./test-support/script-sandbox.js";
 
 const SCRIPT = new URL("../install.sh", import.meta.url).pathname;
 
@@ -20,13 +21,13 @@ function supportedHost(): boolean {
  * present, npm recording its arguments, and `directionallylocal` noting that `up` ran. No
  * server state file: being root alone isn't a server, so the server path needs DL_MODE=server
  * or DL_INSTALL_ONLY=1 (or DL_SERVER_STATE naming a file that's there).
+ * It runs in a script sandbox (test-support/script-sandbox.ts): nothing outside its temp root
+ * is on PATH or under any directory it may write to, checked before it starts.
  */
 function install(env: Record<string, string>, options: { npmFails?: boolean; dlUpFails?: boolean; counts?: boolean; uid?: number } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "dl-install-"));
-  const stub = (name: string, body: string) => {
-    writeFileSync(join(dir, name), `#!/bin/sh\n${body}\n`);
-    chmodSync(join(dir, name), 0o755);
-  };
+  const box = createScriptSandbox("dl-install-");
+  const dir = box.root;
+  const stub = box.stub;
   stub("id", `echo ${options.uid ?? 0}`);
   stub("uname", 'case "$1" in -m) echo x86_64 ;; *) echo Linux ;; esac');
   // sudo: notes its arguments and runs the command, as root would (id says 0 inside it).
@@ -36,12 +37,14 @@ function install(env: Record<string, string>, options: { npmFails?: boolean; dlU
   chmodSync(join(dir, "root", "id"), 0o755);
   stub("node", 'exit 0');
   stub("curl", `echo "$*" >> "${dir}/curl.log"`);
-  stub("npm", options.npmFails ? 'echo "npm ERR! 404 Not Found"; exit 1' : `echo "$*" >> "${dir}/npm.log"; env | grep '^DL_' | sort >> "${dir}/npm.env"`);
+  stub("npm", options.npmFails ? 'echo "npm ERR! 404 Not Found"; exit 1' : fakeNpm(dir, { before: `echo "$*" >> "${dir}/npm.log"; env | grep '^DL_' | sort >> "${dir}/npm.env"` }));
   stub("dl", 'echo 0.1.2');
   stub("directionallylocal", `echo "$*" >> "${dir}/up.log"; env | grep '^DL_' | sort >> "${dir}/up.env"${options.dlUpFails ? "; exit 3" : ""}`);
   try {
     // The anonymous count is off unless a test turns it on (DL_NO_TELEMETRY: "").
-    const result = spawnSync("sh", [SCRIPT], { env: { PATH: `${dir}:/usr/bin:/bin`, DL_NO_TELEMETRY: "1", DL_SERVER_STATE: join(dir, "no-server-state"), ...env }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    const runEnv = { ...box.env, DL_HOME: join(box.home, ".directionallylocal"), DL_NO_TELEMETRY: "1", DL_SERVER_STATE: join(dir, "no-server-state"), ...env };
+    assertConfined(dir, runEnv, box.home);
+    const result = spawnSync("sh", [SCRIPT], { cwd: box.home, env: runEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     const read = (name: string) => existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : undefined;
     return { ...result, npm: read("npm.log"), up: read("up.log"), npmEnv: read("npm.env"), upEnv: read("up.env"), sudo: read("sudo.log"), counts: options.counts ? installCounts(join(dir, "curl.log")) : [] };
   } finally {
@@ -99,17 +102,18 @@ describe("install.sh", () => {
  * Runs install.sh as a laptop user would, with every command it calls stubbed on PATH: a
  * Node that is patched or not, npm installing a fake dl into --prefix, and curl serving a
  * Node.js download from `dist`. DL_TTY names a missing file, so there's no terminal to start dl in.
+ * It runs in a script sandbox (test-support/script-sandbox.ts): nothing outside its temp root
+ * is on PATH or under any directory it may write to, checked before it starts. `envIn` gives
+ * variables that name paths inside that root (it isn't known before the run).
  */
-function laptopInstall(options: { os?: "Darwin" | "Linux"; machine?: string; android?: boolean; getconf?: { LONG_BIT?: string; GNU_LIBC_VERSION?: string }; uid?: number; nodePatched?: boolean; shell?: string; env?: Record<string, string>; dist?: (dir: string) => void; npmFails?: boolean; npmOutput?: string; terminal?: boolean; ttyInput?: string; ivm?: "loads" | "builds"; extraPath?: string | ((home: string) => string); home?: (home: string) => void; dlExit?: number } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "dl-install-laptop-"));
-  const bin = join(dir, "stubs");
-  const home = join(dir, "home");
+function laptopInstall(options: { os?: "Darwin" | "Linux"; machine?: string; android?: boolean; getconf?: { LONG_BIT?: string; GNU_LIBC_VERSION?: string }; uid?: number; nodePatched?: boolean; shell?: string; env?: Record<string, string>; envIn?: (root: string) => Record<string, string>; dist?: (dir: string) => void; npmFails?: boolean; npmOutput?: string; terminal?: boolean; ttyInput?: string; ivm?: "loads" | "builds"; extraPath?: string | ((home: string) => string); home?: (home: string) => void; dlExit?: number } = {}) {
+  const box = createScriptSandbox("dl-install-laptop-");
+  const dir = box.root;
+  const bin = box.stubs;
+  const home = box.home;
   const dist = join(dir, "dist");
-  for (const path of [bin, home, dist]) mkdirSync(path);
-  const stub = (name: string, body: string, where = bin) => {
-    writeFileSync(join(where, name), `#!/bin/sh\n${body}\n`);
-    chmodSync(join(where, name), 0o755);
-  };
+  mkdirSync(dist);
+  const stub = box.stub;
   stub("id", `echo ${options.uid ?? 501}`);
   stub("uname", `case "$1" in -m) echo ${options.machine ?? "arm64"} ;; -o) echo ${options.android ? "Android" : "GNU/Linux"} ;; *) echo ${options.os ?? "Darwin"} ;; esac`);
   // What this system's libc says: a 64-bit one with a new enough glibc unless a test says otherwise.
@@ -119,14 +123,18 @@ function laptopInstall(options: { os?: "Darwin" | "Linux"; machine?: string; and
   // With options.ivm, npm installs an isolated-vm that loads only after its own install script ran.
   const node = (patched: boolean) => `case "$1" in -e) case "$3" in *isolated-vm) [ -f "$3/built" ] || ${options.ivm === "loads" ? "true" : "false"}; exit $? ;; esac; exit ${patched ? 0 : 1} ;; -v) echo v24.22.1 ;; *) [ "$2" = --version ] && echo 0.10.0 || { echo "dl $* in $(pwd)" >> "${dir}/started.log"; echo "\${DL_REFERRAL-unset}" >> "${dir}/referral.log"; echo "\${DL_INSTALL_CODE-unset}" >> "${dir}/install-code.log"; exit ${options.dlExit ?? 0}; } ;; esac`;
   stub("node", node(options.nodePatched ?? true));
-  // npm: records its arguments and installs a dl entry point under --prefix.
-  const npm = options.npmFails ? 'echo "npm http fetch GET 404 https://registry.npmjs.org/directionallylocal 80ms"; echo "npm ERR! 404"; exit 1' : `echo "$*" >> "${dir}/npm.log"
+  // npm: records its arguments and installs a dl entry point under --prefix (or npm_config_prefix,
+  // as the server path's `npm install -g` uses), refusing a prefix that's empty or outside `dir`.
+  const npm = options.npmFails ? 'echo "npm http fetch GET 404 https://registry.npmjs.org/directionallylocal 80ms"; echo "npm ERR! 404"; exit 1' : fakeNpm(dir, {
+    before: `echo "$*" >> "${dir}/npm.log"
 ${options.npmOutput ?? ""}
-[ "$1 $2" = "run install" ] && { echo "in $(pwd)" >> "${dir}/npm.log"; touch built; exit 0; }
-prefix=""; while [ $# -gt 0 ]; do [ "$1" = --prefix ] && prefix=$2; shift; done
-mkdir -p "$prefix/lib/node_modules/directionallylocal/bin" && echo '// dl' > "$prefix/lib/node_modules/directionallylocal/bin/directionallylocal.mjs"
-${options.ivm ? 'mkdir -p "$prefix/lib/node_modules/directionallylocal/node_modules/isolated-vm"' : ""}`;
+[ "$1 $2" = "run install" ] && { echo "in $(pwd)" >> "${dir}/npm.log"; touch built; exit 0; }`,
+    after: options.ivm ? 'mkdir -p "$prefix/lib/node_modules/directionallylocal/node_modules/isolated-vm"' : "",
+  });
   stub("npm", npm);
+  // The server path (root saying yes, DL_MODE=server) ends with dl --version and dl up: fakes, never the real ones.
+  stub("dl", "echo 0.10.0");
+  stub("directionallylocal", `echo "$*" >> "${dir}/up.log"`);
   stub("curl", `echo "$*" >> "${dir}/curl.log"
 out=""; url=""; head=""; while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift ;; -*I*) head=1 ;; -*) ;; *) url=$1 ;; esac; shift; done
 file="${dist}/$(basename "$url")"; [ -f "$file" ] || exit 22
@@ -139,16 +147,13 @@ if [ -n "$head" ]; then printf 'HTTP/2 200\\r\\ncontent-length: %s\\r\\n\\r\\n' 
   const tty = join(dir, "terminal");
   if (options.terminal) writeFileSync(tty, options.ttyInput ?? "");
   {
-    const result = spawnSync("sh", [SCRIPT], {
-      cwd: home,
-      env: { PATH: `${bin}:/usr/bin:/bin`, DL_NO_TELEMETRY: "1", HOME: home, SHELL: options.shell ?? "/bin/zsh", DL_NODE_DIST: "https://nodejs.example/dist", DL_TTY: options.terminal ? tty : join(dir, "no-terminal"), DL_SERVER_STATE: join(dir, "no-server-state"), ...options.env, ...(extraPath ? { PATH: `${extraPath}:${bin}:/usr/bin:/bin` } : {}) },
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const env = { ...box.env, DL_NO_TELEMETRY: "1", SHELL: options.shell ?? "/bin/zsh", DL_NODE_DIST: "https://nodejs.example/dist", DL_TTY: options.terminal ? tty : join(dir, "no-terminal"), DL_SERVER_STATE: join(dir, "no-server-state"), ...options.env, ...options.envIn?.(dir), ...(extraPath ? { PATH: `${extraPath}:${box.env.PATH}` } : {}) };
+    assertConfined(dir, env, home);
+    const result = spawnSync("sh", [SCRIPT], { cwd: home, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     const read = (path: string) => existsSync(path) ? readFileSync(path, "utf8") : undefined;
     // The caller removes `dir` once it has read what it needs.
     const counts = () => installCounts(join(dir, "curl.log"));
-    return { ...result, dir, home, read, counts, npm: read(join(dir, "npm.log")), curl: read(join(dir, "curl.log")), sudo: read(join(dir, "sudo.log")) };
+    return { ...result, dir, home, env, read, counts, refused: box.refused(), npm: read(join(dir, "npm.log")), curl: read(join(dir, "curl.log")), sudo: read(join(dir, "sudo.log")) };
   }
 }
 
@@ -168,9 +173,7 @@ function nodeDist(dist: string, options: { corrupt?: boolean; platform?: string;
   writeFileSync(join(build, name, "include", "node", "node.h"), "");
   writeFileSync(join(build, name, "CHANGELOG.md"), "");
   writeFileSync(join(build, name, "LICENSE"), "");
-  write("npm", `echo "own $*" >> "${dirname(dist)}/npm.log"
-prefix=""; while [ $# -gt 0 ]; do [ "$1" = --prefix ] && prefix=$2; shift; done
-mkdir -p "$prefix/lib/node_modules/directionallylocal/bin" && echo '// dl' > "$prefix/lib/node_modules/directionallylocal/bin/directionallylocal.mjs"`);
+  write("npm", fakeNpm(dirname(dist), { before: `echo "own $*" >> "${dirname(dist)}/npm.log"` }));
   // Both archives nodejs.org has; the install takes the .tar.xz (half the size) when tar can unpack it.
   const sums = [`${"0".repeat(64)}  node-v24.22.1-linux-x64.tar.gz`];
   for (const [ext, flag] of [["tar.gz", "-czf"], ["tar.xz", "-cJf"]] as const) {
@@ -247,7 +250,9 @@ describe("install.sh on a laptop", () => {
     const first = laptopInstall({ env: { DL_VERSION: "0.10.0" } });
     cleanup.push(first.dir);
     assert.equal(first.status, 0, first.stderr);
-    const again = spawnSync("sh", [SCRIPT], { cwd: first.home, env: { PATH: `${first.dir}/stubs:/usr/bin:/bin`, HOME: first.home, SHELL: "/bin/zsh", DL_VERSION: "0.10.0", DL_TTY: "/nonexistent" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    const againEnv = { ...first.env, DL_VERSION: "0.10.0", DL_TTY: join(first.dir, "no-terminal") };
+    assertConfined(first.dir, againEnv, first.home);
+    const again = spawnSync("sh", [SCRIPT], { cwd: first.home, env: againEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     assert.equal(again.status, 0, again.stderr);
     const rc = first.read(join(first.home, ".zshrc"))!;
     assert.equal(rc.match(/Directionally Local/g)?.length, 1);
@@ -289,26 +294,25 @@ describe("install.sh on a laptop", () => {
   });
 
   it("with dl already on PATH and DL_NO_MODIFY_PATH=1, touches no startup file and prints no fallback", () => {
-    const home = mkdtempSync(join(tmpdir(), "dl-home-"));
-    cleanup.push(home);
-    const result = run({ env: { DL_NO_MODIFY_PATH: "1", DL_HOME: join(home, "dl-here") } });
+    // DL_HOME elsewhere, but still inside the test's temp root.
+    const result = run({ envIn: (root) => ({ DL_NO_MODIFY_PATH: "1", DL_HOME: join(root, "dl-here") }) });
     assert.equal(result.status, 0, result.stderr);
     assert.ok(!existsSync(join(result.home, ".zshrc")));
-    assert.ok(existsSync(join(home, "dl-here", "bin", "dl")));
-    assert.match(result.stdout, new RegExp(`dl isn't on your PATH\\. To use it, run: export PATH="${home}/dl-here/bin:\\$PATH"\n`), "not on PATH yet, and no startup file says so");
-    const onPath = run({ env: { DL_NO_MODIFY_PATH: "1", DL_HOME: join(home, "dl-there") }, extraPath: join(home, "dl-there", "bin") });
+    assert.ok(existsSync(join(result.dir, "dl-here", "bin", "dl")));
+    assert.match(result.stdout, new RegExp(`dl isn't on your PATH\\. To use it, run: export PATH="${result.dir}/dl-here/bin:\\$PATH"\n`), "not on PATH yet, and no startup file says so");
+    const onPath = run({ envIn: (root) => ({ DL_NO_MODIFY_PATH: "1", DL_HOME: join(root, "dl-there") }), extraPath: (home) => join(home, "..", "dl-there", "bin") });
     assert.equal(onPath.status, 0, onPath.stderr);
     assert.doesNotMatch(onPath.stdout, /new terminal|PATH|source/);
     assert.match(onPath.stdout, /Then type: dl\n {2}dl signs you in at dl\.new, then opens your own coding agent \(Claude Code, OpenCode, Cursor…\) on your plan\.\n$/);
   });
 
   it("with a startup file it can't write (read-only, Nix, home-manager), still installs and says the line to add", () => {
-    // ZDOTDIR naming a file: no .zshrc can be made under it, for root as well.
-    const blocked = run({ env: { ZDOTDIR: "/dev/null" } });
+    // ZDOTDIR naming a file (in the test's temp root): no .zshrc can be made under it, for root as well.
+    const blocked = run({ envIn: (root) => ({ ZDOTDIR: join(root, "not-a-directory") }), home: (home) => writeFileSync(join(home, "..", "not-a-directory"), "") });
     assert.equal(blocked.status, 0, blocked.stderr);
     assert.ok(existsSync(join(blocked.home, ".directionallylocal", "bin", "dl")), "dl is installed");
     const line = `export PATH="${join(blocked.home, ".directionallylocal", "bin")}:$PATH"`;
-    assert.ok(blocked.stdout.includes(`Couldn't write to /dev/null/.zshrc`), blocked.stdout);
+    assert.ok(blocked.stdout.includes(`Couldn't write to ${join(blocked.dir, "not-a-directory", ".zshrc")}`), blocked.stdout);
     assert.ok(blocked.stdout.includes(`Add this to your shell startup file yourself: ${line}\n`), blocked.stdout);
     assert.ok(blocked.stdout.includes(`dl isn't on your PATH. To use it, run: ${line}\n`), "and how to use it in this terminal, not a source of a file it never wrote");
     assert.doesNotMatch(blocked.stdout, /source ~\/\.zshrc|Added dl to your PATH/);
@@ -554,7 +558,7 @@ describe("install.sh on a laptop", () => {
 
   it("stops before any download on Android (Termux), 32-bit ARM, or a glibc too old for Node.js 24, saying what to do", () => {
     const dist = (d: string) => nodeDist(d, { platform: "linux-arm64" });
-    const termux = run({ os: "Linux", machine: "aarch64", nodePatched: false, dist, env: { TERMUX_VERSION: "0.118.1", PREFIX: "/data/data/com.termux/files/usr" } });
+    const termux = run({ os: "Linux", machine: "aarch64", nodePatched: false, dist, env: { TERMUX_VERSION: "0.118.1" }, envIn: (root) => ({ PREFIX: join(root, "data/data/com.termux/files/usr") }) });
     assert.equal(termux.status, 1);
     assert.match(termux.stderr, /Android \(Termux\) can't run dl directly[\s\S]*pkg install proot-distro && proot-distro install ubuntu && proot-distro login ubuntu/);
     assert.equal(run({ os: "Linux", machine: "aarch64", android: true, dist }).status, 1, "Termux's uname says Android");
@@ -778,6 +782,11 @@ describe("install.sh: server or laptop", () => {
     try {
       assert.match(result.stdout, /Set up this machine as a server instead\? \[y\/N\] /);
       assert.match(result.npm ?? "", /^install -g --no-audit/m, "the server's global install");
+      // npm install -g has no --prefix here: the fake npm used npm_config_prefix in the temp root,
+      // never $prefix-less /lib (which once replaced a real server's dl with a stub).
+      assert.ok(existsSync(join(result.dir, "npm-global", "lib", "node_modules", "directionallylocal", "bin", "directionallylocal.mjs")));
+      assert.equal(result.read(join(result.dir, "up.log")), "up\n", "the fake dl up, not the real one");
+      assert.equal(result.refused, "", "nothing reached a real system command");
     } finally {
       rmSync(result.dir, { recursive: true, force: true });
     }
@@ -847,6 +856,84 @@ describe("install.sh: server or laptop", () => {
       }
     } finally {
       rmSync(state, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("install.sh tests: the script sandbox keeps every run inside its temp root", () => {
+  // What a machine-wide dl looks like before and after, to show nothing here touched it.
+  const globalDl = ["/lib", "/usr/lib", "/usr/local/lib"].map((dir) => join(dir, "node_modules", "directionallylocal", "bin", "directionallylocal.mjs"));
+  const snapshot = () => globalDl.map((path) => (existsSync(path) ? `${path} ${statSync(path).mtimeMs} ${createHash("sha256").update(readFileSync(path)).digest("hex")}` : `${path} missing`));
+  const npmIn = (box: ReturnType<typeof createScriptSandbox>, env: Record<string, string>, args: string[]) => {
+    box.stub("npm", fakeNpm(box.root));
+    return spawnSync(join(box.stubs, "npm"), args, { cwd: box.home, env, encoding: "utf8" });
+  };
+
+  it("the fake npm refuses an empty prefix (npm install -g with no --prefix and no npm_config_prefix) and writes nothing", () => {
+    const box = createScriptSandbox("dl-sandbox-");
+    try {
+      const before = snapshot();
+      const { npm_config_prefix: _prefix, ...noPrefix } = box.env;
+      const empty = npmIn(box, noPrefix, ["install", "-g", "--no-audit", "directionallylocal@latest"]);
+      assert.equal(empty.status, 1, "refused");
+      assert.match(empty.stderr, /fake npm: refusing prefix '': empty or outside the test's temp root/);
+      for (const [env, args] of [
+        [box.env, ["install", "-g", "--prefix", "/usr", "directionallylocal"]],
+        [box.env, ["install", "-g", "--prefix", "", "directionallylocal"]],
+        [box.env, ["install", "-g", "--prefix", `${box.root}/../escape`, "directionallylocal"]],
+        [{ ...box.env, npm_config_prefix: "/usr/local" }, ["install", "-g", "directionallylocal"]],
+      ] as Array<[Record<string, string>, string[]]>) {
+        assert.equal(npmIn(box, env, args).status, 1, args.join(" "));
+      }
+      assert.deepEqual(snapshot(), before, "no machine-wide dl was written");
+      assert.ok(!existsSync(join(box.root, "..", "escape")));
+      // Inside the root it installs, under npm_config_prefix without --prefix, as npm does.
+      assert.equal(npmIn(box, box.env, ["install", "-g", "directionallylocal"]).status, 0);
+      assert.equal(readFileSync(join(box.root, "npm-global", "lib", "node_modules", "directionallylocal", "bin", "directionallylocal.mjs"), "utf8"), "// dl\n");
+    } finally {
+      rmSync(box.root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to start a script whose writable paths, PATH or working directory reach outside the root", () => {
+    const box = createScriptSandbox("dl-sandbox-");
+    try {
+      assert.doesNotThrow(() => assertConfined(box.root, box.env, box.home));
+      const outside: Array<Record<string, string>> = [
+        { HOME: "/root" },
+        { HOME: "" },
+        { HOME: "home" },
+        { DL_HOME: "/usr/lib/directionallylocal" },
+        { npm_config_prefix: "/usr" },
+        { npm_config_prefix: "" },
+        { PREFIX: "/usr/local" },
+        { XDG_CONFIG_HOME: join(box.root, "..", "elsewhere") },
+        { TMPDIR: "/tmp" },
+        { ZDOTDIR: "/dev/null" },
+        { PATH: `${box.stubs}:/usr/bin:/bin` },
+        { PATH: "" },
+      ];
+      for (const change of outside) assert.throws(() => assertConfined(box.root, { ...box.env, ...change }, box.home), /test sandbox/, JSON.stringify(change));
+      // DL_HOME's default follows HOME: HOME outside means DL_HOME outside too.
+      assert.throws(() => assertConfined(box.root, { ...box.env, HOME: "/home/someone" }), /test sandbox/);
+      assert.throws(() => assertConfined(box.root, box.env, "/"), /working directory/);
+      // A link inside the root that points out of it is outside.
+      symlinkSync("/usr", join(box.root, "link-out"));
+      assert.throws(() => assertConfined(box.root, { ...box.env, npm_config_prefix: join(box.root, "link-out", "local") }, box.home), /outside/);
+    } finally {
+      rmSync(box.root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses any machine-changing command a test doesn't fake, and has no system directory on PATH", () => {
+    const box = createScriptSandbox("dl-sandbox-");
+    try {
+      const result = spawnSync("sh", ["-c", "apt-get update; systemctl restart hotcell; directionallylocal up; npm install -g x; sudo true; echo done"], { cwd: box.home, env: box.env, encoding: "utf8" });
+      assert.equal(result.stdout, "done\n");
+      assert.equal(box.refused(), "apt-get update\nsystemctl restart hotcell\ndirectionallylocal up\nnpm install -g x\nsudo true\n");
+      assert.doesNotMatch(box.env.PATH!, /(^|:)\/(usr\/)?(s?bin|local)/);
+    } finally {
+      rmSync(box.root, { recursive: true, force: true });
     }
   });
 });
