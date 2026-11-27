@@ -75,6 +75,29 @@ export function outputChars(parsed: unknown): number {
   return total;
 }
 
+/**
+ * The output text in a chunk's deltas or a completion's messages (text, reasoning, tool calls'
+ * arguments), joined, for the degenerate-output check (degenerate.ts), which keeps only a verdict.
+ */
+export function outputText(parsed: unknown): string {
+  const choices = (parsed as { choices?: unknown } | null)?.choices;
+  if (!Array.isArray(choices)) return "";
+  let text = "";
+  for (const choice of choices) {
+    const part = (choice as { delta?: unknown; message?: unknown } | null);
+    const fields = (part?.delta ?? part?.message) as Record<string, unknown> | undefined;
+    if (!fields || typeof fields !== "object") continue;
+    for (const key of ["reasoning_content", "reasoning", "content"]) if (typeof fields[key] === "string") text += fields[key] as string;
+    if (Array.isArray(fields.tool_calls)) {
+      for (const call of fields.tool_calls) {
+        const args = (call as { function?: { arguments?: unknown } } | null)?.function?.arguments;
+        if (typeof args === "string") text += args;
+      }
+    }
+  }
+  return text;
+}
+
 const MAX_LINE_BUFFER = 4 * 1024 * 1024;
 
 export function meterStream(body: ReadableStream<Uint8Array>, onEnd: (outcome: StreamOutcome) => Promise<void>, now: () => number = () => Date.now()): ReadableStream<Uint8Array> {

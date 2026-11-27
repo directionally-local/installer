@@ -98,7 +98,8 @@ import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
 import { autopilotOnlyMessage, AUTOPILOT_ONLY_REASON, heldFromClient, modelClients, type ModelClient } from "./gpt6-clients.js";
-import { meterStream, outputChars } from "./sse.js";
+import { meterStream, outputChars, outputText } from "./sse.js";
+import { degenerate, DEGENERATE_ERROR_MESSAGE, type DegenerateInfo, guardStream, logDegenerate } from "./degenerate.js";
 import type { RegistryProviderId, RegistryRoute } from "./providers.js";
 import { accessOf, approxTokens, configuredUpstreams, contextTooLong, firstChoiceUpstreams, offeredModels, exchangeUsage, mergedUsage, exchangeRules, FALLBACK_BLOCKS, isRegistryProvider, formatRationTokens, listedUpstream, liquidPayload, modelPlans, openRelayPayload, personCapUsd, personSpendKey, proOnly, providerFallbackNotice, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, registryRoute, reportedCharge, resetDay, upstreamBlock, type ProviderBlock, type ProviderSpend } from "./providers.js";
 import { PROBE_CRON, probeOnce, probeTargets } from "./probes.js";
@@ -5262,10 +5263,32 @@ async function compatibleChat(
   }
 
   const contentType = response.headers.get("content-type") ?? "";
+  const model = String(payload.model);
+  // Degenerate output (degenerate.ts): junk from the first tokens is dropped before anything
+  // reaches the client, settled as nothing charged, and the turn goes to the next upstream once.
+  const degenerateHead = async (info: DegenerateInfo, stage: "head" | "response") => {
+    logDegenerate({ upstream: target.upstream, model, stage, info, retried: input.retry !== undefined });
+    const allowance = await settle(undefined, "degenerate_stream", { chargeNothing: true, upstreamError: true, outcome: "error", ttfbMs });
+    if (input.retry) return input.retry();
+    return apiError(503, "upstream_degenerate", DEGENERATE_ERROR_MESSAGE, { retryAfter: 1, retryable: true, upstream: target.upstream }, { ...quotaHeaders(allowance), "retry-after": "1" });
+  };
   if (stream && response.body && contentType.includes("text/event-stream")) {
+    // Junk that starts later is cut with an error event; what was sent isn't charged either.
+    let cut: DegenerateInfo | undefined;
+    const guarded = await guardStream(response.body, {
+      onDegenerate: (info) => {
+        cut = info;
+        logDegenerate({ upstream: target.upstream, model, stage: "stream", info, retried: false });
+      },
+    });
+    if ("degenerate" in guarded) return degenerateHead(guarded.degenerate, "head");
     const metered = meterStream(
-      response.body,
+      guarded.stream,
       async ({ usage, errored, upstreamFailed, firstContentAt, chargeUsd, outputTokens }) => {
+        if (cut) {
+          await settle(undefined, "degenerate_stream", { chargeNothing: true, upstreamError: true, outcome: "error", ttfbMs, ...(firstContentAt !== undefined ? { ttftMs: firstContentAt - started } : {}) });
+          return;
+        }
         await settle(usage, usage ? (errored ? "stream_error" : "ok") : "no_usage", {
           ttfbMs,
           outputTokens,
@@ -5284,6 +5307,8 @@ async function compatibleChat(
 
   const text = await response.text();
   const parsed = parseJson(text) as { usage?: unknown; error?: unknown } | undefined;
+  const junk = degenerate(outputText(parsed));
+  if (junk) return degenerateHead({ reason: junk, outputChars: outputChars(parsed) }, "response");
   const usage = mergedUsage(parseUsage(parsed?.usage), exchangeUsage(parsed));
   const charge = reportedCharge(parsed, response.headers.get("openrelay-cost-nano-usd"));
   const allowance = await settle(usage, usage ? "ok" : "no_usage", { ttfbMs, ttftMs: c.now() - started, outputTokens: usage ? 0 : streamedOutputTokens(outputChars(parsed), 0), ...(parsed?.error ? { upstreamError: true } : {}), ...(charge !== undefined ? { creditUsd: charge } : {}) });
