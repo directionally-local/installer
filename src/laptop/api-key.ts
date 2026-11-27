@@ -294,7 +294,6 @@ export async function dlKeyFromFreeTier(io: LaunchIO & { color?: boolean }, deps
       baseUrl: urls.openai.replace(/\/v1$/, ""),
       anthropicBaseUrl: urls.anthropic,
       savedAt: new Date().toISOString(),
-      source: "free-tier",
     };
     await saveDlKey(key, env, deps.path);
     io.out(`  ${color.green("✓")} Signed in with your free tier sign-in ${color.dim("· nothing to do again")}\n`);

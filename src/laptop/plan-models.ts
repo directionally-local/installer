@@ -1,4 +1,4 @@
-import { DL_DEFAULT_MODEL } from "./dl-key.js";
+import { DL_DEFAULT_MODEL, planName } from "./dl-key.js";
 
 /**
  * The models on the person's dl plan, as each agent dl sets up shows them. Every plan has
@@ -21,6 +21,15 @@ export function planModelName(model: { id: string; name?: string }): string {
 /** Whether the key's models include Kimi K3.1 (Plus and Max). */
 export function hasKimi(models: readonly { id: string }[]): boolean {
   return models.some((model) => model.id === KIMI_MODEL);
+}
+
+/**
+ * A dl model's name wherever a picker shows it: "dl / DeepSeek V4.1 Flash (Free)",
+ * "dl / Kimi K3.1 (Plus)". The plan is the saved dl key's (`null` is Free); an older
+ * Autopilot free tier sign-in is Free too.
+ */
+export function planModelLabel(model: { id: string; name?: string }, plan: string | null | undefined): string {
+  return `dl / ${planModelName(model)} (${planName(plan)})`;
 }
 
 /**

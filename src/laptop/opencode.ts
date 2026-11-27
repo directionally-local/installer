@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
-import { planModelName, planModelsLine, planOrder } from "./plan-models.js";
+import { planModelLabel, planModelsLine, planOrder } from "./plan-models.js";
 
 /**
  * `dl opencode [opencode args...]`: the person's own OpenCode (github.com/anomalyco/opencode, was
@@ -32,6 +32,16 @@ import { planModelName, planModelsLine, planOrder } from "./plan-models.js";
 export const HARNESS = "opencode" as const;
 /** The provider id in OpenCode: models are `dl/<free tier model id>`. */
 export const PROVIDER_ID = "dl";
+/**
+ * The provider's heading in /models. OpenCode 1.19.6 pins its own "opencode" provider first and
+ * sorts every other provider by display name (packages/tui/src/component/dialog-model.tsx:
+ * `sortBy(provider => provider.id !== "opencode", provider => provider.name)`), so the leading
+ * space sorts dl above every letter- or digit-named provider while the heading still reads "dl".
+ * OpenCode's own pinned provider (its Zen models) is still above dl: no config-only ordering rule
+ * can outrank it without taking over or disabling that provider, which dl doesn't do. This only
+ * orders providers: it doesn't remove or disable any of the person's own.
+ */
+export const PROVIDER_NAME = ` ${PROVIDER_ID}`;
 /** The variable OpenCode reads the harness key from (`{env:...}` in the config). */
 export const KEY_ENV = "DL_FREE_TIER_KEY";
 /** The official install commands (opencode.ai/docs), printed when `opencode` isn't on PATH. */
@@ -65,8 +75,13 @@ export const SMALL_MODEL = "deepseek/deepseek-v4.1-flash-1017";
 type Env = Record<string, string | undefined>;
 type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
-/** OpenCode's inline config for this run (the OpenCode 1 shape, which OpenCode 2 reads too). */
-export function opencodeConfig(input: { origin: string; models: readonly FreeTierModel[] }): Record<string, unknown> {
+/**
+ * OpenCode's inline config for this run (the OpenCode 1 shape, which OpenCode 2 reads too).
+ * Model display names are dl's full labels ("dl / DeepSeek V4.1 Flash (Free)"); `model` and
+ * `small_model` are dl's own default (DeepSeek, or the first model the key may use), never one
+ * of the person's providers.
+ */
+export function opencodeConfig(input: { origin: string; models: readonly FreeTierModel[]; plan?: string | null }): Record<string, unknown> {
   const ids = input.models.map((model) => model.id);
   const main = ids.includes(DEFAULT_MODEL) ? DEFAULT_MODEL : ids[0]!;
   const small = ids.includes(SMALL_MODEL) ? SMALL_MODEL : main;
@@ -76,7 +91,7 @@ export function opencodeConfig(input: { origin: string; models: readonly FreeTie
     small_model: `${PROVIDER_ID}/${small}`,
     provider: {
       [PROVIDER_ID]: {
-        name: "dl free tier",
+        name: PROVIDER_NAME,
         npm: "@ai-sdk/openai-compatible",
         options: {
           baseURL: `${input.origin}/v1`,
@@ -87,7 +102,7 @@ export function opencodeConfig(input: { origin: string; models: readonly FreeTie
           input.models.map((model) => [
             model.id,
             {
-              name: model.name,
+              name: planModelLabel(model, input.plan),
               tool_call: true,
               attachment: model.vision,
               modalities: { input: model.vision ? ["text", "image"] : ["text"], output: ["text"] },
@@ -101,7 +116,7 @@ export function opencodeConfig(input: { origin: string; models: readonly FreeTie
 }
 
 /** OpenCode's environment: the person's, without CONFLICTING_ENV, plus the config and key. */
-export function opencodeEnv(parent: Env, input: { origin: string; key: string; models: readonly FreeTierModel[] }): { env: Env; removed: string[] } {
+export function opencodeEnv(parent: Env, input: { origin: string; key: string; models: readonly FreeTierModel[]; plan?: string | null }): { env: Env; removed: string[] } {
   const env: Env = { ...parent };
   const removed: string[] = [];
   for (const name of CONFLICTING_ENV) {
@@ -175,8 +190,8 @@ export async function freeTierModels(fetchImpl: Fetch, origin: string, key: stri
 }
 
 /** The line after dl opencode sets up OpenCode: the plan's models, under the dl provider in /models. */
-export function opencodeModelsLine(models: readonly FreeTierModel[]): string {
-  return planModelsLine(planOrder(models).map(planModelName), `switch with /models (under ${PROVIDER_ID})`);
+export function opencodeModelsLine(models: readonly FreeTierModel[], plan: string | null = null): string {
+  return planModelsLine(planOrder(models).map((model) => planModelLabel(model, plan)), `switch with /models (under ${PROVIDER_ID})`);
 }
 
 export interface OpencodeDeps extends LaunchDeps {
@@ -193,12 +208,12 @@ export function opencodeLaunch(deps: OpencodeDeps = {}): HarnessLaunch {
     sessionPrefix: "dl-opencode",
     missing: `${OPENCODE_INSTALL}\n\n  or with npm: ${OPENCODE_INSTALL_NPM}`,
     binaries: { posix: ["opencode"], win32: ["opencode.exe", "opencode.cmd", "opencode"] },
-    prepare: async ({ env, args, origin, key, binary }) => {
+    prepare: async ({ env, args, origin, key, binary, plan: planPromise }) => {
       if (namesServer(args)) {
         return { error: "dl opencode can't use --server: free tokens are set up in the OpenCode server dl opencode starts. Leave --server out, or use that server with your own provider." };
       }
-      const [version, models] = await Promise.all([(deps.version ?? opencodeVersion)(binary, env), freeTierModels(call, origin, key)]);
-      return { ...opencodeEnv(env, { origin, key, models }), args: opencodeArgs(args, majorVersion(version)), models: opencodeModelsLine(models) };
+      const [version, models, plan] = await Promise.all([(deps.version ?? opencodeVersion)(binary, env), freeTierModels(call, origin, key), planPromise]);
+      return { ...opencodeEnv(env, { origin, key, models, plan }), args: opencodeArgs(args, majorVersion(version)), models: opencodeModelsLine(models, plan) };
     },
   };
 }
