@@ -17,10 +17,10 @@ dl
 
 1. **Sign in.** The first `dl` signs you in (or up) at dl.new in your browser and keeps your `dl_sk_` key on this computer.
 2. **Pick your agent.** dl looks for the coding agents installed on this computer (it only reads directory listings and runs nothing) and asks which one to use: Autopilot, our own agent, first as the recommendation (included in your plan), then *"I also found these on your computer"* with what it found.
-3. **It opens on your plan.** Claude Code, OpenCode, Pi and T3 Code open straight on your key, with your plan's models: DeepSeek V4.1 Flash on Free and Starter, plus Kimi K3.1 on Plus and Max (in Claude Code, Opus is Kimi and Sonnet is DeepSeek, so `/model` switches; in OpenCode and Pi both are under the `dl` provider). For any other agent (Cursor, Cline, Zed, Roo Code, Kilo Code, Continue, Aider…), dl prints the exact setup: your key and the base URLs `https://api.dl.new/v1` (OpenAI-style) and `https://api.dl.new/anthropic` (Anthropic-style).
+3. **It opens on your plan.** Claude Code, OpenCode, Pi, Codex CLI and T3 Code open straight on your key, with your plan's models: DeepSeek V4.1 Flash on Free and Starter, plus Kimi K3.1 on Plus and Max (in Claude Code, Opus is Kimi and Sonnet is DeepSeek, so `/model` switches; in OpenCode, Pi and Codex both are under the `dl` provider). For any other agent (Cursor, Cline, Zed, Roo Code, Kilo Code, Continue, Aider…), dl prints the exact setup: your key and the base URLs `https://api.dl.new/v1` (OpenAI-style) and `https://api.dl.new/anthropic` (Anthropic-style).
 4. **It remembers.** The last agent you used is on top next time ("Back to Claude Code?"), so Enter opens it. `dl -c` continues that agent's latest session.
 
-Open one directly with `dl claude`, `dl opencode`, `dl pi` or `dl t3`. `dl api-key` prints your key and both base URLs again. No agent installed? dl offers Autopilot first, or asks which one you use.
+Open one directly with `dl claude`, `dl opencode`, `dl pi`, `dl codex` or `dl t3`. `dl api-key` prints your key and both base URLs again. No agent installed? dl offers Autopilot first, or asks which one you use.
 
 **Autopilot is optional.** It's dl's own open-source agent, listed first as the recommendation. dl downloads it the first time you pick it (or run `dl autopilot`) into `~/.directionallylocal/autopilot`, and `dl update` keeps it on the version dl pins. Background tasks, servers and GPU boxes still use Autopilot, as below.
 
@@ -121,6 +121,7 @@ The "fits ~N agents" figure is a conservative estimate: memory left after the ho
 | `dl claude [ARGS]` | Your own Claude Code on your dl plan. See [Claude Code with free tokens: dl claude](#claude-code-with-free-tokens-dl-claude). |
 | `dl opencode [ARGS]` | Your own OpenCode on your dl plan. See [OpenCode with free tokens: dl opencode](#opencode-with-free-tokens-dl-opencode). |
 | `dl pi [ARGS]` | Your own Pi on your dl plan. See [Pi with free tokens: dl pi](#pi-with-free-tokens-dl-pi). |
+| `dl codex [ARGS]` | Your own Codex CLI on your dl plan. See [Codex CLI on your plan: dl codex](#codex-cli-on-your-plan-dl-codex). |
 | `dl api-key [NAME]` | Your dl key for any other tool (Cursor, Cline, Roo, Kilo, Continue, Zed, Aider, OpenCode…), with the base URLs `https://api.dl.new/v1` and `https://api.dl.new/anthropic`. More keys at [dl.new/keys](https://dl.new/keys). `dl api-key list`, `dl api-key revoke ID`. See [Use dl's free tokens in other tools](#use-dls-free-tokens-in-other-tools-dl-api-key). |
 | `dl conductor` | [Conductor](https://conductor.build) (and Zed, Cline and other desktop apps) on dl's free tokens: starts `dl proxy` if it isn't running and prints the settings to paste into the app. See [Desktop apps with free tokens: dl proxy and dl conductor](#desktop-apps-with-free-tokens-dl-proxy-and-dl-conductor). |
 | `dl proxy start` / `stop` / `status` | A local proxy on `127.0.0.1:4789` that desktop apps use for the free tier, with a local token as their API key. `dl proxy run` runs it in the terminal; `dl proxy install` / `uninstall` start it at login (macOS LaunchAgent, Linux systemd user service). |
@@ -330,6 +331,43 @@ exit code is dl's.
   loads a small extension (`pi -e`, a temporary file removed when Pi exits) that adds the "dl"
   provider; the key is in `DL_FREE_TIER_KEY`, never in a file or on the command line.
 - **What dl sends:** the same as `dl opencode`; each Pi session's id goes with its requests.
+
+### Codex CLI on your plan: dl codex
+
+`dl codex` starts the [Codex CLI](https://github.com/openai/codex) you already have, on your dl
+plan. Every argument after `codex` goes to it unchanged (`dl codex exec "fix the test"`,
+`dl codex resume --last`), and its exit code is dl's.
+
+- **Codex itself:** dl never installs it. Without `codex` on your PATH it prints
+  `npm install -g @openai/codex` and stops.
+- **How it talks to dl:** Codex speaks only the OpenAI Responses API, which dl serves at
+  `https://api.dl.new/v1/responses` on the same plan, limits and models as every other agent.
+- **The models:** provider "dl", DeepSeek V4.1 Flash by default, the plan's others (Kimi K3.1 on
+  Plus and Max) by id in `/model` or `-m`. Pass your own `-m`/`--model`, `--oss`, `-p`/`--profile`
+  or `-c model_provider=…` and dl leaves that choice to you. Codex warns once that it has no
+  metadata for the model; that's expected for any model it doesn't ship with.
+- **Your settings stay yours:** `~/.codex/config.toml` isn't read or changed. For this run only,
+  dl passes Codex `-c` overrides that add the "dl" provider (`wire_api = "responses"`) and turn
+  off hosted web search (dl has none); your sessions, `codex resume`, MCP servers and AGENTS.md
+  work as before. The key is in `DL_API_KEY`, never in a file or on the command line.
+- **By hand:** the same provider in `~/.codex/config.toml`, with your key from `dl api-key` in
+  `DL_API_KEY`:
+
+  ```toml
+  model = "deepseek/deepseek-v4.1-flash-1017"
+  model_provider = "dl"
+  web_search = "disabled"
+
+  [model_providers.dl]
+  name = "dl"
+  base_url = "https://api.dl.new/v1"
+  env_key = "DL_API_KEY"
+  wire_api = "responses"
+  ```
+
+- **Not supported:** `previous_response_id` (dl keeps no responses; Codex always sends the whole
+  conversation, so it isn't needed), hosted tools (web search, image generation) and remote
+  compaction (Codex compacts locally with a custom provider).
 
 ### T3 Code with free tokens: dl t3
 
@@ -659,7 +697,7 @@ Which one it is: a server only with `DL_MODE=server`, when the laptop's setup ru
 
 When it ends, either way, it sends one anonymous count to the free tier service, in the background: OS (`darwin` or `linux`), chip (`arm64` or `x64`), laptop or server, the `dl` version, ok or the step that failed, and which page it came from (`DL_INSTALL_VIA`, set by dl.new's scripts). No IP address or identity is kept. `DL_NO_TELEMETRY=1`, `DO_NOT_TRACK=1` or a `CI` variable turns it off.
 The same variables, set when you run `dl`, also turn off what `dl` itself would count: the
-session end (duration, how it ended) and OS that `dl claude`, `dl opencode`, `dl pi`, `dl t3` and
+session end (duration, how it ended) and OS that `dl claude`, `dl opencode`, `dl pi`, `dl codex`, `dl t3` and
 `dl proxy` send, and `dl status` marking dl Pro's offer as seen. A bare session start (an id and a
 time, sent with the session's own short-lived key when it starts and every 6 hours) still goes:
 the free tier can be set to refuse free tokens from a sign-in that sends none (`dlOnly`, off by

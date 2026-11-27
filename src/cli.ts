@@ -17,6 +17,7 @@ import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
 import { claudeCommand } from "./laptop/claude.js";
 import { freeTierModels, opencodeCommand } from "./laptop/opencode.js";
 import { piCommand } from "./laptop/pi.js";
+import { codexCommand } from "./laptop/codex.js";
 import { conductorCommand, proxyCommand } from "./laptop/proxy.js";
 import { t3Command } from "./laptop/t3.js";
 import { acpCommand, zedCommand } from "./laptop/zed.js";
@@ -96,6 +97,9 @@ On your laptop:
   dl pi [ARGS]            your own Pi on your dl plan, with your dl sign-in; ARGS go to pi as they
                           are. Needs pi installed (npm i -g @earendil-works/pi-coding-agent).
                           Nothing under ~/.pi is touched
+  dl codex [ARGS]         your own Codex CLI on your dl plan, with your dl sign-in; ARGS go to
+                          codex as they are. Needs codex installed (npm i -g @openai/codex).
+                          Set for this run only (codex -c): ~/.codex/config.toml isn't touched
   dl conductor            Conductor (and Zed, Cline and other desktop apps) on free tokens: starts
                           dl proxy and prints the settings to paste into the app
   dl proxy start|stop|status   a local proxy on 127.0.0.1:4789 that desktop apps use for the free
@@ -226,7 +230,7 @@ Unattended installs answer the questions with environment variables:
 Usage counts:
   DL_NO_TELEMETRY=1, DO_NOT_TRACK=1 or CI   no install count, no session end (duration, exit),
                           OS or Pro-offer counts from dl. A bare session start (id and time) still
-                          goes with dl claude/opencode/pi/t3/proxy: the free tier needs it to keep
+                          goes with dl claude/opencode/pi/codex/t3/proxy: the free tier needs it to keep
                           free tokens inside dl
 
 Advanced:
@@ -272,6 +276,8 @@ export interface MainOptions {
   opencode?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** `dl pi`; the real one unless replaced. */
   pi?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
+  /** `dl codex`; the real one unless replaced. */
+  codex?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** `dl api-key`; the real one unless replaced. */
   apiKey?: (args: string[], io: { out: (text: string) => void; err: (text: string) => void }) => Promise<number>;
   /** `dl t3`; the real one unless replaced. */
@@ -325,6 +331,8 @@ export async function main(
   if (argv[0] === "opencode") return (await used("opencode"), await (options.opencode ?? opencodeCommand)(argv.slice(1), io));
   // `dl pi ARGS`: the same for Pi.
   if (argv[0] === "pi") return (await used("pi"), await (options.pi ?? piCommand)(argv.slice(1), io));
+  // `dl codex ARGS`: the same for Codex CLI.
+  if (argv[0] === "codex") return (await used("codex"), await (options.codex ?? codexCommand)(argv.slice(1), io));
   // `dl autopilot ARGS`: dl's own agent, downloaded the first time; ARGS go to autopilot.
   if (argv[0] === "autopilot") {
     await used(AUTOPILOT_ID);
@@ -1054,6 +1062,7 @@ function routerDeps(options: MainOptions, io: { out: (text: string) => void; err
     claude: options.claude ?? claudeCommand,
     opencode: options.opencode ?? opencodeCommand,
     pi: options.pi ?? piCommand,
+    codex: options.codex ?? codexCommand,
     t3: options.t3 ?? t3Command,
   };
   return {

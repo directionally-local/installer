@@ -206,7 +206,7 @@ describe("Open Relay: what the endpoints say", () => {
     const openrelay = pub.providers.find((provider) => provider.id === "openrelay")!;
     assert.deepEqual(
       { name: openrelay.name, website: openrelay.website, logo: openrelay.logo, models: openrelay.models.map((model: Record<string, any>) => [model.id, model.name, model.family, model.access, model.status, model.clients]) },
-      { name: "Open Relay", website: "https://openrelay.inc/", logo: "/logos/openrelay.svg", models: [[GLM_FLASH, "GLM 5.3 Flash", "glm", "free", "on", ["autopilot", "opencode", "pi"]]] },
+      { name: "Open Relay", website: "https://openrelay.inc/", logo: "/logos/openrelay.svg", models: [[GLM_FLASH, "GLM 5.3 Flash", "glm", "free", "on", ["autopilot", "opencode", "pi", "codex"]]] },
     );
   });
 

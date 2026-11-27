@@ -106,6 +106,7 @@ import { PROBE_CRON, probeOnce, probeTargets } from "./probes.js";
 import { measureKey } from "./provider-store.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
 import { anthropicError, errorStatus, estimateInputTokens, toAnthropicMessage, toAnthropicStream, toChatRequest } from "./anthropic.js";
+import { failedStream, responseAsStream, responseId, responsesError, streamFailure, toChatRequest as responsesToChat, toResponse, toResponsesStream } from "./responses.js";
 import { DAY_MS, isoDay, weekEnd, weekStart, WEEK_MS } from "./week.js";
 import { planResetValues } from "./plan-reset.js";
 import { FREE_ENDED_CODE, FREE_ENDED_MESSAGE, PLAN_MIX_LABEL, freeEnded, freeEndedFor, limitRefusal, meterFor, realFromCounted, warningEmailValues, withNotices } from "./plan-limits.js";
@@ -572,6 +573,7 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/v1/plan/fallback") return planFallback(c);
   if (method === "GET" && path === "/v1/models") return models(c);
   if (method === "POST" && path === "/v1/chat/completions") return chatCompletions(c);
+  if (path === "/v1/responses" || path.startsWith("/v1/responses/")) return responses(c, path, method);
   if (method === "POST" && path === "/v1/events") return events(c);
   if (path === "/v1/harness-keys" || path.startsWith("/v1/harness-keys/")) return harnessKeys(c, path.slice("/v1/harness-keys".length).replace(/^\//, ""), method);
   if (path.startsWith("/anthropic/")) return anthropic(c, path.slice("/anthropic".length), method);
@@ -3406,7 +3408,7 @@ async function planModels(c: Ctx, config: FreeConfig, githubId: number, isAdmin:
 
 async function models(c: Ctx): Promise<Response> {
   // OpenCode's harness key may list them too (dl opencode reads the list to configure it).
-  const identity = await authenticate(c, { keys: true, toolKeys: true, harness: ["opencode", "pi"] });
+  const identity = await authenticate(c, { keys: true, toolKeys: true, harness: ["opencode", "pi", "codex"] });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
@@ -3459,14 +3461,14 @@ async function events(c: Ctx): Promise<Response> {
  * Harness keys: what `dl claude` hands Claude Code and `dl opencode` hands OpenCode (see
  * HARNESS_KEY in account-object.ts).
  *
- *   POST   /v1/harness-keys {harness: "claude-code" | "opencode" | "pi"}  → 201 {id, key, harness, expiresAt, ttlSeconds, otherHarnessShare}
+ *   POST   /v1/harness-keys {harness: "claude-code" | "opencode" | "pi" | "codex"}  → 201 {id, key, harness, expiresAt, ttlSeconds, otherHarnessShare}
  *          (a signed-in access token only: not a server key, not another harness key)
  *   POST   /v1/harness-keys/:id/refresh                → {id, expiresAt}: another HARNESS_KEY_TTL_MS
  *   DELETE /v1/harness-keys/:id                         → {id, revoked: true}
  *
  * Refresh and revoke take the access token or that same harness key, so dl needs the sign-in only
  * to start. A Claude Code key works on /anthropic/v1/messages (and count_tokens), an OpenCode
- * or Pi key on /v1/chat/completions and /v1/models; both on /v1/events, and nowhere else. 403 harness_not_allowed while `allowOtherHarnesses` is off; 409 harness_key_limit past
+ * or Pi key on /v1/chat/completions and /v1/models, a Codex key on /v1/responses and /v1/models; all on /v1/events, and nowhere else. 403 harness_not_allowed while `allowOtherHarnesses` is off; 409 harness_key_limit past
  * MAX_HARNESS_KEYS running at once.
  */
 async function harnessKeys(c: Ctx, rest: string, method: string): Promise<Response> {
@@ -3600,6 +3602,81 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
   if (!translated.stream) return json(message, 200, headers);
   // A stream was asked for but the upstream answered in one piece: send it as one stream.
   return new Response(messageAsStream(message), { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", ...headers } });
+}
+
+/** An OpenAI-shaped error answer (the Responses endpoint's). */
+function responsesErrorResponse(status: number, message: string, code?: string, headers: Record<string, string> = {}, extra: Record<string, unknown> = {}, param: string | null = null): Response {
+  return json(responsesError(status, message, code, extra, param), status, headers);
+}
+
+/** Our `{error: {code, message, ...}}` answer from `chat` (or `authenticate`), parsed, its message reworded for the caller. */
+async function refusalOf(response: Response, reword: (message: string) => string): Promise<{ code?: string; message: string; retryable?: boolean; extra: Record<string, unknown> }> {
+  const body = parseJson(await response.text()) as { error?: Record<string, unknown> } | undefined;
+  const error = body?.error ?? {};
+  const message = typeof error.message === "string" ? reword(error.message) : "The free tier refused the request.";
+  const extra: Record<string, unknown> = {};
+  for (const key of ["resetsAt", "retryAfter", "allowed", "trial", "share", "upgradeUrl"]) if (error[key] !== undefined) extra[key] = error[key];
+  return { ...(typeof error.code === "string" ? { code: error.code } : {}), message, ...(error.retryable === true ? { retryable: true } : {}), extra };
+}
+
+/**
+ * The OpenAI Responses endpoint, for Codex CLI through `dl codex` (see responses.ts):
+ * `POST /v1/responses`. Auth is what chat completions takes (a dl key or tool key, a sign-in or
+ * server key) or a Codex harness key. The request is translated to a chat completions body and
+ * goes through `chat` like any other: the same plan limits, model routing and fallbacks,
+ * moderation, history repair, reservation and settlement. A refusal goes out with its HTTP status
+ * (OpenAI's error shape), or, when the request streams, as a stream ending in `response.failed`,
+ * which is where Codex reads a refusal's message (streamFailure says which code does what).
+ */
+async function responses(c: Ctx, path: string, method: string): Promise<Response> {
+  if (method !== "POST" || path !== "/v1/responses") {
+    return responsesErrorResponse(404, `${method} ${path} isn't a route: dl keeps no responses, so only POST /v1/responses is served (send the whole conversation each time).`, "not_found");
+  }
+  const createdAt = Math.floor(c.now() / 1000);
+  const identity = await authenticate(c, { keys: true, toolKeys: true, harness: ["codex"] });
+  if (identity instanceof Response) {
+    const refusal = await refusalOf(identity, (message) => message);
+    return responsesErrorResponse(identity.status, refusal.message, refusal.code, passHeaders(identity), refusal.extra);
+  }
+  const reword = identity.harness ? (message: string) => forHarness(message, identity.harness) : identity.keyKind === "tool" ? forTool : (message: string) => message;
+  const raw = await c.request.text();
+  const bodyBytes = new TextEncoder().encode(raw).length;
+  if (bodyBytes > MAX_BODY_BYTES) return responsesErrorResponse(413, "The request body is larger than 8 MB.", "request_too_large");
+  const input = parseJson(raw);
+  if (!input || typeof input !== "object" || Array.isArray(input)) return responsesErrorResponse(400, "The body must be one JSON object.", "invalid_request");
+  const request = input as Record<string, unknown>;
+  const translated = responsesToChat(request, { vision: modelById(request.model)?.vision === true });
+  if (!translated.ok) return responsesErrorResponse(400, translated.message, "invalid_request", {}, {}, translated.param ?? null);
+  // Codex's conversation id: its session-id header, else the prompt cache key it sets to the same id.
+  const hint = c.request.headers.get("session-id") ?? c.request.headers.get("session_id") ?? translated.sessionHint;
+  const answer = await countedChat(c, identity, await chat(c, { identity, body: translated.body, bodyBytes, ...(hint ? { sessionHint: hint } : {}) }));
+  const asked = typeof request.model === "string" ? request.model : "";
+  const served = answer.headers.get("x-dl-fallback") ?? asked;
+  const options = { model: served, tools: translated.tools, echo: translated.echo, createdAt, id: responseId() };
+  const headers = { ...passHeaders(answer), "x-dl-served-model": served };
+  const streamHeaders = { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", ...headers };
+  if (answer.status !== 200) {
+    const refusal = await refusalOf(answer, reword);
+    if (!translated.stream) return responsesErrorResponse(answer.status, refusal.message, refusal.code, headers, refusal.extra);
+    const retryAfter = Number(answer.headers.get("retry-after") ?? refusal.extra.retryAfter);
+    const failure = streamFailure(answer.status, refusal, Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : undefined);
+    return new Response(failedStream({ ...failure, extra: refusal.extra }, options), { status: 200, headers: streamHeaders });
+  }
+  const contentType = answer.headers.get("content-type") ?? "";
+  if (translated.stream && answer.body && contentType.includes("text/event-stream")) {
+    return new Response(toResponsesStream(answer.body, options), { status: 200, headers: streamHeaders });
+  }
+  const completion = parseJson(await answer.text()) as Record<string, unknown> | undefined;
+  if (!completion || typeof completion !== "object" || completion.error) {
+    // dl's own words for an error body, never the provider's message (upstream-errors.ts).
+    const message = completion?.error ? upstreamRefusal(JSON.stringify(completion)).message : "The model provider sent an answer that couldn't be read. Try again.";
+    if (!translated.stream) return responsesErrorResponse(502, message, "upstream_error", headers);
+    return new Response(failedStream(streamFailure(502, { code: "upstream_error", message }), options), { status: 200, headers: streamHeaders });
+  }
+  const response = toResponse(completion, options);
+  if (!translated.stream) return json(response, 200, headers);
+  // A stream was asked for but the upstream answered in one piece: send it as one stream.
+  return new Response(responseAsStream(response), { status: 200, headers: streamHeaders });
 }
 
 /** A whole Anthropic message as its event sequence (for an upstream that didn't stream). */
@@ -3880,6 +3957,7 @@ const HARNESS_FAMILIES: Readonly<Record<Harness, readonly Family[]>> = {
   "claude-code": ["deepseek"],
   opencode: FAMILIES,
   pi: FAMILIES,
+  codex: FAMILIES,
 };
 
 async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unknown>; bodyBytes?: number; sessionHint?: string }): Promise<Response> {
@@ -4013,7 +4091,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   let requested = modelById(body.model)!;
   // What the client asked for, whatever serves (a plan's fallback, a provider's failover).
   const asked = requested;
-  // Claude Code gets DeepSeek only; OpenCode and Pi, every model.
+  // Claude Code gets DeepSeek only; OpenCode, Pi and Codex, every model.
   if (harness && !HARNESS_FAMILIES[harness].includes(requested.family)) {
     return apiError(400, "model_not_allowed", `Claude Code through dl is served by ${DEEPSEEK_MODEL} only.`, { allowed: [DEEPSEEK_MODEL] }, await headers());
   }

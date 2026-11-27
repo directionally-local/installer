@@ -100,7 +100,7 @@ export const HARNESS_KEY_TTL_MS = 15 * 60_000;
 /** Live harness keys per account: one per running `dl claude` or `dl opencode`. */
 export const MAX_HARNESS_KEYS = 10;
 /** The coding agents other than Autopilot dl can launch on free tokens. */
-export const HARNESSES = ["claude-code", "opencode", "pi"] as const;
+export const HARNESSES = ["claude-code", "opencode", "pi", "codex"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
 export function parseHarnessKey(key: string): { githubId: number; id: string; secret: string } | undefined {

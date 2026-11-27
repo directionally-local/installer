@@ -477,6 +477,6 @@ describe("session keys", () => {
       { at: at(201), sessionKey: "s1", harness: null },
       { at: at(202), sessionKey: "s1", harness: "claude-code" },
     ]);
-    assert.deepEqual(log, { sessions: 3, keyedSessions: 1, requests: 7, oneShotSessions: 1, clients: { autopilot: 2, claudeCode: 1, opencode: 4, pi: 0 } });
+    assert.deepEqual(log, { sessions: 3, keyedSessions: 1, requests: 7, oneShotSessions: 1, clients: { autopilot: 2, claudeCode: 1, opencode: 4, pi: 0, codex: 0 } });
   });
 });

@@ -1489,6 +1489,7 @@ are deleted once the day is over, so only the number stays. Rows older than 120 
 - **Clients**: `autopilot` (a sign-in token or server key: plain dl, GPT-6 requests served
   through OpenAI's Responses API included), `opencode` (`dl opencode`'s harness key on
   `/v1/chat/completions`), `claude-code` (`dl claude`'s harness key on `/anthropic/v1/messages`),
+  `pi` (`dl pi`'s on `/v1/chat/completions`), `codex` (`dl codex`'s on `/v1/responses`),
   `tool:<name>` (a tool key, named from the tool's User-Agent: `tool:cursor`, `tool:cline`…; see
   [Use dl's free tokens in other tools](#use-dls-free-tokens-in-other-tools-tool-keys)),
   `other` (`dl_only` and `proxy_not_allowed`: the request isn't from dl), and `signin` for the
@@ -1712,7 +1713,7 @@ stored), each for one harness (`claude-code` or `opencode`):
 
 | request | response |
 |---|---|
-| `POST /v1/harness-keys {"harness": "claude-code" \| "opencode"}` (a signed-in access token only) | 201 `{id, key, harness, expiresAt, ttlSeconds: 900, otherHarnessShare}` (that tool's part of the allowance, 0 to 1; 1 by default, the same as Autopilot) |
+| `POST /v1/harness-keys {"harness": "claude-code" \| "opencode" \| "pi" \| "codex"}` (a signed-in access token only) | 201 `{id, key, harness, expiresAt, ttlSeconds: 900, otherHarnessShare}` (that tool's part of the allowance, 0 to 1; 1 by default, the same as Autopilot) |
 | `POST /v1/harness-keys/:id/refresh` (the access token, or that key) | `{id, expiresAt}`: another 15 minutes |
 | `DELETE /v1/harness-keys/:id` (the access token, or that key) | `{id, revoked: true}` |
 
@@ -1720,14 +1721,60 @@ A key expires 15 minutes after it was made or last refreshed; dl refreshes it ev
 while the tool runs and deletes it when the tool exits. Signing out of the sign-in it was
 minted from ends it, as does an admin's revoke-tokens. At most 10 live per account
 (`harness_key_limit`). A Claude Code key works only on `/anthropic/v1/messages`, `count_tokens`
-and `/v1/events`; an OpenCode key only on `/v1/chat/completions`, `/v1/models` and `/v1/events`.
-Neither works on `/v1/me` or `/v1/keys`.
+and `/v1/events`; an OpenCode or Pi key only on `/v1/chat/completions`, `/v1/models` and
+`/v1/events`; a Codex key only on `/v1/responses`, `/v1/models` and `/v1/events`. None works on
+`/v1/me` or `/v1/keys`.
 
 **OpenCode** speaks chat completions, so its requests take Autopilot's path unchanged: DeepSeek
 (GPT-6 too only while `gpt6Clients` is `all`, see below), streaming, and every refusal, with the share, the kill switch and the dl-only check below applied as for Claude
 Code. Refusal messages are reworded for OpenCode (`forHarness`: "run dl and type /upgrade",
 "pick it in /models"). `/v1/models` also says whether each model reads images (`vision`); dl
 configures OpenCode from it.
+
+**The Responses endpoint** (`src/responses.ts`), `POST /v1/responses`, for Codex CLI (`dl codex`,
+or a provider with `wire_api = "responses"` by hand) and any OpenAI Responses client. Auth is what
+chat completions takes (a dl key or tool key, a sign-in or server key) or a Codex harness key. The
+request is translated into a chat completions body and goes through `chat` like any other: the
+same plan limits, model routing and fallbacks, moderation, history repair (`tool-history.ts`),
+reservation, metering and settlement. The answer comes back as a `response` object (`store:
+false`, usage with `input_tokens_details.cached_tokens` and `output_tokens_details.reasoning_tokens`),
+or streamed as `response.created`, `response.in_progress`, per output item
+`response.output_item.added`, its deltas (`response.reasoning_text.delta`;
+`response.content_part.added`, `response.output_text.delta` / `.done`, `response.content_part.done`;
+`response.function_call_arguments.delta` / `.done`; a freeform tool's
+`response.custom_tool_call_input.delta` / `.done`) and `response.output_item.done`, then
+`response.completed` (or `response.incomplete` at the output limit, `response.failed` when the
+upstream stream breaks). The response's `model` and `x-dl-served-model` name the model that
+answered (a plan's fallback included).
+
+- **Supported:** `instructions`; `input` as a string or items: `message` (system, developer,
+  user, assistant; text, refusal, image parts), `function_call`, `function_call_output`,
+  `custom_tool_call` / `_output`, `reasoning`, `additional_tools`; `tools`: function tools,
+  `namespace` groups (Codex's sub-agent tools, sent to the model as `<namespace>__<name>` and
+  mapped back) and `custom` freeform tools (a function taking one `input` string, with the
+  grammar in its description; answered as `custom_tool_call`); `tool_choice`,
+  `parallel_tool_calls`, `max_output_tokens`, `temperature`, `top_p`, `reasoning.effort`,
+  `text.format`, `stream`.
+- **Reasoning:** the model's reasoning comes back as a `reasoning` item with the text in
+  `content` (`reasoning_text`) and again in `encrypted_content` as `dl.reasoning.v1:` + base64
+  (not encrypted: Codex sends reasoning items back as they came, and this is how the reasoning
+  reaches the model again as `reasoning_content`). Other services' encrypted reasoning is dropped.
+- **Ignored:** `store` (nothing is stored), `include`, `prompt_cache_key` (used as the session
+  label when no `session-id` header names one), `metadata`, `client_metadata`, `user`,
+  `service_tier`, `truncation`, `text.verbosity`, `reasoning.summary`; hosted tools (web search,
+  file search, image generation…) and items no chat model can take.
+- **Refused (400 `invalid_request`):** `previous_response_id`, `conversation`, `background` and
+  `item_reference` items: no response is kept to continue from, so send the whole conversation in
+  `input`. Any other method or path under `/v1/responses` is 404.
+- **Errors:** OpenAI's shape, `{"error": {"message", "type", "code", "param"}}` with our code and
+  the HTTP status, messages reworded for Codex (`forHarness`) or a tool key (`forTool`). When the
+  request streams (Codex always does), a refusal is HTTP 200 with `response.created` then
+  `response.failed`, since that's where Codex reads a refusal's message; its `error.code` picks
+  what Codex does (our code is in `dl_code`): transient refusals are `rate_limit_exceeded` or
+  `server_error` with the delay in `error.headers["retry-after"]` (retried), a conversation past
+  the context window `context_length_exceeded`, a content policy refusal
+  `content_policy_violation`, and every other refusal (a used-up allowance, a model the plan
+  doesn't serve, a blocked account) `invalid_prompt`, the one code Codex shows without retrying.
 
 **The Anthropic Messages endpoint** (`src/anthropic.ts`). dl sets
 `ANTHROPIC_BASE_URL=<service>/anthropic`, so Claude Code posts to `/anthropic/v1/messages?beta=true`
@@ -2181,7 +2228,7 @@ values from being used for another, and leave room to give one purpose a key of 
   | `DELETE /v1/keys/:id` | `{id, revoked: true}`, or 404 `key_not_found` |
 
   - **Where a key works:** `Authorization: Bearer dlk_…` on `/v1/chat/completions`,
-    `/v1/models`, `/v1/me` and `/v1/events`. Usage is charged to the same account.
+    `/v1/responses`, `/v1/models`, `/v1/me` and `/v1/events`. Usage is charged to the same account.
   - **Storage:** only the SHA-256 of the secret is kept.
   - **Limits:** at most 5 keys per account (409 `key_limit_reached`), and names must be unique
     within an account (409 `key_name_taken`).
@@ -2218,7 +2265,7 @@ token) and pastes it into the tool:
 - **Who may make one:** admins, Pro, and any active account that isn't below the bar with no
   free tokens (what `below_bar` refuses in chat); no grant needed. Otherwise 403
   `tool_keys_unavailable`. A blocked or suspended account's keys get `blocked` or `suspended`.
-- **Where it works:** `/v1/chat/completions`, `/v1/models`, `/v1/me` and
+- **Where it works:** `/v1/chat/completions`, `/v1/responses`, `/v1/models`, `/v1/me` and
   `/anthropic/v1/messages` (+ `count_tokens`). Elsewhere (`/v1/events`, `/v1/access-request`,
   billing, feedback) 403 `tool_key_not_allowed`: a tool key can't send dl's session events.
 - **How it is served:** like another coding agent dl launches (`dl opencode`): the same

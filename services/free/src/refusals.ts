@@ -85,6 +85,7 @@ export const REFUSAL_CLIENTS = [
   "opencode",
   "claude-code",
   "pi",
+  "codex",
   "tool",
   "other",
   "signin",
@@ -96,7 +97,7 @@ export function requestClient(
   harness: string | undefined,
   reason: RefusalReason,
 ): RefusalClient {
-  if (harness === "claude-code" || harness === "opencode" || harness === "pi" || harness === "tool") return harness;
+  if (harness === "claude-code" || harness === "opencode" || harness === "pi" || harness === "codex" || harness === "tool") return harness;
   if (
     harness !== undefined ||
     reason === "dl_only" ||

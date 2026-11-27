@@ -14,14 +14,14 @@ import { delimiter, join } from "node:path";
  * the agent's own config folder isn't there to say so.
  *
  * What dl does with each, once picked (router.ts):
- *  - `dl`: a CLI dl starts itself on the person's dl key (dl claude, dl opencode, dl pi, dl t3).
+ *  - `dl`: a CLI dl starts itself on the person's dl key (dl claude, dl opencode, dl pi, dl codex, dl t3).
  *  - `steps`: anything else that takes a custom OpenAI- or Anthropic-style endpoint: dl prints
  *    exactly where to put the key and base URL.
  *  - `noCustomModels`: agents that only use their own vendor's models (so far): dl can't route
  *    them; it says so, and tells the service which agent it was.
  */
 
-export type LaunchCommand = "claude" | "opencode" | "pi" | "t3";
+export type LaunchCommand = "claude" | "opencode" | "pi" | "codex" | "t3";
 
 export interface AgentSpec {
   id: string;
@@ -77,7 +77,7 @@ export const AGENT_CATALOG: readonly AgentSpec[] = [
   { id: "cursor", name: "Cursor", bins: ["cursor", "cursor-agent"], homeBins: [".local/bin/cursor-agent"], macApps: ["Cursor"], desktop: /^(cursor|co\.anysphere\.cursor)/ },
   { id: "cline", name: "Cline", bins: ["cline"], extensions: ["saoudrizwan.claude-dev"] },
   { id: "zed", name: "Zed", bins: ["zed", "zeditor", "zedit"], macApps: ["Zed"], desktop: /^(zed|dev\.zed\.zed)/ },
-  { id: "codex", name: "Codex CLI", bins: ["codex"], extensions: ["openai.chatgpt"] },
+  { id: "codex", name: "Codex CLI", bins: ["codex"], extensions: ["openai.chatgpt"], dl: "codex" },
   { id: "aider", name: "Aider", bins: ["aider"] },
   { id: "goose", name: "Goose", bins: ["goose"], homeBins: [".local/bin/goose"], macApps: ["Goose"], desktop: /^goose/, confirm: GOOSE_CONFIRM },
   { id: "continue", name: "Continue", bins: ["cn"], extensions: ["continue.continue"] },

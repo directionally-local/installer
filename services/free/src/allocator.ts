@@ -219,7 +219,7 @@ export interface AllocatorFacts {
    * idle-split runs of requests without one), requests in them, sessions of at most two
    * requests, and requests per client.
    */
-  requestLog: { sessions: number; keyedSessions: number; requests: number; oneShotSessions: number; clients: { autopilot: number; claudeCode: number; opencode: number; pi?: number } };
+  requestLog: { sessions: number; keyedSessions: number; requests: number; oneShotSessions: number; clients: { autopilot: number; claudeCode: number; opencode: number; pi?: number; codex?: number } };
   /** Distinct UTC days with requests in the window; distinct weeks with requests ever. */
   activeDays: number;
   activeWeeks: number;
@@ -243,6 +243,7 @@ export function inputSummary(facts: AllocatorFacts): Record<string, number> {
     claudeCodeRequests: facts.requestLog.clients.claudeCode,
     opencodeRequests: facts.requestLog.clients.opencode,
     piRequests: facts.requestLog.clients.pi ?? 0,
+    codexRequests: facts.requestLog.clients.codex ?? 0,
     activeDays: facts.activeDays,
     activeWeeks: facts.activeWeeks,
     requests: facts.timing.requests,
@@ -331,7 +332,7 @@ export function allocationMessages(facts: AllocatorFacts, allowance: { tokensPer
   const g = facts.github;
   const body = [
     `Allowance: ${allowance.tokensPerWeek} tokens a week (step ${allowance.stage}), ${allowance.usedThisWeek} used this week.`,
-    `Coding agents used (requests in the last ${ALLOCATOR_HISTORY_DAYS} days): Autopilot ${facts.requestLog.clients.autopilot}, Claude Code ${facts.requestLog.clients.claudeCode}, OpenCode ${facts.requestLog.clients.opencode}, Pi ${facts.requestLog.clients.pi ?? 0}. All are equally fine; only Autopilot reports session events.`,
+    `Coding agents used (requests in the last ${ALLOCATOR_HISTORY_DAYS} days): Autopilot ${facts.requestLog.clients.autopilot}, Claude Code ${facts.requestLog.clients.claudeCode}, OpenCode ${facts.requestLog.clients.opencode}, Pi ${facts.requestLog.clients.pi ?? 0}, Codex ${facts.requestLog.clients.codex ?? 0}. All are equally fine; only Autopilot reports session events.`,
     `Sessions from the request log (every agent; one model request per agent step): ${facts.requestLog.sessions} (${facts.requestLog.keyedSessions} with a session id, the rest split by ${ALLOCATOR_IDLE_MS / 60_000} idle minutes), ${facts.requestLog.requests} requests (${facts.requestLog.sessions > 0 ? (facts.requestLog.requests / facts.requestLog.sessions).toFixed(1) : "0"} per session), ${facts.requestLog.oneShotSessions} with at most two requests.`,
     `Autopilot session events: ${facts.sessions} sessions, ${facts.turns} turns (${facts.sessions > 0 ? (facts.turns / facts.sessions).toFixed(1) : "0"} per session), ${facts.oneTurnSessions} with at most one turn.`,
     `Active: ${facts.activeDays} distinct days in the last ${ALLOCATOR_HISTORY_DAYS} days, ${facts.activeWeeks} distinct weeks since joining.`,
@@ -375,11 +376,12 @@ export function logSessions(rows: ReadonlyArray<{ at: number; sessionKey: string
   const keyed = new Map<string, number>();
   const runs: number[] = [];
   let last = -Infinity;
-  const clients = { autopilot: 0, claudeCode: 0, opencode: 0, pi: 0 };
+  const clients = { autopilot: 0, claudeCode: 0, opencode: 0, pi: 0, codex: 0 };
   for (const row of rows) {
     if (row.harness === "claude-code") clients.claudeCode++;
     else if (row.harness === "opencode") clients.opencode++;
     else if (row.harness === "pi") clients.pi++;
+    else if (row.harness === "codex") clients.codex++;
     else clients.autopilot++;
     if (row.sessionKey) {
       keyed.set(row.sessionKey, (keyed.get(row.sessionKey) ?? 0) + 1);

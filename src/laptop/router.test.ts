@@ -137,13 +137,12 @@ describe("bare dl: the router", () => {
     assert.doesNotMatch(free.text(), /kimi/);
   });
 
-  it("every by-hand agent's steps name Kimi K3.1's id when the plan has it, or point at the key card's (Codex can't run on the plan yet)", () => {
+  it("every by-hand agent's steps name Kimi K3.1's id when the plan has it, or point at the key card's", () => {
     const both = ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3.1-pro"];
     for (const spec of AGENT_CATALOG) {
       if (spec.noCustomModels || spec.id === "autopilot" || spec.id === "opencode" || spec.id === "pi" || spec.id === "t3") continue;
       const steps = setupSteps(spec, KEY, both).join("\n");
-      if (spec.id === "codex") assert.doesNotMatch(steps, /kimi/, spec.id);
-      else if (/key and models below/.test(steps)) continue; // the generic steps: the key card lists both
+      if (/key and models below/.test(steps)) continue; // the generic steps: the key card lists both
       else assert.match(steps, /moonshotai\/kimi-k3\.1-pro/, `${spec.id}: ${steps}`);
       assert.doesNotMatch(setupSteps(spec, KEY).join("\n"), /kimi/, `${spec.id} on Free/Starter`);
     }
@@ -313,9 +312,11 @@ describe("agent history and Autopilot's key", () => {
   });
   it("per-agent steps match each tool's current setup", () => {
     const steps = (id: string) => setupSteps(AGENT_CATALOG.find((spec) => spec.id === id)!, KEY).join("\n");
-    // Codex CLI dropped wire_api = "chat"; dl serves Chat Completions only, so no config to paste.
-    assert.match(steps("codex"), /Responses API/);
-    assert.doesNotMatch(steps("codex"), /wire_api = "chat"\n|\[model_providers/);
+    // Codex CLI speaks only the Responses API: dl codex, or a provider with wire_api = "responses".
+    assert.match(steps("codex"), /run dl codex/);
+    assert.match(steps("codex"), /\[model_providers\.dl\]\n {2}name = "dl"\n {2}base_url = "https:\/\/api\.dl\.new\/v1"\n {2}env_key = "DL_API_KEY"\n {2}wire_api = "responses"/);
+    assert.match(steps("codex"), /^ {2}model = "deepseek\/deepseek-v4\.1-flash-1017"\n {2}model_provider = "dl"/m);
+    assert.doesNotMatch(steps("codex"), /wire_api = "chat"/);
     // Crush's config is crushrc now, with the completions provider type.
     assert.match(steps("crush"), /provider add dl --type completions --base-url https:\/\/api\.dl\.new\/v1/);
     // Continue's config.yaml needs name, version and schema.

@@ -655,7 +655,7 @@ describe("GET /v1/providers", () => {
           family: "kimi",
           contextWindow: 1_048_576,
           access: "opt-in",
-          clients: ["autopilot", "opencode", "pi"],
+          clients: ["autopilot", "opencode", "pi", "codex"],
           status: "on",
           tokensPerSecond: null,
           ttftMs: null,
@@ -669,7 +669,7 @@ describe("GET /v1/providers", () => {
           family: "glm",
           contextWindow: 262_144,
           access: "free",
-          clients: ["autopilot", "opencode", "pi"],
+          clients: ["autopilot", "opencode", "pi", "codex"],
           status: "on",
           tokensPerSecond: null,
           ttftMs: null,
@@ -679,7 +679,7 @@ describe("GET /v1/providers", () => {
       ],
     });
     const deepseek = body.providers[1].models[0];
-    assert.deepEqual([deepseek.id, deepseek.family, deepseek.access, deepseek.clients, deepseek.status], [MODEL, "deepseek", "free", ["autopilot", "claude-code", "opencode", "pi"], "on"]);
+    assert.deepEqual([deepseek.id, deepseek.family, deepseek.access, deepseek.clients, deepseek.status], [MODEL, "deepseek", "free", ["autopilot", "claude-code", "opencode", "pi", "codex"], "on"]);
     // GPT-6 stays listed as trusted, in Autopilot only (gpt6Clients "autopilot").
     assert.deepEqual(
       body.providers[0].models.map((model: Record<string, unknown>) => [model.id, model.family, model.access, model.clients]),

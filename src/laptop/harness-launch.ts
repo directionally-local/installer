@@ -12,7 +12,7 @@ import { oneLine } from "./printable.js";
 import { telemetryOff } from "./telemetry.js";
 
 /**
- * Another coding agent on the free tier, launched by dl (`dl claude`, `dl opencode`, `dl pi`, `dl t3`). The flow is
+ * Another coding agent on the free tier, launched by dl (`dl claude`, `dl opencode`, `dl pi`, `dl codex`, `dl t3`). The flow is
  * the same for each; what differs (the binary, how it is told where the free tier is) is the
  * agent's `HarnessLaunch`.
  *
@@ -39,7 +39,7 @@ import { telemetryOff } from "./telemetry.js";
  */
 
 /** The coding agents dl launches on free tokens: the service's `HARNESSES`. */
-export type Harness = "claude-code" | "opencode" | "pi";
+export type Harness = "claude-code" | "opencode" | "pi" | "codex";
 
 type Env = Record<string, string | undefined>;
 type Fetch = (url: string, init: RequestInit) => Promise<Response>;
