@@ -10,7 +10,7 @@ import type { DownloadCount, InstallCount } from "./telemetry.js";
 import { CAMPAIGN_KEYS_PER_DAY, CAMPAIGN_OTHER, type Campaign, type CampaignRow, type CampaignStep, type WebFunnelRow, type WebStep } from "./web-signup.js";
 import { REFUSALS_KEEP_DAYS, type RefusalRow } from "./refusals.js";
 import { countedRequest, DL_ONLY_MIN_REQUESTS, DL_ONLY_WINDOW_MS, outsideDl } from "./abuse.js";
-import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, signupFunnel, type DashboardData, type DashboardLimits } from "./dashboard-data.js";
+import { dailyCohorts, dashboardData, installBreakdown, notAdmin, RETENTION_DAYS, signupFunnel, type DashboardData, type DashboardLimits, type Sql } from "./dashboard-data.js";
 import type { CleanEvent, GpuCount } from "./events.js";
 import { healthData, type HealthData, type HealthWindow } from "./health-data.js";
 import { adminHomeData, type AdminHomeData } from "./admin-home-data.js";
@@ -387,6 +387,8 @@ export interface Gate {
   providerSpend: ProviderSpend;
   /** The caller's spend on each registry provider this week, and on each model with its own cap ("model:<id>"), for the per-person caps (with `githubId`). */
   personProviderWeekUsd?: Partial<Record<string, number>>;
+  /** Providers skipped for now after naming a wait (Open Relay's 429 "retry after Ns"); absent when none. */
+  cooledDown?: string[];
 }
 
 /** A registry provider's credit for GET /admin/providers: never shown publicly. */
@@ -2888,7 +2890,21 @@ export class DirectoryObject extends DurableObject {
       ...(policy && githubId !== undefined ? { person: this.#personState(githubId, now, policy) } : {}),
       providerSpend: { ...providerSpend(this.ctx.storage.sql, now, spend), modelWeekUsd: modelWeekSpend(this.ctx.storage.sql, now) },
       ...(githubId !== undefined ? { personProviderWeekUsd: personProviderWeek(this.ctx.storage.sql, githubId, now) } : {}),
+      ...cooledDownProviders(this.ctx.storage.sql, now),
     };
+  }
+
+  /**
+   * Skips `provider` until `until` (ms): it asked for a wait (Open Relay's 429 "retry after
+   * Ns"). A later wait than the one held extends it; an earlier one doesn't shorten it.
+   */
+  async coolDownProvider(provider: string, until: number): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = CASE WHEN CAST(settings.value AS INTEGER) < CAST(excluded.value AS INTEGER) THEN excluded.value ELSE settings.value END`,
+      `${COOLDOWN_PREFIX}${provider}`,
+      String(Math.round(until)),
+    );
   }
 
   #paused(): boolean {
@@ -5238,4 +5254,13 @@ export function share(cached: number, promptTokens: number): number | null {
 function round(value: number, places = 6): number {
   const factor = 10 ** places;
   return Math.round(value * factor) / factor;
+}
+
+const COOLDOWN_PREFIX = "cooldown:";
+
+/** The providers still cooling down at `now` (coolDownProvider), as `{ cooledDown }`, or nothing when none are. */
+function cooledDownProviders(sql: Sql, now: number): { cooledDown?: string[] } {
+  const rows = sql.exec<{ key: string; value: string }>("SELECT key, value FROM settings WHERE key LIKE 'cooldown:%'").toArray();
+  const cooled = rows.filter((row) => Number(row.value) > now).map((row) => row.key.slice(COOLDOWN_PREFIX.length));
+  return cooled.length > 0 ? { cooledDown: cooled } : {};
 }

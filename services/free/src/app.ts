@@ -94,6 +94,7 @@ import type { RateLimiterObject } from "./rate-limit-object.js";
 import { chooseUpstream, providerConfigured } from "./upstream-choice.js";
 import { GENERIC as GENERIC_REFUSAL, REJECTED_AFTER_REPAIR, upstreamRefusal } from "./upstream-errors.js";
 import { repairToolHistory } from "./tool-history.js";
+import { MAX_OPENRELAY_COOLDOWN_S, openRelayRetryAfterSeconds, restoreToolNamesInCompletion, restoreToolNamesInStream } from "./openrelay-shape.js";
 import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
@@ -101,7 +102,7 @@ import { autopilotOnlyMessage, AUTOPILOT_ONLY_REASON, heldFromClient, modelClien
 import { meterStream, outputChars, outputText } from "./sse.js";
 import { degenerate, DEGENERATE_ERROR_MESSAGE, type DegenerateInfo, guardStream, logDegenerate } from "./degenerate.js";
 import type { RegistryProviderId, RegistryRoute } from "./providers.js";
-import { accessOf, approxTokens, configuredUpstreams, contextTooLong, firstChoiceUpstreams, offeredModels, exchangeUsage, mergedUsage, exchangeRules, FALLBACK_BLOCKS, isRegistryProvider, formatRationTokens, listedUpstream, liquidPayload, modelPlans, openRelayPayload, personCapUsd, personSpendKey, proOnly, providerFallbackNotice, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, registryRoute, reportedCharge, resetDay, upstreamBlock, type ProviderBlock, type ProviderSpend } from "./providers.js";
+import { accessOf, approxTokens, configuredUpstreams, contextTooLong, firstChoiceUpstreams, offeredModels, exchangeUsage, mergedUsage, exchangeRules, FALLBACK_BLOCKS, isRegistryProvider, formatRationTokens, listedUpstream, liquidPayload, modelPlans, openRelayRequest, personCapUsd, personSpendKey, proOnly, providerFallbackNotice, providerKey, providerLimitMessage, providerModels, providerSettings, providerSpec, PROVIDERS, rationOf, registryBlock, registryRoute, reportedCharge, resetDay, upstreamBlock, type ProviderBlock, type ProviderSpend } from "./providers.js";
 import { PROBE_CRON, probeOnce, probeTargets } from "./probes.js";
 import { measureKey } from "./provider-store.js";
 import { isResponse, toChatCompletion, toChatStream, toResponsesRequest } from "./openai-responses.js";
@@ -1063,6 +1064,8 @@ export interface Runtime {
   providerSpend: ProviderSpend;
   /** The caller's spend on each registry provider this week, when `c.callerId` was set. */
   personProviderWeekUsd?: Partial<Record<string, number>>;
+  /** Providers skipped for now after asking for a wait (Open Relay's 429 "retry after Ns"). */
+  cooledDown?: string[];
 }
 
 /**
@@ -1085,6 +1088,7 @@ export function runtime(c: Ctx): Promise<Runtime> {
       ...(gate.person ? { person: gate.person } : {}),
       providerSpend: gate.providerSpend,
       ...(gate.personProviderWeekUsd ? { personProviderWeekUsd: gate.personProviderWeekUsd } : {}),
+      ...(gate.cooledDown ? { cooledDown: gate.cooledDown } : {}),
     }));
   return c.runtimeState;
 }
@@ -1095,7 +1099,19 @@ export async function alert(c: Ctx, alerts: readonly Alert[]): Promise<void> {
 }
 
 /** What the provider checks read from the request's runtime view. */
-type ProviderGate = { creditUsedUsd: number; openaiCreditUsedUsd: number; providerSpend?: ProviderSpend };
+type ProviderGate = { creditUsedUsd: number; openaiCreditUsedUsd: number; providerSpend?: ProviderSpend; cooledDown?: readonly string[] };
+
+/**
+ * Open Relay asked for a wait (a 429 "retry after Ns"): requests skip it for that long (at most
+ * MAX_OPENRELAY_COOLDOWN_S) while another upstream can serve (servingModel). Never fails the request.
+ */
+async function coolDownOpenRelay(c: Ctx, seconds: number): Promise<void> {
+  try {
+    await directory(c).coolDownProvider("openrelay", c.now() + Math.min(seconds, MAX_OPENRELAY_COOLDOWN_S) * 1000);
+  } catch {
+    // The wait is a courtesy: without it the next request tries Open Relay and falls back again.
+  }
+}
 
 /** Whether a provider has a key and credit left (a registry provider: also on, inside its weekly budget). */
 function providerReady(provider: Upstream, config: FreeConfig, gate: ProviderGate): boolean {
@@ -1180,6 +1196,29 @@ function providerCredit(provider: Upstream, config: FreeConfig): number {
  * its usual provider as the backup.
  */
 function servingModel(
+  requested: FreeModel,
+  gate: ProviderGate,
+  config: FreeConfig,
+): { model: FreeModel; provider: Upstream; fallback: boolean; backups?: Upstream[] } | undefined {
+  return withoutCooledDown(requested, routeServing(requested, gate, config), gate.cooledDown ?? []);
+}
+
+/**
+ * `serving` without the upstreams cooling down (Open Relay after a 429 that named its wait):
+ * one that would serve first gives way to the first backup that isn't, and is left out of the
+ * backups. With no other upstream to serve, it serves anyway.
+ */
+export function withoutCooledDown<S extends { model: FreeModel; provider: Upstream; fallback: boolean; backups?: Upstream[] }>(requested: FreeModel, serving: S | undefined, cooled: readonly string[]): S | undefined {
+  if (!serving || cooled.length === 0) return serving;
+  const backups = (serving.backups ?? []).filter((provider) => !cooled.includes(provider));
+  if (!cooled.includes(serving.provider)) return serving.backups ? { ...serving, backups } : serving;
+  const [next, ...rest] = backups;
+  if (!next) return serving;
+  return { ...serving, model: onUpstream(requested, next), provider: next, backups: rest };
+}
+
+/** servingModel before cooling-down upstreams are skipped. */
+function routeServing(
   requested: FreeModel,
   gate: ProviderGate,
   config: FreeConfig,
@@ -5189,8 +5228,8 @@ async function openRelayChat(
     retry?: () => Promise<Response>;
   },
 ): Promise<Response> {
-  const payload = openRelayPayload(input.body, { model: input.model, maxTokens: input.maxTokens, stream: input.stream, user: input.user });
-  return compatibleChat(c, { upstream: "openrelay", url: OPENRELAY_URL, key: c.config.openrelayApiKey, payload }, input);
+  const { payload, toolNames } = openRelayRequest(input.body, { model: input.model, maxTokens: input.maxTokens, stream: input.stream, user: input.user });
+  return compatibleChat(c, { upstream: "openrelay", url: OPENRELAY_URL, key: c.config.openrelayApiKey, payload, ...(toolNames ? { toolNames } : {}) }, input);
 }
 
 /**
@@ -5201,7 +5240,7 @@ async function openRelayChat(
  */
 async function compatibleChat(
   c: Ctx,
-  target: { upstream: "luminal" | "liquid" | "openrelay"; url: string; key: string | undefined; payload: Record<string, unknown> },
+  target: { upstream: "luminal" | "liquid" | "openrelay"; url: string; key: string | undefined; payload: Record<string, unknown>; toolNames?: ReadonlyMap<string, string> },
   input: { stream: boolean; started: number; settle: Settle; timeoutSeconds: number; reservedAllowance: Allowance; retry?: () => Promise<Response> },
 ): Promise<Response> {
   const { stream, started, settle } = input;
@@ -5235,6 +5274,13 @@ async function compatibleChat(
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     const retryAfter = response.headers.get("retry-after");
+    if (response.status === 429 && target.upstream === "openrelay") {
+      // Open Relay's token rate limit names its wait only in the message ("retry after 74s"; no
+      // Retry-After header): the next upstream serves now, and Open Relay is skipped until then.
+      const seconds = openRelayRetryAfterSeconds(text, retryAfter);
+      if (seconds !== undefined) await coolDownOpenRelay(c, seconds);
+      return transient(429, "upstream_busy", UPSTREAM_BUSY_MESSAGE, retryAfter ?? (seconds !== undefined ? String(seconds) : null), { status: "upstream_busy", outcome: "rate_limited", ttfbMs });
+    }
     if (response.status === 429) return transient(429, "upstream_busy", UPSTREAM_BUSY_MESSAGE, retryAfter, { status: "upstream_busy", outcome: "rate_limited", ttfbMs });
     if (response.status >= 500) return transient(503, "upstream_unavailable", UPSTREAM_UNAVAILABLE_MESSAGE, retryAfter, { status: "upstream_error", outcome: "error", ttfbMs });
     // Liquid: no seller's offer passes the rules right now (live: 400, code `no_eligible_offer`).
@@ -5283,7 +5329,7 @@ async function compatibleChat(
     });
     if ("degenerate" in guarded) return degenerateHead(guarded.degenerate, "head");
     const metered = meterStream(
-      guarded.stream,
+      target.toolNames ? restoreToolNamesInStream(guarded.stream, target.toolNames) : guarded.stream,
       async ({ usage, errored, upstreamFailed, firstContentAt, chargeUsd, outputTokens }) => {
         if (cut) {
           await settle(undefined, "degenerate_stream", { chargeNothing: true, upstreamError: true, outcome: "error", ttfbMs, ...(firstContentAt !== undefined ? { ttftMs: firstContentAt - started } : {}) });
@@ -5305,7 +5351,8 @@ async function compatibleChat(
     });
   }
 
-  const text = await response.text();
+  const received = await response.text();
+  const text = target.toolNames ? restoreToolNamesInCompletion(received, target.toolNames) : received;
   const parsed = parseJson(text) as { usage?: unknown; error?: unknown } | undefined;
   const junk = degenerate(outputText(parsed));
   if (junk) return degenerateHead({ reason: junk, outputChars: outputChars(parsed) }, "response");
