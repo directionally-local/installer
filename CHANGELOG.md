@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.52.0](https://github.com/directionally-local/installer/compare/v0.51.0...v0.52.0) (2026-11-27)
+
+
+### Features
+
+* **free:** post new feedback to Slack ([#486](https://github.com/directionally-local/installer/issues/486)) ([83f87df](https://github.com/directionally-local/installer/commit/83f87df6bf679ea0e6900dfecaf1f02ebf8ffc43))
+* **laptop:** name dl's provider for the plan in every agent ([#487](https://github.com/directionally-local/installer/issues/487)) ([59230eb](https://github.com/directionally-local/installer/commit/59230eb7683d95fe3102b5bace9fc7c2a4cef63c))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.36.1 ([#489](https://github.com/directionally-local/installer/issues/489)) ([03268eb](https://github.com/directionally-local/installer/commit/03268eb8ec440646977b850b0b114633176ef1cf))
+* **free:** retry short rate limits and stop refusals looking like logins ([#488](https://github.com/directionally-local/installer/issues/488)) ([b94cf79](https://github.com/directionally-local/installer/commit/b94cf79d65978027bf44835804aff44645ef4dd3))
+* **free:** show our message in Claude Code for plan, dl-only, bar and blocked refusals ([#490](https://github.com/directionally-local/installer/issues/490)) ([75e65c5](https://github.com/directionally-local/installer/commit/75e65c508722bda09854c53decd60cd283b300a5))
+* **test:** read npm pack --json from npm 12 as well ([#483](https://github.com/directionally-local/installer/issues/483)) ([66dbd17](https://github.com/directionally-local/installer/commit/66dbd17f6bd7668a6438723a1151949f4c0a50b5))
+
 ## [0.51.0](https://github.com/directionally-local/installer/compare/v0.50.0...v0.51.0) (2026-11-27)
 
 
