@@ -87,6 +87,26 @@ describe("scrubUpstream", () => {
     assert.deepEqual(ours, copy);
   });
 
+  it("keeps only OpenAI's top-level fields on a completion or chunk", () => {
+    const extras = {
+      metrics: { time_to_first_token_ms: 412, speculative_decoding: { accepted: 30, drafted: 40 } },
+      prompt_text: "<|user|>hello",
+      service_tier: "default",
+      native_finish_reason: "stop",
+    };
+    const body = { id: "c1", object: "chat.completion", created: 1, model: MODEL, system_fingerprint: "fp", ...extras, choices: [{ index: 0, message: { role: "assistant", content: "hi", reasoning_content: "r" } }], usage: usage(5, 2, 0, 0) };
+    assert.equal(scrubUpstream(body), true);
+    assert.deepEqual(Object.keys(body), ["id", "object", "created", "model", "system_fingerprint", "choices", "usage"]);
+    assert.equal(body.choices[0]!.message.reasoning_content, "r");
+    const chunk = { id: "c1", object: "chat.completion.chunk", ...extras, choices: [{ index: 0, delta: { content: "hi" } }] };
+    assert.equal(scrubUpstream(chunk), true);
+    assert.deepEqual(Object.keys(chunk), ["id", "object", "choices"]);
+    // An error chunk keeps its error.
+    const failed = { id: "c1", choices: [], error: { message: "boom" }, metrics: {} };
+    scrubUpstream(failed);
+    assert.deepEqual(failed, { id: "c1", choices: [], error: { message: "boom" } });
+  });
+
   it("passes a clean answer byte for byte", async () => {
     const text = `{"id":"x",  "model":"m","usage":{"prompt_tokens":1}}`;
     assert.equal(await (await clientReply(new Response(text, { headers: { "content-type": "application/json" } }))).text(), text);
@@ -161,6 +181,37 @@ describe("no upstream cost reaches a client", () => {
     }
     // The same upstream answer on /v1/chat/completions.
     for (const stream of [false, true]) await clean(await chat(service, token, MODEL, { stream }));
+  });
+
+  it("DeepSeek's metrics, prompt_text and service_tier reach no client, on any route, streamed or not", async () => {
+    const { service, token } = await member({ LUMINAL_API_KEY: "lum-test" });
+    const extras = { metrics: { time_to_first_token_ms: 412, speculative_decoding: { accepted: 30, drafted: 40 } }, prompt_text: "<|user|>hello", service_tier: "default" };
+    const upstream = (body: Record<string, unknown>) =>
+      body.stream
+        ? sse([JSON.stringify({ id: "d1", object: "chat.completion.chunk", model: MODEL, ...extras, choices: [{ index: 0, delta: { content: "hi" } }] }), JSON.stringify({ id: "d1", object: "chat.completion.chunk", model: MODEL, ...extras, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: usage(100, 10, 0, 0) })])
+        : Response.json({ id: "d1", object: "chat.completion", created: 1, model: MODEL, ...extras, choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "hi" } }], usage: usage(100, 10, 0, 0) });
+    service.setOpenRouter(upstream);
+    service.setLuminal(upstream);
+    const NONSTANDARD = /metrics|time_to_first_token|speculative|prompt_text|service_tier/;
+    for (const stream of [false, true]) {
+      const text = await clean(await chat(service, token, MODEL, { stream }));
+      assert.doesNotMatch(text, NONSTANDARD);
+      assert.deepEqual(usageOf(text), { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, prompt_tokens_details: { cached_tokens: 0 } });
+      if (!stream) assert.deepEqual(Object.keys(JSON.parse(text) as object), ["id", "object", "created", "model", "choices", "usage"]);
+    }
+    const claude = (await (await service.request("POST", "/v1/harness-keys", { token, body: { harness: "claude-code" } })).json()) as { key: string };
+    for (const stream of [false, true]) {
+      const text = await clean(await service.request("POST", "/anthropic/v1/messages?beta=true", { token: claude.key, ip: ip(), headers: { "anthropic-version": "2023-06-01" }, body: { model: "claude-sonnet-4-5", max_tokens: 256, stream, messages: [{ role: "user", content: "hello" }] } }));
+      assert.doesNotMatch(text, NONSTANDARD);
+      assert.match(text, /"output_tokens":10/);
+      if (!stream) assert.deepEqual(Object.keys(JSON.parse(text) as object), ["id", "type", "role", "model", "content", "stop_reason", "stop_sequence", "usage"]);
+    }
+    const codex = (await (await service.request("POST", "/v1/harness-keys", { token, body: { harness: "codex" } })).json()) as { key: string };
+    for (const stream of [false, true]) {
+      const text = await clean(await service.request("POST", "/v1/responses", { token: codex.key, ip: ip(), headers: { originator: "codex_cli_rs" }, body: { model: MODEL, input: "hello", stream } }));
+      assert.doesNotMatch(text, NONSTANDARD);
+      assert.match(text, /"output_tokens":10/);
+    }
   });
 
   it("an upstream error inside a stream loses its host metadata", async () => {

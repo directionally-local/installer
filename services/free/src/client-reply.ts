@@ -10,6 +10,19 @@
 /** Top-level fields of a completion or chunk that are the upstream's own, removed whole. */
 const UPSTREAM_FIELDS = new Set(["cost", "openrelay", "exchange", "provider"]);
 
+/**
+ * The top-level fields a chat completion or chunk may carry to a client: OpenAI's, plus `error`
+ * (an error chunk inside a stream). Everything else an upstream adds at the top level (DeepSeek's
+ * `metrics` with `time_to_first_token_ms` and `speculative_decoding`, `prompt_text`,
+ * `service_tier`, and whatever comes next) is removed.
+ */
+const COMPLETION_FIELDS = new Set(["id", "object", "created", "model", "choices", "usage", "system_fingerprint", "error"]);
+
+/** A chat completion or chunk (rather than an error body): it has `choices`, or says what it is. */
+function isCompletion(value: Record<string, unknown>): boolean {
+  return Array.isArray(value.choices) || (typeof value.object === "string" && value.object.startsWith("chat.completion"));
+}
+
 /** A field name about money: removed at the top level and anywhere in `usage`. */
 const MONEY_KEY = /cost|price|credit|charge|billing|usd|byok/i;
 
@@ -35,14 +48,16 @@ function withoutMoney(value: Record<string, unknown>): boolean {
 }
 
 /**
- * Removes the upstream's own fields from a parsed completion, chunk or error body, in place.
- * True when anything was removed.
+ * Removes the upstream's own fields from a parsed completion, chunk or error body, in place: a
+ * completion or chunk keeps only OpenAI's top-level fields (COMPLETION_FIELDS). True when anything
+ * was removed.
  */
 export function scrubUpstream(parsed: unknown): boolean {
   if (!isObject(parsed)) return false;
   let changed = false;
+  const completion = isCompletion(parsed);
   for (const key of Object.keys(parsed)) {
-    if (UPSTREAM_FIELDS.has(key) || MONEY_KEY.test(key)) {
+    if (UPSTREAM_FIELDS.has(key) || MONEY_KEY.test(key) || (completion && !COMPLETION_FIELDS.has(key))) {
       delete parsed[key];
       changed = true;
     }
