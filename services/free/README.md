@@ -752,6 +752,9 @@ POST /v1/feedback
   (`429 rate_limited` with `retryAfter`).
 - `503 feedback_unavailable` when the service has no email binding or `ALERT_EMAIL_TO`; `502
   feedback_failed` when sending failed.
+- **Slack.** With `SLACK_FEEDBACK_WEBHOOK_URL` set, the same feedback is also posted to Slack in
+  the background (see [Alerts](#alerts)); email remains the primary channel and the
+  message still isn't stored.
 
 `GET /v1/feedback/reply-address` (signed in only) → `{"email": "me@example.com"}` or
 `{"email": null}`: the same public GitHub email lookup, so the client can show where replies will
@@ -1349,6 +1352,16 @@ Google Workspace mail and DNS are not touched):
 | other | any https URL | `{"text": text, "content": text}` |
 
 A failed alert is logged and not retried; it never fails the request that triggered it.
+
+**Feedback to Slack.** `SLACK_FEEDBACK_WEBHOOK_URL` (a secret: a Slack Incoming Webhook) adds a
+second, optional channel for new feedback, unsupported-agent requests and provider inquiries.
+When it's set, each one is also posted to Slack with its type, who (a GitHub login and profile
+link when known), the message, client/version/OS when given, the reply-to address when given and
+the time. Posts are fire-and-forget: the request never waits for Slack or fails because of it,
+and a post gives up after 3 seconds. At most 200 go out a UTC day across all three sources. All
+text people typed has &, < and > escaped, and long text is cut at about 2,500 characters with a
+"(truncated)" note. Only the daily count is stored; feedback's message and reply address are
+still not stored anywhere, and the webhook URL is never logged.
 
 ## Token allocator
 

@@ -25,6 +25,7 @@ import { policyOf, waitText } from "./queue.js";
 import { normalizeReferralCode, referralLink } from "./referrals.js";
 import { networkOf, rateLimitNetwork } from "./network.js";
 import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, type Sender } from "./feedback.js";
+import { queueSlackFeedback } from "./slack-feedback.js";
 import { apiError, json } from "./errors.js";
 import { adminHomePage } from "./admin-home-page.js";
 import { dashboardCsv, deniedPage, earlyAccessCsv, healthCsv, isCsvTable, isHealthCsvTable, noGithubCsv, signedInPage, signInPage, toolsPage, type SpendView, type ToolsState } from "./dashboard-page.js";
@@ -327,6 +328,8 @@ export interface Env {
   TOPUP_TOKENS?: string;
   ALERT_WEBHOOK_URL?: string;
   ALERT_WEBHOOK_KIND?: string;
+  /** A secret: a Slack Incoming Webhook for new feedback, agent requests and provider inquiries. Never logged. */
+  SLACK_FEEDBACK_WEBHOOK_URL?: string;
   ALERT_TELEGRAM_CHAT_ID?: string;
   ALERT_EMAIL_TO?: string;
   ALERT_EMAIL_FROM?: string;
@@ -3938,9 +3941,10 @@ async function feedback(c: Ctx): Promise<Response> {
   for (const [key, limit] of buckets) await c.env.RATE_LIMITER.getByName(key).spend(key, limit, 1, c.now());
 
   const { message, email, client } = parsed.value;
-  const looked = email === undefined && sender ? await publicGithubEmail(sender.login, c.fetch, c.now()) : null;
+  const at = c.now();
+  const looked = email === undefined && sender ? await publicGithubEmail(sender.login, c.fetch, at) : null;
   const replyTo = email ?? looked;
-  const mail = feedbackEmail({ message, sender, replyTo, replySource: email ? "given" : looked ? "github" : undefined, client, at: c.now() });
+  const mail = feedbackEmail({ message, sender, replyTo, replySource: email ? "given" : looked ? "github" : undefined, client, at });
   try {
     await sendEmail(binding, {
       from: alertEmailFrom,
@@ -3948,7 +3952,7 @@ async function feedback(c: Ctx): Promise<Response> {
       fromName: "dl feedback",
       subject: mail.subject,
       body: mail.body,
-      now: c.now(),
+      now: at,
       ...(replyTo ? { replyTo } : {}),
     });
   } catch (error) {
@@ -3956,9 +3960,10 @@ async function feedback(c: Ctx): Promise<Response> {
     console.error("feedback email failed", error instanceof Error ? error.name : "error");
     return apiError(502, "feedback_failed", "The feedback couldn't be sent. Try again in a minute.");
   }
+  queueSlackFeedback(c, { kind: "feedback", at, message, sender, client, replyTo });
   // A count for the admin home; the email went, so a failure here doesn't fail the request.
   await directory(c)
-    .countFeedback(c.now())
+    .countFeedback(at)
     .catch(() => console.error("feedback count failed"));
   return json({ ok: true, replyTo: replyTo ?? null });
 }
@@ -7319,6 +7324,7 @@ async function webProviderInquiry(c: Ctx): Promise<Response> {
   const now = c.now();
   const saved = await directory(c).saveProviderInquiry({ now, inquiry: parsed.value });
   if (!saved.ok) return rateLimited(Math.max(1, Math.ceil((Math.floor(now / DAY_MS) * DAY_MS + DAY_MS - now) / 1000)));
+  queueSlackFeedback(c, { kind: "provider-inquiry", at: now, ...parsed.value });
   const binding = c.env.ALERT_EMAIL;
   const { alertEmailTo, alertEmailFrom } = c.config;
   if (saved.email && binding && alertEmailTo) {
@@ -7368,6 +7374,7 @@ async function agentRequest(c: Ctx): Promise<Response> {
   }
   const saved = await directory(c).saveAgentRequest({ now, request: parsed.value, account: who });
   if (!saved.ok) return rateLimited(Math.max(1, Math.ceil((Math.floor(now / DAY_MS) * DAY_MS + DAY_MS - now) / 1000)));
+  queueSlackFeedback(c, { kind: "agent-request", at: now, ...parsed.value, account: who });
   const binding = c.env.ALERT_EMAIL;
   const { alertEmailTo, alertEmailFrom } = c.config;
   if (saved.email && binding && alertEmailTo) {
