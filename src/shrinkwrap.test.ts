@@ -112,8 +112,11 @@ describe("npm-shrinkwrap.json for the published tarball", () => {
     try {
       const result = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: root, encoding: "utf8" });
       assert.equal(result.status, 0, result.stderr);
-      const packed = JSON.parse(result.stdout) as { files: { path: string }[] }[];
-      const files = packed.flatMap((entry) => entry.files.map((file) => file.path));
+      // npm ≤11 prints an array of entries; npm 12 prints one object keyed by package name.
+      type Entry = { files: { path: string }[] };
+      const parsed = JSON.parse(result.stdout) as Entry[] | Entry | Record<string, Entry>;
+      const entries: Entry[] = Array.isArray(parsed) ? parsed : "files" in parsed ? [parsed as Entry] : Object.values(parsed as Record<string, Entry>);
+      const files = entries.flatMap((entry) => entry.files.map((file) => file.path));
       assert.ok(files.includes("npm-shrinkwrap.json"), `packed: ${files.join(", ")}`);
     } finally {
       rmSync(join(root, "npm-shrinkwrap.json"), { force: true });

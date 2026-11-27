@@ -41,8 +41,10 @@ function main() {
   rmSync(shrinkwrapPath, { force: true });
 
   try {
-    const packed = JSON.parse(run("npm", ["pack", "--dry-run", "--json"]));
-    const files = packed.flatMap((entry) => entry.files.map((file) => file.path));
+    // npm ≤11 prints an array of entries; npm 12 prints one object keyed by package name.
+    const parsed = JSON.parse(run("npm", ["pack", "--dry-run", "--json"]));
+    const entries = Array.isArray(parsed) ? parsed : "files" in parsed ? [parsed] : Object.values(parsed);
+    const files = entries.flatMap((entry) => entry.files.map((file) => file.path));
     if (!files.includes("npm-shrinkwrap.json")) {
       problems.push("npm pack --dry-run doesn't include npm-shrinkwrap.json (is it in package.json's files?)");
     }
