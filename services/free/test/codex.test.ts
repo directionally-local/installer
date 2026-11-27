@@ -224,7 +224,7 @@ describe("POST /v1/responses", () => {
     const expired = await responses(service, key, { model: MODEL, input: "x", stream: true });
     assert.equal(expired.status, 401);
     const body = (await expired.json()) as { error: { message: string; type: string } };
-    assert.equal(body.error.message, "This dl codex session's free tier key has expired. Quit Codex and run dl codex again.");
+    assert.equal(body.error.message, "This dl codex session key has expired. Quit Codex and run dl codex again.");
     assert.equal(body.error.type, "authentication_error");
   });
 

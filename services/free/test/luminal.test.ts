@@ -132,7 +132,7 @@ describe("Luminal errors (no automatic fallback)", () => {
     const response = await chat(service, token);
     assert.equal(response.status, 429);
     assert.equal(response.headers.get("retry-after"), "7");
-    assert.deepEqual(await errorOf(response), { code: "upstream_busy", message: "The free tier is busy right now; retrying…", retryAfter: 7, retryable: true, upstream: "luminal" });
+    assert.deepEqual(await errorOf(response), { code: "upstream_busy", message: "Our model provider is busy right now; retrying…", retryAfter: 7, retryable: true, upstream: "luminal" });
     assert.equal(service.calls.openRouter.length, 0, "no switch to OpenRouter");
     const row = rows(service).at(-1)!;
     assert.equal(rows(service).length, before + 1);
@@ -158,6 +158,17 @@ describe("Luminal errors (no automatic fallback)", () => {
     assert.equal(unreachable.status, 503);
     assert.equal((await errorOf(unreachable)).code, "upstream_unavailable");
     assert.equal(service.calls.openRouter.length, 0);
+  });
+
+  it("keeps 'free tier' out of the 503 a paid/admin key receives", async () => {
+    const { service, adminToken } = await member();
+    service.setLuminal(() => new Response("bad gateway", { status: 502 }));
+    const response = await chat(service, adminToken);
+    assert.equal(response.status, 503);
+    const error = await errorOf(response);
+    assert.equal(error.code, "upstream_unavailable");
+    assert.equal(error.message, "Our model provider is having trouble right now; retrying…");
+    assert.equal(JSON.stringify(error).includes("free tier"), false);
   });
 
   it("answers 503 upstream_timeout when nothing arrives before the first-byte timeout", async () => {
