@@ -420,7 +420,7 @@ describe("refusal counts: every coding agent path, by client", () => {
         },
       },
     );
-    assert.equal(refused.status, 403);
+    assert.equal(refused.status, 402);
     assert.equal(
       ((await refused.json()) as { type: string }).type,
       "error",

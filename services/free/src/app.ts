@@ -3680,7 +3680,7 @@ async function toAnthropicErrorResponse(response: Response, tool = false): Promi
   const error = body?.error ?? {};
   const code = typeof error.code === "string" ? error.code : undefined;
   const message = typeof error.message === "string" ? (tool ? forTool(error.message) : forHarness(error.message)) : "The free tier refused the request.";
-  const status = errorStatus(response.status, error.retryable === true);
+  const status = errorStatus(response.status, error.retryable === true, code);
   const extra: Record<string, unknown> = {};
   for (const key of ["resetsAt", "retryAfter", "trial", "share"]) if (error[key] !== undefined) extra[key] = error[key];
   return anthropicErrorResponse(status, message, code, passHeaders(response), extra);
