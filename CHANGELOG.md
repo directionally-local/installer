@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.50.0](https://github.com/directionally-local/installer/compare/v0.49.1...v0.50.0) (2026-11-27)
+
+
+### Features
+
+* **laptop:** Autopilot first in the picker; plan models in each agent ([#469](https://github.com/directionally-local/installer/issues/469)) ([940ee02](https://github.com/directionally-local/installer/commit/940ee02976a75b6c5a790e150b1553af2e592528))
+
+
+### Bug Fixes
+
+* **deps:** pin autopilot-ai 3.34.1 ([#467](https://github.com/directionally-local/installer/issues/467)) ([d93e1af](https://github.com/directionally-local/installer/commit/d93e1aff1b1b5208dbc10be58a095e4eb4a56702))
+* **free:** drop degenerate upstream streams and retry on the next upstream ([#470](https://github.com/directionally-local/installer/issues/470)) ([0d94511](https://github.com/directionally-local/installer/commit/0d9451156028a56344a1881142a08212620311ba))
+* **free:** never advise discarding the conversation on an unknown refusal ([#465](https://github.com/directionally-local/installer/issues/465)) ([0648cac](https://github.com/directionally-local/installer/commit/0648cac2b97cfae70c1540c5d0dce46ab41c52e6))
+* **free:** repair broken tool histories and retry Open Relay's opaque 400 ([#463](https://github.com/directionally-local/installer/issues/463)) ([80680b3](https://github.com/directionally-local/installer/commit/80680b301c8e8bf34269ef273a9605ba86945980))
+* **install:** require https for the advertised install command ([#468](https://github.com/directionally-local/installer/issues/468)) ([4ee36bd](https://github.com/directionally-local/installer/commit/4ee36bd003e67b7707078dcb16f764c0289d5977))
+
 ## [0.49.1](https://github.com/directionally-local/installer/compare/v0.49.0...v0.49.1) (2026-11-26)
 
 
