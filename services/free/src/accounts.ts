@@ -77,6 +77,29 @@ export function parseApiKey(key: string): { account: number; id: string; secret:
   return Number.isSafeInteger(account) && account > 0 ? { account, id: match[2]!, secret: match[3]! } : undefined;
 }
 
+// ─── Autopilot keys ─────────────────────────────────────────────────────────
+
+/**
+ * `dl_ak_<account base36>_<id>_<secret>`: a short-lived key dl mints from the person's dl key
+ * (POST /v1/autopilot-keys) for the one Autopilot it launches, and refreshes while that
+ * Autopilot runs (account-object.ts AUTOPILOT_KEY_TTL_MS). Requests with it count as Autopilot:
+ * GPT-6 and the paid plans' GPT-6 launch bonus, which a dl key in another tool doesn't get.
+ * Laid out like a dl key (`dl_sk_`) so the account routes to its Account object.
+ */
+const AUTOPILOT_KEY = /^dl_ak_([0-9a-z]{1,11})_([a-z0-9]{12})_([A-Za-z0-9_-]{43})$/;
+export const AUTOPILOT_KEY_PREFIX = "dl_ak_";
+
+export function formatAutopilotKey(account: number, id: string, secret: string): string {
+  return `${AUTOPILOT_KEY_PREFIX}${account.toString(36)}_${id}_${secret}`;
+}
+
+export function parseAutopilotKey(key: string): { account: number; id: string; secret: string } | undefined {
+  const match = AUTOPILOT_KEY.exec(key);
+  if (!match) return undefined;
+  const account = parseInt(match[1]!, 36);
+  return Number.isSafeInteger(account) && account > 0 ? { account, id: match[2]!, secret: match[3]! } : undefined;
+}
+
 /** What a list shows of a key: the prefix and the secret's last four characters. */
 export function keyHint(lastFour: string | null): string {
   return lastFour ? `${API_KEY_PREFIX}…${lastFour}` : `${API_KEY_PREFIX}…`;

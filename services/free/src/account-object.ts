@@ -21,7 +21,7 @@ import {
   type Usage,
 } from "./quota.js";
 import { weekEnd, weekStart } from "./week.js";
-import { formatApiKey } from "./accounts.js";
+import { formatApiKey, formatAutopilotKey } from "./accounts.js";
 import { isPlanId, type PlanId } from "./plan-prices.js";
 import { META, METER_SCHEMA, bonusUsdThisWeek, claimNotice, countedThisWeek, creditMeter, expectedCounted, inFlightOn, meterSnapshot, migrateMeters, pruneMeters, readMeta, recordMeter, tierOf, writeMeta, type MeterSnapshot } from "./plan-meter.js";
 import {
@@ -109,6 +109,22 @@ export function parseHarnessKey(key: string): { githubId: number; id: string; se
   const githubId = Number(match[1]);
   return Number.isSafeInteger(githubId) ? { githubId, id: match[2]!, secret: match[3]! } : undefined;
 }
+
+/**
+ * Autopilot keys (`dl_ak_`, accounts.ts): what dl hands the Autopilot it launches in place of the
+ * person's dl key, so its requests count as Autopilot (GPT-6, the paid plans' launch bonus). Minted
+ * from a dl key (`parent`: that key's id) or a sign-in (`sid`), short-lived like a harness key:
+ * AUTOPILOT_KEY_TTL_MS after it was made or last refreshed. Only the dl key or sign-in that made
+ * it can refresh it, never the key itself, so a copy dies within the TTL once dl stops refreshing.
+ * Revoking the parent dl key, or signing that session out, ends it at once.
+ */
+export const AUTOPILOT_KEY_TTL_MS = 15 * 60_000;
+/** Live Autopilot keys per account: one per running Autopilot that dl launched. */
+export const MAX_AUTOPILOT_KEYS = 16;
+
+export type CreateAutopilotKeyResult =
+  | { ok: true; id: string; key: string; expiresAt: number }
+  | { ok: false; code: "not_invited" | "suspended" | "blocked" | "autopilot_key_limit" };
 
 export type CreateHarnessKeyResult =
   | { ok: true; id: string; key: string; expiresAt: number }
@@ -397,6 +413,14 @@ const SCHEMA = [
      id         TEXT PRIMARY KEY,
      harness    TEXT NOT NULL,
      key_hash   TEXT NOT NULL,
+     sid        TEXT,
+     created_at INTEGER NOT NULL,
+     expires_at INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS autopilot_keys (
+     id         TEXT PRIMARY KEY,
+     key_hash   TEXT NOT NULL,
+     parent     TEXT,
      sid        TEXT,
      created_at INTEGER NOT NULL,
      expires_at INTEGER NOT NULL
@@ -1262,8 +1286,10 @@ export class AccountObject extends DurableObject<AccountEnv> {
         sql.exec("INSERT INTO revoked_sessions (sid, expires_at) VALUES (?, ?) ON CONFLICT(sid) DO UPDATE SET expires_at = MAX(expires_at, excluded.expires_at)", sid, input.until);
         // Harness keys minted from that sign-in end with it (they can outlive the record above).
         sql.exec("DELETE FROM harness_keys WHERE sid = ?", sid);
+        sql.exec("DELETE FROM autopilot_keys WHERE sid = ?", sid);
       }
       if (input.notBefore !== undefined) sql.exec("DELETE FROM harness_keys WHERE sid IS NULL");
+      if (input.notBefore !== undefined) sql.exec("DELETE FROM autopilot_keys WHERE sid IS NULL AND parent IS NULL");
       if (input.notBefore !== undefined) {
         sql.exec("INSERT INTO meta (key, value) VALUES ('not_before', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(input.notBefore));
       }
@@ -1326,16 +1352,86 @@ export class AccountObject extends DurableObject<AccountEnv> {
   /** Deletes one key (only of `kind` when given); false when there is no such key. */
   async revokeKey(id: string, kind?: KeyKind): Promise<boolean> {
     const found = (kind === undefined ? this.ctx.storage.sql.exec("SELECT 1 FROM server_keys WHERE id = ?", id) : this.ctx.storage.sql.exec("SELECT 1 FROM server_keys WHERE id = ? AND kind = ?", id, kind)).toArray().length > 0;
-    if (found) this.ctx.storage.sql.exec("DELETE FROM server_keys WHERE id = ?", id);
+    if (found) {
+      this.ctx.storage.sql.exec("DELETE FROM server_keys WHERE id = ?", id);
+      // The Autopilot keys it minted end with it.
+      this.ctx.storage.sql.exec("DELETE FROM autopilot_keys WHERE parent = ?", id);
+    }
     return found;
   }
 
-  /** Deletes every key, server and tool (and every harness key); returns how many there were. */
+  /** Deletes every key, server and tool (and every harness and Autopilot key); returns how many there were. */
   async revokeAllKeys(): Promise<number> {
     const count = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM server_keys").toArray()[0]?.n ?? 0;
     this.ctx.storage.sql.exec("DELETE FROM server_keys");
     this.ctx.storage.sql.exec("DELETE FROM harness_keys");
+    this.ctx.storage.sql.exec("DELETE FROM autopilot_keys");
     return count;
+  }
+
+  /**
+   * Mints an Autopilot key (see AUTOPILOT_KEY_TTL_MS) for one Autopilot dl launches: from the dl
+   * key `parent` (its id) or the sign-in session `sid`. The secret is returned here once.
+   */
+  async createAutopilotKey(input: { parent?: string; sid?: string; now: number }): Promise<CreateAutopilotKeyResult> {
+    const row = this.#row();
+    if (!row) return { ok: false, code: "not_invited" };
+    if (row.status === "blocked") return { ok: false, code: "blocked" };
+    if (row.status === "suspended") return { ok: false, code: "suspended" };
+    const sql = this.ctx.storage.sql;
+    sql.exec("DELETE FROM autopilot_keys WHERE expires_at <= ?", input.now);
+    const live = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM autopilot_keys").toArray()[0]?.n ?? 0;
+    if (live >= MAX_AUTOPILOT_KEYS) return { ok: false, code: "autopilot_key_limit" };
+    const id = [...crypto.getRandomValues(new Uint8Array(6))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const secret = randomToken();
+    const expiresAt = input.now + AUTOPILOT_KEY_TTL_MS;
+    sql.exec(
+      "INSERT INTO autopilot_keys (id, key_hash, parent, sid, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+      id,
+      await sha256Hex(secret),
+      input.parent ?? null,
+      input.parent === undefined ? (input.sid ?? null) : null,
+      input.now,
+      expiresAt,
+    );
+    return { ok: true, id, key: formatAutopilotKey(row.github_id, id, secret), expiresAt };
+  }
+
+  /**
+   * Pushes a live Autopilot key's expiry out again; undefined when it is unknown, expired, or (with
+   * `parent`) was minted by another dl key. A refresh never revives an expired key.
+   */
+  async refreshAutopilotKey(id: string, now: number, parent?: string): Promise<number | undefined> {
+    const sql = this.ctx.storage.sql;
+    const found = sql.exec<{ expires_at: number; parent: string | null }>("SELECT expires_at, parent FROM autopilot_keys WHERE id = ?", id).toArray()[0];
+    if (!found || found.expires_at <= now) return undefined;
+    if (parent !== undefined && found.parent !== parent) return undefined;
+    const expiresAt = now + AUTOPILOT_KEY_TTL_MS;
+    sql.exec("UPDATE autopilot_keys SET expires_at = ? WHERE id = ?", expiresAt, id);
+    return expiresAt;
+  }
+
+  /** Deletes one Autopilot key (with `parent`, only one that dl key minted); false when there was none. */
+  async revokeAutopilotKey(id: string, parent?: string): Promise<boolean> {
+    const sql = this.ctx.storage.sql;
+    const found = sql.exec<{ parent: string | null }>("SELECT parent FROM autopilot_keys WHERE id = ?", id).toArray()[0];
+    if (!found || (parent !== undefined && found.parent !== parent)) return false;
+    sql.exec("DELETE FROM autopilot_keys WHERE id = ?", id);
+    return true;
+  }
+
+  /**
+   * The account behind a live Autopilot key; undefined when the key is unknown, wrong, expired,
+   * its dl key was revoked, or its sign-in session was signed out.
+   */
+  async verifyAutopilotKey(id: string, secret: string, now: number): Promise<{ githubId: number; login: string; parent?: string; sid?: string } | undefined> {
+    const row = this.#row();
+    const sql = this.ctx.storage.sql;
+    const key = sql.exec<{ key_hash: string; parent: string | null; sid: string | null; expires_at: number }>("SELECT key_hash, parent, sid, expires_at FROM autopilot_keys WHERE id = ?", id).toArray()[0];
+    if (!row || !key || key.expires_at <= now || !timingSafeEqual(await sha256Hex(secret), key.key_hash)) return undefined;
+    if (key.parent !== null && sql.exec("SELECT 1 FROM server_keys WHERE id = ?", key.parent).toArray().length === 0) return undefined;
+    if (key.sid !== null && sql.exec("SELECT 1 FROM revoked_sessions WHERE sid = ?", key.sid).toArray().length > 0) return undefined;
+    return { githubId: row.github_id, login: row.login, ...(key.parent !== null ? { parent: key.parent } : {}), ...(key.sid !== null ? { sid: key.sid } : {}) };
   }
 
   /** Mints a harness key for one dl session (see HARNESS_KEY). The secret is returned here once. */

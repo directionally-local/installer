@@ -7,11 +7,11 @@ import { githubSignals } from "../../shared/src/github-signals.js";
 import { hmacKey, signJwt, verifyJwt } from "../../shared/src/jwt.js";
 import { hmacHex, subkey } from "../../shared/src/keys.js";
 import type { Limit } from "../../shared/src/rate-limit.js";
-import { HARNESSES, HARNESS_KEY_TTL_MS, MAX_HARNESS_KEYS, MAX_SERVER_KEYS, parseHarnessKey, parseServerKey, type AccountObject, type Harness, type KeyKind, type Allowance, type Limits, type Plan, type ServerKeyView } from "./account-object.js";
+import { AUTOPILOT_KEY_TTL_MS, MAX_AUTOPILOT_KEYS, HARNESSES, HARNESS_KEY_TTL_MS, MAX_HARNESS_KEYS, MAX_SERVER_KEYS, parseHarnessKey, parseServerKey, type AccountObject, type Harness, type KeyKind, type Allowance, type Limits, type Plan, type ServerKeyView } from "./account-object.js";
 import { TOOL_KEYS_OFF_MESSAGE, TOOL_KEYS_UNAVAILABLE_MESSAGE, TOOL_KEY_NOT_HERE_MESSAGE, forTool, toolClient, toolLimitMessage, toolName } from "./tool-keys.js";
 import type { AuthObject, Identity } from "./auth-object.js";
 import { normalizeUserCode } from "./codes.js";
-import { accountObjectName, API_KEY_PREFIX, parseApiKey } from "./accounts.js";
+import { accountObjectName, API_KEY_PREFIX, AUTOPILOT_KEY_PREFIX, parseApiKey, parseAutopilotKey } from "./accounts.js";
 import { sendOwnerPaymentAlert } from "./owner-payment-alerts.js";
 import { applyPlanEvent, githubCallback, githubStart, googleCallback, googleStart, paidAdmin, paidV1, paidWebRoute } from "./paid-web.js";
 import { GOOGLE_CALLBACK_PATH } from "./google.js";
@@ -580,6 +580,7 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/v1/chat/completions") return chatCompletions(c);
   if (path === "/v1/responses" || path.startsWith("/v1/responses/")) return responses(c, path, method);
   if (method === "POST" && path === "/v1/events") return events(c);
+  if (path === "/v1/autopilot-keys" || path.startsWith("/v1/autopilot-keys/")) return autopilotKeys(c, path.slice("/v1/autopilot-keys".length).replace(/^\//, ""), method);
   if (path === "/v1/harness-keys" || path.startsWith("/v1/harness-keys/")) return harnessKeys(c, path.slice("/v1/harness-keys".length).replace(/^\//, ""), method);
   if (path.startsWith("/anthropic/")) return anthropic(c, path.slice("/anthropic".length), method);
   if (method === "POST" && path === "/v1/feedback") return feedback(c);
@@ -935,10 +936,18 @@ async function tokenBody(c: Ctx, identity: Identity, refreshToken: string, sid: 
 /** Who is calling: from a sign-in session's access token, or from a server key. */
 /** The 401 on /v1 and /anthropic for a caller with no auth or a bad dl.new API key (`dl_sk_`, `dlk_`). */
 export const API_KEY_MISSING_MESSAGE = "Missing or invalid API key. Create one at dl.new/keys.";
+/** The 401 for an Autopilot key that expired or was revoked: dl stopped refreshing it. */
+export const AUTOPILOT_KEY_EXPIRED_MESSAGE = "dl's key for this Autopilot session expired or was revoked. Quit Autopilot and run dl again.";
 
 interface Caller extends Identity {
-  /** "harness": a harness key from `dl claude` or `dl opencode` (see HARNESS_KEY in account-object.ts). */
-  via: "access" | "key" | "harness";
+  /**
+   * "harness": a harness key from `dl claude` or `dl opencode` (see HARNESS_KEY in account-object.ts).
+   * "autopilot": an Autopilot key (`dl_ak_`, accounts.ts) dl minted for the Autopilot it launched.
+   */
+  via: "access" | "key" | "harness" | "autopilot";
+  /** With an Autopilot key: its id, and the dl key that minted it (when one did). */
+  autopilotKeyId?: string;
+  autopilotParent?: string;
   /** With a harness key: which coding agent, and the key's id. */
   harness?: Harness;
   harnessKeyId?: string;
@@ -954,12 +963,13 @@ interface Caller extends Identity {
  * too, from an account allowed keys (`serverKeysAllowed`); with `ungrantedKeys` as well, from
  * any account (only /request, so a server with an old key can ask for a grant). With `toolKeys`,
  * a tool key too (tool-keys.ts), while the `toolKeys` setting is on. With `harness`,
- * a harness key: any (true), or only one minted for one of the listed agents. An access token
- * from a revoked session is refused like an expired one.
+ * a harness key: any (true), or only one minted for one of the listed agents. With
+ * `autopilotKeys`, an Autopilot key (`dl_ak_`): counted as Autopilot. An access token from a
+ * revoked session is refused like an expired one.
  */
 async function authenticate(
   c: Ctx,
-  options: { keys?: boolean; ungrantedKeys?: boolean; toolKeys?: boolean; harness?: boolean | readonly Harness[]; apiKeyHeader?: boolean } = {},
+  options: { keys?: boolean; ungrantedKeys?: boolean; toolKeys?: boolean; harness?: boolean | readonly Harness[]; autopilotKeys?: boolean; apiKeyHeader?: boolean } = {},
 ): Promise<Caller | Response> {
   // Anthropic clients may send the key as `x-api-key` instead (apiKeyHeader: the Anthropic endpoint).
   const apiKey = options.apiKeyHeader ? c.request.headers.get("x-api-key")?.trim() : undefined;
@@ -969,7 +979,7 @@ async function authenticate(
   // API-key wording; a dl or Autopilot access token keeps "Sign in again".
   const modelApi = /^\/(?:v1|anthropic)\//.test(c.url.pathname);
   const bearer = match?.[1] ?? "";
-  const apiKeyCaller = modelApi && (!match || bearer.startsWith(API_KEY_PREFIX) || bearer.startsWith("dlk_"));
+  const apiKeyCaller = modelApi && (!match || bearer.startsWith(API_KEY_PREFIX) || bearer.startsWith(AUTOPILOT_KEY_PREFIX) || bearer.startsWith("dlk_"));
   const invalid = () =>
     apiError(401, "invalid_token", apiKeyCaller ? API_KEY_MISSING_MESSAGE : "Sign in again: the access token is missing, invalid or expired.", {}, { "www-authenticate": 'Bearer error="invalid_token"' });
   if (!match) return invalid();
@@ -1010,6 +1020,23 @@ async function authenticate(
     const stored = await directory(c).getPerson(owner.githubId);
     if ((!stored || stored.status === "active") && !(await serverKeysAllowed(c, owner.githubId, stored))) return serverKeysUnavailable();
     return { ...owner, via: "key", keyKind: "server", keyId: parsed.id };
+  }
+  if (bearer.startsWith(AUTOPILOT_KEY_PREFIX)) {
+    // An Autopilot key: only where `autopilotKeys` allows it (the model APIs Autopilot uses and
+    // /v1/events). Expired, its dl key revoked, or signed out: `invalid_token`, so Autopilot asks
+    // dl for the current key (dl re-mints one when a refresh finds it gone) and resends once.
+    const parsed = parseAutopilotKey(bearer);
+    if (!options.autopilotKeys || !parsed) return invalid();
+    const owner = await account(c, parsed.account).verifyAutopilotKey(parsed.id, parsed.secret, c.now());
+    if (!owner) return apiError(401, "invalid_token", AUTOPILOT_KEY_EXPIRED_MESSAGE, {}, { "www-authenticate": 'Bearer error="invalid_token"' });
+    return {
+      githubId: owner.githubId,
+      login: owner.login,
+      via: "autopilot",
+      autopilotKeyId: parsed.id,
+      ...(owner.parent ? { autopilotParent: owner.parent } : {}),
+      ...(owner.sid ? { sid: owner.sid } : {}),
+    };
   }
   if (bearer.startsWith(API_KEY_PREFIX)) {
     // dl.new's API keys (accounts.ts): tool keys tied to the account, not a GitHub id.
@@ -2955,7 +2982,7 @@ async function plansPublic(c: Ctx): Promise<Response> {
 
 /** GET /v1/usage: the caller's plan usage this week (a sign-in, a server key or a tool key). */
 async function usage(c: Ctx): Promise<Response> {
-  const identity = await authenticate(c, { keys: true, toolKeys: true });
+  const identity = await authenticate(c, { keys: true, toolKeys: true, autopilotKeys: true });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
@@ -2975,7 +3002,7 @@ async function planFallback(c: Ctx): Promise<Response> {
 }
 
 async function me(c: Ctx): Promise<Response> {
-  const identity = await authenticate(c, { keys: true, toolKeys: true });
+  const identity = await authenticate(c, { keys: true, toolKeys: true, autopilotKeys: true });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
@@ -3453,7 +3480,7 @@ async function planModels(c: Ctx, config: FreeConfig, githubId: number, isAdmin:
 
 async function models(c: Ctx): Promise<Response> {
   // OpenCode's harness key may list them too (dl opencode reads the list to configure it).
-  const identity = await authenticate(c, { keys: true, toolKeys: true, harness: ["opencode", "pi", "codex"] });
+  const identity = await authenticate(c, { keys: true, toolKeys: true, harness: ["opencode", "pi", "codex"], autopilotKeys: true });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
@@ -3485,7 +3512,8 @@ async function models(c: Ctx): Promise<Response> {
 }
 
 async function events(c: Ctx): Promise<Response> {
-  const identity = await authenticate(c, { keys: true, harness: true });
+  // An Autopilot key too: the Autopilot dl launched sends its session events with it.
+  const identity = await authenticate(c, { keys: true, harness: true, autopilotKeys: true });
   if (identity instanceof Response) return identity;
   const guarded = await apiGuard(c, identity);
   if (guarded) return guarded;
@@ -3498,6 +3526,65 @@ async function events(c: Ctx): Promise<Response> {
   const cleaned = identity.harness ? batch.map((event) => ({ ...event, props: { ...event.props, harness: identity.harness } })) : batch;
   const accepted = await directory(c).recordEvents(identity.githubId, cleaned, c.now());
   return json({ accepted }, 202);
+}
+
+// ─── Autopilot launched by dl ───────────────────────────────────────────────
+
+/**
+ * Autopilot keys (`dl_ak_`, accounts.ts; AUTOPILOT_KEY_TTL_MS in account-object.ts): what dl hands
+ * the Autopilot it launches instead of the person's dl key, so that Autopilot's requests count as
+ * Autopilot (GPT-6 while `gpt6Clients` is "autopilot", the paid plans' GPT-6 launch bonus) while
+ * the same dl key in any other tool stays a tool key.
+ *
+ *   POST   /v1/autopilot-keys              → 201 {id, key, expiresAt, ttlSeconds}
+ *   POST   /v1/autopilot-keys/:id/refresh  → {id, expiresAt}: another AUTOPILOT_KEY_TTL_MS
+ *   DELETE /v1/autopilot-keys/:id          → {id, revoked: true}
+ *
+ * Minting and refreshing take the dl key (`dl_sk_`, a tool key) or a sign-in's access token; a
+ * key minted from a dl key is refreshed only by that dl key. The Autopilot key itself can only
+ * revoke itself, never refresh: dl refreshes it while Autopilot runs, so a copy of it dies within
+ * the TTL once dl stops. 409 autopilot_key_limit past MAX_AUTOPILOT_KEYS live at once.
+ */
+async function autopilotKeys(c: Ctx, rest: string, method: string): Promise<Response> {
+  const identity = await authenticate(c, { keys: true, toolKeys: true, autopilotKeys: rest !== "" });
+  if (identity instanceof Response) return identity;
+  const guarded = await apiGuard(c, identity);
+  if (guarded) return guarded;
+  const person = account(c, identity.githubId);
+  // A dl key (or an older `dlk_` tool key) or a sign-in; never a server key or another agent's key.
+  const fromKey = identity.via === "key" && identity.keyKind === "tool" ? identity.keyId : undefined;
+  if (rest === "") {
+    if (method !== "POST") return apiError(405, "method_not_allowed", "Use POST.");
+    if (identity.via !== "access" && fromKey === undefined) return apiError(403, "forbidden", "Autopilot keys are made from your dl key or a signed-in dl.");
+    const created = await person.createAutopilotKey({ ...(fromKey !== undefined ? { parent: fromKey } : identity.sid ? { sid: identity.sid } : {}), now: c.now() });
+    if (created.ok) return json({ id: created.id, key: created.key, expiresAt: new Date(created.expiresAt).toISOString(), ttlSeconds: AUTOPILOT_KEY_TTL_MS / 1000 }, 201);
+    switch (created.code) {
+      case "autopilot_key_limit":
+        return apiError(409, "autopilot_key_limit", `At most ${MAX_AUTOPILOT_KEYS} Autopilot sessions started by dl can run at once. Quit one first.`, { max: MAX_AUTOPILOT_KEYS });
+      case "not_invited":
+        return apiError(403, "not_invited", "This account has no dl plan yet.");
+      default:
+        return apiError(403, created.code, created.code === "blocked" ? "This account is blocked." : "This account is suspended.");
+    }
+  }
+  const [id, action] = rest.split("/");
+  if (!id) return apiError(404, "not_found", `${method} /v1/autopilot-keys/${rest} isn't a route.`);
+  // The dl key that minted it (or any sign-in of the account): `parent` limits a dl key to its own.
+  const parent = fromKey;
+  const owner = identity.via === "access" || fromKey !== undefined;
+  if (method === "POST" && action === "refresh") {
+    if (!owner) return apiError(403, "forbidden", "Only the dl key that made this Autopilot key can refresh it.");
+    const expiresAt = await person.refreshAutopilotKey(id, c.now(), parent);
+    if (expiresAt === undefined) return apiError(404, "autopilot_key_not_found", "That Autopilot key expired or isn't yours. Make a new one.");
+    return json({ id, expiresAt: new Date(expiresAt).toISOString() });
+  }
+  if (method === "DELETE" && action === undefined) {
+    // An Autopilot key may end only itself.
+    if (!owner && !(identity.via === "autopilot" && identity.autopilotKeyId === id)) return apiError(403, "forbidden", "This key can't revoke that Autopilot key.");
+    if (!(await person.revokeAutopilotKey(id, parent))) return apiError(404, "autopilot_key_not_found", "No Autopilot key with that id on this account.");
+    return json({ id, revoked: true });
+  }
+  return apiError(404, "not_found", `${method} /v1/autopilot-keys/${rest} isn't a route.`);
 }
 
 // ─── Other coding agents through dl (`dl claude`, `dl opencode`) ────────────
@@ -3964,7 +4051,7 @@ interface TranslatedChat {
  * slash commands are typed in dl.
  */
 async function chatCompletions(c: Ctx): Promise<Response> {
-  const identity = await authenticate(c, { keys: true, toolKeys: true, harness: ["opencode", "pi"] });
+  const identity = await authenticate(c, { keys: true, toolKeys: true, harness: ["opencode", "pi"], autopilotKeys: true });
   if (identity instanceof Response) {
     identity.headers.set("x-dl-quota-resets-at", new Date(weekEnd(c.now())).toISOString());
     return identity;
@@ -3976,7 +4063,8 @@ async function chatCompletions(c: Ctx): Promise<Response> {
 
 /**
  * The agent a caller counts as for GPT-6 and the other agents' share: a harness key's, "tool" for
- * a tool key (tool-keys.ts), undefined for Autopilot (a sign-in token or a server key).
+ * a tool key (tool-keys.ts), undefined for Autopilot (a sign-in token, a server key, or the
+ * Autopilot key dl mints for the Autopilot it launches).
  */
 function otherAgent(identity: Caller): string | undefined {
   return identity.via === "harness" ? identity.harness : identity.keyKind === "tool" ? "tool" : undefined;
@@ -4346,7 +4434,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   // Free tokens work inside dl only: a sign-in token with no session event in the last day that
   // made many requests no session event covers is in another tool (abuse.ts). Server keys (dl's server
   // mode) are left out; like the blocks below, Pro and top-ups still work.
-  const outsideDl = gate.config.dlOnly && identity.via !== "key" && gate.person?.outsideDl === true;
+  // An Autopilot key is dl's by construction (dl minted it for the Autopilot it launched).
+  const outsideDl = gate.config.dlOnly && identity.via !== "key" && identity.via !== "autopilot" && gate.person?.outsideDl === true;
   const freeBlock: (() => Promise<Response>) | undefined = isAdmin
     ? undefined
     : outsideDl
