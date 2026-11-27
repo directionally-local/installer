@@ -140,7 +140,7 @@ export function piLaunch(deps: PiDeps = {}): HarnessLaunch {
     missing: `${PI_INSTALL_NPM}\n\n  or: ${PI_INSTALL}`,
     binaries: { posix: ["pi"], win32: ["pi.cmd", "pi.exe", "pi"] },
     prepare: async ({ env, args, origin, key, plan: planPromise }) => {
-      const [models, plan] = await Promise.all([freeTierModels(call, origin, key), planPromise]);
+      const [models, plan] = await Promise.all([freeTierModels(call, origin, key), planPromise()]);
       const dir = await mkdtemp(join(deps.tmp ?? tmpdir(), "dl-pi-"));
       const file = join(dir, EXTENSION_FILE);
       await writeFile(file, piExtension({ origin, models, plan }), { mode: 0o600 });

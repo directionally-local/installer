@@ -188,7 +188,7 @@ export function claudeLaunch(deps: LaunchDeps = {}): HarnessLaunch {
     prepare: async ({ env, args, origin, key, plan: planPromise }) => {
       // A claude-code harness key (the old free tier sign-in) can't list models: DeepSeek only then.
       // /v1/me's plan is already in flight; wait for both together.
-      const [models, plan] = await Promise.all([key.startsWith("dlh_") ? FREE_TIER_MODELS : freeTierModels(call, origin, key), planPromise]);
+      const [models, plan] = await Promise.all([key.startsWith("dlh_") ? FREE_TIER_MODELS : freeTierModels(call, origin, key), planPromise()]);
       return { ...claudeEnv(env, { origin, key, models, plan }), args, models: claudeModelsLine(models, plan) };
     },
   };

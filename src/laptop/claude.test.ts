@@ -572,7 +572,7 @@ describe("dl claude on a dl key (dl's own sign-in)", () => {
       spawn: child.spawn,
     }));
     assert.equal(code, 0);
-    assert.deepEqual(service.calls.map((call) => `${call.method} ${call.url}`), ["GET https://api.dl.new/v1/me", "GET https://api.dl.new/v1/models"], "nothing to mint, refresh, revoke or count; only the key's plan and models");
+    assert.deepEqual(service.calls.map((call) => `${call.method} ${call.url}`).sort(), ["GET https://api.dl.new/v1/me", "GET https://api.dl.new/v1/models"], "nothing to mint, refresh, revoke or count; only the key's plan and models");
     const env = child.started[0]!.options.env as Record<string, string>;
     assert.equal(env.ANTHROPIC_BASE_URL, "https://api.dl.new/anthropic");
     assert.equal(env.ANTHROPIC_AUTH_TOKEN, "dl_sk_0123456789abcdef");

@@ -212,7 +212,7 @@ export function opencodeLaunch(deps: OpencodeDeps = {}): HarnessLaunch {
       if (namesServer(args)) {
         return { error: "dl opencode can't use --server: free tokens are set up in the OpenCode server dl opencode starts. Leave --server out, or use that server with your own provider." };
       }
-      const [version, models, plan] = await Promise.all([(deps.version ?? opencodeVersion)(binary, env), freeTierModels(call, origin, key), planPromise]);
+      const [version, models, plan] = await Promise.all([(deps.version ?? opencodeVersion)(binary, env), freeTierModels(call, origin, key), planPromise()]);
       return { ...opencodeEnv(env, { origin, key, models, plan }), args: opencodeArgs(args, majorVersion(version)), models: opencodeModelsLine(models, plan) };
     },
   };

@@ -337,7 +337,7 @@ export function t3Launch(deps: T3Deps = {}): HarnessLaunch {
       const claudeKey = keys["claude-code"];
       const opencodeKey = keys.opencode;
       if (!claudeKey || !opencodeKey) return { error: "The free tier didn't give dl t3 a key for each agent. Try again." };
-      const [models, plan] = await Promise.all([freeTierModels(call, origin, opencodeKey), planPromise]);
+      const [models, plan] = await Promise.all([freeTierModels(call, origin, opencodeKey), planPromise()]);
       const settingsPath = deps.t3Settings ?? t3SettingsPath(env);
       const enabled = await enableT3OpenCode(settingsPath, { allow: openCodeConsent(args, settingsPath, deps.confirm), models, plan });
       return {
