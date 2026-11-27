@@ -1,9 +1,12 @@
 import { platform } from "node:os";
 import { claudeSettingsRefusal } from "./claude-settings.js";
 import { launchHarness, onPath, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
+import { FREE_TIER_MODELS, freeTierModels, type FreeTierModel } from "./opencode.js";
+import { hasKimi, KIMI_MODEL, planModelName, planModelsLine } from "./plan-models.js";
 
 /**
- * `dl claude [claude args...]`: the person's own Claude Code on the free tier, served by DeepSeek.
+ * `dl claude [claude args...]`: the person's own Claude Code on the dl plan: DeepSeek, and Kimi K3.1
+ * as Opus on Plus and Max.
  * The flow is shared with `dl opencode` (harness-launch.ts); this file is Claude Code's part.
  *
  * 1. Free tier sign-in: Autopilot's (refreshed when it has expired). Not signed in: Autopilot's
@@ -22,9 +25,15 @@ import { launchHarness, onPath, type HarnessLaunch, type LaunchDeps, type Launch
  *    claude, since that key would win over dl's and go to the free tier.
  */
 
-/** The model Claude Code is told to use for every role; the service serves DeepSeek whatever it names. */
+/**
+ * The model Claude Code is told to use for every role on Free and Starter, and for every role but
+ * Opus on Plus and Max (where Opus is Kimi K3.1: CLAUDE_OPUS_KIMI). The service serves DeepSeek
+ * for any Claude model name; an open-model id it names exactly goes through the plan.
+ */
 export const CLAUDE_MODEL = "deepseek/deepseek-v4.1-flash-1017";
-/** That model's real context window (DeepSeek V4.1 Flash: 1M), declared to Claude Code, which doesn't know the model. */
+/** On a plan with Kimi (its id in the key's /v1/models), Claude Code's Opus is Kimi K3.1. */
+export const CLAUDE_OPUS_KIMI = KIMI_MODEL;
+/** The models' real context window (DeepSeek V4.1 Flash and Kimi K3.1: 1M), declared to Claude Code, which doesn't know them. */
 export const CLAUDE_CONTEXT_WINDOW = 1_048_576;
 export const HARNESS = "claude-code" as const;
 /** The official install command, printed when `claude` isn't on PATH. */
@@ -42,8 +51,14 @@ export const CONFLICTING_ENV = [
   "ANTHROPIC_MODEL",
   "ANTHROPIC_DEFAULT_MODEL",
   "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION",
   "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION",
   "ANTHROPIC_DEFAULT_FABLE_MODEL",
   "ANTHROPIC_SMALL_FAST_MODEL",
   "ANTHROPIC_CUSTOM_HEADERS",
@@ -76,22 +91,37 @@ export async function claudeOnPath(env: Env = process.env): Promise<string | und
 /**
  * Claude Code's environment: the person's, without CONFLICTING_ENV, plus the free tier's. Returns
  * the names it left out too, so dl can say so once.
+ *
+ * `models` is what the key may use (its /v1/models). With Kimi K3.1 there (Plus, Max), Opus is
+ * Kimi and Sonnet, Haiku and background work DeepSeek, so Claude Code's own /model picker switches
+ * between them, each row named for its model (the _NAME/_DESCRIPTION variables Claude Code reads
+ * when ANTHROPIC_BASE_URL is a gateway); Claude Code starts on Sonnet (DeepSeek). Without Kimi,
+ * every role is DeepSeek, as before. Subagents stay on DeepSeek either way.
  */
-export function claudeEnv(parent: Env, input: { origin: string; key: string }): { env: Env; removed: string[] } {
+export function claudeEnv(parent: Env, input: { origin: string; key: string; models?: readonly FreeTierModel[] }): { env: Env; removed: string[] } {
   const env: Env = { ...parent };
   const removed: string[] = [];
   for (const name of CONFLICTING_ENV) {
     if (env[name] !== undefined && env[name] !== "") removed.push(name);
     delete env[name];
   }
+  const kimi = hasKimi(input.models ?? FREE_TIER_MODELS);
+  const deepseek = planModelName({ id: CLAUDE_MODEL });
   Object.assign(env, {
     ANTHROPIC_BASE_URL: `${input.origin}/anthropic`,
     // Sent as `Authorization: Bearer`; unlike ANTHROPIC_API_KEY it needs no approval prompt.
     ANTHROPIC_AUTH_TOKEN: input.key,
-    ANTHROPIC_MODEL: CLAUDE_MODEL,
-    ANTHROPIC_DEFAULT_OPUS_MODEL: CLAUDE_MODEL,
+    // With Kimi, the alias: Claude Code starts on Sonnet (DeepSeek) and /model moves to Opus (Kimi).
+    ANTHROPIC_MODEL: kimi ? "sonnet" : CLAUDE_MODEL,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: kimi ? CLAUDE_OPUS_KIMI : CLAUDE_MODEL,
+    ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: kimi ? planModelName({ id: CLAUDE_OPUS_KIMI }) : deepseek,
+    ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION: kimi ? "On your dl plan · the stronger model, with a smaller weekly limit" : "On your dl plan",
     ANTHROPIC_DEFAULT_SONNET_MODEL: CLAUDE_MODEL,
+    ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: deepseek,
+    ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION: kimi ? "On your dl plan · fast, with the larger weekly limit" : "On your dl plan",
     ANTHROPIC_DEFAULT_HAIKU_MODEL: CLAUDE_MODEL,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: deepseek,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION: "On your dl plan",
     // Older Claude Code versions read this one for background tasks.
     ANTHROPIC_SMALL_FAST_MODEL: CLAUDE_MODEL,
     CLAUDE_CODE_SUBAGENT_MODEL: CLAUDE_MODEL,
@@ -103,6 +133,12 @@ export function claudeEnv(parent: Env, input: { origin: string; key: string }): 
     CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",
   });
   return { env, removed };
+}
+
+/** The line after dl claude sets up Claude Code: which plan model each /model row is. */
+export function claudeModelsLine(models: readonly FreeTierModel[]): string {
+  if (!hasKimi(models)) return planModelsLine([planModelName({ id: CLAUDE_MODEL })]);
+  return planModelsLine([`${planModelName({ id: CLAUDE_MODEL })} (Sonnet)`, `${planModelName({ id: CLAUDE_OPUS_KIMI })} (Opus)`], "switch with /model");
 }
 
 /**
@@ -117,20 +153,27 @@ export function claudePrintMode(args: string[], stdoutIsTerminal: boolean): bool
   return !stdoutIsTerminal || args.some((arg) => arg === "-p" || arg === "--print" || arg.startsWith("--print="));
 }
 
-/** `dl claude` for the shared launcher (harness-launch.ts). */
-export const CLAUDE_LAUNCH: HarnessLaunch = {
-  harness: HARNESS,
-  command: "dl claude",
-  product: "Claude Code",
-  sessionPrefix: "dl-claude",
-  missing: `${CLAUDE_INSTALL}\n\n  or with npm: ${CLAUDE_INSTALL_NPM}`,
-  binaries: BINARIES,
-  stdoutDiagnostics: { prefix: UNRECOGNIZED_MODEL_PREFIX, when: claudePrintMode },
-  check: (_args, { env, cwd }) => claudeSettingsRefusal("dl claude", "dl's free tier", { env, cwd }),
-  prepare: async ({ env, args, origin, key }) => ({ ...claudeEnv(env, { origin, key }), args }),
-};
+/** `dl claude` for the shared launcher (harness-launch.ts). The key's /v1/models says whether Opus is Kimi. */
+export function claudeLaunch(deps: LaunchDeps = {}): HarnessLaunch {
+  const call = deps.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
+  return {
+    harness: HARNESS,
+    command: "dl claude",
+    product: "Claude Code",
+    sessionPrefix: "dl-claude",
+    missing: `${CLAUDE_INSTALL}\n\n  or with npm: ${CLAUDE_INSTALL_NPM}`,
+    binaries: BINARIES,
+    stdoutDiagnostics: { prefix: UNRECOGNIZED_MODEL_PREFIX, when: claudePrintMode },
+    check: (_args, { env, cwd }) => claudeSettingsRefusal("dl claude", "dl's free tier", { env, cwd }),
+    prepare: async ({ env, args, origin, key }) => {
+      // A claude-code harness key (the old free tier sign-in) can't list models: DeepSeek only then.
+      const models = key.startsWith("dlh_") ? FREE_TIER_MODELS : await freeTierModels(call, origin, key);
+      return { ...claudeEnv(env, { origin, key, models }), args, models: claudeModelsLine(models) };
+    },
+  };
+}
 
 export async function claudeCommand(args: string[], io: ClaudeIO, deps: ClaudeDeps = {}): Promise<number> {
   const { findClaude, ...rest } = deps;
-  return launchHarness(CLAUDE_LAUNCH, args, io, { ...rest, ...(findClaude ? { find: findClaude } : {}) });
+  return launchHarness(claudeLaunch(rest), args, io, { ...rest, ...(findClaude ? { find: findClaude } : {}) });
 }

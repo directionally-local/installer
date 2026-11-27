@@ -80,10 +80,11 @@ export interface HarnessLaunch {
    * The agent's environment and arguments for this run. `removed` names the person's variables
    * left out (dl says so once); `notes` are said once too. An `error` stops before the agent
    * starts (the key is revoked). `sessionId` is the one dl's session events carry; `cleanup`
-   * runs once the agent has exited (temporary files).
+   * runs once the agent has exited (temporary files). `models` is the one line naming the plan's
+   * models in this agent and how to switch (plan-models.ts), shown at a terminal before it starts.
    */
   prepare: (input: { env: Env; args: string[]; origin: string; key: string; keys: Partial<Record<Harness, string>>; binary: string; sessionId: string }) => Promise<
-    | { env: Env; args: string[]; removed: string[]; notes?: string[]; cleanup?: () => Promise<void> }
+    | { env: Env; args: string[]; removed: string[]; notes?: string[]; models?: string; cleanup?: () => Promise<void> }
     | { error: string }
   >;
 }
@@ -306,7 +307,9 @@ export async function launchHarness(spec: HarnessLaunch, args: string[], io: Lau
   if (prepared.removed.length > 0) io.err(`  ${command}: not passing ${prepared.removed.join(", ")} to ${product} for this session (it runs on dl's free tier).\n`);
   for (const note of prepared.notes ?? []) io.err(`  ${command}: ${note}\n`);
   const nudge = primary ? allowanceNote(primary.otherHarnessShare) : undefined;
-  if (nudge && (deps.terminal ?? process.stderr.isTTY === true)) {
+  const atTerminal = deps.terminal ?? process.stderr.isTTY === true;
+  if (prepared.models && atTerminal) io.err(`  ${palette(!env.NO_COLOR && env.TERM !== "dumb").dim(prepared.models)}\n`);
+  if (nudge && atTerminal) {
     io.err(`  ${palette(!env.NO_COLOR && env.TERM !== "dumb").dim(nudge)}\n`);
   }
 

@@ -290,6 +290,22 @@ describe("paid plans: through the API", () => {
     assert.ok(view.tools.some((row: Record<string, unknown>) => String(row.tool).startsWith("tool:")));
   });
 
+  it("lists on /v1/models only what the plan serves: Starter DeepSeek, Plus and Max DeepSeek and Kimi", async () => {
+    const ids = async (tier?: "starter" | "plus" | "max") => {
+      const { service, token } = await world({ TOOL_KEYS: "true" });
+      if (tier) await subscribe(service, tier);
+      const made = await service.request("POST", "/v1/keys", { token, ip: ip(), body: { name: "dl", kind: "tool" } });
+      const key = ((await made.json()) as { key: string }).key;
+      const response = await service.request("GET", "/v1/models", { token: key });
+      assert.equal(response.status, 200);
+      return ((await response.json()) as { data: Array<{ id: string }> }).data.map((model) => model.id);
+    };
+    assert.deepEqual(await ids("starter"), [MODEL]);
+    assert.deepEqual(await ids("plus"), [MODEL, KIMI]);
+    assert.deepEqual(await ids("max"), [MODEL, KIMI]);
+    assert.ok(!(await ids()).includes(KIMI), "no plan: no Kimi");
+  });
+
   it("ends free tokens at freeEndsAt for non-paying accounts only", async () => {
     const { service } = await world();
     await service.signIn({ id: 200, login: "bob" });

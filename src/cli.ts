@@ -15,7 +15,7 @@ import { FREE_TIER_PROVIDER, freeTierAccount, freeTierLine, freeTierProPrompt, t
 import { freeModelStatus, modelsCommand } from "./laptop/free-providers.js";
 import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
 import { claudeCommand } from "./laptop/claude.js";
-import { opencodeCommand } from "./laptop/opencode.js";
+import { freeTierModels, opencodeCommand } from "./laptop/opencode.js";
 import { piCommand } from "./laptop/pi.js";
 import { conductorCommand, proxyCommand } from "./laptop/proxy.js";
 import { t3Command } from "./laptop/t3.js";
@@ -288,6 +288,8 @@ export interface MainOptions {
   agentCommand?: typeof agentCommand;
   /** Bare `dl` on a laptop (router.ts); the real one unless replaced. */
   router?: typeof routerHome;
+  /** The model ids a dl key may use (GET /v1/models), for the router's by-hand steps; the service is asked unless replaced. */
+  agentModels?: RouterDeps["models"];
   /**
    * Whether this is a GPU box whose plain dl opens its own agent on its own model ("first-run":
    * GPUs, and nothing set up on them yet); looked up unless replaced.
@@ -1069,6 +1071,7 @@ function routerDeps(options: MainOptions, io: { out: (text: string) => void; err
     // The scan's beat only at a terminal with colour; tests and pipes get it all at once.
     ...(io.color === true ? { sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)) } : {}),
     firstTokens: options.firstTokens ?? ((key) => firstTokens(key)),
+    models: options.agentModels ?? (async (key) => (await freeTierModels((url, init) => fetch(url, init), key.baseUrl, key.key)).map((model) => model.id)),
   };
 }
 

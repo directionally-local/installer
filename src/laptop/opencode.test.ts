@@ -119,7 +119,7 @@ describe("dl opencode", () => {
     const mintBody = { id: "abcdefabcdef", key: KEY, harness: "opencode", expiresAt: "x", ttlSeconds: 900, otherHarnessShare: 0.5 };
     const shown = capture();
     assert.equal(await opencodeCommand([], shown.io, deps({ fetch: fakeService({ mintBody }).fetch, spawn: fakeSpawn().spawn, terminal: true })), 0);
-    assert.equal(shown.err(), "  \x1b[2mFree tokens: this agent gets 50% of your weekly free allowance.\x1b[22m\n");
+    assert.equal(shown.err(), "  \x1b[2mModel on your plan: DeepSeek V4.1 Flash\x1b[22m\n  \x1b[2mFree tokens: this agent gets 50% of your weekly free allowance.\x1b[22m\n");
     const piped = capture();
     assert.equal(await opencodeCommand([], piped.io, deps({ fetch: fakeService({ mintBody }).fetch, spawn: fakeSpawn().spawn })), 0);
     assert.equal(piped.err(), "");

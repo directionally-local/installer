@@ -321,3 +321,41 @@ describe("select: an accent and notes below the label", () => {
     assert.match(t.out(), /1  First engine \(an accent\)\n     a note under the label/);
   });
 });
+
+describe("select: section headings", () => {
+  const SECTIONS: SelectOption[] = [
+    { value: "ours", label: "Autopilot", accent: "— recommended", detail: "(downloads when picked)", heading: "Use our coding agent" },
+    { value: "a", label: "Claude Code", detail: "claude", heading: "I also found these on your computer" },
+    { value: "b", label: "OpenCode", detail: "opencode" },
+  ];
+
+  it("draws each heading over its section, notes aligned within it, and ↑/↓ skips the headings", async () => {
+    const tty = fakeTerminal();
+    const picked = tty.prompter.select(QUESTION, SECTIONS, 0);
+    await tick();
+    assert.deepEqual(screen(tty.out()), [
+      "  Where  ↑/↓ to move · Enter to pick",
+      "",
+      "  Use our coding agent",
+      "  › Autopilot — recommended  (downloads when picked)",
+      "",
+      "  I also found these on your computer",
+      "    Claude Code  claude",
+      "    OpenCode     opencode",
+    ]);
+    tty.type("\x1b[B");
+    await tick();
+    assert.equal(screen(tty.out())[6], "  › Claude Code  claude");
+    tty.type("\r");
+    assert.deepEqual(await picked, { value: "a" });
+  });
+
+  it("shows the headings in the numbered fallback too, numbering only the options", async () => {
+    const tty = fakeTerminal(false);
+    const picked = tty.prompter.select(QUESTION, SECTIONS, 0);
+    await waitFor(() => tty.out().includes("›"));
+    assert.match(tty.out(), /^ {2}Use our coding agent\n {2}1 {2}Autopilot — recommended {3}\(downloads when picked\)\n\n {2}I also found these on your computer\n {2}2 {2}Claude Code {3}claude\n {2}3 {2}OpenCode {6}opencode/);
+    tty.type("3\n");
+    assert.deepEqual(await picked, { value: "b" });
+  });
+});

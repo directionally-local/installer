@@ -7,7 +7,7 @@ import { ScriptedPrompter, type Prompter, type SelectOption } from "../prompt.js
 import { AGENT_CATALOG, type DetectedAgent } from "./agent-catalog.js";
 import type { AgentRequest, DlKey } from "./dl-key.js";
 import {
-  AGAIN_QUESTION, AUTOPILOT_ROW, autopilotKeyEnv, FIRST_QUESTION, INSTALL_AUTOPILOT, markFirstTokensShown, NOTHING_FOUND, orderAgents, pickerOptions, readAgentHistory, recordAgentUse, routerHome, setupSteps, THANKS,
+  AGAIN_QUESTION, ALSO_FOUND, AUTOPILOT_PITCH, AUTOPILOT_ROW, autopilotKeyEnv, FIRST_QUESTION, markFirstTokensShown, OUR_AGENT, ANOTHER_AGENT, keyCard, setupText, NOTHING_FOUND, orderAgents, pickerOptions, readAgentHistory, recordAgentUse, routerHome, setupSteps, THANKS,
   type RouterDeps,
 } from "./router.js";
 
@@ -57,36 +57,56 @@ async function world(found: DetectedAgent[], answers: Record<string, string>, op
 }
 
 describe("bare dl: the router", () => {
-  it("first run: asks which of the found agents to use, Autopilot a quiet last row, and opens the pick", async () => {
-    const w = await world([CLAUDE, CURSOR], { [FIRST_QUESTION]: "Claude Code" });
+  it("first run: Autopilot first under \"Use our coding agent\", selected, then the agents found, and opens the pick", async () => {
+    const w = await world([CLAUDE, OPENCODE, CURSOR], { [FIRST_QUESTION]: "Claude Code" });
     assert.equal(await routerHome(w.deps), 0);
     const { question, options, initial } = w.prompter.shown[0]!;
-    assert.match(question, /I found these on your computer\. Which one do you want to use\?/);
-    assert.deepEqual(options.map((o) => o.label), ["Claude Code", "Cursor", AUTOPILOT_ROW]);
-    assert.equal(options[2]!.quiet, true);
-    assert.equal(options[2]!.detail, "downloads when picked");
-    assert.equal(options[1]!.detail, "app · set up by hand");
-    assert.equal(initial, 0);
+    assert.match(question, /Which one do you want to use\?/);
+    assert.deepEqual(options.map((o) => [o.heading ?? "", o.label, o.accent ?? "", o.detail ?? ""]), [
+      [OUR_AGENT, AUTOPILOT_ROW, AUTOPILOT_PITCH, "(downloads when picked)"],
+      [ALSO_FOUND, "Claude Code", "", "claude"],
+      ["", "OpenCode", "", "opencode"],
+      ["", "Cursor", "", "app · set up by hand"],
+    ]);
+    assert.equal(OUR_AGENT, "Use our coding agent");
+    assert.equal(ALSO_FOUND, "I also found these on your computer");
+    assert.equal(AUTOPILOT_PITCH, "— recommended · included in your plan");
+    assert.equal(initial, 0, "Autopilot is selected");
+    assert.ok(!options[0]!.quiet);
     assert.deepEqual(w.launched, [["claude", []]]);
     assert.equal((await readAgentHistory(w.path)).lastUsed, "claude-code");
   });
 
-  it("remembers: the last one used is on top as \"Back to <Agent>?\", and Enter opens it", async () => {
+  it("first run, Enter: Autopilot", async () => {
+    const w = await world([CLAUDE], { [FIRST_QUESTION]: "" });
+    await routerHome(w.deps);
+    assert.deepEqual(w.autopilot, [{}]);
+    assert.deepEqual(w.launched, []);
+  });
+
+  it("remembers: \"Back to <Agent>?\" stays first and selected, then Autopilot, then the rest; Enter opens it", async () => {
     const w = await world([CLAUDE, OPENCODE, CURSOR], { [FIRST_QUESTION]: "OpenCode", [AGAIN_QUESTION]: "" });
     await routerHome(w.deps);
     await routerHome(w.deps);
     const again = w.prompter.shown[1]!;
     assert.match(again.question, /Which coding agent\?/);
-    assert.deepEqual(again.options.map((o) => [o.label, o.accent ?? ""]), [["Back to OpenCode?", ""], ["Claude Code", ""], ["Cursor", ""], [AUTOPILOT_ROW, ""]]);
+    assert.deepEqual(again.options.map((o) => [o.heading ?? "", o.label]), [["", "Back to OpenCode?"], [OUR_AGENT, AUTOPILOT_ROW], [ALSO_FOUND, "Claude Code"], ["", "Cursor"]]);
+    assert.equal(again.initial, 0);
     assert.deepEqual(w.launched, [["opencode", []], ["opencode", []]]);
   });
 
-  it("orders by most recent use, then catalog order; Autopilot moves to the top when it was last used", async () => {
+  it("the last one used isn't here any more: Autopilot is first and selected again", () => {
+    const options = pickerOptions([CLAUDE], { lastUsed: "pi", used: { pi: "2026-11-25T00:00:00Z" } }, false);
+    assert.deepEqual(options.map((o) => o.label), [AUTOPILOT_ROW, "Claude Code"]);
+  });
+
+  it("orders by most recent use, then catalog order; \"Back to Autopilot?\" when it was last used, not listed twice", async () => {
     const history = { lastUsed: "autopilot", used: { cursor: "2026-11-20T00:00:00Z", autopilot: "2026-11-25T00:00:00Z" } };
     assert.deepEqual(orderAgents([CLAUDE, OPENCODE, CURSOR], history).map((a) => a.id), ["cursor", "claude-code", "opencode"]);
     const options = pickerOptions([CLAUDE, CURSOR], history, true);
-    assert.deepEqual(options.map((o) => [o.value, o.label, o.accent ?? ""]), [["autopilot", "Back to Autopilot?", ""], ["cursor", "Cursor", ""], ["claude-code", "Claude Code", ""]]);
+    assert.deepEqual(options.map((o) => [o.value, o.label, o.heading ?? ""]), [["autopilot", "Back to Autopilot?", ""], ["cursor", "Cursor", ALSO_FOUND], ["claude-code", "Claude Code", ""]]);
     assert.equal(options[0]!.detail, undefined, "installed: nothing to download");
+    assert.equal(pickerOptions([CLAUDE], history, false)[0]!.detail, "downloads when picked");
   });
 
   it("an app dl can't start: the exact steps, the key and both base URLs", async () => {
@@ -98,6 +118,35 @@ describe("bare dl: the router", () => {
     assert.match(w.text(), /https:\/\/api\.dl\.new\/anthropic/);
     assert.deepEqual(w.launched, []);
     assert.equal((await readAgentHistory(w.path)).lastUsed, "cursor");
+  });
+
+  it("by hand on Plus or Max: both models in the steps and the key card, and which to switch to", async () => {
+    const w = await world([CURSOR], { [FIRST_QUESTION]: "Cursor" });
+    w.deps.models = async () => ["moonshotai/kimi-k3.1-pro", "deepseek/deepseek-v4.1-flash-1017"];
+    await routerHome(w.deps);
+    const text = w.text();
+    assert.match(text, /Add custom models named deepseek\/deepseek-v4\.1-flash-1017 and moonshotai\/kimi-k3\.1-pro and pick one in the chat/);
+    assert.match(text, /Models {11}deepseek\/deepseek-v4\.1-flash-1017 {3}\(DeepSeek V4\.1 Flash, the default\)\n {21}moonshotai\/kimi-k3\.1-pro {12}\(Kimi K3\.1\)\n/);
+    assert.match(text, /\n {2}Models on your plan: DeepSeek V4\.1 Flash, Kimi K3\.1 — switch in Cursor's model picker\n/);
+
+    const free = await world([CURSOR], { [FIRST_QUESTION]: "Cursor" });
+    free.deps.models = async () => { throw new Error("offline"); };
+    await routerHome(free.deps);
+    assert.match(free.text(), /Add a custom model named deepseek\/deepseek-v4\.1-flash-1017 and pick it in the chat/);
+    assert.match(free.text(), /\n {2}Model on your plan: DeepSeek V4\.1 Flash\n/);
+    assert.doesNotMatch(free.text(), /kimi/);
+  });
+
+  it("every by-hand agent's steps name Kimi K3.1's id when the plan has it, or point at the key card's (Codex can't run on the plan yet)", () => {
+    const both = ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3.1-pro"];
+    for (const spec of AGENT_CATALOG) {
+      if (spec.noCustomModels || spec.id === "autopilot" || spec.id === "opencode" || spec.id === "pi" || spec.id === "t3") continue;
+      const steps = setupSteps(spec, KEY, both).join("\n");
+      if (spec.id === "codex") assert.doesNotMatch(steps, /kimi/, spec.id);
+      else if (/key and models below/.test(steps)) continue; // the generic steps: the key card lists both
+      else assert.match(steps, /moonshotai\/kimi-k3\.1-pro/, `${spec.id}: ${steps}`);
+      assert.doesNotMatch(setupSteps(spec, KEY).join("\n"), /kimi/, `${spec.id} on Free/Starter`);
+    }
   });
 
   it("an agent with no custom models: says so and tells the service", async () => {
@@ -132,19 +181,18 @@ describe("bare dl: the router", () => {
 describe("the first run's touches", () => {
   const many: DetectedAgent[] = [CLAUDE, OPENCODE, CURSOR, WINDSURF, { id: "aider", name: "Aider", how: ["aider"] }];
 
-  it("lists each agent as it's found, then the picker; five or more is a collection", async () => {
+  it("names each agent on one line as it's found, then the picker; five or more is a collection", async () => {
     const w = await world(many, { [FIRST_QUESTION]: "Claude Code" });
     const pauses: number[] = [];
     w.deps.sleep = async (ms) => void pauses.push(ms);
     await routerHome(w.deps);
     const text = w.text();
-    assert.match(text, /\n {2}✓ Claude Code {3}claude\n {2}✓ OpenCode {6}opencode\n {2}✓ Cursor {8}app\n {2}✓ Windsurf {6}app\n {2}✓ Aider {9}aider\n {2}You've got a collection\.\n/);
+    assert.match(text, /\n {2}Looking on your computer… ✓ Claude Code {2}✓ OpenCode {2}✓ Cursor {2}✓ Windsurf {2}✓ Aider {2}You've got a collection\.\n/);
     assert.deepEqual(pauses, [80, 80, 80, 80], "≤ 80 ms apart, ≤ 400 ms in all");
-    assert.ok(text.indexOf("You've got a collection.") < text.length, "before the picker");
 
     const two = await world([CLAUDE, CURSOR], { [FIRST_QUESTION]: "Cursor" });
     await routerHome(two.deps);
-    assert.match(two.text(), /✓ Claude Code {3}claude\n {2}✓ Cursor {8}app\n/);
+    assert.match(two.text(), /Looking on your computer… ✓ Claude Code {2}✓ Cursor\n/);
     assert.doesNotMatch(two.text(), /collection/);
   });
 
@@ -158,7 +206,7 @@ describe("the first run's touches", () => {
     await routerHome(w.deps);
     const before = w.text().length;
     await routerHome(w.deps);
-    assert.doesNotMatch(w.text().slice(before), /✓ Claude Code/, "no scan the second time");
+    assert.doesNotMatch(w.text().slice(before), /Looking on your computer/, "no scan the second time");
   });
 
   it("after the first agent run that served tokens: the first-tokens line, once per install", async () => {
@@ -213,33 +261,35 @@ describe("the first run's touches", () => {
 });
 
 describe("bare dl with no agent found", () => {
-  const question = "Which agent do you use?";
+  const question = FIRST_QUESTION;
 
-  it("asks for the agent's name; an unknown one is reported, with thanks and the key to set it up", async () => {
+  it("Autopilot first (selected), then a field for the agent's name; an unknown one is reported, with thanks and the key", async () => {
     const w = await world([], { [question]: "Supercoder 9000" });
     assert.equal(await routerHome(w.deps), 0);
     assert.equal(NOTHING_FOUND, "No agents here yet. Everyone starts somewhere.");
     assert.ok(w.text().includes(NOTHING_FOUND));
-    assert.deepEqual(w.prompter.shown[0]!.options.map((o) => o.label), ["Type the name of the agent you use", INSTALL_AUTOPILOT]);
-    assert.equal(w.prompter.shown[0]!.options[0]!.input?.inline, true);
+    const shown = w.prompter.shown[0]!;
+    assert.deepEqual(shown.options.map((o) => [o.heading ?? "", o.label]), [[OUR_AGENT, AUTOPILOT_ROW], [ANOTHER_AGENT, "Type the name of the agent you use"]]);
+    assert.equal(shown.initial, 0);
+    assert.equal(shown.options[1]!.input?.inline, true);
     assert.deepEqual(w.reports.map((r) => [r.name, r.dlVersion, r.found]), [["Supercoder 9000", "0.48.0", []]]);
     assert.equal(THANKS, "Never heard of it — telling Sina.");
     assert.match(w.text(), /\n {2}Never heard of it — telling Sina\.\n[\s\S]*Key/, "then the key and base URLs");
     assert.match(w.text(), /dl_sk_0123456789abcdef[\s\S]*https:\/\/api\.dl\.new\/v1/);
   });
 
-  it("a known agent's name gets its steps; Enter alone skips; Install Autopilot opens Autopilot", async () => {
+  it("a known agent's name gets its steps; Enter on the field skips; Enter on Autopilot opens it", async () => {
     const known = await world([], { [question]: "aider" });
     await routerHome(known.deps);
     assert.match(known.text(), /aider --openai-api-base https:\/\/api\.dl\.new\/v1/);
     assert.deepEqual(known.reports, []);
 
-    const skipped = await world([], { [question]: "" });
+    const skipped = await world([], { [question]: "2" });
     assert.equal(await routerHome(skipped.deps), 0);
     assert.deepEqual(skipped.reports, []);
     assert.match(skipped.text(), /Your key and base URLs/);
 
-    const install = await world([], { [question]: INSTALL_AUTOPILOT });
+    const install = await world([], { [question]: "" });
     await routerHome(install.deps);
     assert.deepEqual(install.autopilot, [{}]);
   });

@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
-import { CLAUDE_INSTALL, CLAUDE_MODEL, UNRECOGNIZED_MODEL_PREFIX, claudeCommand, claudeEnv, claudePrintMode, type ClaudeDeps } from "./claude.js";
+import { CLAUDE_INSTALL, CLAUDE_MODEL, CLAUDE_OPUS_KIMI, UNRECOGNIZED_MODEL_PREFIX, claudeCommand, claudeEnv, claudeModelsLine, claudePrintMode, type ClaudeDeps } from "./claude.js";
+import { FREE_TIER_MODELS } from "./opencode.js";
 import { diverter } from "./harness-launch.js";
 import { freeTierAccessToken } from "./free-tier-token.js";
 import { main } from "../cli.js";
@@ -157,8 +158,14 @@ describe("dl claude", () => {
         ANTHROPIC_AUTH_TOKEN: KEY,
         ANTHROPIC_MODEL: CLAUDE_MODEL,
         ANTHROPIC_DEFAULT_OPUS_MODEL: CLAUDE_MODEL,
+        ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: "DeepSeek V4.1 Flash",
+        ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION: "On your dl plan",
         ANTHROPIC_DEFAULT_SONNET_MODEL: CLAUDE_MODEL,
+        ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: "DeepSeek V4.1 Flash",
+        ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION: "On your dl plan",
         ANTHROPIC_DEFAULT_HAIKU_MODEL: CLAUDE_MODEL,
+        ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: "DeepSeek V4.1 Flash",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION: "On your dl plan",
         ANTHROPIC_SMALL_FAST_MODEL: CLAUDE_MODEL,
         CLAUDE_CODE_SUBAGENT_MODEL: CLAUDE_MODEL,
         CLAUDE_CODE_MAX_CONTEXT_TOKENS: "1048576",
@@ -187,13 +194,13 @@ describe("dl claude", () => {
       return child.spawn(command, args, options);
     };
     assert.equal(await claudeCommand([], io, deps({ fetch: fakeService(201, mint).fetch, spawn, terminal: true })), 0);
-    assert.equal(errAtSpawn, "  \x1b[2mFree tokens: this agent gets 50% of your weekly free allowance.\x1b[22m\n");
-    assert.equal(err(), errAtSpawn, "one line, before Claude Code starts");
+    assert.equal(errAtSpawn, "  \x1b[2mModel on your plan: DeepSeek V4.1 Flash\x1b[22m\n  \x1b[2mFree tokens: this agent gets 50% of your weekly free allowance.\x1b[22m\n");
+    assert.equal(err(), errAtSpawn, "the plan's model and the share, before Claude Code starts");
 
     // NO_COLOR: the same line, plain.
     const plain = capture();
     await claudeCommand([], plain.io, deps({ env: { PATH: "/usr/bin", NO_COLOR: "1" }, fetch: fakeService(201, mint).fetch, spawn: fakeSpawn().spawn, terminal: true }));
-    assert.equal(plain.err(), "  Free tokens: this agent gets 50% of your weekly free allowance.\n");
+    assert.equal(plain.err(), "  Model on your plan: DeepSeek V4.1 Flash\n  Free tokens: this agent gets 50% of your weekly free allowance.\n");
   });
 
   it("states another share plainly, and leaves the line out at the whole allowance or when the service sends none", async () => {
@@ -203,9 +210,10 @@ describe("dl claude", () => {
       await claudeCommand([], io, deps({ env: { PATH: "/usr/bin", NO_COLOR: "1" }, fetch: fakeService(201, mint).fetch, spawn: fakeSpawn().spawn, terminal: true }));
       return err();
     };
-    assert.equal(await run({ otherHarnessShare: 0.25 }), "  Free tokens: this agent gets 25% of your weekly free allowance.\n");
-    assert.equal(await run({}), "");
-    assert.equal(await run({ otherHarnessShare: 1 }), "");
+    const model = "  Model on your plan: DeepSeek V4.1 Flash\n";
+    assert.equal(await run({ otherHarnessShare: 0.25 }), `${model}  Free tokens: this agent gets 25% of your weekly free allowance.\n`);
+    assert.equal(await run({}), model);
+    assert.equal(await run({ otherHarnessShare: 1 }), model);
   });
 
   it("shows no allowance line when the output isn't a terminal, or when the free tier refuses", async () => {
@@ -381,6 +389,67 @@ describe("Claude Code's [claude-code:unrecognized_model] line", () => {
 });
 
 describe("claudeEnv", () => {
+  const KIMI = { id: CLAUDE_OPUS_KIMI, name: "Kimi K3.1 Pro", contextWindow: 1_048_576, maxOutputTokens: 131_072, vision: true };
+  const role = (env: Record<string, string | undefined>) => ({
+    model: env.ANTHROPIC_MODEL,
+    opus: [env.ANTHROPIC_DEFAULT_OPUS_MODEL, env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME],
+    sonnet: [env.ANTHROPIC_DEFAULT_SONNET_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME],
+    haiku: [env.ANTHROPIC_DEFAULT_HAIKU_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME],
+    small: env.ANTHROPIC_SMALL_FAST_MODEL,
+    subagents: env.CLAUDE_CODE_SUBAGENT_MODEL,
+  });
+
+  it("on a plan with Kimi (Plus, Max): Opus is Kimi K3.1, Sonnet, Haiku and background work DeepSeek, starting on Sonnet", () => {
+    const { env } = claudeEnv({}, { origin: ORIGIN, key: KEY, models: [...FREE_TIER_MODELS, KIMI] });
+    assert.deepEqual(role(env), {
+      model: "sonnet",
+      opus: [CLAUDE_OPUS_KIMI, "Kimi K3.1"],
+      sonnet: [CLAUDE_MODEL, "DeepSeek V4.1 Flash"],
+      haiku: [CLAUDE_MODEL, "DeepSeek V4.1 Flash"],
+      small: CLAUDE_MODEL,
+      subagents: CLAUDE_MODEL,
+    });
+    assert.match(env.ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION!, /smaller weekly limit/);
+    assert.equal(claudeModelsLine([...FREE_TIER_MODELS, KIMI]), "Models on your plan: DeepSeek V4.1 Flash (Sonnet), Kimi K3.1 (Opus) — switch with /model");
+  });
+
+  it("on Free and Starter (no Kimi in the key's models, or none given): every role DeepSeek", () => {
+    for (const models of [FREE_TIER_MODELS, undefined]) {
+      const { env } = claudeEnv({}, { origin: ORIGIN, key: KEY, ...(models ? { models } : {}) });
+      assert.deepEqual(role(env), { model: CLAUDE_MODEL, opus: [CLAUDE_MODEL, "DeepSeek V4.1 Flash"], sonnet: [CLAUDE_MODEL, "DeepSeek V4.1 Flash"], haiku: [CLAUDE_MODEL, "DeepSeek V4.1 Flash"], small: CLAUDE_MODEL, subagents: CLAUDE_MODEL });
+    }
+    assert.equal(claudeModelsLine(FREE_TIER_MODELS), "Model on your plan: DeepSeek V4.1 Flash");
+  });
+
+  it("dl claude on a dl key reads the key's /v1/models: a Plus key gets Kimi as Opus and the line, a failed lookup DeepSeek only", async () => {
+    const models = (data: unknown, status = 200) => async (url: string): Promise<Response> =>
+      url.endsWith("/v1/models") ? Response.json(data, { status }) : Response.json({ ok: true });
+    const run = async (fetch: (url: string) => Promise<Response>) => {
+      const child = fakeSpawn({ code: 0 });
+      const out = capture();
+      await claudeCommand([], out.io, deps({
+        env: { PATH: "/usr/bin", NO_COLOR: "1" },
+        dlKey: async () => ({ key: "dl_sk_0123456789abcdef", plan: "plus", baseUrl: "https://api.dl.new", anthropicBaseUrl: "https://api.dl.new/anthropic", savedAt: "" }),
+        fetch,
+        spawn: child.spawn,
+        terminal: true,
+      }));
+      return { env: child.started[0]!.options.env as Record<string, string>, err: out.err() };
+    };
+    const plus = await run(models({ data: [
+      { id: CLAUDE_MODEL, name: "DeepSeek V4.1 Flash 1017", context_window: 1_048_576, max_output_tokens: 65_536 },
+      { id: CLAUDE_OPUS_KIMI, name: "Kimi K3.1 Pro", context_window: 1_048_576, max_output_tokens: 131_072, vision: true },
+    ] }));
+    assert.equal(plus.env.ANTHROPIC_DEFAULT_OPUS_MODEL, CLAUDE_OPUS_KIMI);
+    assert.equal(plus.env.ANTHROPIC_DEFAULT_SONNET_MODEL, CLAUDE_MODEL);
+    assert.equal(plus.err, "  Models on your plan: DeepSeek V4.1 Flash (Sonnet), Kimi K3.1 (Opus) — switch with /model\n");
+    const starter = await run(models({ data: [{ id: CLAUDE_MODEL, name: "DeepSeek V4.1 Flash 1017", context_window: 1_048_576, max_output_tokens: 65_536 }] }));
+    assert.equal(starter.env.ANTHROPIC_DEFAULT_OPUS_MODEL, CLAUDE_MODEL);
+    assert.equal(starter.err, "  Model on your plan: DeepSeek V4.1 Flash\n");
+    const down = await run(models({ error: "nope" }, 503));
+    assert.equal(down.env.ANTHROPIC_DEFAULT_OPUS_MODEL, CLAUDE_MODEL);
+  });
+
   it("lists only variables that were set", () => {
     assert.deepEqual(claudeEnv({ ANTHROPIC_MODEL: "", PATH: "/bin" }, { origin: ORIGIN, key: KEY }).removed, []);
   });
@@ -459,7 +528,7 @@ describe("dl claude on a dl key (dl's own sign-in)", () => {
       spawn: child.spawn,
     }));
     assert.equal(code, 0);
-    assert.deepEqual(service.calls, [], "nothing to mint, refresh, revoke or count");
+    assert.deepEqual(service.calls.map((call) => `${call.method} ${call.url}`), ["GET https://api.dl.new/v1/models"], "nothing to mint, refresh, revoke or count; only the key's models");
     const env = child.started[0]!.options.env as Record<string, string>;
     assert.equal(env.ANTHROPIC_BASE_URL, "https://api.dl.new/anthropic");
     assert.equal(env.ANTHROPIC_AUTH_TOKEN, "dl_sk_0123456789abcdef");

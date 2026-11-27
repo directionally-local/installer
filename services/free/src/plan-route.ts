@@ -145,7 +145,7 @@ export function dueWarning(served: PlanServe): string | undefined {
   return served.view ? warningFor(served.view) : undefined;
 }
 
-/** The model a Claude Code (/anthropic) request is served by: a DeepSeek id it names exactly, else DeepSeek V4.1 Flash; never Kimi or GPT-6. */
+/** The model a Claude Code (/anthropic) request asks for: an open-model id it names exactly (DeepSeek, or Kimi K3.1 Pro, whose family is "deepseek"), else DeepSeek V4.1 Flash; never GPT-6. The plan decides whether Kimi serves. */
 export function anthropicModelFor(named: unknown): FreeModel {
   const model = modelById(named);
   if (model && model.family === "deepseek") return model;

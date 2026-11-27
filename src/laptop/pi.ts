@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
 import { DEFAULT_MODEL, freeTierModels, type FreeTierModel } from "./opencode.js";
+import { planModelName, planModelsLine, planOrder } from "./plan-models.js";
 
 /**
  * `dl pi [pi args...]`: the person's own Pi (github.com/earendil-works/pi, npm
@@ -119,6 +120,11 @@ export function piEnv(parent: Env, key: string): Env {
   return { ...parent, [KEY_ENV]: key, PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0" };
 }
 
+/** The line after dl pi sets up Pi: the plan's models, under the dl provider in /model. */
+export function piModelsLine(models: readonly FreeTierModel[]): string {
+  return planModelsLine(planOrder(models).map(planModelName), "switch with /model");
+}
+
 export interface PiDeps extends LaunchDeps {
   /** Where the temporary extension directory goes; the OS's unless replaced. */
   tmp?: string;
@@ -142,6 +148,7 @@ export function piLaunch(deps: PiDeps = {}): HarnessLaunch {
         env: piEnv(env, key),
         args: piArgs(args, file, models),
         removed: [],
+        models: piModelsLine(models),
         cleanup: () => rm(dir, { recursive: true, force: true }),
       };
     },
