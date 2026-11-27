@@ -94,7 +94,7 @@ describe("Pi harness keys", () => {
     assert.equal((await service.request("DELETE", `/v1/harness-keys/${id}`, { token: key })).status, 200);
     const expired = await chat(service, key, {}, { "x-dl-harness": "pi" });
     assert.equal(expired.status, 401);
-    assert.equal((await apiError(expired)).message, "This dl pi session's free tier key has expired. Quit Pi and run dl pi again.");
+    assert.equal((await apiError(expired)).message, "This dl pi session's key has expired. Quit Pi and run dl pi again.");
 
     assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { allowOtherHarnesses: false } })).status, 200);
     const refused = await chat(service, second.key);

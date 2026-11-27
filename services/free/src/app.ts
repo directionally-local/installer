@@ -3679,7 +3679,7 @@ async function toAnthropicErrorResponse(response: Response, tool = false): Promi
   const body = parseJson(await response.text()) as { error?: Record<string, unknown> } | undefined;
   const error = body?.error ?? {};
   const code = typeof error.code === "string" ? error.code : undefined;
-  const message = typeof error.message === "string" ? (tool ? forTool(error.message) : forHarness(error.message)) : "The free tier refused the request.";
+  const message = typeof error.message === "string" ? (tool ? forTool(error.message) : forHarness(error.message)) : "The request was refused.";
   const status = errorStatus(response.status, error.retryable === true, code);
   const extra: Record<string, unknown> = {};
   for (const key of ["resetsAt", "retryAfter", "trial", "share"]) if (error[key] !== undefined) extra[key] = error[key];
@@ -3696,7 +3696,7 @@ async function toAnthropicErrorResponse(response: Response, tool = false): Promi
  */
 async function anthropic(c: Ctx, path: string, method: string): Promise<Response> {
   if (method !== "POST" || (path !== "/v1/messages" && path !== "/v1/messages/count_tokens")) {
-    return anthropicErrorResponse(404, `${method} /anthropic${path} isn't a route: the free tier serves POST /anthropic/v1/messages.`, "not_found");
+    return anthropicErrorResponse(404, `${method} /anthropic${path} isn't a route: send POST /anthropic/v1/messages.`, "not_found");
   }
   const identity = await authenticate(c, { harness: ["claude-code"], apiKeyHeader: true, keys: true, toolKeys: true });
   if (identity instanceof Response) return toAnthropicErrorResponse(identity);
@@ -3752,7 +3752,7 @@ function responsesErrorResponse(status: number, message: string, code?: string, 
 async function refusalOf(response: Response, reword: (message: string) => string): Promise<{ code?: string; message: string; retryable?: boolean; extra: Record<string, unknown> }> {
   const body = parseJson(await response.text()) as { error?: Record<string, unknown> } | undefined;
   const error = body?.error ?? {};
-  const message = typeof error.message === "string" ? reword(error.message) : "The free tier refused the request.";
+  const message = typeof error.message === "string" ? reword(error.message) : "The request was refused.";
   const extra: Record<string, unknown> = {};
   for (const key of ["resetsAt", "retryAfter", "allowed", "trial", "share", "upgradeUrl"]) if (error[key] !== undefined) extra[key] = error[key];
   return { ...(typeof error.code === "string" ? { code: error.code } : {}), message, ...(error.retryable === true ? { retryable: true } : {}), extra };
@@ -4229,7 +4229,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     const allowed = (await modelsFor(c, gate.config, identity.githubId, gate.person))
       .filter((model) => families.includes(model.family) && !heldFromClient(model, gate.config.gpt6Clients, agent, isAdmin))
       .map((model) => model.id);
-    return apiError(400, "model_not_allowed", `The free tier serves ${allowed.join(", ")} only.`, { allowed }, await headers());
+    return apiError(400, "model_not_allowed", `This key serves ${allowed.join(", ")} only.`, { allowed }, await headers());
   }
   let requested = modelById(body.model)!;
   // What the client asked for, whatever serves (a plan's fallback, a provider's failover).
@@ -4434,7 +4434,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       if (paused) await alert(c, [paused]);
       return apiError(503, "upstream_credit_exhausted", CREDIT_EXHAUSTED_MESSAGE, { reason: "credit_exhausted", pausedForEveryone: true, resetsAt: null }, await headers());
     }
-    return apiError(503, "upstream_unavailable", "Free tokens are unavailable right now. Try again later, or use your own key: /provider.", { reason: "no_upstream" }, await headers());
+    return apiError(503, "upstream_unavailable", "Our model provider isn't available right now. Try again later, or use your own key: /provider.", { reason: "no_upstream" }, await headers());
   }
   // Why free tokens are unavailable to a free-plan person right now, if they are: queued, or a
   // global cap reached. Pro and top-ups still work; the reservation decides which applies.

@@ -5,6 +5,7 @@ import { ADMIN_ID, completion, createInvite, createService, luminalUsage, MODEL,
 import { costAtPrices, type Usage } from "../src/quota.js";
 import { creditAlert, crossed } from "../src/alerts.js";
 import { readFreeConfig } from "../src/config.js";
+import { harnessKeyExpiredMessage } from "../src/messages.js";
 import { creditForecast, shouldQueue } from "../src/queue.js";
 import { hasContent } from "../src/sse.js";
 
@@ -132,7 +133,7 @@ describe("Luminal errors (no automatic fallback)", () => {
     const response = await chat(service, token);
     assert.equal(response.status, 429);
     assert.equal(response.headers.get("retry-after"), "7");
-    assert.deepEqual(await errorOf(response), { code: "upstream_busy", message: "The free tier is busy right now; retrying…", retryAfter: 7, retryable: true, upstream: "luminal" });
+    assert.deepEqual(await errorOf(response), { code: "upstream_busy", message: "Our model provider is busy right now; retrying…", retryAfter: 7, retryable: true, upstream: "luminal" });
     assert.equal(service.calls.openRouter.length, 0, "no switch to OpenRouter");
     const row = rows(service).at(-1)!;
     assert.equal(rows(service).length, before + 1);
@@ -158,6 +159,26 @@ describe("Luminal errors (no automatic fallback)", () => {
     assert.equal(unreachable.status, 503);
     assert.equal((await errorOf(unreachable)).code, "upstream_unavailable");
     assert.equal(service.calls.openRouter.length, 0);
+  });
+
+  it("keeps paid and admin keys' upstream errors free of free-tier wording", async () => {
+    const { service, token, adminToken } = await member();
+    // Alice on Pro: a paying key, not a free one.
+    await service.account(100).applySubscription({ subscriptionId: "sub_paid", state: "active", periodEnd: Date.now() + 30 * 86_400_000, eventAt: 1 });
+
+    service.setLuminal(() => new Response(JSON.stringify({ error: { message: "rate limit" } }), { status: 429, headers: { "retry-after": "1" } }));
+    const busy = await errorOf(await chat(service, token));
+    assert.equal(busy.message, "Our model provider is busy right now; retrying…");
+
+    service.setLuminal(() => new Response("bad gateway", { status: 502 }));
+    const paid = await errorOf(await chat(service, token));
+    const admin = await errorOf(await chat(service, adminToken));
+    assert.equal(paid.message, "Our model provider is having trouble right now; retrying…");
+    assert.equal(admin.message, paid.message);
+
+    for (const message of [busy.message, paid.message, admin.message, harnessKeyExpiredMessage("claude-code")]) {
+      assert.doesNotMatch(message, /free tier/i, "paying users never read 'free tier'");
+    }
   });
 
   it("answers 503 upstream_timeout when nothing arrives before the first-byte timeout", async () => {
@@ -270,13 +291,15 @@ describe("Luminal credit", () => {
 
     const refused = await chat(service, token);
     assert.equal(refused.status, 503);
-    assert.deepEqual(await errorOf(refused), {
+    const error = await errorOf(refused);
+    assert.deepEqual(error, {
       code: "upstream_credit_exhausted",
-      message: "Free tokens are paused while we top up. Your own key still works.",
+      message: "dl is paused while we top up. Your own key still works.",
       reason: "credit_exhausted",
       pausedForEveryone: true,
       resetsAt: null,
     });
+    assert.doesNotMatch(JSON.stringify(error), /free tier|free tokens/i, "paying users never read free-tier wording");
     assert.equal((await chat(service, adminToken)).status, 503);
     // Pro usage pauses too.
     await service.account(100).applySubscription({ subscriptionId: "sub_1", state: "active", periodEnd: Date.now() + 30 * 86_400_000, eventAt: 1 });

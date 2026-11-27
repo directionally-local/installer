@@ -83,7 +83,7 @@ export const SERVER_KEYS_UNAVAILABLE_MESSAGE =
 export const DEVICE_TAKEN_MESSAGE = "This device already has a free allowance under another GitHub account; sign in with that account instead.";
 export const INVALID_INVITE_MESSAGE = "That invite code isn't valid or was already used.";
 
-export const PAUSED_MESSAGE = "Free tokens are paused for everyone right now; your own key still works. Try the free tier again later.";
+export const PAUSED_MESSAGE = "dl is paused for everyone right now; your own key still works. Try again later.";
 
 export function weeklyBudgetMessage(resetsAt: string): string {
   return `Free tokens are paused for everyone until ${resetsAt}: this week's free budget is used up. Your own key still works.`;
@@ -157,10 +157,10 @@ export function gptLimitMessage(plan: "free" | "pro" = "free", proOffered = true
 export const QUEUED_SIGNED_IN =
   "Free tokens are busy this week, so you're in line for them; your terminal shows your place. Your own key and paid plans work now.";
 
-export const CREDIT_EXHAUSTED_MESSAGE = "Free tokens are paused while we top up. Your own key still works.";
-export const UPSTREAM_BUSY_MESSAGE = "The free tier is busy right now; retrying…";
-export const UPSTREAM_UNAVAILABLE_MESSAGE = "The free tier's model provider is having trouble right now; retrying…";
-export const UPSTREAM_TIMEOUT_MESSAGE = "The free tier's model provider didn't answer in time; retrying…";
+export const CREDIT_EXHAUSTED_MESSAGE = "dl is paused while we top up. Your own key still works.";
+export const UPSTREAM_BUSY_MESSAGE = "Our model provider is busy right now; retrying…";
+export const UPSTREAM_UNAVAILABLE_MESSAGE = "Our model provider is having trouble right now; retrying…";
+export const UPSTREAM_TIMEOUT_MESSAGE = "Our model provider didn't answer in time; retrying…";
 
 // ─── Other coding agents through dl (`dl claude`, `dl opencode`) ────────────
 
@@ -174,9 +174,9 @@ export const HARNESS_WORDS: Readonly<Record<Harness, { product: string; command:
 
 /** A harness key that expired, was revoked, or whose sign-in ended (401 invalid_harness_key). */
 export function harnessKeyExpiredMessage(harness?: Harness): string {
-  if (!harness) return "This dl session's free tier key has expired. Quit the tool and run it from dl again (dl claude, dl opencode, dl pi, dl codex).";
+  if (!harness) return "This dl session's key has expired. Quit the tool and run it from dl again (dl claude, dl opencode, dl pi, dl codex).";
   const { product, command } = HARNESS_WORDS[harness];
-  return `This ${command} session's free tier key has expired. Quit ${product} and run ${command} again.`;
+  return `This ${command} session's key has expired. Quit ${product} and run ${command} again.`;
 }
 
 /** Claude Code's: what `dl claude` users have always seen. */

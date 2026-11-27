@@ -266,7 +266,7 @@ describe("chat completions", () => {
     const listed = ((await (await service.request("GET", "/v1/models", { token })).json()) as { data: Array<{ id: string }> }).data.map((model) => model.id);
     const error = ((await (await chat(service, token, { model: "openai/gpt-5" })).json()) as { error: { message: string; allowed: string[] } }).error;
     assert.deepEqual(error.allowed, listed);
-    assert.equal(error.message, `The free tier serves ${listed.join(", ")} only.`);
+    assert.equal(error.message, `This key serves ${listed.join(", ")} only.`);
   });
 
   it("rate-limits each person to 60 requests a minute", async () => {
@@ -341,7 +341,12 @@ describe("kill switch and global caps", () => {
     const { service, token, adminToken } = await member();
     assert.equal((await service.request("POST", "/admin/pause", { token: adminToken })).status, 200);
     assert.equal(await errorCode(await chat(service, token)), "service_paused");
-    assert.equal(await errorCode(await chat(service, adminToken)), "service_paused", "the kill switch stops admins too");
+    const admin = await chat(service, adminToken);
+    assert.equal(admin.status, 503);
+    const pausedBody = (await admin.json()) as { error: { code: string; message: string } };
+    assert.equal(pausedBody.error.code, "service_paused", "the kill switch stops admins too");
+    assert.equal(pausedBody.error.message, "dl is paused for everyone right now; your own key still works. Try again later.");
+    assert.doesNotMatch(pausedBody.error.message, /free tier|free tokens/i);
     await service.request("POST", "/admin/unpause", { token: adminToken });
     assert.equal((await chat(service, token)).status, 200);
   });
