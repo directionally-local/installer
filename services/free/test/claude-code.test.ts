@@ -331,6 +331,55 @@ describe("Claude Code's share of the allowance", () => {
   });
 });
 
+describe("rate limits and refusals on /anthropic", () => {
+  it("answers a short rate limit as 429 rate_limit_error with Retry-After, so Claude Code retries", async () => {
+    const { service, token } = await world();
+    const { key } = await mint(service, token);
+    // Empty the person's per-minute bucket (apiPerson: 60 a minute) before the request.
+    const limiter = (
+      service.namespaces.RATE_LIMITER as {
+        getByName(name: string): { spend(key: string, limit: { capacity: number; perHour: number }, cost: number, now: number): Promise<{ allowed: boolean }> };
+      }
+    ).getByName("api:gh:100");
+    const limit = { capacity: 60, perHour: 3600 };
+    while ((await limiter.spend("api:gh:100", limit, 1, service.clock.now)).allowed) {
+      // Spend until the bucket is empty.
+    }
+    const refused = await messages(service, key);
+    assert.equal(refused.status, 429);
+    assert.equal(refused.headers.get("retry-after"), "1");
+    const error = await anthropicError(refused);
+    assert.deepEqual([error.type, error.code], ["rate_limit_error", "rate_limited"]);
+    assert.match(error.message, /^Too many requests\. Try again in 1 seconds\.$/);
+    assert.equal(service.calls.luminal.length, 0, "nothing goes upstream");
+  });
+
+  it("answers a used-up allowance as 402 billing_error with our message, not a 403 login problem", async () => {
+    const { service, token } = await world({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
+    const { key } = await mint(service, token);
+    // 10M uncached prompt tokens at $0.035/M: $0.35 a request, against a $1 week.
+    service.setLuminal(() => completion(luminalUsage(10_000_000, 0)));
+    for (let index = 0; index < 3; index++) assert.equal((await messages(service, key)).status, 200);
+    const refused = await messages(service, key);
+    assert.equal(refused.status, 402);
+    const error = await anthropicError(refused);
+    assert.deepEqual([error.type, error.code], ["billing_error", "quota_exceeded"]);
+    assert.match(error.message, /used up|dl Pro/);
+    assert.doesNotMatch(error.message, /authenticate|log ?in/i);
+  });
+
+  it("answers a pause for everyone as 402 billing_error, not a 403 login problem", async () => {
+    const { service, token } = await world();
+    const { key } = await mint(service, token);
+    service.env.PAUSED = "true";
+    const refused = await messages(service, key);
+    assert.equal(refused.status, 402);
+    const error = await anthropicError(refused);
+    assert.deepEqual([error.type, error.code], ["billing_error", "service_paused"]);
+    assert.match(error.message, /paused/);
+  });
+});
+
 describe("Claude Code and the dl-only check", () => {
   it("counts its requests like Autopilot's: dl's session events cover them, and none means dl_only after 20 (dlOnly on)", async () => {
     const { service, token } = await world({ DL_ONLY: "true" });

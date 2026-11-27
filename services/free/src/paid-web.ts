@@ -785,7 +785,7 @@ async function sendCode(c: Ctx, email: string, norm: string, purpose: string, co
   const transport = userEmailVia(c);
   if (!transport) return apiError(503, "email_unavailable", "We can't send email right now. Try GitHub, or again in a few minutes.");
   const issued = await auth(c).issueEmailCode({ emailNorm: norm, purpose, now: c.now() });
-  if (!issued.ok) return apiError(429, "resend_too_soon", `Wait ${issued.retryAfter} seconds before asking for another code.`, { retryAfter: issued.retryAfter }, { "retry-after": String(issued.retryAfter) });
+  if (!issued.ok) return apiError(429, "resend_too_soon", `Wait ${issued.retryAfter} seconds before asking for another code.`, { retryAfter: issued.retryAfter, retryable: true }, { "retry-after": String(issued.retryAfter) });
   for (const [key, limit] of [[`paid:email:addr:${norm}`, PAID_LIMITS.emailAddress] as [string, Limit], ...(extra.address ?? [])]) {
     const addressRetry = await limited(c, key, limit);
     if (addressRetry !== undefined) {
@@ -1335,7 +1335,7 @@ async function cliPoll(c: Ctx): Promise<Response> {
     case "pending":
       return apiError(428, "authorization_pending", "Waiting for you to approve the sign-in in your browser.", { interval: CLI_LOGIN_INTERVAL_S });
     case "slow_down":
-      return apiError(429, "slow_down", `Poll every ${CLI_LOGIN_INTERVAL_S} seconds.`, { interval: CLI_LOGIN_INTERVAL_S });
+      return apiError(429, "slow_down", `Poll every ${CLI_LOGIN_INTERVAL_S} seconds.`, { interval: CLI_LOGIN_INTERVAL_S, retryable: true });
     case "denied":
       return apiError(403, "access_denied", "The sign-in was denied in the browser.");
     case "expired":

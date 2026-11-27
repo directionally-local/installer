@@ -670,8 +670,12 @@ async function bucketNetworkHash(secret: string, ipNet: string): Promise<string>
   return [...mac.slice(0, 16)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * A short rate limit: 429 with Retry-After, and `retryable` so the Anthropic route answers 429
+ * (rate_limit_error) instead of a 403 Claude Code would read as a login problem.
+ */
 export function rateLimited(retryAfter: number, headers: Record<string, string> = {}): Response {
-  return apiError(429, "rate_limited", `Too many requests. Try again in ${retryAfter} seconds.`, { retryAfter }, { "retry-after": String(retryAfter), ...headers });
+  return apiError(429, "rate_limited", `Too many requests. Try again in ${retryAfter} seconds.`, { retryAfter, retryable: true }, { "retry-after": String(retryAfter), ...headers });
 }
 
 export async function readJson(c: Ctx): Promise<Record<string, unknown> | undefined> {

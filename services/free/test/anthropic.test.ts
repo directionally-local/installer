@@ -309,10 +309,11 @@ describe("errors and token counts", () => {
     assert.equal((anthropicError(429, "x").error as { type: string }).type, "rate_limit_error");
   });
 
-  it("keeps transient statuses (Claude Code retries them) and turns final refusals into 403", () => {
+  it("keeps transient statuses (Claude Code retries them) and turns final refusals into 402", () => {
     assert.equal(errorStatus(503, true), 503);
     assert.equal(errorStatus(429, true), 429);
-    assert.equal(errorStatus(503, false), 403);
+    assert.equal(errorStatus(503, false), 402);
+    assert.equal(errorStatus(429, false), 402);
     assert.equal(errorStatus(402, false), 402);
     assert.equal(errorStatus(502, false), 502);
   });
