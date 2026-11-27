@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.52.1](https://github.com/directionally-local/installer/compare/v0.52.0...v0.52.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **free:** normalize invite codes that start with DL ([#491](https://github.com/directionally-local/installer/issues/491)) ([8f30f07](https://github.com/directionally-local/installer/commit/8f30f077cff3bf73db79f19dcce6a25bc991cc02))
+
 ## [0.52.0](https://github.com/directionally-local/installer/compare/v0.51.0...v0.52.0) (2026-11-27)
 
 
