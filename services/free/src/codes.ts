@@ -34,6 +34,9 @@ export function newInviteCode(): string {
 
 export function normalizeInviteCode(input: string): string {
   const compact = input.toUpperCase().replace(/[^A-Z0-9]/g, "");
-  const body = compact.startsWith("DL") ? compact.slice(2) : compact;
+  // A code is `DL-XXXX-XXXX`; accept it with or without the `DL-` prefix. A bare
+  // code may itself start with "DL" (e.g. `DLQZ-ZFF3`), so only strip a prefix
+  // when what remains is the 8-character body.
+  const body = compact.length === 10 && compact.startsWith("DL") ? compact.slice(2) : compact;
   return body.length === 8 ? `DL-${body.slice(0, 4)}-${body.slice(4)}` : input.trim().toUpperCase();
 }
