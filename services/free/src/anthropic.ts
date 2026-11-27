@@ -471,12 +471,14 @@ export function errorType(status: number): string {
 
 /**
  * The status an error goes out with. Claude Code retries 429 and 5xx answers; a refusal that a
- * retry can't change (a pause for everyone, a used-up budget) goes out as 403 so it doesn't, and
- * its message is shown instead. Transient ones (`retryable`) keep theirs, Retry-After included.
+ * retry can't change (a pause for everyone, a used-up budget) goes out as 402 (billing_error),
+ * which Claude Code shows verbatim without retrying and without calling it a login problem (a 403
+ * makes it say "Failed to authenticate"). Transient ones (`retryable`) keep theirs, Retry-After
+ * included; a 502 (the provider failed) stays 502 so it is retried.
  */
 export function errorStatus(status: number, retryable: boolean): number {
   if (retryable) return status;
-  if (status === 429 || status >= 500) return status === 502 ? 502 : 403;
+  if (status === 429 || status >= 500) return status === 502 ? 502 : 402;
   return status;
 }
 
