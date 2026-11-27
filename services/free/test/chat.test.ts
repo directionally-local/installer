@@ -393,3 +393,16 @@ describe("kill switch and global caps", () => {
     assert.match(body.error.message, /^Free tokens are paused for everyone: .*total budget is used up\. Your own key still works\.$/);
   });
 });
+
+describe("upstream availability", () => {
+  it("keeps plan-neutral wording in the no-upstream 503 an admin key receives", async () => {
+    const { service, adminToken } = await member({ OPENROUTER_API_KEY: "", LUMINAL_API_KEY: "" });
+    const refused = await chat(service, adminToken);
+    assert.equal(refused.status, 503);
+    const body = (await refused.json()) as { error: { code: string; message: string; reason: string } };
+    assert.equal(body.error.code, "upstream_unavailable");
+    assert.equal(body.error.reason, "no_upstream");
+    assert.equal(body.error.message, "Our model provider isn't available right now. Try again later, or use your own key: /provider.");
+    assert.doesNotMatch(JSON.stringify(body), /free tier|free tokens/i);
+  });
+});
