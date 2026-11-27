@@ -42,8 +42,9 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       # Trusted publishing needs npm >= 11.5.1. Pinned exactly (this job can publish), so
-      # raise it by hand; npm 12 needs Node.js ^24.15.0 here.
-      - run: npm install -g npm@12.2.3
+      # raise it by hand. Stay on npm 11: npm 12 leaves npm-shrinkwrap.json out of the
+      # published tarball, which would let dl's dependency tree float again.
+      - run: npm install -g npm@11.21.3
 
       - run: npm ci
       - run: npm run typecheck
