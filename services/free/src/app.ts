@@ -1,5 +1,6 @@
 import type { DurableObjectNamespace } from "cloudflare:workers";
 import { isProxyRouter, PROXY_ROUTER_MESSAGE } from "./abuse.js";
+import { clientReply } from "./client-reply.js";
 import { randomToken, sha256Hex, timingSafeEqual } from "../../shared/src/auth.js";
 import { githubAuthorizeUrl, githubPrimaryEmail, githubPublicProfile, githubSignInFromCode, githubUserByLogin, githubUserFromCode, type Fetch, type GitHubAppCredentials } from "../../shared/src/github.js";
 import { githubSignals } from "../../shared/src/github-signals.js";
@@ -3581,7 +3582,7 @@ async function anthropic(c: Ctx, path: string, method: string): Promise<Response
   const translated = toChatRequest(request, { model: model.id, vision: model.vision });
   if (!translated.ok) return anthropicErrorResponse(400, translated.message, "invalid_request");
   const hint = anthropicSessionHint(request);
-  const answer = await countedChat(c, identity, await chat(c, { identity, body: translated.body, bodyBytes, ...(hint ? { sessionHint: hint } : {}) }));
+  const answer = await countedChat(c, identity, await clientReply(await chat(c, { identity, body: translated.body, bodyBytes, ...(hint ? { sessionHint: hint } : {}) })));
   if (answer.status !== 200) return toAnthropicErrorResponse(answer, tool);
   // The model that answered, not the claude-* name asked for: reported as the message's `model`
   // and in `x-dl-served-model`, so logs, evals and cost attribution name what produced the output.
@@ -3924,7 +3925,8 @@ async function chatCompletions(c: Ctx): Promise<Response> {
     identity.headers.set("x-dl-quota-resets-at", new Date(weekEnd(c.now())).toISOString());
     return identity;
   }
-  const answer = await countedChat(c, identity, await chat(c, { identity }));
+  // The upstream's cost, price and host stay in our records, never in the answer (client-reply.ts).
+  const answer = await countedChat(c, identity, await clientReply(await chat(c, { identity })));
   return identity.harness ? rewordedForHarness(answer, identity.harness) : identity.keyKind === "tool" ? reworded(answer, forTool) : answer;
 }
 
