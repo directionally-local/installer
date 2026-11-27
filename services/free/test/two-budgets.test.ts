@@ -290,4 +290,25 @@ describe("two weekly budgets: a zero budget is off, not spent", () => {
     assert.ok(body.allowance.budgets.deepseek.spentUsd >= 1);
     assert.ok(body.proPrompt, "a spent open-models budget still counts as used up");
   });
+
+  it("doesn't show a used-up week when DeepSeek's budget is off (DeepSeek cap 0)", async () => {
+    // A switched-off DeepSeek budget is the mirror of the GPT-6 = 0 case:
+    // openModelsUsedUp must not report the open models as used up either.
+    const { service, token } = await member({ DEEPSEEK_WEEKLY_USD_CAP: "0" });
+    const body = (await me(service, token)) as Record<string, any>;
+    assert.equal(body.budgets.deepseek.usdPerWeek, 0, "DeepSeek's weekly budget reads as 0 (off)");
+    assert.equal(body.proPrompt, null, "a 0 budget is off, not a used-up week");
+  });
+
+  it("still reads a positive GPT-6 budget as used up once $2 is spent, and refuses GPT-6", async () => {
+    // Covers the spend == cap boundary on the GPT-6 side with a positive cap:
+    // the spent > 0 check in #allowance must still fire when usdPerWeek > 0.
+    const { service, token, admin } = await member();
+    await service.request("POST", "/admin/people/100/grant", { token: admin, body: { spentUsdThisWeek: 2 } });
+    const body = (await me(service, token)) as Record<string, any>;
+    assert.equal(body.budgets.gpt6.usdPerWeek, 2);
+    assert.equal(body.allowance.remaining, 0, "a spent positive budget is used up");
+    const err = (await (await chat(service, token, LUNA)).json()) as { error: { code: string } };
+    assert.equal(err.error.code, "gpt_limit", "GPT-6 is refused once its cap is spent");
+  });
 });
