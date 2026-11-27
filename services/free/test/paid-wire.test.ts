@@ -185,7 +185,7 @@ describe("the welcome email", () => {
     for (const part of [
       "thanks for subscribing to dl.new Plus.",
       "https://dl.new/connect",
-      "    curl -fsSL dl.new | sh\n",
+      "    curl -fsSL https://dl.new | sh\n",
       "    dl\n",
       "dl claude",
       "https://api.dl.new/v1",

@@ -621,7 +621,7 @@ Settings: `cardTrial` (true), `cardTrialTokens` (20000000), `cardTrialDays` (30,
   guard on `enforce`, safety identifiers, $2/week, the output cap, the credit-based projection,
   the end on 31 Jan 2027, never on cash). GPT-6 outside the bonus still needs trust.
 - **Welcome email** (`welcome_paid`, user-emails.ts): on claim, once per payment: where the key
-  is (dl.new/connect), `curl -fsSL dl.new | sh` then `dl claude`, other tools' base URL and
+  is (dl.new/connect), `curl -fsSL https://dl.new | sh` then `dl claude`, other tools' base URL and
   dl.new/keys, dl.new/signin, each plan model's weekly limit with "(95.5% caching applied)", and
   the bonus line when the account holds it. No refund line. When the payment had the launch
   offer, the first line adds "Your first month was 50% off. It renews at $20/mo." (the percent

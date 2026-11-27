@@ -217,7 +217,7 @@ describe("install.sh on a laptop", () => {
     assert.ok(!existsSync(join(root, "npm-cache")), "npm's cache for the install is removed afterwards");
     assert.equal(result.sudo, undefined, "no sudo");
     assert.doesNotMatch(result.curl ?? "", /nodejs/, "no Node download");
-    assert.match(result.curl ?? "", /^-fsSL https:\/\/dl\.new\/dl\/latest\/dl-bundles\.txt$/m, "it looked for a prebuilt bundle; there's none, so npm");
+    assert.match(result.curl ?? "", /^-fsSL --proto =https --tlsv1\.2 https:\/\/dl\.new\/dl\/latest\/dl-bundles\.txt$/m, "it looked for a prebuilt bundle; there's none, so npm");
     const wrapper = result.read(join(root, "bin", "dl"))!;
     assert.match(wrapper, new RegExp(`exec "[^"]*/stubs/node" "${root}/dl/lib/node_modules/directionallylocal/bin/directionallylocal\\.mjs" "\\$@"`));
     assert.doesNotMatch(wrapper, /export PATH/, "the user's own Node: nothing added to PATH");
@@ -492,7 +492,7 @@ describe("install.sh on a laptop", () => {
     assert.equal(result.status, 0, result.stderr);
     const root = join(result.home, ".directionallylocal");
     assert.equal(result.npm, undefined, "no npm");
-    assert.match(result.curl ?? "", /^-fsSL https:\/\/dl\.new\/dl\/latest\/dl-bundles\.txt\n-fsSL https:\/\/dl\.new\/dl\/0\.14\.0\/dl-0\.14\.0-darwin-arm64\.tar\.gz -o /m, "the list, then this computer's bundle (its size is in the list)");
+    assert.match(result.curl ?? "", /^-fsSL --proto =https --tlsv1\.2 https:\/\/dl\.new\/dl\/latest\/dl-bundles\.txt\n-fsSL --proto =https --tlsv1\.2 https:\/\/dl\.new\/dl\/0\.14\.0\/dl-0\.14\.0-darwin-arm64\.tar\.gz -o /m, "the list, then this computer's bundle (its size is in the list)");
     assert.equal(result.read(join(root, "dl", "lib", "node_modules", "directionallylocal", "bin", "directionallylocal.mjs")), "// dl from the bundle\n");
     assert.match(result.read(join(root, "bin", "dl")) ?? "", /directionallylocal\.mjs" "\$@"/);
     assert.deepEqual(readdirSync(root).sort(), ["bin", "dl"], "no download or unpacking directory left");
@@ -501,7 +501,7 @@ describe("install.sh on a laptop", () => {
     // DL_VERSION picks that version's list.
     const pinned = run({ dist: (dist) => bundleDist(dist), env: { DL_VERSION: "0.14.0" } });
     assert.equal(pinned.status, 0, pinned.stderr);
-    assert.match(pinned.curl ?? "", /^-fsSL https:\/\/dl\.new\/dl\/0\.14\.0\/dl-bundles\.txt$/m);
+    assert.match(pinned.curl ?? "", /^-fsSL --proto =https --tlsv1\.2 https:\/\/dl\.new\/dl\/0\.14\.0\/dl-bundles\.txt$/m);
     assert.equal(pinned.npm, undefined);
   });
 
@@ -611,7 +611,7 @@ describe("install.sh: the anonymous install count", () => {
     const counts = result.counts();
     assert.equal(counts.length, 1);
     assert.deepEqual(counts[0]!.body, { os: "darwin", arch: "arm64", mode: "laptop", dlVersion: "0.10.0", result: "ok", via: "run" });
-    assert.match(counts[0]!.args, /^-fsS -m 3 -X POST -H Content-Type: application\/json -d \{/);
+    assert.match(counts[0]!.args, /^-fsS --proto =https --tlsv1\.2 -m 3 -X POST -H Content-Type: application\/json -d \{/);
     assert.doesNotMatch(result.stdout + result.stderr, /telemetry|free\.directionallylocal|anonymous|count/i);
   });
 
