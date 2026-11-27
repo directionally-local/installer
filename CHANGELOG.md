@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.51.0](https://github.com/directionally-local/installer/compare/v0.50.0...v0.51.0) (2026-11-27)
+
+
+### Features
+
+* dl codex and POST /v1/responses, so Codex CLI runs on dl ([#476](https://github.com/directionally-local/installer/issues/476)) ([3569319](https://github.com/directionally-local/installer/commit/3569319622782955e03228df7546250c083a0145))
+* **free:** admin credit-tokens route to give back tokens an upstream fault charged ([#474](https://github.com/directionally-local/installer/issues/474)) ([b3299d6](https://github.com/directionally-local/installer/commit/b3299d60c9c85b79ffbe7cb3376b3ab74593b81c))
+* **free:** Autopilot-only keys from the dl key, so the GPT-6 launch bonus works in Autopilot launched by dl ([#477](https://github.com/directionally-local/installer/issues/477)) ([b42e850](https://github.com/directionally-local/installer/commit/b42e850803b79718f8b003a2f240e4b41f2bcbaf))
+* router tracking: which coding agent people pick, and whether they stay and pay ([#478](https://github.com/directionally-local/installer/issues/478)) ([75bf8e2](https://github.com/directionally-local/installer/commit/75bf8e2356e80a828aff3630f6e1ae0a143e2b30))
+
+
+### Bug Fixes
+
+* **deps:** pin autopilot-ai 3.35.0 ([#481](https://github.com/directionally-local/installer/issues/481)) ([0391589](https://github.com/directionally-local/installer/commit/03915894bfc94b05575739c8582fb3dd4b6be04b))
+* **free:** chat replies keep only OpenAI's top-level fields ([#480](https://github.com/directionally-local/installer/issues/480)) ([bd853e1](https://github.com/directionally-local/installer/commit/bd853e152fa5a1d73c524857e696fb67973e7ea8))
+* **free:** keep upstream costs out of client replies ([#475](https://github.com/directionally-local/installer/issues/475)) ([6cb9e07](https://github.com/directionally-local/installer/commit/6cb9e07459b998824f4558afe199027c0b38640f))
+* **free:** shape requests to Open Relay's rules and skip it while it asks for a wait ([#471](https://github.com/directionally-local/installer/issues/471)) ([f055785](https://github.com/directionally-local/installer/commit/f0557857aae333f3415f43749e44d35fa1127f7d))
+* **install:** install Node, Docker and Tailscale from signed apt repositories ([#473](https://github.com/directionally-local/installer/issues/473)) ([25dd078](https://github.com/directionally-local/installer/commit/25dd078eef6e212e186516dcb4a1878173e53548))
+* **laptop:** name dl's models in every agent's picker; Autopilot on any saved dl key ([#482](https://github.com/directionally-local/installer/issues/482)) ([4275a34](https://github.com/directionally-local/installer/commit/4275a345cf7258107dec77b7479775197b8135e3))
+* publish npm-shrinkwrap.json so installs pin transitive dependencies ([#472](https://github.com/directionally-local/installer/issues/472)) ([b0159de](https://github.com/directionally-local/installer/commit/b0159de6bb0f93f1e82f997f7967c1cad523bc66))
+
 ## [0.50.0](https://github.com/directionally-local/installer/compare/v0.49.1...v0.50.0) (2026-11-27)
 
 
