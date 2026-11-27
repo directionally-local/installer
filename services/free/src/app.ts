@@ -27,6 +27,7 @@ import { feedbackEmail, MAX_FEEDBACK_BYTES, parseFeedback, publicGithubEmail, ty
 import { apiError, json } from "./errors.js";
 import { adminHomePage } from "./admin-home-page.js";
 import { dashboardCsv, deniedPage, earlyAccessCsv, healthCsv, isCsvTable, isHealthCsvTable, noGithubCsv, signedInPage, signInPage, toolsPage, type SpendView, type ToolsState } from "./dashboard-page.js";
+import { AGENT_PICK_MAX_BYTES, AGENT_PICK_PATH, parseAgentPick, requestAgent } from "./agent-picks.js";
 import { AGENT_REQUEST_MAX_BYTES, AGENT_REQUEST_PATH, agentRequestEmail, agentRequestsJson, parseAgentRequest, type AgentRequestAccount } from "./agent-request.js";
 import { PROVIDER_INQUIRY_MAX_BYTES, parseProviderInquiry, providerInquiriesJson, providerInquiryEmail } from "./provider-inquiry.js";
 import { NO_GITHUB_PATH, noGithubBody, noGithubClickAlert, noGithubJson, noGithubLeadAlert, noGithubSource, parseNoGithubLead } from "./no-github.js";
@@ -278,6 +279,8 @@ const LIMITS = {
   providerInquiryIp: { capacity: 5, perHour: 5 },
   // dl's "my coding agent isn't supported" (agent-request.ts): each kept request can email the owner.
   agentRequestIp: { capacity: 10, perHour: 10 },
+  // dl's router picks (agent-picks.ts): one per `dl` run, so a busy person makes a few an hour.
+  agentPickPerson: { capacity: 60, perHour: 60 },
 } satisfies Record<string, Limit>;
 
 export interface Env {
@@ -584,6 +587,7 @@ async function route(c: Ctx): Promise<Response> {
   if (method === "POST" && path === "/v1/telemetry/web") return webTelemetry(c);
   if (method === "POST" && path === "/v1/install-code/exchange") return installCodeExchange(c);
   if (method === "POST" && path === AGENT_REQUEST_PATH) return agentRequest(c);
+  if (method === "POST" && path === AGENT_PICK_PATH) return agentPick(c);
   if (path.startsWith("/v1/cli-login/")) {
     const handled = paidV1(c, path, method);
     if (handled) return handled;
@@ -1013,7 +1017,8 @@ async function authenticate(
     if (!found || found.kind !== "tool") return invalidKey();
     const { kind: _kind, paid, ...owner } = found;
     // The tool keys switch is for free accounts; a paying one's keys always work.
-    if (!paid && !applyOverrides(c.config, await directory(c).overrides()).toolKeys) return apiError(403, "tool_keys_off", TOOL_KEYS_OFF_MESSAGE);
+    // `ungrantedKeys` (counts and requests that spend nothing) isn't held to it either.
+    if (!paid && !options.ungrantedKeys && !applyOverrides(c.config, await directory(c).overrides()).toolKeys) return apiError(403, "tool_keys_off", TOOL_KEYS_OFF_MESSAGE);
     return { ...owner, via: "key", keyKind: "tool", keyId: parsed.id };
   }
   const claims = await verifyJwt(bearer, await jwtVerifyKeys(c.config), Math.floor(c.now() / 1000));
@@ -4148,6 +4153,8 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
   const client: UseClient = harness ?? (tool ? "tool" : "autopilot");
   // What the request row keeps as its client: the harness, or `tool:<name>` from the tool's User-Agent.
   const recordedClient = harness ?? (tool ? toolClient(c.request.headers) : undefined);
+  // The coding agent for router tracking (agent-picks.ts): kept per person and day with every request.
+  const trackedAgent = requestAgent({ harness, tool, headers: c.request.headers });
 
   // Account-pooling routers (resale or sharing of free accounts) are refused outright: the free
   // tier is for one person's own coding, not an upstream for a proxy.
@@ -4500,6 +4507,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       ...(failover ? { failover: true } : {}),
       ...(identity.via === "key" ? { viaKey: true } : {}),
       ...(recordedClient ? { harness: recordedClient } : {}),
+      agent: trackedAgent,
       // The requested model's budget paid, even when its fallback served.
       family: effective.family,
       ...(sessionKey ? { sessionKey } : {}),
@@ -5492,6 +5500,13 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     const until = Math.floor(now / DAY_MS) * DAY_MS + DAY_MS;
     return json({ days, ...noGithubJson(await directory(c).noGithub({ from: until - days * DAY_MS, until })) });
   }
+  if (method === "GET" && rest === "agents") {
+    // Router tracking (agent-picks.ts): picks, usage, retention and paying people by coding agent over ?days= (1 to 366, default 30).
+    const raw = c.url.searchParams.get("days");
+    const days = raw === null ? 30 : Number(raw);
+    if (!Number.isInteger(days) || days < 1 || days > 366) return apiError(400, "invalid_request", "Use ?days=1 to 366.");
+    return json(await directory(c).agentsReport({ now, days, adminIds: [...c.config.adminGithubIds] }));
+  }
   if (method === "GET" && rest === "agent-requests") {
     // Coding agents people asked dl to support (agent-request.ts), newest first. User content.
     return json(agentRequestsJson(await directory(c).agentRequests()));
@@ -6415,12 +6430,13 @@ async function adminWeb(c: Ctx, path: string, method: string): Promise<Response>
 
 /** GET /admin: the home page, from the Directory's admin-home reads and the spend counters. */
 async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, now: number, login: string, signOut: boolean): Promise<Response> {
-  const [data, spend, webFunnel, flaggedUses, refusals] = await Promise.all([
+  const [data, spend, webFunnel, flaggedUses, refusals, agents] = await Promise.all([
     directory(c).adminHome({ now, adminIds: [...c.config.adminGithubIds], trialCutoff: config.trialCutoff }),
     directory(c).spend(now),
     directory(c).webFunnel(),
     directory(c).useDescriptions({ since: now - 7 * DAY_MS, minRisk: "low", limit: 50 }),
     directory(c).refusals(Math.floor(now / DAY_MS) - 29),
+    directory(c).agentsReport({ now, days: 30, adminIds: [...c.config.adminGithubIds] }),
   ]);
   const view = spendView(c, config, paused, spend);
   return adminHomePage({
@@ -6447,6 +6463,7 @@ async function adminHomeResponse(c: Ctx, config: FreeConfig, paused: boolean, no
     webFunnel,
     flaggedUses,
     refusals,
+    agents,
     now,
   });
 }
@@ -7130,6 +7147,26 @@ async function agentRequest(c: Ctx): Promise<Response> {
     }
   }
   return json({ ok: true });
+}
+
+/**
+ * POST /v1/agent-pick {agent, firstRun, found?, dlVersion?} → 202 {ok: true}: the coding agent
+ * someone picked in dl's router, or opened with `dl <agent>` (agent-picks.ts). Needs the dl key
+ * (or any key or sign-in of the account); spends nothing, so it isn't held to grants or the tool
+ * keys switch. Agent ids and counts only. 60 an hour per account.
+ */
+async function agentPick(c: Ctx): Promise<Response> {
+  if (Number(c.request.headers.get("content-length") ?? 0) > AGENT_PICK_MAX_BYTES) return apiError(400, "invalid_request", "The request is too large.");
+  const identity = await authenticate(c, { keys: true, ungrantedKeys: true, toolKeys: true, harness: true });
+  if (identity instanceof Response) return identity;
+  const text = await c.request.text();
+  if (new TextEncoder().encode(text).length > AGENT_PICK_MAX_BYTES) return apiError(400, "invalid_request", "The request is too large.");
+  const parsed = parseAgentPick(parseJson(text));
+  if (!parsed.ok) return apiError(400, "invalid_request", parsed.message);
+  const retry = await limited(c, `agent-pick:gh:${identity.githubId}`, LIMITS.agentPickPerson);
+  if (retry !== undefined) return rateLimited(retry);
+  await directory(c).recordAgentPick({ githubId: identity.githubId, pick: parsed.value, now: c.now() });
+  return json({ ok: true }, 202);
 }
 
 /** POST /web/checkout: Stripe Checkout for Pro, coming back to the web page (?checkout=done or ?checkout=cancel). */

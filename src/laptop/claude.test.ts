@@ -321,7 +321,7 @@ describe("dl claude", () => {
 
   it("is reached from main with every argument after `claude`, flags included", async () => {
     let got: string[] | undefined;
-    const code = await main(["claude", "--resume", "-p", "hi", "--help"], capture().io, { claude: async (args) => ((got = args), 7) });
+    const code = await main(["claude", "--resume", "-p", "hi", "--help"], capture().io, { claude: async (args) => ((got = args), 7), reportPick: () => undefined });
     assert.equal(code, 7);
     assert.deepEqual(got, ["--resume", "-p", "hi", "--help"]);
   });

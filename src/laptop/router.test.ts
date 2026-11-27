@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { ScriptedPrompter, type Prompter, type SelectOption } from "../prompt.js";
 import { AGENT_CATALOG, type DetectedAgent } from "./agent-catalog.js";
 import type { AgentRequest, DlKey } from "./dl-key.js";
+import type { AgentPickReport } from "./agent-pick.js";
 import {
   AGAIN_QUESTION, ALSO_FOUND, AUTOPILOT_PITCH, AUTOPILOT_ROW, autopilotKeyEnv, FIRST_QUESTION, markFirstTokensShown, OUR_AGENT, ANOTHER_AGENT, keyCard, setupText, NOTHING_FOUND, orderAgents, pickerOptions, readAgentHistory, recordAgentUse, routerHome, setupSteps, THANKS,
   type RouterDeps,
@@ -31,12 +32,13 @@ class Recording implements Prompter {
   }
 }
 
-async function world(found: DetectedAgent[], answers: Record<string, string>, options: { signedIn?: boolean; firstTokens?: RouterDeps["firstTokens"]; launchCode?: number } = {}) {
+async function world(found: DetectedAgent[], answers: Record<string, string>, options: { signedIn?: boolean; firstTokens?: RouterDeps["firstTokens"]; launchCode?: number; pick?: RouterDeps["pick"] } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "dl-router-"));
   let out = "";
   const launched: Array<[string, string[]]> = [];
   const autopilot: Array<{ continue?: boolean }> = [];
   const reports: AgentRequest[] = [];
+  const picks: Array<AgentPickReport & { key: string }> = [];
   const prompter = new Recording(answers);
   let clock = Date.parse("2026-11-26T00:00:00Z");
   const deps: RouterDeps = {
@@ -48,12 +50,13 @@ async function world(found: DetectedAgent[], answers: Record<string, string>, op
     launch: async (command, args) => (launched.push([command, args]), options.launchCode ?? 0),
     autopilot: async (_key, run) => (autopilot.push(run), 0),
     report: async (request) => void reports.push(request),
+    pick: options.pick ?? ((pick, key) => void picks.push({ ...pick, key: key.key })),
     dlVersion: "0.48.0",
     historyPath: join(dir, "agents.json"),
     now: () => new Date(clock += 1000),
     ...(options.firstTokens ? { firstTokens: options.firstTokens } : {}),
   };
-  return { deps, prompter, launched, autopilot, reports, text: () => out, path: deps.historyPath! };
+  return { deps, prompter, launched, autopilot, reports, picks, text: () => out, path: deps.historyPath! };
 }
 
 describe("bare dl: the router", () => {
@@ -292,6 +295,49 @@ describe("bare dl with no agent found", () => {
     const install = await world([], { [question]: "" });
     await routerHome(install.deps);
     assert.deepEqual(install.autopilot, [{}]);
+  });
+});
+
+describe("router tracking: each pick is sent", () => {
+  it("the first run's pick, with the agents found; then \"Back to X?\" as a later pick; never dl -c", async () => {
+    const w = await world([CLAUDE, OPENCODE, CURSOR], { [FIRST_QUESTION]: "Claude Code", [AGAIN_QUESTION]: "" });
+    await routerHome(w.deps);
+    await routerHome(w.deps);
+    await routerHome(w.deps, { continue: true });
+    assert.deepEqual(w.picks, [
+      { agent: "claude-code", firstRun: true, found: ["claude-code", "opencode", "cursor"], dlVersion: "0.48.0", key: KEY.key },
+      { agent: "claude-code", firstRun: false, found: ["claude-code", "opencode", "cursor"], dlVersion: "0.48.0", key: KEY.key },
+    ]);
+  });
+
+  it("Autopilot, an agent set up by hand, and one with no custom models count as picks", async () => {
+    const autopilot = await world([CLAUDE], { [FIRST_QUESTION]: AUTOPILOT_ROW });
+    await routerHome(autopilot.deps);
+    assert.deepEqual(autopilot.picks.map((p) => [p.agent, p.firstRun]), [["autopilot", true]]);
+    const cursor = await world([CURSOR], { [FIRST_QUESTION]: "Cursor" });
+    await routerHome(cursor.deps);
+    assert.deepEqual(cursor.picks.map((p) => p.agent), ["cursor"]);
+    const windsurf = await world([WINDSURF], { [FIRST_QUESTION]: "Windsurf" });
+    await routerHome(windsurf.deps);
+    assert.deepEqual(windsurf.picks.map((p) => p.agent), ["windsurf"]);
+  });
+
+  it("with nothing found: Autopilot and a known typed name are picks; an unknown name isn't (it's an agent request)", async () => {
+    const autopilot = await world([], { [FIRST_QUESTION]: "" });
+    await routerHome(autopilot.deps);
+    assert.deepEqual(autopilot.picks.map((p) => [p.agent, p.firstRun, p.found]), [["autopilot", true, []]]);
+    const aider = await world([], { [FIRST_QUESTION]: "aider" });
+    await routerHome(aider.deps);
+    assert.deepEqual(aider.picks.map((p) => p.agent), ["aider"]);
+    const unknown = await world([], { [FIRST_QUESTION]: "Supercoder 9000" });
+    await routerHome(unknown.deps);
+    assert.deepEqual(unknown.picks, []);
+  });
+
+  it("a pick that throws never stops the agent from opening", async () => {
+    const w = await world([CLAUDE], { [FIRST_QUESTION]: "Claude Code" }, { pick: () => { throw new Error("offline"); } });
+    assert.equal(await routerHome(w.deps), 0);
+    assert.deepEqual(w.launched, [["claude", []]]);
   });
 });
 

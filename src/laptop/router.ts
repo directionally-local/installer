@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { PromptCancelled, type Prompter, type SelectOption } from "../prompt.js";
 import { palette } from "../ui.js";
 import { AGENT_CATALOG, AUTOPILOT_ID, findSpec, type AgentSpec, type DetectedAgent, type LaunchCommand } from "./agent-catalog.js";
+import type { AgentPickReport } from "./agent-pick.js";
 import { agentRequest, DL_DEFAULT_MODEL, keyUrls, type AgentRequest, type DlKey } from "./dl-key.js";
 import { COLLECTION_AT, COLLECTION_TEXT, scanStep } from "./onboarding.js";
 import { oneLine } from "./printable.js";
@@ -151,6 +152,11 @@ export interface RouterDeps {
   autopilot: (key: DlKey, options: { continue?: boolean }) => Promise<number>;
   /** Tells the service about an agent dl doesn't know; never throws. */
   report: (request: AgentRequest, key: DlKey) => Promise<unknown>;
+  /**
+   * Tells the service which agent was picked (agent-pick.ts): fire and forget, so it must return
+   * at once and never throw. Not called for `dl -c`, which isn't a pick.
+   */
+  pick?: (pick: AgentPickReport, key: DlKey) => void;
   dlVersion: string;
   historyPath?: string;
   now?: () => Date;
@@ -182,6 +188,14 @@ export async function routerHome(deps: RouterDeps, options: { continue?: boolean
   ]);
   const record = (id: string) => recordAgentUse(id, deps.historyPath, deps.now).catch(() => undefined);
   const models = () => keyModels(deps, key);
+  // Router tracking: the pick, whether it's the first here, and the agents found. Never waited on.
+  const notePick = (id: string) => {
+    try {
+      deps.pick?.({ agent: id, firstRun: !history.lastUsed, found: found.map((one) => one.id).filter((one) => one !== AUTOPILOT_ID), dlVersion: deps.dlVersion }, key);
+    } catch {
+      // A pick that can't be sent is dropped.
+    }
+  };
 
   // Back at the shell after an agent run: the first tokens served, once per install.
   const afterRun = async (code: number): Promise<number> => {
@@ -227,7 +241,7 @@ export async function routerHome(deps: RouterDeps, options: { continue?: boolean
   }
 
   const agents = found.filter((one) => one.id !== AUTOPILOT_ID);
-  if (agents.length === 0 && history.lastUsed !== AUTOPILOT_ID) return nothingFound(deps, key, autopilotInstalled, found, open);
+  if (agents.length === 0 && history.lastUsed !== AUTOPILOT_ID) return nothingFound(deps, key, autopilotInstalled, found, open, notePick);
 
   // The first time: each agent found, one line at a time (≤ 400 ms in all), then the picker.
   if (!history.lastUsed) await scanLines(deps, agents);
@@ -239,6 +253,7 @@ export async function routerHome(deps: RouterDeps, options: { continue?: boolean
     if (error instanceof PromptCancelled) return 130;
     throw error;
   }
+  notePick(picked.value);
   return open(picked.value);
 }
 
@@ -272,6 +287,7 @@ async function nothingFound(
   autopilotInstalled: boolean,
   found: readonly DetectedAgent[],
   open: (id: string) => Promise<number>,
+  notePick: (id: string) => void = () => undefined,
 ): Promise<number> {
   const { io } = deps;
   const c = palette(io.color === true);
@@ -283,7 +299,10 @@ async function nothingFound(
     if (error instanceof PromptCancelled) return 130;
     throw error;
   }
-  if (answer.value === AUTOPILOT_ID) return open(AUTOPILOT_ID);
+  if (answer.value === AUTOPILOT_ID) {
+    notePick(AUTOPILOT_ID);
+    return open(AUTOPILOT_ID);
+  }
   const name = oneLine(answer.text ?? "", 80).trim();
   if (!name) {
     io.out(`\n  ${c.dim("Your key and base URLs, for any agent that takes them:")}\n`);
@@ -294,6 +313,7 @@ async function nothingFound(
   // An agent dl knows but didn't find here (installed somewhere dl doesn't look): its own steps.
   const known = findSpec(name);
   if (known && known.id !== AUTOPILOT_ID && !known.noCustomModels) {
+    notePick(known.id);
     await recordAgentUse(known.id, deps.historyPath, deps.now).catch(() => undefined);
     io.out(setupText(known, key, c, await keyModels(deps, key)));
     return 0;

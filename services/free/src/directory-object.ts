@@ -1,4 +1,5 @@
 import { DurableObject, type DurableObjectState } from "cloudflare:workers";
+import { AGENT_PICK_SCHEMA, addAgentUsage, agentsReport, saveAgentPick, type AgentPick, type AgentsReport } from "./agent-picks.js";
 import { AGENT_REQUEST_SCHEMA, listAgentRequests, saveAgentRequest, type AgentRequest, type AgentRequestAccount, type AgentRequestInput } from "./agent-request.js";
 import { listProviderInquiries, PROVIDER_INQUIRY_SCHEMA, saveProviderInquiry, type ProviderInquiry, type ProviderInquiryInput } from "./provider-inquiry.js";
 import { NO_GITHUB_SCHEMA, noGithubDays, noGithubDigestLine, noGithubReport, recordNoGithubClick, saveNoGithubLead, withNoGithubLine, type NoGithubAlerts, type NoGithubDay, type NoGithubReport, type NoGithubSource } from "./no-github.js";
@@ -273,6 +274,11 @@ export interface RequestRecord {
    * unset for Autopilot. Counts only: the admin view's breakdown and the allowance share.
    */
   harness?: string;
+  /**
+   * The coding agent it counts under for router tracking (agent-picks.ts requestAgent): autopilot,
+   * claude-code, opencode, pi, t3, crush, another tool's name, or other. Kept in agent_daily only.
+   */
+  agent?: string;
   /** The weekly dollar budget it was charged to (the requested model's); unset: the served model's. */
   family?: Family;
   /** Held to a free trial (trials.ts): its counted tokens and cost go to the trial's budget. */
@@ -512,6 +518,7 @@ const SCHEMA = [
   ...PROVIDER_INQUIRY_SCHEMA,
   // Coding agents people asked dl to support (agent-request.ts).
   ...AGENT_REQUEST_SCHEMA,
+  ...AGENT_PICK_SCHEMA,
   `CREATE TABLE IF NOT EXISTS people (
      github_id    INTEGER PRIMARY KEY,
      login        TEXT NOT NULL,
@@ -3323,6 +3330,9 @@ export class DirectoryObject extends DurableObject {
           completionTokens: record.completionTokens,
           ...(record.harness ? { harnessRequests: 1, harnessTokens: record.chargedTokens } : {}),
         });
+        // Router tracking: every served request under its agent. An abandoned reservation (no agent
+        // known, no tokens) isn't one.
+        if (record.status !== "abandoned") addAgentUsage(this.ctx.storage.sql, { githubId: record.githubId, agent: record.agent ?? (record.harness ? record.harness.replace(/^tool:/, "") : "autopilot"), at: record.at, tokens: record.chargedTokens });
       }
       this.ctx.storage.sql.exec(
         `INSERT INTO person_daily (day, github_id, is_admin, requests, prompt_tokens, cached_tokens, completion_tokens, charged_tokens, cost_usd, errors)
@@ -4608,6 +4618,18 @@ export class DirectoryObject extends DurableObject {
   /** The newest inquiries and the total kept (admins). */
   async providerInquiries(limit?: number): Promise<{ inquiries: ProviderInquiry[]; total: number }> {
     return listProviderInquiries(this.ctx.storage.sql, limit);
+  }
+
+  // ─── Router tracking (agent-picks.ts) ──────────────────────────────────────
+
+  /** Keeps one pick in dl's router for an account. */
+  async recordAgentPick(input: { githubId: number; pick: AgentPick; now: number }): Promise<void> {
+    this.ctx.storage.transactionSync(() => saveAgentPick(this.ctx.storage.sql, input));
+  }
+
+  /** Picks, usage, retention and paying people by coding agent over the last `days` days (admins left out). */
+  async agentsReport(input: { now: number; days: number; adminIds: readonly number[] }): Promise<AgentsReport> {
+    return agentsReport(this.ctx.storage.sql, input);
   }
 
   // ─── Agent requests (agent-request.ts) ─────────────────────────────────────

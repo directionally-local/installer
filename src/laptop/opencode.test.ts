@@ -222,7 +222,7 @@ describe("dl opencode", () => {
 
   it("is reached from main with every argument after `opencode`, flags included", async () => {
     let got: string[] | undefined;
-    const code = await main(["opencode", "--continue", "-m", "dl/gpt-6-astra", "--help"], capture().io, { opencode: async (args) => ((got = args), 5) });
+    const code = await main(["opencode", "--continue", "-m", "dl/gpt-6-astra", "--help"], capture().io, { opencode: async (args) => ((got = args), 5), reportPick: () => undefined });
     assert.equal(code, 5);
     assert.deepEqual(got, ["--continue", "-m", "dl/gpt-6-astra", "--help"]);
   });
