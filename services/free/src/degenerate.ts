@@ -42,6 +42,12 @@ const MAX_PERIOD = 64;
 export const HEAD_CHARS = 512;
 /** A head with this many bytes and still too little output (only empty chunks) is let through as it is. */
 const HEAD_MAX_BYTES = 256 * 1024;
+/**
+ * The longest the head is held back: a model that thinks quietly before its first token (or an
+ * upstream that goes silent) still gets its response to the client, which can then give up and
+ * cancel; that stream is watched as it passes instead (no retry, but cut on junk).
+ */
+export const HEAD_WAIT_MS = 3_000;
 
 /** Why `text` (recent output) is degenerate, or undefined when it isn't. */
 export function degenerate(text: string): DegenerateReason | undefined {
@@ -143,8 +149,9 @@ export type GuardResult = { degenerate: DegenerateInfo } | { stream: ReadableStr
  * otherwise `{ stream }` replays the head and passes the rest through, and if it degenerates
  * later it calls `onDegenerate`, cancels the upstream and ends with an error event and `[DONE]`.
  */
-export async function guardStream(body: ReadableStream<Uint8Array>, options: { onDegenerate: (info: DegenerateInfo) => void; headChars?: number }): Promise<GuardResult> {
+export async function guardStream(body: ReadableStream<Uint8Array>, options: { onDegenerate: (info: DegenerateInfo) => void; headChars?: number; headWaitMs?: number }): Promise<GuardResult> {
   const headChars = options.headChars ?? HEAD_CHARS;
+  const headWaitMs = options.headWaitMs ?? HEAD_WAIT_MS;
   const reader = body.getReader();
   const watch = new DegenerateWatch();
   let caught: DegenerateInfo | undefined;
@@ -155,29 +162,41 @@ export async function guardStream(body: ReadableStream<Uint8Array>, options: { o
   const head: Uint8Array[] = [];
   let headBytes = 0;
   let ended = false;
-  while (!caught && !sse.finished && watch.chars < headChars && headBytes < HEAD_MAX_BYTES) {
-    let result: ReadableStreamReadResult<Uint8Array>;
-    try {
-      result = await reader.read();
-    } catch (error) {
-      // A failed read in the head: replay what came and let the failure surface as before.
-      return { stream: replay(head, reader, undefined, error) };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<"wait">((resolve) => {
+    timer = setTimeout(() => resolve("wait"), headWaitMs);
+  });
+  const guard = { sse, onCaught: () => caught, onDegenerate: options.onDegenerate };
+  try {
+    while (!caught && !sse.finished && watch.chars < headChars && headBytes < HEAD_MAX_BYTES) {
+      const pending = reader.read();
+      let result: ReadableStreamReadResult<Uint8Array> | "wait";
+      try {
+        result = await Promise.race([pending, deadline]);
+      } catch (error) {
+        // A failed read in the head: replay what came and let the failure surface as before.
+        return { stream: replay(head, reader, undefined, { failure: error }) };
+      }
+      // Too slow to judge before answering: the read still under way is the stream's next chunk.
+      if (result === "wait") return { stream: replay(head, reader, guard, { pending }) };
+      if (result.done) {
+        sse.push(undefined);
+        ended = true;
+        break;
+      }
+      head.push(result.value);
+      headBytes += result.value.byteLength;
+      sse.push(result.value);
     }
-    if (result.done) {
-      sse.push(undefined);
-      ended = true;
-      break;
-    }
-    head.push(result.value);
-    headBytes += result.value.byteLength;
-    sse.push(result.value);
+  } finally {
+    clearTimeout(timer);
   }
   if (caught) {
     await reader.cancel("degenerate").catch(() => undefined);
     return { degenerate: caught };
   }
   if (ended) return { stream: replay(head, reader, undefined) };
-  return { stream: replay(head, reader, { sse, onCaught: () => caught, onDegenerate: options.onDegenerate }) };
+  return { stream: replay(head, reader, guard) };
 }
 
 /** `head` again, then the rest of `reader`, watched by `guard` when given. */
@@ -185,10 +204,12 @@ function replay(
   head: Uint8Array[],
   reader: ReadableStreamDefaultReader<Uint8Array>,
   guard: { sse: SseText; onCaught: () => DegenerateInfo | undefined; onDegenerate: (info: DegenerateInfo) => void } | undefined,
-  failure?: unknown,
+  options: { failure?: unknown; pending?: Promise<ReadableStreamReadResult<Uint8Array>> } = {},
 ): ReadableStream<Uint8Array> {
   let index = 0;
   let cut = false;
+  const { failure } = options;
+  let pending = options.pending;
   return new ReadableStream<Uint8Array>(
     {
       async pull(controller) {
@@ -207,7 +228,9 @@ function replay(
         }
         let result: ReadableStreamReadResult<Uint8Array>;
         try {
-          result = await reader.read();
+          const next = pending ?? reader.read();
+          pending = undefined;
+          result = await next;
         } catch (error) {
           controller.error(error);
           return;

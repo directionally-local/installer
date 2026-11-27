@@ -89,6 +89,33 @@ describe("degenerate output: the check", () => {
     assert.ok("degenerate" in junk);
     assert.equal(junk.degenerate.reason, "special_tokens");
   });
+
+  it("doesn't hold a quiet stream back past the head wait, and still cuts it when it turns to junk", async () => {
+    const encoder = new TextEncoder();
+    const line = (delta: Record<string, unknown>) => encoder.encode(`data: ${JSON.stringify({ choices: [{ index: 0, delta }] })}\n\n`);
+    let reads = 0;
+    let release: () => void = () => undefined;
+    const quiet = new Promise<void>((resolve) => (release = resolve));
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        reads += 1;
+        if (reads === 1) return controller.enqueue(line({ role: "assistant", content: "" }));
+        if (reads === 2) await quiet; // thinks before its first token
+        if (reads < 200) return controller.enqueue(line({ reasoning_content: JUNK }));
+        controller.close();
+      },
+    });
+    let caught: string | undefined;
+    const started = Date.now();
+    const guarded = await guardStream(body, { headWaitMs: 50, onDegenerate: (info) => (caught = info.reason) });
+    assert.ok("stream" in guarded, "answered before the head was judged");
+    assert.ok(Date.now() - started < 1_000);
+    release();
+    const text = await new Response(guarded.stream).text();
+    assert.equal(caught, "special_tokens");
+    assert.ok(text.includes('"code":"degenerate_stream"'));
+    assert.ok((text.match(/place_holder/g) ?? []).length < 20);
+  });
 });
 
 describe("degenerate output: the service", () => {

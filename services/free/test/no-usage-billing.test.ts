@@ -155,7 +155,8 @@ describe("requests that end without usage", () => {
     await prime(service, token);
     const start = await week(service, token);
     // 3,000 characters of output in one read, then the upstream keeps going; the client aborts.
-    service.setLuminal(() => upstream([Array.from({ length: 500 }, () => chunk("abcdef")).join("")], "hang"));
+    // Six different characters each time: one piece repeated is junk the service cuts (degenerate.ts).
+    service.setLuminal(() => upstream([Array.from({ length: 500 }, (_, index) => chunk(String(100_000 + index))).join("")], "hang"));
     const response = await chat(service, token, agentBody());
     const reader = response.body!.getReader();
     await reader.read();
