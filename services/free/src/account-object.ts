@@ -23,7 +23,7 @@ import {
 import { weekEnd, weekStart } from "./week.js";
 import { formatApiKey } from "./accounts.js";
 import { isPlanId, type PlanId } from "./plan-prices.js";
-import { META, METER_SCHEMA, bonusUsdThisWeek, claimNotice, countedThisWeek, expectedCounted, inFlightOn, meterSnapshot, migrateMeters, pruneMeters, readMeta, recordMeter, tierOf, writeMeta, type MeterSnapshot } from "./plan-meter.js";
+import { META, METER_SCHEMA, bonusUsdThisWeek, claimNotice, countedThisWeek, creditMeter, expectedCounted, inFlightOn, meterSnapshot, migrateMeters, pruneMeters, readMeta, recordMeter, tierOf, writeMeta, type MeterSnapshot } from "./plan-meter.js";
 import {
   ACCOUNT_TRIAL_SCHEMA,
   addTrialUsage,
@@ -1193,6 +1193,46 @@ export class AccountObject extends DurableObject<AccountEnv> {
     }
     if (input.spentUsdThisWeek !== undefined) sql.exec("UPDATE account SET cost_used = cost_used_deepseek + ? WHERE github_id = ?", input.spentUsdThisWeek, row.github_id);
     return this.#allowance(this.#current(input.now), input.now, input.limits);
+  }
+
+  /**
+   * Admin credit: gives back `countedTokens` of this week's usage on one model, for tokens charged
+   * by an upstream fault. Every meter the model's requests were charged to goes down by up to that
+   * much, floored at 0: the plan's per-model meter (paid plans and the Free plan), and the free
+   * tier's weekly counters (the pool's tokens, the family's tokens and, at the model's output
+   * price, its dollars). Undefined with no account.
+   */
+  async creditTokens(input: { model: string; countedTokens: number; now: number }): Promise<
+    { planCounted: number; poolTokens: number; familyTokens: number; usd: number } | undefined
+  > {
+    const row = this.#current(input.now);
+    if (!row) return undefined;
+    const model = modelById(input.model);
+    if (!model) return undefined;
+    const sql = this.ctx.storage.sql;
+    const start = weekStart(input.now);
+    const tokens = Math.max(0, Math.round(input.countedTokens));
+    const family = familyOfPool(model.pool);
+    return this.ctx.storage.transactionSync(() => {
+      const planCounted = creditMeter(sql, model.id, tokens, input.now);
+      const pool = sql.exec<{ used: number }>("SELECT used FROM pool_usage WHERE week_start = ? AND pool = ?", start, model.pool).toArray()[0]?.used ?? 0;
+      const poolTokens = Math.min(tokens, Math.max(0, pool));
+      if (poolTokens > 0) {
+        sql.exec("UPDATE pool_usage SET used = used - ? WHERE week_start = ? AND pool = ?", poolTokens, start, model.pool);
+        sql.exec("UPDATE account SET used = MAX(0, used - ?) WHERE github_id = ?", poolTokens, row.github_id);
+      }
+      const familyRow = sql.exec<{ tokens: number }>("SELECT tokens FROM family_tokens WHERE week_start = ? AND family = ?", start, family).toArray()[0]?.tokens ?? 0;
+      const familyTokens = Math.min(tokens, Math.max(0, familyRow));
+      if (familyTokens > 0) sql.exec("UPDATE family_tokens SET tokens = tokens - ? WHERE week_start = ? AND family = ?", familyTokens, start, family);
+      const fresh = this.#row()!;
+      const spent = family === "deepseek" ? fresh.cost_used_deepseek : Math.max(0, fresh.cost_used - fresh.cost_used_deepseek);
+      const usd = Math.min(Math.max(0, spent), (tokens * model.prices.output) / 1_000_000);
+      if (usd > 0) {
+        if (family === "deepseek") sql.exec("UPDATE account SET cost_used = MAX(0, cost_used - ?), cost_used_deepseek = MAX(0, cost_used_deepseek - ?) WHERE github_id = ?", usd, usd, row.github_id);
+        else sql.exec("UPDATE account SET cost_used = MAX(0, cost_used - ?) WHERE github_id = ?", usd, row.github_id);
+      }
+      return { planCounted, poolTokens, familyTokens, usd };
+    });
   }
 
   /**

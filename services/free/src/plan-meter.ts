@@ -145,6 +145,19 @@ export function pruneMeters(sql: MeterSql, now: number): void {
   sql.exec("DELETE FROM plan_notices WHERE week_start < ?", weekStart(now));
 }
 
+/**
+ * Admin credit: takes up to `counted` tokens off this week's counted usage on one model (never
+ * below the free trial's share, which the plan's limit leaves out anyway). Real-token columns are
+ * left as they were: they record what was processed. Returns the counted tokens taken off.
+ */
+export function creditMeter(sql: MeterSql, model: string, counted: number, now: number): number {
+  const row = sql.exec<{ counted: number; trial_counted: number }>("SELECT counted, trial_counted FROM model_usage WHERE week_start = ? AND model = ?", weekStart(now), model).toArray()[0];
+  if (!row) return 0;
+  const take = Math.min(Math.max(0, Math.round(counted)), Math.max(0, row.counted - row.trial_counted));
+  if (take > 0) sql.exec("UPDATE model_usage SET counted = counted - ? WHERE week_start = ? AND model = ?", take, weekStart(now), model);
+  return take;
+}
+
 /** Counted tokens this week on one model, held to the plan's limit: a free trial's usage left out. */
 export function countedThisWeek(sql: MeterSql, model: string, now: number): number {
   const row = sql.exec<{ counted: number; trial_counted: number }>("SELECT counted, trial_counted FROM model_usage WHERE week_start = ? AND model = ?", weekStart(now), model).toArray()[0];

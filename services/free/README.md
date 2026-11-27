@@ -2288,6 +2288,13 @@ token) and pastes it into the tool:
 A per-person grant (`POST /admin/people/:id/grant`) still wins over the weekly defaults: `usdPerWeek`
 and `spentUsdThisWeek` are GPT-6's; `deepseekSpentUsdThisWeek` sets DeepSeek's spend.
 
+`POST /admin/people/:id/credit-tokens {countedTokens, reason, model?}` gives back tokens an
+upstream fault charged (a runaway stream, say): this week's usage on one model (DeepSeek by
+default) goes down by up to `countedTokens` on every meter it was charged to, never below 0: the
+plan's per-model meter (paid plans and the Free plan), the free tier's pool and family tokens, and
+its dollars at the model's output price. Each credit is in the config log as
+`credit_tokens:<id>:<login>` with the reason and what came off.
+
 `POST /admin/reset-week {dryRun?}` starts this week over for everyone who isn't blocked: both
 budgets' dollars and tokens and every token pool back to 0 (requests in flight still settle).
 Top-ups, plans and personal caps stay. `{dryRun: true}` only counts. It answers
