@@ -2487,6 +2487,14 @@ export class DirectoryObject extends DurableObject {
     return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM person_networks WHERE github_id = ?", githubId).toArray()[0]?.n ?? 0;
   }
 
+  /** Logs an admin's token credit (POST /admin/people/:id/credit-tokens) in the config log. False for no such person. */
+  async logCredit(githubId: number, credit: Record<string, unknown>, actor: { githubId: number; login: string; now: number }): Promise<boolean> {
+    const found = this.ctx.storage.sql.exec<{ login: string }>("SELECT login FROM people WHERE github_id = ?", githubId).toArray()[0];
+    if (!found) return false;
+    this.#log(`credit_tokens:${githubId}:${found.login}`, null, credit, actor);
+    return true;
+  }
+
   /** An admin sets a person's level; it stands until they change it again. False for no such person. */
   async setLevel(githubId: number, level: Level, actor: { githubId: number; login: string; now: number }): Promise<boolean> {
     return this.ctx.storage.transactionSync(() => {

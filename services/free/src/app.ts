@@ -5795,7 +5795,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     return json({ people: rows, nextCursor, total: ordered.length });
   }
 
-  const match = /^people\/(\d+)(?:\/(suspend|unsuspend|block|unblock|grant|revoke-tokens|level))?$/.exec(rest);
+  const match = /^people\/(\d+)(?:\/(suspend|unsuspend|block|unblock|grant|revoke-tokens|level|credit-tokens))?$/.exec(rest);
   if (match) {
     const githubId = Number(match[1]);
     const action = match[2];
@@ -5838,6 +5838,23 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
       if (level !== "full" && level !== "basic" && level !== "starter") return apiError(400, "invalid_request", 'Send {level: "full"}, {level: "basic"} or {level: "starter"}.');
       if (!(await directory(c).setLevel(githubId, level, actor))) return apiError(404, "not_found", "No such person.");
       return json({ githubId, level });
+    }
+    if (action === "credit-tokens" && method === "POST") {
+      // Gives back tokens charged by an upstream fault (e.g. a runaway stream): this week's usage on
+      // one model (default DeepSeek) goes down by up to countedTokens, floored at 0, and is logged.
+      const body = (await readJson(c)) ?? {};
+      const countedTokens = body.countedTokens;
+      const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 300) : "";
+      const modelId = body.model === undefined ? DEEPSEEK_MODEL : body.model;
+      if (typeof countedTokens !== "number" || !Number.isSafeInteger(countedTokens) || countedTokens <= 0 || countedTokens > 1_000_000_000 || reason === "" || typeof modelId !== "string" || !modelById(modelId)) {
+        return apiError(400, "invalid_request", "Send {countedTokens: a whole number above 0, reason: \"why\"} and optionally {model} (default DeepSeek).");
+      }
+      if (!(await directory(c).getPerson(githubId))) return apiError(404, "not_found", "No such person.");
+      const credited = await account(c, githubId).creditTokens({ model: modelId, countedTokens, now });
+      if (!credited) return apiError(404, "not_found", "No such person.");
+      await directory(c).logCredit(githubId, { model: modelId, countedTokens, reason, ...credited }, actor);
+      const own = await personLimits(c, config, githubId, now);
+      return json({ githubId, model: modelId, requested: countedTokens, credited, allowance: allowanceView(await account(c, githubId).allowance(now, own.limits)) });
     }
     if (action === "grant" && method === "POST") {
       const body = (await readJson(c)) ?? {};
