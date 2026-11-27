@@ -1697,10 +1697,44 @@ GPT-6 (`gpt-6-luna`, `gpt-6.1-sol`, `gpt-6-astra`) is served only inside Autopil
   agent. Their `/v1/models` and the unknown-model refusal's `allowed` leave GPT-6 out. Claude Code
   through dl is DeepSeek only either way.
 - **Admins** pass, so GPT-6 can still be tested in other agents.
-- **`/v1/me`** answers only sign-in tokens and server keys, so it is unchanged. `/v1/providers`
+- **`/v1/me`** answers sign-in tokens, server keys, tool keys and Autopilot keys; it is unchanged. `/v1/providers`
   keeps GPT-6 listed (`access: "trusted"`) with `clients: ["autopilot"]`.
 - **`gpt6Clients`** (`GPT6_CLIENTS`, runtime setting): `autopilot` (the default) or `all`, which
   serves GPT-6 to every agent as before, once OpenAI has approved it.
+
+## Autopilot launched by dl: Autopilot keys
+
+GPT-6 (and the paid plans' $2/week GPT-6.1 Sol launch bonus) is served in Autopilot only. A dl
+key (`dl_sk_`) works in any tool, so the service treats it as a tool key: no GPT-6. When dl
+launches Autopilot it trades the dl key for an **Autopilot key** (`dl_ak_<account base36>_<id>_<secret>`,
+`src/accounts.ts`; stored hashed in the Account object's `autopilot_keys`) and passes that to
+Autopilot instead. Requests with it count as Autopilot (`otherAgent` undefined): GPT-6 while
+`gpt6Clients` is `autopilot`, the bonus gate, the safety identifier, the pre-send guard, the
+$2/week bonus meter and the output cap, all unchanged.
+
+| request | response |
+|---|---|
+| `POST /v1/autopilot-keys` (a dl key, an older `dlk_` tool key, or a signed-in access token) | 201 `{id, key, expiresAt, ttlSeconds: 900}` |
+| `POST /v1/autopilot-keys/:id/refresh` (the dl key that made it, or a sign-in of the account) | `{id, expiresAt}`: another 15 minutes; 404 `autopilot_key_not_found` once expired |
+| `DELETE /v1/autopilot-keys/:id` (the dl key that made it, a sign-in, or that key itself) | `{id, revoked: true}` |
+
+- **Lifetime.** 15 minutes from when it was made or last refreshed. The key **can't refresh
+  itself**: only the dl key (held by dl) can, so a copy taken out of Autopilot's environment dies
+  within 15 minutes of dl stopping. A refresh never revives an expired key. Revoking the dl key
+  that made it, or signing out the session it came from, ends it at once. At most 16 live per
+  account (409 `autopilot_key_limit`).
+- **Where it works.** `/v1/chat/completions`, `/v1/models`, `/v1/me`, `/v1/usage` and
+  `/v1/events` (Autopilot sends its session events with it). Nowhere else: not the Anthropic
+  endpoint, not `/v1/keys`, `/v1/harness-keys` or `/v1/autopilot-keys` (minting).
+- **Expired.** 401 `invalid_token`; Autopilot then re-reads dl's key file and resends once.
+- **dl** (`src/laptop/autopilot-key.ts`) mints it at launch, writes it to a private 0600 file
+  (`AUTOPILOT_DL_FREE_TOKEN_FILE`) and sets `AUTOPILOT_DL_FREE_TOKEN`, checks every 30 s and
+  refreshes 4 minutes after the last refresh that worked, mints a new one into the file when a
+  refresh finds it gone (the computer slept), and revokes it when Autopilot exits. When it can't
+  be made (an older service, offline, an older Autopilot), Autopilot gets the dl key as before.
+- **Security.** It isn't attestation: anyone holding the dl key can mint one. Every request stays
+  on that person's own account, safety identifier, pre-send guard and $2/week bonus meter, so the
+  worst case is the bonus a paying account already has.
 
 ## Claude Code and OpenCode through dl claude and dl opencode
 

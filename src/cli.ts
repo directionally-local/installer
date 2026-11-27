@@ -10,7 +10,8 @@ import { doctor, formatChecks } from "./doctor.js";
 import { serverKeysCommand } from "./keys.js";
 import { briefStatus, connectLaptop, laptopsCommand, logsCommand, pairLaptop, serverHome, serverRunsCommand } from "./home.js";
 import { cancel, connect, describeError, laptopHome, laptopReady, pull, run, runs, servers, use, watch, type ReadyHere } from "./laptop/commands.js";
-import { autopilotAuth, autopilotOnPath, findAutopilot, installedAutopilotVersion, type AutopilotAuth } from "./laptop/autopilot.js";
+import { autopilotAuth, autopilotOnPath, findAutopilot, installedAutopilotVersion, pathAutopilotVersion, type AutopilotAuth } from "./laptop/autopilot.js";
+import { withAutopilotKey } from "./laptop/autopilot-key.js";
 import { FREE_TIER_PROVIDER, freeTierAccount, freeTierLine, freeTierProPrompt, type FreeTierAccount } from "./laptop/free-tier.js";
 import { freeModelStatus, modelsCommand } from "./laptop/free-providers.js";
 import { claudeCodeCommand } from "./laptop/claude-code-hook.js";
@@ -1110,7 +1111,12 @@ function routerDeps(options: MainOptions, io: { out: (text: string) => void; err
  */
 async function autopilotOnKey(input: SessionInput, io: { out: (text: string) => void; err: (text: string) => void; color?: boolean }): Promise<number> {
   const key = await readDlKey().catch(() => undefined);
+  const start = () => startHere({ ...(input.autopilot ? {} : { autopilot: () => ensureAutopilot(io) }), ...input }, io);
   // A key made from Autopilot's own free tier sign-in (an update from dl 0.47): Autopilot keeps that sign-in.
-  if (key && key.source !== "free-tier") Object.assign(process.env, autopilotKeyEnv(key, await autopilotProvider(autopilotConfigFile())));
-  return await startHere({ ...(input.autopilot ? {} : { autopilot: () => ensureAutopilot(io) }), ...input }, io);
+  if (!key || key.source === "free-tier") return await start();
+  Object.assign(process.env, autopilotKeyEnv(key, await autopilotProvider(autopilotConfigFile())));
+  // An Autopilot-only key in place of the dl key, refreshed while Autopilot runs (autopilot-key.ts):
+  // GPT-6 and the plans' launch bonus are served in Autopilot only.
+  const version = input.autopilot ? undefined : (installedAutopilotVersion() ?? (await pathAutopilotVersion().catch(() => undefined)));
+  return await withAutopilotKey(key, version, process.env, start);
 }
