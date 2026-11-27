@@ -146,6 +146,15 @@ describe("a zero weekly dollar budget is off, not used up", () => {
     assert.equal(body.allowance.remaining, 0, "a spent positive budget is still used up");
     assert.equal((await errorOf(await chat(service, token, LUNA))).code, "gpt_limit");
   });
+
+  it("still shows the Pro prompt when a positive DeepSeek budget is spent", async () => {
+    const { service, token } = await member({ DEEPSEEK_WEEKLY_USD_CAP: "1" });
+    service.setOpenRouter(() => completion(usage(1000, 100, 0, 5)));
+    assert.equal((await chat(service, token, DEEPSEEK)).status, 200);
+    const body = await me(service, token);
+    assert.ok(body.allowance.budgets.deepseek.spentUsd >= 1);
+    assert.ok(body.proPrompt, "a spent positive budget is still used up");
+  });
 });
 
 describe("two weekly budgets: refusals", () => {
