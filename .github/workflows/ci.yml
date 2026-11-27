@@ -18,6 +18,10 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # The published tarball must carry npm-shrinkwrap.json (prepack writes it from
+      # package-lock.json, production dependencies only) so `npm install -g` pins dl's
+      # transitive dependencies instead of resolving them from ranges.
+      - run: node scripts/check-shrinkwrap.mjs
       - run: shellcheck install.sh
   # Wall-clock speed checks on large generated data (services/**/*.perf.ts). They depend
   # on the runner's speed, so they're reported here but never block a merge or a
