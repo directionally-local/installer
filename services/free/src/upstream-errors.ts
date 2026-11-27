@@ -12,7 +12,14 @@ export interface UpstreamRefusal {
   reason?: string;
 }
 
-const GENERIC = "The model provider refused the request.";
+/**
+ * Anything unknown. The commonest unknown refusal is a conversation a client broke after an
+ * interrupted step (a tool call answered twice, or not at all): the client resends it with every
+ * message, so every message fails until the person starts over or updates (tool-history.ts
+ * repairs the shapes known so far before any upstream sees them).
+ */
+export const GENERIC =
+  "The model provider refused the request. If every message in this conversation now fails, it may have got into a bad state after an interrupted step: start a new conversation (/clear in Autopilot), or update with `dl update`.";
 
 /** Known failures, by what the provider's message, code or type says: the first that matches wins. */
 const KNOWN: ReadonlyArray<{ test: RegExp; message: string }> = [
