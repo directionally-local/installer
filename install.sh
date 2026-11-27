@@ -17,12 +17,13 @@
 # installs Node.js 24 if needed and the directionallylocal CLI (also `dl`), then runs `dl up`,
 # which asks how to reach this server and for the model key, and sets up Hotcell + Autopilot
 # as services. Safe to run again.
-# A server runs vendors' own install scripts as root, as they publish them (not pinned or
-# checked by this script): NodeSource's (deb.nodesource.com/setup_24.x, here, when Node.js is
-# missing or unpatched), and, from `dl up`, Docker's (get.docker.com, when Docker isn't
-# installed) and Tailscale's (tailscale.com/install.sh, when it's reached over Tailscale and
-# Tailscale isn't installed). None of them gets the secrets below: they're held back from
-# every command but `dl up` (and its vendor scripts run with a scrubbed environment).
+# A server adds vendors' signed apt repositories as root, with each key's fingerprint pinned and
+# checked here before apt trusts it: NodeSource's (deb.nodesource.com, here, when Node.js is
+# missing or unpatched), and, from `dl up`, Docker's (download.docker.com, when Docker isn't
+# installed) and Tailscale's (pkgs.tailscale.com, when it's reached over Tailscale and Tailscale
+# isn't installed). No vendor script is piped to a shell. None of them gets the secrets below:
+# they're held back from every command but `dl up` (and its apt steps run with a scrubbed
+# environment).
 #
 # Which one: DL_MODE=server or DL_MODE=laptop decides. Otherwise it's a server only when the
 # laptop's setup runs it (DL_INSTALL_ONLY=1) or when dl up already set this Linux machine up
@@ -128,11 +129,21 @@ count_install() {
 # them with a clean one): the non-secret answers dl up reads, and what apt and the downloads
 # need. Never the secrets (SECRET_VARS): only dl up gets those, see hold_secrets and dl_up.
 ROOT_ENV="DEBIAN_FRONTEND DL_MODE DL_VERSION DL_INSTALL_ONLY DL_TITLE_SHOWN DL_ACCESS DL_PROVIDER DL_PROVIDER_BASE_URL DL_SKIP_CREDENTIAL_CHECK DL_REFERRAL DL_AUTOPILOT_SPEC DL_HOTCELL_SPEC DL_PREVIEWS_BUCKET DL_NO_TELEMETRY DO_NOT_TRACK CI NO_COLOR http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY"
-# The answers that are secrets: dl up's alone, never in the environment of NodeSource's script,
-# apt or npm (whose packages' install scripts run as root).
+# The answers that are secrets: dl up's alone, never in the environment of the apt steps, npm
+# (whose packages' install scripts run as root) or a vendor's script.
 SECRET_VARS="DL_TAILSCALE_AUTH_KEY DL_PROVIDER_API_KEY DL_OPENROUTER_API_KEY DL_GITHUB_TOKEN DL_INSTALL_CODE"
 # Names (comma-separated) sudo also passes through by name, set only for dl up (see dl_up).
 SUDO_KEEP=""
+
+# Vendors' apt repositories, signed: each key's fingerprint is pinned here and checked before apt
+# trusts it, and the deb line names the key with signed-by. No vendor script is piped to a shell.
+# DL_APT_KEYRINGS and DL_APT_SOURCES stand in for apt's directories in tests.
+APT_KEYRINGS="${DL_APT_KEYRINGS:-/etc/apt/keyrings}"
+APT_SOURCES="${DL_APT_SOURCES:-/etc/apt/sources.list.d}"
+NODESOURCE_KEY_URL="https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key"
+NODESOURCE_FINGERPRINT="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
+NODESOURCE_KEYRING="$APT_KEYRINGS/nodesource.asc"
+NODESOURCE_LIST="$APT_SOURCES/nodesource.list"
 
 # Runs a command as root: as it is when this is root; otherwise `sudo env NAME=VALUE… COMMAND`
 # with the ROOT_ENV variables that are set (an explicit list, not sudo -E).
@@ -159,9 +170,46 @@ as_root() {
   fi
 }
 
+# Adds a vendor's signed apt repository as root: downloads its key, checks the key's fingerprint
+# against the pinned one before apt trusts it, then writes the deb line with signed-by. Fails,
+# changing nothing, when the key isn't the pinned one. $1: name, $2: key URL, $3: keyring path,
+# $4: pinned fingerprint (hex), $5: the deb line (without "deb "), $6: the .list path.
+add_signed_repo() {
+  asr_name=$1
+  asr_url=$2
+  asr_keyring=$3
+  asr_fingerprint=$4
+  asr_line=$5
+  asr_list=$6
+  asr_download="$asr_keyring.download"
+  if ! command -v gpg >/dev/null 2>&1; then
+    quietly "installing gnupg" as_root apt-get update -qq
+    quietly "installing gnupg" as_root apt-get install -y -qq gnupg
+  fi
+  quietly "preparing apt's keyring directory" as_root mkdir -p "$APT_KEYRINGS"
+  quietly "preparing apt's keyring directory" as_root chmod 755 "$APT_KEYRINGS"
+  quietly "downloading $asr_name's signing key" as_root curl -fsSL --proto '=https' --tlsv1.2 "$asr_url" -o "$asr_download"
+  # Exactly one primary key, and its own fpr: a second pub record would get apt to trust another key.
+  asr_got=$(as_root gpg --show-keys --with-colons --with-fingerprint "$asr_download" 2>/dev/null | awk -F: '
+    $1 == "pub" { pubs++; want = 1; next }
+    $1 == "fpr" && want { if (pubs == 1) fpr = $10; want = 0 }
+    END { if (pubs == 1) print fpr }
+  ')
+  if [ "$asr_got" != "$asr_fingerprint" ]; then
+    as_root rm -f "$asr_download"
+    fail "the signing key from $asr_url isn't $asr_name's (fingerprint ${asr_got:-unknown}, expected $asr_fingerprint); nothing was added"
+  fi
+  # The inner shell expands $1 and $2; this one must not.
+  # shellcheck disable=SC2016
+  quietly "adding $asr_name's apt repository" as_root sh -c 'mkdir -p "$(dirname "$2")" && chmod 755 "$(dirname "$2")" && mv "$1" "$2" && chmod 644 "$2"' sh "$asr_download" "$asr_keyring"
+  # shellcheck disable=SC2016
+  quietly "adding $asr_name's apt repository" as_root sh -c 'mkdir -p "$(dirname "$2")" && printf "deb %s\n" "$1" > "$2"' sh "$asr_line" "$asr_list"
+  quietly "updating apt" as_root apt-get update -qq
+}
+
 # Server mode, first thing: the secrets set in the environment go into shell variables of this
 # script (HELD_NAME, not exported) and out of the environment, so nothing started from here
-# (NodeSource's script, apt, npm and its packages' install scripts) sees them. HELD lists them.
+# (apt, npm and its packages' install scripts) sees them. HELD lists them.
 HELD=""
 hold_secrets() {
   for hs_name in $SECRET_VARS; do
@@ -914,7 +962,8 @@ main() {
     line=24
     case "$(node_major)" in 24|26) line=$(node_major) ;; esac
     step "Installing Node.js ${line}"
-    quietly "adding the Node.js ${line} repository" as_root sh -c "curl -fsSL --proto '=https' --tlsv1.2 https://deb.nodesource.com/setup_${line}.x | bash -"
+    add_signed_repo "NodeSource" "$NODESOURCE_KEY_URL" "$NODESOURCE_KEYRING" "$NODESOURCE_FINGERPRINT" \
+      "[signed-by=$NODESOURCE_KEYRING] https://deb.nodesource.com/node_${line}.x nodistro main" "$NODESOURCE_LIST"
     quietly "installing Node.js ${line}" as_root apt-get install -y -qq nodejs
     node_is_patched || fail "Node.js $(node -v 2>/dev/null || echo '?') is still missing the CVE-2026-111497 fix; install 22.23.4+, 24.22.1+ or 26.12.1+ and re-run"
     step_done "Installed Node.js" "$(node -v)"
@@ -922,9 +971,24 @@ main() {
 
   STAGE=install_dl
   REASON=""
-  package="${DL_PACKAGE:-directionallylocal@${DL_VERSION:-latest}}"
   step "Getting the installer"
-  quietly "installing $package" as_root npm install -g --no-audit --no-fund --loglevel=error "$package"
+  if [ -n "${DL_PACKAGE:-}" ]; then
+    package=$DL_PACKAGE
+  else
+    tag=${DL_VERSION:-latest}
+    # The exact version behind the tag, from the registry: what's installed is recorded, and
+    # `@latest` can't move under the install between the lookup and the download.
+    resolved=$(as_root npm view "directionallylocal@$tag" version 2>>"$LOG") || fail "couldn't look up directionallylocal@$tag on npm (check this server's internet connection or proxy, then run this again)"
+    resolved=$(printf '%s\n' "$resolved" | tail -n 1 | tr -d '[:space:]')
+    case $resolved in
+      ""|*[!0-9A-Za-z.+-]*) fail "npm returned no usable version for directionallylocal@$tag (got \"$resolved\")" ;;
+    esac
+    package="directionallylocal@$resolved"
+  fi
+  # --ignore-scripts: dl needs no install script on a server. Its only dependency (yaml) has none,
+  # and isolated-vm (Autopilot's optional sandbox) isn't installed with dl here: `dl up` installs
+  # Autopilot into its own release directory, where it builds isolated-vm if it has no prebuilt one.
+  quietly "installing $package" as_root npm install -g --no-audit --no-fund --loglevel=error --ignore-scripts "$package"
   COUNT_VERSION=$(dl --version 2>/dev/null || echo "")
   step_done "Got the installer" "dl $COUNT_VERSION"
 

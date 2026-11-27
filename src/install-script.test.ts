@@ -24,7 +24,7 @@ function supportedHost(): boolean {
  * It runs in a script sandbox (test-support/script-sandbox.ts): nothing outside its temp root
  * is on PATH or under any directory it may write to, checked before it starts.
  */
-function install(env: Record<string, string>, options: { npmFails?: boolean; dlUpFails?: boolean; counts?: boolean; uid?: number } = {}) {
+function install(env: Record<string, string>, options: { npmFails?: boolean; npmViewFails?: boolean; dlUpFails?: boolean; counts?: boolean; uid?: number; nodePatched?: boolean; gpgTwoKeys?: boolean } = {}) {
   const box = createScriptSandbox("dl-install-");
   const dir = box.root;
   const stub = box.stub;
@@ -35,18 +35,44 @@ function install(env: Record<string, string>, options: { npmFails?: boolean; dlU
   mkdirSync(join(dir, "root"));
   writeFileSync(join(dir, "root", "id"), "#!/bin/sh\necho 0\n");
   chmodSync(join(dir, "root", "id"), 0o755);
-  stub("node", 'exit 0');
-  stub("curl", `echo "$*" >> "${dir}/curl.log"`);
-  stub("npm", options.npmFails ? 'echo "npm ERR! 404 Not Found"; exit 1' : fakeNpm(dir, { before: `echo "$*" >> "${dir}/npm.log"; env | grep '^DL_' | sort >> "${dir}/npm.env"` }));
+  // A Node that is patched (the marker) or not; installing nodejs from apt patches it.
+  if (options.nodePatched ?? true) writeFileSync(join(dir, "node-patched"), "");
+  stub("node", `case "$1" in
+  -p) echo 24 ;;
+  -e) [ -f "${dir}/node-patched" ] ;;
+  -v) echo v24.22.1 ;;
+  *) exit 0 ;;
+esac`);
+  // curl: records its arguments, and creates the file it downloads to (-o).
+  stub("curl", `echo "$*" >> "${dir}/curl.log"
+out=""; while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done
+[ -z "$out" ] || : > "$out"`);
+  // gpg: the NodeSource key's pinned fingerprint, as --with-colons --with-fingerprint prints it.
+  stub("gpg", options.gpgTwoKeys
+    ? `echo "pub:-:2048:1:2F59B5F99B1BE0B4:1464022864:::-:::scESC::::::23::0:"
+echo "fpr:::::::::6F71F525282841EEDAF851B42F59B5F99B1BE0B4:"
+echo "pub:-:2048:1:AAAAAAAAAAAAAAAA:1464022864:::-:::scESC::::::23::0:"
+echo "fpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:"`
+    : `echo "pub:-:2048:1:2F59B5F99B1BE0B4:1464022864:::-:::scESC::::::23::0:"
+echo "fpr:::::::::6F71F525282841EEDAF851B42F59B5F99B1BE0B4:"`);
+  stub("apt-get", `echo "$*" >> "${dir}/apt.log"
+case "$*" in *nodejs*) : > "${dir}/node-patched" ;; esac`);
+  // npm: `view` answers the exact version behind the tag; `install` records its arguments.
+  stub("npm", fakeNpm(dir, { before: `echo "$*" >> "${dir}/npm.log"
+case "$1" in
+  view) ${options.npmViewFails ? 'echo "npm ERR! 404 Not Found"; exit 1' : "echo 0.49.1; exit 0"} ;;
+  install) ${options.npmFails ? 'echo "npm ERR! 404 Not Found"; exit 1' : ""} ;;
+esac
+env | grep '^DL_' | sort >> "${dir}/npm.env"` }));
   stub("dl", 'echo 0.1.2');
   stub("directionallylocal", `echo "$*" >> "${dir}/up.log"; env | grep '^DL_' | sort >> "${dir}/up.env"${options.dlUpFails ? "; exit 3" : ""}`);
   try {
     // The anonymous count is off unless a test turns it on (DL_NO_TELEMETRY: "").
-    const runEnv = { ...box.env, DL_HOME: join(box.home, ".directionallylocal"), DL_NO_TELEMETRY: "1", DL_SERVER_STATE: join(dir, "no-server-state"), ...env };
+    const runEnv = { ...box.env, DL_HOME: join(box.home, ".directionallylocal"), DL_NO_TELEMETRY: "1", DL_SERVER_STATE: join(dir, "no-server-state"), DL_APT_KEYRINGS: join(dir, "keyrings"), DL_APT_SOURCES: join(dir, "sources"), ...env };
     assertConfined(dir, runEnv, box.home);
     const result = spawnSync("sh", [SCRIPT], { cwd: box.home, env: runEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     const read = (name: string) => existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : undefined;
-    return { ...result, npm: read("npm.log"), up: read("up.log"), npmEnv: read("npm.env"), upEnv: read("up.env"), sudo: read("sudo.log"), counts: options.counts ? installCounts(join(dir, "curl.log")) : [] };
+    return { ...result, npm: read("npm.log"), apt: read("apt.log"), curl: read("curl.log"), up: read("up.log"), npmEnv: read("npm.env"), upEnv: read("up.env"), sudo: read("sudo.log"), counts: options.counts ? installCounts(join(dir, "curl.log")) : [] };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -80,7 +106,8 @@ describe("install.sh", () => {
     const only = install({ DL_INSTALL_ONLY: "1" });
     assert.equal(only.status, 0, only.stderr);
     assert.equal(only.stdout, "Directionally Local\n.. Getting the installer\nok Getting the installer: dl 0.1.2\n", "plain lines without a terminal");
-    assert.match(only.npm ?? "", /^install -g --no-audit --no-fund --loglevel=error directionallylocal@latest$/m);
+    assert.match(only.npm ?? "", /^view directionallylocal@latest version$/m, "the exact version behind the tag, from the registry");
+    assert.match(only.npm ?? "", /^install -g --no-audit --no-fund --loglevel=error --ignore-scripts directionallylocal@0\.49\.1$/m, "no dependency's install script runs");
     assert.equal(only.up, undefined, "dl up didn't run");
 
     // Without it, the same install goes on to dl up (so the stubs above are what it calls).
@@ -89,12 +116,44 @@ describe("install.sh", () => {
     assert.equal(full.up, "up\n");
   });
 
+  it("adds NodeSource's signed apt repository, with its key's fingerprint checked", { skip: !supportedHost() && "needs Ubuntu or Debian" }, () => {
+    const only = install({ DL_INSTALL_ONLY: "1" }, { nodePatched: false });
+    assert.equal(only.status, 0, only.stderr);
+    assert.match(only.curl ?? "", /^-fsSL --proto =https --tlsv1\.2 https:\/\/deb\.nodesource\.com\/gpgkey\/nodesource-repo\.gpg\.key -o .*\/keyrings\/nodesource\.asc\.download$/m, "the armored key is saved as .asc");
+    assert.match(only.apt ?? "", /^update -qq$/m);
+    assert.ok(!only.curl?.includes("setup_24.x"), "never NodeSource's setup script");
+    assert.ok(!only.sudo?.includes("bash"), "never a script piped to a shell");
+  });
+
+  it("refuses a key file with more than one primary key", { skip: !supportedHost() && "needs Ubuntu or Debian" }, () => {
+    const two = install({ DL_INSTALL_ONLY: "1" }, { nodePatched: false, gpgTwoKeys: true });
+    assert.equal(two.status, 1);
+    assert.match(two.stderr, /isn't NodeSource's \(fingerprint unknown, expected 6F71F525282841EEDAF851B42F59B5F99B1BE0B4\)/);
+    assert.ok(!two.apt?.includes("install -y -qq nodejs"), "nothing installed");
+  });
+
+  it("installs the exact DL_VERSION, and DL_PACKAGE as given", { skip: !supportedHost() && "needs Ubuntu or Debian" }, () => {
+    const pinned = install({ DL_INSTALL_ONLY: "1", DL_VERSION: "0.48.0" });
+    assert.equal(pinned.status, 0, pinned.stderr);
+    assert.match(pinned.npm ?? "", /^view directionallylocal@0\.48\.0 version$/m);
+    assert.match(pinned.npm ?? "", /^install -g --no-audit --no-fund --loglevel=error --ignore-scripts directionallylocal@0\.49\.1$/m);
+
+    const tarball = install({ DL_INSTALL_ONLY: "1", DL_PACKAGE: "/tmp/dl.tgz" });
+    assert.equal(tarball.status, 0, tarball.stderr);
+    assert.doesNotMatch(tarball.npm ?? "", /^view /m, "a local package isn't looked up");
+    assert.match(tarball.npm ?? "", /^install -g --no-audit --no-fund --loglevel=error --ignore-scripts \/tmp\/dl\.tgz$/m);
+  });
+
   it("reports a failed step on stderr and exits 1", { skip: !supportedHost() && "needs Ubuntu or Debian" }, () => {
     const failed = install({ DL_INSTALL_ONLY: "1" }, { npmFails: true });
     assert.equal(failed.status, 1);
     assert.equal(failed.stdout, "Directionally Local\n.. Getting the installer\n");
-    assert.match(failed.stderr, /npm ERR! 404 Not Found[\s\S]*directionallylocal: installing directionallylocal@latest failed/);
+    assert.match(failed.stderr, /npm ERR! 404 Not Found[\s\S]*directionallylocal: installing directionallylocal@0\.49\.1 failed/);
     assert.equal(failed.up, undefined);
+
+    const unlooked = install({ DL_INSTALL_ONLY: "1" }, { npmViewFails: true });
+    assert.equal(unlooked.status, 1);
+    assert.match(unlooked.stderr, /directionallylocal: couldn't look up directionallylocal@latest on npm/);
   });
 });
 
@@ -127,6 +186,7 @@ function laptopInstall(options: { os?: "Darwin" | "Linux"; machine?: string; and
   // as the server path's `npm install -g` uses), refusing a prefix that's empty or outside `dir`.
   const npm = options.npmFails ? 'echo "npm http fetch GET 404 https://registry.npmjs.org/directionallylocal 80ms"; echo "npm ERR! 404"; exit 1' : fakeNpm(dir, {
     before: `echo "$*" >> "${dir}/npm.log"
+[ "$1" = view ] && { echo 0.49.1; exit 0; }
 ${options.npmOutput ?? ""}
 [ "$1 $2" = "run install" ] && { echo "in $(pwd)" >> "${dir}/npm.log"; touch built; exit 0; }`,
     after: options.ivm ? 'mkdir -p "$prefix/lib/node_modules/directionallylocal/node_modules/isolated-vm"' : "",
@@ -829,20 +889,20 @@ describe("install.sh: server or laptop", () => {
       const user = laptopInstall({ os: "Linux", env: { DL_MODE: "server" } });
       try {
         assert.equal(user.status, 1, "the stub sudo fails");
-        assert.match(user.sudo ?? "", /^sudo env DEBIAN_FRONTEND=noninteractive DL_MODE=server DL_NO_TELEMETRY=1 npm install -g/m, "the server path, through sudo, with the non-secret variables by name");
+        assert.match(user.sudo ?? "", /^sudo env DEBIAN_FRONTEND=noninteractive DL_MODE=server DL_NO_TELEMETRY=1 npm view directionallylocal@latest version$/m, "the server path, through sudo, with the non-secret variables by name");
       } finally {
         rmSync(user.dir, { recursive: true, force: true });
       }
       const viaSetup = laptopInstall({ os: "Linux", env: { DL_INSTALL_ONLY: "1" } });
       try {
-        assert.match(viaSetup.sudo ?? "", /^sudo env DEBIAN_FRONTEND=noninteractive DL_INSTALL_ONLY=1 DL_NO_TELEMETRY=1 npm install -g/m, "DL_INSTALL_ONLY=1 (the laptop's setup, over SSH) is always a server");
+        assert.match(viaSetup.sudo ?? "", /^sudo env DEBIAN_FRONTEND=noninteractive DL_INSTALL_ONLY=1 DL_NO_TELEMETRY=1 npm view directionallylocal@latest version$/m, "DL_INSTALL_ONLY=1 (the laptop's setup, over SSH) is always a server");
       } finally {
         rmSync(viaSetup.dir, { recursive: true, force: true });
       }
       // A user on a Linux machine dl up already set up as a server: the server path too.
       const serverUser = laptopInstall({ os: "Linux", env: { DL_SERVER_STATE: join(state, "state.json") } });
       try {
-        assert.match(serverUser.sudo ?? "", /^sudo env DEBIAN_FRONTEND=noninteractive DL_NO_TELEMETRY=1 npm install -g/m);
+        assert.match(serverUser.sudo ?? "", /^sudo env DEBIAN_FRONTEND=noninteractive DL_NO_TELEMETRY=1 npm view directionallylocal@latest version$/m);
       } finally {
         rmSync(serverUser.dir, { recursive: true, force: true });
       }

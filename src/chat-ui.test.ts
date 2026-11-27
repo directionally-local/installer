@@ -204,7 +204,7 @@ test("share explains a Tailscale HTTPS failure", async () => {
 });
 
 for (const [name, tailscale, said, next] of [
-  ["missing", { installed: false }, /isn't installed here/, /tailscale\.com\/install\.sh.*sudo tailscale up.*dl ui share/],
+  ["missing", { installed: false }, /isn't installed here/, /pkgs\.tailscale\.com.*sudo tailscale up.*dl ui share/],
   ["logged out", { installed: true, up: false }, /isn't signed in here/, /sudo tailscale up \(it prints a sign-in link\)/],
   ["HTTPS certificates off", { installed: true, up: true }, /HTTPS certificates are off/, /login\.tailscale\.com\/admin\/dns/],
 ] as const) {

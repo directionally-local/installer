@@ -6,6 +6,8 @@ export interface FakeCommand {
   input?: string;
   /** The command was marked as printing a secret (kept out of the install log). */
   secretOutput?: boolean;
+  /** The command ran with only the vendor steps' environment. */
+  scrubbed?: boolean;
 }
 
 /**
@@ -41,6 +43,13 @@ export class FakeSystem implements System {
   hotcellRouteUrls = new Map<string, string>();
   /** Routes `hotcell keys ls --json` reports as inactive. */
   hotcellInactive = new Set<string>();
+  /** What `gpg --show-keys` reports for a downloaded key, by download path: the pinned ones. */
+  keyFingerprints = new Map<string, string>([
+    ["/etc/apt/keyrings/docker.asc.download", "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"],
+    ["/etc/apt/keyrings/tailscale.gpg.download", "2596A99EAAB33821893C0A79458CA832957F5868"],
+  ]);
+  /** A whole `gpg --show-keys` output for a download path, when a test needs more than one key. */
+  keyOutputs = new Map<string, string>();
   memoryKb = 8 * 1024 * 1024;
   nodeVersion = "24.22.1";
   /** What Autopilot's server CLI reports (aster token list / runs / pair list). */
@@ -61,7 +70,7 @@ export class FakeSystem implements System {
     this.dockerSocket = this.docker;
     this.tailscaleInstalled = options.tailscale ?? false;
     this.tailscaleUp = options.tailscaleUp ?? false;
-    this.files.set("/etc/os-release", { content: 'ID=ubuntu\nVERSION_ID="24.04"\nPRETTY_NAME="Ubuntu 24.04.1 LTS"\n', mode: 0o644 });
+    this.files.set("/etc/os-release", { content: 'ID=ubuntu\nVERSION_ID="24.04"\nVERSION_CODENAME=noble\nPRETTY_NAME="Ubuntu 24.04.1 LTS"\n', mode: 0o644 });
     this.dirs.add("/run/systemd/system");
     this.dirs.add("/etc/update-motd.d");
   }
@@ -71,7 +80,7 @@ export class FakeSystem implements System {
   }
 
   async run(command: string, args: string[], options: RunOptions = {}): Promise<RunResult> {
-    this.commands.push({ command, args, ...(options.input !== undefined ? { input: options.input } : {}), ...(options.secretOutput ? { secretOutput: true } : {}) });
+    this.commands.push({ command, args, ...(options.input !== undefined ? { input: options.input } : {}), ...(options.secretOutput ? { secretOutput: true } : {}), ...(options.scrubbed ? { scrubbed: true } : {}) });
     const result = this.respond(command, args, options);
     if (result.code !== 0 && !options.allowFailure) throw new Error(`${command} ${args.join(" ")} failed: ${result.stderr}`);
     return result;
@@ -132,10 +141,20 @@ export class FakeSystem implements System {
         if (args[0] === "ps") return ok(this.containers.join("\n"));
         return ok();
       case "ip": return this.docker ? ok("4: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\n") : fail("no docker0");
-      case "sh":
-        // Docker's script installs the packages; the daemon still has to be started properly.
-        if (line.includes("get.docker.com")) this.dockerInstalled = true;
-        if (line.includes("tailscale.com/install.sh")) this.tailscaleInstalled = true;
+      case "gpg": {
+        // The key's primary fingerprint, as `--with-colons --with-fingerprint` prints it.
+        const output = this.keyOutputs.get(args.at(-1)!);
+        if (output !== undefined) return ok(output);
+        const fingerprint = this.keyFingerprints.get(args.at(-1)!);
+        return fingerprint ? ok(`pub:-:4096:1:0000000000000000:0:::-:::scESC::::::23::0:\nfpr:::::::::${fingerprint}:\n`) : fail("no key");
+      }
+      case "tee": {
+        const path = args[0]!;
+        this.files.set(path, { content: options.input ?? "", mode: 0o644 });
+        return ok(options.input ?? "");
+      }
+      case "mv":
+        this.files.set(args[1]!, { content: "", mode: 0o644 });
         return ok();
       case "useradd":
         this.users.add(args.at(-1)!);
@@ -209,6 +228,8 @@ export class FakeSystem implements System {
       case "apt-cache": return ok(this.nodeFromNodeSource ? "nodejs:\n  Installed: 24.22.1-1nodesource1\n  500 https://deb.nodesource.com/node_24.x nodistro/main arm64 Packages\n" : "nodejs:\n  Installed: 18.19.1+dfsg-6ubuntu5\n");
       case "apt-get":
         if (args.includes("unattended-upgrades")) this.unattendedUpgrades = true;
+        if (args.includes("docker-ce")) this.dockerInstalled = true;
+        if (args.includes("tailscale")) this.tailscaleInstalled = true;
         return ok();
       case "systemctl":
         if (args[0] === "enable" && args.includes("docker.socket") && this.dockerInstalled) this.dockerSocket = true;

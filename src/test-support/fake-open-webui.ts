@@ -40,9 +40,7 @@ export class FakeUiSystem extends FakeSystem {
     if (command === "sudo") {
       this.calls.push(["sudo", ...args].join(" "));
       if (args[0] === "tailscale" || args[0] === "docker") return this.run(args[0], args.slice(1), options);
-      if (args[0] === "sh") return super.run("sh", args.slice(1), options);
-      this.commands.push({ command, args });
-      return ok();
+      return super.run(args[0]!, args.slice(1), options);
     }
     if (command === "sh") this.calls.push(["sh", ...args].join(" "));
     if (command !== "docker" && command !== "tailscale") return super.run(command, args, options);

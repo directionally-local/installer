@@ -2,7 +2,7 @@ import { nodeAdvisory } from "./node-advisory.js";
 import type { System } from "./system.js";
 
 export interface HostFacts {
-  os: { id: string; versionId: string; prettyName: string };
+  os: { id: string; versionId: string; codename: string; prettyName: string };
   arch: string;
   memoryMb: number;
   cpus: number;
@@ -98,7 +98,7 @@ export function parseOsRelease(text: string): HostFacts["os"] {
     const match = line.match(/^([A-Z_]+)=(.*)$/);
     if (match) values.set(match[1]!, match[2]!.replace(/^"(.*)"$/, "$1"));
   }
-  return { id: values.get("ID") ?? "", versionId: values.get("VERSION_ID") ?? "", prettyName: values.get("PRETTY_NAME") ?? "" };
+  return { id: values.get("ID") ?? "", versionId: values.get("VERSION_ID") ?? "", codename: values.get("VERSION_CODENAME") ?? "", prettyName: values.get("PRETTY_NAME") ?? "" };
 }
 
 export function parseMemTotalMb(text: string): number {

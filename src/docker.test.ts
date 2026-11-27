@@ -18,7 +18,7 @@ describe("Docker", () => {
     const system = new FakeSystem();
     system.dockerInstalled = true;
     await install(system);
-    assert.ok(!system.ran.some((command) => command.includes("get.docker.com")), "never reinstalls over an existing Docker");
+    assert.ok(!system.ran.some((command) => command.includes("download.docker.com")), "never reinstalls over an existing Docker");
     assert.ok(system.logs.includes("ok Setting up Docker: was installed; started it"));
     assert.ok(system.docker);
   });

@@ -58,7 +58,9 @@ test("Tailscale missing: installs it, signs in with a link and QR code, serves H
   setOnWait((count) => { if (count === 2) webui.add("me@acme.com", "Me", "pw", "admin"); });
   const result = await firstRunChat(options());
   assert.deepEqual(result, { ok: true, url: LINK, hasAdmin: true });
-  assert.ok(system.calls.some((call) => call.startsWith("sh -c exec env -i ") && call.endsWith(" sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'")), "server mode's install");
+  assert.ok(system.ran.some((command) => command.startsWith("curl -fsSL --proto =https --tlsv1.2 https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg")), "Tailscale's signed apt repository");
+  assert.ok(system.ran.includes("apt-get install -y -qq tailscale"), "installed from it");
+  assert.ok(!system.ran.some((command) => command.includes("tailscale.com/install.sh")), "no piped vendor script");
   assert.ok(system.calls.includes("tailscale up --qr --hostname=gpu-box --timeout=15m"), "the sign-in link and a QR code, on the terminal");
   assert.ok(system.calls.includes(`tailscale serve --bg --https=443 http://127.0.0.1:${UI_PORT}`));
   assert.equal(system.uiContainers.get("dl-ui")!.args.includes("HOST=127.0.0.1"), true);

@@ -114,7 +114,7 @@ describe("uninstall", () => {
 
 describe("host detection", () => {
   it("parses the facts preflight needs", () => {
-    assert.deepEqual(parseOsRelease('ID=ubuntu\nVERSION_ID="24.04"\nPRETTY_NAME="Ubuntu 24.04.1 LTS"\n'), { id: "ubuntu", versionId: "24.04", prettyName: "Ubuntu 24.04.1 LTS" });
+    assert.deepEqual(parseOsRelease('ID=ubuntu\nVERSION_ID="24.04"\nVERSION_CODENAME=noble\nPRETTY_NAME="Ubuntu 24.04.1 LTS"\n'), { id: "ubuntu", versionId: "24.04", codename: "noble", prettyName: "Ubuntu 24.04.1 LTS" });
     assert.equal(parseMemTotalMb("MemTotal:       16303972 kB\nMemFree: 1 kB\n"), 15922);
     assert.equal(parseDfFreeGb("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 83886080 4194304 73400320 6% /\n"), 70);
     assert.equal(parseInterfaceIp("4: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0"), "172.17.0.1");

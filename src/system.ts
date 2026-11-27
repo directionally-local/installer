@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, openSync } from "node:fs";
 import { chmod, chown, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { scrubbedEnv } from "./vendor-script.js";
 
 export interface RunOptions {
   /** Written to the command's stdin; how secrets reach commands without appearing in argv. */
@@ -16,6 +17,11 @@ export interface RunOptions {
   describe?: string;
   /** Output carries a secret (e.g. a one-time link): keep it out of the install log. */
   secretOutput?: boolean;
+  /**
+   * Run with only the vendor steps' environment (vendor-script.ts): none of dl's answers or
+   * secrets reach a vendor's apt step or script.
+   */
+  scrubbed?: boolean;
 }
 
 export interface RunResult {
@@ -84,7 +90,7 @@ export class RealSystem implements System {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd: options.cwd,
-        env: { ...process.env, ...options.env },
+        env: options.scrubbed ? scrubbedEnv({ ...process.env, ...options.env }) : { ...process.env, ...options.env },
         stdio: [options.input === undefined ? "ignore" : "pipe", stream ? "inherit" : "pipe", stream ? "inherit" : "pipe"],
       });
       let stdout = "";

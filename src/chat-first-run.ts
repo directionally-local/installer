@@ -78,7 +78,7 @@ export async function firstRunChat(options: FirstRunChatOptions): Promise<ChatSe
       await options.system.run("sudo", ["-v"], { describe: "sudo -v", inherit: true });
     }
     if (tailscale.state === "missing") {
-      ui.line("info", "Tailscale", "not installed · installing it (tailscale.com/install.sh)");
+      ui.line("info", "Tailscale", "not installed · installing it (Tailscale's apt repository)");
       await installTailscale(options.system, { sudo: !options.root });
       tailscale = await tailscaleState(options.system);
       if (tailscale.state === "missing") return stop("Tailscale didn't install.", "install it (https://tailscale.com/download/linux), then dl ui up and dl ui share");
