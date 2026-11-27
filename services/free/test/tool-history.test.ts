@@ -51,6 +51,33 @@ describe("repairToolHistory", () => {
     assert.equal(out.dropped, 2);
   });
 
+  // Open Relay's probes (27 Nov 2026): both DeepSeek and Kimi give an opaque 400 for these.
+  const probeTool = { type: "function", function: { name: "get_time", description: "Get the time", parameters: { type: "object", properties: { tz: { type: "string" } }, required: [] } } };
+  const probeAsk = { role: "user", content: "What time is it?" };
+  const probeCall = { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "get_time", arguments: "{}" } }] };
+  const probeResult = { role: "tool", tool_call_id: "call_1", content: "12:00" };
+  const probeNext = { role: "user", content: "Thanks. Say ok." };
+
+  it("drops an orphan tool result with no tool call before it (probe d_orphan_tool_result_no_call)", () => {
+    const body = { tools: [probeTool], messages: [probeAsk, probeResult, probeNext], max_tokens: 16 };
+    const out = repairToolHistory(body.messages);
+    assert.deepEqual(out.messages, [probeAsk, probeNext]);
+    assert.deepEqual([out.added, out.dropped], [0, 1]);
+  });
+
+  it("drops an extra tool result with an unknown tool_call_id (probe e_tool_result_unknown_id)", () => {
+    const body = { tools: [probeTool], messages: [probeAsk, probeCall, probeResult, { role: "tool", tool_call_id: "call_zzz", content: "x" }, probeNext], max_tokens: 16 };
+    const out = repairToolHistory(body.messages);
+    assert.deepEqual(out.messages, [probeAsk, probeCall, probeResult, probeNext]);
+    assert.deepEqual([out.added, out.dropped], [0, 1]);
+  });
+
+  it("drops a tool result whose tool_call_id is missing, and an orphan that opens the history", () => {
+    const out = repairToolHistory([probeResult, probeAsk, probeCall, { role: "tool", content: "no id" }, probeResult, probeNext]);
+    assert.deepEqual(out.messages, [probeAsk, probeCall, probeResult, probeNext]);
+    assert.deepEqual([out.added, out.dropped], [0, 2]);
+  });
+
   it("never touches the text of what it keeps, nor anything that isn't a message", () => {
     const odd = [ask, "not a message", assistant("a"), result("a", "1"), null, next];
     assert.equal(repairToolHistory(odd).messages, odd);

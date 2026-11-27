@@ -28,6 +28,7 @@
  * Nothing here is secret: the keys are only named (`keyEnv`), never read.
  */
 
+import { openRelayRules, shapeOpenRelayRequest, type ShapedRequest } from "./openrelay-shape.js";
 import type { FreeConfig, Prices } from "./config.js";
 import { DEEPSEEK_MODEL, FREE_MODELS, isFirstChoice, servedBy, upstreamsOf, type FreeModel } from "./models.js";
 
@@ -752,6 +753,19 @@ export const OPENRELAY_FIELDS = ["messages", "tools", "tool_choice", "parallel_t
  * becomes `reasoning_effort`.
  */
 export function openRelayPayload(body: Record<string, unknown>, input: { model: FreeModel; maxTokens: number; stream: boolean; user?: string }): Record<string, unknown> {
+  return openRelayRequest(body, input).payload;
+}
+
+/**
+ * openRelayPayload shaped to the model's rules on Open Relay (openrelay-shape.ts: safe tool
+ * names, no loose `strict`, `max_tokens` inside the window), with the tool names to give back
+ * to the client in the answer when any were renamed.
+ */
+export function openRelayRequest(body: Record<string, unknown>, input: { model: FreeModel; maxTokens: number; stream: boolean; user?: string }): ShapedRequest {
+  return shapeOpenRelayRequest(plainOpenRelayPayload(body, input), openRelayRules(input.model.upstreamModel, input.model.contextWindow));
+}
+
+function plainOpenRelayPayload(body: Record<string, unknown>, input: { model: FreeModel; maxTokens: number; stream: boolean; user?: string }): Record<string, unknown> {
   const payload: Record<string, unknown> = { model: input.model.upstreamModel };
   for (const field of OPENRELAY_FIELDS) if (body[field] !== undefined) payload[field] = body[field];
   const effort = (body.reasoning as { effort?: unknown } | null | undefined)?.effort;
