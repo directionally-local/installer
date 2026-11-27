@@ -122,7 +122,7 @@ count_install() {
     esac
   fi
   c_body="$c_body\"via\":\"$c_via\"}"
-  (curl -fsS -m 3 -X POST -H 'Content-Type: application/json' -d "$c_body" https://free.directionallylocal.com/v1/telemetry/install >/dev/null 2>&1 &) 2>/dev/null || true
+  (curl -fsS --proto '=https' --tlsv1.2 -m 3 -X POST -H 'Content-Type: application/json' -d "$c_body" https://free.directionallylocal.com/v1/telemetry/install >/dev/null 2>&1 &) 2>/dev/null || true
 }
 # What root's commands keep from this environment when this runs through sudo (which starts
 # them with a clean one): the non-secret answers dl up reads, and what apt and the downloads
@@ -296,7 +296,7 @@ mb() {
 
 # The size a URL will download, from its Content-Length (after redirects); empty when unknown.
 remote_bytes() {
-  curl -fsSIL "$1" 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "content-length:" { n = $2 } END { if (n > 0) print n }'
+  curl -fsSIL --proto '=https' --tlsv1.2 "$1" 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "content-length:" { n = $2 } END { if (n > 0) print n }'
 }
 
 # WATCH for a curl download (DOWNLOAD_TO, DOWNLOAD_BYTES): "45% · 14 of 31 MB".
@@ -322,7 +322,7 @@ download() {
   STEP="$3${DOWNLOAD_BYTES:+ ($(mb "$DOWNLOAD_BYTES") MB)}"
   if [ -z "$FANCY" ]; then step "$STEP"; fi
   WATCH=watch_download
-  quietly "downloading $1" curl -fsSL "$1" -o "$2"
+  quietly "downloading $1" curl -fsSL --proto '=https' --tlsv1.2 "$1" -o "$2"
 }
 
 # About how much the npm install downloads (dl and its packages; Autopilot is optional and
@@ -434,7 +434,7 @@ install_own_node() {
   if [ "$1" = linux ]; then check_glibc; fi
   step "Installing Node.js 24"
   REASON=fetch
-  sums=$(curl -fsSL "$base/SHASUMS256.txt") || fail "couldn't reach nodejs.org to download Node.js (check this computer's internet connection or proxy, then run this again)"
+  sums=$(curl -fsSL --proto '=https' --tlsv1.2 "$base/SHASUMS256.txt") || fail "couldn't reach nodejs.org to download Node.js (check this computer's internet connection or proxy, then run this again)"
   ext=tar.gz
   if can_unxz "$1"; then ext=tar.xz; fi
   want="-$1-$2.$ext"
@@ -611,7 +611,7 @@ install_bundle() {
   # Built against glibc: Alpine and other musl Linux use npm.
   if [ "$os" = linux ] && ls /lib/ld-musl-* >/dev/null 2>&1; then return 1; fi
   bundles="${DL_BUNDLES:-https://dl.new/dl}"
-  list=$(curl -fsSL "$bundles/${DL_VERSION:-latest}/dl-bundles.txt" 2>/dev/null) || return 1
+  list=$(curl -fsSL --proto '=https' --tlsv1.2 "$bundles/${DL_VERSION:-latest}/dl-bundles.txt" 2>/dev/null) || return 1
   # Lines of PLATFORM FILE SHA256 BYTES NODE_MAJOR; a bundle's native parts are built for one
   # major version of Node.js, so it's used only with that one.
   major=$("$node" -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')
@@ -914,7 +914,7 @@ main() {
     line=24
     case "$(node_major)" in 24|26) line=$(node_major) ;; esac
     step "Installing Node.js ${line}"
-    quietly "adding the Node.js ${line} repository" as_root sh -c "curl -fsSL https://deb.nodesource.com/setup_${line}.x | bash -"
+    quietly "adding the Node.js ${line} repository" as_root sh -c "curl -fsSL --proto '=https' --tlsv1.2 https://deb.nodesource.com/setup_${line}.x | bash -"
     quietly "installing Node.js ${line}" as_root apt-get install -y -qq nodejs
     node_is_patched || fail "Node.js $(node -v 2>/dev/null || echo '?') is still missing the CVE-2026-111497 fix; install 22.23.4+, 24.22.1+ or 26.12.1+ and re-run"
     step_done "Installed Node.js" "$(node -v)"

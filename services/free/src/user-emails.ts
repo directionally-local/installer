@@ -247,7 +247,7 @@ sina`,
 sina here, i build dl.new. thanks for subscribing to {plan}.{promo}
 
 you're all set. run this once:
-    curl -fsSL dl.new | sh
+    curl -fsSL https://dl.new | sh
 then, in a project folder:
     dl
 it signs you in through your browser and opens the agent you pick (claude code, opencode, pi…). or go straight to claude code with dl claude. setup steps: https://dl.new/connect
@@ -282,7 +282,7 @@ how it works:
 - don't want it? cancel before then at https://dl.new/billing and you won't be charged.
 
 you're all set. run this once:
-    curl -fsSL dl.new | sh
+    curl -fsSL https://dl.new | sh
 then, in a project folder:
     dl
 it signs you in through your browser and opens the agent you pick (claude code, opencode, pi…). or go straight to claude code with dl claude. setup steps: https://dl.new/connect
@@ -308,7 +308,7 @@ sina`,
 sina here, i build dl.new. you're on the free plan: {tokens} tokens of deepseek v4.1 flash every week (95.5% caching applied), no card needed. it resets every monday at 00:00 utc.
 
 you're all set. run this once:
-    curl -fsSL dl.new | sh
+    curl -fsSL https://dl.new | sh
 then, in a project folder:
     dl
 it signs you in through your browser and opens the agent you pick (claude code, opencode, pi…). or go straight to claude code with dl claude. setup steps: https://dl.new/connect
@@ -367,7 +367,7 @@ sina here, i build dl.new. your free trial has started: {tokens} tokens of deeps
 it's one time and doesn't reset. when it's used up, pick a plan at https://dl.new to keep going.
 
 you're all set. run this once:
-    curl -fsSL dl.new | sh
+    curl -fsSL https://dl.new | sh
 then, in a project folder:
     dl
 it signs you in through your browser and opens the agent you pick (claude code, opencode, pi…). or go straight to claude code with dl claude. setup steps: https://dl.new/connect
