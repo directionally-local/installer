@@ -189,7 +189,7 @@ const LUNA = { id: "gpt-6-luna", name: "GPT-6 Luna", contextWindow: 1_050_000, m
 describe("Pi's provider for a run", () => {
   it("is OpenAI-compatible at the service's /v1, with the listed models, their limits and what they can read", () => {
     const provider = piProvider({ origin: ORIGIN, models: [LUNA, ...FREE_TIER_MODELS] }) as any;
-    assert.equal(provider.name, "dl", "the same provider heading as OpenCode");
+    assert.equal(provider.name, "dl", "the same provider heading as OpenCode on Free");
     assert.equal(provider.baseUrl, `${ORIGIN}/v1`);
     assert.equal(provider.api, "openai-completions");
     assert.equal(provider.apiKey, "$DL_FREE_TIER_KEY");
@@ -200,6 +200,12 @@ describe("Pi's provider for a run", () => {
     assert.equal(PI_COMPAT.sendSessionAffinityHeaders, true);
     assert.equal(PI_COMPAT.sessionAffinityFormat, "openrouter");
     assert.deepEqual(provider.models.find((model: any) => model.id === "gpt-6-luna").input, ["text", "image"]);
+  });
+
+  it("names the provider for the plan, like OpenCode's heading without its leading space", () => {
+    assert.equal((piProvider({ origin: ORIGIN, models: FREE_TIER_MODELS }) as any).name, "dl");
+    assert.equal((piProvider({ origin: ORIGIN, models: FREE_TIER_MODELS, plan: "plus" }) as any).name, "dl (Plus)");
+    assert.equal((piProvider({ origin: ORIGIN, models: FREE_TIER_MODELS, plan: "max" }) as any).name, "dl (Max)");
   });
 
   it("is a plain JavaScript extension Pi can load", async () => {

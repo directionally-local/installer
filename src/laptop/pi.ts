@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
 import { DEFAULT_MODEL, freeTierModels, type FreeTierModel } from "./opencode.js";
-import { planModelLabel, planModelsLine, planOrder } from "./plan-models.js";
+import { planModelLabel, planModelsLine, planOrder, planProviderName } from "./plan-models.js";
 
 /**
  * `dl pi [pi args...]`: the person's own Pi (github.com/earendil-works/pi, npm
@@ -74,7 +74,9 @@ export const PI_COMPAT = {
 /** The provider Pi gets (Pi's legacy `ProviderConfig` shape for `pi.registerProvider`). */
 export function piProvider(input: { origin: string; models: readonly FreeTierModel[]; plan?: string | null }): Record<string, unknown> {
   return {
-    name: PROVIDER_ID,
+    // The same heading as OpenCode's, without its leading-space sort trick: "dl" on Free,
+    // "dl (Plus)" on a paid plan.
+    name: planProviderName(input.plan),
     baseUrl: `${input.origin}/v1`,
     apiKey: `$${KEY_ENV}`,
     api: "openai-completions",

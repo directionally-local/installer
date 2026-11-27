@@ -1,6 +1,6 @@
 import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
 import { DEFAULT_MODEL, freeTierModels, type FreeTierModel } from "./opencode.js";
-import { planModelName, planModelsLine, planOrder } from "./plan-models.js";
+import { planModelName, planModelsLine, planOrder, planProviderName } from "./plan-models.js";
 
 /**
  * `dl codex [codex args...]`: the person's own Codex CLI (github.com/openai/codex, npm
@@ -44,10 +44,10 @@ type Env = Record<string, string | undefined>;
 const toml = (value: string) => JSON.stringify(value);
 
 /** The `-c` overrides that define the dl provider (also what the by-hand steps put in config.toml). */
-export function providerOverrides(origin: string): string[] {
+export function providerOverrides(origin: string, plan: string | null | undefined = null): string[] {
   const at = `model_providers.${PROVIDER_ID}`;
   return [
-    `${at}.name=${toml("dl")}`,
+    `${at}.name=${toml(planProviderName(plan))}`,
     `${at}.base_url=${toml(`${origin}/v1`)}`,
     `${at}.env_key=${toml(KEY_ENV)}`,
     `${at}.env_key_instructions=${toml("Run Codex through dl (dl codex), or set DL_API_KEY to your key from dl.new/keys.")}`,
@@ -82,11 +82,11 @@ function mainModel(models: readonly FreeTierModel[]): FreeTierModel {
 }
 
 /** Codex's arguments: dl's `-c` overrides first, then the person's own, as they are. */
-export function codexArgs(args: readonly string[], origin: string, models: readonly FreeTierModel[]): string[] {
+export function codexArgs(args: readonly string[], origin: string, models: readonly FreeTierModel[], plan: string | null | undefined = null): string[] {
   const picked = choices(args);
   const main = mainModel(models);
   const overrides = [
-    ...providerOverrides(origin),
+    ...providerOverrides(origin, plan),
     ...(picked.provider ? [] : [`model_provider=${toml(PROVIDER_ID)}`]),
     ...(picked.provider || picked.model ? [] : [`model=${toml(main.id)}`, `model_context_window=${main.contextWindow}`]),
     `web_search=${toml("disabled")}`,
@@ -108,14 +108,14 @@ export function codexModelsLine(models: readonly FreeTierModel[]): string {
  * The config.toml for setting Codex up by hand (router.ts's steps): the same provider, with the
  * key in DL_API_KEY. `models` are the plan's ids, the default first.
  */
-export function codexConfigToml(origin: string, model: string): string[] {
+export function codexConfigToml(origin: string, model: string, plan: string | null | undefined = null): string[] {
   return [
     `model = ${toml(model)}`,
     `model_provider = ${toml(PROVIDER_ID)}`,
     `web_search = ${toml("disabled")}`,
     "",
     `[model_providers.${PROVIDER_ID}]`,
-    `name = ${toml("dl")}`,
+    `name = ${toml(planProviderName(plan))}`,
     `base_url = ${toml(`${origin}/v1`)}`,
     `env_key = ${toml(KEY_ENV)}`,
     `wire_api = ${toml("responses")}`,
@@ -131,9 +131,9 @@ export function codexLaunch(deps: LaunchDeps = {}): HarnessLaunch {
     sessionPrefix: "dl-codex",
     missing: CODEX_INSTALL,
     binaries: { posix: ["codex"], win32: ["codex.cmd", "codex.exe", "codex"] },
-    prepare: async ({ env, args, origin, key }) => {
-      const models = await freeTierModels(call, origin, key);
-      return { env: codexEnv(env, key), args: codexArgs(args, origin, models), removed: [], models: codexModelsLine(models) };
+    prepare: async ({ env, args, origin, key, plan: planPromise }) => {
+      const [models, plan] = await Promise.all([freeTierModels(call, origin, key), planPromise()]);
+      return { env: codexEnv(env, key), args: codexArgs(args, origin, models, plan), removed: [], models: codexModelsLine(models) };
     },
   };
 }

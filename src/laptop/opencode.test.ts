@@ -14,6 +14,7 @@ import {
   opencodeCommand,
   opencodeConfig,
   PROVIDER_NAME,
+  providerName,
   type OpencodeDeps,
 } from "./opencode.js";
 import { main } from "../cli.js";
@@ -178,6 +179,7 @@ describe("dl opencode", () => {
       spawn: child.spawn,
     }));
     const config = configOf(child.started[0]!.options);
+    assert.equal(config.provider.dl.name, " dl (Plus)", "the provider heading follows the plan too");
     assert.equal(config.provider.dl.models[FREE_TIER_MODELS[0]!.id].name, "dl / DeepSeek V4.1 Flash (Plus)");
     assert.equal(config.provider.dl.models[KIMI_MODEL].name, "dl / Kimi K3.1 (Plus)");
     assert.equal(config.model, `dl/${FREE_TIER_MODELS[0]!.id}`);
@@ -269,11 +271,27 @@ describe("OpenCode's config for a run", () => {
   it("names the plan in the provider's models, and never touches the person's own providers", () => {
     const config = opencodeConfig({ origin: ORIGIN, models: [LUNA, ...FREE_TIER_MODELS], plan: "plus" });
     const provider = (config.provider as Record<string, any>).dl;
+    assert.equal(provider.name, " dl (Plus)", "the provider heading follows the plan");
+    assert.equal(provider.name.trim(), "dl (Plus)");
+    assert.ok(provider.name < "A", "the leading space still sorts dl first on a paid plan");
     assert.equal(provider.models[FREE_TIER_MODELS[0]!.id].name, "dl / DeepSeek V4.1 Flash (Plus)");
     assert.equal(provider.models["gpt-6-luna"].name, "dl / GPT-6 Luna (Plus)");
     // Only dl's provider and top-level default/small model are set; no enabled/disabled lists.
     assert.deepEqual(Object.keys(config), ["$schema", "model", "small_model", "provider"]);
     assert.doesNotMatch(JSON.stringify(config), /disabled_providers|enabled_providers/);
+  });
+
+  it("names the provider for the plan: dl on Free, dl (Plus) and dl (Max) on a paid plan", () => {
+    assert.equal(providerName(null), " dl");
+    assert.equal(providerName(undefined), " dl");
+    // The service's /v1/me says "free" for a Free account, not null.
+    assert.equal(providerName("free"), " dl");
+    assert.equal(providerName("Free"), " dl");
+    assert.equal(providerName("plus"), " dl (Plus)");
+    assert.equal(providerName("max"), " dl (Max)");
+    assert.equal(providerName("plus").trim(), "dl (Plus)");
+    assert.ok(providerName("plus") < "A", "the leading space is kept on every plan");
+    assert.equal((opencodeConfig({ origin: ORIGIN, models: FREE_TIER_MODELS }).provider as Record<string, any>).dl.name, PROVIDER_NAME);
   });
 
   it("falls back to the first model when DeepSeek isn't listed", () => {
