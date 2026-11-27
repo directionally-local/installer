@@ -4434,7 +4434,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       if (paused) await alert(c, [paused]);
       return apiError(503, "upstream_credit_exhausted", CREDIT_EXHAUSTED_MESSAGE, { reason: "credit_exhausted", pausedForEveryone: true, resetsAt: null }, await headers());
     }
-    return apiError(503, "upstream_unavailable", "This model is unavailable right now. Try again later, or use your own key: /provider.", { reason: "no_upstream" }, await headers());
+    return apiError(503, "upstream_unavailable", "Our model provider isn't available right now. Try again later, or use your own key: /provider.", { reason: "no_upstream" }, await headers());
   }
   // Why free tokens are unavailable to a free-plan person right now, if they are: queued, or a
   // global cap reached. Pro and top-ups still work; the reservation decides which applies.

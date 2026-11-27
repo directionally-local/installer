@@ -291,13 +291,15 @@ describe("Luminal credit", () => {
 
     const refused = await chat(service, token);
     assert.equal(refused.status, 503);
-    assert.deepEqual(await errorOf(refused), {
+    const error = await errorOf(refused);
+    assert.deepEqual(error, {
       code: "upstream_credit_exhausted",
-      message: "Free tokens are paused while we top up. Your own key still works.",
+      message: "dl is paused while we top up. Your own key still works.",
       reason: "credit_exhausted",
       pausedForEveryone: true,
       resetsAt: null,
     });
+    assert.doesNotMatch(JSON.stringify(error), /free tier|free tokens/i, "paying users never read free-tier wording");
     assert.equal((await chat(service, adminToken)).status, 503);
     // Pro usage pauses too.
     await service.account(100).applySubscription({ subscriptionId: "sub_1", state: "active", periodEnd: Date.now() + 30 * 86_400_000, eventAt: 1 });

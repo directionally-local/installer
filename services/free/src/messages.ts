@@ -83,7 +83,7 @@ export const SERVER_KEYS_UNAVAILABLE_MESSAGE =
 export const DEVICE_TAKEN_MESSAGE = "This device already has a free allowance under another GitHub account; sign in with that account instead.";
 export const INVALID_INVITE_MESSAGE = "That invite code isn't valid or was already used.";
 
-export const PAUSED_MESSAGE = "Free tokens are paused for everyone right now; your own key still works. Try the free tier again later.";
+export const PAUSED_MESSAGE = "dl is paused for everyone right now; your own key still works. Try again later.";
 
 export function weeklyBudgetMessage(resetsAt: string): string {
   return `Free tokens are paused for everyone until ${resetsAt}: this week's free budget is used up. Your own key still works.`;
@@ -157,7 +157,7 @@ export function gptLimitMessage(plan: "free" | "pro" = "free", proOffered = true
 export const QUEUED_SIGNED_IN =
   "Free tokens are busy this week, so you're in line for them; your terminal shows your place. Your own key and paid plans work now.";
 
-export const CREDIT_EXHAUSTED_MESSAGE = "Free tokens are paused while we top up. Your own key still works.";
+export const CREDIT_EXHAUSTED_MESSAGE = "dl is paused while we top up. Your own key still works.";
 export const UPSTREAM_BUSY_MESSAGE = "Our model provider is busy right now; retrying…";
 export const UPSTREAM_UNAVAILABLE_MESSAGE = "Our model provider is having trouble right now; retrying…";
 export const UPSTREAM_TIMEOUT_MESSAGE = "Our model provider didn't answer in time; retrying…";
