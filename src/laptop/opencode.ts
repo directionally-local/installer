@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { launchHarness, type HarnessLaunch, type LaunchDeps, type LaunchIO } from "./harness-launch.js";
-import { planModelLabel, planModelsLine, planOrder } from "./plan-models.js";
+import { planModelLabel, planModelsLine, planOrder, planProviderName } from "./plan-models.js";
 
 /**
  * `dl opencode [opencode args...]`: the person's own OpenCode (github.com/anomalyco/opencode, was
@@ -19,6 +19,9 @@ import { planModelLabel, planModelsLine, planOrder } from "./plan-models.js";
  *    limits, and makes dl/deepseek/deepseek-v4.1-flash-1017 the model (and for titles). Their own providers and
  *    settings stay; they can switch to them in /models as usual. It's the OpenCode 1 config shape,
  *    which OpenCode 2 reads unchanged (and maps the package to its built-in compatible runtime).
+ *    OpenCode 2's migration guide says the V1 config format remains supported; its schema marks
+ *    `provider` deprecated in favor of `providers`, but still accepts it (checked against 2.4.2,
+ *    where the provider, model ids, `{env:...}` key and `small_model` all work as on 1.19.6).
  *  - The key isn't in that config: it says `{env:DL_FREE_TIER_KEY}`, and the key is in that
  *    variable. The harness key is refreshed by id, so the string OpenCode read at start stays
  *    good for the whole run; no longer TTL is needed.
@@ -33,18 +36,32 @@ export const HARNESS = "opencode" as const;
 /** The provider id in OpenCode: models are `dl/<free tier model id>`. */
 export const PROVIDER_ID = "dl";
 /**
- * The provider's heading in /models. OpenCode 1.19.6 pins its own "opencode" provider first and
- * sorts every other provider by display name (packages/tui/src/component/dialog-model.tsx:
+ * The provider's heading in /models on Free: " dl". OpenCode 1.19.6 pins its own "opencode"
+ * provider first and sorts every other provider by display name (packages/tui/src/component/dialog-model.tsx:
  * `sortBy(provider => provider.id !== "opencode", provider => provider.name)`), so the leading
  * space sorts dl above every letter- or digit-named provider while the heading still reads "dl".
  * OpenCode's own pinned provider (its Zen models) is still above dl: no config-only ordering rule
  * can outrank it without taking over or disabling that provider, which dl doesn't do. This only
  * orders providers: it doesn't remove or disable any of the person's own.
+ *
+ * On a paid plan the name follows the plan (" dl (Plus)", " dl (Max)"), like the model names
+ * (planModelLabel); the leading space stays, so the order is the same on every plan.
  */
 export const PROVIDER_NAME = ` ${PROVIDER_ID}`;
+
+/** The provider's display name for a plan: " dl" on Free, " dl (Plus)" on a paid plan. */
+export function providerName(plan: string | null | undefined): string {
+  return ` ${planProviderName(plan)}`;
+}
+
 /** The variable OpenCode reads the harness key from (`{env:...}` in the config). */
 export const KEY_ENV = "DL_FREE_TIER_KEY";
-/** The official install commands (opencode.ai/docs), printed when `opencode` isn't on PATH. */
+/**
+ * The official install commands (opencode.ai/docs), printed when `opencode` isn't on PATH. These
+ * are OpenCode 2's: the V2 curl installer replaces a V1 binary, and `@opencode/cli` is 2.x
+ * (1.x's npm package is `opencode-ai`). dl never installs or pins OpenCode: it runs the person's
+ * own, so a 1.x install keeps working (opencodeArgs leaves out --standalone there).
+ */
 export const OPENCODE_INSTALL = "curl -fsSL https://opencode.ai/v2/install | bash";
 export const OPENCODE_INSTALL_NPM = "npm install -g @opencode/cli";
 
@@ -91,7 +108,7 @@ export function opencodeConfig(input: { origin: string; models: readonly FreeTie
     small_model: `${PROVIDER_ID}/${small}`,
     provider: {
       [PROVIDER_ID]: {
-        name: PROVIDER_NAME,
+        name: providerName(input.plan),
         npm: "@ai-sdk/openai-compatible",
         options: {
           baseURL: `${input.origin}/v1`,

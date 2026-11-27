@@ -440,7 +440,7 @@ export function setupSteps(spec: AgentSpec, key: DlKey, models: readonly string[
       return [
         `Install Codex CLI (${CODEX_INSTALL}), then run dl codex: it sets Codex up for that run, and your ~/.codex/config.toml stays as it is.`,
         "Or by hand: put this in ~/.codex/config.toml (top-level keys above any [table]):",
-        ...codexConfigToml(origin(openai), model).map((line) => `  ${line}`),
+        ...codexConfigToml(origin(openai), model, key.plan).map((line) => `  ${line}`),
         ...others.map((id) => `(For ${planModelName({ id })}: model = "${id}", or /model inside Codex.)`),
         "Then: export DL_API_KEY=<your key> and run codex.",
       ];

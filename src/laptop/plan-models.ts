@@ -33,6 +33,19 @@ export function planModelLabel(model: { id: string; name?: string }, plan: strin
 }
 
 /**
+ * The dl provider's display name wherever a picker shows it: "dl" on Free, "dl (Plus)" on a paid
+ * plan, matching the "dl / <Model> (<Plan>)" model names above. Agents that sort providers by
+ * name add their own leading space (opencode.ts PROVIDER_NAME); this is the name itself.
+ *
+ * GET /v1/me names the Free plan "free" (a string, not null), so Free is any case of "free" and
+ * a blank plan, not just null: otherwise a Free account would read "dl (Free)".
+ */
+export function planProviderName(plan: string | null | undefined): string {
+  const name = planName(plan?.trim() || null);
+  return name.toLowerCase() === "free" ? "dl" : `dl (${name})`;
+}
+
+/**
  * The one line after an agent is set up: "Models on your plan: DeepSeek V4.1 Flash, Kimi K3.1 —
  * switch with /model". `switchHow` is the agent's own way ("switch with /models"); left out with
  * one model, as there's nothing to switch to.

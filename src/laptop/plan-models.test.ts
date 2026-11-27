@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { DEEPSEEK_MODEL, hasKimi, KIMI_MODEL, planModelLabel, planModelName, planModelsLine, planOrder } from "./plan-models.js";
+import { DEEPSEEK_MODEL, hasKimi, KIMI_MODEL, planModelLabel, planModelName, planModelsLine, planOrder, planProviderName } from "./plan-models.js";
 import { FREE_TIER_MODELS, opencodeConfig, opencodeModelsLine } from "./opencode.js";
 import { piModelsLine, piProvider } from "./pi.js";
 import { t3ModelsLine } from "./t3.js";
@@ -15,6 +15,16 @@ describe("the plan's models in each agent", () => {
     assert.equal(planModelLabel({ id: DEEPSEEK_MODEL }, null), "dl / DeepSeek V4.1 Flash (Free)");
     assert.equal(planModelLabel({ id: KIMI_MODEL }, "plus"), "dl / Kimi K3.1 (Plus)");
     assert.equal(planModelLabel({ id: "x/other", name: "Other" }, "max"), "dl / Other (Max)");
+    assert.equal(planProviderName(null), "dl");
+    assert.equal(planProviderName(undefined), "dl");
+    // GET /v1/me names the Free plan "free" (a string), not null.
+    assert.equal(planProviderName("free"), "dl");
+    assert.equal(planProviderName("Free"), "dl");
+    assert.equal(planProviderName("FREE"), "dl");
+    assert.equal(planProviderName(""), "dl");
+    assert.equal(planProviderName("  "), "dl");
+    assert.equal(planProviderName("plus"), "dl (Plus)");
+    assert.equal(planProviderName("max"), "dl (Max)");
     assert.ok(hasKimi(PLUS));
     assert.ok(!hasKimi(FREE_TIER_MODELS));
     assert.equal(planModelsLine(["DeepSeek V4.1 Flash"], "switch with /model"), "Model on your plan: DeepSeek V4.1 Flash", "nothing to switch to");

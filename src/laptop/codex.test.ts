@@ -122,7 +122,8 @@ describe("dl codex", () => {
     const out = capture();
     const code = await codexCommand([], out.io, deps({ fetch: service.fetch, spawn: spawned.spawn, token: undefined, dlKey: async () => ({ key: DL_KEY, baseUrl: "https://api.dl.new", anthropicBaseUrl: "https://api.dl.new/anthropic" }) as never }));
     assert.equal(code, 0, out.err());
-    assert.deepEqual(service.calls.map((call) => `${call.method} ${call.url}`), ["GET https://api.dl.new/v1/models"]);
+    // The plan is read too, for the provider's name (dl (Plus) on a paid plan).
+    assert.deepEqual(service.calls.map((call) => `${call.method} ${call.url}`).sort(), ["GET https://api.dl.new/v1/me", "GET https://api.dl.new/v1/models"]);
     const run = spawned.started[0]!;
     assert.equal((run.options.env as Record<string, string>)[KEY_ENV], DL_KEY);
     assert.equal(overrides(run.args)["model_providers.dl.base_url"], '"https://api.dl.new/v1"');
@@ -149,6 +150,13 @@ describe("dl codex", () => {
 
   it("falls back to the first listed model when DeepSeek isn't listed", () => {
     assert.equal(overrides(codexArgs([], ORIGIN, [KIMI])).model, `"${KIMI.id}"`);
+  });
+
+  it("names the provider for the plan: dl on Free, dl (Plus) on a paid plan", () => {
+    assert.equal(overrides(codexArgs([], ORIGIN, FREE_TIER_MODELS))["model_providers.dl.name"], '"dl"');
+    assert.equal(overrides(codexArgs([], ORIGIN, FREE_TIER_MODELS, "plus"))["model_providers.dl.name"], '"dl (Plus)"');
+    assert.equal(overrides(codexArgs([], ORIGIN, FREE_TIER_MODELS, "max"))["model_providers.dl.name"], '"dl (Max)"');
+    assert.equal(codexConfigToml("https://api.dl.new", DEEPSEEK, "plus").find((line) => line.startsWith("name = ")), 'name = "dl (Plus)"');
   });
 
   it("writes provider overrides Codex reads as TOML", () => {

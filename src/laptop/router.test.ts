@@ -360,7 +360,7 @@ describe("agent history and Autopilot's key", () => {
     const steps = (id: string) => setupSteps(AGENT_CATALOG.find((spec) => spec.id === id)!, KEY).join("\n");
     // Codex CLI speaks only the Responses API: dl codex, or a provider with wire_api = "responses".
     assert.match(steps("codex"), /run dl codex/);
-    assert.match(steps("codex"), /\[model_providers\.dl\]\n {2}name = "dl"\n {2}base_url = "https:\/\/api\.dl\.new\/v1"\n {2}env_key = "DL_API_KEY"\n {2}wire_api = "responses"/);
+    assert.match(steps("codex"), /\[model_providers\.dl\]\n {2}name = "dl \(Starter\)"\n {2}base_url = "https:\/\/api\.dl\.new\/v1"\n {2}env_key = "DL_API_KEY"\n {2}wire_api = "responses"/);
     assert.match(steps("codex"), /^ {2}model = "deepseek\/deepseek-v4\.1-flash-1017"\n {2}model_provider = "dl"/m);
     assert.doesNotMatch(steps("codex"), /wire_api = "chat"/);
     // Crush's config is crushrc now, with the completions provider type.
