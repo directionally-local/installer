@@ -470,15 +470,25 @@ export function errorType(status: number): string {
 }
 
 /**
- * The status an error goes out with. Claude Code retries 429 and 5xx answers; a refusal that a
- * retry can't change (a pause for everyone, a used-up budget) goes out as 402 (billing_error),
- * which Claude Code shows verbatim without retrying and without calling it a login problem (a 403
- * makes it say "Failed to authenticate"). Transient ones (`retryable`) keep theirs, Retry-After
- * included; a 502 (the provider failed) stays 502 so it is retried.
+ * Refusals that are about the plan or our policy, not the key: on /anthropic they go out as 402
+ * (billing_error) so Claude Code shows our message instead of "Failed to authenticate" (which it
+ * says for any 403). dl and Autopilot still get their 403s and parse these codes; the mapping
+ * happens only in the Anthropic error translation (`toAnthropicErrorResponse` in app.ts).
  */
-export function errorStatus(status: number, retryable: boolean): number {
+export const BILLING_REFUSAL_CODES: ReadonlySet<string> = new Set(["harness_not_allowed", "dl_only", "below_bar", "blocked"]);
+
+/**
+ * The status an error goes out with. Claude Code retries 429 and 5xx answers; a refusal that a
+ * retry can't change (a pause for everyone, a used-up budget, a plan or policy refusal) goes out
+ * as 402 (billing_error), which Claude Code shows verbatim without retrying and without calling
+ * it a login problem (a 403 makes it say "Failed to authenticate"). Transient ones (`retryable`)
+ * keep theirs, Retry-After included; a 502 (the provider failed) stays 502 so it is retried. Real
+ * auth failures (401) stay 401, and a 403 with any other code stays 403.
+ */
+export function errorStatus(status: number, retryable: boolean, code?: string): number {
   if (retryable) return status;
   if (status === 429 || status >= 500) return status === 502 ? 502 : 402;
+  if (status === 403 && code !== undefined && BILLING_REFUSAL_CODES.has(code)) return 402;
   return status;
 }
 

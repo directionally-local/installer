@@ -318,6 +318,14 @@ describe("errors and token counts", () => {
     assert.equal(errorStatus(502, false), 502);
   });
 
+  it("turns plan and policy refusals into 402 by their code, and leaves auth failures alone", () => {
+    for (const code of ["harness_not_allowed", "dl_only", "below_bar", "blocked"]) assert.equal(errorStatus(403, false, code), 402, code);
+    assert.equal(errorStatus(403, false, "proxy_not_allowed"), 403);
+    assert.equal(errorStatus(403, false, "suspended"), 403);
+    assert.equal(errorStatus(401, false, "invalid_token"), 401);
+    assert.equal(errorStatus(401, false, "invalid_harness_key"), 401);
+  });
+
   it("estimates input tokens at about 4 characters each", () => {
     const body = { system: "x".repeat(400), messages: [{ role: "user", content: "y".repeat(400) }] };
     const estimate = estimateInputTokens(body);

@@ -40,8 +40,8 @@ async function world(vars: Record<string, string> = {}) {
   return { service, admin, token: tokens.access_token, refreshToken: tokens.refresh_token };
 }
 
-async function mint(service: Service, token: string): Promise<{ id: string; key: string; expiresAt: string; ttlSeconds: number; otherHarnessShare: number }> {
-  const response = await service.request("POST", "/v1/harness-keys", { token, body: { harness: "claude-code" } });
+async function mint(service: Service, token: string, harness = "claude-code"): Promise<{ id: string; key: string; expiresAt: string; ttlSeconds: number; otherHarnessShare: number }> {
+  const response = await service.request("POST", "/v1/harness-keys", { token, body: { harness } });
   assert.equal(response.status, 201, await response.clone().text());
   return (await response.json()) as never;
 }
@@ -60,6 +60,13 @@ async function anthropicError(response: Response): Promise<{ type: string; messa
   const body = (await response.json()) as { type: string; error: { type: string; message: string; code?: string } };
   assert.equal(body.type, "error");
   return body.error;
+}
+
+/** The same refusal on the endpoint dl and Autopilot use: still our 403, code and message. */
+async function chatError(service: Service, token: string): Promise<{ status: number; code: string; message: string }> {
+  const response = await service.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [{ role: "user", content: "hello" }] } });
+  const body = (await response.json()) as { error: { code: string; message: string } };
+  return { status: response.status, code: body.error.code, message: body.error.message };
 }
 
 let eventId = 0;
@@ -134,9 +141,9 @@ describe("harness keys", () => {
     const off = await service.request("POST", "/admin/config", { token: admin, body: { allowOtherHarnesses: false } });
     assert.equal(off.status, 200, await off.clone().text());
     const refused = await messages(service, key);
-    assert.equal(refused.status, 403);
+    assert.equal(refused.status, 402);
     const error = await anthropicError(refused);
-    assert.deepEqual([error.type, error.code], ["permission_error", "harness_not_allowed"]);
+    assert.deepEqual([error.type, error.code], ["billing_error", "harness_not_allowed"]);
     assert.match(error.message, /Free tokens in Claude Code are switched off/);
     assert.equal(service.calls.luminal.length, 0, "nothing goes upstream");
     const mintRefused = await service.request("POST", "/v1/harness-keys", { token, body: { harness: "claude-code" } });
@@ -389,9 +396,9 @@ describe("Claude Code and the dl-only check", () => {
       service.clock.now += 1000;
     }
     const refused = await messages(service, key);
-    assert.equal(refused.status, 403);
+    assert.equal(refused.status, 402);
     const dlOnly = await anthropicError(refused);
-    assert.deepEqual([dlOnly.type, dlOnly.code], ["permission_error", "dl_only"]);
+    assert.deepEqual([dlOnly.type, dlOnly.code], ["billing_error", "dl_only"]);
     assert.match(dlOnly.message, /run dl claude again/);
     const sent = await sessionEvent(service, key);
     assert.equal(sent.status, 202);
@@ -409,5 +416,84 @@ describe("Claude Code and the dl-only check", () => {
     const people = (await (await service.request("GET", "/admin/people", { token: admin })).json()) as { people: Array<{ githubId: number; otherHarnessThisWeek: { requests: number; tokens: number } }> };
     const alice = people.people.find((person) => person.githubId === 100)!;
     assert.deepEqual(alice.otherHarnessThisWeek, { requests: 2, tokens: 220 });
+  });
+});
+
+describe("final refusals on /anthropic are 402 billing_error", () => {
+  it("harness_not_allowed: the kill switch", async () => {
+    const { service, admin, token } = await world();
+    const { key } = await mint(service, token);
+    const opencode = await mint(service, token, "opencode");
+    assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { allowOtherHarnesses: false } })).status, 200);
+    const refused = await messages(service, key);
+    assert.equal(refused.status, 402);
+    const error = await anthropicError(refused);
+    assert.deepEqual([error.type, error.code], ["billing_error", "harness_not_allowed"]);
+    assert.match(error.message, /Free tokens in Claude Code are switched off for now/);
+    assert.doesNotMatch(error.message, /authenticate|log ?in/i);
+    assert.equal(service.calls.luminal.length, 0, "nothing goes upstream");
+    // dl's own endpoints keep the 403 and the code they parse.
+    const other = await chatError(service, opencode.key);
+    assert.equal(other.status, 403);
+    assert.equal(other.code, "harness_not_allowed");
+    assert.match(other.message, /Free tokens in OpenCode are switched off for now/);
+  });
+
+  it("dl_only: free tokens outside dl", async () => {
+    const { service, token } = await world({ DL_ONLY: "true" });
+    const { key } = await mint(service, token);
+    for (let index = 0; index < 20; index++) {
+      assert.equal((await messages(service, key)).status, 200);
+      service.clock.now += 1000;
+    }
+    const refused = await messages(service, key);
+    assert.equal(refused.status, 402);
+    const error = await anthropicError(refused);
+    assert.deepEqual([error.type, error.code], ["billing_error", "dl_only"]);
+    assert.match(error.message, /Free tokens in Claude Code work only while it runs from dl claude\. Quit Claude Code and run dl claude again/);
+    assert.doesNotMatch(error.message, /authenticate|log ?in/i);
+    const other = await chatError(service, token);
+    assert.equal(other.status, 403);
+    assert.equal(other.code, "dl_only");
+  });
+
+  it("below_bar: an account below the bar with no free tokens", async () => {
+    const service = await createService({
+      OPEN_ADMISSION: "true",
+      ...LUMINAL,
+      STARTER_WEEKLY_TOKENS: "0",
+      FULL_MIN_ACCOUNT_AGE_DAYS: "365",
+      FULL_MIN_CONTRIBUTIONS: "100",
+      FULL_MIN_PUBLIC_REPOS: "100000",
+      NETWORK_SIGNUPS_PER_DAY: "1000",
+      DOMAIN_SIGNUPS_PER_DAY: "1000",
+    });
+    const { access_token: token } = await service.signIn({ id: 100, login: "alice", createdAt: "2026-06-01T00:00:00Z", publicRepos: 0, contributions: 10 });
+    const { key } = await mint(service, token);
+    const refused = await messages(service, key);
+    assert.equal(refused.status, 402);
+    const error = await anthropicError(refused);
+    assert.deepEqual([error.type, error.code], ["billing_error", "below_bar"]);
+    assert.match(error.message, /^Free tokens are for established GitHub accounts:/);
+    assert.doesNotMatch(error.message, /authenticate|log ?in/i);
+    assert.equal(service.calls.luminal.length, 0, "nothing goes upstream");
+    const other = await chatError(service, token);
+    assert.equal(other.status, 403);
+    assert.equal(other.code, "below_bar");
+  });
+
+  it("blocked: an account an admin blocked", async () => {
+    const { service, admin, token } = await world();
+    const { key } = await mint(service, token);
+    assert.equal((await service.request("POST", "/admin/people/100/block", { token: admin })).status, 200);
+    const refused = await messages(service, key);
+    assert.equal(refused.status, 402);
+    const error = await anthropicError(refused);
+    assert.deepEqual([error.type, error.code], ["billing_error", "blocked"]);
+    assert.equal(error.message, "This account is blocked from the free tier. Contact contact@directionallylocal.com.");
+    const other = await chatError(service, token);
+    assert.equal(other.status, 403);
+    assert.equal(other.code, "blocked");
+    assert.equal(other.message, "This account is blocked from the free tier. Contact contact@directionallylocal.com.");
   });
 });

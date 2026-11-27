@@ -1468,14 +1468,15 @@ use the same sentence, so a client that doesn't know a code can show the message
 | `trial_ended` | chat (402) | `trial` (`{tokens, used, remaining, ended}`), `offers`: a trial account used its one-time trial |
 | `quota_exceeded` | chat (402) | `reason: "tokens" \| "spend"`, `family: "gpt6" \| "deepseek"`, `resetsAt`, `offers`, `referralLink` |
 | `basic_limit`, `starter_limit` | chat (402) | `reason: "tokens" \| "spend"`, `family: "gpt6" \| "deepseek"`, `resetsAt`, `request`, `offers`, `referralLink` |
-| `below_bar` | chat (403) | `contact`, `request` |
+| `below_bar` | chat (403); `/anthropic/v1/messages` (402) | `contact`, `request` |
 | `free_tier_queued` | chat (402) | `position`, `etaAt`, `offers`, `referralLink` |
 | `upstream_credit_exhausted` | chat (503) | `reason: "credit_exhausted"`, `pausedForEveryone: true`, `resetsAt: null` |
 | `upstream_busy` | chat (429, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `upstream_unavailable` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
 | `upstream_timeout` | chat (503, `Retry-After`) | `retryAfter`, `retryable: true`, `upstream: "luminal"` |
-| `dl_only` | chat (403) | none |
-| `harness_not_allowed` | `POST /v1/harness-keys`, `/anthropic/v1/messages`, `/v1/chat/completions` with an OpenCode key (403) | none: `allowOtherHarnesses` is off |
+| `dl_only` | chat (403); `/anthropic/v1/messages` (402) | none |
+| `blocked` | chat, keys, refresh and sign-in (403); `/anthropic/v1/messages` (402) | none: an admin blocked the account |
+| `harness_not_allowed` | `POST /v1/harness-keys`, `/v1/chat/completions` with an OpenCode key (403); `/anthropic/v1/messages` (402) | none: `allowOtherHarnesses` is off |
 | `harness_limit` | `/anthropic/v1/messages`, `/v1/chat/completions` with an OpenCode key (402) | `harness`, `share`, `resetsAt` (not for the trial), `offers`: that tool's share of the week or trial is used, the account's isn't |
 | `invalid_harness_key` | `/anthropic/v1/messages`, `/v1/chat/completions`, `/v1/models`, `/v1/events`, harness key refresh (401) | none: expired, revoked, or its sign-in ended |
 | `harness_key_limit` | `POST /v1/harness-keys` (409) | `max` |
@@ -1853,7 +1854,9 @@ attribution downstream name the model that produced the output.
 - **Errors** are Anthropic's shape, `{"type": "error", "error": {"type", "message", "code"}}`, with
   our message (dl's slash commands reworded as "run dl and type /upgrade"). Transient upstream
   errors keep 429/503 and `Retry-After`, which Claude Code retries; refusals a retry can't change
-  (a pause for everyone, a global budget) go out as 403 so it doesn't retry them.
+  (a pause for everyone, a budget or plan limit, `harness_not_allowed`, `dl_only`, `below_bar`,
+  `blocked`) go out as 402 `billing_error`, which Claude Code shows as our message without
+  retrying: it reads any 403 as a failed login. A real auth failure (401) stays 401.
 - **The share** (`otherHarnessShare`, default 1: the full allowance, the same as Autopilot): below 1,
   Claude Code's and OpenCode's requests see the allowance scaled by it: every token pool, both
   dollar budgets and the trial, while what the week (and the trial) used is counted in full. So
