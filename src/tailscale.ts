@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
+import { addSignedAptRepo, tailscaleRepo } from "./apt-repo.js";
+import { parseOsRelease } from "./detect.js";
 import type { RunResult, System } from "./system.js";
-import { scrubbedScript } from "./vendor-script.js";
 
 /**
  * Tailscale, as dl uses it: `tailscale serve` publishes a local port as HTTPS on this machine's
@@ -10,20 +11,20 @@ import { scrubbedScript } from "./vendor-script.js";
 /** Where to turn on MagicDNS and HTTPS certificates (dl up, dl doctor and dl ui say the same). */
 export const HTTPS_CERTS_URL = "https://login.tailscale.com/admin/dns";
 
-/** Tailscale's own install script, as server mode (dl up) runs it. */
-export const TAILSCALE_INSTALL = "curl -fsSL https://tailscale.com/install.sh | sh";
-
 /**
  * Installs Tailscale unless it's there; returns whether it installed it. `sudo` when not root.
- * The script runs with a scrubbed environment (vendor-script.ts): dl up's auth key and the
- * other answers in dl's environment never reach it.
+ * Tailscale comes from its signed apt repository, with its key's fingerprint checked before apt
+ * trusts it: never tailscale.com/install.sh piped to a shell. The apt steps run with a scrubbed
+ * environment (vendor-script.ts): dl up's auth key and the other answers never reach them.
  */
 export async function installTailscale(system: System, options: { sudo?: boolean } = {}): Promise<boolean> {
   if ((await system.probe("tailscale", ["version"])).code === 0) return false;
-  const describe = "install Tailscale (tailscale.com/install.sh)";
-  const script = scrubbedScript(TAILSCALE_INSTALL);
-  if (options.sudo) await system.run("sudo", ["sh", "-c", script], { inherit: true, describe });
-  else await system.run("sh", ["-c", script], { inherit: true, describe });
+  const os = parseOsRelease(await system.readFile("/etc/os-release") ?? "");
+  await addSignedAptRepo(system, tailscaleRepo(os), { sudo: options.sudo });
+  const args = ["install", "-y", "-qq", "tailscale"];
+  const runOptions = { env: { DEBIAN_FRONTEND: "noninteractive" }, inherit: true, scrubbed: true, describe: "install Tailscale (Tailscale's apt repository)" };
+  if (options.sudo) await system.run("sudo", ["apt-get", ...args], runOptions);
+  else await system.run("apt-get", args, runOptions);
   return true;
 }
 

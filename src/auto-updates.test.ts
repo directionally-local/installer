@@ -23,7 +23,7 @@ describe("automatic Node.js security updates", () => {
     await install(system);
     assert.match(system.files.get(NODE_AUTO_UPDATES)?.content ?? "", /Origins-Pattern \{\s+"site=deb\.nodesource\.com";\s+\};/);
     assert.match(system.files.get(AUTO_UPGRADES)?.content ?? "", /\/\/ mine/, "an existing schedule is left alone");
-    assert.ok(!system.ran.some((command) => command.startsWith("apt-get install")), "already installed");
+    assert.ok(!system.ran.some((command) => command.startsWith("apt-get install") && command.includes("unattended-upgrades")), "unattended-upgrades is already installed");
     assert.equal((await doctor(system)).find((check) => check.name === "security updates")?.ok, true);
   });
 

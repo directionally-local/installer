@@ -76,7 +76,8 @@ describe("directionallylocal up", () => {
     assert.ok(system.logs.includes("ok Joining your tailnet: joined as box"));
 
     // Docker, accounts, software, image, services, access.
-    assert.ok(system.ran.some((command) => command.includes("get.docker.com")));
+    assert.ok(system.ran.some((command) => command.includes("download.docker.com/linux/ubuntu")), "Docker's signed apt repository");
+    assert.ok(system.ran.includes("apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"));
     assert.ok(system.users.has("hotcell") && system.users.has("autopilot"));
     // Autopilot and Hotcell are the versions this dl pins (never npm's latest).
     assert.ok(system.ran.includes(`npm install --prefix /opt/directionallylocal/releases/autopilot-${AUTOPILOT}_hotcell-${HOTCELL} --no-audit --no-fund --omit=dev autopilot-ai@${AUTOPILOT} hotcell@${HOTCELL}`), system.ran.join("\n"));
@@ -202,7 +203,7 @@ describe("directionallylocal up", () => {
     await up(system, { prompter: again, fetchImpl: fetchOk, sleep: noSleep });
     assert.deepEqual(again.asked, []);
     const rerun = system.ran.slice(firstRunCommands);
-    assert.ok(!rerun.some((command) => command.includes("get.docker.com") || command.startsWith("npm install") || command.startsWith("docker build") || command.startsWith("tailscale up")));
+    assert.ok(!rerun.some((command) => command.includes("download.docker.com") || command.startsWith("npm install") || command.startsWith("docker build") || command.startsWith("tailscale up")));
     assert.equal(parseEnvFile(system.files.get(PATHS.hotcellEnv)?.content).HOTCELL_API_KEY, apiKey);
   });
 
@@ -215,7 +216,7 @@ describe("directionallylocal up", () => {
       fetchImpl: fetchOk,
       sleep: noSleep,
     });
-    assert.ok(!system.ran.some((command) => command.includes("get.docker.com")));
+    assert.ok(!system.ran.some((command) => command.includes("download.docker.com")));
     assert.ok(system.ran.includes("ufw allow in on docker0 to 172.17.0.1 port 4752 proto tcp comment directionallylocal sandboxes"));
     assert.ok(system.ran.includes("ufw allow in on docker0 to 172.17.0.1 port 4760 proto tcp comment directionallylocal sandboxes"));
     assert.equal(system.hotcellKeyValues.get("openrouter"), OPENROUTER_KEY, "DL_OPENROUTER_API_KEY is the OpenRouter shorthand");

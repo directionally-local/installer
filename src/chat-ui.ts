@@ -6,7 +6,7 @@ import { localFetch, modelApiBase, type FetchModel } from "./model-smoke.js";
 import type { Prompter } from "./prompt.js";
 import { modelStatePath, readDeployments } from "./state.js";
 import type { System } from "./system.js";
-import { HTTPS_CERTS_URL, serveHttps, serveStatus, stopServing, TAILSCALE_INSTALL, tailnetUrl, tailscaleState } from "./tailscale.js";
+import { HTTPS_CERTS_URL, serveHttps, serveStatus, stopServing, tailnetUrl, tailscaleState } from "./tailscale.js";
 import type { Ui } from "./ui.js";
 
 /**
@@ -520,7 +520,7 @@ export async function shareOnTailnet(options: Starting & Pick<ChatUiOptions, "st
 
 /** Why there's no private HTTPS link yet, and what to do: one line each. */
 export function tailscaleBlocker(state: "missing" | "logged-out" | "no-https"): { problem: string; next: string } {
-  if (state === "missing") return { problem: "Tailscale isn't installed here, and dl shares the chat only over HTTPS on your tailnet.", next: `install Tailscale (${TAILSCALE_INSTALL}), sign in (sudo tailscale up), then dl ui share` };
+  if (state === "missing") return { problem: "Tailscale isn't installed here, and dl shares the chat only over HTTPS on your tailnet.", next: "install Tailscale (https://pkgs.tailscale.com/stable/), sign in (sudo tailscale up), then dl ui share" };
   if (state === "logged-out") return { problem: "Tailscale isn't signed in here, and dl shares the chat only over HTTPS on your tailnet.", next: "sudo tailscale up (it prints a sign-in link), then dl ui share" };
   return { problem: "HTTPS certificates are off for your tailnet, so there's no private HTTPS link yet.", next: `turn on MagicDNS and HTTPS certificates at ${HTTPS_CERTS_URL}, then dl ui share` };
 }

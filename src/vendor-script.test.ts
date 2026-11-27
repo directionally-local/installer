@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { scrubbedScript } from "./vendor-script.js";
+import { scrubbedEnv, scrubbedScript } from "./vendor-script.js";
 
 describe("scrubbedScript", () => {
   it("runs a vendor's script without dl's answers or anything else from the environment", () => {
@@ -31,5 +31,19 @@ describe("scrubbedScript", () => {
     const text = scrubbedScript("curl -fsSL https://get.docker.com | sh");
     assert.match(text, /\$\{PATH\+"PATH=\$PATH"\}/, "names, for the shell to expand");
     assert.ok(!text.includes(process.env.PATH ?? "/usr/bin"), "not this process's values");
+  });
+});
+
+describe("scrubbedEnv", () => {
+  it("keeps only what a vendor step needs, never dl's answers", () => {
+    const env = scrubbedEnv({
+      PATH: "/usr/bin:/bin",
+      HOME: "/home/me",
+      https_proxy: "http://proxy.example:3128",
+      DL_TAILSCALE_AUTH_KEY: "tskey-auth-secret",
+      DL_PROVIDER_API_KEY: "sk-secret",
+      OTHER_SECRET: "x",
+    });
+    assert.deepEqual(env, { PATH: "/usr/bin:/bin", HOME: "/home/me", https_proxy: "http://proxy.example:3128" });
   });
 });

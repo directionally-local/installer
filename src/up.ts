@@ -8,7 +8,7 @@ import {
 import type { Prompter } from "./prompt.js";
 import { ACCESS_MODES, readState, writeState, type AccessMode, type InstallState } from "./state.js";
 import type { System } from "./system.js";
-import { scrubbedScript } from "./vendor-script.js";
+import { addSignedAptRepo, dockerRepo } from "./apt-repo.js";
 import { HTTPS_CERTS_URL, installTailscale, machineName, parseTailnetName, tailnetName, tailscaleIsUp } from "./tailscale.js";
 import { PlainUi, type SummaryItem, type Ui } from "./ui.js";
 import { ownerLink } from "./server-api.js";
@@ -129,13 +129,16 @@ export async function up(system: System, options: UpOptions): Promise<UpResult> 
     let detail = "already running";
     if (!facts.docker) {
       // An installed Docker (Ubuntu's docker.io or Docker's docker-ce) is started, never
-      // replaced: get.docker.com swapping packages under a running install is how the socket
-      // and service fall out of step. Docker's script runs with a scrubbed environment
-      // (vendor-script.ts): none of dl up's answers (keys, tokens) reach it.
+      // replaced: swapping packages under a running install is how the socket and service fall
+      // out of step. A missing one comes from Docker's signed apt repository, with its key's
+      // fingerprint checked before apt trusts it: never get.docker.com's script piped to a shell.
+      // The apt steps run with a scrubbed environment (vendor-script.ts): none of dl up's
+      // answers (keys, tokens) reach them.
       if (facts.dockerInstalled) {
         detail = "was installed; started it";
       } else {
-        await system.run("sh", ["-c", scrubbedScript("curl -fsSL https://get.docker.com | sh")], { inherit: true, describe: "install Docker (get.docker.com)" });
+        await addSignedAptRepo(system, dockerRepo(facts.os, facts.arch));
+        await system.run("apt-get", ["install", "-y", "-qq", "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin", "docker-compose-plugin"], { env: { DEBIAN_FRONTEND: "noninteractive" }, inherit: true, scrubbed: true, describe: "install Docker (Docker's apt repository)" });
         detail = "installed";
       }
       await startDocker(system, sleep);
