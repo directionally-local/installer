@@ -1,6 +1,7 @@
 import { DurableObject, type DurableObjectState } from "cloudflare:workers";
 import { AGENT_PICK_SCHEMA, addAgentUsage, agentsReport, saveAgentPick, type AgentPick, type AgentsReport } from "./agent-picks.js";
 import { AGENT_REQUEST_SCHEMA, listAgentRequests, saveAgentRequest, type AgentRequest, type AgentRequestAccount, type AgentRequestInput } from "./agent-request.js";
+import { SLACK_FEEDBACK_SCHEMA, takeSlackPost as takeSlackPostRow } from "./slack-feedback.js";
 import { listProviderInquiries, PROVIDER_INQUIRY_SCHEMA, saveProviderInquiry, type ProviderInquiry, type ProviderInquiryInput } from "./provider-inquiry.js";
 import { NO_GITHUB_SCHEMA, noGithubDays, noGithubDigestLine, noGithubReport, recordNoGithubClick, saveNoGithubLead, withNoGithubLine, type NoGithubAlerts, type NoGithubDay, type NoGithubReport, type NoGithubSource } from "./no-github.js";
 import { normalizeEmail } from "./email-guard.js";
@@ -520,6 +521,8 @@ const SCHEMA = [
   ...PROVIDER_INQUIRY_SCHEMA,
   // Coding agents people asked dl to support (agent-request.ts).
   ...AGENT_REQUEST_SCHEMA,
+  // Counts behind the Slack posts about feedback, agent requests and provider inquiries.
+  ...SLACK_FEEDBACK_SCHEMA,
   ...AGENT_PICK_SCHEMA,
   `CREATE TABLE IF NOT EXISTS people (
      github_id    INTEGER PRIMARY KEY,
@@ -4743,6 +4746,11 @@ export class DirectoryObject extends DurableObject {
   /** Counts one feedback message on its UTC day (nothing of it is stored). */
   async countFeedback(at: number): Promise<void> {
     this.ctx.storage.sql.exec("INSERT INTO feedback_daily (day, n) VALUES (?, 1) ON CONFLICT (day) DO UPDATE SET n = n + 1", Math.floor(at / DAY_MS));
+  }
+
+  /** Whether a Slack post is allowed today (200 a UTC day, all sources together); counts it when it is. */
+  async takeSlackPost(at: number): Promise<boolean> {
+    return takeSlackPostRow(this.ctx.storage.sql, at);
   }
 
   /** The admin home's numbers (see admin-home-data.ts). */
