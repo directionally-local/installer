@@ -93,6 +93,7 @@ import {
 import type { RateLimiterObject } from "./rate-limit-object.js";
 import { chooseUpstream, providerConfigured } from "./upstream-choice.js";
 import { upstreamRefusal } from "./upstream-errors.js";
+import { repairToolHistory } from "./tool-history.js";
 import { freeStatus, type FreeStatus } from "./status.js";
 import { HOSTS_OBJECT, hostOf, isNoHostError, providerPreferences } from "./routing.js";
 import { applyOverrides, parseSettingsUpdate, settingsView } from "./runtime-config.js";
@@ -4570,6 +4571,14 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
     const task = describeUse(c, gate, { githubId: identity.githubId, sessionId: labelSession, client, input: useInput(body), user });
     if (c.background) c.background(task);
   }
+  // A history left broken by an interrupted tool call (a call without a result, a second or a
+  // stray result) is made valid before any upstream sees it (tool-history.ts): strict upstreams
+  // refuse it, and the client would resend it with every later message. After every check, so
+  // the pre-checks and moderation still read everything the client sent.
+  if (Array.isArray(body.messages)) {
+    const repaired = repairToolHistory(body.messages);
+    if (repaired.messages !== body.messages) body = { ...body, messages: repaired.messages };
+  }
   // OpenAI's models and registry models retry on what nextSteps gives; Luminal and OpenRouter don't.
   const retries = serving.provider === "openai" || isRegistryProvider(serving.provider) ? nextSteps(serving.model, serving.backups ?? []) : [];
   const answered = await attempt(serving.model, serving.provider, reservation, retries);
@@ -5177,6 +5186,13 @@ async function compatibleChat(
     // Luminal): a prompt it can't take goes on to the next upstream. Without one, the 400 goes back.
     if (target.upstream === "openrelay" && input.retry && contextTooLong(text)) {
       await settle(undefined, "upstream_context", { chargeNothing: true, ttfbMs });
+      return input.retry();
+    }
+    // Open Relay refuses some requests other upstreams take (live: 400 invalid_request_error,
+    // "the request was rejected by the model", for a message history it won't read) and never
+    // says why: the request goes on to the next upstream, which answers or gives its own 400.
+    if (target.upstream === "openrelay" && input.retry && response.status === 400) {
+      await settle(undefined, "upstream_rejected", { chargeNothing: true, ttfbMs });
       return input.retry();
     }
     // A 4xx: the request itself (400), or the service's key or account (401, 402, 403).
