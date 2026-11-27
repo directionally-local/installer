@@ -429,7 +429,7 @@ export interface QueueRun {
 /** One use description as the admin sees it. */
 /** The coding agent a use description came from: Autopilot (sign-in token or server key), or one dl launched. */
 /** "tool": an API key for any tool (tool-keys.ts). */
-export type UseClient = "autopilot" | "opencode" | "claude-code" | "pi" | "tool";
+export type UseClient = "autopilot" | "opencode" | "claude-code" | "pi" | "codex" | "tool";
 
 export interface UseRow {
   githubId: number;
@@ -445,7 +445,7 @@ export interface UseRow {
 }
 
 function useClientOf(value: string | null): UseClient | null {
-  return value === "autopilot" || value === "opencode" || value === "claude-code" || value === "pi" || value === "tool" ? value : null;
+  return value === "autopilot" || value === "opencode" || value === "claude-code" || value === "pi" || value === "codex" || value === "tool" ? value : null;
 }
 
 export interface SpendSummary {

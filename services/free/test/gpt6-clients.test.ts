@@ -124,7 +124,7 @@ describe("GPT-6 in Autopilot only (gpt6Clients)", () => {
     assert.equal((await chat(service, key, "gpt-6-luna")).status, 200);
     const providers = (await (await service.request("GET", "/v1/providers")).json()) as { providers: Array<{ models: Array<{ id: string; clients: string[] }> }> };
     const luna = providers.providers.flatMap((provider) => provider.models).find((model) => model.id === "gpt-6-luna");
-    assert.deepEqual(luna?.clients, ["autopilot", "opencode", "pi"]);
+    assert.deepEqual(luna?.clients, ["autopilot", "opencode", "pi", "codex"]);
     assert.equal((await service.request("POST", "/admin/config", { token: admin, body: { gpt6Clients: "everyone" } })).status, 400);
   });
 

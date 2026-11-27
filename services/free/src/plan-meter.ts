@@ -44,7 +44,7 @@ export const METER_SCHEMA = [
      output  INTEGER NOT NULL DEFAULT 0,
      PRIMARY KEY (day, model)
    ) WITHOUT ROWID`,
-  // Per tool per week: "autopilot", "claude-code", "opencode", "pi", or "tool:<name>" (tool-keys.ts).
+  // Per tool per week: "autopilot", "claude-code", "opencode", "pi", "codex", or "tool:<name>" (tool-keys.ts).
   `CREATE TABLE IF NOT EXISTS tool_usage (
      week_start INTEGER NOT NULL,
      tool       TEXT NOT NULL,

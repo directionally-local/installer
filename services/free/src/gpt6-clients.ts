@@ -26,7 +26,7 @@ export function autopilotOnlyMessage(modelName = "GPT-6.1 Sol"): string {
 export const AUTOPILOT_ONLY_MESSAGE = autopilotOnlyMessage();
 
 /** The agents a model can be used in, as /v1/providers lists them. */
-export type ModelClient = "autopilot" | "claude-code" | "opencode" | "pi";
+export type ModelClient = "autopilot" | "claude-code" | "opencode" | "pi" | "codex";
 
 /** Whether GPT-6 is served to a caller: `harness` is the harness key's agent, undefined for Autopilot. */
 export function gpt6ServedTo(setting: Gpt6Clients, harness: string | undefined, isAdmin: boolean): boolean {
@@ -44,5 +44,5 @@ export function heldFromClient(model: Pick<FreeModel, "family">, setting: Gpt6Cl
  */
 export function modelClients(model: Pick<FreeModel, "id" | "family">, setting: Gpt6Clients): ModelClient[] {
   if (model.family === "gpt6" && setting === "autopilot") return ["autopilot"];
-  return model.id === DEEPSEEK_MODEL ? ["autopilot", "claude-code", "opencode", "pi"] : ["autopilot", "opencode", "pi"];
+  return model.id === DEEPSEEK_MODEL ? ["autopilot", "claude-code", "opencode", "pi", "codex"] : ["autopilot", "opencode", "pi", "codex"];
 }

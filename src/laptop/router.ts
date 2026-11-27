@@ -8,13 +8,17 @@ import { agentRequest, DL_DEFAULT_MODEL, keyUrls, type AgentRequest, type DlKey 
 import { COLLECTION_AT, COLLECTION_TEXT, scanStep } from "./onboarding.js";
 import { oneLine } from "./printable.js";
 import { KIMI_MODEL, planModelName, planModelsLine, planOrder } from "./plan-models.js";
+import { CODEX_INSTALL, codexConfigToml } from "./codex.js";
+
+/** The service origin of an OpenAI-style base URL (".../v1" → "..."). */
+const origin = (openai: string) => openai.replace(/\/v1\/?$/, "");
 
 /**
  * Bare `dl` on a laptop: a router for the person's own coding agent. dl signs in once (dl.new,
  * in the browser: dl-key.ts), finds the coding agents on this computer (agent-catalog.ts), and
  * asks which one to use; picking one sets it up on the dl key and, for a CLI dl knows, starts it.
  * dl remembers the choice: the next `dl` puts "Back to <the last one>?" on top, already selected,
- * so Enter opens it again. `dl claude` (and dl opencode, pi, t3, autopilot)
+ * so Enter opens it again. `dl claude` (and dl opencode, pi, codex, t3, autopilot)
  * opens one directly and becomes the last used.
  *
  * Autopilot, dl's own agent, is the recommendation at the top ("Use our coding agent", included in
@@ -167,7 +171,7 @@ export interface RouterDeps {
 }
 
 /** `dl -c`: what continuing means for each CLI (its own latest session in this folder). */
-const CONTINUE_ARGS: Record<LaunchCommand, string[]> = { claude: ["--continue"], opencode: ["--continue"], pi: ["--continue"], t3: [] };
+const CONTINUE_ARGS: Record<LaunchCommand, string[]> = { claude: ["--continue"], opencode: ["--continue"], pi: ["--continue"], codex: ["resume", "--last"], t3: [] };
 
 /** Bare `dl` (and `dl -c`): sign in if needed, then the picker (or the nothing-found screen), then the agent. */
 export async function routerHome(deps: RouterDeps, options: { continue?: boolean } = {}): Promise<number> {
@@ -339,6 +343,7 @@ const SWITCH_HOW: Partial<Record<string, string>> = {
   aider: "switch with /model inside aider",
   qwen: "switch with OPENAI_MODEL, or /model inside Qwen Code",
   crush: "switch with ctrl+p → Switch Model",
+  codex: "switch with /model inside Codex",
 };
 
 /** The line after an agent's setup steps: the plan's models, and how to switch in that agent. */
@@ -413,8 +418,11 @@ export function setupSteps(spec: AgentSpec, key: DlKey, models: readonly string[
       ];
     case "codex":
       return [
-        "Codex CLI now talks only to the OpenAI Responses API (wire_api = \"responses\"; \"chat\" was removed), which dl doesn't serve yet, so Codex can't run on your plan today.",
-        "Meanwhile pick another agent in dl (Claude Code, OpenCode, Pi), or use the key below in any tool that takes an OpenAI- or Anthropic-style base URL.",
+        `Install Codex CLI (${CODEX_INSTALL}), then run dl codex: it sets Codex up for that run, and your ~/.codex/config.toml stays as it is.`,
+        "Or by hand: put this in ~/.codex/config.toml (top-level keys above any [table]):",
+        ...codexConfigToml(origin(openai), model).map((line) => `  ${line}`),
+        ...others.map((id) => `(For ${planModelName({ id })}: model = "${id}", or /model inside Codex.)`),
+        "Then: export DL_API_KEY=<your key> and run codex.",
       ];
     case "aider":
       return ["Run:", `  aider --openai-api-base ${openai} --openai-api-key ${key.key} --model openai/${model}`, ...others.map((id) => `(For ${planModelName({ id })}: --model openai/${id}, or /model openai/${id} inside aider.)`)];
@@ -473,7 +481,7 @@ export function setupText(spec: AgentSpec, key: DlKey, c: Colors, models: readon
   let n = 0;
   // Numbered steps; indented lines are text to copy (kept as they are), "(…)" lines a quiet note.
   const lines = steps.map((line) => line.startsWith("  ") ? `       ${line.slice(2)}` : line.startsWith("(") ? `       ${c.dim(line)}` : `    ${c.cyan(`${++n}.`)} ${line}`);
-  return `\n  ${c.bold(`Set up ${spec.name} with dl`)}\n\n${lines.join("\n")}\n${keyCard(key, c, models)}${spec.id === "codex" ? "" : `  ${setupModelsLine(models, spec)}\n`}  ${c.dim(`dl shows this again when you pick ${spec.name}. Your key works in every agent.`)}\n\n`;
+  return `\n  ${c.bold(`Set up ${spec.name} with dl`)}\n\n${lines.join("\n")}\n${keyCard(key, c, models)}  ${setupModelsLine(models, spec)}\n  ${c.dim(`dl shows this again when you pick ${spec.name}. Your key works in every agent.`)}\n\n`;
 }
 
 /** Autopilot's environment for a run on the dl key: the key always; dl's plan as its provider only when it has none yet. */
