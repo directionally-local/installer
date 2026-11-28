@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.53.1](https://github.com/directionally-local/installer/compare/v0.53.0...v0.53.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* **versions:** pin Autopilot 3.37.0 ([#505](https://github.com/directionally-local/installer/issues/505)) ([362f9d3](https://github.com/directionally-local/installer/commit/362f9d3a1b58b3edda4b1f0c8d610a9f2ffee2e3))
+
 ## [0.53.0](https://github.com/directionally-local/installer/compare/v0.52.1...v0.53.0) (2026-11-28)
 
 
