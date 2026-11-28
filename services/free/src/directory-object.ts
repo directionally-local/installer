@@ -2508,6 +2508,14 @@ export class DirectoryObject extends DurableObject {
   }
 
   /** An admin sets a person's level; it stands until they change it again. False for no such person. */
+  /**
+   * Logs an admin's complimentary plan change for one person (ENG-26). The billing side is applied
+   * by the caller; this only records who did it and what changed, in the same config log as levels.
+   */
+  async logComplimentaryPlan(githubId: number, login: string, actor: { githubId: number; login: string; now: number }, from: string | null, to: string | null, until: number | null): Promise<void> {
+    this.#log(`person_plan:${githubId}:${login}`, { plan: from }, { plan: to, until }, actor);
+  }
+
   async setLevel(githubId: number, level: Level, actor: { githubId: number; login: string; now: number }): Promise<boolean> {
     return this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;

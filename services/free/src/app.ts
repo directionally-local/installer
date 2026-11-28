@@ -6063,7 +6063,7 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     return json({ people: rows, nextCursor, total: ordered.length });
   }
 
-  const match = /^people\/(\d+)(?:\/(suspend|unsuspend|block|unblock|grant|revoke-tokens|level|credit-tokens))?$/.exec(rest);
+  const match = /^people\/(\d+)(?:\/(suspend|unsuspend|block|unblock|grant|revoke-tokens|level|credit-tokens|plan))?$/.exec(rest);
   if (match) {
     const githubId = Number(match[1]);
     const action = match[2];
@@ -6099,6 +6099,32 @@ async function admin(c: Ctx, rest: string, method: string): Promise<Response> {
     if ((action === "block" || action === "unblock") && method === "POST") {
       const status = await setBlocked(c, githubId, action === "block", actor);
       return status ? json({ githubId, status }) : apiError(404, "not_found", "No such person.");
+    }
+    if (action === "plan" && method === "POST") {
+      // A complimentary plan without Stripe (ENG-26): put one person on a paid plan until a date,
+      // or clear it. Same billing fields a webhook would set, so everything downstream agrees.
+      const body = (await readJson(c)) ?? {};
+      const plan = body.plan;
+      if (plan !== null && plan !== "starter" && plan !== "plus" && plan !== "max") {
+        return apiError(400, "invalid_request", 'Send {plan: "starter" | "plus" | "max", until: "YYYY-MM-DD"} or {plan: null}.');
+      }
+      const person = await directory(c).getPerson(githubId);
+      if (!person) return apiError(404, "not_found", "No such person.");
+      const account_ = account(c, githubId);
+      const before = (await account_.paidPlan(now)) ?? null;
+      if (plan === null) {
+        await account_.applySubscription({ subscriptionId: `complimentary_${githubId}`, state: "canceled", periodEnd: null, eventAt: now });
+        await directory(c).logComplimentaryPlan(githubId, person.login, actor, before, null, null);
+        return json({ githubId, plan: null });
+      }
+      const parsed = typeof body.until === "string" ? Date.parse(body.until) : Number.NaN;
+      if (!Number.isSafeInteger(parsed)) return apiError(400, "invalid_request", 'Send {until: "YYYY-MM-DD"} for a plan.');
+      const until = Math.floor(parsed / 1000) * 1000 + 24 * 60 * 60 * 1000 - 1;
+      if (until <= now) return apiError(400, "invalid_request", "until is in the past.");
+      if (until > now + 366 * 24 * 60 * 60 * 1000) return apiError(400, "invalid_request", "until is more than a year away.");
+      await account_.applySubscription({ subscriptionId: `complimentary_${githubId}`, state: "active", periodEnd: until, eventAt: now, tier: plan, trial: { trialing: false, trialEnd: null } });
+      await directory(c).logComplimentaryPlan(githubId, person.login, actor, before, plan, until);
+      return json({ githubId, plan, until: new Date(until).toISOString() });
     }
     if (action === "level" && method === "POST") {
       const body = (await readJson(c)) ?? {};
