@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.53.0](https://github.com/directionally-local/installer/compare/v0.52.1...v0.53.0) (2026-11-28)
+
+
+### Features
+
+* **free:** offer live subscription plans on paywalls ([#504](https://github.com/directionally-local/installer/issues/504)) ([9eb23d8](https://github.com/directionally-local/installer/commit/9eb23d86b16590e3fffc7dee4a081c36ec303b94))
+
+
+### Bug Fixes
+
+* **deps:** install Autopilot 3.36.3 ([#503](https://github.com/directionally-local/installer/issues/503)) ([92c79c6](https://github.com/directionally-local/installer/commit/92c79c6a5136ef9f7288d93fa038a288511deb2f))
+* **free:** a zero weekly budget means off, not spent (ENG-43) ([#494](https://github.com/directionally-local/installer/issues/494)) ([8589acd](https://github.com/directionally-local/installer/commit/8589acd3427da80214063abb40501c391a0a9dec))
+* **free:** plan-neutral upstream error messages ([#493](https://github.com/directionally-local/installer/issues/493)) ([ad92264](https://github.com/directionally-local/installer/commit/ad92264d3d35999162e47d14cc430cd8b0eab205))
+
 ## [0.52.1](https://github.com/directionally-local/installer/compare/v0.52.0...v0.52.1) (2026-11-27)
 
 
