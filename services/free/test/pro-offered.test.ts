@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADMIN_ID, completion, createService, MODEL, usage, type Service } from "./harness.js";
 import { readFreeConfig } from "../src/config.js";
+import { PAID_VARS, FakeStripe } from "./paid-fixtures.js";
 import { parseSettingsUpdate } from "../src/runtime-config.js";
 import { forHarness, gptLimitMessage, harnessLimitMessage, quotaMessage, trialEndedMessage } from "../src/messages.js";
 import { basicLine, starterLine } from "../src/admission.js";
@@ -206,6 +207,24 @@ describe("the service with proOffered", () => {
     assert.equal(error.code, "trial_ended");
     assert.equal(error.message, "Your 1M free trial tokens are used up. Keep going with a top-up: /upgrade");
     assert.equal("pro" in error.offers, false);
+  });
+
+  it("serves the live monthly plans and the trial exhaustion refusal with them (ENG-54)", async () => {
+    const service = await createService({ ...PAID_VARS, PAID_PLANS: "true", OPENAI_API_KEY: "sk-openai-test", TRIAL_CUTOFF: "2026-11-01T00:00:00Z", TRIAL_TOKENS: "1000000" });
+    new FakeStripe(service);
+    const token = (await service.signIn({ id: 300, login: "bob" })).access_token;
+    const plans = await (await service.request("GET", "/web/plans", { headers: { origin: "https://dl.new" } })).json() as Record<string, any>;
+    const account = await me(service, token);
+    assert.deepStrictEqual(account.subscriptions.map((p: any) => [p.id, p.priceUsd, p.promoPriceUsd]), plans.plans.map((p: any) => [p.id, p.priceUsd, p.promoPriceUsd]));
+    assert.equal(account.subscriptions[0].checkoutUrl, "https://dl.new/?plan=starter");
+    service.setLuminal(() => completion(usage(2_000_000, 0, 0, 0.001)));
+    const chat = () => service.request("POST", "/v1/chat/completions", { token, body: { model: MODEL, messages: [{ role: "user", content: "hello" }] } });
+    assert.equal((await chat()).status, 200);
+    const error = await errorOf(await chat());
+    assert.equal(error.code, "trial_ended");
+    assert.deepStrictEqual(error.subscriptions.map((p: any) => [p.id, p.priceUsd, p.promoPriceUsd]), plans.plans.map((p: any) => [p.id, p.priceUsd, p.promoPriceUsd]));
+    assert.equal(error.subscriptions[0].checkoutUrl, "https://dl.new/?plan=starter");
+    assert.equal(account.offers.topup.fromPrice, "$2");
   });
 
   it("can be switched back on, and Pro is offered again", async () => {

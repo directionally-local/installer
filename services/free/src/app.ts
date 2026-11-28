@@ -120,7 +120,7 @@ import { noCardUsedUpMessage, notInTrialNotice, trialsOffer, startsWithPlanNotic
 import { displayName as planDisplayName, isPaidPlan, planLimitFor, planName as planTitle } from "./plans.js";
 import { PLAN_METER_MODELS, afterMeterFull, anthropicModelFor, bonusProjection, dueWarning, planRoute, tokenMeter, type PlanServe } from "./plan-route.js";
 import { bonusAccountView, mixView, planCatalog, planLimitsView, planUsageView } from "./plan-usage.js";
-import { isPlanId, PLANS, promoPrice, promoView } from "./plan-prices.js";
+import { isPlanId, PLAN_IDS, PLANS, plansView, promoPrice, promoView } from "./plan-prices.js";
 import { BONUS_MODEL, bonusBlock } from "./gpt6-bonus.js";
 import type { PlanState } from "./account-object.js";
 import { allocateIfDue, allocatedLimits, anthropicSessionHint, limitedLevel, rescue, sessionKeyOf, stageOf, stepOf, usedShare, type AllocatorRun } from "./allocator.js";
@@ -1392,6 +1392,30 @@ export function usdLabel(amount: number): string {
  * is no `pro` at all, so clients (Autopilot, dl.new) offer only the top-up; existing subscribers
  * see their plan in `plan` and manage it from the billing portal.
  */
+export interface SubscriptionOffer {
+  id: "starter" | "plus" | "max";
+  name: string;
+  priceUsd: number;
+  promoPriceUsd: number | null;
+  description: string;
+  checkoutUrl: string;
+}
+
+/** dl.new's Starter, Plus and Max plans: the same prices, promo and limits the web Checkout shows. */
+export async function subscriptionOffers(c: Ctx, config: RuntimeSettings): Promise<SubscriptionOffer[]> {
+  const prices = c.config.stripe.prices ?? {};
+  if (!config.paidPlans || !c.config.stripe.secretKey || PLAN_IDS.some((id) => !prices[id])) return [];
+  const catalog = await planCatalogFor(c);
+  return plansView({ catalog, available: true, promo: promoView(config, c.now()) }).plans.map((plan) => ({
+    id: plan.id,
+    name: plan.name,
+    priceUsd: plan.priceUsd,
+    promoPriceUsd: plan.promoPriceUsd,
+    description: plan.description.replace(/\. Weekly limits reset Mon 00:00 UTC\.$/, ""),
+    checkoutUrl: `${webOrigin(c)}/?plan=${plan.id}`,
+  }));
+}
+
 export function offers(config: FreeConfig) {
   const { pro, topup } = config.offers;
   return {
@@ -3103,6 +3127,8 @@ async function me(c: Ctx): Promise<Response> {
         }
       : null,
     offers: offers(config),
+    /** Monthly dl.new subscriptions: the primary conversion path; the top-up above remains secondary. */
+    subscriptions: await bestEffort("plan catalogue not available for /v1/me", () => subscriptionOffers(c, config), []),
     /**
      * The one-time trial, for an account admitted at or after the trial cutoff: `{tokens, used,
      * remaining, ended}` (tokens counted as prompt with cached, plus completion, every free model
@@ -4603,15 +4629,16 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
           402,
           "gpt_limit",
           gptLimitMessage(reservation.allowance.plan, gate.config.proOffered),
-          { family: "gpt6", resetsAt, reason: reservation.reason, alternative: DEEPSEEK_MODEL, offers: offers(gate.config) },
+          { family: "gpt6", resetsAt, subscriptions: await subscriptionOffers(c, gate.config), reason: reservation.reason, alternative: DEEPSEEK_MODEL, offers: offers(gate.config) },
           quota,
         );
       }
       // Which limit ran out (the token allowance or the dollar one), named in the refusal.
       const limitName = refusalLimitName(reservation.allowance, reservation.reason, reservation.family, serving.model, gate.config.cachedTokenWeight);
-      // dl Pro's prompt: a free account's week of open models (DeepSeek) is used up, Pro is offered.
+      // Monthly dl.new plans replace the legacy-Pro paywall while checkout is on.
+      const subscriptions = (await bestEffort("plan catalogue not available for a limit refusal", () => subscriptionOffers(c, gate.config), [])) ?? [];
       const proPrompt =
-        !isAdmin && reservation.allowance.plan === "free" && !reservation.allowance.trial && (reservation.family === "deepseek" || !reservation.deepseekLeft) ? proPromptFor(c, gate.config, limitName) : null;
+        !isAdmin && reservation.allowance.plan === "free" && !reservation.allowance.trial && (reservation.family === "deepseek" || !reservation.deepseekLeft) ? subscriptions.length ? null : proPromptFor(c, gate.config, limitName) : null;
       if (proPrompt) await countPro(c, "seen", identity.githubId);
       // A basic or Starter week used up: what the level gets, when it resets, and the ways to more.
       if (!isAdmin && reservation.allowance.plan === "free" && (level === "basic" || level === "starter")) {
@@ -4621,7 +4648,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
           proPrompt
             ? `${proPrompt.message}, or type /request in dl and tell us what you're building.`
             : limitLine(level, limits.levelTokens ?? 0, limits.weeklyUsd, limits.deepseekWeeklyUsd ?? undefined, limitName),
-          { resetsAt, reason: reservation.reason, family: reservation.family, request: ACCESS_REQUEST_PATH, offers: offers(gate.config), referralLink: link, ...(proPrompt ? { proPrompt: proPrompt.view } : {}) },
+          { resetsAt, subscriptions, reason: reservation.reason, family: reservation.family, request: ACCESS_REQUEST_PATH, offers: offers(gate.config), referralLink: link, ...(proPrompt ? { proPrompt: proPrompt.view } : {}) },
           quota,
         );
       }
@@ -4629,12 +4656,13 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
         402,
         "quota_exceeded",
         proPrompt ? proPrompt.message : quotaMessage(reservation.reason, resetsAt, reservation.allowance.plan),
-        { resetsAt, reason: reservation.reason, family: reservation.family, offers: offers(gate.config), referralLink: link, ...(proPrompt ? { proPrompt: proPrompt.view } : {}) },
+        { resetsAt, subscriptions, reason: reservation.reason, family: reservation.family, offers: offers(gate.config), referralLink: link, ...(proPrompt ? { proPrompt: proPrompt.view } : {}) },
         quota,
       );
     }
     if (reservation.code === "trial_ended") {
-      return apiError(402, "trial_ended", trialEndedMessage(reservation.trial.tokens, gate.config.proOffered ? usdLabel(gate.config.offers.pro.priceUsdMonthly) : null), { trial: trialView(reservation.allowance), offers: offers(gate.config) }, quota);
+      const subscriptions = (await bestEffort("plan catalogue not available for the trial response", () => subscriptionOffers(c, gate.config), [])) ?? [];
+      return apiError(402, "trial_ended", trialEndedMessage(reservation.trial.tokens, gate.config.proOffered ? usdLabel(gate.config.offers.pro.priceUsdMonthly) : null), { trial: trialView(reservation.allowance), subscriptions, offers: offers(gate.config) }, quota);
     }
     if (reservation.code === "blocked") return blockedError(quota);
     if (reservation.code === "suspended") return apiError(403, "suspended", "This account is suspended from the free tier.", {}, quota);
@@ -7246,6 +7274,7 @@ async function webMe(c: Ctx): Promise<Response> {
       resetsAt: new Date(tools.resetsAt).toISOString(),
     },
     offers: offers(config),
+    subscriptions: await bestEffort("plan catalogue not available for web account", () => subscriptionOffers(c, config), []),
     /** Pro's state for the account page: when it renews or ends, and whether it was set to end. */
     pro: allowance.plan === "pro" || allowance.proPeriodEnd !== null
       ? { periodEnd: allowance.proPeriodEnd === null ? null : new Date(allowance.proPeriodEnd).toISOString(), cancelAtPeriodEnd: allowance.proCancelAtPeriodEnd }
