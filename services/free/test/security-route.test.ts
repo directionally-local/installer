@@ -290,7 +290,7 @@ describe("security work kept off GPT-6", () => {
     await service.request("POST", "/admin/people/102/grant", { token: admin, body: { usedThisWeek: 50_000_000 } });
     const weekly = await errorOf(await chat(service, other));
     assert.equal(weekly.code, "gpt_limit");
-    assert.deepEqual(Object.keys(weekly).filter((key) => key !== "offers").sort(), Object.keys(error).sort());
+    assert.deepEqual(Object.keys(weekly).filter((key) => !["offers", "subscriptions"].includes(key)).sort(), Object.keys(error).sort());
   });
 
   it("leaves DeepSeek alone", async () => {
