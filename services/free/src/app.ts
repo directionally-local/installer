@@ -1402,7 +1402,7 @@ export interface SubscriptionOffer {
 }
 
 /** dl.new's Starter, Plus and Max plans: the same prices, promo and limits the web Checkout shows. */
-export async function subscriptionOffers(c: Ctx, config: RuntimeSettings): Promise<SubscriptionOffer[]> {
+export async function subscriptionOffers(c: Ctx, config: FreeConfig): Promise<SubscriptionOffer[]> {
   const prices = c.config.stripe.prices ?? {};
   if (!config.paidPlans || !c.config.stripe.secretKey || PLAN_IDS.some((id) => !prices[id])) return [];
   const catalog = await planCatalogFor(c);
@@ -3128,7 +3128,7 @@ async function me(c: Ctx): Promise<Response> {
       : null,
     offers: offers(config),
     /** Monthly dl.new subscriptions: the primary conversion path; the top-up above remains secondary. */
-    subscriptions: await bestEffort("plan catalogue not available for /v1/me", () => subscriptionOffers(c, config), []),
+    subscriptions: await bestEffort("plan catalogue not available for /v1/me", () => subscriptionOffers(c, config)),
     /**
      * The one-time trial, for an account admitted at or after the trial cutoff: `{tokens, used,
      * remaining, ended}` (tokens counted as prompt with cached, plus completion, every free model
@@ -4636,7 +4636,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       // Which limit ran out (the token allowance or the dollar one), named in the refusal.
       const limitName = refusalLimitName(reservation.allowance, reservation.reason, reservation.family, serving.model, gate.config.cachedTokenWeight);
       // Monthly dl.new plans replace the legacy-Pro paywall while checkout is on.
-      const subscriptions = (await bestEffort("plan catalogue not available for a limit refusal", () => subscriptionOffers(c, gate.config), [])) ?? [];
+      const subscriptions = (await bestEffort("plan catalogue not available for a limit refusal", () => subscriptionOffers(c, gate.config))) ?? [];
       const proPrompt =
         !isAdmin && reservation.allowance.plan === "free" && !reservation.allowance.trial && (reservation.family === "deepseek" || !reservation.deepseekLeft) ? subscriptions.length ? null : proPromptFor(c, gate.config, limitName) : null;
       if (proPrompt) await countPro(c, "seen", identity.githubId);
@@ -4661,7 +4661,7 @@ async function chat(c: Ctx, input: { identity: Caller; body?: Record<string, unk
       );
     }
     if (reservation.code === "trial_ended") {
-      const subscriptions = (await bestEffort("plan catalogue not available for the trial response", () => subscriptionOffers(c, gate.config), [])) ?? [];
+      const subscriptions = (await bestEffort("plan catalogue not available for the trial response", () => subscriptionOffers(c, gate.config))) ?? [];
       return apiError(402, "trial_ended", trialEndedMessage(reservation.trial.tokens, gate.config.proOffered ? usdLabel(gate.config.offers.pro.priceUsdMonthly) : null), { trial: trialView(reservation.allowance), subscriptions, offers: offers(gate.config) }, quota);
     }
     if (reservation.code === "blocked") return blockedError(quota);
@@ -7274,7 +7274,7 @@ async function webMe(c: Ctx): Promise<Response> {
       resetsAt: new Date(tools.resetsAt).toISOString(),
     },
     offers: offers(config),
-    subscriptions: await bestEffort("plan catalogue not available for web account", () => subscriptionOffers(c, config), []),
+    subscriptions: await bestEffort("plan catalogue not available for web account", () => subscriptionOffers(c, config)),
     /** Pro's state for the account page: when it renews or ends, and whether it was set to end. */
     pro: allowance.plan === "pro" || allowance.proPeriodEnd !== null
       ? { periodEnd: allowance.proPeriodEnd === null ? null : new Date(allowance.proPeriodEnd).toISOString(), cancelAtPeriodEnd: allowance.proCancelAtPeriodEnd }
