@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.54.0](https://github.com/directionally-local/installer/compare/v0.53.1...v0.54.0) (2026-11-28)
+
+
+### Features
+
+* **free:** give one person a complimentary plan without Stripe (ENG-26) ([#507](https://github.com/directionally-local/installer/issues/507)) ([d3eec0b](https://github.com/directionally-local/installer/commit/d3eec0be1497e53d376fc1ee212b5bccd813a798))
+
 ## [0.53.1](https://github.com/directionally-local/installer/compare/v0.53.0...v0.53.1) (2026-11-28)
 
 
